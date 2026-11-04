@@ -22,15 +22,17 @@
 //!    variable reaches the shell;
 //! 4. execs the login shell, the readiness probe or the literal program.
 //!
-//! **Placement.** When the account has a GUI login (its `gui/<uid>` launchd
-//! domain exists), the shim execs `/bin/launchctl asuser <uid>` in front of the
-//! entry. `asuser` execs in place (same pid, same descriptors) and moves the
-//! process into the person's launchd bootstrap and audit session. Placement is
-//! then *verified* from the entry's own audit record: the audit user must be
-//! the account and the session must have graphic access. If the person logged
-//! out between the check and the exec, the entry falls back to the plain shell,
-//! which is what D335 asks for when they are not logged in. `SSH_AUTH_SOCK` is
-//! taken from the placed bootstrap only when it names a socket the account owns.
+//! **Placement.** A root shim always execs `/bin/launchctl asuser <uid>` in
+//! front of the entry. `asuser` execs in place (same pid, same descriptors)
+//! and moves the process into the person's launchd bootstrap and audit
+//! session: their GUI login when they have one (keychain, ssh-agent, privacy
+//! permissions), otherwise a fresh session whose audit user is the person, so
+//! the shell is attributed to them and shares no session with the root daemon
+//! (D335, #328 P2). Placement is then *verified* from the entry's own audit
+//! record (`classify`): the audit user must be the person, and graphic access
+//! tells the GUI login from a plain shell. `SSH_AUTH_SOCK` is taken from the
+//! placed bootstrap only in the GUI case, and only when it names a socket the
+//! account owns.
 #![allow(unsafe_code)]
 
 use nix::unistd::{self, Gid, Uid, User};
@@ -104,8 +106,11 @@ pub(crate) fn command(user: &User, start: Start, program: &[OsString]) -> io::Re
     // The entry runs as root before it drops privileges. It is the binary that
     // is running this shim, which the root infraternal agent already trusts.
     let executable = std::env::current_exe()?.canonicalize()?;
-    let placed = Uid::effective().is_root() && logged_in(user.uid);
-    let mut command = if placed {
+    // A root shim always enters the person's own launchd bootstrap and audit
+    // session through `launchctl asuser`: their GUI login when they have one,
+    // otherwise a fresh session whose audit user is the person, never the
+    // daemon's system session (#328 P2). A rootless shim is already the person.
+    let mut command = if Uid::effective().is_root() {
         let mut command = Command::new(LAUNCHCTL);
         command
             .arg("asuser")
@@ -130,20 +135,6 @@ pub(crate) fn command(user: &User, start: Start, program: &[OsString]) -> io::Re
     }
     command.env_clear();
     Ok(command)
-}
-
-/// The account has a GUI login when its `gui/<uid>` launchd domain exists.
-/// An SSH-only session has no such domain (D335 safe default, #328).
-fn logged_in(uid: Uid) -> bool {
-    Command::new(LAUNCHCTL)
-        .arg("print")
-        .arg(format!("gui/{uid}"))
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 /// Parsed private entry arguments.
@@ -246,7 +237,9 @@ fn prepare(request: &Request) -> io::Result<Command> {
     if root {
         drop_privileges(&name, user.uid, user.gid)?;
     }
-    let placed = placed(user.uid)?;
+    // `root` means the shim started this entry through `launchctl asuser`.
+    let (audit_user, audit_flags) = audit_record()?;
+    let placed = classify(root, user.uid, audit_user, audit_flags)?;
     let shell = if request.start == Start::Readiness || user.shell.as_os_str().is_empty() {
         PathBuf::from("/bin/sh")
     } else {
@@ -346,8 +339,8 @@ fn drop_privileges(name: &CString, uid: Uid, gid: Gid) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether `launchctl asuser` placed this process in the account's GUI login.
-fn placed(uid: Uid) -> io::Result<bool> {
+/// This process's audit user and session flags (`getaudit_addr`).
+fn audit_record() -> io::Result<(u32, u64)> {
     let mut info = AuditInfo {
         auid: 0,
         mask: [0; 2],
@@ -364,7 +357,27 @@ fn placed(uid: Uid) -> io::Result<bool> {
     if unsafe { getaudit_addr(&raw mut info, length) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(info.auid == uid.as_raw() && info.flags & GRAPHIC_ACCESS != 0)
+    Ok((info.auid, info.flags))
+}
+
+/// Decide the shell's placement from its own audit record: `Ok(true)` inside
+/// the person's GUI login (keychain, ssh-agent, privacy permissions), `Ok(false)`
+/// a plain shell in a session of its own.
+///
+/// After `launchctl asuser` (`through_asuser`) the audit user must be the person
+/// in both cases. Anything else means the shell would share another session,
+/// such as the root daemon's system session or someone else's login, so the
+/// entry refuses rather than start it there. Graphic access only tells GUI from
+/// plain. A rootless shim was never moved, so it keeps the caller's session.
+fn classify(through_asuser: bool, uid: Uid, audit_user: u32, flags: u64) -> io::Result<bool> {
+    let own = audit_user == uid.as_raw();
+    if through_asuser && !own {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the shell did not get its own login session",
+        ));
+    }
+    Ok(own && flags & GRAPHIC_ACCESS != 0)
 }
 
 /// The account's per-user temporary directory, as login shells receive it.
@@ -445,12 +458,38 @@ mod tests {
         assert!(parse(&args(&["--uid", "1", "--program", "--", &long])).is_none());
     }
 
+    /// Every process has an audit record; the call must succeed with our
+    /// layout. (The values are checked end to end by the Mac proof.)
     #[test]
     fn audit_record_layout_is_readable() {
-        // An unprivileged test process has some audit record; the call must
-        // succeed with our layout and never report a GUI placement for uid 0
-        // unless the test really runs inside root's GUI session.
-        let result = placed(Uid::from_raw(u32::MAX));
-        assert!(matches!(result, Ok(false)), "{result:?}");
+        audit_record().unwrap();
+    }
+
+    const UNSET: u32 = u32::MAX; // AU_DEFAUDITID: no audit user
+    const GUI: u64 = 0x2030; // graphic, tty and console access
+    const SYSTEM: u64 = 0x1; // the root daemon's system session
+
+    /// D335 placement after `launchctl asuser`: the person's GUI login or a
+    /// plain session of their own; never the daemon's or someone else's.
+    #[test]
+    fn asuser_shells_run_only_in_the_persons_own_session() {
+        let person = Uid::from_raw(1500);
+        assert!(classify(true, person, 1500, GUI).unwrap());
+        assert!(!classify(true, person, 1500, 0).unwrap());
+        // The daemon's system session (what a LaunchDaemon's plain shell
+        // inherited before #328 P2): no audit user, so refused.
+        assert!(classify(true, person, UNSET, SYSTEM).is_err());
+        // A daemon sitting in someone else's GUI login (a developer's sudo
+        // from Terminal) must not lend that login to this person.
+        assert!(classify(true, person, 501, GUI).is_err());
+    }
+
+    /// A rootless shim is already the person and keeps the caller's session.
+    #[test]
+    fn rootless_shells_keep_the_callers_session() {
+        let person = Uid::from_raw(1500);
+        assert!(classify(false, person, 1500, GUI).unwrap());
+        assert!(!classify(false, person, 1500, 0).unwrap());
+        assert!(!classify(false, person, 501, GUI).unwrap());
     }
 }
