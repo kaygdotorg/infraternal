@@ -23,7 +23,6 @@
  */
 import type { Ctx } from "../context";
 import { el } from "../dom";
-import { nearestStop } from "../layout/stops";
 import { ICON, lineIcon, viewIcon } from "../views/icons";
 
 export interface Crumbs { paint(): void; dispose(): void }
@@ -88,29 +87,8 @@ export function createCrumbs(cx: Ctx): Crumbs {
     const row = rows.find((r) => r.groups.some((g) => g.windowId === windowId));
     return row ? { rows, row, group: row.groups.find((g) => g.windowId === windowId)! } : undefined;
   };
-  /**
-   * The Settings window in view. A view with rows of windows moves under the camera (a step to the next row, a scroll sideways)
-   * without anything being clicked, so the focused window cannot say where the person is. The COLUMN is the camera's stop (the
-   * window the canvas lock framed: a window at the first or last stop sits at the screen's edge, not its middle, so the middle
-   * of the screen would name its neighbour), and the ROW is the band drawn nearest the middle of the screen (the group scrolls
-   * inside the view). Drawn boxes decide the row, so a window moved or narrowed by a drag needs no bookkeeping.
-   */
-  const inView = (): string | undefined => {
-    const rec = views.get("settings");
-    if (!rec) return undefined;
-    const st = cx.nav.stopsFor(rec);
-    const column = rec.view.cols[st.owners[nearestStop(st, camera.cam.cx)] ?? -1];
-    if (!column) return undefined;
-    const screen = stage.getBoundingClientRect(), my = screen.top + screen.height / 2;
-    let best: string | undefined, bestDistance = Infinity;
-    for (const win of column.wins) {
-      const box = rec.wins.get(win.id)?.card.root.getBoundingClientRect();
-      if (!box || box.width === 0) continue;
-      const distance = Math.abs(box.top + box.height / 2 - my);
-      if (distance < bestDistance) { best = win.id; bestDistance = distance; }
-    }
-    return best;
-  };
+  /** The Settings window in view (`Nav.windowInView`): the breadcrumb names what the person sees, not what was clicked last (D323). */
+  const inView = (): string | undefined => { const rec = views.get("settings"); return rec ? cx.nav.windowInView(rec) : undefined; };
   /** While the camera flies, the window it flies to (the focused one) is where the person is going; at rest, what is in view. */
   const here = (): ReturnType<typeof place> => place(camera.isMoving ? state.activeWin?.model.id : inView() ?? state.activeWin?.model.id);
 

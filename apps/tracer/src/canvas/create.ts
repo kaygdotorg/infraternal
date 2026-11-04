@@ -113,7 +113,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
     onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); if (cx.camera.isMoving && cx.camera.lod === "thumb") freezeTerminals(true); },
-    onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); freezeTerminals(false); cx.pill.settled(); },
+    onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); freezeTerminals(false); cx.pill.settled(); cx.nav.settled(); },
     onFlight: () => { cx.view.hideSummary(); hideTips(); },
   });
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
@@ -210,6 +210,9 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       const target = cx.camera.target;
       if (target) cx.camera.flyTo(target);
     } else if (cx.camera.target && cx.views.size) cx.camera.set(cx.camera.target()); else cx.camera.apply(true);
+    // A new layout (wider windows) must not leave the window the person is on out of view: frame it again.
+    const on = state.activeWin;
+    if (on && on.owner.view.id === state.currentView && on.owner.view.cols.some((col) => col.group !== undefined)) cx.nav.focusWindow(on, !animate);
   };
   const ro = new ResizeObserver(() => {
     if (viewport.clientWidth === lastW && viewport.clientHeight === lastH) return;
