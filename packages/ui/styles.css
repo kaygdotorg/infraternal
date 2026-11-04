@@ -1301,6 +1301,6 @@
 .ui-sheet { position: absolute; z-index: 9; left: 0.5rem; right: 0.5rem; bottom: calc(0.5rem + env(safe-area-inset-bottom)); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border-radius: 1.25rem; outline: none; }
 .ui-sheet > .ui-dp-holder { min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .ui-sheet-grab { display: grid; place-items: center; height: 1.5rem; cursor: grab; }
-.ui-sheet-handle { width: 2.25rem; height: 0.25rem; border-radius: 999px; background: var(--fg-3); opacity: 0.6; }
+.ui-sheet-handle { width: 2.25rem; height: 0.25rem; border-radius: 0.125rem; background: var(--fg-3); opacity: 0.6; }
 .ui-sheet .ui-dp { padding-top: 0.125rem; padding-bottom: 1rem; }
 @media (pointer: coarse) { .ui-dp-expand { margin-right: -0.375rem; } .ui-dp-lead { font-size: var(--text-body); } }

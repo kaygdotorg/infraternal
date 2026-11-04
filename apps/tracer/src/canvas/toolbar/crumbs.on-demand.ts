@@ -27,7 +27,8 @@ import { ICON, lineIcon, viewIcon } from "../views/icons";
 
 export interface Crumbs { paint(): void; dispose(): void }
 
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+/** The shared easing token (WAAPI cannot read a `var()` in an easing string, so the value is read once). */
+const ease = (): string => getComputedStyle(document.documentElement).getPropertyValue("--ease-out").trim() || "ease-out";
 const CHEVRON = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.chevron}</svg>`;
 const TICK = '<svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>';
 
@@ -78,7 +79,7 @@ export function createCrumbs(cx: Ctx): Crumbs {
     name.textContent = text;
     pillEl.setAttribute("aria-label", text);
     const now = performance.now();
-    if (had && now - lastMotion > 260 && !matchMedia("(prefers-reduced-motion: reduce)").matches) name.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: EASE });
+    if (had && now - lastMotion > 260 && !matchMedia("(prefers-reduced-motion: reduce)").matches) name.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: ease() });
     if (had) lastMotion = now;
   };
 
@@ -101,7 +102,7 @@ export function createCrumbs(cx: Ctx): Crumbs {
     anchor.setAttribute("aria-expanded", "false");
     if (instant || matchMedia("(prefers-reduced-motion: reduce)").matches) { node.remove(); return; }
     node.style.pointerEvents = "none";
-    node.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: EASE }).onfinish = () => node.remove();
+    node.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 120, easing: ease() }).onfinish = () => node.remove();
   };
   const openMenu = (anchor: HTMLElement, label: string, items: Array<{ label: string; icon?: string; current: boolean; go(): void }>, source: "pointer" | "keyboard"): void => {
     closeMenu(true);
@@ -129,7 +130,7 @@ export function createCrumbs(cx: Ctx): Crumbs {
     node.style.maxHeight = `${Math.max(120, Math.floor(screen.bottom - box.bottom - 16))}px`;
     node.style.transformOrigin = `${Math.round(box.left + box.width / 2 - screen.left - parseFloat(node.style.left))}px 0`;
     anchor.setAttribute("aria-expanded", "true");
-    if (source === "pointer" && !matchMedia("(prefers-reduced-motion: reduce)").matches) node.animate([{ opacity: 0, transform: "translateY(-4px) scale(0.96)" }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
+    if (source === "pointer" && !matchMedia("(prefers-reduced-motion: reduce)").matches) node.animate([{ opacity: 0, transform: "translateY(-4px) scale(0.96)" }, { opacity: 1, transform: "none" }], { duration: 200, easing: ease() });
     menu = { el: node, anchor };
   };
   const focusWindow = (windowId: string | undefined): void => {

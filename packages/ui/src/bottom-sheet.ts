@@ -27,7 +27,8 @@ export interface BottomSheet {
   close(source: "pointer" | "keyboard"): void;
 }
 
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+/** The shared easing token (WAAPI cannot read a `var()` in an easing string, so the value is read once). */
+const ease = (): string => getComputedStyle(document.documentElement).getPropertyValue("--ease-out").trim() || "ease-out";
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 /** A drag this far down, or a flick this fast (px per ms), closes the sheet. */
 const CLOSE_DISTANCE = 72, CLOSE_SPEED = 0.6;
@@ -52,7 +53,7 @@ export function openBottomSheet(options: BottomSheetOptions): BottomSheet {
 
   if (options.source === "pointer" || reduced()) {
     const frames = reduced() ? [{ opacity: 0 }, { opacity: 1 }] : [{ transform: "translateY(100%)" }, { transform: "none" }];
-    root.animate(frames, { duration: reduced() ? 160 : 240, easing: EASE });
+    root.animate(frames, { duration: reduced() ? 160 : 240, easing: ease() });
     scrim.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
   }
   (options.source === "keyboard" ? options.focus ?? root : root).focus({ preventScroll: true });
@@ -70,7 +71,7 @@ export function openBottomSheet(options: BottomSheetOptions): BottomSheet {
     // From wherever a drag left it, so a close after a drag continues the motion instead of jumping back first.
     const from = root.style.transform || "none";
     scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: "ease-out", fill: "forwards" });
-    root.animate([{ transform: from }, { transform: "translateY(100%)" }], { duration: 160, easing: EASE, fill: "forwards" }).onfinish = done;
+    root.animate([{ transform: from }, { transform: "translateY(100%)" }], { duration: 160, easing: ease(), fill: "forwards" }).onfinish = done;
   };
 
   scrim.addEventListener("pointerdown", () => close("pointer"), { signal: events.signal });
@@ -97,7 +98,7 @@ export function openBottomSheet(options: BottomSheetOptions): BottomSheet {
     if (dy > CLOSE_DISTANCE || speed > CLOSE_SPEED) { close("pointer"); return; }
     const from = root.style.transform;
     root.style.transform = "";
-    if (!reduced()) root.animate([{ transform: from }, { transform: "none" }], { duration: 200, easing: EASE });
+    if (!reduced()) root.animate([{ transform: from }, { transform: "none" }], { duration: 200, easing: ease() });
   };
   grab.addEventListener("pointerup", release, { signal: events.signal });
   grab.addEventListener("pointercancel", release, { signal: events.signal });
