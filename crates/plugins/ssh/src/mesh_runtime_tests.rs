@@ -2,6 +2,7 @@
 use super::*;
 use tokio::net::UnixStream;
 
+/// Session.
 fn session(peer: UnixStream) -> Session {
     Session {
         id: [1; 16],
@@ -15,6 +16,7 @@ fn session(peer: UnixStream) -> Session {
     }
 }
 
+/// Expect.
 async fn expect(shim: &mut UnixStream, reader: &mut Reader) -> Frame {
     tokio::time::timeout(std::time::Duration::from_secs(5), reader.read(shim))
         .await
@@ -22,6 +24,7 @@ async fn expect(shim: &mut UnixStream, reader: &mut Reader) -> Frame {
         .expect("frame")
 }
 
+/// Shell output input resize and exit cross the bridge.
 #[tokio::test]
 async fn shell_output_input_resize_and_exit_cross_the_bridge() {
     let (bridge_end, mut shim) = UnixStream::pair().unwrap();
@@ -102,6 +105,7 @@ async fn shell_output_input_resize_and_exit_cross_the_bridge() {
     assert!(matches!(exit.await.unwrap(), Exit::Status(3)));
 }
 
+/// Control flows while output is blocked.
 #[tokio::test]
 async fn control_flows_while_output_is_blocked() {
     let (bridge_end, mut shim) = UnixStream::pair().unwrap();
@@ -127,6 +131,7 @@ async fn control_flows_while_output_is_blocked() {
     drop(attachment);
 }
 
+/// Signals map to linux numbers.
 #[test]
 fn signals_map_to_linux_numbers() {
     assert_eq!(signal_number(&russh::Sig::HUP), Some(1));

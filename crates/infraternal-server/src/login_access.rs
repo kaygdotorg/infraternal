@@ -12,10 +12,12 @@ use infraternal_plugin_api::login_access::{
 };
 use sqlx::{SqliteConnection, SqlitePool};
 
+/// The stored form of a host: empty for the server's own host, else the 16 ID bytes.
 fn host_key(host: Option<uuid::Uuid>) -> Vec<u8> {
     host.map_or_else(Vec::new, |host| host.as_bytes().to_vec())
 }
 
+/// The rule-model host for a stored key; `None` for a malformed key.
 fn host_ref(key: &[u8]) -> Option<HostRef> {
     if key.is_empty() {
         return Some(HostRef::Embedded);
@@ -23,8 +25,10 @@ fn host_ref(key: &[u8]) -> Option<HostRef> {
     key.try_into().ok().map(HostRef::Remote)
 }
 
+/// One stored rule row: subject, kind, account, host.
 type RuleRow = (Option<String>, String, Option<String>, Option<Vec<u8>>);
 
+/// Read one row into a rule; a row the schema should have refused gives `None`.
 fn rule(row: RuleRow) -> Option<Rule> {
     let (subject, kind, account, host) = row;
     Some(Rule {

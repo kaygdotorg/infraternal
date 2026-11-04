@@ -41,10 +41,12 @@ pub struct OrdinaryUids {
     pub last: u32,
 }
 impl OrdinaryUids {
+    /// Ordinary accounts on Linux.
     pub const LINUX: Self = Self {
         first: 1000,
         last: 59_999,
     };
+    /// Ordinary accounts on macOS.
     pub const MACOS: Self = Self {
         first: 501,
         last: 59_999,
@@ -58,6 +60,7 @@ impl OrdinaryUids {
             Self::LINUX
         }
     }
+    /// Whether `uid` is an ordinary (person) account in this range.
     #[must_use]
     pub const fn contains(self, uid: u32) -> bool {
         uid >= self.first && uid <= self.last

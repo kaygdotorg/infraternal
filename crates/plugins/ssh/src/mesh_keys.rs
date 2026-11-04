@@ -32,12 +32,19 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// a sign request carries a session identifier and a small authentication body.
 pub const MAX_MESSAGE: usize = 256 * 1024;
 
+/// Agent protocol: generic failure reply.
 const FAILURE: u8 = 5;
+/// Agent protocol: generic success reply.
 const SUCCESS: u8 = 6;
+/// Agent protocol: list identities request.
 const REQUEST_IDENTITIES: u8 = 11;
+/// Agent protocol: list identities reply.
 const IDENTITIES_ANSWER: u8 = 12;
+/// Agent protocol: sign request.
 const SIGN_REQUEST: u8 = 13;
+/// Agent protocol: sign reply.
 const SIGN_RESPONSE: u8 = 14;
+/// Agent protocol: extension request (`session-bind@openssh.com`).
 const EXTENSION: u8 = 27;
 
 /// One person's identity on this machine: the certificate and its key.
@@ -56,18 +63,22 @@ pub fn may_ask(uid: u32, added_with: Option<u32>, ordinary: OrdinaryUids) -> boo
     uid != 0 && ordinary.contains(uid) && added_with == Some(uid)
 }
 
+/// A bounds-checked reader over one message body.
 struct Fields<'a>(&'a [u8]);
 impl<'a> Fields<'a> {
+    /// One byte, or `None` at the end.
     fn byte(&mut self) -> Option<u8> {
         let (&first, rest) = self.0.split_first()?;
         self.0 = rest;
         Some(first)
     }
+    /// A big-endian `uint32`, or `None` if fewer than four bytes remain.
     fn u32(&mut self) -> Option<u32> {
         let (bytes, rest) = self.0.split_first_chunk::<4>()?;
         self.0 = rest;
         Some(u32::from_be_bytes(*bytes))
     }
+    /// An SSH `string`: its length must fit in what remains.
     fn string(&mut self) -> Option<&'a [u8]> {
         let length = usize::try_from(self.u32()?).ok()?;
         if length > self.0.len() {
@@ -77,11 +88,13 @@ impl<'a> Fields<'a> {
         self.0 = rest;
         Some(string)
     }
+    /// Whether the whole body was consumed; trailing bytes refuse the message.
     fn done(&self) -> bool {
         self.0.is_empty()
     }
 }
 
+/// Append an SSH `string` (length prefix and bytes).
 fn put_string(out: &mut Vec<u8>, bytes: &[u8]) -> Option<()> {
     out.extend_from_slice(&u32::try_from(bytes.len()).ok()?.to_be_bytes());
     out.extend_from_slice(bytes);
@@ -98,6 +111,7 @@ pub struct Session {
 }
 
 impl Session {
+    /// Signing needs a non-forwarding binding and no forwarding binding ever.
     fn may_sign(&self) -> bool {
         self.bound && !self.forwarded
     }

@@ -2,9 +2,12 @@
 use super::*;
 use std::path::PathBuf;
 
+/// The key socket path written into the block.
 const SOCKET: &str = "/run/infraternal/mesh-ssh-agent.sock";
+/// A known-hosts path written into the block.
 const KNOWN: &str = "/var/lib/infraternal/mesh-ssh/known_hosts";
 
+/// Config.
 fn config() -> String {
     client_config(
         "internal",
@@ -16,6 +19,7 @@ fn config() -> String {
     .unwrap()
 }
 
+/// Block is scoped to mesh names and addresses.
 #[test]
 fn block_is_scoped_to_mesh_names_and_addresses() {
     let file = config();
@@ -25,6 +29,7 @@ fn block_is_scoped_to_mesh_names_and_addresses() {
     assert!(!file.contains("ForwardAgent yes"));
 }
 
+/// Ranges off octet boundaries match names only.
 #[test]
 fn ranges_off_octet_boundaries_match_names_only() {
     let file = client_config(
@@ -38,6 +43,7 @@ fn ranges_off_octet_boundaries_match_names_only() {
     assert!(file.contains("Match host \"*.internal\"\n"));
 }
 
+/// Values that could escape are refused.
 #[test]
 fn values_that_could_escape_are_refused() {
     let net = Ipv4Addr::new(10, 254, 0, 0);
@@ -52,6 +58,7 @@ fn values_that_could_escape_are_refused() {
     }
 }
 
+/// Known hosts trusts only the ca for mesh patterns.
 #[test]
 fn known_hosts_trusts_only_the_ca_for_mesh_patterns() {
     let line = known_hosts("internal", Ipv4Addr::new(10, 254, 0, 0), 16, [7; 32]).unwrap();
@@ -59,6 +66,7 @@ fn known_hosts_trusts_only_the_ca_for_mesh_patterns() {
     assert_eq!(line.lines().count(), 1);
 }
 
+/// Stock ssh applies the block only to mesh hosts.
 #[test]
 fn stock_ssh_applies_the_block_only_to_mesh_hosts() {
     if std::process::Command::new("ssh")

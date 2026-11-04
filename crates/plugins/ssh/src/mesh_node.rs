@@ -49,6 +49,7 @@ use std::{
 };
 use tokio::{sync::watch, task::JoinHandle};
 
+/// One server-only control action of this component.
 const fn control(id: &'static str, summary: &'static str) -> ActionDef {
     ActionDef {
         id,
@@ -63,6 +64,7 @@ const fn control(id: &'static str, summary: &'static str) -> ActionDef {
         opens: None,
     }
 }
+/// The actions only the authenticated server link may call.
 const CONTROL_ACTIONS: &[ActionDef] = &[
     control("mesh.ssh.host_key", "Read this node's mesh SSH host key"),
     control(
@@ -75,6 +77,7 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
         "Install a person's certificate and the client files",
     ),
 ];
+/// The node component's descriptor; it has no public actions.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "mesh-ssh-node",
     api: infraternal_plugin_api::API_VERSION,
@@ -92,6 +95,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     unavailable_event: br#"{"type":"error","error":"Mesh SSH is unavailable."}"#,
 };
 
+/// Input of `mesh.ssh.configure`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configure {
@@ -103,12 +107,14 @@ struct Configure {
     host_certificate: Option<String>,
 }
 
+/// Input of `mesh.ssh.person_key`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersonKeyRequest {
     person: String,
 }
 
+/// Input of `mesh.ssh.client`; a `person` of null removes the client side.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Client {
@@ -130,6 +136,7 @@ struct Client {
     added_with: Option<AddedWith>,
 }
 
+/// How the server identifies the account the machine was added with.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 enum AddedWith {
@@ -141,15 +148,19 @@ enum AddedWith {
 /// to group and other writes ([`trusted_directory`]); otherwise nothing is
 /// written or served (J181 M4).
 const SOCKET: &str = "/run/infraternal/mesh-ssh-agent.sock";
+/// The known-hosts file holding the mesh CA line.
 const KNOWN_HOSTS: &str = "/etc/ssh/infraternal-mesh-known_hosts";
+/// The uid that must own every trusted directory.
 const ROOT: u32 = 0;
 
+/// What the server last asked for: listener on or off, and its host certificate.
 #[derive(Clone)]
 struct Desired {
     enabled: bool,
     certificate: Option<Certificate>,
 }
 
+/// State shared by the component, its listener tasks and the key socket.
 struct Shared {
     authority: Authority<ShimRuntime>,
     host_key: PrivateKey,
@@ -209,6 +220,7 @@ impl MeshSshNode {
         })
     }
 
+    /// Install a snapshot and the listener state; report a refused snapshot.
     fn configure(&mut self, input: &[u8]) -> Result<Vec<u8>, PluginError> {
         let input: Configure = serde_json::from_slice(input).map_err(|_| PluginError::Rejected)?;
         let certificate = match input.host_certificate.as_deref() {
@@ -253,6 +265,7 @@ impl MeshSshNode {
         Ok(br#"{"accepted":true}"#.to_vec())
     }
 
+    /// Make a person's in-memory key and return its public half.
     fn person_key(&self, input: &[u8]) -> Result<Vec<u8>, PluginError> {
         let input: PersonKeyRequest =
             serde_json::from_slice(input).map_err(|_| PluginError::Rejected)?;
@@ -274,6 +287,7 @@ impl MeshSshNode {
             .map_err(|_| PluginError::Rejected)
     }
 
+    /// Install or remove the client side: certificate, files and key socket.
     fn client(&mut self, input: &[u8]) -> Result<Vec<u8>, PluginError> {
         let input: Client = serde_json::from_slice(input).map_err(|_| PluginError::Rejected)?;
         let known_hosts = Path::new(KNOWN_HOSTS);
@@ -380,6 +394,7 @@ pub(crate) fn trusted_directory(path: &Path, root_uid: u32) -> bool {
         })
 }
 
+/// Refuse a path whose directory is not trusted ([`trusted_directory`]).
 fn in_trusted_directory(path: &Path) -> std::io::Result<()> {
     let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
     if trusted_directory(parent, ROOT) {
@@ -406,6 +421,7 @@ fn write_file(path: &std::path::Path, contents: &str, mode: u32) -> std::io::Res
     std::fs::rename(&temporary, path)
 }
 
+/// Write the known-hosts file and the `ssh_config.d` block.
 fn write_client_files(
     known_hosts: &std::path::Path,
     known: &str,
@@ -420,6 +436,7 @@ fn write_client_files(
     )
 }
 
+/// Remove both client files; missing files are fine.
 fn remove_client_files(known_hosts: &std::path::Path) {
     let _ = std::fs::remove_file(crate::mesh_client_config::CONFIG_PATH);
     let _ = std::fs::remove_file(known_hosts);
@@ -527,6 +544,7 @@ struct ListenerKey {
     certificate: Vec<u8>,
 }
 
+/// The listener inputs, or `None` when the listener must be off.
 fn listener_key(view: Option<&MeshView>, want: &Desired) -> Option<ListenerKey> {
     let view = view?;
     let certificate = want.certificate.as_ref()?;
@@ -609,6 +627,7 @@ async fn supervise(
     stop(&mut running).await;
 }
 
+/// Bind one mesh address on TCP/22 (exact bind or owned redirect).
 async fn bind(address: IpAddr, interface: String) -> Option<MeshPort> {
     // Binding may install an nft redirect: blocking work, off the reactor.
     tokio::task::spawn_blocking(move || MeshPort::bind(address, &interface).ok())
@@ -617,6 +636,7 @@ async fn bind(address: IpAddr, interface: String) -> Option<MeshPort> {
         .flatten()
 }
 
+/// Serve one bound listener until it is stopped.
 fn accept(
     shared: &Arc<Shared>,
     port: &MeshPort,
@@ -673,8 +693,10 @@ fn accept(
 /// A security bound on peers that have not proven who they are, not a limit
 /// on sessions: a slot is released as soon as the peer authenticates.
 const PENDING_PER_SOURCE: usize = 8;
+/// Unauthenticated connections across all sources.
 const PENDING_TOTAL: usize = 64;
 
+/// Counts of unauthenticated connections, in total and per source.
 #[derive(Clone, Default)]
 struct Pending(Arc<std::sync::Mutex<(usize, std::collections::HashMap<IpAddr, usize>)>>);
 
@@ -685,6 +707,7 @@ struct PendingSlot {
 }
 
 impl Pending {
+    /// Take a slot for a new connection from `source`, or `None` over a bound.
     fn admit(&self, source: IpAddr) -> Option<PendingSlot> {
         let mut counts = self.0.lock().ok()?;
         let (total, by_source) = &mut *counts;
@@ -716,6 +739,7 @@ impl Drop for PendingSlot {
     }
 }
 
+/// Stop the listeners; open connections end only through the brake.
 async fn stop(running: &mut Vec<(MeshPort, JoinHandle<()>)>) {
     for (mut port, task) in running.drain(..) {
         // Stops new connections; open ones end only through the brake.

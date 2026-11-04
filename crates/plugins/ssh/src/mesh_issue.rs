@@ -81,6 +81,7 @@ pub struct HostRequest<'a> {
     pub lifetime: u64,
 }
 
+/// Adapts the caller's signing function to the certificate builder.
 struct CaSigner<'a> {
     public: Ed25519PublicKey,
     sign: &'a SignBody<'a>,
@@ -100,6 +101,7 @@ impl From<&CaSigner<'_>> for KeyData {
     }
 }
 
+/// A builder with a random nonce and a validity set back by [`CLOCK_SKEW`].
 fn builder(subject: &PublicKey, now: u64, lifetime: u64) -> Result<Builder, IssueError> {
     if !(MIN_LIFETIME..=MAX_LIFETIME).contains(&lifetime) {
         return Err(IssueError);
@@ -115,6 +117,7 @@ fn builder(subject: &PublicKey, now: u64, lifetime: u64) -> Result<Builder, Issu
     .map_err(|_| IssueError)
 }
 
+/// Sign with the CA and validate the result against that same CA key.
 fn sign(builder: Builder, ca: [u8; 32], sign: &SignBody<'_>) -> Result<Certificate, IssueError> {
     let signer = CaSigner {
         public: Ed25519PublicKey(ca),
@@ -243,6 +246,7 @@ pub fn check_host(certificate: &Certificate) -> Result<(), IssueError> {
     }
 }
 
+/// Whether the validity interval is between [`MIN_LIFETIME`] and [`MAX_LIFETIME`].
 fn lifetime_ok(certificate: &Certificate) -> bool {
     certificate
         .valid_before()

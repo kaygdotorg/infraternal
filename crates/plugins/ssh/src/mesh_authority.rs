@@ -77,6 +77,7 @@ pub type AccountLookup = fn(&str) -> Option<u32>;
 
 /// Opens a shell or command in the requested account's login session.
 pub trait SessionRuntime: Send + Sync + 'static {
+    /// Open a shell or command as `account` for `person`; refuse on any failure.
     fn open(
         &self,
         person: &str,
@@ -98,11 +99,13 @@ pub enum NotInstalled {
     Busy,
 }
 
+/// The installed snapshot with its CA fingerprint computed once.
 struct Installed {
     snapshot: Snapshot,
     ca: Fingerprint,
 }
 
+/// Everything the authority decides from, behind one lock.
 #[derive(Default)]
 struct State {
     installed: Option<Arc<Installed>>,
@@ -118,6 +121,7 @@ pub struct Authority<R> {
 }
 
 impl<R: SessionRuntime> Authority<R> {
+    /// An authority with nothing installed: it refuses until a snapshot and a mesh view arrive.
     #[must_use]
     pub fn new(runtime: R, accounts: AccountLookup) -> Self {
         Self {
@@ -205,6 +209,7 @@ impl<R: SessionRuntime> LoginAuthority for Authority<R> {
 }
 
 impl<R> Guard<'_, R> {
+    /// The registered certificate with this full digest, if any.
     fn issued(&self, digest: &[u8; 32]) -> Option<&Issued> {
         self.installed
             .snapshot

@@ -2,6 +2,7 @@
 use super::*;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
+/// The owner with the setup defaults, a second person, and live sessions for both.
 async fn fixture() -> MeshSshPlugin {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -37,6 +38,7 @@ async fn fixture() -> MeshSshPlugin {
     MeshSshPlugin::new(pool, None, None)
 }
 
+/// Only the owner changes settings.
 #[tokio::test]
 async fn only_the_owner_changes_settings() {
     let plugin = fixture().await;
@@ -61,6 +63,7 @@ async fn only_the_owner_changes_settings() {
     assert!(!plugin.enabled("00000000-0000-0000-0000-000000000001").await);
 }
 
+/// Rules are listed added and removed.
 #[tokio::test]
 async fn rules_are_listed_added_and_removed() {
     let plugin = fixture().await;
@@ -125,6 +128,7 @@ async fn rules_are_listed_added_and_removed() {
     );
 }
 
+/// Snapshot carries valid certificates and grants with a rising sequence.
 #[tokio::test]
 async fn snapshot_carries_valid_certificates_and_grants_with_a_rising_sequence() {
     let plugin = fixture().await;
@@ -151,6 +155,7 @@ async fn snapshot_carries_valid_certificates_and_grants_with_a_rising_sequence()
     assert!(!first.grants.contains_key("bob"));
 }
 
+/// The sequence keeps rising across a server restart.
 #[tokio::test]
 async fn the_sequence_keeps_rising_across_a_server_restart() {
     // J181 M1: a restarted server must not push below what nodes hold.
@@ -169,6 +174,7 @@ async fn the_sequence_keeps_rising_across_a_server_restart() {
     assert!(after + 60_000 >= clock, "never far below the clock");
 }
 
+/// Insert a remote host added by the owner with this mode, uid and add-host address.
 async fn remote(plugin: &MeshSshPlugin, mode: &str, uid: i64, address: &str) -> uuid::Uuid {
     let id = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'kayg',?,?,unixepoch())")
@@ -187,6 +193,7 @@ async fn remote(plugin: &MeshSshPlugin, mode: &str, uid: i64, address: &str) -> 
     id
 }
 
+/// Only the account used to add the machine acts as the person.
 #[tokio::test]
 async fn only_the_account_used_to_add_the_machine_acts_as_the_person() {
     // J181 M3.
@@ -208,6 +215,7 @@ async fn only_the_account_used_to_add_the_machine_acts_as_the_person() {
     assert_eq!(plugin.added_with(None).await, None);
 }
 
+/// Every issued certificate is recorded for audit.
 #[tokio::test]
 async fn every_issued_certificate_is_recorded_for_audit() {
     // J181 M6.

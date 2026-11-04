@@ -50,8 +50,10 @@ const RENEW_BEFORE: u64 = 12 * 60 * 60;
 /// How long to wait before retrying a push that could not complete: a node
 /// that refused it (stale or busy) must get the current state soon.
 const RETRY: Duration = Duration::from_secs(10);
+/// The one refusal text: it never says which check failed.
 const REFUSED: &str = "mesh SSH settings unavailable or unauthorized";
 
+/// One owner action of the mesh SSH server plugin.
 const fn action(id: &'static str, summary: &'static str, effect: Effect) -> ActionDef {
     ActionDef {
         id,
@@ -127,6 +129,7 @@ pub(crate) struct MeshSshPlugin {
     changes: watch::Sender<u64>,
 }
 
+/// Server time in Unix seconds.
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -143,11 +146,13 @@ fn host_ref(host: &str) -> Result<Option<uuid::Uuid>, ()> {
     }
 }
 
+/// The stored form of a host for `login_rules` and `login_names_match`.
 fn host_blob(host: Option<uuid::Uuid>) -> Vec<u8> {
     host.map_or_else(Vec::new, |host| host.as_bytes().to_vec())
 }
 
 impl MeshSshPlugin {
+    /// The plugin over the server database, CA source and public origin.
     pub(crate) fn new(
         pool: SqlitePool,
         ca: Option<Arc<dyn CaKeySource>>,
@@ -173,6 +178,7 @@ impl MeshSshPlugin {
             .send_modify(|version| *version = version.wrapping_add(1));
     }
 
+    /// Whether the owner turned mesh SSH on for this node.
     async fn enabled(&self, host: &str) -> bool {
         sqlx::query_scalar::<_, bool>("SELECT enabled = 1 FROM mesh_ssh_hosts WHERE host = ?")
             .bind(host)
@@ -484,6 +490,7 @@ impl MeshSshPlugin {
         tx.commit().await.map_err(|_| ())
     }
 
+    /// Push to one node until its connection ends.
     async fn serve_node(self, channel: Arc<dyn NodeChannel>) {
         let mut changes = self.changes.subscribe();
         let mut issue = true;
@@ -608,6 +615,7 @@ impl MeshSshPlugin {
 /// One stored rule: id, subject (none for everyone), kind, account, host.
 type RuleRow = (i64, Option<String>, String, Option<String>, Option<Vec<u8>>);
 
+/// Every login rule, in creation order.
 async fn list_rules(tx: &mut sqlx::SqliteConnection) -> Result<Value, &'static str> {
     let rows: Vec<RuleRow> = sqlx::query_as(
         "SELECT id, subject, account_kind, account, host_id FROM login_rules ORDER BY id",

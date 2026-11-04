@@ -36,6 +36,7 @@ pub struct ShimRuntime {
 }
 
 impl ShimRuntime {
+    /// A runtime over the infraternal agent's session state directory.
     #[must_use]
     pub fn new(state: PathBuf) -> Self {
         Self { state }
@@ -70,6 +71,7 @@ impl SessionRuntime for ShimRuntime {
     }
 }
 
+/// Start the pump task and hand its ends to the SSH channel.
 fn bridge(session: Session, size: TerminalSize) -> Attachment {
     let (input, from_client) = tokio::io::duplex(PACKET_BYTES);
     let (to_client, output) = tokio::io::duplex(PACKET_BYTES);
@@ -165,6 +167,7 @@ async fn pump(
     }
 }
 
+/// The shim resize frame for an SSH terminal size.
 fn resize(size: TerminalSize) -> Frame {
     Frame::Resize {
         cols: size.columns,

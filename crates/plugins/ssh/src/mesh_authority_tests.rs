@@ -7,11 +7,16 @@ use crate::{
 use infraternal_plugin_api::login_access::LoginGrant;
 use russh::keys::{Algorithm, Certificate, PrivateKey, signature::Signer as _, ssh_key::Signature};
 
+/// The person every fixture certificate is issued to.
 const PERSON: &str = "0b5c8a64-7d1f-4c43-9d0e-0c6a8a5b7f10";
+/// The mesh address the certificate is bound to.
 const SOURCE: &str = "10.254.0.7";
+/// The mesh node that owns [`SOURCE`].
 const SOURCE_NODE: u64 = 7;
+/// This node, the SSH target.
 const TARGET_NODE: u64 = 9;
 
+/// A runtime that opens nothing; admission is under test, not shells.
 struct NoRuntime;
 #[allow(clippy::unused_async_trait_impl)]
 impl SessionRuntime for NoRuntime {
@@ -26,6 +31,7 @@ impl SessionRuntime for NoRuntime {
     }
 }
 
+/// Accounts.
 fn accounts(name: &str) -> Option<u32> {
     match name {
         "root" => Some(0),
@@ -35,11 +41,13 @@ fn accounts(name: &str) -> Option<u32> {
     }
 }
 
+/// A CA and one certificate it issued.
 struct Fixture {
     ca: PrivateKey,
     certificate: Certificate,
 }
 
+/// Fixture.
 fn fixture() -> Fixture {
     let ca = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
     let subject = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519)
@@ -65,10 +73,12 @@ fn fixture() -> Fixture {
     Fixture { ca, certificate }
 }
 
+/// Ca key.
 fn ca_key(ca: &PrivateKey) -> [u8; 32] {
     ca.public_key().key_data().ed25519().unwrap().0
 }
 
+/// Now.
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -76,6 +86,7 @@ fn now() -> u64 {
         .as_secs()
 }
 
+/// Snapshot.
 fn snapshot(fixture: &Fixture, sequence: u64, grant: LoginGrant) -> Snapshot {
     Snapshot {
         sequence,
@@ -92,6 +103,7 @@ fn snapshot(fixture: &Fixture, sequence: u64, grant: LoginGrant) -> Snapshot {
     }
 }
 
+/// Own kayg.
 fn own_kayg() -> LoginGrant {
     LoginGrant {
         own_username: Some("kayg".into()),
@@ -99,6 +111,7 @@ fn own_kayg() -> LoginGrant {
     }
 }
 
+/// Mesh.
 fn mesh(ssh_allowed: bool) -> MeshView {
     MeshView {
         node: TARGET_NODE,
@@ -115,10 +128,12 @@ fn mesh(ssh_allowed: bool) -> MeshView {
     }
 }
 
+/// New authority.
 fn new_authority() -> Authority<NoRuntime> {
     Authority::new(NoRuntime, accounts)
 }
 
+/// Admit.
 async fn admit(
     authority: &Authority<NoRuntime>,
     fixture: &Fixture,
@@ -137,6 +152,7 @@ async fn admit(
     .map(|_| ())
 }
 
+/// Ready.
 async fn ready(grant: LoginGrant, ssh_allowed: bool) -> (Authority<NoRuntime>, Fixture) {
     let fixture = fixture();
     let authority = new_authority();
@@ -148,12 +164,14 @@ async fn ready(grant: LoginGrant, ssh_allowed: bool) -> (Authority<NoRuntime>, F
     (authority, fixture)
 }
 
+/// Both checks pass for the persons own account.
 #[tokio::test]
 async fn both_checks_pass_for_the_persons_own_account() {
     let (authority, fixture) = ready(own_kayg(), true).await;
     assert_eq!(admit(&authority, &fixture, SOURCE, "kayg").await, Ok(()));
 }
 
+/// Nothing installed refuses.
 #[tokio::test]
 async fn nothing_installed_refuses() {
     let fixture = fixture();
@@ -169,6 +187,7 @@ async fn nothing_installed_refuses() {
     assert!(other.current().await.is_err());
 }
 
+/// Network access denied refuses.
 #[tokio::test]
 async fn network_access_denied_refuses() {
     let (authority, fixture) = ready(own_kayg(), false).await;
@@ -178,6 +197,7 @@ async fn network_access_denied_refuses() {
     );
 }
 
+/// Login access denied refuses.
 #[tokio::test]
 async fn login_access_denied_refuses() {
     let (authority, fixture) = ready(own_kayg(), true).await;
@@ -195,6 +215,7 @@ async fn login_access_denied_refuses() {
     );
 }
 
+/// Any account reaches root.
 #[tokio::test]
 async fn any_account_reaches_root() {
     let grant = LoginGrant {
@@ -210,6 +231,7 @@ async fn any_account_reaches_root() {
     );
 }
 
+/// Unregistered certificate refuses.
 #[tokio::test]
 async fn unregistered_certificate_refuses() {
     let (authority, _) = ready(own_kayg(), true).await;
@@ -221,6 +243,7 @@ async fn unregistered_certificate_refuses() {
     );
 }
 
+/// Certificate from another address refuses.
 #[tokio::test]
 async fn certificate_from_another_address_refuses() {
     let (authority, fixture) = ready(own_kayg(), true).await;
@@ -237,6 +260,7 @@ async fn certificate_from_another_address_refuses() {
     );
 }
 
+/// Removing a certificate revokes it.
 #[tokio::test]
 async fn removing_a_certificate_revokes_it() {
     let (authority, fixture) = ready(own_kayg(), true).await;
@@ -249,6 +273,7 @@ async fn removing_a_certificate_revokes_it() {
     );
 }
 
+/// Older or repeated snapshots are refused.
 #[tokio::test]
 async fn older_or_repeated_snapshots_are_refused() {
     let (authority, fixture) = ready(own_kayg(), true).await;
@@ -269,6 +294,7 @@ async fn older_or_repeated_snapshots_are_refused() {
     );
 }
 
+/// Snapshot for another node refuses.
 #[tokio::test]
 async fn snapshot_for_another_node_refuses() {
     let fixture = fixture();
@@ -280,6 +306,7 @@ async fn snapshot_for_another_node_refuses() {
     assert!(authority.current().await.is_err());
 }
 
+/// Leaving the mesh refuses.
 #[tokio::test]
 async fn leaving_the_mesh_refuses() {
     let (authority, _) = ready(own_kayg(), true).await;
@@ -287,6 +314,7 @@ async fn leaving_the_mesh_refuses() {
     assert!(authority.current().await.is_err());
 }
 
+/// Snapshot wire form refuses unknown fields.
 #[test]
 fn snapshot_wire_form_refuses_unknown_fields() {
     let fixture = fixture();

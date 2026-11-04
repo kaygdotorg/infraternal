@@ -3,16 +3,20 @@ use super::*;
 use russh::keys::{Algorithm, HashAlg, PrivateKey};
 use std::cell::Cell;
 
+/// Fixed server time for reproducible validity windows.
 const NOW: u64 = 1_800_000_000;
 
+/// Key.
 fn key() -> PrivateKey {
     PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap()
 }
 
+/// Ca public.
 fn ca_public(ca: &PrivateKey) -> [u8; 32] {
     ca.public_key().key_data().ed25519().unwrap().0
 }
 
+/// Sign with.
 fn sign_with(ca: &PrivateKey) -> impl Fn(&[u8]) -> Option<[u8; 64]> + '_ {
     |body: &[u8]| {
         let signature: russh::keys::ssh_key::Signature = ca.try_sign(body).ok()?;
@@ -20,6 +24,7 @@ fn sign_with(ca: &PrivateKey) -> impl Fn(&[u8]) -> Option<[u8; 64]> + '_ {
     }
 }
 
+/// Person request.
 fn person_request(subject: &PublicKey, lifetime: u64) -> PersonRequest<'_> {
     PersonRequest {
         subject,
@@ -30,6 +35,7 @@ fn person_request(subject: &PublicKey, lifetime: u64) -> PersonRequest<'_> {
     }
 }
 
+/// Person certificate has exactly the verified shape.
 #[test]
 fn person_certificate_has_exactly_the_verified_shape() {
     let ca = key();
@@ -67,6 +73,7 @@ fn person_certificate_has_exactly_the_verified_shape() {
     assert!(certificate.valid_before() - certificate.valid_after() <= 24 * 60 * 60);
 }
 
+/// Ipv6 source is bound to one address.
 #[test]
 fn ipv6_source_is_bound_to_one_address() {
     let ca = key();
@@ -83,6 +90,7 @@ fn ipv6_source_is_bound_to_one_address() {
     );
 }
 
+/// Lifetime is between one hour and one day.
 #[test]
 fn lifetime_is_between_one_hour_and_one_day() {
     let ca = key();
@@ -100,6 +108,7 @@ fn lifetime_is_between_one_hour_and_one_day() {
     }
 }
 
+/// Empty person or a locked signer refuses.
 #[test]
 fn empty_person_or_a_locked_signer_refuses() {
     let ca = key();
@@ -111,6 +120,7 @@ fn empty_person_or_a_locked_signer_refuses() {
     assert!(person_certificate(ca_public(&ca), &locked, &person_request(&subject, 3600)).is_err());
 }
 
+/// A signer that is not the named ca is caught.
 #[test]
 fn a_signer_that_is_not_the_named_ca_is_caught() {
     let ca = key();
@@ -126,6 +136,7 @@ fn a_signer_that_is_not_the_named_ca_is_caught() {
     );
 }
 
+/// The signer only sees an ssh certificate body.
 #[test]
 fn the_signer_only_sees_an_ssh_certificate_body() {
     let ca = key();
@@ -140,6 +151,7 @@ fn the_signer_only_sees_an_ssh_certificate_body() {
     assert!(seen.get());
 }
 
+/// Host certificate names the host and carries no options.
 #[test]
 fn host_certificate_names_the_host_and_carries_no_options() {
     let ca = key();
@@ -168,6 +180,7 @@ fn host_certificate_names_the_host_and_carries_no_options() {
     assert!(certificate.extensions().is_empty());
 }
 
+/// Host certificate needs a name.
 #[test]
 fn host_certificate_needs_a_name() {
     let ca = key();
@@ -182,6 +195,7 @@ fn host_certificate_needs_a_name() {
     assert!(host_certificate(ca_public(&ca), &sign_with(&ca), &request).is_err());
 }
 
+/// Issued certificates pass their independent checks and others do not.
 #[test]
 fn issued_certificates_pass_their_independent_checks_and_others_do_not() {
     let ca = key();

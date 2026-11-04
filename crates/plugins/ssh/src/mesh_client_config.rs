@@ -49,6 +49,7 @@ fn patterns(suffix: &str, network: Ipv4Addr, prefix: u8) -> Option<Vec<String>> 
     Some(patterns)
 }
 
+/// An absolute path quoted for `ssh_config`, or `None` if it could break out of the quotes.
 fn quoted_path(path: &Path) -> Option<String> {
     let path = path.to_str()?;
     (path.starts_with('/')

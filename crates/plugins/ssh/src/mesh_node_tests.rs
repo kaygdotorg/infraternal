@@ -3,6 +3,7 @@ use super::*;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
+/// Directory.
 fn directory(mode: u32) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "j175-node-{}-{mode:o}-{}",
@@ -14,6 +15,7 @@ fn directory(mode: u32) -> PathBuf {
     path
 }
 
+/// Only directories owned by root and closed to others are trusted.
 #[test]
 fn only_directories_owned_by_root_and_closed_to_others_are_trusted() {
     // J181 M4: a writable known-hosts directory would let any local user add
@@ -31,6 +33,7 @@ fn only_directories_owned_by_root_and_closed_to_others_are_trusted() {
     std::fs::remove_dir_all(closed).unwrap();
 }
 
+/// Turning off or leaving the mesh ends sessions but renewal does not.
 #[test]
 fn turning_off_or_leaving_the_mesh_ends_sessions_but_renewal_does_not() {
     // J181 M7: off is the emergency brake for open connections.
@@ -48,6 +51,7 @@ fn turning_off_or_leaving_the_mesh_ends_sessions_but_renewal_does_not() {
     assert!(!ends_sessions(None, key(9, b"a").as_ref()));
 }
 
+/// A brake ends a running connection.
 #[tokio::test]
 async fn a_brake_ends_a_running_connection() {
     let (brake, watched) = watch::channel(0_u64);
@@ -59,6 +63,7 @@ async fn a_brake_ends_a_running_connection() {
         .unwrap();
 }
 
+/// A stale snapshot is reported not accepted.
 #[test]
 fn a_stale_snapshot_is_reported_not_accepted() {
     // J181 M1: the server must learn that a push was refused.
@@ -84,6 +89,7 @@ fn a_stale_snapshot_is_reported_not_accepted() {
     });
 }
 
+/// Unauthenticated connections are bounded per source and in total.
 #[test]
 fn unauthenticated_connections_are_bounded_per_source_and_in_total() {
     // J181 M2: a peer with no key cannot exhaust the agent's descriptors.

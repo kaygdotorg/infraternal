@@ -1,9 +1,14 @@
+//! Checks the login access reduction and host check against the D235/D319 rules.
 use super::*;
 
+/// Linux ordinary-account range, the common case.
 const LINUX: OrdinaryUids = OrdinaryUids::LINUX;
+/// The target host in most cases.
 const HOST: HostRef = HostRef::Remote([7; 16]);
+/// A second host, for rules scoped to one host.
 const OTHER_HOST: HostRef = HostRef::Remote([8; 16]);
 
+/// Rule.
 fn rule(subject: Subject, account: Account, hosts: Hosts) -> Rule {
     Rule {
         subject,
@@ -12,10 +17,12 @@ fn rule(subject: Subject, account: Account, hosts: Hosts) -> Rule {
     }
 }
 
+/// Person.
 fn person(id: &str) -> Subject {
     Subject::Person(id.to_owned())
 }
 
+/// Defaults.
 fn defaults(owner: &str) -> Vec<Rule> {
     vec![
         rule(Subject::Everyone, Account::OwnUsername, Hosts::All),
@@ -23,6 +30,7 @@ fn defaults(owner: &str) -> Vec<Rule> {
     ]
 }
 
+/// Added.
 fn added(host: HostRef) -> HostFacts {
     HostFacts {
         host,
@@ -31,6 +39,7 @@ fn added(host: HostRef) -> HostFacts {
     }
 }
 
+/// Foreign.
 fn foreign(host: HostRef) -> HostFacts {
     HostFacts {
         host,
@@ -39,6 +48,7 @@ fn foreign(host: HostRef) -> HostFacts {
     }
 }
 
+/// Owner default allows any account including root.
 #[test]
 fn owner_default_allows_any_account_including_root() {
     let grant = grant(&defaults("p-owner"), "p-owner", "kayg", &foreign(HOST));
@@ -47,6 +57,7 @@ fn owner_default_allows_any_account_including_root() {
     assert!(grant.allows("kayg", 1000, LINUX));
 }
 
+/// Own username only on machines the person added.
 #[test]
 fn own_username_only_on_machines_the_person_added() {
     let rules = defaults("p-owner");
@@ -58,6 +69,7 @@ fn own_username_only_on_machines_the_person_added() {
     assert_eq!(theirs, LoginGrant::default());
 }
 
+/// Own username on a machine marked names match people.
 #[test]
 fn own_username_on_a_machine_marked_names_match_people() {
     let facts = HostFacts {
@@ -69,6 +81,7 @@ fn own_username_on_a_machine_marked_names_match_people() {
     assert!(grant.allows("bob", 1001, LINUX));
 }
 
+/// Own username never reaches root system or other names.
 #[test]
 fn own_username_never_reaches_root_system_or_other_names() {
     let grant = grant(&defaults("p-owner"), "p-bob", "bob", &added(HOST));
@@ -82,6 +95,7 @@ fn own_username_never_reaches_root_system_or_other_names() {
     assert!(!grant.allows("root", 0, LINUX));
 }
 
+/// A person named root gets no own username.
 #[test]
 fn a_person_named_root_gets_no_own_username() {
     let grant = grant(&defaults("p-owner"), "p-x", "root", &added(HOST));
@@ -89,6 +103,7 @@ fn a_person_named_root_gets_no_own_username() {
     assert!(!grant.allows("root", 0, LINUX));
 }
 
+/// Macos ordinary accounts start at 501.
 #[test]
 fn macos_ordinary_accounts_start_at_501() {
     let grant = grant(&defaults("p-owner"), "p-bob", "bob", &added(HOST));
@@ -97,6 +112,7 @@ fn macos_ordinary_accounts_start_at_501() {
     assert!(!grant.allows("bob", 501, LINUX));
 }
 
+/// Named rules match their exact account and host only.
 #[test]
 fn named_rules_match_their_exact_account_and_host_only() {
     let rules = vec![rule(
@@ -113,6 +129,7 @@ fn named_rules_match_their_exact_account_and_host_only() {
     assert!(!elsewhere.allows("deploy", 998, LINUX));
 }
 
+/// Rules for another person never apply.
 #[test]
 fn rules_for_another_person_never_apply() {
     let rules = vec![
@@ -129,6 +146,7 @@ fn rules_for_another_person_never_apply() {
     assert!(!grant.allows("deploy", 998, LINUX));
 }
 
+/// No rules refuse everything.
 #[test]
 fn no_rules_refuse_everything() {
     let grant = grant(&[], "p-owner", "kayg", &added(HostRef::Embedded));
@@ -136,6 +154,7 @@ fn no_rules_refuse_everything() {
     assert!(!grant.allows("root", 0, LINUX));
 }
 
+/// Embedded host is its own target.
 #[test]
 fn embedded_host_is_its_own_target() {
     let rules = vec![rule(
@@ -149,6 +168,7 @@ fn embedded_host_is_its_own_target() {
     assert!(!grant(&rules, "p-bob", "bob", &foreign(HOST)).allows("deploy", 998, LINUX));
 }
 
+/// Empty or unsafe account names never match.
 #[test]
 fn empty_or_unsafe_account_names_never_match() {
     let rules = vec![rule(
@@ -160,6 +180,7 @@ fn empty_or_unsafe_account_names_never_match() {
     assert!(!grant.allows("", 1001, LINUX));
 }
 
+/// A grant without fields decodes as refusing everything.
 #[test]
 fn a_grant_without_fields_decodes_as_refusing_everything() {
     let decoded: LoginGrant = serde_json::from_str("{}").expect("empty grant");

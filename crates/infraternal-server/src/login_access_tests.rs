@@ -3,8 +3,10 @@ use super::*;
 use infraternal_plugin_api::login_access::OrdinaryUids;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
+/// Linux ordinary-account range.
 const LINUX: OrdinaryUids = OrdinaryUids::LINUX;
 
+/// An in-memory database migrated with `migrator`.
 async fn pool_with(migrator: &sqlx::migrate::Migrator) -> SqlitePool {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
@@ -19,10 +21,12 @@ async fn pool_with(migrator: &sqlx::migrate::Migrator) -> SqlitePool {
     pool
 }
 
+/// An in-memory database with every migration.
 async fn pool() -> SqlitePool {
     pool_with(&sqlx::migrate!("./migrations")).await
 }
 
+/// Insert a person with the same ID, name and username.
 async fn person(pool: &SqlitePool, id: &str, owner: bool) {
     sqlx::query("INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,?,?,?,'test')")
         .bind(id)
@@ -34,6 +38,7 @@ async fn person(pool: &SqlitePool, id: &str, owner: bool) {
         .unwrap();
 }
 
+/// Insert a rootful remote host added by `adder`.
 async fn host(pool: &SqlitePool, adder: &str) -> uuid::Uuid {
     let id = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,unixepoch())")
@@ -45,6 +50,7 @@ async fn host(pool: &SqlitePool, adder: &str) -> uuid::Uuid {
     id
 }
 
+/// The owner with the setup defaults, and a second person.
 async fn owner_and_bob() -> SqlitePool {
     let pool = pool().await;
     person(&pool, "kayg", true).await;
@@ -55,6 +61,7 @@ async fn owner_and_bob() -> SqlitePool {
     pool
 }
 
+/// Owner starter rule allows any account everywhere.
 #[tokio::test]
 async fn owner_starter_rule_allows_any_account_everywhere() {
     let pool = owner_and_bob().await;
@@ -66,6 +73,7 @@ async fn owner_starter_rule_allows_any_account_everywhere() {
     }
 }
 
+/// Others get their own username only on machines they added.
 #[tokio::test]
 async fn others_get_their_own_username_only_on_machines_they_added() {
     let pool = owner_and_bob().await;
@@ -83,6 +91,7 @@ async fn others_get_their_own_username_only_on_machines_they_added() {
     );
 }
 
+/// Names match marker extends own username.
 #[tokio::test]
 async fn names_match_marker_extends_own_username() {
     let pool = owner_and_bob().await;
@@ -100,6 +109,7 @@ async fn names_match_marker_extends_own_username() {
     );
 }
 
+/// Named rule for one host.
 #[tokio::test]
 async fn named_rule_for_one_host() {
     let pool = owner_and_bob().await;
@@ -124,6 +134,7 @@ async fn named_rule_for_one_host() {
     );
 }
 
+/// Removed or unknown host and unknown person refuse.
 #[tokio::test]
 async fn removed_or_unknown_host_and_unknown_person_refuse() {
     let pool = owner_and_bob().await;
@@ -149,6 +160,7 @@ async fn removed_or_unknown_host_and_unknown_person_refuse() {
     );
 }
 
+/// Deleting the starter rule persists and leaves own username.
 #[tokio::test]
 async fn deleting_the_starter_rule_persists_and_leaves_own_username() {
     let pool = owner_and_bob().await;
@@ -173,6 +185,7 @@ fn login_access_version() -> i64 {
         .version
 }
 
+/// Every migration applies to a populated database and seeds rules once.
 #[tokio::test]
 async fn every_migration_applies_to_a_populated_database_and_seeds_rules_once() {
     let mut before = sqlx::migrate!("./migrations");
@@ -224,6 +237,7 @@ async fn every_migration_applies_to_a_populated_database_and_seeds_rules_once() 
     assert_eq!(count, 2);
 }
 
+/// Schema refuses rules that would read wider than written.
 #[tokio::test]
 async fn schema_refuses_rules_that_would_read_wider_than_written() {
     let pool = owner_and_bob().await;

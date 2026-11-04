@@ -4,6 +4,7 @@ use crate::mesh_issue::{self, PersonRequest};
 use russh::keys::{Algorithm, HashAlg, PublicKey};
 use std::sync::Arc;
 
+/// Identity.
 fn identity() -> PersonKey {
     let ca = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
     let key = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
@@ -30,12 +31,14 @@ fn identity() -> PersonKey {
     PersonKey { certificate, key }
 }
 
+/// String.
 fn string(bytes: &[u8]) -> Vec<u8> {
     let mut out = (u32::try_from(bytes.len()).unwrap()).to_be_bytes().to_vec();
     out.extend_from_slice(bytes);
     out
 }
 
+/// Sign request.
 fn sign_request(blob: &[u8], data: &[u8]) -> Vec<u8> {
     let mut body = vec![SIGN_REQUEST];
     body.extend(string(blob));
@@ -44,6 +47,7 @@ fn sign_request(blob: &[u8], data: &[u8]) -> Vec<u8> {
     body
 }
 
+/// Session bind.
 fn session_bind(forwarding: u8) -> Vec<u8> {
     let mut body = vec![EXTENSION];
     body.extend(string(b"session-bind@openssh.com"));
@@ -54,6 +58,7 @@ fn session_bind(forwarding: u8) -> Vec<u8> {
     body
 }
 
+/// Lists nothing without an identity.
 #[test]
 fn lists_nothing_without_an_identity() {
     let reply = Session::default()
@@ -62,6 +67,7 @@ fn lists_nothing_without_an_identity() {
     assert_eq!(reply, [IDENTITIES_ANSWER, 0, 0, 0, 0]);
 }
 
+/// Lists the certificate and signs with its key.
 #[test]
 fn lists_the_certificate_and_signs_with_its_key() {
     let identity = identity();
@@ -97,6 +103,7 @@ fn lists_the_certificate_and_signs_with_its_key() {
     .unwrap();
 }
 
+/// Refuses to sign for any other key.
 #[test]
 fn refuses_to_sign_for_any_other_key() {
     let identity = identity();
@@ -113,11 +120,13 @@ fn refuses_to_sign_for_any_other_key() {
     assert_eq!(reply, [FAILURE]);
 }
 
+/// Identity blob of plain key.
 fn identity_blob_of_plain_key(identity: &PersonKey) -> Vec<u8> {
     // The bare public key of the same pair is not the listed identity.
     identity.key.public_key().to_bytes().unwrap()
 }
 
+/// A forwarded connection never signs.
 #[test]
 fn a_forwarded_connection_never_signs() {
     let identity = identity();
@@ -149,6 +158,7 @@ fn a_forwarded_connection_never_signs() {
     );
 }
 
+/// A direct binding still signs.
 #[test]
 fn a_direct_binding_still_signs() {
     let identity = identity();
@@ -163,6 +173,7 @@ fn a_direct_binding_still_signs() {
     );
 }
 
+/// Key management requests fail.
 #[test]
 fn key_management_requests_fail() {
     let identity = identity();
@@ -186,6 +197,7 @@ fn key_management_requests_fail() {
     );
 }
 
+/// Malformed messages end the connection.
 #[test]
 fn malformed_messages_end_the_connection() {
     let identity = identity();
@@ -211,6 +223,7 @@ fn malformed_messages_end_the_connection() {
     }
 }
 
+/// Only the account used to add the machine may ask.
 #[test]
 fn only_the_account_used_to_add_the_machine_may_ask() {
     // J181 M3: another ordinary account on the same machine is not the person.
@@ -225,6 +238,7 @@ fn only_the_account_used_to_add_the_machine_may_ask() {
     assert!(may_ask(501, Some(501), OrdinaryUids::MACOS));
 }
 
+/// Oversized and empty lengths are refused.
 #[tokio::test]
 async fn oversized_and_empty_lengths_are_refused() {
     for length in [0_u32, u32::try_from(MAX_MESSAGE + 1).unwrap(), u32::MAX] {
@@ -240,6 +254,7 @@ async fn oversized_and_empty_lengths_are_refused() {
     }
 }
 
+/// Stock ssh add lists the certificate.
 #[tokio::test]
 async fn stock_ssh_add_lists_the_certificate() {
     if std::process::Command::new("ssh-add")
@@ -292,6 +307,7 @@ async fn stock_ssh_add_lists_the_certificate() {
     std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// An undeclared connection never signs.
 #[test]
 fn an_undeclared_connection_never_signs() {
     // J181 M5: OpenSSH before 8.9 sends no binding, so a forwarded request
@@ -314,6 +330,7 @@ fn an_undeclared_connection_never_signs() {
     );
 }
 
+/// A later forwarding binding revokes signing.
 #[test]
 fn a_later_forwarding_binding_revokes_signing() {
     let identity = identity();

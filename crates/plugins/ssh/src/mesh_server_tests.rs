@@ -3,6 +3,7 @@ use super::*;
 use crate::mesh_authority::{Authority, SessionRuntime};
 use std::time::Instant;
 
+/// A runtime that opens nothing; only connection bounds are under test.
 struct NoRuntime;
 #[allow(clippy::unused_async_trait_impl)]
 impl SessionRuntime for NoRuntime {
@@ -17,6 +18,7 @@ impl SessionRuntime for NoRuntime {
     }
 }
 
+/// Host key.
 fn host_key() -> PrivateKey {
     PrivateKey::random(
         &mut russh::keys::key::safe_rng(),
@@ -25,6 +27,7 @@ fn host_key() -> PrivateKey {
     .unwrap()
 }
 
+/// Authenticated shells use keepalives not an idle timeout.
 #[test]
 fn authenticated_shells_use_keepalives_not_an_idle_timeout() {
     let config = config(host_key());
@@ -34,6 +37,7 @@ fn authenticated_shells_use_keepalives_not_an_idle_timeout() {
     assert!(config.keepalive_max > 0);
 }
 
+/// A silent connection is closed at the login deadline.
 #[tokio::test]
 async fn a_silent_connection_is_closed_at_the_login_deadline() {
     let authority = Arc::new(Authority::new(NoRuntime, |_| None));
