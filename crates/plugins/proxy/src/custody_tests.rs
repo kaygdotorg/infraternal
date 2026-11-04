@@ -405,7 +405,11 @@ fn first_secret_creates_the_private_store_lazily() {
     let state = TempState::new();
     let custody = FileDnsTokenCustody::open(&state.0).expect("open custody");
     let path = custody
-        .put("cloudflare", "CF_DNS_API_TOKEN", SecretToken::new(b"x".to_vec()))
+        .put(
+            "cloudflare",
+            "CF_DNS_API_TOKEN",
+            SecretToken::new(b"x".to_vec()),
+        )
         .expect("first write creates the store");
     let root = state.0.join("proxy-secrets");
     assert_eq!(fs::metadata(&root).unwrap().mode() & 0o7777, 0o700);
