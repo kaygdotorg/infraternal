@@ -3,6 +3,17 @@
 
 use std::{io, process::ExitCode};
 
+/// Entry point of the private session image.
+///
+/// The image is started with a private first argument that selects one
+/// role, `__shim` or `__ssh-session`.
+/// Anything else is refused before any state is opened, so this binary can
+/// never act as the operator-facing CLI.
+///
+/// Exit codes: `0` when the selected role ran to completion, `2` when the
+/// arguments do not select a role, `1` when hardening or the role failed.
+/// Diagnostics are fixed strings on purpose: private paths and terminal
+/// bytes must never reach stderr.
 fn main() -> ExitCode {
     if harden_startup().is_err() {
         return ExitCode::FAILURE;
@@ -21,18 +32,30 @@ fn main() -> ExitCode {
     }
 }
 
+/// Marks the process non-dumpable and names it `infraternal`.
+///
+/// Must run first, before arguments are parsed or private state is opened:
+/// `exec` resets the dumpable flag, so a fresh image starts out dumpable and
+/// could otherwise be inspected through ptrace or a core file while it holds
+/// session secrets. Returns the `prctl` error if either call fails, and the
+/// caller then exits without doing any work.
 fn harden_startup() -> nix::Result<()> {
     // Exec resets dumpability; close it before parsing or opening private state.
     nix::sys::prctl::set_dumpable(false)?;
     nix::sys::prctl::set_name(c"infraternal")
 }
 
+/// The one role this image was asked to play, with its decoded options.
 enum Invocation {
+    /// `__shim`: host a session's pseudo-terminal and replay buffer.
     Shim(infraternal_shim::startup::Options),
+    /// `__ssh-session`: run the SSH bridge for a session.
     Bridge(infraternal_plugin_ssh::session_bridge::Options),
 }
 
 impl Invocation {
+    /// Runs the selected role until it finishes. Blocks the calling thread.
+    /// Errors are returned without detail; `main` prints a fixed message.
     fn run(self) -> io::Result<()> {
         match self {
             Self::Shim(options) => options.run(),
@@ -41,6 +64,12 @@ impl Invocation {
     }
 }
 
+/// Picks the role from the arguments after the program name.
+///
+/// The first argument must be exactly `__shim` or `__ssh-session`; the rest is
+/// handed to that role's own decoder. Returns `None` for no arguments, an
+/// unknown command, or options the role refuses, so malformed requests never
+/// start a role.
 fn invocation(arguments: &[std::ffi::OsString]) -> Option<Invocation> {
     let (command, arguments) = arguments.split_first()?;
     if command == "__shim" {
