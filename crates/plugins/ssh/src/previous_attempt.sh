@@ -851,6 +851,12 @@ finish_stuck_upgrade() {
  stage="$base/.bootstrap-lock"
  # A failed activation keeps its rollback journal; nothing to finish.
  [ -f "$stage/activating" ] || exit 0
+ # The server chose Finish because it saw this agent online, but that was a
+ # moment before this command. Deleting the journal removes the rollback
+ # copies, so re-check under the guard, right before the delete: an agent
+ # that has stopped since keeps everything, and the next add-host sees it
+ # again (#305, J202 P2).
+ $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || exit 75
  retire_setup_lease
  rm -rf "$stage"
  retire_set_aside

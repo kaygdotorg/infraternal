@@ -1182,6 +1182,21 @@ supersede_stuck_install "{expected}"
         self.assertTrue((self.base / 'bin/live').exists())
         self.assertEqual(self.mutating_calls(), [], 'the running service is never touched')
 
+    def test_a_finish_whose_agent_stopped_since_the_check_keeps_the_rollback_state(self):
+        # J202 P2: the server saw the agent online and chose Finish; the agent
+        # stops before the host command runs. Nothing may be deleted.
+        stage, _ = self.make_upgrade_fixture()
+        previous = stage / 'previous-binary'
+        previous.write_bytes(b'old agent')
+        previous.chmod(0o700)
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        self.assertTrue(expected.endswith(' live'), expected)
+        self.manager_active.unlink()
+        result = self.run_shell(f'\nfinish_stuck_upgrade "{expected}"\n')
+        self.assertEqual(result.returncode, 75, result.stderr.decode())
+        self.assertTrue(stage.exists(), 'the journal stays')
+        self.assertEqual(previous.read_bytes(), b'old agent', 'the rollback copy stays')
+
     def stop_service(self):
         """As a set-aside that stopped the service and then died leaves it."""
         (self.unit.parent / 'default.target.wants/infraternal-agent.service').unlink()

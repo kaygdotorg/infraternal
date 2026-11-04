@@ -1274,7 +1274,18 @@ impl Bootstrap {
                         .await?;
                     match verdict {
                         StuckInstall::Finish => {
-                            previous.finish_upgrade(session.as_ref(), target).await?;
+                            previous
+                                .finish_upgrade(session.as_ref(), target)
+                                .await
+                                .map_err(|mut error| {
+                                    // 75: the agent stopped between the server's
+                                    // online check and the host's delete; the
+                                    // journal and rollback copies stay (J202 P2).
+                                    if error.exit_status == Some(75) {
+                                        error.message = AGENT_STOPPED_BEFORE_FINISH;
+                                    }
+                                    error
+                                })?;
                             self.backend
                                 .preflight_existing_host(&batch.authority, target, lookup.clone())
                                 .await?;
@@ -2070,6 +2081,9 @@ async fn restore_previous(
 
 /// How long a confirmation may wait for the person. Closing the add-host
 /// window cancels it sooner; this only bounds a window left open.
+/// A Finish whose host agent stopped after the server saw it online (#305, J202 P2).
+const AGENT_STOPPED_BEFORE_FINISH: &str = "This host's infraternal agent stopped before its setup could be finished. Nothing was removed; add the host again.";
+
 /// A confirmed Replace or Re-enroll whose host no longer matches what was confirmed.
 const CHANGED_WHILE_WAITING: &str = "This host changed while it waited for your confirmation. Nothing was stopped; add it again to see what it needs now.";
 
