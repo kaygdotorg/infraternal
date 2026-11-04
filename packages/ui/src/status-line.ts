@@ -29,7 +29,7 @@ const STYLE = `
 .ui-status-line { display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; }
 .ui-status-icons { position: relative; display: inline-grid; flex: none; height: 1lh; align-items: center; }
 .ui-status-icons > .ui-icon { grid-area: 1 / 1; opacity: 0; transform: scale(0.6); filter: blur(2px);
-  transition: opacity 140ms ease-out, transform 160ms cubic-bezier(0.23, 1, 0.32, 1), filter 140ms ease-out; }
+  transition: opacity 140ms ease-out, transform 160ms var(--ease-out), filter 140ms ease-out; }
 [data-state="idle"] > .ui-status-icons > .ui-status-info,
 [data-state="ok"] > .ui-status-icons > .ui-status-ok,
 [data-state="error"] > .ui-status-icons > .ui-status-alert { opacity: 1; transform: none; filter: none; }

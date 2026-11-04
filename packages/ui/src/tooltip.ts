@@ -69,7 +69,7 @@ const STYLE = `
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
   border-radius: 0.875rem; opacity: 0; transform: scale(0.96); pointer-events: none;
-  transition: opacity 150ms ease-out, transform 180ms cubic-bezier(0.23, 1, 0.32, 1); }
+  transition: opacity 150ms ease-out, transform 180ms var(--ease-out); }
 .ui-confirm-tip[hidden] { display: none !important; }
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
 .ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 0.625rem; height: 0.625rem; margin-left: -0.3125rem; background: inherit;
@@ -82,7 +82,7 @@ const STYLE = `
 .ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button { display: inline-grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent;
   color: var(--fg-2); cursor: pointer;
-  transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color 120ms ease, color 120ms ease; }
+  transition: transform 120ms var(--ease-out), background-color 120ms ease, color 120ms ease; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button:active { transform: scale(0.97); }
 :is(.ui-confirm-tip, .ui-confirm-bar) button:focus { outline: none; }

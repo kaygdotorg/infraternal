@@ -371,11 +371,11 @@ button { color: inherit; }
 .sidebar-toggle {
   --sb-w: 18.25rem; --sb-head-y: calc(var(--pill-h) + 0.75rem + 0.5625rem);
   position: absolute; z-index: 6; top: calc(0.625rem + env(safe-area-inset-top)); left: var(--gutter);
-  transition: transform 260ms cubic-bezier(0.23, 1, 0.32, 1), opacity 120ms var(--ease-out);
+  transition: transform 260ms var(--ease-out), opacity 120ms var(--ease-out);
 }
 /* packages/ui's sheet loads after this one, so the shared pill's 140 ms press transition would win over the rule above at
    equal specificity and the travel would run at 140 ms (#314). The doubled class keeps the travel's own timing. */
-.ui-pill.sidebar-toggle { transition: transform 260ms cubic-bezier(0.23, 1, 0.32, 1), opacity 120ms var(--ease-out); }
+.ui-pill.sidebar-toggle { transition: transform 260ms var(--ease-out), opacity 120ms var(--ease-out); }
 .ui-pill.sidebar-toggle.instant { transition: none; }
 @media (prefers-reduced-motion: reduce) { .ui-pill.sidebar-toggle { transition: none; } }
 .terminal-screen[data-sidebar-open] .sidebar-toggle { transform: translate(calc(var(--sb-w) - 0.5625rem - var(--pill-h)), var(--sb-head-y)); }
@@ -669,7 +669,7 @@ button { color: inherit; }
 /* While the terminal history is scrolled back the toolbar shrinks to a slim strip; a tap or the bottom restores it. */
 .terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keytray { transform: translateY(calc(var(--keybar-height) - 1rem)); }
 .terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keyrows { opacity: 0.25; }
-.keytray { transition: transform 280ms var(--ease-drawer, cubic-bezier(0.23, 1, 0.32, 1)); }
+.keytray { transition: transform 280ms var(--ease-drawer, var(--ease-out)); }
 .keyrows { transition: opacity 180ms ease; }
 @media (prefers-reduced-motion: reduce) { .keytray { transition: none; } }
 
@@ -709,7 +709,7 @@ li.bm-subhead[data-id]:focus { outline: none; }
 /* ---- the privileged-access consent (#215; windows/access-level.on-demand.ts) ---- */
 /* The "Access level" value is a button while the machine is limited: the same highlight as a copyable value, a pointer, and its
    warm tooltip. The pane opens under the row (the grid row grows from 0 to its content, like the sidebar's folds). */
-.cl-pv { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.cl-pv { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out, var(--ease-out)); }
 .cl-pv[data-open] { grid-template-rows: 1fr; }
 .cl-pv-clip { min-height: 0; overflow: hidden; }
 /* A quiet tinted fill, never a border: the same fill as the compact field, so the field inside reads as sitting on it. */

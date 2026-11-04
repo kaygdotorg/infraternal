@@ -10,7 +10,7 @@
 .ac-badge {
   position: absolute; left: calc(var(--pill-h) - 1rem); bottom: 2px; display: grid; place-items: center; width: 0.875rem; height: 0.875rem; border-radius: 50%;
   background: var(--warn); color: #2a1a00; font: 700 0.625rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: none;
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--bg) 80%, transparent); animation: ac-badge-in 180ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1));
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--bg) 80%, transparent); animation: ac-badge-in 180ms var(--ease-out, var(--ease-out));
 }
 @keyframes ac-badge-in { from { opacity: 0; transform: scale(0.6); } }
 @media (prefers-reduced-motion: reduce) { .ac-badge { animation-name: ac-badge-fade; } @keyframes ac-badge-fade { from { opacity: 0; } } }
@@ -65,7 +65,7 @@
 
 /* ---- the "Logs in as" pane ------------------------------------------------------------------------------------------------- */
 /* Opens under its row: the height runs from 0 to its content (grid rows), so nothing below jumps. */
-.ac-pane { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out, cubic-bezier(0.23, 1, 0.32, 1)); }
+.ac-pane { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out, var(--ease-out)); }
 .ac-pane[data-open] { grid-template-rows: 1fr; }
 .ac-pane[hidden] { display: none; }
 .ac-pane[inert] { visibility: hidden; transition: grid-template-rows 240ms var(--ease-out, ease), visibility 0s linear 240ms; }
