@@ -116,7 +116,7 @@ async function show(page: Page, section: (typeof SECTIONS)[number]): Promise<voi
       const win = document.querySelector(`.ui-window[data-window-id="s-${id}"]`);
       if (!win || !win.querySelector(".ui-settings-pane")) return false;
       // The camera may still be flying to the window: every measurement is relative to the pane, so only its rows must exist.
-      return win.querySelectorAll("li, .ui-sp-row, .ui-kv-row, .ui-tabs").length > 0;
+      return win.querySelectorAll("li, .ui-sp, .ui-sp-row, .ui-kv-row, .ui-tabs").length > 0;
     }, section.id), { timeout: 5000 }).toBe(true).then(() => true, () => false);
     if (ok) return;
   }

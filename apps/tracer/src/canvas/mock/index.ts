@@ -133,8 +133,9 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   });
   const cx = canvas.cx;
   // The docs: a Docs view with a window per page, and searchable in the palette (#302). The production canvas always has them
-  // (when the server has docs), and so does the test double: the "?" buttons read them (#304).
-  const docs = installDocsSource(core, cx);
+  // (when the server has docs); the test double adds them only with `?docs=1`, so the scenes keep the views they are about. The "?"
+  // buttons are there either way (#304): without the docs they say the page is not available.
+  const docs = new URLSearchParams(location.search).get("docs") === "1" ? installDocsSource(core, cx) : undefined;
   const { camera, state } = cx;
   const stopOffer = offerMeshView(cx, mesh);
   let sceneIndex = 0;

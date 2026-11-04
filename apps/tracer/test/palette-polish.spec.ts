@@ -32,8 +32,12 @@ test("no palette row renders without a title, whole list and scoped to Settings"
   expect(await page.locator("#palette-results .result").count()).toBeGreaterThan(20);
   expect(await blank()).toEqual([]);
   // Every settings entry the palette offers carries its component and group ("Appearance › Theme").
-  await page.keyboard.type("appearance terminal you about");
-  const settings = await page.locator('#palette-results .result[data-action^="canvas:settings:"] .result-label').allTextContents();
+  const settings: string[] = [];
+  for (const word of ["appearance", "terminal"]) {
+    await page.locator("#palette-input").fill(word);
+    await page.waitForTimeout(300);
+    settings.push(...await page.locator('#palette-results .result[data-action^="canvas:settings:"] .result-label').allTextContents());
+  }
   expect(settings.filter((t) => t.includes(" › ")).length).toBeGreaterThanOrEqual(8);
   await page.keyboard.press("Escape");
   // The list scoped to the Settings view: its windows are named by their groups.

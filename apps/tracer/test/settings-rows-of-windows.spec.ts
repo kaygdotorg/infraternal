@@ -10,7 +10,7 @@ import { expect, test, type Page } from "playwright/test";
 
 const SHOTS = process.env.SETTINGS_SHOTS;
 /** `SETTINGS_THEME=latte` writes the light captures (the default is the dark `mocha`). */
-const URL = `/?mock=1&proto=clusters&scene=3&theme=${process.env.SETTINGS_THEME ?? "mocha"}&bg=none`;
+const URL = `/?mock=1&proto=clusters&docs=1&scene=3&theme=${process.env.SETTINGS_THEME ?? "mocha"}&bg=none`;
 const SIZES = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
   phone: { viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
