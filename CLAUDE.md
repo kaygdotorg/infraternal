@@ -51,6 +51,10 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 - A commit message says what changed and why: the problem, the choice made,
   and the alternatives you rejected. Put the decision number or the issue
   (`#N`) in it. A reader must understand the commit without this session.
+- Every piece of code ships with documentation-style comments (D345): each
+  module, type, function and exported symbol says in plain, friendly words
+  what it is for and how to use it, plus non-obvious invariants and reasons.
+  Comments never count as lines of code. Docs will be generated from them.
 - Code comments are the documentation. Each module starts with a doc comment
   that explains its role. Non-obvious code explains its invariants and the
   reason for it, not only what it does.
