@@ -37,7 +37,7 @@ test("no palette row renders without a title, whole list and scoped to Settings"
     await page.locator("#palette-input").fill(word);
     // The wording of the settings loads on demand (D188) and the palette is refreshed when it arrives: wait for the rows.
     await expect.poll(() => page.locator('#palette-results .result[data-action^="canvas:settings:"]').count(), { timeout: 10_000 }).toBeGreaterThan(0);
-    settings.push(...await page.locator('#palette-results .result[data-action^="canvas:settings:"] .result-label').allTextContents());
+    settings.push(...await page.locator('#palette-results .result[data-action^="canvas:settings:"]').allTextContents());
   }
   expect(settings.filter((t) => t.includes("›")).length).toBeGreaterThanOrEqual(8);
   await page.keyboard.press("Escape");
