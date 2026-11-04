@@ -3871,3 +3871,33 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - Boot machines (#156) stay deferred, and their UI is grilled later:
        "I would like to grill the UI when we get close to defininig /
        building the architecture."
+342. **App windows on the canvas, and joining with keys (owner grill,
+     2026-11-04, #146, D337):**
+     - **The card:** an app window keeps the terminal's card, but has its own
+       controls at the top right: "that's fine but what i am saying we need
+       controls for app windows which are obviously different than the
+       terminal ones at the top right". Which controls is a follow-up
+       question.
+     - **Shape:** bars in the window's background colour, never cropping
+       ("bars over cropping yes").
+     - **A closed app window** keeps its card with "<App> was closed" and a
+       Close window button; the layout never changes on its own ("agreed").
+     - **Control** shows in the pill, not over the picture ("agreed").
+     - **The first click** selects the window; the second reaches the app,
+       as for terminals ("agreed").
+     - **Phone:** a tap is a click on the machine and a long press is a
+       right-click ("agreed").
+     - **Joining with keys:** no separate key type. API keys get scopes, and
+       a join permission does the job: "we shouldn't add more types, we can
+       rather scope API keys and a join permission gets us the same kinda
+       security?"
+     - **The join permission's properties:** "this should be very
+       customisable / the "join" permission should have several properties
+       like the ones you said: reusable, expiry, along with user to assign,
+       tags to assign / of course access wil be determined by our grants".
+       One-time by default with a 24 h expiry; reusable is a choice
+       ("agreed and unlimited expiry keys are allowed"). Machines can be
+       marked ephemeral, removed after a while offline ("yes").
+     - **Creating** such a key needs a passkey tap bound to its exact
+       settings. **Revoking** it stops new joins; machines that joined stay,
+       with a separate action to remove them ("agreed").
