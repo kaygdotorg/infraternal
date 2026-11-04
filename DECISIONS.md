@@ -3824,3 +3824,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        way to indicate which one is custom."
      - The preview card's first terminal line must not be clipped at the
        bottom.
+339. **More answers (owner, 2026-11-04):**
+     - A root install requested through MCP does not run until the owner
+       approves it. The server answers the AI agent with "approval needed",
+       a short code and a link. An Inbox item asks for a passkey tap bound
+       to that one install, the agent waits, and the request expires after
+       about 10 minutes: "this is the correct way", "the flow is great".
+     - Removing a host in the browser falls under the 15-minute admin
+       window (D333): "yes it should".
+     - Machine names: always the reported hostname. Only an empty name or
+       `localhost` falls back to `<os>-<first 6 characters of the id>`.
+       Collisions get a short suffix (`raspberrypi-2`). The DNS name comes as
+       soon as there is a real name: "agreed".
+     - Person-to-machine visibility rules belong to the EE edition: "yes
+       person to machine rules is ee area."
