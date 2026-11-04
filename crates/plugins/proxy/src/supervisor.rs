@@ -1098,21 +1098,28 @@ impl TraefikSupervisor {
         let lock = acquire_supervisor_lock(&settings.lock_directory)?;
         // Holding the owner lock proves no other agent is live, so any leaf of ours that still
         // exists belongs to a crashed agent: kill it whole, forks included, before the first
-        // child could race it for the listeners [#281, D336]. Without delegation the lock-holder
-        // reaper below is the only line.
-        let (cgroups, containment) = match ProxyCgroups::detect(&settings.lock_directory) {
-            Ok(cgroups) => {
-                let stopped = cgroups.adopt_orphans()?;
-                if stopped > 0 {
-                    (*log)(format!(
-                        "stopped {stopped} proxy cgroup(s) left by an earlier infraternal agent"
-                    ));
-                }
-                (
-                    Some(Arc::new(cgroups)),
-                    crate::cgroup::Containment::contained(),
-                )
+        // child could race it for the listeners [#281, D336]. Without delegation no new leaf is
+        // made, but leaves an earlier, contained run left (a unit that lost Delegate=yes) are
+        // still ours to kill; that needs no delegation (#281, J172 P3-4). The lock-holder reaper
+        // below is the second line, and the only one for a child that never had a leaf.
+        let detected = ProxyCgroups::detect(&settings.lock_directory);
+        let fallback_reaper = detected
+            .is_err()
+            .then(|| ProxyCgroups::for_reaping(&settings.lock_directory))
+            .flatten();
+        if let Some(reaper) = detected.as_ref().ok().or(fallback_reaper.as_ref()) {
+            let stopped = reaper.adopt_orphans()?;
+            if stopped > 0 {
+                (*log)(format!(
+                    "stopped {stopped} proxy cgroup(s) left by an earlier infraternal agent"
+                ));
             }
+        }
+        let (cgroups, containment) = match detected {
+            Ok(cgroups) => (
+                Some(Arc::new(cgroups)),
+                crate::cgroup::Containment::contained(),
+            ),
             Err(reason) => (None, crate::cgroup::Containment::Fallback(reason)),
         };
         if let crate::cgroup::Containment::Fallback(_) = &containment {

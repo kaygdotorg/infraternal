@@ -19,6 +19,7 @@
 //!   the parent cgroup. The design note accepts that until option 2.
 //! - Where no usable delegation exists, detection returns the reason, and the supervisor
 //!   keeps the pidfd-verified lock-holder reaper (J159). Status output says which applies.
+//!   Leaves left by an earlier contained run are still killed on start in that case.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -175,6 +176,20 @@ impl ProxyCgroups {
     /// Returns the reason when `base` can't hold proxy leaves.
     pub fn at(base: PathBuf, lock_directory: &Path) -> Result<Self, &'static str> {
         check_base(&base)?;
+        Self::unchecked(base, lock_directory)
+    }
+
+    /// Only for [`ProxyCgroups::adopt_orphans`] when containment is unavailable: this process's
+    /// own cgroup, without the delegation check. Killing and removing our own tagged leaves
+    /// needs no delegation, and a unit that lost `Delegate=yes` can still hold some (#281,
+    /// J172 P3-4). Never use it to create leaves.
+    #[must_use]
+    pub fn for_reaping(lock_directory: &Path) -> Option<Self> {
+        let own = fs::read_to_string("/proc/self/cgroup").ok()?;
+        Self::unchecked(own_cgroup(&own)?, lock_directory).ok()
+    }
+
+    fn unchecked(base: PathBuf, lock_directory: &Path) -> Result<Self, &'static str> {
         let lock =
             fs::metadata(lock_directory).map_err(|_| "the proxy state directory is unreadable")?;
         Ok(Self {

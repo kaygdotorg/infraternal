@@ -480,6 +480,78 @@ fn the_root_cgroup_is_named_as_the_fallback_reason() {
     assert!(reason.contains("root cgroup"), "{reason}");
 }
 
+// P3-4: when delegation is gone (a unit lost Delegate=yes), leaves from an earlier contained run
+// must still be killed on start; killing our own tagged leaves needs no delegation.
+#[test]
+fn leftover_cgroups_are_reaped_even_without_delegation() {
+    let Some(own) = own_cgroup_directory() else {
+        return;
+    };
+    let writable = nix::unistd::access(&own, nix::unistd::AccessFlags::W_OK).is_ok()
+        && own.join("cgroup.kill").exists();
+    if !writable {
+        eprintln!("leftover: skipped, {} is not ours to write", own.display());
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("proxy-cg-left-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let marker = marker();
+    let _cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    let leaf = own.join(format!("{}7", leaf_prefix(&lock_directory)));
+    std::fs::create_dir(&leaf).expect("plant a leftover leaf");
+    let mut planted = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("echo $$ > \"$1/cgroup.procs\" && exec /usr/bin/setsid /bin/sleep {marker}"),
+            "planted",
+        ])
+        .arg(&leaf)
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("start a process in the leftover leaf");
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the planted process runs"
+    );
+    let started = TraefikSupervisor::start(
+        generation_probe_settings(
+            &root,
+            &state,
+            &lock_directory,
+            root.join("fake-traefik"),
+            "127.0.0.1:9".parse().expect("unused probe"),
+        ),
+        std::sync::Arc::new(|_: String| {}),
+    );
+    wait_for(|| grandchildren(&marker).is_empty(), Duration::from_secs(2));
+    let survivors = grandchildren(&marker);
+    let leaf_left = leaf.exists();
+    drop(started);
+    sweep(&marker);
+    let _ = planted.wait();
+    if leaf.exists() {
+        let _ = std::fs::write(leaf.join("cgroup.kill"), "1");
+        thread::sleep(Duration::from_millis(100));
+        let _ = std::fs::remove_dir(&leaf);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!(
+        "leftover: containment={} survivors={survivors:?} leaf left={leaf_left}",
+        crate::cgroup::containment().kind()
+    );
+    assert!(
+        survivors.is_empty(),
+        "a leftover proxy process survived the start"
+    );
+    assert!(!leaf_left, "the leftover leaf survived the start");
+}
+
 // P3-5: the leaf name carries the lock directory's device and inode, so two agents in one cgroup
 // whose lock directories share an inode on different filesystems never adopt each other's leaves.
 #[test]
