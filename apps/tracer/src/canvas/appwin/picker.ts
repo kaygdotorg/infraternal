@@ -23,8 +23,11 @@ import { ICON } from "../views/icons";
 import { entryTitle, matches, type Entry } from "./inventory";
 import { canStream, type Machines } from "./machines";
 
+/** The ease-out curve for rows that glide to a new place. */
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+/** Icon paths (a display) for screen rows. */
 const SCREEN_ICON = '<rect x="3" y="4.5" width="18" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 17v3.5"/>';
+/** The padlock drawn beside a missing-permission note. */
 const LOCK_ICON = ICONS.lock;
 
 /** What choosing a row opens. */
@@ -32,6 +35,7 @@ export type Choice =
   | { kind: "shell"; machine: HostEntry }
   | { kind: "stream"; machine: HostEntry; entry: Entry };
 
+/** One line of the picker: what choosing it opens, how it looks, and the words the search field matches. */
 interface Row {
   id: string;
   choice: Choice;
@@ -61,11 +65,17 @@ export function rowsOf(machine: HostEntry, machines: Machines): Row[] {
   return rows;
 }
 
+/** True when every word of `query` (any order, any case) appears in the row's search words. An empty query matches all. */
 const wordsMatch = (row: Row, query: string): boolean => {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   return words.every((w) => row.words.includes(w));
 };
 
+/**
+ * The "New window" popover. It polls the machines while it is open and repaints rows in place, so the highlighted row and the typed text
+ * are not disturbed. Arrow keys move the highlight, Enter chooses the highlighted row (or the first one), and scrolling the canvas
+ * closes it. `choose` gets the picked `Choice`; `onClosed` runs once, after the popover has closed and the picker has stopped polling.
+ */
 export class Picker {
   readonly popover: AnchoredPopover;
   private readonly scroll: HTMLElement;
@@ -104,6 +114,7 @@ export class Picker {
     if (source === "keyboard" || !matchMedia("(pointer: coarse)").matches) this.input.focus({ preventScroll: true });
   }
 
+  /** Closes the popover; `source` says whether the pointer or the keyboard caused it, so focus returns sensibly. */
   close(source: PopoverSource): void { this.popover.close(source); }
   private dispose(): void { this.life.abort(); this.stopPoll(); }
 

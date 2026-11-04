@@ -14,6 +14,7 @@ import { APPWIN_EVENT, appWindowsWanted, readAppWindowsPref, writeAppWindowsPref
 /** The part of the connection a stream uses. */
 export type StreamConnection = Pick<MuxConnection, "call" | "openStream" | "closeStream" | "send" | "isWelcomed" | "onWelcome">;
 
+/** What the canvas asks of the desktop streams. The product builds one with `createAppWindowsAdapter`; without one, app windows are not offered. */
 export interface AppWindowsAdapter {
   readonly connection: StreamConnection;
   /** Wanted here and supported by the server. */
@@ -28,6 +29,11 @@ export interface AppWindowsAdapter {
   onChange(listener: () => void): () => void;
 }
 
+/**
+ * Builds the adapter over the page's one connection. `serverCan` reads the desktop-video bit of the capabilities the server sent in
+ * its Hello (unknown counts as no). `available()` needs both that and the browser's wish (`appWindowsWanted`). `onChange` fires
+ * when either may have changed.
+ */
 export function createAppWindowsAdapter(connection: MuxConnection): AppWindowsAdapter {
   const serverCan = (): boolean => ((connection.serverCaps ?? 0n) & DESKTOP_VIDEO_CAP) !== 0n;
   return {

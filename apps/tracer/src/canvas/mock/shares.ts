@@ -7,6 +7,7 @@ import { GROUPS, PEOPLE, usernameOf } from "./data";
 import type { IncomingShare, SharingAdapter } from "../sharing/adapter";
 import { allowedHosts, type MockWorld } from "./world";
 
+/** Makes the sharing adapter over the test double's `/__mock/shares` endpoints. It polls every 1.5 seconds, and only while the signed-in role is "asha", the one who receives. */
 export function createMockSharing(world: MockWorld): SharingAdapter {
   const me = (): string => usernameOf(world.role);
   return {

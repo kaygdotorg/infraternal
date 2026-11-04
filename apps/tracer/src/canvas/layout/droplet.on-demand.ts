@@ -27,16 +27,25 @@
 import { scrollerOf } from "./columns";
 import { Spring } from "../../../../../packages/ui/src/spring";
 
+/** Limits `v` to the range `lo`–`hi`. */
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
+/** A smooth 0-to-1 ramp of `v` between `a` and `b` (smoothstep): 0 at or below `a`, 1 at or above `b`, with a gentle start and end. */
 const smooth = (a: number, b: number, v: number): number => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 
+/** The neck distance in pixels: the shapes are joined while closer than this and the neck lets go at about this gap. */
 const K = 64; // how far apart (px) the shapes are when the neck lets go
 // Scale frequency, preserving damping ratios and the physical overshoot. The
 // two phases settle in about 600 ms, leaving room for missed rendering frames
 // inside the one-second interaction budget [41][70][81].
 const MOTION_RATE = 1.5;
+/** Scales a spring's stiffness and damping by `MOTION_RATE`, which speeds the motion up and keeps the damping ratio (so the overshoot is the same). */
 const physics = (stiffness: number, damping: number) => ({ stiffness: stiffness * MOTION_RATE ** 2, damping: damping * MOTION_RATE });
+/** The vertex shader: draws one full-layer quad. */
 const VERT = `attribute vec2 a; void main() { gl_Position = vec4(a, 0.0, 1.0); }`;
+/**
+ * The fragment shader: the smooth union of two rounded boxes (a different radius for each corner), filled with the window material
+ * and edged with a hairline. Where the boxes are closer than `uK` the union has a neck.
+ */
 const FRAG = `precision highp float;
 uniform vec2 uRes; uniform float uDpr; uniform vec4 uA; uniform vec4 uB; uniform vec4 uRA; uniform vec4 uRB; uniform float uR; uniform float uK; uniform vec4 uFill; uniform vec4 uLine;
 // A rounded box with a radius per corner (right side: bottom, top; left side: bottom, top).
@@ -53,6 +62,7 @@ void main() {
   gl_FragColor = line + fill * (1.0 - line.a);
 }`;
 
+/** Cache of resolved colours, cleared when it passes 32 entries. */
 const rgbaCache = new Map<string, [number, number, number, number]>();
 /** The resolved rgba (premultiplied, 0..1) of any CSS colour string, through a 1 px 2D canvas (read back once per colour). */
 function rgba(css: string): [number, number, number, number] {
@@ -81,10 +91,17 @@ function rgba(css: string): [number, number, number, number] {
  * destroys it at the end (the iOS memory rule, README). The context is dropped when the page is hidden (`endSplit`).
  */
 interface Gl { canvas: HTMLCanvasElement; gl: WebGLRenderingContext; prog: WebGLProgram; U: Record<string, WebGLUniformLocation> }
+/** The parked GL context kept between splits on a fine-pointer device; `undefined` on touch or before `warmContext` has run. */
 let pooled: Gl | undefined;
+/** True on a device with a fine pointer, which keeps one parked GL context between splits. */
 const keepContext = (): boolean => matchMedia("(pointer: fine)").matches;
+/** The names of the shader's uniforms, looked up once when the program is built. */
 const UNIFORMS = ["uRes", "uDpr", "uR", "uK", "uFill", "uLine", "uA", "uB", "uRA", "uRB"] as const;
 
+/**
+ * Creates the layer canvas, the GL context and the compiled program, and draws one pixel so the driver finishes compiling the shader now
+ * and not during the first animated frame. Returns `undefined` when WebGL is not available.
+ */
 function createGl(): Gl | undefined {
   const canvas = document.createElement("canvas");
   canvas.className = "cl-goo";
@@ -118,6 +135,7 @@ function createGl(): Gl | undefined {
   return { canvas, gl, prog, U };
 }
 
+/** Gives up the parked GL context, if there is one. */
 const dropContext = (): void => {
   pooled?.gl.getExtension("WEBGL_lose_context")?.loseContext();
   pooled = undefined;
@@ -125,6 +143,7 @@ const dropContext = (): void => {
 /** Builds the parked context when the browser is idle (fine pointers only). */
 export const warmContext = (): void => { if (!pooled && keepContext()) pooled = createGl(); };
 
+/** Optional counters for measurement: frames drawn, total and worst draw time in milliseconds, and a trace of `[time, gap]` pairs. */
 export interface SplitProbe { frames: number; drawMs: number; maxDrawMs: number; trace?: Array<[number, number]> }
 
 /** The finisher of the animation that is running, if any: there is never more than one GL context alive. */

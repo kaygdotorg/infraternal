@@ -10,6 +10,7 @@ import { onDemand } from "../../on-demand";
 import type { WinRec } from "../context";
 import type { SetupSource } from "./setup-pill.on-demand";
 
+/** What `attachSetup` needs to show one host's remaining setup in its window. */
 export interface AttachSetup {
   /** What the person calls the host. */
   host: string;
@@ -33,6 +34,11 @@ export function warmSetup(): void {
   void onDemand(() => import("./setup-pill.on-demand")).catch(() => { /* attachSetup tries again when it is needed */ });
 }
 
+/**
+ * Binds the setup pill to the window `rec`. The pill is removed when the window closes (its cleanup is chained after any cleanup
+ * the window already had). If the window closes before the pill's code arrives, nothing is bound. If the code fails to load the
+ * error is swallowed on purpose: the terminal works without the pill. Resolves when binding is done or abandoned.
+ */
 export function attachSetup(rec: WinRec, options: AttachSetup): Promise<void> {
   let closed = false;
   const before = rec.cleanup;

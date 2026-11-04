@@ -15,6 +15,7 @@ import type { StatusActionPref } from "../../../../../packages/ui/src/settings-p
 import type { ToastController } from "../../../../../packages/ui/src/toast";
 import { identityModel, type AccountModel } from "./model";
 
+/** What the account session needs: the signed-in person, the account id and session incarnation that guard against stale answers, and the toast for errors. */
 export interface AccountSessionEnv {
   person: { name: string; username: string };
   accountId: string;
@@ -22,12 +23,18 @@ export interface AccountSessionEnv {
   toast: ToastController;
 }
 
+/** The account model plus the Settings → Account rows built on it. */
 export interface AccountSession {
   model: AccountModel;
   /** The Settings → Account rows: same order and ids as the shells in product.ts. */
   statuses: StatusActionPref[];
 }
 
+/**
+ * Builds the model and the two security rows. The passkey row offers "Add a second" only while exactly one passkey exists; adding
+ * one reloads the page on success (the new credential changes the session) and shows an error toast with a Reload action on failure.
+ * The recovery row is read-only: it states whether a key is set up and says that its verification history is unavailable.
+ */
 export function createAccountSession(env: AccountSessionEnv): AccountSession {
   const model = identityModel(env.person, env.accountId, env.sessionIncarnation);
   let busy = false;

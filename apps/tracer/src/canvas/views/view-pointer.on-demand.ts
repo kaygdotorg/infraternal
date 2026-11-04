@@ -30,6 +30,7 @@ const SUMMARY_ROWS = 5;
 /** A press the hook saw before this module arrived: where it began and where the pointer is now. */
 export interface EarlyPress { id: number; x0: number; y0: number; x: number; y: number }
 
+/** What a view's pointer behaviour offers the canvas: wiring a view's label, showing its hover card and continuing an early press. */
 export interface ViewPointer {
   /** Gives a view's label and region their hover card and drag. */
   wire(c: ViewRec): void;
@@ -49,6 +50,7 @@ export interface ViewPointerHost {
   settle(fixedId: ViewId, at?: { x: number; y: number }): void;
 }
 
+/** Makes the pointer behaviour for the canvas `cx`. `host` lends it the view frames and the grid push-aside. `dispose` removes the hover card. */
 export function createViewPointer(cx: Ctx, host: ViewPointerHost): ViewPointer {
   const { world, signal, camera, state, views } = cx;
   const cam = camera.cam;

@@ -9,15 +9,20 @@
  */
 import type { Method, Outcome, PrivilegeService, Probe } from "../sessions/privilege";
 
+/** The scenario names that `?privilege=` accepts. */
 export const SCENARIOS = ["sudo", "doas", "root", "denied", "wrong", "offline", "timeout", "bulk"] as const;
+/** One of the scenario names. */
 export type Scenario = (typeof SCENARIOS)[number];
 
 /** The machines a "bulk" run covers, and which of them allow sudo. */
 const SELECTION = ["build-01", "nix-cache", "edge-arm"];
+/** Which machines of the bulk selection allow sudo. */
 const ALLOWS_SUDO = new Set(["build-01", "nix-cache"]);
 
+/** True when `value` is a scenario name. Use it to check a query parameter. */
 export const isScenario = (value: string | null): value is Scenario => SCENARIOS.includes(value as Scenario);
 
+/** Makes a privilege service that behaves like `scenario` on every machine. It forgets each secret as soon as it has read its length. */
 export function createPrivilegeDouble(scenario: Scenario): PrivilegeService {
   const full = new Set<string>();
   const wrongOnce = new Set<string>();

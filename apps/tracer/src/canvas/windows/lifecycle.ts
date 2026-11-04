@@ -32,8 +32,11 @@ import { iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { SCALE_REST, restAt } from "../springs";
 
+/** The window lifecycle API of the canvas: make, open, close, split, step. Each member is described on its own line. */
 export interface WindowsModule {
+  /** Builds the window for model `m`, owned by view `c`, and returns its record. To add a window to a tiled view use `addColumn`. */
   make(c: ViewRec, m: WindowModel): WinRec;
+  /** Makes `rec` the active window, or none for `undefined`. */
   setActive(rec: WinRec | undefined): void;
   /** Adds a window in a new column at `index` of a tiled view; the others glide aside. */
   addColumn(c: ViewRec, m: WindowModel, index: number, w?: number, silent?: boolean, opaque?: boolean): WinRec;
@@ -91,6 +94,7 @@ export interface WindowsModule {
   move(dir: "left" | "right" | "up" | "down", instant?: boolean): void;
 }
 
+/** Makes the lifecycle for the canvas `cx`. */
 export function createWindows(cx: Ctx): WindowsModule {
   const { camera, state, views, flip } = cx;
 

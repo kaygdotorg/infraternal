@@ -19,9 +19,13 @@ import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
 import { SESSION_ICON } from "../views/icons";
 
+/** The three actions of the row pill. */
 type Act = "info" | "rename" | "remove";
+/** The tooltip of each action. */
 const TIP: Record<Act, string> = { info: "Info", rename: "Rename", remove: "Remove" };
+/** Icon paths (a bin) for Remove. */
 const BIN = '<path d="M5 7h14M10 7V4.5h4V7M7 7l.8 12.5h8.4L17 7M10.5 11v5M13.5 11v5"/>';
+/** The icon paths of each action. */
 const ICON: Record<Act, string> = { info: ICON_INFO, rename: SESSION_ICON.rename, remove: BIN };
 
 /** The row (a host caption or a session's `li`) a node is in, with the id the tree wrote on it. */
@@ -32,6 +36,10 @@ const rowOf = (tree: HTMLElement, node: Element | null): { row: HTMLElement; id:
   return id && (id.startsWith("h:") || id.startsWith("s:")) ? { row, id } : undefined;
 };
 
+/**
+ * Wires the hover action pill on the rows of the sidebar `tree`. `actionsOf` gives the row's menu actions, which the pill reuses. Returns the
+ * function that removes the listeners; `closeSidebar` is called when an action needs the sidebar out of the way.
+ */
 export function createRowPill(cx: Ctx, tree: HTMLElement, menu: RowMenu, actionsOf: (row: HTMLElement) => RowAction[], closeSidebar: () => void): () => void {
   const abort = new AbortController();
   const { signal } = abort;
