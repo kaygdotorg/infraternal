@@ -69,7 +69,31 @@ verify_quick() {
         if command -v timeout >/dev/null; then
             test_prefix=(timeout --kill-after=30 "${VERIFY_QUICK_TEST_TIMEOUT:-1500}")
         fi
-        rust_run_gate "unit tests (changed)" ${test_prefix[@]+"${test_prefix[@]}"} cargo test "${cargo_scope[@]}" --lib --bins --locked
+        if ((whole)); then
+            rust_run_gate "unit tests (changed)" ${test_prefix[@]+"${test_prefix[@]}"} cargo test "${cargo_scope[@]}" --lib --bins --locked
+        else
+            # `--lib` makes Cargo refuse a package that has no library (the `infraternal` CLI is
+            # bin-only), so bin-only packages are tested with `--bins` alone, in their own run.
+            local -a lib_scope=() bin_scope=()
+            local bin_only
+            bin_only="$(cargo metadata --no-deps --format-version 1 --locked | python3 -c '
+import json, sys
+meta = json.load(sys.stdin)
+for pkg in meta["packages"]:
+    if not any("lib" in t["kind"] or "rlib" in t["kind"] or "proc-macro" in t["kind"] for t in pkg["targets"]):
+        print(pkg["name"])
+')" || return $?
+            for name in "${packages[@]}"; do
+                if grep -qxF "$name" <<< "$bin_only"; then bin_scope+=(-p "$name"); else lib_scope+=(-p "$name"); fi
+            done
+            if ((${#lib_scope[@]})); then
+                rust_run_gate "unit tests (changed)" ${test_prefix[@]+"${test_prefix[@]}"} cargo test "${lib_scope[@]}" --lib --bins --locked
+                if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
+            fi
+            if ((${#bin_scope[@]})); then
+                rust_run_gate "unit tests (changed, bin-only)" ${test_prefix[@]+"${test_prefix[@]}"} cargo test "${bin_scope[@]}" --bins --locked
+            fi
+        fi
         if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
     fi
 
