@@ -7,6 +7,7 @@
  * box itself, so the request is always one the machine accepts. Pure: unit-tested in `size.test.ts`.
  */
 
+/** A stream size the machine will accept: even pixel sides, the matching box in points, and the density between them. */
 export interface StreamSize {
   /** Pixels of the picture (even). */
   width: number;
@@ -17,10 +18,14 @@ export interface StreamSize {
   backingScale: number;
 }
 
+/** Largest picture side the wire allows, in pixels. */
 const MAX_SIDE = 4096;
+/** Largest picture the wire allows, in total pixels (four megapixels). */
 const MAX_PIXELS = 4 * 1024 * 1024;
+/** Smallest picture side the wire allows, in pixels. */
 const MIN_SIDE = 2;
 
+/** Rounds down to an even number, never below `MIN_SIDE`. */
 const evenFloor = (v: number): number => Math.max(MIN_SIDE, Math.floor(v / 2) * 2);
 
 /**

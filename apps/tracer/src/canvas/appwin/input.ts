@@ -21,6 +21,7 @@ export function containedRect(box: { width: number; height: number }, frame: { w
   return { x: (box.width - width) / 2, y: (box.height - height) / 2, width, height };
 }
 
+/** A 0–1 fraction as the wire's integer millionths, clamped to 0–1,000,000. */
 const clampMillionths = (v: number): number => Math.min(1_000_000, Math.max(0, Math.round(v * 1_000_000)));
 
 /**
