@@ -606,6 +606,32 @@ transaction={TRANSACTION}
         secret.chmod(0o644)
         self.assertEqual(self.run_shell('\ninspect_previous').returncode, 71)
 
+    def test_upgrade_beside_a_current_shims_cleanup_endpoint_is_classified(self):
+        # A current shim binds <id>.stop beside <id>.sock (infraternal-shim
+        # cleanup.rs). It is the shim's, not an unknown file (71), and not a
+        # second terminal.
+        self.make_upgrade_fixture()
+        previous = Path.cwd()
+        listeners = []
+        try:
+            os.chdir(self.socket.parent)
+            for name in (self.socket.name, '3' * 32 + '.stop'):
+                listener = socket.socket(socket.AF_UNIX)
+                listener.bind(name)
+                os.chmod(name, 0o600)
+                listener.listen()
+                listeners.append(listener)
+        finally:
+            os.chdir(previous)
+        try:
+            result = self.run_shell('\ninspect_previous')
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            fields = result.stdout.decode().strip().split(' ')
+            self.assertEqual((fields[0], fields[8]), ('INFRATERNAL_SETUP_UPGRADE', '1'), result.stdout)
+        finally:
+            for listener in listeners:
+                listener.close()
+
     def test_upgrade_with_a_running_old_agents_control_socket_is_classified(self):
         # The real b-0.1.0 binary, running against the restored #305 fixture,
         # bound sessions/plugins.sock as 0775 inside the 0700 sessions directory.

@@ -121,6 +121,11 @@ validate_upgrade_socket_dir() {
   [ "$setup_entry_count" -le 1024 ] || refuse size
   setup_socket_name=${setup_socket##*/}
   case "$setup_socket_name" in
+   *.stop)
+    # A shim's lifecycle cleanup endpoint beside its session socket
+    # (crates/infraternal-shim, cleanup.rs): not a terminal, not counted.
+    [ -S "$setup_socket" ] && [ ! -L "$setup_socket" ] && [ -O "$setup_socket" ] && [ "$(stat -c '%a' "$setup_socket")" = 600 ] || exit 71
+    hex_id "${setup_socket_name%.stop}";;
    *.ending)
     setup_socket_id=${setup_socket_name%.*}
     hex_id "$setup_socket_id"
@@ -149,6 +154,11 @@ validate_upgrade_sessions() {
    plugins.sock)
     [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] || exit 71;;
    sessions) validate_upgrade_socket_dir "$setup_runtime_entry";;
+   *.stop)
+    # A shim's cleanup endpoint, as in validate_upgrade_socket_dir.
+    [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71
+    setup_runtime_name=${setup_runtime_entry##*/}
+    hex_id "${setup_runtime_name%.stop}";;
    # The proxy plugin's owner-only credential store (crates/plugins/proxy,
    # custody.rs): 0700 directories and 0600 files, all this user's (#281).
    proxy-secrets) private_tree "$setup_runtime_entry";;
