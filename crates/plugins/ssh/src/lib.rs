@@ -13,6 +13,7 @@ pub mod duplex;
 pub mod install;
 mod lifecycle;
 pub mod mesh_admission;
+pub mod mesh_authority;
 pub mod mesh_certificate;
 pub mod mesh_flow;
 pub mod mesh_issue;
