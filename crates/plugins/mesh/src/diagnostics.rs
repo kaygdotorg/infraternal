@@ -107,13 +107,13 @@ impl InvalidHosts {
     }
 }
 
-/// The failure counter of the operation running on this task, set by
-/// [`StorageDiagnostics::run`].
-///
-/// A counter belongs to one logical operation and is shared by all service
-/// clones. Task-local scoping carries it through free storage helpers without
-/// exposing stored values or installing request authority in shared state.
 tokio::task_local! {
+    /// The failure counter of the operation running on this task, set by
+    /// [`StorageDiagnostics::run`].
+    ///
+    /// A counter belongs to one logical operation and is shared by all service
+    /// clones. Task-local scoping carries it through free storage helpers without
+    /// exposing stored values or installing request authority in shared state.
     static CURRENT: StorageDiagnostics;
 }
 
