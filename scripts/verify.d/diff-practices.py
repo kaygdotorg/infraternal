@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check D345 documentation against the merge base.
+"""Check D345 documentation and D351 test waits against the merge base.
 
 Reuse doc-coverage's lexer so strings and comments cannot invent declarations.
 Changed bodies count, not just changed signatures. Existing untouched items do
@@ -199,10 +199,51 @@ def check_docs(path, old, src, lang):
     return findings
 
 
+def check_sleeps(path, old, src, lang):
+    """Flag new fixed test waits unless their preceding line explains why."""
+    masked, comments, _ = dc.lex(src, lang)
+    changed = set()
+    for tag, _, _, a, b in difflib.SequenceMatcher(None, old.splitlines(), src.splitlines(), autojunk=False).get_opcodes():
+        if tag in ('replace', 'insert'):
+            changed.update(range(a + 1, b + 1))
+    lines = src.splitlines()
+    # Rust integration tests live in tests/, unit tests in cfg(test) modules or
+    # #[test]/#[tokio::test] functions. Test-named helper files are test code.
+    test_file = bool(re.search(r'(^|/)(tests?|real|e2e)/|(?:[._]tests?|[._]spec)\.', path))
+    test_spans = []
+    if lang == 'rust':
+        paired = pairs(masked)
+        for marker in re.finditer(r'#\[\s*(?:cfg\s*\([^\]]*\btest\b[^\]]*\)|(?:tokio::)?test(?:\([^\]]*\))?)\s*\]', masked):
+            if re.search(r'not\s*\(\s*test\s*\)', marker[0]):
+                continue
+            brace = masked.find('{', marker.end())
+            semicolon = masked.find(';', marker.end())
+            if brace >= 0 and (semicolon < 0 or brace < semicolon):
+                test_spans.append((marker.start(), paired.get(brace, len(src))))
+        pattern = r'\b(?:(?:std::)?thread::sleep|(?:tokio::)?time::sleep)\s*\('
+    elif lang == 'ts':
+        pattern = r'\.\s*waitForTimeout\s*\('
+        test_file = True  # This API is a browser test wait even in fixture helpers.
+    else:
+        return []
+    findings = []
+    paired = pairs(masked)
+    for call in re.finditer(pattern, masked):
+        line = src.count('\n', 0, call.start()) + 1
+        endline = src.count('\n', 0, paired.get(call.end() - 1, call.end()) + 1) + 1
+        if not (test_file or any(a <= call.start() <= b for a, b in test_spans)):
+            continue
+        if not any(n in changed for n in range(line, max(line + 1, endline + 1))):
+            continue
+        if line < 2 or not re.fullmatch(r'\s*// sleep:\s*\S.*', lines[line - 2]):
+            findings.append(f'{path}:{line}: new fixed test sleep needs // sleep: <reason> on the line above (D351)')
+    return findings
+
+
 def main():
     """Compare the worktree (including staged edits) with the requested merge base."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('docs',))
+    parser.add_argument('mode', choices=('docs', 'sleeps'))
     parser.add_argument('base', nargs='?', default='origin/dev')
     args = parser.parse_args()
     base = git('merge-base', 'HEAD', args.base).decode().strip()
@@ -216,7 +257,7 @@ def main():
         previous = subprocess.run(['git', 'show', f'{base}:{path}'], capture_output=True)
         old = previous.stdout.decode() if previous.returncode == 0 else ''
         src = Path(path).read_text()
-        findings.extend(check_docs(path, old, src, lang))
+        findings.extend((check_docs if args.mode == 'docs' else check_sleeps)(path, old, src, lang))
     print('\n'.join(findings) if findings else f'diff {args.mode}: ok (merge base {base[:12]})')
     return bool(findings)
 

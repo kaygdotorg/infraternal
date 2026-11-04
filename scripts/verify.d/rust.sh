@@ -303,6 +303,7 @@ rust_verify_fast() {
     rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
     rust_run_gate "doc coverage ratchet" verify_doc_coverage
     rust_run_gate "doc comments on diff" verify_diff_docs
+    rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
         rust_run_gate "static builds" rust_static_build_check
     fi

@@ -60,6 +60,36 @@ class DiffPractices(unittest.TestCase):
         new = old.replace('old();', 'new();')
         self.assertTrue(p.check_docs('a.rs', old, new, 'rust'))
 
+    def test_rust_test_scope(self):
+        """Recognize inline unit tests, integration helpers and qualified sleeps."""
+        for call in ('std::thread::sleep', 'thread::sleep', 'tokio::time::sleep', 'time::sleep'):
+            src = f'#[cfg(test)]\nmod tests {{\nfn check() {{\n    {call}(duration);\n}}\n}}\n'
+            self.assertEqual(len(p.check_sleeps('src/lib.rs', '', src, 'rust')), 1)
+            self.assertFalse(p.check_sleeps('src/lib.rs', '', src.replace(f'    {call}', f'    // sleep: exercise timer expiry.\n    {call}'), 'rust'))
+            self.assertFalse(p.check_sleeps('src/lib.rs', '', f'fn production() {{ {call}(duration); }}', 'rust'))
+            self.assertTrue(p.check_sleeps('tests/helper.rs', '', f'fn helper() {{ {call}(duration); }}', 'rust'))
+
+    def test_sleep_diff_and_decoys(self):
+        """Legacy waits are untouched; comments and literals are not calls."""
+        old = 'page.waitForTimeout(20);\n'
+        self.assertFalse(p.check_sleeps('a.spec.ts', old, old + 'expect(ok);\n', 'ts'))
+        self.assertTrue(p.check_sleeps('a.spec.ts', old, old.replace('20', '30'), 'ts'))
+        self.assertFalse(p.check_sleeps('a.spec.ts', '', '// sleep: allow the animation to settle.\npage.waitForTimeout(30);\n', 'ts'))
+        self.assertFalse(p.check_sleeps('a.spec.ts', '', '// page.waitForTimeout(30);\nconst text = "page.waitForTimeout(20)";\n', 'ts'))
+        self.assertTrue(p.check_sleeps('a.spec.ts', '', '// sleep:   \npage.waitForTimeout(30);\n', 'ts'))
+
+    def test_composite_cfg_test_waits(self):
+        """Feature-gated inline test modules still require an explained wait."""
+        src = '#[cfg(all(test, feature = "fixture"))]\nmod checks {\nfn check() {\nthread::sleep(duration);\n}\n}\n'
+        self.assertTrue(p.check_sleeps('src/lib.rs', '', src, 'rust'))
+        self.assertFalse(p.check_sleeps('src/lib.rs', '', src.replace('all(test, feature = "fixture")', 'not(test)'), 'rust'))
+
+    def test_unrelated_attributes_do_not_bypass_docs(self):
+        """Only retired shape-lint removals are exempted from item documentation."""
+        old = '//! Module.\n#[allow(dead_code)]\nfn undocumented() {}\n'
+        new = old.replace('#[allow(dead_code)]\n', '')
+        self.assertTrue(p.check_docs('a.rs', old, new, 'rust'))
+
     def test_merge_base_and_staged_body(self):
         """The command checks staged and unstaged work against the real merge base."""
         with tempfile.TemporaryDirectory() as directory:
