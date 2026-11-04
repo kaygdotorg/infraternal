@@ -1,6 +1,10 @@
 /** Resolves the pinned renderer's optional Node filesystem loader inside browser builds. */
 import type { BunPlugin } from "bun";
 
+/**
+ * A build plugin: add it to the bundler's `plugins` for the browser build. It answers the one unresolved import in the
+ * renderer artifact with a stub whose `readFile` always throws, which makes the renderer fetch its WebAssembly instead.
+ */
 export const browserFileLoader: BunPlugin = {
   name: "browser-file-loader",
   setup(build) {

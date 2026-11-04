@@ -6,7 +6,6 @@ import { loading, type Loading } from "../../../packages/ui/src/countup";
 import { BRAND_MARK, KEY_MARK } from "./auth-marks";
 import { onDemand } from "./on-demand";
 
-/** Mounts one auth flow and calls onAuthenticated after the server sets its cookie. */
 /**
  * Mounts one auth flow into `host`: first-run setup when the server says `setupRequired`, passkey sign-in otherwise.
  * @param message text shown in the card's message line (for example why the user was signed out); may be empty

@@ -30,7 +30,6 @@
  */
 /** Number of dot layers (levels of detail); layer k has spacing `gap * 2^k`. */
 const LEVELS = 4;
-/** How far a layer may be scaled from the zoom it was painted at before it is painted again. */
 /** The smallest scale a painted layer may be shown at before it is painted again; the layer box is sized to still cover the screen at this scale. */
 const MIN_SCALE = 0.6;
 /** The largest scale a painted layer may be shown at before it is painted again. */

@@ -3,8 +3,13 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { brotliCompressSync, gzipSync, constants } from "node:zlib";
 
+/** File types worth compressing; images, fonts and other binary formats are already compressed. */
 const TEXT_EXTENSIONS = new Set([".html", ".js", ".css", ".json", ".svg", ".txt", ".wasm"]);
 
+/**
+ * Walks `directory` and writes a gzip (`.gz`) and a Brotli (`.br`) copy next to every text asset, each only when it is
+ * smaller than the original. The output is the same on every run, so builds stay reproducible.
+ */
 export async function precompress(directory: string): Promise<void> {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);

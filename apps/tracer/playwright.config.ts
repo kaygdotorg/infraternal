@@ -2,18 +2,22 @@
 import { defineConfig, devices } from "playwright/test";
 import { tracerEvidencePath } from "./test/evidence-path";
 
+/** The port of the test server; `TRACER_TEST_PORT`, default 4621. */
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("TRACER_TEST_PORT must be an integer TCP port");
 }
+/** The pixel ratio of the test browser; `TRACER_TEST_DPR`, 1, 2 or 3. */
 const deviceScaleFactor = Number(process.env.TRACER_TEST_DPR ?? "1");
 if (![1, 2, 3].includes(deviceScaleFactor)) {
   throw new Error("TRACER_TEST_DPR must be 1, 2, or 3");
 }
+/** Set to `chrome` to run app-window checks in a branded Chrome instead of the bundled Chromium. */
 const appWindowBrowser = process.env.TRACER_APPWIN_BROWSER;
 if (appWindowBrowser !== undefined && appWindowBrowser !== "chrome") {
   throw new Error("TRACER_APPWIN_BROWSER must be unset or chrome");
 }
+/** A path to a Chrome binary to use with `TRACER_APPWIN_BROWSER=chrome`. */
 const appWindowChromeExecutable = process.env.TRACER_CHROME_EXECUTABLE;
 if (appWindowChromeExecutable !== undefined && appWindowBrowser !== "chrome") {
   throw new Error("TRACER_CHROME_EXECUTABLE requires TRACER_APPWIN_BROWSER=chrome");
@@ -24,6 +28,7 @@ if (appWindowChromeExecutable !== undefined && appWindowBrowser !== "chrome") {
 process.env.INFRATERNAL_EVIDENCE_DIR ??= tracerEvidencePath(".");
 // Browser reports and frame incidents stay outside the checkout.
 const perfDir = process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf");
+/** The address the tests open. */
 const origin = `http://localhost:${port}`;
 
 export default defineConfig({

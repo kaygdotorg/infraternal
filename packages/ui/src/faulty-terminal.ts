@@ -172,9 +172,9 @@ function createRenderer(canvas: ShaderCanvas, font: string, light: boolean): Fau
   };
 }
 
-/** Creates the worker-safe shader renderer without attaching browser input or frame loops. */
 /**
- * Creates the renderer on an offscreen canvas. Used by the worker; the main-thread path uses the same code.
+ * Creates the worker-safe shader renderer on an offscreen canvas, without attaching browser input or frame loops.
+ * Used by the worker; the main-thread path uses the same code.
  * Returns `undefined` when WebGL 2 is unavailable.
  */
 export function createFaultyTerminalRenderer(canvas: OffscreenCanvas, font: string, light = false): FaultyTerminalRenderer | undefined {

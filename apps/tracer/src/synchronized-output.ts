@@ -39,7 +39,6 @@ const enum SequenceState {
   ControlStringEscape,
 }
 
-/** The byte scanner skips ordinary text in native `indexOf` and examines only VT control sequences. */
 /**
  * Watches terminal output for the synchronized-output mode so the caller can hold painting while a program draws.
  * Feed every chunk to `feed` before it reaches the terminal parser.
@@ -50,7 +49,8 @@ const enum SequenceState {
  * - `requiresAtomicPaint` stays true from the start of a hold until the caller calls `finishAtomicPaint`, so the
  *   output queued during the hold is painted together.
  * - A full reset (`ESC c`) turns the mode off.
- * `dispose()` cancels the timers.
+ * `dispose()` cancels the timers. The byte scanner skips ordinary text in native `indexOf` and examines only VT control
+ * sequences.
  */
 export class SynchronizedOutput {
   private state = SequenceState.Ground;
