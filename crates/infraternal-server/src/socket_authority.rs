@@ -12,12 +12,14 @@ pub(crate) struct SocketAuthority {
     host: Option<Weak<dyn SocketHost>>,
 }
 impl SocketAuthority {
+    /// Creates the authority for a newly admitted socket. It holds only a weak reference to `host`, so it never keeps the socket state alive.
     pub(crate) fn admitted(host: Weak<dyn SocketHost>) -> Arc<Self> {
         Arc::new(Self {
             live: watch::channel(true).0,
             host: Some(host),
         })
     }
+    /// Test-only authority with no host, so only [`SocketAuthority::withdraw`] ends it.
     #[cfg(test)]
     fn fixture() -> Arc<Self> {
         Arc::new(Self {
@@ -25,11 +27,13 @@ impl SocketAuthority {
             host: None,
         })
     }
+    /// Ends this socket's authority for good. Every pending and future `authorized` call fails and `cancelled` completes. Safe to call twice.
     pub(crate) fn withdraw(&self) {
         self.live.send_replace(false);
     }
 }
 impl Authority for SocketAuthority {
+    /// True while the socket has not been withdrawn and (if it has a host) the host still exists. Reads memory only.
     fn permits(&self) -> bool {
         *self.live.borrow()
             && self
@@ -37,6 +41,7 @@ impl Authority for SocketAuthority {
                 .as_ref()
                 .is_none_or(|host| host.strong_count() != 0)
     }
+    /// Runs `operation` through the socket host's own authority check. Fails with `Err(())` if authority is already gone, the host has been dropped, or authority is withdrawn while it waits.
     fn authorized<'a>(
         &'a self,
         operation: Operation<'a, Result<(), ()>>,
@@ -54,6 +59,7 @@ impl Authority for SocketAuthority {
             }
         })
     }
+    /// Completes when authority is withdrawn. Returns immediately if it already was.
     fn cancelled(&self) -> Operation<'_, ()> {
         let mut live = self.live.subscribe();
         Box::pin(async move {

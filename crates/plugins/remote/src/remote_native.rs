@@ -4,6 +4,7 @@ use crate::{channel::Channel, remote_quic::BoundStream};
 use std::{io, time::Duration};
 use tokio::sync::{Mutex, watch};
 
+/// Time a single frame write may take, and the frame timeout reported to callers. A write that exceeds it fails and the channel is retired.
 const ACTIVE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// One native control or terminal stream. Private construction keeps native ids
@@ -45,6 +46,7 @@ impl NativeChannel {
         Ok(Self::new(send, receive, 0))
     }
 
+    /// Wraps the two halves with the given writer id.
     fn new(send: quinn::SendStream, receive: quinn::RecvStream, writer_id: u32) -> Self {
         Self {
             writer_id,
@@ -55,8 +57,10 @@ impl NativeChannel {
     }
 }
 
+/// Guard that retires the channel if a write is cancelled or fails before finishing, because a half-written frame cannot be followed by another.
 struct RetireWrite<'a>(&'a watch::Sender<bool>, bool);
 impl Drop for RetireWrite<'_> {
+    /// Retires the channel unless the write completed.
     fn drop(&mut self) {
         if !self.1 {
             self.0.send_replace(true);
@@ -65,16 +69,20 @@ impl Drop for RetireWrite<'_> {
 }
 
 impl Channel for NativeChannel {
+    /// The writer id established at binding, or 0 for the control stream.
     fn native_stream_id(&self) -> Option<u32> {
         Some(self.writer_id)
     }
+    /// Time allowed for one frame.
     fn frame_timeout(&self) -> Option<Duration> {
         Some(ACTIVE_DEADLINE)
     }
+    /// Marks the channel finished. Pending and later reads and writes fail with `BrokenPipe`.
     fn retire(&self) {
         self.retired.send_replace(true);
     }
 
+    /// Reads up to `bytes.len()` bytes; returns 0 at the end of the stream. Fails with `BrokenPipe` once retired.
     async fn read(&self, bytes: &mut [u8]) -> io::Result<usize> {
         let mut retired = self.retired.subscribe();
         if *retired.borrow() {
@@ -87,6 +95,7 @@ impl Channel for NativeChannel {
         }
     }
 
+    /// Writes all of `bytes` within the deadline. Fails with `BrokenPipe` once retired or `TimedOut` on delay; a failed or cancelled write retires the channel.
     async fn write(&self, bytes: &[u8]) -> io::Result<()> {
         let mut retired = self.retired.subscribe();
         if *retired.borrow() {
