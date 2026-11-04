@@ -3952,17 +3952,18 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - The documentation will be generated from these comments. Its
        structure is decided later, reusing the existing docs; the comments
        are written now.
-346. **GotaTun becomes the default once it is stable (owner, 2026-11-04;
-     amends D332's switch rule):** "if gotatun is stable, we should switch
-     our app to it already because we will find more bugs that way".
-     - The switch no longer waits for throughput and loss-aware p99 parity
-       with kernel WireGuard. It waits for stability: the integration
-       branch passes its final security re-review and `scripts/verify
-       fast`; there are 0 lost probes in the R4b hold; and a 1 h soak shows
-       flat memory and no reorder or retransmit regressions against the
-       control.
-     - Then GotaTun is the default engine on Linux, and the kernel path
-       stays an explicit opt-out per node.
-     - The D332 measurements continue unchanged as the performance goal.
-       Throughput and p99 against the kernel are still reported, and still
-       drive the latency work.
+346. **GotaTun becomes the default now, to find bugs by using it (owner,
+     2026-11-04; amends D332's switch rule):** "if gotatun is stable, we
+     should switch our app to it already because we will find more bugs that
+     way", then: "is not that stability replaces perf. i am the only user and
+     using gotatun inside the app right now and basing everything on top of it
+     uncovers more bugs that we need to fix".
+     - GotaTun becomes the default Linux engine as soon as the integration
+       branch merges. The merge still needs its final security re-review and
+       a green `scripts/verify fast` (CLAUDE.md priority 2). It does not wait
+       for performance parity or for an extra soak.
+     - The kernel path stays an explicit opt-out per node.
+     - Performance is unchanged as a goal (D331, D332): reaching throughput
+       and loss-aware p99 parity with kernel WireGuard is still the target,
+       still measured, and still drives the latency work. Bugs found by
+       running on GotaTun are fixed as they appear.
