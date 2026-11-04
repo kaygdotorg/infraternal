@@ -624,10 +624,27 @@ retire_stuck_service() {
  # through one: refuse now, while the service and sessions are untouched
  # (#305 P2-3). stop_stage_shims repeats the check after the stop.
  "$helper" --bootstrap-runtime "$base" "$replace_identity" stage-processes </dev/null || exit $?
- replace_enabled=no
- replace_active=no
- if $manager is-enabled --quiet infraternal-agent.service >/dev/null 2>&1; then replace_enabled=yes; fi
- if $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1; then replace_active=yes; fi
+ # Put back means as first found, not as an earlier set-aside left it
+ # (#305 P3-1). A found-service already in the journal was written by a
+ # set-aside killed after its stop, before any trap could run; a pending
+ # replaced journal belongs to a Replace whose restore never ran. Either one
+ # stopped this service, so its record is kept, not measured again.
+ replace_found=
+ for candidate in "$stage/found-service" "$base".bootstrap-replaced-*/found-service; do
+  [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+  replace_found=$candidate
+  break
+ done
+ if [ -n "$replace_found" ]; then
+  private_file "$replace_found"
+  read -r replace_enabled replace_active < "$replace_found"
+  case "$replace_enabled:$replace_active" in yes:yes|yes:no|no:yes|no:no) :;; *) exit 71;; esac
+ else
+  replace_enabled=no
+  replace_active=no
+  if $manager is-enabled --quiet infraternal-agent.service >/dev/null 2>&1; then replace_enabled=yes; fi
+  if $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1; then replace_active=yes; fi
+ fi
  # The state found travels with the journal, so whatever step fails later,
  # in this script or after it, can put the service back as it was (#305 P1-1).
  # dash runs no EXIT trap when a signal ends it, and a dropped SSH session

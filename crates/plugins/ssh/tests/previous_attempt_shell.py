@@ -1058,6 +1058,41 @@ supersede_stuck_install "{expected}"
         self.assertTrue((self.base / 'bin/live').exists())
         self.assertEqual(self.mutating_calls(), [], 'the running service is never touched')
 
+    def stop_service(self):
+        """As a set-aside that stopped the service and then died leaves it."""
+        (self.unit.parent / 'default.target.wants/infraternal-agent.service').unlink()
+        self.manager_active.unlink()
+
+    def test_a_retried_set_aside_keeps_the_service_state_first_found(self):
+        # #305 P3-1: an earlier set-aside stopped the service and was killed
+        # before its move; no trap ran. The retry must put back what that one
+        # found, not the stopped service it left.
+        stage, _ = self.make_upgrade_fixture()
+        found = stage / 'found-service'
+        found.write_text('yes yes\n')
+        found.chmod(0o600)
+        self.stop_service()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
+        self.assertEqual((aside / '.superseded-service').read_text(), 'yes yes\n')
+        restore = self.run_shell(f'\nrestore_superseded_install {TRANSACTION}\n')
+        self.assertEqual(restore.returncode, 0, restore.stderr.decode())
+        self.assertEqual(self.service_state(), (True, True), 'enabled and running, as first found')
+
+    def test_a_replace_beside_a_pending_replaced_journal_carries_its_service_state(self):
+        # #305 P3-1: Replace tx1 stopped the service and its restore never ran;
+        # a newer upgrade tx2 got stuck too. Replacing tx2 records what tx1 found.
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        newer = '4' * 32
+        self.make_upgrade_fixture(transaction=newer)
+        self.stop_service()
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        self.assertEqual(Path(f'{self.base}.bootstrap-replaced-{newer}/found-service').read_text(), 'yes yes\n')
+        restore = self.run_shell(f'\nrestore_replaced_install {newer}\n')
+        self.assertEqual(restore.returncode, 0, restore.stderr.decode())
+        self.assertEqual(self.service_state(), (True, True), 'enabled and running, as first found')
+
     def test_finishing_a_newer_upgrade_retires_a_replaced_journal(self):
         # #305 P2-3: a Replace set journal tx1 aside; the new upgrade tx2
         # reached START and lost its commit, so the next add-host finishes it.
