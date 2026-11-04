@@ -12,6 +12,24 @@ const NOW: i64 = 1_800_000_000;
 /// The 30-day sliding session lifetime.
 const SESSION: i64 = 30 * 86_400;
 
+/// Call the HTTP adapter as a browser on loopback would, without an invitation issuer.
+async fn run(
+    auth: &Auth,
+    action: &str,
+    headers: &HeaderMap,
+) -> super::super::Result<axum::response::Response> {
+    execute(
+        auth,
+        #[cfg(feature = "remote")]
+        None,
+        action,
+        headers,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        json!({}),
+    )
+    .await
+}
+
 /// A successful response prepared before logout must not restore its ended cookie afterward.
 #[tokio::test]
 async fn logout_ends_all_referenced_sessions_before_delayed_responses_refresh_cookies() {
@@ -64,12 +82,8 @@ async fn logout_ends_all_referenced_sessions_before_delayed_responses_refresh_co
 
     // The first request has completed its authenticated action but has not yet
     // crossed the final response-cookie refresh boundary.
-    let delayed_response = execute(&auth, "session", &older_headers, json!({}))
-        .await
-        .unwrap();
-    let logout_response = execute(&auth, "logout", &logout_headers, json!({}))
-        .await
-        .unwrap();
+    let delayed_response = run(&auth, "session", &older_headers).await.unwrap();
+    let logout_response = run(&auth, "logout", &logout_headers).await.unwrap();
     let _logout_response =
         refresh_session_cookie(&auth, "logout", &logout_headers, logout_response).await;
 
@@ -140,7 +154,7 @@ async fn logout_revokes_every_presented_session_when_cookie_selection_is_ambiguo
         format!("{name}={older}; {name}={newer}").parse().unwrap(),
     );
 
-    execute(&auth, "logout", &headers, json!({})).await.unwrap();
+    run(&auth, "logout", &headers).await.unwrap();
 
     let remaining: i64 =
         sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash IN (?, ?)")
@@ -212,21 +226,16 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
             .unwrap()
     };
 
-    let refused = execute(&auth, "logout", &headers(MAX_LOGOUT_SESSIONS), json!({})).await;
+    let refused = run(&auth, "logout", &headers(MAX_LOGOUT_SESSIONS)).await;
     assert!(
         matches!(refused, Err(super::super::Error::Invalid)),
         "more bearers than the cap must be refused"
     );
     assert_eq!(live_rows().await, 1, "a refused logout must delete nothing");
 
-    execute(
-        &auth,
-        "logout",
-        &headers(MAX_LOGOUT_SESSIONS - 1),
-        json!({}),
-    )
-    .await
-    .unwrap();
+    run(&auth, "logout", &headers(MAX_LOGOUT_SESSIONS - 1))
+        .await
+        .unwrap();
     assert_eq!(
         live_rows().await,
         0,

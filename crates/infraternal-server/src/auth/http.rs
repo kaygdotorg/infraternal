@@ -348,7 +348,7 @@ async fn dispatch(
         )
             .into_response(),
     };
-    refresh_session_cookie(&auth, &action, &headers, response).await
+    refresh_session_cookie(&state.auth, &action, &headers, response).await
 }
 
 // Recovery authority needs a new sample after expensive verification and writer-lock waits.
