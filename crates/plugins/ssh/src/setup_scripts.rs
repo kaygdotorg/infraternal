@@ -1,5 +1,6 @@
 //! Builds the existing journaled enrollment, activation, start and linger steps for SSH setup (#190).
 
+/// Enroll into private staged state before replacing a running installation.
 pub(super) fn join(url: &str) -> String {
     format!(
         r#"
@@ -21,6 +22,7 @@ fi
     )
 }
 
+/// Publish the staged image, canonical launcher and optional short CLI symlink.
 pub(super) const ACTIVATE: &str = r##"
 stage="$base/.bootstrap-lock"
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
@@ -70,6 +72,18 @@ mv -Tf "$stage/current" "$base/bin/current"
 ln -s "$base/bin/current" "$stage/launcher"
 : > "$stage/replacing-launcher"
 mv -Tf "$stage/launcher" "$launcher"
+# Create without replacement: even a dangling foreign infra belongs to its owner.
+# Journal intent first so an interrupted activation can retire only our new link.
+alias="${launcher%/*}/infra"
+if [ ! -e "$alias" ] && [ ! -L "$alias" ]; then
+    : > "$stage/creating-alias"
+    if ! ln -sT infraternal "$alias"; then
+        rm -f "$stage/creating-alias"
+        printf 'ALIAS skipped\n'
+    fi
+elif [ ! -L "$alias" ] || [ "$(stat -c '%u' "$alias")" != "$(id -u)" ] || [ "$(readlink "$alias")" != infraternal ]; then
+    printf 'ALIAS skipped\n'
+fi
 printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\nStartLimitIntervalSec=0\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=always\nRestartSec=2\nKillMode=process\nDelegate=yes\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$stage/unit"
 : > "$stage/replacing-unit"
 mv -f "$stage/unit" "$unit"
