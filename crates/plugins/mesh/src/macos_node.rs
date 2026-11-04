@@ -448,8 +448,11 @@ pub const ENFORCEMENT: &str = "unavailable";
 /// `WireGuard` peer would reach every port on this Mac in both cases, so only a
 /// peer that may open connections to every port here (`inbound` is `All`) is
 /// installed. The coordinator is always installed: every node may reach it
-/// (D164). The cost is that an arrow from this Mac to a node without the
-/// reverse arrow does not work until enforcement arrives.
+/// (D164). Its own inbound policy is not checked, so the server host can reach
+/// every port on this Mac, which a Linux node would deny without an arrow.
+/// The owner accepted that gap until the slice-3 filter (#265, J162 F1), and
+/// `mesh status` says so. The cost is that an arrow from this Mac to a node
+/// without the reverse arrow does not work until enforcement arrives.
 fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::PeerPolicy> {
     config.peers.iter().filter_map(|(node, policy)| {
         (config.server == Some(*node)

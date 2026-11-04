@@ -425,8 +425,12 @@ fn report_mesh_service_status_result(
 }
 
 /// Says what `enforcement: unavailable` means for someone reading `mesh status`.
+///
+/// The server is named as something that can reach this Mac, not only as something
+/// the Mac connects to: until the slice-3 filter (#265), the coordinator's peer is
+/// installed without an inbound check, so the server host reaches every port here.
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
-const MESH_ENFORCEMENT_DETAILS: &str = "Access rules are not enforced on this Mac yet, so it connects only to the server and to peers allowed to reach every port on it.";
+const MESH_ENFORCEMENT_DETAILS: &str = "Access rules are not enforced on this Mac yet. Until they are, the server can reach every port on this Mac, and other peers connect only if they are allowed to reach every port on it.";
 
 /// The machine-readable `mesh status` fields; `enforcement` reports the access-rule gap (#265).
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
@@ -2079,6 +2083,17 @@ mod dispatch_tests {
         });
         assert_eq!(data["enforcement"], "unavailable");
         assert_eq!(data["running"], true);
+    }
+
+    /// J162 F1 (#265): the details must not hide that the server reaches every port here.
+    #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    #[test]
+    fn mesh_status_says_the_server_can_reach_every_port_on_this_mac() {
+        assert!(
+            super::MESH_ENFORCEMENT_DETAILS.contains("the server can reach every port on this Mac"),
+            "{}",
+            super::MESH_ENFORCEMENT_DETAILS
+        );
     }
     use super::{ExitCode, dispatch_selected_action};
     #[cfg(feature = "plugin-mesh")]
