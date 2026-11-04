@@ -69,12 +69,11 @@ interface BindingProbe {
 }
 
 function bindingProbe(stream: AppStream): BindingProbe {
-  const label = { textContent: "" };
-  const badge = { dataset: {}, hasAttribute: () => false, setAttribute() {}, removeAttribute() {}, querySelector: () => label };
   return Object.assign(Object.create(bindingPrototype), {
     stream, queued: [], disposed: false, activeNow: true, justActivated: false,
     lastState: { kind: "live" }, o: { machine: "fixture" },
-    root: { querySelector: (selector: string) => selector === ".aw-control" ? badge : undefined },
+    // The pill's mark is DOM work these input tests do not exercise.
+    paintPillMark() {},
   }) as BindingProbe;
 }
 

@@ -25,16 +25,14 @@
 .aw-mark .ui-spinner { width: 18px; height: 18px; }
 .aw-action { margin-top: 18px; }
 
-/* The strip and the badge sit over the picture; neither blocks the machine's own pixels outside its small box. */
-.aw > .cl-sx-strip { z-index: 2; }
-/* "Controlled from infraternal": the badge mirrors the machine's own menu-bar indicator. Quiet, and a button only to let go. */
-.aw-control { z-index: 2; animation: aw-in 180ms var(--ease-out, ease-out); transition: opacity 160ms ease, transform 140ms var(--ease-out, ease-out), background-color 140ms ease; }
-.aw-control[data-leaving] { opacity: 0; pointer-events: none; }
-.aw-control[data-kind="controlled"] { color: var(--fg); }
-.aw-control[data-kind="paused"], .aw-control[data-kind="view"] { color: var(--fg-2); cursor: default; }
-.aw-control:disabled { opacity: 1; }
+/* The pill's small mark (window-body.ts `paintPillMark`): control, view only or paused, 14 px like the connection dot beside
+   it. Nothing about control or state is drawn over the picture. Its colour follows the quiet scale: the one thing the
+   person is doing (controlling) is the full text colour, everything else is secondary. */
+.aw-pillmark { position: relative; z-index: 1; display: inline-grid; flex: none; place-items: center; width: 0.875rem; height: 0.875rem; color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
+.aw-pillmark[data-kind="controlled"] { color: var(--fg); }
+.aw-pillmark svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 @keyframes aw-in { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .aw-control { animation: none; } .aw-surface, .aw-card { transition: opacity 120ms linear; } }
+@media (prefers-reduced-motion: reduce) { .aw-pillmark { animation: none; } .aw-surface, .aw-card { transition: opacity 120ms linear; } }
 
 /* ---- the picker (the session manager's card, with a field) ------------------------------------------------------ */
 .aw-head { padding-bottom: 8px; }
