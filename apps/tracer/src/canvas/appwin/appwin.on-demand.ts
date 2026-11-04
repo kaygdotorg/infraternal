@@ -50,10 +50,14 @@ export interface AppWindowsPart {
 const SCREEN_ICON = '<rect x="3" y="4.5" width="18" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 17v3.5"/>';
 const WINDOW_ICON = '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M3.5 9.5h17"/>';
 
-/** The words in a window's pill after the machine: "App · title", or the display's name. */
+/**
+ * The words in a window's pill: "title · App", or the display's name. The title comes first because it is the part that
+ * tells two windows of one app apart, and a narrow pill is cut from the end: the part that differs is the part that
+ * survives. An untitled window is just the app's name.
+ */
 export function streamLabel(entry: Entry): string {
   if (entry.kind === "screen") return entry.name;
-  return entry.title ? `${entry.appName} · ${entry.title}` : entry.appName;
+  return entry.title ? `${entry.title} · ${entry.appName}` : entry.appName;
 }
 
 export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWindowsPart {
