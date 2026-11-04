@@ -1656,7 +1656,7 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.2"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=73eb9f1ae185313609d031c644cb4a81f3c927dc#73eb9f1ae185313609d031c644cb4a81f3c927dc"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=84b7bb28e385d57dfb80493e78202898fad24d1e#84b7bb28e385d57dfb80493e78202898fad24d1e"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
@@ -2283,7 +2283,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "gotatun 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "gotatun 0.10.2 (git+https://github.com/kaygdotorg/gotatun?rev=73eb9f1ae185313609d031c644cb4a81f3c927dc)",
+ "gotatun 0.10.2 (git+https://github.com/kaygdotorg/gotatun?rev=84b7bb28e385d57dfb80493e78202898fad24d1e)",
  "hickory-proto",
  "infraternal-linux-tun",
  "infraternal-mesh",
