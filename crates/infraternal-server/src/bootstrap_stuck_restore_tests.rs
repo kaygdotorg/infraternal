@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // A Replace or Re-enroll that fails after the stuck install was set aside puts
-// it back as it was found (#305 P1-1, P2-1, P3-3). The fake host simulates the
-// set-aside step on real files; the restore script itself runs for real in sh
-// against a private HOME, with a service manager that keeps state.
+// it back as it was found (#305 P1-1, P2-1, P3-3). The set-aside and restore
+// programs run for real in sh against a private HOME, with a service manager
+// that keeps state. Only the set-aside's read-only proofs are stubbed; the
+// shell oracle (previous_attempt_shell.py) proves those.
 use super::*;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf};
 
@@ -18,6 +19,10 @@ enum Stop {
     /// attempt is dropped before it learns the script's result.
     InSetAside,
 }
+
+/// Stand-ins for the set-aside's read-only proofs, defined just before its
+/// call. The guard, the service stop, the journal move and the traps stay real.
+const SET_ASIDE_PROOFS: &str = "\ninspect_previous() { printf '%s\\n' \"$replace_expected\"; }\nruntime_helper() { helper=true; }\nscan_holders() { :; }\nnot_live() { :; }\nstop_stage_shims() { :; }";
 
 /// A private HOME holding a stuck rootless install and a mock service manager.
 struct Home {
@@ -57,10 +62,12 @@ impl Home {
         )
         .unwrap();
         // Enabled is a file, active is a file: the restore must recreate both.
+        // With slow-stop present, stop marks "stopping" and takes 2 s, as a
+        // real agent's shutdown does (#305 P3-3).
         let manager = home.root.join("bin/systemctl");
         std::fs::write(
             &manager,
-            "#!/bin/sh\n[ \"$1\" = --user ] && shift\nprintf '%s\\n' \"$*\" >> \"$HOME/manager.log\"\ncase \"$1\" in\n enable) : > \"$HOME/enabled\"; [ \"$2\" != --now ] || : > \"$HOME/active\";;\n disable) rm -f \"$HOME/enabled\";;\n start) : > \"$HOME/active\";;\n stop) rm -f \"$HOME/active\";;\n is-enabled) [ -e \"$HOME/enabled\" ]; exit;;\n is-active) [ -e \"$HOME/active\" ]; exit;;\nesac\nexit 0\n",
+            "#!/bin/sh\n[ \"$1\" = --user ] && shift\nprintf '%s\\n' \"$*\" >> \"$HOME/manager.log\"\ncase \"$1\" in\n enable) : > \"$HOME/enabled\"; [ \"$2\" != --now ] || : > \"$HOME/active\";;\n disable) rm -f \"$HOME/enabled\";;\n start) : > \"$HOME/active\";;\n stop) if [ -e \"$HOME/slow-stop\" ]; then : > \"$HOME/stopping\"; sleep 2; fi; rm -f \"$HOME/active\";;\n is-enabled) [ -e \"$HOME/enabled\" ]; exit;;\n is-active) [ -e \"$HOME/active\" ]; exit;;\nesac\nexit 0\n",
         )
         .unwrap();
         std::fs::set_permissions(&manager, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -87,17 +94,24 @@ impl Home {
             self.root.join("active").exists(),
         )
     }
-    /// What `replace_stuck_install` leaves: the journal moved aside with the
-    /// service state found, and the service stopped and disabled.
-    fn replace(&self) {
-        let replaced = PathBuf::from(format!(
-            "{}.bootstrap-replaced-{}",
-            self.base().display(),
-            self.transaction.simple()
-        ));
-        std::fs::rename(self.base().join(".bootstrap-lock"), &replaced).unwrap();
-        Self::private(&replaced.join("found-service"), "yes yes\n");
-        self.stop();
+    /// Run a host program in sh as the private HOME's user, with its mock
+    /// service manager first on PATH. Never killed on drop: like sshd, the
+    /// host runs a command to the end after the client goes away (#305 P2-1).
+    fn sh(&self, script: &str) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .env("HOME", &self.root)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.root.join("bin").display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+        command
     }
     /// What `supersede_stuck_install` leaves: the whole install, its unit and
     /// the service state found set aside, the launcher removed.
@@ -172,11 +186,19 @@ impl SshSession for HostSession {
             self.scripts.lock().unwrap().push(script.clone());
             let stdout = if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) {
                 self.check.clone()
-            } else if script.contains("\nreplace_stuck_install ") {
-                self.home.replace();
-                Vec::new()
-            } else if script.contains("\nsupersede_stuck_install ") {
-                self.home.supersede();
+            } else if let Some(call) = ["\nreplace_stuck_install ", "\nsupersede_stuck_install "]
+                .into_iter()
+                .find(|call| script.contains(call))
+            {
+                // The real set-aside program; a dropped attempt leaves it running.
+                let script = script.replacen(call, &format!("{SET_ASIDE_PROOFS}{call}"), 1);
+                let output = self.home.sh(&script).output().await.unwrap();
+                if !output.status.success() {
+                    eprintln!("set-aside stderr: {}", String::from_utf8_lossy(&output.stderr));
+                    let mut failure = Failure::install("the set-aside program failed");
+                    failure.exit_status = output.status.code().and_then(|c| u8::try_from(c).ok());
+                    return Err(failure);
+                }
                 if self.stop == Stop::InSetAside {
                     self.reached.notify_one();
                     std::future::pending::<()>().await;
@@ -186,21 +208,7 @@ impl SshSession for HostSession {
                 || script.contains("\nrestore_superseded_install ")
             {
                 // The real restore program, against the private HOME.
-                let output = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(&script)
-                    .env("HOME", &self.home.root)
-                    .env(
-                        "PATH",
-                        format!(
-                            "{}:{}",
-                            self.home.root.join("bin").display(),
-                            std::env::var("PATH").unwrap_or_default()
-                        ),
-                    )
-                    .output()
-                    .await
-                    .unwrap();
+                let output = self.home.sh(&script).output().await.unwrap();
                 if !output.status.success() {
                     let mut failure = Failure::install("the restore program refused");
                     failure.exit_status = output.status.code().and_then(|c| u8::try_from(c).ok());
@@ -422,6 +430,51 @@ async fn a_replace_the_browser_cancels_puts_the_stuck_install_back_as_found() {
     drop(run.batch.take());
     run.wait_ran("\nrestore_replaced_install ", &home).await;
     home.assert_as_found();
+}
+
+/// Cancel the attempt while the host is still stopping the stuck install's
+/// service: the set-aside runs on, and the restore must wait for it and put
+/// the install back, not give up on the setup guard (#305 P2-1, P3-3).
+async fn cancel_during_the_stop(own: bool) {
+    let f = fixture(true).await;
+    let home = Arc::new(Home::new());
+    std::fs::write(home.root.join("slow-stop"), "").unwrap();
+    let (check, digest) = if own {
+        let digest = own_stuck_host(&f).await;
+        (home_check(&home, f.prior, &digest, "remote.example.test"), digest)
+    } else {
+        (home_check(&home, Uuid::new_v4(), &[9; 32], "old.example"), [7; 32])
+    };
+    let mut run = Run::start(&f, &home, check, digest, Stop::Join);
+    run.confirm(run.offer().await);
+    tokio::time::timeout(TEST_HANG_BOUND, async {
+        while !home.root.join("stopping").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("never stopped: {:?}", run.batch().events(0).1));
+    // Closing the sheet (or locking the phone) closes its socket mid-stop.
+    drop(run.batch.take());
+    let restore = if own {
+        "\nrestore_replaced_install "
+    } else {
+        "\nrestore_superseded_install "
+    };
+    run.wait_ran(restore, &home).await;
+    // The set-aside has ended by now, and nothing stops the service again.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    home.assert_as_found();
+}
+
+#[tokio::test]
+async fn a_replace_cancelled_during_the_stop_is_put_back_as_found() {
+    cancel_during_the_stop(true).await;
+}
+
+#[tokio::test]
+async fn a_reenroll_cancelled_during_the_stop_is_put_back_as_found() {
+    cancel_during_the_stop(false).await;
 }
 
 #[tokio::test]
