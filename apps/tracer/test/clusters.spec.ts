@@ -20,7 +20,10 @@ const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
 
 async function open(page: Page, scene: number, query = ""): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft${query}`);
+  // These specs check gestures, geometry and timing, not a look: they run on the Solid theme (`look=solid`). Under the default Tinted theme the windows' 6 px blur costs
+  // enough frames in software rendering (17 ms a frame becomes 27 ms on a phone-sized page and 64 ms on a desktop one) that held fingers and wheel steps coalesce and a
+  // gesture is sometimes lost. The cost of the blur is measured on its own, with the frame times, on #323.
+  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft&look=solid${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await expect.poll(() => probe(page, (p) => p.views().length)).toBeGreaterThan(0);
   // Let the camera come to rest before measuring.
@@ -430,12 +433,10 @@ async function touchPage(browser: Browser, scene: number): Promise<{ page: Page;
   // These specs test the geometry of the Comfortable phone width (a neighbour peeks in, a gap to tap: a tap at x=371 lands on the
   // slice of the next window, 10 px wide at the screen edge, and so leaves the focused terminal); full width, the
   // default (D191), has its own specs in real/phone.spec.ts.
-  // These specs check gestures and geometry, not a look, so they run on the Solid theme. Under the default Tinted theme the windows' 6 px blur costs enough frames in
-  // software rendering (27 ms a frame on a phone-sized page instead of 17) that a held finger's moves coalesce and a drag or a long press is lost; the cost of the blur is
-  // measured on its own, with the frame times, on #323.
-  await context.addInitScript(() => { try { localStorage.setItem("tracer.window-size.phone", "comfortable"); localStorage.setItem("tracer.themes", JSON.stringify({ v: 1, selected: "solid", basics: { colors: "ink", font: "maple-mono-nf", uiSize: 100 }, themes: [] })); } catch { /* storage blocked */ } });
+  await context.addInitScript(() => { try { localStorage.setItem("tracer.window-size.phone", "comfortable"); } catch { /* storage blocked */ } });
   const page = await context.newPage();
-  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft`);
+  // Gestures, not a look: the Solid theme (see `open`).
+  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft&look=solid`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(900);
   const cdp = await context.newCDPSession(page);

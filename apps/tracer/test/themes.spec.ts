@@ -66,6 +66,15 @@ test.describe("the Themes window", () => {
     await expect(page.locator(`${WINDOW} .ui-theme`)).toHaveCount(3);
   });
 
+  test("?look= starts on that theme for one page load and saves nothing", async ({ page }) => {
+    await page.goto("/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&look=frosted&at=appearance.themes");
+    await expect(page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
+    expect(await look(page)).toMatchObject({ id: "frosted", tint: "0.5", blur: "12px" });
+    await page.waitForTimeout(1500);
+    expect(await page.evaluate(() => localStorage.getItem("tracer.themes")), "nothing was saved on the device").toBeNull();
+    expect((await account(page)).themes, "nor on the account").toBeNull();
+  });
+
   test("the plus card makes a copy of the selected theme, selects it and lets its name change", async ({ page }) => {
     await open(page);
     await page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`).click();

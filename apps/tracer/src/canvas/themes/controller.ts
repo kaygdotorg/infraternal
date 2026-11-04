@@ -10,7 +10,8 @@
  * read and applied synchronously, then the account's copy is fetched; if the account has a different list it replaces this device's
  * (the account is the shared one), and if the account has none, this device's list is sent up.
  *
- * A person who has never chosen starts on Tinted (D322), built from the Colour, font and size the product already shows them.
+ * A person who has never chosen starts on Tinted (D322), built from the Colour, font and size the product already shows them. `?look=` picks a theme for
+ * one page load without saving it (tests and screenshots).
  */
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { readUiSize } from "../../../../../packages/ui/src/ui-scale";
@@ -37,6 +38,10 @@ export function startThemes(core: CoreScreen): () => void {
   const now = core.appearance();
   const store = createThemeStore({ colors: now.theme, font: now.font, uiSize: readUiSize() }, readDevice());
   shared = store;
+  // `?look=<theme id>` starts on that theme and never saves it, the way `?theme=`, `?font=` and `?bg=` pick a look for a test or a screenshot. It is taken before the
+  // store is followed, so choosing it writes nothing; an id that is not a theme is ignored.
+  const forced = new URLSearchParams(location.search).get("look");
+  if (forced) store.select(forced);
   // True while this module is changing the page itself, so the change events it causes are not mistaken for the person's own picks.
   let applying = false;
   const show = (): void => { applying = true; try { applyLook(core, store.selected()); } finally { applying = false; } };
