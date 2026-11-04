@@ -17,6 +17,7 @@ import { attachRowMenu, type RowAction } from "./row-menu";
 import { mountRowAsk, type RowAsk } from "./row-confirm";
 import type { SettingsSection } from "./settings-overlay";
 
+/** The heading shown for each shortcut area. */
 const AREA_TITLE: Record<string, string> = { canvas: "Canvas", terminal: "Terminal", global: "Everywhere" };
 /** The reset glyph (inner SVG on the 24 px grid), shared by the row menu. */
 const RESET_ICON = '<path d="M5 12a7 7 0 1 0 2.3-5.2M5 5v4h4"/>';

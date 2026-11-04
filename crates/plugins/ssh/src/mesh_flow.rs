@@ -20,16 +20,21 @@ pub const RECEIVE_WINDOW: u32 = 64 * 1024;
 /// Both directions split transfers into bounded work units.
 pub const PACKET_BYTES: usize = 16 * 1024;
 
+/// Queue contents shared between the SSH callback and the input worker.
 #[derive(Default)]
 struct State {
+    /// Received bytes not yet handed to the downstream writer.
     bytes: VecDeque<u8>,
+    /// The peer sent EOF; no more bytes will be accepted after this.
     eof: bool,
 }
 
 /// The SSH callback only copies bytes and wakes the sole input worker.
 #[derive(Clone, Default)]
 pub struct Ingress {
+    /// The queue, behind a short-held lock (never held across an await).
     state: Arc<Mutex<State>>,
+    /// Wakes the worker when bytes or EOF arrive.
     ready: Arc<Notify>,
 }
 
@@ -61,6 +66,8 @@ impl Ingress {
         Ok(())
     }
 
+    /// Wait for queued bytes and move up to `output.len()` of them into `output`.
+    /// Returns the count; `0` means EOF with an empty queue.
     async fn next(&self, output: &mut [u8]) -> io::Result<usize> {
         loop {
             let ready = self.ready.notified();

@@ -38,6 +38,10 @@ export interface FontFaceSource {
   weight: string;
 }
 
+/**
+ * One selectable font: its id, label, CSS family, files (`faces`) and the weights it reads best at. See the module
+ * comment for what each weight field means. `id` is what is saved in the browser as the user's choice.
+ */
 export interface MonoFont {
   id: string;
   /** Name shown in the palette. */
@@ -70,6 +74,7 @@ export interface MonoFont {
   placeGlyphs?: boolean;
 }
 
+/** The two faces (upright and italic) of a variable-weight family whose files live in `fonts/<id>/`. */
 const variable = (id: string): FontFaceSource[] => [
   { file: `${id}/roman.latin.woff2`, style: "normal", weight: "400 700" },
   { file: `${id}/italic.latin.woff2`, style: "italic", weight: "400 700" },
@@ -119,12 +124,15 @@ export const FONTS: readonly MonoFont[] = [
     bodyWeight: 550, terminalWeight: 550, boldWeight: 700, range: [400, 700], faces: variable("source-code-pro") },
 ];
 
+/** The font used when nothing is saved. It is the one preloaded for the sign-in card. */
 export const DEFAULT_FONT_ID = "maple-mono-nf";
 
+/** The registered font with this `id`, or `undefined` for an unknown or missing id. */
 export function fontById(id: string | null | undefined): MonoFont | undefined {
   return FONTS.find((font) => font.id === id);
 }
 
+/** The four UI text weights derived from a font by {@link uiWeights}. */
 export interface UiWeights { secondary: number; body: number; label: number; title: number }
 
 /**
@@ -165,6 +173,7 @@ export function applyFontVars(font: MonoFont, root: HTMLElement): void {
   root.dataset.font = font.id;
 }
 
+/** Font loads already started, by font and slant, so a repeat call shares the same promise. */
 const registered = new Map<string, Promise<void>>();
 
 /**

@@ -129,6 +129,7 @@ fn recovered(views: &[Value], view: &Value) -> bool {
         })
 }
 
+/// True if the document holds any recovery view, that is, one whose name marks it as a copy of an existing view of the same kind.
 pub(super) fn needed(document: &Document) -> bool {
     document.0["views"]
         .as_array()
@@ -139,6 +140,7 @@ pub(super) fn needed(document: &Document) -> bool {
 /// Removing those views before merging excludes their own duplicate targets from the canonical seen set.
 /// A committed snapshot records their removal, so repeated loads and stale-device imports converge idempotently.
 // Keep synchronous mutation state separate from the asynchronous transaction frame.
+/// Merges recovery views back into the views they were copied from and removes them. Returns `Ok(true)` if the document changed and `Ok(false)` if nothing was needed. If merging cannot fit the document's size limits it leaves the document as it was, so the account stays editable. Fails if the views are not an array.
 #[inline(never)]
 pub(super) fn repair(document: &mut Document) -> Result<bool, ()> {
     let views = document.0["views"].as_array().ok_or(())?;

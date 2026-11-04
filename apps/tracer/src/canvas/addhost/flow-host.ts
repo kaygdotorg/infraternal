@@ -19,6 +19,7 @@ export interface FlowSurface {
   reveal?(): void;
 }
 
+/** Decides where the wizard's card is drawn. `open` makes a fresh surface titled `title` (the title is its accessible name). */
 export interface FlowHost {
   open(options: { title: string }): FlowSurface;
 }

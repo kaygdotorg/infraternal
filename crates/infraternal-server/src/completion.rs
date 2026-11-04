@@ -29,6 +29,8 @@ impl<F: std::future::Future + Send + 'static + ?Sized> DetachOnDrop<F>
 where
     F::Output: Send,
 {
+    /// Wraps `operation`. It runs inline while polled; if the wrapper is dropped before
+    /// it finishes, the operation is handed to a runtime task instead of being cancelled.
     pub(crate) fn new(operation: std::pin::Pin<Box<F>>) -> Self {
         Self {
             operation: Some(operation),
@@ -49,6 +51,7 @@ where
 {
     type Output = F::Output;
 
+    /// Polls the wrapped operation. Once it has produced its output, polling again stays `Pending` forever.
     fn poll(
         self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
@@ -71,6 +74,7 @@ impl<F: std::future::Future + Send + 'static + ?Sized> Drop for DetachOnDrop<F>
 where
     F::Output: Send,
 {
+    /// Hands unfinished work to [`detach`] so cancelling a waiter never aborts the database work or frees its admission permits.
     fn drop(&mut self) {
         if let Some(query) = self.operation.take() {
             // Ownership, including any admission permits, stays with the operation

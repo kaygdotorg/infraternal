@@ -12,6 +12,7 @@ import type { SpringConfig } from "../../../../../packages/ui/src/spring";
 /** The duration-based spring config: critically damped, so it has no bounce to set. */
 type FlipSpring = Extract<SpringConfig, { visualDuration: number }>;
 
+/** The reflow animator made by `createFlip`: call `measure`, change the layout, then `play`. */
 export interface Flip {
   /** Records where the elements are now. */
   measure(nodes: Iterable<HTMLElement>): Map<HTMLElement, DOMRect>;
@@ -23,6 +24,10 @@ export interface Flip {
 
 /** A spring's progress from 1 (where the element was) to 0 (where it is), sampled into a CSS easing. */
 const easings = new Map<string, { css: string; duration: number }>();
+/**
+ * Samples a critically damped spring into a CSS `linear()` easing and its duration in milliseconds. It runs from 0 to 1, never goes past
+ * 1, and ends where the spring comes to rest (at most 3 seconds). The result is cached for each duration.
+ */
 export function springEasing(cfg: FlipSpring): { css: string; duration: number } {
   const key = String(cfg.visualDuration);
   const hit = easings.get(key);

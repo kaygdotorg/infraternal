@@ -21,8 +21,10 @@
  */
 import { Spring } from "./spring";
 import { comboLabel, isOverridden, isTypingTarget, keyCaps, shortcutSections } from "./shortcuts";
+/** Re-exported for callers that already import the view: true for keystrokes that belong to a field or terminal. */
 export { isTypingTarget } from "./shortcuts";
 
+/** What {@link mountShortcutsView} needs: the `pill` that morphs, the `stage` that holds the panel, and `areas()`, the current areas most specific first. */
 export interface ShortcutsViewOptions {
   /** The pill that morphs (the session capsule). */
   pill: HTMLElement;
@@ -32,6 +34,7 @@ export interface ShortcutsViewOptions {
   areas(): string[];
 }
 
+/** The handle returned by {@link mountShortcutsView}. `toggle()` opens or closes; `close(true)` skips the animation; `dispose()` removes everything it added. */
 export interface ShortcutsView {
   readonly isOpen: boolean;
   open(): void;
@@ -41,9 +44,16 @@ export interface ShortcutsView {
 }
 
 
+/** Limits a value to 0 to 1. */
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
+/** An eased 0 to 1 ramp of `value` between `from` and `to` (smoothstep), used to stage the content fade. */
 const smooth = (from: number, to: number, value: number): number => { const t = clamp01((value - from) / (to - from)); return t * t * (3 - 2 * t); };
 
+/**
+ * Prepares the `?` view for `options.pill` and returns its handle. Nothing is drawn until it is opened.
+ * @example
+ * const view = mountShortcutsView({ pill, stage, areas: () => ["canvas"] }); view.toggle();
+ */
 export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView {
   const { pill, stage } = options;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");

@@ -26,6 +26,9 @@ impl Identity {
             self.process.as_raw_fd()
         ))
     }
+    /// True while the pinned process is still the same live process, and (when a
+    /// parent pin exists) is still a child of that exact parent, recursively.
+    /// Zombie and dead states count as not alive. Any read error counts as not alive.
     pub(crate) fn alive(&self) -> bool {
         self.record().is_ok_and(|(pid, parent)| {
             pid == self.pid
@@ -60,7 +63,10 @@ impl Identity {
         }
     }
 }
+/// Cache key: the person (as a UUID) and the host account's numeric uid.
 type Key = (uuid::Uuid, u32);
+/// Process-wide cache of authenticated login identities, shared by all
+/// requests. Bounded to 256 entries by `remember`.
 static CACHE: OnceLock<Mutex<HashMap<Key, Identity>>> = OnceLock::new();
 
 /// Reuse only the exact live process previously authenticated by the system manager.
@@ -108,6 +114,9 @@ pub(crate) fn pin(pid: i32, group: PathBuf) -> io::Result<Identity> {
     Ok(identity)
 }
 
+/// Reads a small `/proc` file, refusing anything over 8192 bytes with
+/// `PermissionDenied` so a hostile or unexpected process cannot make the agent
+/// buffer unbounded data.
 fn bounded(path: &std::path::Path) -> io::Result<Vec<u8>> {
     use std::io::Read as _;
     let mut bytes = Vec::new();

@@ -10,6 +10,7 @@
  */
 import type { Ctx, ViewRec, WinRec } from "../context";
 
+/** Tells windows whether they are live. `watch` and `unwatch` add and remove a window; the other methods change what counts as live. */
 export interface Visibility {
   watch(rec: WinRec): void;
   unwatch(rec: WinRec): void;
@@ -22,6 +23,10 @@ export interface Visibility {
   dispose(): void;
 }
 
+/**
+ * Makes the tracker. A window is live when it is within half a viewport of the screen, its view is not far, and the page is not paused.
+ * It uses one IntersectionObserver, so it costs nothing while the screen is still.
+ */
 export function createVisibility(cx: Ctx): Visibility {
   const near = new Set<Element>();
   const recs = new Map<Element, WinRec>();

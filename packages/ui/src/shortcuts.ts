@@ -34,6 +34,7 @@ export interface Combo {
   ctrl?: boolean;
 }
 
+/** One action a person can trigger by key. `id` is stable (it keys the saved override); `label` is what the `?` view shows. */
 export interface Shortcut {
   id: string;
   label: string;
@@ -48,6 +49,7 @@ export interface Shortcut {
   alternates?: Combo[];
 }
 
+/** A titled group of shortcuts that one area registers with {@link registerShortcuts}. */
 export interface ShortcutSection {
   id: string;
   title: string;
@@ -75,8 +77,10 @@ export const PALETTE_KEYS: PlatformKeys = { mac: "⌘K", other: "Ctrl+Shift+K" }
  * Ctrl+Shift+K there; a Mac keeps ⌘K, which never reaches a terminal. ⌘⇧P and Ctrl+Shift+P are the alternates.
  */
 export const paletteCombo = (): Combo => platformCombo({ code: "KeyK", key: "k", mod: true, shift: false }, { code: "KeyK", key: "k", mod: true, shift: true });
+/** The second palette chord, ⌘⇧P on a Mac and Ctrl+Shift+P elsewhere. */
 export const paletteAlternate = (): Combo => ({ code: "KeyP", key: "p", mod: true, shift: true });
 
+/** The registered sections by id; registering the same id again replaces the section. */
 const registered = new Map<string, ShortcutSection>();
 
 /** Registers (or replaces) a section; returns a remover. */
@@ -108,13 +112,18 @@ export function keyCaps(keys: PlatformKeys | string): string[] {
 }
 
 // ---- user bindings (one source for every surface) ---------------------------------------------------------
+/** The browser-local key under which the user's rebindings are saved as JSON. */
 const STORE = "tracer.shortcuts";
+/** Callbacks told when any binding changes. */
 const listeners = new Set<() => void>();
+/** Reads the saved rebindings; a missing, unreadable or malformed value gives none. */
 const loadOverrides = (): Record<string, Combo> => {
   try { const raw = JSON.parse(readLocal(STORE) ?? "{}") as Record<string, Combo>; return raw && typeof raw === "object" ? raw : {}; } catch { return {}; }
 };
+/** The user's bindings by shortcut id, replacing the defaults. */
 let overrides = loadOverrides();
 
+/** The letter keys a shell uses with Ctrl, which a PC shortcut may not take. */
 const CTRL_LETTERS = new Set("ABCDEFGHJKLNPRTUWXYZ".split("").map((l) => `Key${l}`));
 /**
  * Why a combination cannot be a shortcut because the terminal needs it, or undefined. Plain keys and
@@ -129,6 +138,7 @@ export function terminalNeeds(combo: Combo): string | undefined {
 }
 
 const KEY_NAMES: Record<string, string> = { ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓", Escape: "Esc", Enter: "Enter", Space: "Space", Backslash: "\\", Slash: "/", Comma: ",", Period: ".", Minus: "-", Equal: "=", BracketLeft: "[", BracketRight: "]", Tab: "Tab" };
+/** The name of a physical key as shown on a key cap ("←", "Esc", "K", "1"). */
 export const keyName = (code: string): string => KEY_NAMES[code] ?? code.replace(/^Key/, "").replace(/^Digit/, "");
 
 /**
@@ -165,6 +175,7 @@ export function comboLabel(combo: Combo): string {
   // Written in the order the reference table uses on PC: Ctrl+Shift+Alt+Enter.
   return [combo.mod ? "Ctrl" : "", shift ? "Shift" : "", combo.alt ? "Alt" : "", key].filter(Boolean).join("+");
 }
+/** Whether two combos are the same chord (key and all modifiers). */
 export const sameCombo = (a: Combo, b: Combo): boolean => a.code === b.code && Boolean(a.mod) === Boolean(b.mod) && Boolean(a.shift) === Boolean(b.shift) && Boolean(a.alt) === Boolean(b.alt) && Boolean(a.ctrl) === Boolean(b.ctrl);
 /** The combination a keystroke makes, read by physical key (how a rebinding is recorded). */
 export const comboOf = (event: KeyboardEvent): Combo => ({ code: event.code, mod: isMacPlatform() ? event.metaKey : event.ctrlKey, shift: event.shiftKey, alt: event.altKey, ctrl: isMacPlatform() && event.ctrlKey });
@@ -187,13 +198,17 @@ export const platformCombo = (mac: Combo, other: Combo): Combo => (isMacPlatform
 
 /** The binding in force: the user's, else the default. */
 export function bindingOf(shortcut: Shortcut): Combo | undefined { return overrides[shortcut.id] ?? shortcut.combo; }
+/** Whether the user has rebound the shortcut with this id. */
 export const isOverridden = (id: string): boolean => id in overrides;
+/** Saves `combo` as the binding of shortcut `id` on this device and tells the listeners. Pass `undefined` to go back to the default. */
 export function setBinding(id: string, combo: Combo | undefined): void {
   if (combo) overrides = { ...overrides, [id]: combo }; else { const { [id]: _removed, ...rest } = overrides; overrides = rest; }
   writeLocal(STORE, JSON.stringify(overrides));
   for (const l of listeners) l();
 }
+/** Drops every rebinding and tells the listeners. */
 export function resetBindings(): void { overrides = {}; writeLocal(STORE, "{}"); for (const l of listeners) l(); }
+/** Calls `listener` after each change to the bindings. Returns the function that stops it. */
 export function onBindingsChange(listener: () => void): () => void { listeners.add(listener); return () => { listeners.delete(listener); }; }
 
 /** The label of a shortcut's current binding ("⌘/", "Ctrl+Shift+/"), or "" when it has none. */

@@ -11,12 +11,18 @@ pub(crate) struct SourceSlots {
     buckets: Mutex<HashMap<IpAddr, Weak<Semaphore>>>,
 }
 impl SourceSlots {
+    /// Creates a limiter that allows at most `limit` simultaneous holders per source address.
     pub(crate) fn new(limit: usize) -> Self {
         Self {
             limit,
             buckets: Mutex::default(),
         }
     }
+    /// Takes one slot for `address`, or returns `None` when that source is at its
+    /// limit or the table of tracked sources (4096) is full of live ones. Drop the permit
+    /// to give the slot back. IPv4-mapped IPv6 addresses count as their IPv4 address, and
+    /// ports are not part of the key, so one host cannot multiply its quota. Finished
+    /// sources are pruned only when the table fills up.
     pub(crate) fn reserve(&self, address: IpAddr) -> Option<OwnedSemaphorePermit> {
         let address = match address {
             IpAddr::V6(v) => v.to_ipv4_mapped().map_or(IpAddr::V6(v), IpAddr::V4),

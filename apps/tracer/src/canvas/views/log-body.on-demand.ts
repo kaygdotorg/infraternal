@@ -10,11 +10,14 @@
  */
 import { el } from "../dom";
 
+/** Most lines a logs window keeps. Older lines are dropped as new ones arrive. */
 const CAP = 500;
 /** Within this many pixels of the end counts as "at the end" (sub-pixel scroll positions, rounding). */
 const PIN_SLACK = 8;
+/** Icon markup for the "Jump to latest" button. */
 const ARROW_DOWN = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>';
 
+/** Builds one log line from `time  source  message` (two spaces apart). A message starting with WARN or ERROR is tinted. */
 function lineEl(line: string): HTMLElement {
   const [time, src, ...rest] = line.split("  ");
   const msg = rest.join("  ");
@@ -26,6 +29,7 @@ function lineEl(line: string): HTMLElement {
   return row;
 }
 
+/** A mounted log view. `push` appends a line (the view stays pinned to the end unless the person scrolled up). */
 export interface LogBody {
   /** The scrolling element. */
   scroller: HTMLElement;

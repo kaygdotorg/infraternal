@@ -4,8 +4,15 @@
 //! never become printable text or interpreted control commands in the VT.
 #![forbid(unsafe_code)]
 
+/// Most bytes of one control string (OSC, DCS, APC, PM or SOS) that are passed
+/// on to the terminal. Bytes beyond this are dropped until the string ends.
 pub(super) const STRING_BYTES: usize = 4096;
 
+/// Where the filter is in the escape-sequence grammar. `String` counts the
+/// bytes passed on so far (`osc` marks an operating-system command, which ends
+/// on BEL as well). `Discard` and `DiscardEscape` are the over-limit states:
+/// the string is still open, so its remaining bytes must stay hidden from the
+/// terminal until a real terminator arrives.
 #[derive(Clone, Copy, Default)]
 enum State {
     #[default]
@@ -28,18 +35,33 @@ enum State {
     },
 }
 
+/// What the caller must do with the byte it just gave to `Limits::byte`.
 pub(super) enum Action {
+    /// Pass the byte on unchanged.
     Keep,
+    /// Withhold the byte: it is excess payload of an over-limit string, or the ESC
+    /// that might start the string's terminator.
     Drop,
+    /// The over-limit string has ended or been abandoned after an ESC was withheld.
+    /// Pass on the withheld ESC before this byte so downstream sees a valid
+    /// terminator or the start of a new command.
     Restart,
+    /// The byte is an 8-bit C1 control. Pass on the seven-bit form instead: ESC
+    /// followed by this value (for example `[` for CSI), so later layers see the
+    /// same boundary however the sequence was encoded.
     Start(u8),
 }
 
+/// Streaming filter that bounds control-string length. Feed it every output
+/// byte in order with `byte`; it keeps its position across calls, so split
+/// reads give the same result as one read.
 #[derive(Default)]
 pub(super) struct Limits {
     state: State,
 }
 impl Limits {
+    /// Bytes that must be appended when saving parser state for later replay. It is
+    /// an ESC when a withheld ESC is pending, and empty otherwise.
     pub(super) fn carry_suffix(&self) -> &'static [u8] {
         if matches!(self.state, State::DiscardEscape { .. }) {
             b"\x1b"
@@ -52,6 +74,11 @@ impl Limits {
     // Terminators and a new ESC command still reach both parser layers.
     // Keep the transition table together so overflow/restart cases are audited
     // against every state rather than split across independent helpers.
+    /// Advances the filter by one output byte and says what to do with it.
+    ///
+    /// Over-long strings stop being forwarded but are not cancelled, so their bytes
+    /// never turn into printable text or commands. A terminator, CAN/SUB, or a new
+    /// ESC command still reaches the terminal.
     #[allow(clippy::too_many_lines)]
     pub(super) fn byte(&mut self, byte: u8) -> Action {
         use Action::{Drop, Keep, Restart};

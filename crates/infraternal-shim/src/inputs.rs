@@ -10,8 +10,13 @@ use std::{
 #[path = "../tests/unit/review_merge_inputs.rs"]
 mod merge_review;
 
+/// Most distinct writer identities one session keeps cursors for. Selecting a
+/// new one beyond this is refused; existing writers are unaffected.
 const MAX_WRITERS: usize = 512;
 
+/// Per-writer cursors, keyed by writer id. Writer `u64::MAX` is reserved for
+/// internal replies (see `Inputs::reply`) and is outside the `u32` range peers
+/// can choose.
 #[cfg(not(feature = "process-per-user"))]
 type Cursors = HashMap<u64, InputCursors>;
 
@@ -20,7 +25,10 @@ type Cursors = HashMap<u64, InputCursors>;
 /// once without resetting accepted/written offsets or staged geometry.
 #[cfg(feature = "process-per-user")]
 enum Cursors {
+    /// Only writer zero exists. Stored inline, so an idle session allocates nothing.
     Legacy(InputCursors),
+    /// Several writers, in a map. Once promoted to this form a session never goes
+    /// back.
     Multiple(HashMap<u64, InputCursors>),
 }
 #[cfg(feature = "process-per-user")]
@@ -36,33 +44,43 @@ impl From<[(u64, InputCursors); 1]> for Cursors {
     reason = "retain HashMap's borrowed-key API so production callers stay identical"
 )]
 impl Cursors {
+    /// The cursors for `writer`, or `None`. In the inline form only writer zero
+    /// exists.
     fn get(&self, writer: &u64) -> Option<&InputCursors> {
         match self {
             Self::Legacy(cursor) => (*writer == 0).then_some(cursor),
             Self::Multiple(cursors) => cursors.get(writer),
         }
     }
+    /// The same as `get`, but mutable.
     fn get_mut(&mut self, writer: &u64) -> Option<&mut InputCursors> {
         match self {
             Self::Legacy(cursor) => (*writer == 0).then_some(cursor),
             Self::Multiple(cursors) => cursors.get_mut(writer),
         }
     }
+    /// True if `writer` has cursors.
     fn contains_key(&self, writer: &u64) -> bool {
         self.get(writer).is_some()
     }
+    /// Number of writers with cursors.
     fn len(&self) -> usize {
         match self {
             Self::Legacy(_) => 1,
             Self::Multiple(cursors) => cursors.len(),
         }
     }
+    /// Capacity of the backing map; zero in the inline form. Used only to size
+    /// memory accounting.
     fn capacity(&self) -> usize {
         match self {
             Self::Legacy(_) => 0,
             Self::Multiple(cursors) => cursors.capacity(),
         }
     }
+    /// Adds or replaces the cursors for `writer`. Promotes the inline form to a map
+    /// first, moving writer zero's cursors over unchanged so its accepted and
+    /// written offsets and staged size survive.
     fn insert(&mut self, writer: u64, cursor: InputCursors) {
         if let Self::Legacy(legacy) = self {
             *self = Self::Multiple(HashMap::from([(0, std::mem::take(legacy))]));
@@ -76,9 +94,16 @@ impl Cursors {
 /// Queue ownership follows byte segments so a partial PTY write credits only
 /// the writers whose bytes were actually written. Identity zero preserves v1.
 pub(super) struct Inputs {
+    /// The writer whose input the terminal is currently taking, if any.
     pub(super) active_writer: Option<u32>,
+    /// Per-writer progress: what was accepted and what was written.
     cursors: Cursors,
+    /// The queued bytes grouped into runs by owner: `(writer, count)` in queue
+    /// order. This lets a partial PTY write credit only the writers whose bytes
+    /// actually went out.
     segments: VecDeque<(u64, usize)>,
+    /// Most runs `segments` may hold. Bounds bookkeeping when writers alternate
+    /// byte by byte.
     #[cfg(feature = "process-per-user")]
     segment_limit: usize,
 }
@@ -88,6 +113,8 @@ impl Default for Inputs {
     }
 }
 impl Inputs {
+    /// Creates the input state with only writer zero, whose staged and accepted
+    /// terminal size are `size` (columns, rows, pixel width, pixel height).
     pub(super) fn with_geometry(size: (u16, u16, u16, u16)) -> Self {
         Self {
             active_writer: None,
@@ -104,6 +131,8 @@ impl Inputs {
             segment_limit: MAX_FRAME,
         }
     }
+    /// Same as `with_geometry`, but for a shared host with a small cap (1024) on
+    /// queued runs, so many sessions stay cheap.
     #[cfg(feature = "process-per-user")]
     pub(super) fn for_host(size: (u16, u16, u16, u16)) -> Self {
         Self {
@@ -111,6 +140,8 @@ impl Inputs {
             ..Self::with_geometry(size)
         }
     }
+    /// Estimate of heap bytes held by the writer map and the run list, for the
+    /// user's memory pool.
     #[cfg(feature = "process-per-user")]
     pub(super) fn allocated_bytes(&self) -> usize {
         let buckets = if self.cursors.capacity() == 0 {
@@ -122,6 +153,9 @@ impl Inputs {
             + if buckets == 0 { 0 } else { 32 }
             + self.segments.capacity() * std::mem::size_of::<(u64, usize)>()
     }
+    /// How many more bytes `writer` may add to a queue already holding `queued`
+    /// bytes. This is zero when the run list is full and `writer` would start a new
+    /// run. Otherwise it is whatever room is left under `MAX_FRAME`.
     #[cfg(feature = "process-per-user")]
     pub(super) fn available(&self, writer: u32, queued: usize) -> usize {
         if self.segments.len() >= self.segment_limit
@@ -134,6 +168,9 @@ impl Inputs {
         }
         MAX_FRAME - queued
     }
+    /// Registers `writer` with `size` as its initial terminal size. A known writer
+    /// is left untouched. Fails with an invalid-input error once `MAX_WRITERS`
+    /// writers exist (the internal reply writer does not count).
     pub(super) fn select(&mut self, writer: u32, size: (u16, u16, u16, u16)) -> io::Result<()> {
         if self.cursors.contains_key(&u64::from(writer)) {
             return Ok(());
@@ -151,6 +188,8 @@ impl Inputs {
         );
         Ok(())
     }
+    /// Stages `size` as the requested size for `writer`; it is not applied yet.
+    /// Fails if there is no writer or it is unknown.
     pub(super) fn request_resize(
         &mut self,
         writer: Option<u32>,
@@ -162,6 +201,9 @@ impl Inputs {
             .requested_size = size;
         Ok(())
     }
+    /// Settles a staged resize. If `applied`, the requested size becomes the
+    /// accepted size; if not, the request is rolled back to the last accepted size.
+    /// Returns the resulting size. Fails if the writer is missing or unknown.
     pub(super) fn finish_resize(
         &mut self,
         writer: Option<u32>,
@@ -178,11 +220,20 @@ impl Inputs {
         }
         Ok(state.requested_size)
     }
+    /// The cursors for `writer`. Fails with an invalid-input error if there is no
+    /// writer or it is unknown.
     pub(super) fn get(&self, writer: Option<u32>) -> io::Result<&InputCursors> {
         self.cursors
             .get(&u64::from(writer.ok_or_else(super::invalid_input)?))
             .ok_or_else(super::invalid_input)
     }
+    /// Queues a writer's input.
+    ///
+    /// `seq` is the offset of `bytes[0]` in that writer's stream. Bytes before the
+    /// writer's accepted offset are skipped (so replays after reconnect are
+    /// harmless). A `seq` beyond the accepted offset would leave a gap and is
+    /// refused, as is input that would overflow the `MAX_FRAME` queue. A refusal
+    /// changes nothing.
     pub(super) fn accept(
         &mut self,
         writer: u32,
@@ -192,6 +243,9 @@ impl Inputs {
     ) -> io::Result<()> {
         self.accept_owned(u64::from(writer), seq, bytes, queue)
     }
+    /// Implements `accept` for any key, including the internal reply writer, and
+    /// records the new bytes in the run list. On the shared host it also refuses
+    /// when a new run is needed but the run list is full.
     fn accept_owned(
         &mut self,
         writer: u64,
@@ -258,6 +312,9 @@ impl Inputs {
         };
         self.accept_owned(u64::MAX, seq, bytes, queue).is_ok()
     }
+    /// Records that `bytes` bytes were written from the front of the queue to the
+    /// PTY, advancing each owner's written offset by what was theirs. Fails if more
+    /// bytes are claimed than are queued.
     pub(super) fn advance(&mut self, mut bytes: usize) -> io::Result<()> {
         while bytes > 0 {
             let (writer, count) = self.segments.front_mut().ok_or_else(super::invalid_input)?;

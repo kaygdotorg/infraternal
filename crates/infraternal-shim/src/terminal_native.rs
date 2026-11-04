@@ -1,6 +1,8 @@
 //! Audited libghostty-vt FFI ownership and bounded snapshot buffer boundary [40][94].
 #![allow(unsafe_code)]
 use std::{ffi::c_void, io, ptr::NonNull};
+/// Creation options laid out as the native library's C structure expects.
+/// `max_scrollback` is the history byte budget.
 #[repr(C)]
 struct Options {
     cols: u16,
@@ -28,7 +30,11 @@ unsafe extern "C" {
     fn ghostty_terminal_mode_get(terminal: *mut c_void, tag: u16, out: *mut bool) -> i32;
     #[cfg(any(test, feature = "process-per-user"))]
     fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
+    /// Writes an approximate repaint into the buffer; returns its length, which the
+    /// caller must check against the buffer size.
     fn infraternal_vt_approximate(terminal: *mut c_void, data: *mut u8, len: usize) -> usize;
+    /// Writes a faithful repaint with `tail` rows of history; returns the length,
+    /// 0 on overflow, or `usize::MAX` if the state is not representable.
     fn infraternal_vt_snapshot(
         terminal: *mut c_void,
         data: *mut u8,
@@ -37,6 +43,8 @@ unsafe extern "C" {
     ) -> usize;
     #[cfg(feature = "compact-history")]
     fn infraternal_vt_compact(terminal: *mut c_void, full: bool);
+    /// Page count and page size in bytes for a screen of `cols` x `rows`. Pure
+    /// arithmetic; creates no terminal.
     #[cfg(feature = "process-per-user")]
     fn infraternal_vt_screen_pages(cols: u16, rows: u16, page_len: *mut usize) -> usize;
 }
@@ -77,6 +85,16 @@ pub(super) const SCREEN_RESERVATION: usize = 8 * 1024 * 1024;
     any(test, not(feature = "compact-history"))
 ))]
 pub(super) const ITEM_HEADER_SHARE: usize = 8;
+/// Owner of one native terminal. The first field is the native handle, or
+/// `None` once retired; the second (shared-host builds only) is the memory
+/// accountant whose allocator the native terminal uses.
+///
+/// Invariants: the handle is uniquely owned and only touched from one thread at
+/// a time. After a failed resize the native state may be half rebuilt, so the
+/// engine retires itself and never queries or frees that handle again. Default
+/// builds keep retired allocations until the shim exits; the shared host frees
+/// its own allocation list without walking the damaged state. A retired engine
+/// ignores output and refuses snapshots and resizes.
 pub(super) struct Engine(
     Option<NonNull<c_void>>,
     #[cfg(feature = "process-per-user")] Option<Box<crate::terminal_memory::Memory>>,
@@ -118,6 +136,8 @@ impl Engine {
         let limit = SCREEN_RESERVATION + bytes.saturating_mul(2);
         Self::build(cols, rows, bytes, limit, host, floor_reservation)
     }
+    /// Creates an engine with `bytes` of history, not charged to any shared host.
+    /// Fails if the native terminal cannot be made.
     pub fn new(cols: u16, rows: u16, bytes: usize) -> io::Result<Self> {
         Self::build(
             cols,
@@ -130,6 +150,9 @@ impl Engine {
             None,
         )
     }
+    /// Creates the native terminal. `limit` is the memory cap for shared-host
+    /// builds. Fails with `InvalidInput` for bad dimensions, otherwise with an
+    /// error naming the native result code.
     fn build(
         cols: u16,
         rows: u16,
@@ -191,16 +214,26 @@ impl Engine {
             })
             .ok_or_else(|| io::Error::other("Ghostty returned a null terminal"))
     }
+    /// (Shared host.) `(bytes in use, peak bytes, refused)` from the memory accountant:
+    /// current native allocation, its high-water mark, and whether any allocation
+    /// was ever refused. All zero or false when there is no accountant.
     #[cfg(feature = "process-per-user")]
     pub fn memory(&self) -> (usize, usize, bool) {
         self.1.as_ref().map_or((0, 0, false), |m| m.stats())
     }
+    /// (Shared host.) Native memory split into `(ordinary bytes, page bytes, block
+    /// count)`. Page bytes are the mapped history pages plus their page-list
+    /// structure; ordinary is everything else except encoded data. Zeros without an
+    /// accountant.
     #[cfg(feature = "process-per-user")]
     pub fn allocation_classes(&self) -> (usize, usize, usize) {
         self.1
             .as_ref()
             .map_or((0, 0, 0), |m| m.allocation_classes())
     }
+    /// (Shared host.) Bytes of this terminal's mapped pages that are resident in
+    /// memory right now, asked of the kernel without touching the pages. Fails if
+    /// the kernel query fails.
     #[cfg(feature = "process-per-user")]
     pub fn resident_pages(&self) -> io::Result<usize> {
         self.1.as_ref().map_or(Ok(0), |m| m.resident_pages())
@@ -214,10 +247,13 @@ impl Engine {
     pub(super) fn host_floor(&self) -> usize {
         self.1.as_ref().map_or(0, |m| m.floor())
     }
+    /// (Shared host.) Bytes currently held in compressed (encoded) history form.
     #[cfg(feature = "process-per-user")]
     pub(super) fn encoded_bytes(&self) -> usize {
         self.1.as_ref().map_or(0, |m| m.encoded_bytes())
     }
+    /// Feeds output bytes to the native parser. The native side keeps its parser
+    /// state but not the pointer. Does nothing if the engine is retired.
     pub fn process(&mut self, data: &[u8]) {
         let Some(handle) = self.0 else { return };
         // SAFETY: uniquely owned terminal; Ghostty consumes the borrowed slice
@@ -236,6 +272,13 @@ impl Engine {
             unsafe { infraternal_vt_compact(handle.as_ptr(), full) }
         }
     }
+    /// Resizes to `cols` x `rows` (pixel size is left at zero).
+    ///
+    /// The native resize is not transactional. On any native error the engine
+    /// retires: the handle and its memory accounting are dropped without being
+    /// touched, and the error is returned (`InvalidInput` for bad dimensions). On a
+    /// shared host, space for the new screen is reserved from the terminal's own
+    /// floor first.
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         // SAFETY: uniquely owned live terminal; zero pixel dimensions are valid.
         // Resize is not transactional in the pinned engine. Retire on every
@@ -285,6 +328,8 @@ impl Engine {
         // SAFETY: read-only oracle borrows live handles synchronously and retains nothing.
         unsafe { infraternal_vt_compare(left.as_ptr(), right.as_ptr(), true) }
     }
+    /// Number of rows of scrollback currently retained, from native metadata only.
+    /// Zero if retired.
     #[cfg(any(test, feature = "process-per-user"))]
     pub fn history_rows(&self) -> usize {
         let Some(handle) = self.0 else { return 0 };
@@ -296,6 +341,9 @@ impl Engine {
         }
         rows
     }
+    /// Writes a bounded, visible-screen-only repaint into `data` and returns its
+    /// length, or 0 if retired or it does not fit. Clipped content is rolled back to
+    /// complete cell operations and a footer is reserved.
     pub fn approximate_snapshot(&self, data: &mut [u8]) -> usize {
         let Some(handle) = self.0 else { return 0 };
         // SAFETY: read-only live handle and writable bounded slice remain valid
@@ -305,6 +353,12 @@ impl Engine {
             unsafe { infraternal_vt_approximate(handle.as_ptr(), data.as_mut_ptr(), data.len()) };
         if len <= data.len() { len } else { 0 }
     }
+    /// Writes a faithful repaint of both screens into `data`, with up to `tail`
+    /// rows of scrollback.
+    ///
+    /// Returns `Ok(Some(len))` on success and `Ok(None)` when it does not fit, so
+    /// the caller can retry with a smaller `tail`. Fails with `Unsupported` if the
+    /// state cannot be represented faithfully, or if the engine is retired.
     pub fn try_snapshot(&self, data: &mut [u8], tail: usize) -> io::Result<Option<usize>> {
         let handle = self
             .0

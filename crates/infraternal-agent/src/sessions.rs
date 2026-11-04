@@ -9,18 +9,17 @@
 use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
+#[cfg(target_os = "linux")]
 use infraternal_shim::readiness::Registration;
-use nix::{
-    sys::inotify::{AddWatchFlags, InitFlags, Inotify},
-    unistd::Uid,
-};
+#[cfg(target_os = "linux")]
+use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+use nix::unistd::Uid;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::{
     fs::{self, DirBuilder},
     io,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt},
-    },
+    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -42,6 +41,7 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 // bind (#324); HANDSHAKE refused launches that were still progressing, and
 // their shells kept running. Process exit is the progress signal; this bound
 // only detects a hang, well inside the server's 60 s connect budget (#29).
+#[cfg(target_os = "linux")]
 const LAUNCH: Duration = Duration::from_secs(30);
 
 /// Init manager selected once for session work, never periodically re-probed.
@@ -55,6 +55,7 @@ pub enum Manager {
 impl Manager {
     /// A shim needs direct exec for a live login or the kernel self-image;
     /// choosing its launcher must not replace the host login backend.
+    #[cfg(target_os = "linux")]
     pub(crate) fn for_shim(self, exe: &Path, login: bool) -> Self {
         if login || exe == Path::new("/proc/self/exe") {
             Self::Detached
@@ -65,26 +66,33 @@ impl Manager {
 
     /// Probe the applicable manager without trusting environment hints alone.
     pub async fn detect() -> Self {
-        let root = Uid::effective().is_root();
-        let mut command = isolated(Path::new("systemctl"));
-        if !root {
-            command.arg("--user");
+        #[cfg(target_os = "macos")]
+        {
+            return Self::Detached;
         }
-        let available = timeout(
-            HANDSHAKE,
-            command
-                .arg("show-environment")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await;
-        if available.is_ok_and(|result| result.is_ok_and(|status| status.success())) {
-            if root { Self::System } else { Self::User }
-        } else {
-            Self::Detached
+        #[cfg(target_os = "linux")]
+        {
+            let root = Uid::effective().is_root();
+            let mut command = isolated(Path::new("systemctl"));
+            if !root {
+                command.arg("--user");
+            }
+            let available = timeout(
+                HANDSHAKE,
+                command
+                    .arg("show-environment")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .status(),
+            )
+            .await;
+            if available.is_ok_and(|result| result.is_ok_and(|status| status.success())) {
+                if root { Self::System } else { Self::User }
+            } else {
+                Self::Detached
+            }
         }
     }
 }
@@ -522,7 +530,9 @@ pub fn process_birth_ticks(record: &[u8]) -> Option<u64> {
 }
 
 /// Directory retirement events keep the registry fresh without idle timers.
+#[cfg(target_os = "linux")]
 pub(crate) struct SessionEvents(Registration<Inotify>);
+#[cfg(target_os = "linux")]
 impl SessionEvents {
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
         let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
@@ -542,6 +552,19 @@ impl SessionEvents {
         }
     }
 }
+/// A no-op event source is sufficient while Darwin PTY sessions are unavailable.
+#[cfg(target_os = "macos")]
+pub(crate) struct SessionEvents;
+#[cfg(target_os = "macos")]
+impl SessionEvents {
+    pub(crate) fn new(_state: &Path) -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub(crate) async fn changed(&self) -> io::Result<()> {
+        std::future::pending::<io::Result<()>>().await
+    }
+}
 
 // Exclude the trusted leg-B descriptor at direct exec. Anonymous images need
 // /proc/self/exe to resolve before any intermediate program replaces the image.
@@ -557,6 +580,7 @@ pub(crate) fn isolated(program: &Path) -> Command {
 
 // bind emits IN_CREATE before listen, so a refused early connection must
 // also wake on chmod. The shim chmods to 0600 only after listen succeeds.
+#[cfg(target_os = "linux")]
 fn socket_readiness(state: &Path) -> io::Result<Registration<Inotify>> {
     let watch =
         Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
@@ -704,6 +728,7 @@ pub(crate) async fn launch_rootless_person(
 
 // Keep the ordered authentication/launch/handshake setup together.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[cfg(target_os = "linux")]
 async fn launch_configured(
     exe: &Path,
     state: &Path,
@@ -880,6 +905,7 @@ async fn launch_configured(
 
 /// Wait for a launched shim's Hello. Progress, not a short clock, decides failure: the launcher's exit before the
 /// rendezvous refuses the open at once, and `LAUNCH` only detects a hung start (#324).
+#[cfg(target_os = "linux")]
 async fn await_launch(
     path: &Path,
     id: uuid::Uuid,
@@ -892,6 +918,7 @@ async fn await_launch(
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_hello(
     path: &Path,
     id: uuid::Uuid,
@@ -935,11 +962,57 @@ async fn wait_for_hello(
     }
 }
 
-#[cfg(test)]
+/// PTY session launch is unavailable while the Darwin session shim is compiled out.
+/// # Errors
+/// Always reports unsupported because macOS sessions are outside Mesh slice 1.
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
+async fn launch_configured(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    login: Option<&Path>,
+    login_cgroup: Option<&Path>,
+    login_worker_pid: Option<i32>,
+    login_worker_parent: Option<i32>,
+    login_worker_proc: Option<&std::fs::File>,
+    readiness: bool,
+    person: Option<uuid::Uuid>,
+    retain_output: bool,
+    program: &[String],
+) -> io::Result<Session> {
+    let _ = (
+        exe,
+        state,
+        manager,
+        uid,
+        cols,
+        rows,
+        login,
+        login_cgroup,
+        login_worker_pid,
+        login_worker_parent,
+        login_worker_proc,
+        readiness,
+        person,
+        retain_output,
+        program,
+    );
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "PTY sessions are unavailable on macOS in this slice.",
+    ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
 #[path = "../tests/unit/sessions.rs"]
 mod tests;
 
 /// The startup pipe carries only bounded literal arguments; no shell or secret argv.
+#[cfg(target_os = "linux")]
 fn command_input(program: &[String], readiness: bool) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     for argument in program {

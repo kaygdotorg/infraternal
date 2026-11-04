@@ -1,4 +1,21 @@
 //! Multiplexes one source helper's control replies and bounded media while keeping native input independent of video writes [D200,D203,D232].
+//!
+//! [`run`] is the task behind one served data lane. It starts a private helper,
+//! sends it the session's `Start` request, and then runs two cooperating loops:
+//!
+//! - The pump reads from the lane and the helper. Commands from the server
+//!   (input, size, control, repair) are translated and forwarded to the helper
+//!   in order; the helper's replies are matched to them in order; and video from
+//!   the helper is handed to the sender. Every reply is owed within 3 seconds,
+//!   but while nothing is owed and no video flows there is no timer at all.
+//! - The sender (`send_video`) writes video to the lane in its own task, so a
+//!   slow or blocked video write can never delay input. Between them sits a
+//!   one-slot "newest frame" holder: if the sender falls behind, older frames
+//!   are replaced, and the sender then asks for a keyframe because a delta frame
+//!   after a gap cannot be decoded.
+//!
+//! When the task ends for any reason, the helper is stopped and its cleanup
+//! result is reported separately from the session's own result.
 use crate::{
     media::{ASSEMBLY_TIMEOUT, Video},
     protocol::{self, Input, Kind, Size},
@@ -19,15 +36,23 @@ use std::{
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
+/// Everything a worker needs to serve one lane.
 pub(super) struct Leg {
+    /// The session id, used to tag datagram fragments.
     pub id: Uuid,
+    /// The session's shared size and sequence counter.
     pub metadata: Arc<Metadata>,
     pub lane: Arc<dyn WireLane>,
+    /// Reliable frames or datagram fragments.
     pub delivery: Delivery,
+    /// Becomes true when the worker should stop.
     pub cancelled: watch::Receiver<bool>,
+    /// Requests from elsewhere in the plugin (such as a clock query).
     pub requests: mpsc::Receiver<Control>,
+    /// Lets the video sender queue keyframe and congestion requests.
     pub repair: mpsc::Sender<Control>,
 }
+/// Retires the lane when dropped, however the worker ends.
 struct Lease(Arc<dyn WireLane>);
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -36,19 +61,27 @@ impl Drop for Lease {
 }
 // A solicited reply owns one fixed send+reply deadline; video never renews it.
 const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// A command sent to the helper whose reply has not arrived yet.
 struct Pending {
+    /// When the reply is overdue.
     deadline: tokio::time::Instant,
+    /// The reply kind that answers it. Replies must come back in order.
     expected: Kind,
+    /// Where to pass the reply body on, for requests that want it.
     reply: Option<tokio::sync::oneshot::Sender<Result<Value, PluginError>>>,
 }
+/// The producing end of the one-slot "newest frame" holder.
 struct PendingVideo {
     frames: watch::Sender<Option<Video>>,
 }
+/// Creates the newest-frame holder: the publisher and the sender's receiver.
 fn pending_video() -> (PendingVideo, watch::Receiver<Option<Video>>) {
     let (frames, receive) = watch::channel(None);
     (PendingVideo { frames }, receive)
 }
 impl PendingVideo {
+    /// Stores `video` as the newest frame, replacing any frame the sender has not
+    /// picked up, then yields once so a ready sender can take it first.
     async fn publish(&self, video: Video) {
         // One in-flight write and one newest pending frame bound storage. A
         // stalled native lane cannot pin an older queue entry ahead of damage.
@@ -62,6 +95,12 @@ impl PendingVideo {
         tokio::task::yield_now().await;
     }
 }
+/// Runs one lane to completion: starts a helper, opens the capture, pumps until
+/// the lane ends or `leg.cancelled` is set, and stops the helper.
+///
+/// The returned [`Outcome`] has two parts. `output` is `Ok` for a normal or
+/// cancelled end and an error if something failed. `cleanup` says whether the
+/// helper was confirmed stopped.
 pub(super) async fn run(config: Config, mut leg: Leg) -> Outcome {
     let _lease = Lease(leg.lane.clone());
     if *leg.cancelled.borrow() {
@@ -103,6 +142,13 @@ pub(super) async fn run(config: Config, mut leg: Leg) -> Outcome {
     }
 }
 
+/// The main loop once the helper is capturing; see the module docs.
+///
+/// At most 64 commands may await replies at a time. It fails if a reply is
+/// overdue, arrives out of order, or is an error, if the helper sends something
+/// unexpected, or if the video sender fails. It returns `Ok` when cancelled or
+/// when the request channel closes. On the way out the lane is retired and the
+/// video sender is stopped.
 async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
     let (send, receive) = pending_video();
     let lane = leg.lane.clone();
@@ -161,6 +207,9 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
     }
     result
 }
+/// Turns the helper's video payload (8-byte capture time, 1-byte keyframe flag,
+/// then the encoded frame) into a [`Video`] with the next sequence number from
+/// the session's counter. Rejects a malformed payload or an exhausted counter.
 fn video(body: &bytes::Bytes, metadata: &Metadata) -> Result<Video, PluginError> {
     if body.len() < 10 || body[8] > 1 {
         return Err(PluginError::Rejected);
@@ -183,6 +232,14 @@ fn video(body: &bytes::Bytes, metadata: &Metadata) -> Result<Video, PluginError>
     video.validate().map_err(|_| PluginError::Rejected)?;
     Ok(video)
 }
+/// Writes each newest frame to the lane until the frame holder is closed.
+///
+/// Reliable mode sends a whole frame per packet; datagram mode sends
+/// fixed-size fragments. A frame gets 250 ms to be written, otherwise the worker
+/// fails. After a gap in sequence numbers, delta frames are skipped and a
+/// keyframe is requested through `repair` until one arrives. A write slower than
+/// 100 ms also queues a congestion hint for the encoder, as long as one slot of
+/// the repair queue stays free for keyframe requests.
 async fn send_video(
     lane: Arc<dyn WireLane>,
     mode: Delivery,
@@ -274,6 +331,7 @@ async fn send_video(
     }
     Ok(())
 }
+/// The kind of reply that answers a request of `kind`.
 fn reply_kind(kind: Kind) -> Kind {
     match kind {
         Kind::Start | Kind::Resize => Kind::Geometry,
@@ -287,6 +345,11 @@ fn reply_kind(kind: Kind) -> Kind {
 /// its reply arrives (a click right after a size used to be scaled to the old
 /// output, #146). A failed send or reply ends the whole worker, so the recorded
 /// size never outlives a helper that did not apply it.
+///
+/// `packet` must be exactly one frame. Pointer positions arrive as millionths of
+/// the output width and height and are converted to output pixels. Returns the
+/// helper command kind and its validated JSON body, or a rejection for anything
+/// that is not a repair, control, release, size or input message.
 fn command(packet: &[u8], metadata: &Metadata) -> Result<(Kind, Vec<u8>), PluginError> {
     let decoded = decode_frame(packet).map_err(|_| PluginError::Rejected)?;
     if decoded.wire_len != packet.len() {

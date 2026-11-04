@@ -4,13 +4,17 @@ import type { SubscriptionHandle } from "../../connection";
 import { reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./schema";
 
+/** The test double for break-it specs: the store under test, the revisions on both sides, and two ways for a pretend second device to change the layout. */
 export interface LayoutReviewDouble {
   store: ServerCanvasStore;
   revision(): { server: number; client: number };
+  /** A pretend second device removes the Console view. Returns the new server revision. */
   removeConsole(): number;
+  /** A pretend second device makes two edits but announces only the second, so the store sees a gap in revisions. Returns the new server revision. */
   skipRevision(): number;
 }
 
+/** A layout transport that keeps the document in memory, plays the server's part, and sends snapshot and operation events to the one subscriber. */
 class ReviewTransport implements LayoutTransport {
   readonly isWelcomed = true;
   #listener: ((event: Record<string, unknown>) => void) | undefined;
@@ -68,6 +72,7 @@ class ReviewTransport implements LayoutTransport {
   #emit(event: Record<string, unknown>): void { this.#listener?.(event); }
 }
 
+/** The starting document: a Console view with one column, or ten equal columns when `wide`, each holding one window on the given session. */
 function initialDocument(host: string, sessionId: string, wide: boolean): CanvasDocument {
   const count = wide ? 10 : 1;
   return {
@@ -82,6 +87,7 @@ function initialDocument(host: string, sessionId: string, wide: boolean): Canvas
   };
 }
 
+/** Makes the double and a `ServerCanvasStore` connected to it. Pass `wide` for the ten-column document. */
 export function createLayoutReviewDouble(account: string, host: string, sessionId: string, wide = false): LayoutReviewDouble {
   const transport = new ReviewTransport(initialDocument(host, sessionId, wide));
   const store = new ServerCanvasStore(transport, account, () => undefined);

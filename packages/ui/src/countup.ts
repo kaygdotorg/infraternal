@@ -10,10 +10,24 @@
  */
 import { Spring } from "./spring";
 
+/** How many decimals a number needs when shown plainly; whole values (`2.0`) need none. */
 const decimalsOf = (n: number) => { const s = n.toString(); const d = s.split(".")[1]; return d && parseInt(d, 10) !== 0 ? d.length : 0; };
 
+/**
+ * A running count-up. `to(value)` springs the shown number to a new value; `destroy()` snaps
+ * to the current value and stops the animation.
+ */
 export interface CountUp { to(value: number): void; destroy(): void }
 
+/**
+ * Puts a number in `el` that springs from `from` to every value passed to `to()`.
+ * @param opts.duration roughly how many seconds a change takes (default 2)
+ * @param opts.separator thousands separator, for example `" "`; no grouping when omitted
+ * @param opts.decimals fixed decimals; when omitted it follows the values, and only grows
+ * @param opts.suffix text after the number, for example `"%"`
+ * @example
+ * const c = countUp(el, 0, { suffix: "%" }); c.to(80); // later: c.destroy();
+ */
 export function countUp(el: HTMLElement, from: number, opts: { duration?: number; separator?: string; decimals?: number; suffix?: string } = {}): CountUp {
   const duration = opts.duration ?? 2;
   let decimals = opts.decimals ?? decimalsOf(from);
@@ -34,6 +48,10 @@ export function countUp(el: HTMLElement, from: number, opts: { duration?: number
   };
 }
 
+/**
+ * The handle returned by {@link loading}. `progress(fraction)` reports real progress (0 to 1);
+ * `done()` stops the wait and hides the element.
+ */
 export interface Loading { progress(fraction: number): void; done(): void }
 
 /**

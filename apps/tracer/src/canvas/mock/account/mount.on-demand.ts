@@ -12,6 +12,7 @@ import type { DataMode } from "../data-mode";
 import { SCENARIOS, type AccountDouble } from "./double";
 import { accountDouble } from "./store";
 
+/** The account card on the test double: the double, the mounted card, its palette rows, and `run` for the rows' actions. */
 export interface AccountMock {
   double: AccountDouble;
   mount: AccountMount | undefined;
@@ -20,6 +21,7 @@ export interface AccountMock {
   dispose(): void;
 }
 
+/** Mounts the product's account card over a double that knows every fact, and adds the review rows to the palette. `data` swaps the person's data set. `dispose` undoes both. */
 export function createAccountMock(core: CoreScreen, data: DataMode): AccountMock {
   const double = accountDouble();
   const mount = mountAccountCard({

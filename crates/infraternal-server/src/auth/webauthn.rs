@@ -54,9 +54,11 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
+        make_room_for_person(&mut pending, &user);
         if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
+        let order = pending.start();
         pending.registrations.insert(
             id.clone(),
             Registration {
@@ -69,6 +71,7 @@ impl Auth {
                 rotate_recovery: rotate,
                 expires: now + CEREMONY,
                 binding: None,
+                order,
             },
         );
         Ok(
@@ -303,9 +306,11 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
+        make_room_for_person(&mut pending, user);
         if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
+        let order = pending.start();
         pending.logins.insert(
             id.clone(),
             Login {
@@ -313,6 +318,7 @@ impl Auth {
                 expires: now + CEREMONY,
                 binding: None,
                 network: None,
+                order,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -326,7 +332,9 @@ impl Auth {
     /// Anonymous ceremonies have their own pool, so they can never refuse an
     /// identified ceremony (a signed-in owner's fresh tap or approval), and an
     /// HTTP caller's network holds at most [`ANONYMOUS_CEREMONIES_PER_NETWORK`]
-    /// of it (#263, J145 P2-1).
+    /// of it (#263, J145 P2-1). A full pool makes room from the network
+    /// holding the most (see [`evict_from_heaviest_network`]), so filling it
+    /// cannot refuse a sign-in from a network with fewer (#263, J161 P3-1).
     pub(crate) async fn discoverable_login_start_from(
         &self,
         now: i64,
@@ -358,12 +366,13 @@ impl Auth {
                 mine + usize::from(network.is_some() && login.network == network),
             )
         });
-        if total >= PENDING_CEREMONIES {
-            return Err(Error::Denied);
-        }
         if mine >= ANONYMOUS_CEREMONIES_PER_NETWORK {
             return Err(Error::Throttled);
         }
+        if total >= PENDING_CEREMONIES {
+            evict_from_heaviest_network(&mut pending, mine)?;
+        }
+        let order = pending.start();
         pending.logins.insert(
             id.clone(),
             Login {
@@ -371,6 +380,7 @@ impl Auth {
                 expires: now + CEREMONY,
                 binding: None,
                 network,
+                order,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -589,9 +599,93 @@ impl Auth {
 /// Most ceremonies of each pool (identified and registration; anonymous).
 const PENDING_CEREMONIES: usize = 1024;
 /// Most pending anonymous ceremonies one enclosing network (IPv6 /48, IPv4
-/// /24) may hold. Filling the anonymous pool then takes 32 such networks, the
-/// same residual the owner accepted for pending approvals (#76913).
+/// /24) may hold. 32 such networks fill the anonymous pool, but a full pool
+/// then gives newcomers the slots of the heaviest networks instead of
+/// refusing them.
 const ANONYMOUS_CEREMONIES_PER_NETWORK: usize = 32;
+
+/// Make room in the full anonymous pool for a caller whose network holds
+/// `mine` of it: drop the oldest waiting ceremony of the network holding the
+/// most. A ceremony leaves the pool when its finish begins, so every entry
+/// here is still waiting for a passkey.
+///
+/// A person signing in holds one ceremony for a few seconds, so their network
+/// loses it only once every flooding network is down to one, which takes
+/// about 1024 networks instead of 32. If the caller's network already holds
+/// as many as any other, taking from a peer would only trade places, so the
+/// caller is throttled (429 and Retry-After), not told its passkey failed.
+/// Rejected: refusing at the cap (32 networks lock out every sign-in), and
+/// evicting the globally oldest entry (a fast flood would displace a real
+/// person's prompt before they tap). The count runs only on this full path.
+fn evict_from_heaviest_network(p: &mut Pending, mine: usize) -> Result<()> {
+    let mut counts: std::collections::HashMap<Option<std::net::IpAddr>, usize> =
+        std::collections::HashMap::new();
+    for login in p.logins.values() {
+        if matches!(login.state, LoginState::Discoverable(_)) {
+            *counts.entry(login.network).or_default() += 1;
+        }
+    }
+    let Some((heaviest, most)) = counts.into_iter().max_by_key(|&(_, count)| count) else {
+        return Err(Error::Throttled);
+    };
+    if most <= mine {
+        return Err(Error::Throttled);
+    }
+    let oldest = p
+        .logins
+        .iter()
+        .filter(|(_, login)| {
+            matches!(login.state, LoginState::Discoverable(_)) && login.network == heaviest
+        })
+        .min_by_key(|(_, login)| login.order)
+        .map(|(id, _)| id.clone())
+        .ok_or(Error::Throttled)?;
+    p.logins.remove(&oldest);
+    Ok(())
+}
+
+/// Most ceremonies one person holds in each identified pool (registrations
+/// with identified logins, and approval ceremonies). It is the innermost
+/// source cap for pending approvals (one address or IPv6 /64 in
+/// `devices::SOURCE_CAPS`): the number this server already allows for one
+/// person retrying a few times. Filling a 1024 pool then takes 205 people.
+pub(super) const PER_PERSON_CEREMONIES: usize = 5;
+
+/// Keep `user` under [`PER_PERSON_CEREMONIES`] identified ceremonies by
+/// dropping their own oldest, so one session (a page script, a stolen cookie,
+/// a limited account) can never spend anybody else's slots, and a person
+/// retrying never refuses themself (#263, J161 P3-2). Rejected: refusing the
+/// person at their cap, which lets a stolen cookie keep the owner's own taps
+/// refused for a whole ceremony lifetime.
+fn make_room_for_person(p: &mut Pending, user: &str) {
+    let registrations = p
+        .registrations
+        .iter()
+        .filter(|(_, r)| r.user == user)
+        .map(|(id, r)| (r.order, id, true));
+    let logins = p
+        .logins
+        .iter()
+        .filter(|(_, l)| matches!(&l.state, LoginState::Identified(_, who) if who == user))
+        .map(|(id, l)| (l.order, id, false));
+    let mut held: Vec<_> = registrations.chain(logins).collect();
+    if held.len() < PER_PERSON_CEREMONIES {
+        return;
+    }
+    held.sort_unstable();
+    let excess = held.len() + 1 - PER_PERSON_CEREMONIES;
+    let evict: Vec<_> = held[..excess]
+        .iter()
+        .map(|&(_, id, registration)| (id.clone(), registration))
+        .collect();
+    for (id, registration) in evict {
+        if registration {
+            p.registrations.remove(&id);
+        } else {
+            p.logins.remove(&id);
+        }
+    }
+}
 
 /// Registrations plus identified logins: the pool only signed-in people and
 /// setup can start ceremonies in.

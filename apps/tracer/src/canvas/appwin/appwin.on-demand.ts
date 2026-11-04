@@ -33,6 +33,10 @@ function loadStyles(): void {
   document.head.append(link);
 }
 
+/**
+ * The feature once it is loaded: the picker, the palette rows and the making of app and screen windows. The `report` and
+ * `targets` members exist for tests and measurement.
+ */
 export interface AppWindowsPart {
   togglePicker(anchor: HTMLElement, source: PopoverSource, query?: string): void;
   paletteEntries(): PaletteEntry[];
@@ -47,7 +51,9 @@ export interface AppWindowsPart {
   dispose(): void;
 }
 
+/** Icon paths (a display) for screen rows in the palette. */
 const SCREEN_ICON = '<rect x="3" y="4.5" width="18" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 17v3.5"/>';
+/** Icon paths (a window with a title bar) for app-window rows in the palette. */
 const WINDOW_ICON = '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M3.5 9.5h17"/>';
 
 /**
@@ -60,6 +66,12 @@ export function streamLabel(entry: Entry): string {
   return entry.title ? `${entry.title} · ${entry.appName}` : entry.appName;
 }
 
+/**
+ * Starts the feature on the canvas `cx`. It loads its stylesheet, starts asking each machine for its window list, and refreshes
+ * that list again when the set of hosts changes. `openFromPalette` takes the value `<machineId>/<entryKey>` from a palette row and
+ * shows an error toast if that window has since gone. Opening a target that already has a window focuses that window instead of
+ * making another. `dispose` stops the watchers and closes the picker. Preview builds also expose the part as `window.__appwin`.
+ */
 export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWindowsPart {
   loadStyles();
   const machines = new Machines(adapter.connection, () => cx.adapters.sessions.hosts());

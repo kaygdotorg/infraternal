@@ -15,6 +15,7 @@ export type AppTarget =
   | { type: "window"; windowId: number; ownerPid: number }
   | { type: "screen"; displayId: number };
 
+/** One streamable app window, with the identity the stream needs (`target`) and the words the picker shows. */
 export interface AppWindowEntry {
   kind: "window";
   /** Stable for the life of the window: `w-<pid>-<id>`. No colon: it travels inside a palette action, which splits on colons. */
@@ -29,6 +30,7 @@ export interface AppWindowEntry {
   size?: { width: number; height: number };
 }
 
+/** One streamable display. */
 export interface ScreenEntry {
   kind: "screen";
   key: string;
@@ -40,21 +42,28 @@ export interface ScreenEntry {
   backingScale: number;
 }
 
+/** Anything the picker can offer to stream. */
 export type Entry = AppWindowEntry | ScreenEntry;
 
 /** The two permissions macOS asks the person at the machine for (D208). `undefined` means the machine did not say. */
 export interface Permissions { screenRecording?: boolean; accessibility?: boolean }
 
+/** A machine's streamable windows and screens, plus the permissions it reported. */
 export interface Inventory {
   windows: AppWindowEntry[];
   screens: ScreenEntry[];
   permissions: Permissions;
 }
 
+/** Windows beyond this many in one reply are ignored. */
 const MAX_ROWS = 2000;
+/** Longest accepted text field; a longer one counts as not said. */
 const MAX_TEXT = 512;
+/** A string no longer than `max`, else `undefined`. */
 const text = (value: unknown, max = MAX_TEXT): string | undefined => (typeof value === "string" && value.length <= max ? value : undefined);
+/** An integer within `min`–`max`, else `undefined`. */
 const int = (value: unknown, min: number, max: number): number | undefined => (typeof value === "number" && Number.isInteger(value) && value >= min && value <= max ? value : undefined);
+/** A finite number within `min`–`max`, else `undefined`. */
 const finite = (value: unknown, min: number, max: number): number | undefined => (typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : undefined);
 
 /** A frame is `[x, y, width, height]` or `{ x, y, width, height }`; only the size is used. */
@@ -71,6 +80,11 @@ function frameSize(value: unknown): { width: number; height: number } | undefine
 /** Windows under this many points on a side are toolbars, shadows and badges, not something to stream. */
 const MIN_SIDE = 60;
 
+/**
+ * Shapes the machine's reply into an `Inventory`. Never throws: anything that is not an object gives an empty inventory. A window row is
+ * dropped when its ids are missing or out of range, when it is not on layer 0, when it is under 60 points on a side, when it has no app
+ * name, or when it repeats an earlier key. Up to 16 displays are kept. Windows are sorted on-screen first, then by app, title and id.
+ */
 export function parseInventory(value: unknown): Inventory {
   const root = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const windows: AppWindowEntry[] = [];

@@ -7,10 +7,19 @@ use nix::{
 };
 use std::{collections::HashMap, io};
 
+/// One registered watch: the shim's PID and a unique `token` naming this
+/// registration, so a late event for an older process that had the same PID is
+/// not mistaken for the current one.
 struct Lifetime {
     pid: u32,
     token: isize,
 }
+/// Watches every session shim process for exit through one kqueue that the
+/// daemon's reactor polls, so no per-shim task or timer is needed.
+///
+/// `token` counts registrations and is never reused. `retired` holds ids of
+/// sessions whose PID was taken over by a newer registration; they are reported
+/// as exited by `changed` until `retain` drops them.
 #[derive(Default)]
 pub(crate) struct ProcessExits {
     queue: Option<Registration<Kqueue>>,
@@ -18,6 +27,8 @@ pub(crate) struct ProcessExits {
     token: isize,
     retired: Vec<[u8; 16]>,
 }
+/// Builds a one-shot-capable `NOTE_EXIT` process event for `pid`, carrying
+/// `token` as user data so it can be matched back to a registration.
 fn event(pid: u32, flags: EvFlags, token: isize) -> KEvent {
     KEvent::new(
         pid as usize,
@@ -28,12 +39,15 @@ fn event(pid: u32, flags: EvFlags, token: isize) -> KEvent {
         token,
     )
 }
+/// A zero timeout: kqueue calls return immediately and never block the reactor.
 fn zero_timeout() -> nix::libc::timespec {
     nix::libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     }
 }
+/// Removes the exit filter for `pid`. A filter that is already gone (`ENOENT`
+/// or `ESRCH`) counts as success.
 fn delete(queue: &Kqueue, pid: u32) -> io::Result<()> {
     match queue.kevent(
         &[event(pid, EvFlags::EV_DELETE, 0)],
@@ -45,6 +59,13 @@ fn delete(queue: &Kqueue, pid: u32) -> io::Result<()> {
     }
 }
 impl ProcessExits {
+    /// Starts watching `pid` as the shim of session `id`.
+    ///
+    /// Returns `Ok(false)` if the process had already exited, `Ok(true)` once
+    /// watched. PIDs can be reused before an older exit event is read, so an existing
+    /// filter for the same PID is deleted first, and a previous session id registered
+    /// for that PID is moved to `retired`. Fails if the kqueue cannot be created or
+    /// tokens are exhausted.
     pub(crate) fn watch(&mut self, id: [u8; 16], pid: u32) -> io::Result<bool> {
         if self.queue.is_none() {
             let queue = Kqueue::new()?;
@@ -100,6 +121,8 @@ impl ProcessExits {
             Err(error) => Err(error.into()),
         }
     }
+    /// Stops watching every session for which `live` returns false and removes the
+    /// kernel filters. Also drops matching ids from `retired`.
     pub(crate) fn retain(&mut self, live: impl Fn(&[u8; 16]) -> bool) {
         self.retired.retain(|id| live(id));
         self.shims.retain(|id, life| {
@@ -112,6 +135,9 @@ impl ProcessExits {
             false
         });
     }
+    /// Returns the session ids whose current registration token appears in
+    /// `events`. Matching is by token, not PID, so a late event cannot end a live
+    /// replacement process that reused the PID.
     fn matching_ids(&self, events: &[KEvent]) -> Vec<[u8; 16]> {
         self.shims
             .iter()
@@ -125,6 +151,9 @@ impl ProcessExits {
             })
             .collect()
     }
+    /// Waits until at least one watched shim has exited and returns the session ids
+    /// of the ones that did. Returns immediately with `retired` ids when any exist.
+    /// If nothing was ever registered the future never completes.
     pub(crate) async fn changed(&self) -> io::Result<Vec<[u8; 16]>> {
         if !self.retired.is_empty() {
             return Ok(self.retired.clone());

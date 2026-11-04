@@ -7,6 +7,10 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 import type { FloatModule } from "./float.on-demand";
 
+/**
+ * Makes the stand-in for the floating terminal. `open` loads the real module first (once) and then opens; the other methods answer
+ * from the empty state (`isOpen` false, `info` and `close` nothing) until it has loaded.
+ */
 export function createFloatHandle(cx: Ctx): FloatModule {
   let real: FloatModule | undefined;
   let loading: Promise<FloatModule> | undefined;

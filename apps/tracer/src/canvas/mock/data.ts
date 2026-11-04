@@ -14,15 +14,20 @@ import type { ColumnModel, ContainerRow, Grant, ViewModel, WindowModel } from ".
 export type Role = "viewer" | "operator" | "new" | "asha";
 /** The username the role stands for (the owner is kayg; names are never shortened). */
 export const usernameOf = (role: Role): string => (role === "asha" ? "asha" : "kayg");
+/** The people the test double knows, for the sharing directory. */
 export const PEOPLE = ["kayg", "asha", "ravi"];
+/** The groups the test double knows, with their members. */
 export const GROUPS: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["ravi", "asha"] };
 
+/** The hosts of the test double's world. */
 export const HOST_NAMES = ["build-01", "edge-arm", "nix-cache", "studio-mac"] as const;
 /** Hosts a viewer's grants cover. */
 export const VIEWER_HOSTS = ["build-01", "nix-cache"];
 
+/** The tags of the test double's world, each with the hosts that carry it. */
 export const TAGS: Record<string, string[]> = { "tag:ops": ["studio-mac"], "tag:ci": ["build-01"] };
 
+/** The Mesh grants the test double starts with. A grant with `via` goes through that relay host. */
 export const INITIAL_GRANTS: Grant[] = [
   { id: "g1", from: "build-01", to: "nix-cache" },
   { id: "g2", from: "build-01", to: "edge-arm", via: "fra-relay" },
@@ -34,6 +39,7 @@ export const INITIAL_GRANTS: Grant[] = [
 ];
 
 
+/** The container rows the test double's containers window shows. */
 export const CONTAINERS: ContainerRow[] = [
   { name: "web-api", image: "nginx:1.27", state: "running", cpu: "0.4%" },
   { name: "postgres", image: "postgres:16", state: "running", cpu: "1.2%" },
@@ -44,6 +50,7 @@ export const CONTAINERS: ContainerRow[] = [
 
 /** A varied, repeatable stream of web-api log lines: mostly requests, now and then a warning or an error. */
 const PATHS = ["/v1/hosts", "/v1/hosts/build-01", "/v1/hosts/nix-cache", "/v1/sessions", "/v1/sessions/shell", "/v1/mesh/grants", "/v1/mesh/status", "/v1/containers", "/v1/layouts/default", "/v1/devices", "/healthz"];
+/** Formats a time as `HH:MM:SS` in local time. */
 const hhmmss = (t: number): string => { const d = new Date(t); return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":"); };
 /** The `n`th line of the stream (n = 0, 1, 2, ...), stamped `t`. The same `n` always gives the same text. */
 export const logLine = (n: number, t: number): string => {
@@ -63,8 +70,10 @@ export const logLine = (n: number, t: number): string => {
 export const logBacklog = (count: number, now: number): string[] => Array.from({ length: count }, (_, i) => logLine(i, now - (count - i) * 1400));
 /** How many lines the backlog starts with: enough to fill the tallest window on a big screen several times over. */
 export const LOG_BACKLOG = 240;
+/** The initial backlog of log lines, ending now. */
 export const LOG_LINES = logBacklog(LOG_BACKLOG, Date.now());
 
+/** The lines a fake shell window starts with: a prompt for `user` on `host` showing the command `extra`, then output. */
 export const shellLines = (user: string, host: string, extra: string): string[] => [
   `${user}@${host}:~$ ${extra}`,
   "",

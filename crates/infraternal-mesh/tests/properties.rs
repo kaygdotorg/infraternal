@@ -10,11 +10,14 @@ use infraternal_mesh::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A synthetic public key whose first 8 bytes are `value`, so keys are unique.
 fn key(value: u64) -> PublicKey {
     let mut bytes = [0; 32];
     bytes[..8].copy_from_slice(&value.to_be_bytes());
     PublicKey(bytes)
 }
+/// A synthetic node numbered `value`, named `host-<value>`, in tag `tag-0`,
+/// `tag-1` or `tag-2`.
 fn node(value: u64) -> Node {
     Node {
         id: NodeId(value),
@@ -23,9 +26,11 @@ fn node(value: u64) -> Node {
         tags: BTreeSet::from([format!("tag-{}", value % 3)]),
     }
 }
+/// A new coordinator whose server is node 0, with default settings.
 fn coordinator() -> Coordinator {
     Coordinator::new(MeshSettings::new([1, 2, 3, 4, 5]), &[], node(0)).unwrap()
 }
+/// An arrow granting only TCP port 5432.
 fn arrow(id: u64, from: Endpoint, to: Endpoint, both_ways: bool) -> Arrow {
     Arrow {
         id: RuleId(id),
@@ -38,6 +43,10 @@ fn arrow(id: u64, from: Endpoint, to: Endpoint, both_ways: bool) -> Arrow {
         }])),
     }
 }
+/// Plays the part of the network: applies `change` to each node's in-memory
+/// backend, then checks that every node's view equals what a full recompile of
+/// the coordinator state gives. This is the property the tests rely on:
+/// incremental delivery must equal a from-scratch compile.
 fn deliver(state: &Coordinator, clients: &mut BTreeMap<NodeId, MemoryBackend>, change: &Change) {
     for (id, diff) in &change.peers {
         clients
@@ -336,6 +345,8 @@ fn names_versions_and_backend_status() {
     assert!(state.set_suffix("INVALID".into()).is_err());
 }
 
+/// Whether `endpoint` names `node`, by id or by tag. An independent reference
+/// for the coordinator's own matching.
 fn matches(endpoint: &Endpoint, node: &Node) -> bool {
     match endpoint {
         Endpoint::Node(id) => *id == node.id,
@@ -343,6 +354,8 @@ fn matches(endpoint: &Endpoint, node: &Node) -> bool {
         Endpoint::User(_) => false,
     }
 }
+/// A small deterministic pseudo-random generator: advances `seed` and returns
+/// 32 random bits, so a failing sequence can be replayed from its seed.
 fn random(seed: &mut u64) -> u64 {
     *seed = seed
         .wrapping_mul(6_364_136_223_846_793_005)

@@ -14,6 +14,9 @@ pub(crate) struct Options {
     pub(crate) state: Option<PathBuf>,
 }
 
+/// The reduced command line of `infraternal agent --fd <n> [--state <dir>]`, as spawned
+/// by the server. It exists so this start-up path parses only two flags instead of
+/// building the whole public command tree.
 #[derive(Parser)]
 #[command(name = "infraternal agent")]
 struct Inherited {
@@ -21,6 +24,9 @@ struct Inherited {
     options: Options,
 }
 
+/// True when `args` (program name first) is the internal inherited-fd start-up:
+/// the `agent` command with `--fd`, and none of `--help`, `-h`, `--version` or
+/// `--data`, which belong to the full public parser.
 fn requested(args: &[OsString]) -> bool {
     args.get(1).is_some_and(|arg| arg == "agent")
         && args.iter().skip(2).any(|arg| {
@@ -37,6 +43,12 @@ fn requested(args: &[OsString]) -> bool {
 /// Parse trusted embedded startup without constructing unrelated command trees.
 /// Unknown options/actions still fail through the existing Clap engine; no
 /// alternative parser or new descriptor ownership rule is introduced.
+///
+/// Returns `None` when this process was not started that way, so the caller continues with
+/// the normal command line. Otherwise it runs the infraternal agent on the inherited
+/// socketpair and returns the exit code: success when the agent stops cleanly, failure
+/// (with a message on standard error) when it errors, and `2` for unparsable arguments or a
+/// missing `--fd`.
 pub(crate) fn run_if_requested() -> Option<ExitCode> {
     let args: Vec<_> = std::env::args_os().collect();
     if !requested(&args) {

@@ -6,6 +6,7 @@
 import type { Ctx, WinRec } from "../context";
 import { isInteractive } from "../views/body";
 
+/** The padlock state. `toggle` locks the active window, or unlocks the locked one; `reset` drops the lock when the canvas is rebuilt. */
 export interface InputLock {
   /** The locked window, while there is one. */
   readonly state: { win: WinRec; before: boolean } | undefined;
@@ -14,6 +15,10 @@ export interface InputLock {
   reset(): void;
 }
 
+/**
+ * Makes the lock. Locking needs an active window that takes input, else it does nothing. Locking while the canvas lock is off first
+ * focuses the window. Unlocking puts the canvas lock back as it was before.
+ */
 export function createInputLock(cx: Ctx): InputLock {
   const { state } = cx;
   let lock: { win: WinRec; before: boolean } | undefined;

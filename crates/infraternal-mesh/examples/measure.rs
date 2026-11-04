@@ -13,12 +13,16 @@ use std::{
     time::Instant,
 };
 
+/// Result type of every measurement step: any error aborts the run.
 type Measurement<T> = Result<T, Box<dyn Error>>;
+/// A synthetic public key whose first 8 bytes are `value`, so keys are unique.
 fn key(value: u64) -> PublicKey {
     let mut bytes = [0; 32];
     bytes[..8].copy_from_slice(&value.to_be_bytes());
     PublicKey(bytes)
 }
+/// A synthetic node numbered `value`, named `host-<value>`, in one of ten tags
+/// (`tag-0` to `tag-9`).
 fn node(value: u64) -> Node {
     Node {
         id: NodeId(value),
@@ -27,6 +31,7 @@ fn node(value: u64) -> Node {
         tags: BTreeSet::from([format!("tag-{}", value % 10)]),
     }
 }
+/// A one-way arrow from node `from` to node `to` allowing all ports.
 fn arrow(id: u64, from: u64, to: u64) -> Arrow {
     Arrow {
         id: RuleId(id),
@@ -36,10 +41,13 @@ fn arrow(id: u64, from: u64, to: u64) -> Arrow {
         ports: TrafficPolicy::All,
     }
 }
+/// CPU time used by this process so far, in nanoseconds.
 fn cpu_ns() -> Measurement<u128> {
     let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_PROCESS_CPUTIME_ID)?;
     Ok(u128::try_from(time.tv_sec())? * 1_000_000_000 + u128::try_from(time.tv_nsec())?)
 }
+/// Reads a memory field of `/proc/self/status`, such as `VmRSS:` (current) or
+/// `VmHWM:` (peak), and returns it in bytes.
 fn memory(field: &str) -> Measurement<usize> {
     let status = std::fs::read_to_string("/proc/self/status")?;
     let line = status
@@ -53,6 +61,9 @@ fn memory(field: &str) -> Measurement<usize> {
         .parse::<usize>()?
         * 1024)
 }
+/// Builds a coordinator with `count` nodes where each node has an arrow to the
+/// next `arrows` nodes (wrapping around). Prints the join cost as a `METRIC`
+/// line.
 fn fixture(count: u64, arrows: u64) -> Measurement<Coordinator> {
     let mut state = Coordinator::new(MeshSettings::new([1, 2, 3, 4, 5]), &[], node(0))?;
     let start = Instant::now();
@@ -77,6 +88,10 @@ fn fixture(count: u64, arrows: u64) -> Measurement<Coordinator> {
     }
     Ok(state)
 }
+/// Runs one coordinator change and prints a `METRIC` line named `name` with
+/// its wall time, CPU time, the size of the change as JSON and how many nodes
+/// and peers it touched. The JSON size is for comparison only; it is not the
+/// production encoding.
 fn change(
     name: &str,
     state: &mut Coordinator,
@@ -97,6 +112,11 @@ fn change(
     );
     Ok(())
 }
+/// Entry point: `measure <compile|incremental|view> [nodes] [arrows]`.
+///
+/// Defaults are `compile`, 10000 nodes and 20 arrows per node. Run each mode in
+/// a fresh process so its memory numbers are not mixed with another mode's.
+/// Results are printed as `METRIC` lines.
 fn main() -> Measurement<()> {
     let args: Vec<_> = std::env::args().collect();
     let mode = args.get(1).map_or("compile", String::as_str);
@@ -161,6 +181,8 @@ fn main() -> Measurement<()> {
     );
     Ok(())
 }
+/// Measures the memory one node's peer view needs when it has `count` peers,
+/// as growth of resident memory per peer.
 fn measure_view(count: u64) -> Measurement<()> {
     let mut allocator = AddressAllocator::new(MeshSettings::new([1, 2, 3, 4, 5]), &[])?;
     let addresses: Vec<_> = (0..count)
@@ -198,6 +220,8 @@ fn measure_view(count: u64) -> Measurement<()> {
     black_box(allocator);
     Ok(())
 }
+/// Repeats 20 samples of the common changes (add an arrow, remove a node, rotate
+/// a key, ...) on a built coordinator and prints each as a `METRIC` line.
 fn measure_changes(state: &mut Coordinator, count: u64) -> Measurement<()> {
     let target = NodeId(count / 2);
     for sample in 0..20 {

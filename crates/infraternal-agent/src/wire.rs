@@ -10,7 +10,11 @@ use tokio::sync::{Mutex, watch};
 /// Direction is local to the authenticated lane, never selected by packet data.
 #[derive(Clone, Copy)]
 pub enum Side {
+    /// This end opens the exchange: it sends the definition's requests and accepts
+    /// its replies.
     Requester,
+    /// This end serves the exchange: it accepts the definition's requests and sends
+    /// its replies.
     Provider,
 }
 
@@ -71,6 +75,11 @@ impl<C: Channel> Lane<C> {
             retired,
         })
     }
+    /// True if `packet` is one complete, well-formed frame whose tag is allowed in
+    /// this direction. `incoming` says whether the packet was received or is about
+    /// to be sent; the lane's `side` decides which tag list (requests or replies)
+    /// applies. Anything else is refused, and callers retire the lane on a bad
+    /// incoming packet.
     fn accepts(&self, packet: &[u8], incoming: bool) -> bool {
         let Ok(frame) = infraternal_protocol::decode_frame(packet) else {
             return false;
@@ -149,6 +158,10 @@ impl<C: Channel> WireLane for Lane<C> {
 
 // Cancellation can happen after bytes entered QUIC. Seal all handles before a
 // replacement operation can append another frame to that incomplete prefix.
+/// Guard held while a packet is being written. If the write does not finish
+/// (an error, or the future is dropped), the lane is retired on drop. Part of a
+/// frame may already be on the wire, and retiring stops a later frame from being
+/// appended to that incomplete prefix.
 struct Write<'a, C: Channel> {
     lane: &'a Lane<C>,
     complete: bool,
@@ -163,6 +176,9 @@ impl<C: Channel> Drop for Write<'_, C> {
 
 // A cloned datagram handle must not outlive its reliable lane's admission.
 // The withdrawal signal contains no connection, task or bearer material.
+/// Wraps a lane's datagram handle so that it stops working the moment the
+/// reliable lane is retired. Clones of the handle cannot outlive the lane's
+/// admission. It carries only the retirement signal, no connection or task.
 struct Datagrams {
     inner: Arc<dyn DatagramLane>,
     retired: watch::Receiver<bool>,

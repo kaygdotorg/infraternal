@@ -35,8 +35,13 @@ import { Arrow } from "./arrows";
 import type { Cluster } from "./layout";
 import { grantSentence, type MeshLayout, type MeshSource } from "./source";
 
+/** One mounted arrow: its grant, the drawn `Arrow`, and its name label if it has one. */
 export interface TopoArrow { grant: Grant; arrow: Arrow; label?: SVGTextElement }
 
+/**
+ * What the mesh module lends the graph: making and dropping cards and arrows, drawing an arrow, and the head size. The graph decides
+ * which exist; these make them.
+ */
 export interface GraphHooks {
   makeCard(n: NodeModel): WinRec;
   dropCard(rec: WinRec): void;
@@ -46,7 +51,9 @@ export interface GraphHooks {
   headSize(): number;
 }
 
+/** The graph's level of detail: node `cards` when zoomed in, or one frame per tag `clusters` when zoomed out. */
 export type Level = "cards" | "clusters";
+/** What the mesh module can ask of the graph: sync it, cull it after the camera moved, redraw it, and look things up. Made by `createGraph`. */
 export interface GraphController {
   /** The mesh changed: nodes, grants, status or layout. */
   sync(): void;
@@ -73,8 +80,18 @@ export interface GraphController {
   dispose(): void;
 }
 
+/**
+ * The limits that keep a large graph cheap. `SMALL`: a mesh of up to this many nodes is always drawn whole. `MAX_ARROWS`: most host arrows
+ * mounted at once. `ARROWS_PER_FRAME` and `MOUNTS_PER_FRAME`: most arrows and cards mounted in one frame. `ENTER_CLUSTERS` and
+ * `LEAVE_CLUSTERS`: the zoom below and above which the clusters level starts and ends (different on purpose, so a zoom does not
+ * flicker). `MAX_CLUSTER_ARROWS`: most arrows between clusters.
+ */
 const SMALL = 40, MAX_ARROWS = 150, ARROWS_PER_FRAME = 40, MOUNTS_PER_FRAME = 24, ENTER_CLUSTERS = 0.62, LEAVE_CLUSTERS = 0.7, MAX_CLUSTER_ARROWS = 400;
 
+/**
+ * Makes the graph controller for view `c`. `layoutOf` gives the automatic layout for the current metrics; `hooks` make the cards and
+ * arrows. The controller keeps in the DOM only what the camera can see (see the module comment for the rules).
+ */
 export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (m: Metrics) => MeshLayout, hooks: GraphHooks): GraphController {
   const { camera, state } = cx;
   const cam = camera.cam;

@@ -14,6 +14,7 @@ pub struct BoundStream {
     /// Raw v1 wire frames; the binding parser leaves all following bytes here.
     pub receive: quinn::RecvStream,
 }
+/// The one error every refusal in this module returns (`PermissionDenied`). Its text names no peer, certificate or reason, so a caller cannot learn why a connection was refused.
 fn denied() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -43,10 +44,14 @@ pub fn negotiate_binding(
     }
 }
 
+/// Application protocol name offered and required in the TLS handshake. A peer that does not speak it is refused.
 const ALPN: &[u8] = b"infraternal/1";
+/// Largest writer-binding request, in bytes.
 const BINDING_LIMIT: usize = 128;
+/// How long a new stream has to deliver its binding request before it is refused.
 const BINDING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Builds the trusted CA store from `certificates`. Accepts one to sixteen certificates; none, more than sixteen, or an unparsable one is refused.
 fn roots(certificates: &[X509]) -> io::Result<rustls::RootCertStore> {
     if certificates.is_empty() || certificates.len() > 16 {
         return Err(denied());
@@ -61,6 +66,7 @@ fn roots(certificates: &[X509]) -> io::Result<rustls::RootCertStore> {
     }
     Ok(roots)
 }
+/// Converts this side's certificate and private key into the forms the TLS library needs. Fails with the generic refusal if either cannot be encoded.
 fn identity(
     identity: &Identity,
 ) -> io::Result<(
@@ -93,6 +99,7 @@ const DATAGRAM_BUFFER: usize = 64;
 #[cfg(feature = "native-streams")]
 const DATAGRAM_BUFFER: usize = 128 * 1024;
 
+/// Transport settings for a server-side connection: keep-alive every 15 seconds, idle timeout 60 seconds, and room for `incoming_streams` peer-initiated streams.
 fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
     transport_with_liveness(
         incoming_streams,
@@ -101,6 +108,7 @@ fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
         false,
     )
 }
+/// Shared transport settings with explicit `keep_alive` and `idle` times. Limits received datagram bytes, caps the discovered packet size to [`PATH_SAFE_UDP_PAYLOAD`], and for a client (`client` true) asks the peer to delay acknowledgements by at most 5 ms.
 fn transport_with_liveness(
     incoming_streams: u32,
     keep_alive: std::time::Duration,
@@ -251,6 +259,7 @@ impl PeerFreshness {
     pub fn silence(&mut self, connection: &quinn::Connection) -> std::time::Duration {
         self.recorded_silence(authenticated_frames(connection))
     }
+    /// Time since `frames` last differed from the previous counters. Changed counters restart the clock.
     fn recorded_silence(&mut self, frames: [u64; 24]) -> std::time::Duration {
         if frames != self.frames {
             self.frames = frames;
@@ -320,16 +329,24 @@ pub struct ProbeFailure {
     /// Public counters and clocks distinguish missing physical replies from
     /// authentication/driver progress. No packet or terminal contents survive.
     pub mesh_reply_after_first_send: bool,
+    /// Microseconds since the first probe was sent.
     pub first_send_age_us: u128,
+    /// Microseconds since the probe was flushed to the socket.
     pub flush_age_us: u128,
+    /// Microseconds with no new authenticated traffic.
     pub authenticated_silence_us: u128,
+    /// True if no new authenticated frame was seen.
     pub authenticated_progress_not_observed: bool,
+    /// Datagrams the connection had built before the probe.
     pub constructed_datagrams_before: u64,
+    /// Datagrams the connection had built after the probe.
     pub constructed_datagrams_after: u64,
+    /// Round-trip time estimate, in microseconds.
     pub rtt_us: u128,
 }
 #[cfg(feature = "test-support")]
 impl std::fmt::Display for ProbeFailure {
+    /// Prints the failure in its debug form.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{self:?}")
     }

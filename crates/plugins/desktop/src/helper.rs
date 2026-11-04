@@ -1,4 +1,19 @@
 //! Independent control and capture workers prevent snapshot/encode latency from delaying input [D200,D203,D208].
+//!
+//! [`session`] serves one connected client of the desktop helper. It speaks the
+//! framed protocol from [`crate::protocol`] on the client socket and relays
+//! control commands (list, start, resize, input, status, stop) to the native
+//! companion. While a stream is running, a separate capture thread (a `Worker`)
+//! produces encoded video frames, so slow capture or encoding never delays
+//! input handling.
+//!
+//! The two sides communicate through small bounded slots rather than queues:
+//! one pending resize, a single encoded-frame slot, and coalesced "need a
+//! keyframe" and "congested" flags. A frame that does not fit is dropped and the
+//! next delivered frame is forced to be a keyframe, because a delta frame that
+//! refers to a dropped one would corrupt decoding. A condition variable (`Wake`)
+//! lets the session thread sleep until there is input, a frame or a deadline,
+//! instead of polling.
 #[cfg(any(target_os = "macos", test))]
 use crate::capture::{Capture, CapturedFrame};
 #[cfg(any(target_os = "macos", test))]
@@ -10,9 +25,11 @@ use crate::{
 };
 #[cfg(any(target_os = "macos", test))]
 use std::hash::Hasher;
+/// The companion's reply to a status request: the time of the latest picture.
 #[cfg(any(target_os = "macos", test))]
 #[derive(serde::Deserialize)]
 struct Clock {
+    /// Capture time in the platform's clock ticks; passed along to the encoder.
     capture_ticks: u64,
     // Older clock replies omit this diagnostic field; capture still uses ticks.
     #[serde(default)]
@@ -32,6 +49,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Reads from the client socket with a deadline that starts at the first byte of
+/// a message: an idle client may stay silent forever, but a half-sent message
+/// must be finished within 3 seconds. Reset `deadline` to `None` before each
+/// message.
 struct DeadlineReader {
     stream: UnixStream,
     deadline: Option<Instant>,
@@ -55,6 +76,8 @@ impl Read for DeadlineReader {
         Ok(count)
     }
 }
+/// Extracts the real `capture_rect` from a companion geometry reply, which may
+/// differ from what was requested. Rejects a rectangle that is not valid.
 fn actual(payload: &[u8]) -> io::Result<Rect> {
     #[derive(serde::Deserialize)]
     struct Geometry {
@@ -67,18 +90,34 @@ fn actual(payload: &[u8]) -> io::Result<Rect> {
     Ok(geometry.capture_rect)
 }
 
+/// The running stream: a capture thread plus the handles the session thread
+/// uses to steer it. Dropping it stops and joins the thread.
 struct Worker {
+    /// Current output size, as last requested.
     size: Size,
+    /// Current captured area, as last reported by the companion.
     rect: Rect,
+    /// Latest resize not yet picked up by the capture thread; a newer one
+    /// replaces an older one.
     pending: Arc<Mutex<Option<(Size, Rect)>>>,
     stop: Arc<AtomicBool>,
+    /// The viewer needs a keyframe.
     force_keyframe: Arc<AtomicBool>,
+    /// The viewer's connection is backed up, so the encoder should back off.
     congested: Arc<AtomicBool>,
+    /// True when capturing a whole display. A window is followed by checking its
+    /// position regularly; a display needs no such check.
     screen: bool,
+    /// Encoded frames, holding at most one so a slow client cannot build a backlog.
     frames: mpsc::Receiver<io::Result<Vec<u8>>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Worker {
+    /// Starts the capture thread for `start`, showing `rect` (as reported by the
+    /// companion). Normally the companion captures and encodes itself; setting
+    /// the `INFRATERNAL_DESKTOP_OWNED` environment variable (macOS only, for
+    /// diagnostics) captures in this process and sends pixels to the encoder.
+    /// `wake` is notified whenever a frame or error is ready.
     fn start(start: &Start, rect: Rect, native_path: PathBuf, wake: Arc<Wake>) -> io::Result<Self> {
         // Capture belongs to the stable companion that owns its permissions.
         // Retain owned pixels only for explicit diagnostics; normal capture
@@ -176,6 +215,7 @@ impl Worker {
             thread: Some(thread),
         })
     }
+    /// Records a new size and area and leaves them for the capture thread to apply.
     fn update(&mut self, size: Size, rect: Rect) {
         self.size = size;
         self.rect = rect;
@@ -194,6 +234,9 @@ impl Drop for Worker {
 }
 // Both capture paths share coalesced control flags and one bounded frame slot.
 // These borrows stay inside the owning worker thread; retirement joins it.
+/// The capture thread's view of the signals shared with the session thread: see
+/// the same-named fields of `Worker`. `frames` is the single-slot frame
+/// channel, and `wake` is notified after each frame.
 #[derive(Clone, Copy)]
 struct Production<'a> {
     pending: &'a Mutex<Option<(Size, Rect)>>,
@@ -207,14 +250,19 @@ struct Production<'a> {
 /// Coalesces repair signals and retries only while an IDR is still missing.
 /// The 300 ms floor matches the browser repair throttle without idle requests.
 struct SurfaceRecovery {
+    /// Delta frames are discarded until a keyframe arrives.
     waiting_keyframe: bool,
+    /// A keyframe request is wanted but not yet sent.
     repair_pending: bool,
+    /// When the last keyframe request was sent.
     last_request: Option<Instant>,
 }
 
 impl SurfaceRecovery {
+    /// Shortest gap between two keyframe requests.
     const REPAIR_INTERVAL: Duration = Duration::from_millis(300);
 
+    /// Starts in the "waiting for the first keyframe" state, without requesting one.
     fn new() -> Self {
         Self {
             waiting_keyframe: true,
@@ -223,11 +271,14 @@ impl SurfaceRecovery {
         }
     }
 
+    /// Notes that a keyframe is needed. Repeated calls merge into one request.
     fn request(&mut self) {
         self.waiting_keyframe = true;
         self.repair_pending = true;
     }
 
+    /// True when a keyframe request should be sent now: one is wanted and the
+    /// minimum gap since the last has passed. Calling it records the request as sent.
     fn request_due(&mut self, now: Instant) -> bool {
         if !self.repair_pending
             || self
@@ -240,6 +291,8 @@ impl SurfaceRecovery {
         true
     }
 
+    /// Decides whether a frame may be delivered. A delta frame while a keyframe
+    /// is missing is refused (and asks for a repair); a keyframe ends the recovery.
     fn admit(&mut self, keyframe: bool) -> bool {
         if self.waiting_keyframe && !keyframe {
             self.request();
@@ -254,6 +307,14 @@ impl SurfaceRecovery {
     }
 }
 
+/// Capture loop for the owned-pixel diagnostic path: takes the newest captured
+/// picture, copies its pixels, and has the encoder compress them. Runs until
+/// `stop` is set or the frame receiver goes away.
+///
+/// Unchanged pictures are not re-encoded: the pixels are hashed, and after
+/// 250 ms without change one sharp (higher-quality) frame is sent, then the loop
+/// idles. A frame that cannot be delivered because the slot is full makes the
+/// next one a keyframe.
 #[cfg(any(target_os = "macos", test))]
 fn produce(
     mut capture: MacCapture,
@@ -489,6 +550,13 @@ mod startup_recovery_tests {
     }
 }
 
+/// Capture loop for the normal path: a dedicated companion process captures and
+/// encodes, and this loop forwards its video. Runs until `stop` is set or the
+/// frame receiver goes away.
+///
+/// On a resize the companion is stopped and a fresh one started with the new
+/// geometry. Frames are forwarded only once a keyframe has been seen, and a
+/// missed or dropped frame triggers a rate-limited keyframe request.
 fn produce_surface(
     mut start: Start,
     mut rect: Rect,
@@ -563,6 +631,15 @@ fn produce_surface(
     Ok(())
 }
 
+/// Serves one client connection until it disconnects, `stopping` is set, or
+/// something fails.
+///
+/// The client must pass peer admission first. A reader thread parses incoming
+/// messages while the calling thread runs the control loop, so a slow write
+/// never blocks reading (writes time out after 2 seconds). On exit the
+/// companion is told to stop, the stream thread is joined, and the socket is
+/// shut down.
+///
 /// # Errors
 /// Ends on framing, admission, capture, companion or output deadline failure.
 pub fn session(
@@ -602,6 +679,12 @@ pub fn session(
     let _ = reader_thread.join();
     result
 }
+/// The session's control loop. Each turn handles at most one client request
+/// (relayed to the companion, with `Start` and `Resize` also steering the
+/// stream), checks every 100 ms that a followed window has not moved (sending
+/// a geometry update if it has), and forwards at most one video frame. When
+/// there is nothing to do it sleeps on `wake`. A second `Start` while a stream
+/// runs is answered with an error.
 fn run(
     socket: &mut UnixStream,
     native: &mut Native,
@@ -714,6 +797,9 @@ fn run(
     result
 }
 
+/// Answers a keyframe or congestion request by setting the matching flag on the
+/// running stream; the capture thread acts on it. Returns an error reply if no
+/// stream is running.
 // Repair and quality flags target capture, never the independent GUI child.
 fn capture_request(stream: Option<&Worker>, kind: Kind) -> (Kind, Vec<u8>) {
     let Some(stream) = stream else {
@@ -734,24 +820,32 @@ fn capture_request(stream: Option<&Worker>, kind: Kind) -> (Kind, Vec<u8>) {
     }
 }
 
+/// A wake-up signal for the session thread, shared with the reader and capture
+/// threads. A counter that changes on every notification means a wake-up that
+/// happens just before a wait is never lost: read the counter first, check the
+/// queues, then wait only while the counter is unchanged.
 #[derive(Default)]
 struct Wake {
     generation: Mutex<u64>,
     changed: Condvar,
 }
 impl Wake {
+    /// Wakes the waiting thread, if any.
     fn notify(&self) {
         if let Ok(mut generation) = self.generation.lock() {
             *generation = generation.wrapping_add(1);
             self.changed.notify_one();
         }
     }
+    /// The current counter value, to pass to [`Wake::wait`] later.
     fn generation(&self) -> io::Result<u64> {
         self.generation
             .lock()
             .map(|value| *value)
             .map_err(|_| io::Error::other("Desktop wake unavailable."))
     }
+    /// Sleeps until the counter differs from `previous`, or until `timeout`
+    /// passes (`None` waits indefinitely). Returns at once if it already differs.
     fn wait(&self, previous: u64, timeout: Option<Duration>) -> io::Result<()> {
         let generation = self
             .generation

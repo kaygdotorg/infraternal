@@ -27,6 +27,7 @@ import { el } from "../dom";
 import type { Login } from "./model";
 import { accountHosts, HOSTS_PER_TAG, num, TAG_CARDS_SHOWN, tagGroups, type TagGroup } from "./words";
 
+/** What the "Logs in as" pane needs from the card that owns it. */
 export interface LoginsCardEnv {
   /** Opens Settings, Access. */
   openRules(): void;
@@ -34,6 +35,7 @@ export interface LoginsCardEnv {
   focusRow(): void;
 }
 
+/** The pane's handle. The pane starts closed and inert (hidden from focus and from assistive tools) until `open` or `toggle`. */
 export interface LoginsCard {
   /** The pane; the caller places it under the row that opens it. */
   readonly el: HTMLElement;
@@ -46,6 +48,10 @@ export interface LoginsCard {
   dispose(): void;
 }
 
+/**
+ * Builds one tag's card: the tag chip and its host count in the header, then up to `HOSTS_PER_TAG` host chips and a quiet
+ * "+N more" for the rest. The `null` group (machines with no tag) gets a plain "No tag" header and no tag colour.
+ */
 function tagCard(group: TagGroup): HTMLElement {
   const card = el("div", "ac-tag");
   const head = el("div", "ac-tag-head");
@@ -70,6 +76,11 @@ function tagCard(group: TagGroup): HTMLElement {
   return card;
 }
 
+/**
+ * Creates the pane, closed. Escape inside it closes the pane and returns focus to the row (via `env.focusRow`); the pane
+ * stops that key from reaching the card, so the card stays open. While open it keeps itself scrolled into view as it grows.
+ * Call `dispose` to stop the resize observer and remove the element.
+ */
 export function createLoginsCard(env: LoginsCardEnv): LoginsCard {
   const root = el("div", "ac-pane");
   const clip = el("div", "ac-pane-clip");

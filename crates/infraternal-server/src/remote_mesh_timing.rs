@@ -36,6 +36,7 @@ pub(super) async fn handshake(socket: &mut tokio::net::UnixStream) -> io::Result
     decode(&reply)
 }
 
+/// Reads the 12-byte reply: 8 bytes of seconds and 4 bytes of nanoseconds, both little-endian, since the Unix epoch. Nanoseconds of one second or more are rejected.
 fn decode(reply: &[u8; 12]) -> io::Result<SystemTime> {
     let seconds = u64::from_le_bytes(reply[..8].try_into().map_err(io::Error::other)?);
     let nanos = u32::from_le_bytes(reply[8..].try_into().map_err(io::Error::other)?);

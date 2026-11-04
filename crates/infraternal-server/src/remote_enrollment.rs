@@ -28,6 +28,7 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
         Self { source, store }
     }
 
+    /// Builds the certificate authority from the configured source. Fails with an opaque error while the signing key is locked.
     fn signer(&self) -> Result<CertificateAuthority, RemoteEnrollmentError> {
         CertificateAuthority::from_source(self.source.as_ref()).map_err(|_| RemoteEnrollmentError)
     }

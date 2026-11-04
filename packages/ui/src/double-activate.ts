@@ -10,21 +10,31 @@
 
 /** A second tap this soon after the first, and this close to it, is a double tap (a mouse gets the system's double-click time). */
 const DOUBLE_TAP_MS = 320;
+/** The same, for a mouse: a click pair this close in time counts. */
 const DOUBLE_CLICK_MS = 500;
-/** A second press this close to the first is on the same spot even if the list moved a different row under it. */
+/** Pixels: a second press this close to the first is on the same spot even if the list moved a different row under it. */
 const SAME_SPOT = 6;
+/** Pixels: the most two taps on the same row may be apart; a press that moves more than half of it is a drag. */
 const DOUBLE_TAP_SLOP = 24;
 
-/**
- * Calls `handler` on a double click (mouse) or a double tap (touch, pen). A tap that moved is a drag or a scroll and
- * does not count. Both are found from the pointer events by `keyOf`'s key, not from the browser's `dblclick` alone: that
- * one is not sent when the first click rebuilt the list and the second landed on a new button (opening a session does). The element opts out of the browser's double-tap zoom, so the second tap is ours. `keyOf` names the
- * thing under the finger (a row of a list that one listener serves; `undefined`: nothing to rename here): both taps
- * must land on the same one.
- */
 /** The last tap per element, kept outside the listeners: a list that is rebuilt after the first tap re-attaches them. */
 const lastTaps = new WeakMap<HTMLElement, { x: number; y: number; at: number; key: unknown } | undefined>();
 
+/**
+ * Listens for a double click (mouse) or double tap (touch, pen) on `target` and calls
+ * `handler(event, key)` with the key of the first press.
+ *
+ * Why it reads pointer events and not only `dblclick`: that event is skipped when the first
+ * click rebuilt the list, so the second click lands on a new button (opening a session does this).
+ * A press that moves more than 12 px is a drag or scroll and ends the sequence. The element is
+ * set to `touch-action: manipulation` so the browser's double-tap zoom never swallows the second tap.
+ *
+ * @param target the element to listen on; one listener can serve every row of a list
+ * @param handler called once per double activation
+ * @param signal aborting it removes every listener this call added
+ * @param keyOf identifies the row under the pointer (return `undefined` where nothing can be renamed);
+ *   both presses must hit the same key. By default the key is the target itself.
+ */
 export function onDoubleActivate(target: HTMLElement, handler: (event: Event, key: unknown) => void, signal: AbortSignal, keyOf: (event: Event) => unknown = () => target): void {
   target.style.touchAction ||= "manipulation";
   target.addEventListener("dblclick", (event) => { if (keyOf(event) === undefined) return; event.preventDefault(); handler(event, keyOf(event)); }, { signal });
