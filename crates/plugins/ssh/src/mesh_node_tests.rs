@@ -141,3 +141,26 @@ fn configure_works_from_a_thread_without_a_runtime() {
     .join();
     assert!(matches!(configured, Ok(true)), "{configured:?}");
 }
+
+/// The key socket's directory must let every account reach the socket (the
+/// peer-credential check decides who may ask), and stay closed to writes:
+/// measured on compute01, where the agent's own `/run/infraternal` is 0700.
+#[test]
+fn the_socket_directory_is_traversable_and_closed() {
+    let me = nix::unistd::Uid::effective().as_raw();
+    let fresh = std::env::temp_dir().join(format!("j175-sock-{}", uuid::Uuid::new_v4().simple()));
+    prepare_socket_directory(&fresh, me).unwrap();
+    let existing = directory(0o700);
+    prepare_socket_directory(&existing, me).unwrap();
+    for path in [&fresh, &existing] {
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "{path:?}");
+        assert!(trusted_directory(path, me));
+    }
+    // A directory someone else can write to is refused, never repaired.
+    let open = directory(0o777);
+    assert!(prepare_socket_directory(&open, me).is_err());
+    for path in [fresh, existing, open] {
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}

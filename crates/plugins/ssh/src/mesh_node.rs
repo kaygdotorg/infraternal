@@ -153,7 +153,7 @@ enum AddedWith {
 /// Fixed paths. Each directory on the way must be owned by root and closed
 /// to group and other writes ([`trusted_directory`]); otherwise nothing is
 /// written or served (J181 M4).
-const SOCKET: &str = "/run/infraternal/mesh-ssh-agent.sock";
+const SOCKET: &str = "/run/infraternal-mesh-ssh/agent.sock";
 /// The known-hosts file holding the mesh CA line.
 const KNOWN_HOSTS: &str = "/etc/ssh/infraternal-mesh-known_hosts";
 /// The uid that must own every trusted directory.
@@ -470,6 +470,23 @@ pub(crate) fn trusted_directory(path: &Path, root_uid: u32) -> bool {
         })
 }
 
+/// Create the key socket's own directory 0755, or open an existing one to
+/// traversal, but only when `root_uid` owns it and nobody else can write to
+/// it. It is separate from the infraternal agent's private runtime directory
+/// (0700), which ordinary accounts cannot enter.
+pub(crate) fn prepare_socket_directory(directory: &Path, root_uid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o755).create(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if !trusted_directory(directory, root_uid) {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))
+}
+
 /// Refuse a path whose directory is not trusted ([`trusted_directory`]).
 fn in_trusted_directory(path: &Path) -> std::io::Result<()> {
     let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
@@ -527,10 +544,9 @@ async fn serve_socket(shared: Arc<Shared>) {
     let Some(parent) = path.parent() else {
         return;
     };
-    let _ = std::fs::DirBuilder::new().mode(0o755).create(parent);
     // The socket must be connectable by others, so its directory, not its
     // mode, keeps anyone from replacing it.
-    if !trusted_directory(parent, ROOT) {
+    if prepare_socket_directory(parent, ROOT).is_err() {
         return;
     }
     let _ = std::fs::remove_file(path);
