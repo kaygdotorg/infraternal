@@ -887,18 +887,69 @@ fn the_parent_death_signal_survives_the_credential_drop() {
     );
 }
 
+/// Which program the planted orphan runs, relative to the executable the new supervisor uses.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
+#[derive(Clone, Copy)]
+enum OrphanProgram {
+    /// The supervisor's own executable.
+    Current,
+    /// An earlier release in the same component store.
+    OlderRelease,
+    /// A program that is not any installed Traefik.
+    Foreign,
+}
+
+#[cfg(target_os = "linux")]
+struct OrphanOutcome {
+    orphan_stopped: bool,
+    bystander_alive: bool,
+    started: std::io::Result<()>,
+    orphan_pid: u32,
+    orphan_executable: PathBuf,
+}
+
+/// Install the fake executables for one case: the supervisor's and the one the orphan runs.
+#[cfg(target_os = "linux")]
+fn orphan_layout(root: &Path, which: OrphanProgram, sleep: &[u8]) -> (PathBuf, PathBuf) {
+    match which {
+        OrphanProgram::OlderRelease => {
+            // Each release installs to <store>/<digest>/bin/traefik.
+            let release = |digest: char| {
+                let bin = root
+                    .join("store")
+                    .join(digest.to_string().repeat(64))
+                    .join("bin");
+                std::fs::create_dir_all(&bin).expect("release directory");
+                bin.join("traefik")
+            };
+            let (current, older) = (release('b'), release('a'));
+            fake_traefik(&current, sleep);
+            fake_traefik(&older, sleep);
+            (current, older)
+        }
+        OrphanProgram::Current | OrphanProgram::Foreign => {
+            let executable = root.join("fake-traefik");
+            fake_traefik(&executable, sleep);
+            let orphan = if matches!(which, OrphanProgram::Foreign) {
+                let other = root.join("other-program");
+                fake_traefik(&other, sleep);
+                other
+            } else {
+                executable.clone()
+            };
+            (executable, orphan)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_orphan_case(which: OrphanProgram) -> OrphanOutcome {
     let root = std::env::temp_dir().join(format!("proxy-orphan-{}", uuid::Uuid::new_v4()));
     let (state, lock_directory) = supervisor_fixture(&root);
     // The orphan check compares the running executable's inode, so the fake must be a real
     // program rather than a script run by an interpreter.
-    let executable = root.join("fake-traefik");
-    fake_traefik(
-        &executable,
-        &std::fs::read("/bin/sleep").expect("read sleep"),
-    );
+    let sleep = std::fs::read("/bin/sleep").expect("read sleep");
+    let (executable, orphan_executable) = orphan_layout(&root, which, &sleep);
     let lock_path = lock_directory.join(".traefik-child.lock");
     std::fs::write(&lock_path, b"").expect("create child lock");
     std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
@@ -938,7 +989,7 @@ fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
     // still holding the child lock through an inherited descriptor.
     let program = [
         as_child.clone(),
-        vec![executable.display().to_string(), "60".into()],
+        vec![orphan_executable.display().to_string(), "60".into()],
     ];
     let mut orphan = plant("flock -n 9 &&", &program.concat());
     // A bystander that only holds a descriptor to the same file, as one passed over a socket
@@ -966,18 +1017,64 @@ fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
     let bystander_exit = bystander.try_wait().expect("observe bystander");
     let _ = bystander.kill();
     let _ = bystander.wait();
+    let orphan_pid = orphan.id();
     let started = started.map(drop);
     drop(probe);
     std::fs::remove_dir_all(root).expect("remove orphan fixture");
+    OrphanOutcome {
+        orphan_stopped: orphan_exit.is_some(),
+        bystander_alive: bystander_exit.is_none(),
+        started,
+        orphan_pid,
+        orphan_executable,
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_new_supervisor_stops_an_orphan_that_holds_the_child_lock() {
+    let outcome = run_orphan_case(OrphanProgram::Current);
     assert!(
-        orphan_exit.is_some(),
+        outcome.orphan_stopped,
         "a stale proxy child holding the child lock must be stopped on start"
     );
     assert!(
-        bystander_exit.is_none(),
-        "a process that only shares the lock's file, but is not our Traefik, must not be killed: {bystander_exit:?}"
+        outcome.bystander_alive,
+        "a process that only shares the lock's file, but is not our Traefik, must not be killed"
     );
-    started.expect("the supervisor starts once the orphan is gone");
+    outcome
+        .started
+        .expect("the supervisor starts once the orphan is gone");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_orphan_from_an_older_traefik_release_is_stopped_too() {
+    let outcome = run_orphan_case(OrphanProgram::OlderRelease);
+    assert!(
+        outcome.orphan_stopped,
+        "an orphan running an earlier installed release must be stopped after an upgrade"
+    );
+    assert!(outcome.bystander_alive);
+    outcome
+        .started
+        .expect("the supervisor starts once the older orphan is gone");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_holder_that_is_not_an_installed_traefik_is_named_in_the_error() {
+    let outcome = run_orphan_case(OrphanProgram::Foreign);
+    assert!(
+        !outcome.orphan_stopped,
+        "a program that is not one of our releases is never signalled"
+    );
+    let message = outcome.started.expect_err("start must refuse").to_string();
+    assert!(
+        message.contains(&format!("PID {}", outcome.orphan_pid))
+            && message.contains(&outcome.orphan_executable.display().to_string()),
+        "the error names the holder and its executable: {message}"
+    );
 }
 
 #[test]
