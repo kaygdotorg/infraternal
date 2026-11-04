@@ -685,16 +685,37 @@ replace_stuck_install() {
  mv -T "$stage" "$replaced"
  replace_done
 }
+# The journal was never moved. found-service in it means a set-aside stopped
+# the service and was killed before the move, so no trap ran (SIGKILL, power
+# loss): start and enable it again as found. Prints "restored", or
+# "untouched" when nothing was stopped (#305 P2-1).
+restore_unmoved() {
+ aside=
+ found="$base/.bootstrap-lock/found-service"
+ if [ ! -e "$found" ] && [ ! -L "$found" ]; then
+  printf 'untouched\n'
+  return
+ fi
+ private_file "$found"
+ read -r replace_enabled replace_active < "$found"
+ case "$replace_enabled:$replace_active" in yes:yes|yes:no|no:yes|no:no) :;; *) exit 71;; esac
+ restore_stuck_service
+ printf 'restored\n'
+}
 # Put back a journal that replace_stuck_install moved aside, after the new
 # enrollment failed and its own rollback removed its journal: the stuck
 # install and its service end up as they were found (#305 P1-1). Prints
 # "restored", or "untouched" when this transaction was never replaced.
+# Restores wait for the setup guard (setup_guard_wait): a cancelled attempt
+# kills only its local ssh client, and the set-aside it started runs on to
+# the end on the host; refusing then would leave the service stopped (#305 P2-1).
 restore_replaced_install() {
+ setup_guard_wait=25
  setup_guard
  replaced="$base.bootstrap-replaced-$1"
  if [ ! -e "$replaced" ] && [ ! -L "$replaced" ]; then
   [ -f "$base/.bootstrap-lock/transaction" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$1" ] || exit 71
-  printf 'untouched\n'
+  restore_unmoved
   return
  fi
  [ -d "$replaced" ] && [ ! -L "$replaced" ] && [ -O "$replaced" ] || exit 71
@@ -727,12 +748,13 @@ supersede_stuck_install() {
 # enrollment failed and its own rollback removed the new installation.
 # Prints "restored", or "untouched" when this transaction was never set aside.
 restore_superseded_install() {
+ setup_guard_wait=25
  setup_guard
  aside="$base.bootstrap-superseded-$1"
  aside_origin=$base
  if [ ! -e "$aside" ] && [ ! -L "$aside" ]; then
   [ -f "$base/.bootstrap-lock/transaction" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$1" ] || exit 71
-  printf 'untouched\n'
+  restore_unmoved
   return
  fi
  [ -d "$aside" ] && [ ! -L "$aside" ] && [ -O "$aside" ] || exit 71

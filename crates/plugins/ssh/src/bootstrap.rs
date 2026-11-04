@@ -891,8 +891,12 @@ impl Bootstrap {
                 if let Some(aside) = resources.set_aside
                     && rolled_back
                 {
+                    // The host restore queues up to 25 s behind a set-aside that
+                    // is still running (#305 P2-1); the cap leaves it time to
+                    // finish after that, so "not put back" is never said of a
+                    // restore that is about to complete.
                     let restored = tokio::time::timeout(
-                        Duration::from_secs(30),
+                        Duration::from_secs(45),
                         aside.previous.restore_set_aside(
                             aside.session.as_ref(),
                             &target,

@@ -26,7 +26,14 @@ setup_guard() {
   permissions=$(stat -c '%a' "$parent")
   [ "$((0$permissions & 022))" = 0 ] || exit 71
   exec 9< "$parent"
-  if ! flock -n 9; then
+  # A caller that must run after an in-flight setup (a restore) sets
+  # setup_guard_wait to the seconds it may queue; everyone else refuses at once.
+  if [ -n "${setup_guard_wait:-}" ]; then
+   setup_guard_flag="-w $setup_guard_wait"
+  else
+   setup_guard_flag=-n
+  fi
+  if ! flock $setup_guard_flag 9; then
    if [ "${setup_allow_locked_inspection:-no}" = yes ]; then
     # The inspector is not the lock owner; drop its descriptor before looking
     # through /proc so the diagnostic names the process that holds the guard.

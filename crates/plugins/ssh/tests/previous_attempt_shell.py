@@ -6,6 +6,7 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 import unittest
 import uuid
 
@@ -922,6 +923,73 @@ supersede_stuck_install "{expected}"
 
     def test_a_broken_pipe_after_the_stop_still_puts_the_service_back(self):
         self.signal_after_the_stop('PIPE', 141)
+
+    def cancel_during_the_stop(self, action, restore):
+        # #305 P2-1: a cancel kills only the local ssh client. sshd signals no
+        # non-pty command when its channel closes, so the set-aside runs on to
+        # the end while the restore starts; the restore must wait for it, not
+        # give up on the guard it holds.
+        stage, _ = self.make_upgrade_fixture()
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        stopping = Path(self.temp) / 'stopping'
+        script = self.shell_script(f'''
+slow_manager() {{
+ if [ "$1" = stop ]; then : > "{stopping.resolve()}"; sleep 2; fi
+ mock_manager "$@"
+}}
+manager=slow_manager
+{action} "{expected}"
+''')
+        set_aside = subprocess.Popen(['/bin/sh', '-c', script], env=dict(os.environ, HOME=str(self.home)),
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.children.append(set_aside)
+        for _ in range(500):
+            if stopping.exists() or set_aside.poll() is not None:
+                break
+            time.sleep(0.01)
+        self.assertTrue(stopping.exists(), set_aside.stderr.read().decode() if set_aside.poll() is not None else '')
+        result = self.run_shell(f'\n{restore} {TRANSACTION}\n')
+        self.assertEqual(set_aside.wait(timeout=30), 0)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout, b'restored\n')
+        self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
+        self.assertEqual((stage / 'transaction').read_text(), TRANSACTION + '\n', 'the journal is back')
+        self.assertFalse((stage / 'found-service').exists())
+        self.assertTrue(self.unit.exists())
+
+    def test_a_reenroll_cancelled_during_the_stop_is_put_back(self):
+        self.cancel_during_the_stop('supersede_stuck_install', 'restore_superseded_install')
+
+    def test_a_replace_cancelled_during_the_stop_is_put_back(self):
+        self.cancel_during_the_stop('replace_stuck_install', 'restore_replaced_install')
+
+    def test_a_set_aside_killed_between_the_stop_and_the_move_is_put_back(self):
+        # SIGKILL or power loss after the stop: no trap ran, the journal is in
+        # place and found-service says what to bring back (#305 P2-1).
+        stage, _ = self.make_upgrade_fixture()
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        result = self.run_shell(f'''
+kill_manager() {{
+ mock_manager "$@"
+ [ "$1" != disable ] || kill -KILL $$
+}}
+manager=kill_manager
+supersede_stuck_install "{expected}"
+''')
+        self.assertEqual(result.returncode, -9, result.stderr.decode())
+        self.assertEqual(self.service_state(), (False, False))
+        for restore in ('restore_superseded_install', 'restore_replaced_install'):
+            with self.subTest(restore=restore):
+                result = self.run_shell(f'\n{restore} {TRANSACTION}\n')
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
+                self.assertFalse((stage / 'found-service').exists())
+                self.manager_log.unlink(missing_ok=True)
+                (self.unit.parent / 'default.target.wants/infraternal-agent.service').unlink()
+                self.manager_active.unlink()
+                found = stage / 'found-service'
+                found.write_text('yes yes\n')
+                found.chmod(0o600)
 
     def test_check_reports_an_install_set_aside_and_never_put_back(self):
         # #305 P2-1: the restore never ran, so Check must not answer CLEAR.
