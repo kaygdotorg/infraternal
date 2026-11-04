@@ -75,7 +75,9 @@ Rules:
   - Per-action-tap actions (`fresh_passkey`: key creation or widening, admin
     role changes and CA setup, recovery-key and passkey changes, account
     deletion, turning these rules off) need their own tap for every run and
-    are never key-callable.
+    are never key-callable. Each tap is bound to the one action and parameters
+    on screen, is single use and expires after 120 s (D336,
+    `contracts/keywrap.md`). The 15-minute window never covers them.
 - Each call is audited: who (user, device, adapter), the action, the
   target, the input digest, dry-run or not, and the result. The audit write
   happens before the side effect, and its outcome is updated after it.
