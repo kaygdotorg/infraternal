@@ -55,11 +55,16 @@ export function failureLine(failure: FailureDetail | undefined): string {
   }
 }
 
-/** What confirming a stuck-install replacement ends; empty when the server did not say (#305, D13). */
+/**
+ * What confirming a stuck-install replacement does to its open terminals; empty when the server
+ * did not say. A Replace hands them to the new infraternal agent; a Re-enroll (another server,
+ * `enrolled_with` set) ends them (#305, D13, D337).
+ */
 function sessionsLine(lock: NonNullable<FailureDetail["setup_lock"]>): string {
   if (lock.sessions === undefined) return "";
   if (lock.sessions === 0) return "No terminal sessions are open on it.";
-  return lock.sessions === 1 ? "1 open terminal session will end." : `${lock.sessions} open terminal sessions will end.`;
+  const fate = lock.enrolled_with === undefined ? "will carry over" : "will end";
+  return lock.sessions === 1 ? `1 open terminal session ${fate}.` : `${lock.sessions} open terminal sessions ${fate}.`;
 }
 
 /** Turn the validated host lease coordinates into the message shown in the flow. */

@@ -454,14 +454,16 @@ impl PreviousAttempt {
                 } else {
                     "Fresh setup ownership journal"
                 }),
-                // An upgrade journal counts only sessions a live shim serves,
-                // and replacing it ends them; say how many (#305, D13).
+                // An upgrade journal counts only sessions a live shim serves.
+                // A Replace keeps them: the new agent adopts them (D337, D13).
                 match (upgrade, self.sockets) {
                     (false, 0) => Cow::Borrowed("No live setup found"),
                     (false, _) => Cow::Borrowed("Local sockets with no listener"),
                     (true, 0) => Cow::Borrowed("No open terminal sessions"),
-                    (true, 1) => Cow::Borrowed("1 open terminal session will end"),
-                    (true, open) => Cow::Owned(format!("{open} open terminal sessions will end")),
+                    (true, 1) => Cow::Borrowed("1 open terminal session will carry over"),
+                    (true, open) => {
+                        Cow::Owned(format!("{open} open terminal sessions will carry over"))
+                    }
                 },
             ],
         }
@@ -549,6 +551,13 @@ impl PreviousAttempt {
             Cow::Borrowed("An install this server did not enroll; its identity cannot be read"),
             |enrolled| Cow::Owned(format!("Enrolled with another server: {}", enrolled.server)),
         );
+        // Sessions authorised by another server are never handed to this
+        // one: a Re-enroll ends them (D337).
+        leftovers.findings[2] = match self.sockets {
+            0 => Cow::Borrowed("No open terminal sessions"),
+            1 => Cow::Borrowed("1 open terminal session will end"),
+            open => Cow::Owned(format!("{open} open terminal sessions will end")),
+        };
         leftovers.findings[1] = if self.live {
             Cow::Borrowed(
                 "Its infraternal agent is running and may be connected to that server now; joining here disconnects it",
@@ -814,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_confirmation_names_the_sessions_it_ends() {
+    fn replacement_confirmation_says_open_sessions_carry_over() {
         let finding = |sockets| {
             upgrade(sockets)
                 .findings(InstallMode::Rootless, uuid::Uuid::nil())
@@ -822,8 +831,16 @@ mod tests {
                 .clone()
         };
         assert_eq!(finding(0), "No open terminal sessions");
-        assert_eq!(finding(1), "1 open terminal session will end");
-        assert_eq!(finding(3), "3 open terminal sessions will end");
+        assert_eq!(finding(1), "1 open terminal session will carry over");
+        assert_eq!(finding(3), "3 open terminal sessions will carry over");
+        let message = serde_json::to_value(upgrade(2).stuck_failure(false)).unwrap()["message"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            message.ends_with("2 open terminal sessions will carry over."),
+            "{message}"
+        );
     }
 
     #[test]

@@ -534,11 +534,20 @@ impl Failure {
         } else {
             text.push_str(" Replace the stuck install to continue.");
         }
+        // A Replace (no other server) hands open terminals to the new agent;
+        // a Re-enroll ends them (D337).
+        let fate = if lock.enrolled_with.is_some() {
+            "will end"
+        } else {
+            "will carry over"
+        };
         match lock.sessions {
             Some(0) => text.push_str(" No terminal sessions are open."),
-            Some(1) => text.push_str(" 1 open terminal session will end."),
+            Some(1) => {
+                let _ = write!(text, " 1 open terminal session {fate}.");
+            }
             Some(open) => {
-                let _ = write!(text, " {open} open terminal sessions will end.");
+                let _ = write!(text, " {open} open terminal sessions {fate}.");
             }
             None => {}
         }

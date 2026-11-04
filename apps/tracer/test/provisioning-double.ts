@@ -267,13 +267,13 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
             target.resume = () => walk(1);
             emit(target, "check", "A stuck infraternal agent was found", {
               kind: "stale_previous_attempt",
-              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. Replace the stuck install to continue. 1 open terminal session will end.",
+              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. Replace the stuck install to continue. 1 open terminal session will carry over.",
               log_tail: [],
               setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false, attempt: "d831a93a", sessions: 1 },
             }, undefined, {
               challenge: target.challenge,
               mode: target.mode,
-              findings: ["An interrupted upgrade journal", "The enrolled host identity is kept", "1 open terminal session will end"],
+              findings: ["An interrupted upgrade journal", "The enrolled host identity is kept", "1 open terminal session will carry over"],
             });
             return;
           }

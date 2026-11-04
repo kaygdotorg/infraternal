@@ -64,7 +64,7 @@ for (const size of SIZES) {
 
       await expect(page.getByRole("heading", { name: "A stuck infraternal agent was found on stuck.lab" })).toBeVisible({ timeout: 30_000 });
       await expect(page.locator(".ah-page[data-page='failure'] .ah-lede")).toContainText(/build-node.*setup attempt d831a93a \(process 254\).*2026-11-02T04:05:06Z/);
-      await expect(page.locator(".ah-page[data-page='failure'] .ah-text")).toHaveText("1 open terminal session will end.");
+      await expect(page.locator(".ah-page[data-page='failure'] .ah-text")).toHaveText("1 open terminal session will carry over.");
       const replace = page.locator(".ah-float footer").getByRole("button", { name: "Replace the stuck install", exact: true });
       await expect(replace).toBeVisible();
       const alignment = await replace.evaluate((button) => {

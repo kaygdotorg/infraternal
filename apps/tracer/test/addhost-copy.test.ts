@@ -64,14 +64,14 @@ test("a failed upgrade offers an explicit stuck-install replacement", () => {
   expect(guide.next).toBe("");
 });
 
-test("a stuck-install replacement names the open terminal sessions it ends (#305)", () => {
+test("a stuck-install replacement says its open terminal sessions carry over (#305, D337)", () => {
   const lock = { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false };
   const guide = (sessions: number) => guideFor("fixture host", {
     kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock: { ...lock, sessions },
   } as unknown as FailureDetail);
   expect(guide(0).next).toBe("No terminal sessions are open on it.");
-  expect(guide(1).next).toBe("1 open terminal session will end.");
-  expect(guide(3).next).toBe("3 open terminal sessions will end.");
+  expect(guide(1).next).toBe("1 open terminal session will carry over.");
+  expect(guide(3).next).toBe("3 open terminal sessions will carry over.");
 });
 
 test("a machine enrolled with another server asks to join as a new host (D335)", () => {

@@ -775,6 +775,43 @@ replace_stuck_install "$observed"
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(replaced.exists(), 'the next commit retires them')
 
+    def test_a_replace_keeps_the_open_terminals_for_the_new_agent(self):
+        # D337: a Replace (same server) stops only the agent; the shims keep
+        # their terminals and the new agent adopts them. A session listener
+        # stands in for a shim: the old code drove sessions-stop at it.
+        stage, _ = self.make_upgrade_fixture()
+        previous = Path.cwd()
+        try:
+            os.chdir(self.socket.parent)
+            live = socket.socket(socket.AF_UNIX)
+            live.bind(self.socket.name)
+            os.chmod(self.socket.name, 0o600)
+            live.listen()
+        finally:
+            os.chdir(previous)
+        try:
+            expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+            self.assertEqual(expected.split(' ')[8], '1', expected)
+            result = self.run_shell(f'\nreplace_stuck_install "{expected}"\n')
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertFalse(stage.exists())
+            self.assertTrue(self.socket.is_socket(), 'the session endpoint is left in place')
+            # Relative to its directory: the absolute path can pass the
+            # 108-byte AF_UNIX limit under the gate's scratch root.
+            previous = Path.cwd()
+            try:
+                os.chdir(self.socket.parent)
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.connect(self.socket.name)
+            finally:
+                os.chdir(previous)
+            live.settimeout(5)
+            accepted, _ = live.accept()
+            accepted.close()
+            self.assertEqual(self.mutating_calls()[:2], ['stop infraternal-agent.service', 'disable infraternal-agent.service'])
+        finally:
+            live.close()
+
     def test_a_replacement_records_the_service_found_with_its_journal(self):
         self.make_upgrade_fixture()
         self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)

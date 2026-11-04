@@ -619,7 +619,10 @@ stop_stage_shims() {
 # Stop the stuck install's service and shims for the exact confirmed record.
 # Every read-only proof runs first; after the stop, any failure puts the
 # service back as it was found (#305 P1-2). Callers clear the traps only
-# once the old install is moved out of the way.
+# once the old install is moved out of the way. With replace_inherit=yes
+# (a Replace, same server) only the agent stops: the unit's KillMode=process
+# leaves the shims running, and the new agent adopts their open terminals
+# from $base/sessions, as an upgrade does (D337, D13).
 retire_stuck_service() {
  replace_expected=$1
  aside=
@@ -676,11 +679,28 @@ retire_stuck_service() {
  $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
  $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
  $manager daemon-reload >/dev/null 2>&1 || exit 73
- stop_stage_shims
  exec 7<&-
- not_live
+ if [ "${replace_inherit:-no}" = yes ]; then
+  # The shims stay: the unit's own and the journal payload's. Anything else
+  # holding a file under $base still refuses.
+  not_live_beside_sessions
+ else
+  stop_stage_shims
+  not_live
+ fi
  exec 7< "$stage"
  flock -n 7 || exit 73
+}
+# not_live for a Replace that keeps the open terminals: no other setup holds
+# the journal, and no process holds a file under $base apart from the
+# stopped unit's shims and the journal payload's (scan_holders service).
+not_live_beside_sessions() {
+ if [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
+  exec 8< "$base/.bootstrap-lock"
+  flock -n 8 || exit 73
+  exec 8<&-
+ fi
+ scan_holders service
 }
 replace_untrap() {
  trap - EXIT
@@ -711,6 +731,7 @@ restore_stuck_service() {
 # found; the next commit of this host removes it, so nothing is lost before
 # a new enrollment commits.
 replace_stuck_install() {
+ replace_inherit=yes
  retire_stuck_service "$1"
  replaced="$base.bootstrap-replaced-$replace_transaction"
  [ ! -e "$replaced" ] && [ ! -L "$replaced" ] || exit 72
