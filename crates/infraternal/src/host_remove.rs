@@ -80,6 +80,13 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         ),
     }
 }
+/// The TLS client for the removal routes: peer and hostname verification against public trust.
+fn removal_tls_connector() -> io::Result<openssl::ssl::SslConnector> {
+    let mut tls = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())
+        .map_err(|_| denied())?;
+    tls.set_default_verify_paths().map_err(|_| denied())?;
+    Ok(tls.build())
+}
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
@@ -96,11 +103,7 @@ async fn request(server: &str, cookie: &str, finish: bool, body: Value) -> io::R
         return Err(denied());
     }
     let name = url.host_str().ok_or_else(denied)?;
-    let mut tls = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())
-        .map_err(|_| denied())?;
-    tls.set_default_verify_paths().map_err(|_| denied())?;
-    let ssl = tls
-        .build()
+    let ssl = removal_tls_connector()?
         .configure()
         .map_err(|_| denied())?
         .into_ssl(name)
@@ -154,5 +157,61 @@ struct Connection(tokio::task::JoinHandle<()>);
 impl Drop for Connection {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Found on the test server (#303, J94f): `remove-host` refused every step, its dry run
+    /// included, while the same session's browser dry run succeeded. With `SSL_CERT_FILE` set to
+    /// the system bundle the same binary removed the host. A vendored OpenSSL's default paths
+    /// name its build prefix and hold no roots on the host; J94e fixed the same defect for the
+    /// hosted actions (`2f0f4a007`). The child run points OpenSSL's defaults at nothing, so
+    /// only explicitly loaded roots count.
+    #[test]
+    fn removal_trusts_the_host_ca_bundle() {
+        let bundles = [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+        ];
+        if !bundles
+            .iter()
+            .any(|bundle| std::path::Path::new(bundle).is_file())
+        {
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "host_remove::tests::removal_trust_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(
+                "SSL_CERT_FILE",
+                "/nonexistent/infraternal-no-default-roots.pem",
+            )
+            .env("SSL_CERT_DIR", "/nonexistent/infraternal-no-default-roots")
+            .output()
+            .expect("run the trust probe");
+        let output = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && output.contains("1 passed"),
+            "host removal has no trust roots without OpenSSL's defaults:\n{output}"
+        );
+    }
+
+    /// Run only by `removal_trusts_the_host_ca_bundle`, with OpenSSL's defaults unset.
+    #[test]
+    #[ignore = "child of removal_trusts_the_host_ca_bundle"]
+    fn removal_trust_probe() {
+        let ssl = super::removal_tls_connector()
+            .expect("removal TLS connector")
+            .configure()
+            .expect("TLS configuration")
+            .into_ssl("ssh.kayg.org")
+            .expect("TLS session");
+        assert!(!ssl.ssl_context().cert_store().all_certificates().is_empty());
     }
 }
