@@ -143,9 +143,11 @@ fn service_states_are_truthful_in_text_and_json() {
                 // the two observations of a fresh active service. The matrix
                 // runs under a hang-sized budget: it checks how states read,
                 // and a cold debug binary can spend seconds of a 500 ms window
-                // on its own page faults (#334). The budget's structure (one
-                // deadline for both observations) is a unit test in
-                // infraternal-status.
+                // on its own page faults (#334); with its pages evicted under
+                // two agent suites one run exceeded 30 s. No case here waits
+                // for the budget to expire, so its size costs passing runs
+                // nothing. The budget's structure (one deadline for both
+                // observations) is a unit test in infraternal-status.
                 let delay = match active {
                     "delayed" => "/bin/sleep 0.025\n",
                     "busy" => "/bin/sleep 0.3\n",
@@ -182,7 +184,7 @@ fn service_states_are_truthful_in_text_and_json() {
                         .env("XDG_CONFIG_HOME", &config)
                         .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &system)
                         .env("PATH", home.join("bin"))
-                        .env("INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS", "30000")
+                        .env("INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS", "120000")
                         .output()
                         .unwrap();
                     let text = String::from_utf8(output.stdout).unwrap();
