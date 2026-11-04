@@ -195,6 +195,7 @@ pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes:
     if let Err(reply) = validate(verb, &input) {
         return reply;
     }
+    let mut pending = None;
     let result = tokio::time::timeout(Duration::from_secs(4), async {
         let names = operations::load(state)?;
         let mut live = sessions::discover(state).await?;
@@ -208,11 +209,21 @@ pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes:
         if machine.is_some_and(|m| m != "local" && m != hostname) {
             return Ok(Reply::error(3, "Cross-machine session automation is not allowed yet.", "Run on the target machine in your saved session; remote control requires an access rule and approval."));
         }
-        operations::run(state, uid, verb, &input, live, names).await
+        operations::run(state, uid, verb, &input, live, names, &mut pending).await
     }).await;
+    // A created session's name is made durable off the reactor and outside the
+    // deadline: success still means the name is saved, and a disk busy with
+    // writeback delays only this reply, never other terminals (#334). The
+    // deadline keeps bounding discovery and launch, which can stall on shims.
+    let published = match pending {
+        Some(publication) => publication
+            .await
+            .unwrap_or_else(|error| Err(io::Error::other(error))),
+        None => Ok(()),
+    };
     match result {
-        Ok(Ok(reply)) => reply,
-        Ok(Err(_)) => Reply::error(
+        Ok(Ok(reply)) if published.is_ok() => reply,
+        Ok(_) => Reply::error(
             1,
             "The session operation failed.",
             "List sessions and check whether the target is still running before retrying.",
@@ -340,6 +351,7 @@ mod tests {
             &input,
             visible,
             names.clone(),
+            &mut None,
         )
         .await
         .unwrap();
@@ -350,6 +362,7 @@ mod tests {
             &input,
             Vec::new(),
             names,
+            &mut None,
         )
         .await
         .unwrap();
