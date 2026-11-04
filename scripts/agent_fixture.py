@@ -669,6 +669,7 @@ def cleanup(state):
 
 def control(client, number, action, values, expected=True):
     """Send one bounded control action and reject a mismatched reply identity."""
+    values = with_login_grant(action, values)
     encoded = action.encode()
     client.send(0, 0x30, struct.pack('<I', number) + varint(len(encoded)) + encoded + json.dumps(values).encode())
     while True:
@@ -682,6 +683,21 @@ def control(client, number, action, values, expected=True):
                 raise RuntimeError('control action result differs: ' + str(result.get('reason', 'unspecified')))
             return result
         client.process(frame=frame)
+
+
+def with_login_grant(action, values):
+    """Add the login access grant a real server sends with a person's open (D235 Q14, #221).
+
+    The fixture stands in for the server, so it grants exactly the requested
+    account, as the server's evaluator does for the owner's own machine. The
+    infraternal agent still applies every other refusal (for example a
+    rootless agent asked for another account). A caller that sets `grant`
+    itself, for instance to test a refusal, keeps it.
+    """
+    if action in ('terminal.open', 'terminal.login.prepare') and 'person' in values and 'grant' not in values:
+        account = values.get('account')
+        return values | dict(grant=dict(accounts=[account] if account else []))
+    return values
 
 
 def select_terminal(client, session):
