@@ -25,7 +25,7 @@ async function open(page: Page): Promise<void> {
   await page.waitForTimeout(1000);
   for (let attempt = 0; attempt < 4; attempt++) {
     await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("terminal typing");
+    await page.keyboard.type("Terminal › Typing");
     await page.keyboard.press("Enter");
     const ok = await expect.poll(() => page.evaluate(() => document.querySelectorAll('.ui-window[data-window-id="s-terminal-typing"] .ui-ss-row').length), { timeout: 5000 }).toBeGreaterThan(3).then(() => true, () => false);
     if (ok) break;

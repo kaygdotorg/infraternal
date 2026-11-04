@@ -32,7 +32,7 @@ async function paletteLabels(page: Page, filter = ""): Promise<string[]> {
 
 async function openSettingsHosts(page: Page): Promise<void> {
   await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("Terminal Hosts");
+  await page.keyboard.type("Terminal › Hosts");
   await page.waitForTimeout(200);
   await page.keyboard.press("Enter");
   await expect(page.locator(".ui-sp [data-kind=extended-info]")).toBeVisible({ timeout: 5000 });

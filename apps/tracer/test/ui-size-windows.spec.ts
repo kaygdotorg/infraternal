@@ -36,7 +36,7 @@ const canvasWidth = (page: Page): Promise<number> => page.evaluate((sel) => docu
 const showAppearance = async (page: Page): Promise<void> => {
   await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(350);
-  await page.keyboard.type("Appearance Size", { delay: 6 });
+  await page.keyboard.type("Appearance › Size", { delay: 6 });
   await page.waitForTimeout(400);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(1800);

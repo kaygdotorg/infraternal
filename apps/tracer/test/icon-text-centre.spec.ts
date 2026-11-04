@@ -24,7 +24,7 @@ const STATES: Array<[string, string, (page: Page) => Promise<void>]> = [
     await expect(p.locator("textarea:focus")).toHaveCount(1, { timeout: 20_000 });
     await p.keyboard.press("Control+Shift+K");
     await expect(p.locator("#palette-input")).toBeFocused();
-    await p.keyboard.type("Terminal Typing", { delay: 6 });
+    await p.keyboard.type("Terminal › Typing", { delay: 6 });
     await expect(p.locator("#palette-results .result").first()).toContainText("Terminal › Typing");
     await p.keyboard.press("Enter");
     await expect(p.locator("#palette")).toBeHidden();

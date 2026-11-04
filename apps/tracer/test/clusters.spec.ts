@@ -645,7 +645,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
     await expect(page.locator("#terminal-screen")).not.toHaveAttribute("data-toolbar-edit", "");
     // Settings, Toolbar: the layout comes from the account until "Customise for this device".
     await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("terminal typing");
+    await page.keyboard.type("Terminal › Typing");
     await page.keyboard.press("Enter");
     await expect(page.locator(".ui-ts-tag")).toHaveText("Account layout");
     await page.getByRole("button", { name: "Customise for this device" }).click();
@@ -658,7 +658,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
 test("shortcuts: Settings lists the registry, a row rebinds with a conflict warning, and the new key works everywhere", async ({ page }) => {
   await open(page, 3);
   await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("terminal typing");
+  await page.keyboard.type("Terminal › Typing");
   await page.keyboard.press("Enter");
   await expect(page.locator(".ui-ss-row")).not.toHaveCount(0);
   await page.waitForTimeout(1600);
@@ -865,7 +865,7 @@ test("settings is a view: a gear after a divider, a row of windows for each comp
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
   // The palette goes straight to a group's window.
   await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("you devices");
+  await page.keyboard.type("You › Devices");
   await page.keyboard.press("Enter");
   await expect(page.locator('.ui-window[data-window-id="s-you-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
   // The sidebar is a layer over the canvas (it no longer docks), so it is closed before reaching under it.
