@@ -28,7 +28,7 @@ test("a join request is read as hostname, mode and key fingerprint, and the code
 });
 
 test("a join link never opens a sign-in answer, and a sign-in link never opens a join answer", async () => {
-  server({ device: "kayg-laptop", scopes: ["hosts:read", "terminal:connect", "actions:dry-run"] });
+  server({ device: "kayg-laptop", scopes: ["hosts:read", "terminal:connect", "actions:dry-run"], lifetime_seconds: 86400 });
   await expect(inspectDeviceApproval(CODE, "join_machine")).rejects.toBeInstanceOf(AuthError);
   server(join);
   await expect(inspectDeviceApproval(CODE, "sign_in")).rejects.toBeInstanceOf(AuthError);
@@ -63,11 +63,14 @@ test("a join answer with a bad field is refused whole", async () => {
 
 test("a sign-in device name with a format character is refused", async () => {
   const scopes = ["hosts:read", "terminal:connect", "actions:dry-run"];
+  // A valid sign-in answer in every other field (D333: it always carries the key lifetime), so
+  // only the device name can be the reason for the refusal.
+  const lifetime_seconds = 86400;
   for (const device of ["kayg-\u202elaptop", "kayg\u200blaptop", "kayg\ufefflaptop", "kayg\u2028laptop"]) {
-    server({ device, scopes });
+    server({ device, scopes, lifetime_seconds });
     await expect(inspectDeviceApproval(CODE, "sign_in")).rejects.toBeInstanceOf(AuthError);
   }
-  server({ device: "Kayg's laptop", scopes });
+  server({ device: "Kayg's laptop", scopes, lifetime_seconds });
   expect(await inspectDeviceApproval(CODE, "sign_in")).toMatchObject({ device: "Kayg's laptop" });
 });
 

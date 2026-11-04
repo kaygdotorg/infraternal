@@ -276,7 +276,7 @@ test("a request that has expired offers no approval and says what to do", async 
 
 test("a sign-in answer behind a join link is refused", async ({ page }) => {
   await mockJoin(page);
-  await page.route("**/auth/device-inspect", route => route.fulfill({ json: { device: "kayg-laptop", scopes: ["hosts:read", "terminal:connect", "actions:dry-run"] } }));
+  await page.route("**/auth/device-inspect", route => route.fulfill({ json: { device: "kayg-laptop", scopes: ["hosts:read", "terminal:connect", "actions:dry-run"], lifetime_seconds: 86400 } }));
   await page.goto(LINK);
   await expect(page.getByRole("heading", { name: "Can't add this machine" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve with passkey" })).toHaveCount(0);
