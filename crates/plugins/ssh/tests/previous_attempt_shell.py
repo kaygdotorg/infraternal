@@ -1223,7 +1223,8 @@ supersede_stuck_install "{expected}"
         # root install there must still be recognised. The oracle runs as a
         # normal user, so `id` stands in for root and up_root_base for the path.
         self.make_upgrade_fixture()
-        body = '\n{}private_base_mode; echo "rc=$?"\n'
+        # set -e would end the script on a refusal before it could report it.
+        body = '\n{}if private_base_mode; then echo rc=0; else echo rc=1; fi\n'
         as_root = 'id() { echo 0; }\n'
         self.base.chmod(0o711)
         self.up_root_base = str(self.base)
