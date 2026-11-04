@@ -101,10 +101,22 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
         .iter()
         .map(|migration| migration.version)
         .collect();
+    // D347: the numbered history is fixed; every later migration is named by
+    // UTC timestamp (YYYYMMDDHHMMSS) and sorts after it.
+    let numbered = expected.len();
     assert_eq!(
-        versions, expected,
+        versions[..numbered],
+        expected[..],
         "fresh releases apply 0001 through 0040, then 0049"
     );
+    assert!(
+        versions[numbered..]
+            .iter()
+            .all(|version| (20_000_000_000_000..30_000_000_000_000).contains(version)),
+        "migrations after the numbered history are timestamp-named: {:?}",
+        &versions[numbered..]
+    );
+    assert!(versions.windows(2).all(|pair| pair[0] < pair[1]));
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -134,7 +146,14 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_one(&production)
             .await
             .unwrap();
-    assert_eq!((version, applied), (49, 41));
+    let expected_last = migrations.iter().map(|migration| migration.version).max();
+    assert_eq!(
+        (Some(version), applied),
+        (
+            expected_last,
+            i64::try_from(migrations.iter().count()).unwrap()
+        )
+    );
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
             .fetch_one(&production)
@@ -159,7 +178,7 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_all(&fresh)
             .await
             .unwrap();
-    assert_eq!(fresh_versions, expected);
+    assert_eq!(fresh_versions, versions);
     for pool in [&production, &fresh] {
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM terminal_startup_hints")
@@ -331,7 +350,7 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .fetch_all(&production)
             .await
             .unwrap();
-    assert_eq!(after.len(), 41);
+    assert_eq!(after.len(), migrations.iter().count());
     assert_eq!(&after[..28], before.as_slice());
     assert_eq!(after[28].0, 29);
     assert_eq!(after[29].0, 30);
