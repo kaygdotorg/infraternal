@@ -117,12 +117,28 @@ for (const { name, viewport, touch } of VIEWPORTS) {
       expect(Math.abs(marker! - message!)).toBeLessThanOrEqual(0.5);
     });
 
+    test("the key tray offsets the stack once: a card rests on its stack's bottom edge", async ({ page }) => {
+      await open(page);
+      // A terminal screen on a touch device lifts the stack above its key tray (styles.css); the card must not add the lift again.
+      await page.evaluate(() => { document.body.classList.add("terminal-screen"); document.body.style.setProperty("--keybar-height", "50px"); });
+      await show(page, { message: "One", duration: 0 });
+      const gap = await page.evaluate(() => {
+        const stack = document.querySelector(".ui-toast-stack")!.getBoundingClientRect();
+        const card = document.querySelector(".ui-toast")!.getBoundingClientRect();
+        return Math.abs(stack.bottom - card.bottom);
+      });
+      expect(gap).toBeLessThanOrEqual(0.5);
+    });
+
     test("reduced motion keeps only a short opacity change", async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
       await open(page);
       await show(page, { message: "Calm", duration: 0 });
       const t = await cards(page).first().evaluate((node) => { const s = getComputedStyle(node); return { property: s.transitionProperty, duration: s.transitionDuration }; });
       expect(t.property).toBe("opacity");
+      // Reduced motion drops the movement, not the layout: a toast behind the front one still sits behind it.
+      await show(page, { message: "Calmer", duration: 0 });
+      expect(await cards(page).first().evaluate((node) => getComputedStyle(node).transform)).not.toBe("none");
       expect(Number.parseFloat(t.duration)).toBeLessThanOrEqual(0.2);
     });
 
