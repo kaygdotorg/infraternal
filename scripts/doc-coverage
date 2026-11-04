@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""Doc-comment coverage: how much of the code carries documentation comments (D345).
+
+The doc comments are the product documentation, so this script is both the measuring stick and a
+guard rail. It reads the files tracked by git, groups them into units (one per Rust crate, one per
+TypeScript package, one for the Swift helper) and counts, per unit:
+
+  * modules: one per source file, plus inline `mod name { }` blocks in Rust
+  * fns:     free functions, methods and associated functions, public and private
+  * types:   struct, enum, union, trait, type alias (Rust); class, interface, type, enum (TypeScript);
+             class, struct, enum, protocol, actor, typealias (Swift)
+  * consts:  const and static (Rust); top-level const, let, var (TypeScript); let and var (Swift)
+
+An item counts as documented when a doc comment is attached to it: `///` or `/** */` for Rust,
+`/** */` for TypeScript, `///` or `/** */` for Swift. A module is documented when the file opens with
+`//!` (Rust), a `/** */` block that is not the first item's own comment (TypeScript), or a leading
+`///` or `/** */` block (Swift). Plain `//` comments are not documentation.
+
+What is NOT counted: methods in trait impls (the trait documents them), functions nested inside
+other function bodies, struct fields, enum variants, macros, and anything under vendor/,
+node_modules/, target/, build output or `*.d.ts`.
+
+"Code lines" are lines that hold something other than whitespace and comments. Doc lines never
+count as code.
+
+Usage:
+  scripts/doc-coverage                 table per unit (human readable)
+  scripts/doc-coverage --json [FILE]   machine-readable JSON (stdout, or FILE)
+  scripts/doc-coverage --check         the ratchet: exit 1 if any unit's coverage fell below the baseline
+  scripts/doc-coverage --update        raise the baseline to the current numbers (refuses to lower it;
+                                       --force allows lowering, for an owner-approved removal of code)
+
+The baseline is `scripts/doc-coverage-baseline.json`. Coverage per unit is compared as an exact
+fraction (documented / total), so adding one undocumented item to a unit that was fully documented
+fails, and deleting documented code needs `--update --force` in the same commit.
+
+It is a lexer plus a brace tracker rather than a parser: no compilation, no dependencies, and a
+whole-repo scan takes a couple of seconds. It is a counting tool, so a rare oddly formatted item may
+be misread; the ratchet is stable for a given tree either way.
+"""
+
+import bisect
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+BASELINE = os.path.join(ROOT, "scripts", "doc-coverage-baseline.json")
+KINDS = ("mod", "fn", "type", "const")
+
+SKIP_DIRS = ("vendor/", "node_modules/", "target/", "dist/", "build/", ".svelte-kit/")
+
+
+# --------------------------------------------------------------------------------------------------
+# Lexing: find comments and blank out strings, so the structural scan never sees text in either.
+# --------------------------------------------------------------------------------------------------
+
+RUST_TOKEN = re.compile(r"//|/\*|\"|'|(?<![A-Za-z0-9_])(?:br|cr|r)(#*)\"")
+SWIFT_TOKEN = re.compile(r'//|/\*|"""|"')
+TS_TOKEN = re.compile(r"//|/\*|\"|'|`|/")
+STR_DQ = re.compile(r'"(?:[^"\\]|\\.)*"', re.S)
+STR_SQ = re.compile(r"'(?:[^'\\\n]|\\.)*'")
+TS_REGEX = re.compile(r"/(?:[^/\\\n\[]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/[a-z]*")
+REGEX_PREV = set("(,=:[!&|?{};+-*%<>~^")
+BLANK = re.compile(r"[^\n]")
+
+
+def lex(src, lang):
+    """Return (masked, comments, code_lines).
+
+    `masked` is `src` with every comment and string replaced by spaces (newlines kept), so offsets
+    and line numbers match the original. `comments` is a list of (start, end, kind) where kind is
+    "doc" (documents the next item), "inner" (documents the enclosing module) or "plain".
+    `code_lines` counts lines holding anything besides whitespace and comments.
+    """
+    token = {"rust": RUST_TOKEN, "swift": SWIFT_TOKEN, "ts": TS_TOKEN}[lang]
+    nested = lang in ("rust", "swift")
+    blanks = []  # (start, end) spans to blank in the masked text
+    nocomment = []  # comment-only spans, for the code-line count
+    comments = []
+    pos = 0
+    n = len(src)
+    while True:
+        m = token.search(src, pos)
+        if not m:
+            break
+        i, tok = m.start(), m.group()
+        if tok == "//":
+            end = src.find("\n", i)
+            end = n if end < 0 else end
+            head = src[i : i + 4]
+            if head.startswith("///") and not head.startswith("////") and lang != "ts":
+                kind = "doc"
+            elif head.startswith("//!") and lang == "rust":
+                kind = "inner"
+            else:
+                kind = "plain"
+            comments.append((i, end, kind))
+            blanks.append((i, end))
+            nocomment.append((i, end))
+            pos = end
+        elif tok == "/*":
+            depth, j = 1, i + 2
+            while depth and j < n:
+                a, b = src.find("/*", j), src.find("*/", j)
+                if b < 0:
+                    j = n
+                    break
+                if nested and 0 <= a < b:
+                    depth += 1
+                    j = a + 2
+                else:
+                    depth -= 1
+                    j = b + 2
+            head = src[i : i + 4]
+            if head.startswith("/**") and not head.startswith("/***") and head != "/**/":
+                kind = "doc"
+            elif head.startswith("/*!") and lang == "rust":
+                kind = "inner"
+            else:
+                kind = "plain"
+            comments.append((i, j, kind))
+            blanks.append((i, j))
+            nocomment.append((i, j))
+            pos = j
+        elif tok == '"""':  # Swift multi-line string
+            end = src.find('"""', i + 3)
+            end = n if end < 0 else end + 3
+            blanks.append((i, end))
+            pos = end
+        elif tok == '"':
+            sm = STR_DQ.match(src, i)
+            end = sm.end() if sm else i + 1
+            blanks.append((i, end))
+            pos = end
+        elif tok == "'":
+            if lang == "rust":
+                # A char literal, or a lifetime that must be left alone.
+                if src[i + 1 : i + 2] == "\\":
+                    end = src.find("'", i + 3)
+                    end = i + 1 if end < 0 else end + 1
+                elif src[i + 2 : i + 3] == "'":
+                    end = i + 3
+                else:
+                    end = i + 1
+            else:
+                sm = STR_SQ.match(src, i)
+                end = sm.end() if sm else i + 1
+            if end > i + 1:
+                blanks.append((i, end))
+            pos = end
+        elif tok == "`":  # TypeScript template literal; `${ }` expressions are blanked with it
+            j = i + 1
+            while j < n:
+                c = src[j]
+                if c == "\\":
+                    j += 2
+                elif c == "`":
+                    j += 1
+                    break
+                elif c == "$" and src[j + 1 : j + 2] == "{":
+                    depth, j = 1, j + 2
+                    while depth and j < n:
+                        depth += {"{": 1, "}": -1}.get(src[j], 0)
+                        j += 1
+                else:
+                    j += 1
+            blanks.append((i, j))
+            pos = j
+        elif tok == "/":  # TypeScript: division or a regex literal, decided by the previous token
+            k = i - 1
+            while k >= 0 and src[k] in " \t\n":
+                k -= 1
+            prev_word = re.search(r"[A-Za-z_]+$", src[max(0, k - 8) : k + 1])
+            is_regex = k < 0 or src[k] in REGEX_PREV or (prev_word and prev_word.group() in ("return", "typeof"))
+            rm = TS_REGEX.match(src, i) if is_regex else None
+            if rm:
+                blanks.append((i, rm.end()))
+                pos = rm.end()
+            else:
+                pos = i + 1
+        else:  # Rust raw string r#"..."#
+            end = src.find('"' + m.group(1), m.end())
+            end = n if end < 0 else end + 1 + len(m.group(1))
+            blanks.append((i, end))
+            pos = end
+    return blank_spans(src, blanks), comments, count_code_lines(src, nocomment)
+
+
+def blank_spans(src, spans):
+    """Replace each span with spaces, keeping newlines so offsets still line up."""
+    out, last = [], 0
+    for a, b in spans:
+        out.append(src[last:a])
+        out.append(BLANK.sub(" ", src[a:b]))
+        last = b
+    out.append(src[last:])
+    return "".join(out)
+
+
+def count_code_lines(src, comment_spans):
+    """Lines that still hold something once comments are removed."""
+    return sum(1 for line in blank_spans(src, comment_spans).split("\n") if line.strip())
+
+
+class Doc:
+    """Answers "is the item starting here documented?" from the lexed comments."""
+
+    def __init__(self, masked, comments, attr_re):
+        self.masked = masked
+        self.attr_re = attr_re
+        docs = [c for c in comments if c[2] == "doc"]
+        self.doc_ends = [c[1] for c in docs]
+        self.inner = [c for c in comments if c[2] == "inner"]
+
+    def blank_between(self, a, b):
+        """True when only whitespace and attributes lie between offsets a and b."""
+        text = self.masked[a:b]
+        prev = None
+        while prev != text:
+            prev, text = text, self.attr_re.sub("", text)
+        return not text.strip()
+
+    def item(self, head):
+        """The item whose keyword starts at `head` has a doc comment right above it."""
+        k = bisect.bisect_right(self.doc_ends, head) - 1
+        return k >= 0 and self.blank_between(self.doc_ends[k], head)
+
+
+# --------------------------------------------------------------------------------------------------
+# Rust
+# --------------------------------------------------------------------------------------------------
+
+RUST_ATTR = re.compile(r"#!?\[[^\[\]]*\]")
+RUST_ITEM = re.compile(
+    r"\s*(?P<pub>pub(?:\s*\([^)]*\))?\s+)?(?:default\s+)?"
+    r"(?:(?:const|async|unsafe|safe)\s+|extern\s+)*"
+    r"(?P<kw>fn|struct|enum|union|trait|type|const|static|mod)\s+(?:mut\s+)?(?P<name>[A-Za-z_]\w*)"
+)
+RUST_KIND = {"fn": "fn", "struct": "type", "enum": "type", "union": "type", "trait": "type", "type": "type",
+             "const": "const", "static": "const", "mod": "mod"}
+RUST_BLOCK_IMPL = re.compile(r"\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:unsafe\s+)?impl\b")
+RUST_FOR = re.compile(r"\sfor\s+(?!<)")
+RUST_BOUNDARY = re.compile(r"[{};]")
+
+
+def scan_rust(src, counts):
+    masked, comments, loc = lex(src, "rust")
+    doc = Doc(masked, comments, RUST_ATTR)
+    # The file is a module: documented when its first non-attribute content is a `//!` block.
+    first_inner = doc.inner[0][0] if doc.inner else None
+    tally(counts, "mod", True, first_inner is not None and doc.blank_between(0, first_inner))
+
+    stack = []  # (kind, pub): "mod" | "impl" | "traitimpl" | "trait" | "other"
+    last = -1
+    for m in RUST_BOUNDARY.finditer(masked):
+        i = m.start()
+        header = RUST_ATTR_STRIP(masked[last + 1 : i])
+        stmt_start = last + 1
+        parent = stack[-1] if stack else ("mod", True)
+        im = RUST_ITEM.match(header)
+        kind_of_block = "other"
+        is_pub_item = False
+        if im and parent[0] in ("mod", "impl", "trait") and im.group("name") != "_":
+            kw = im.group("kw")
+            # `head` (the keyword's offset, after any attributes) is where the doc comment must end.
+            head = locate(masked, stmt_start, i, im.group("kw"), im.group("name"))
+            is_pub = bool(im.group("pub")) or (parent[0] == "trait" and parent[1])
+            is_pub_item = is_pub
+            documented = doc.item(head) or bool(re.search(r"#\[\s*doc\b", masked[stmt_start:head]))
+            if kw == "mod" and m.group() == "{":
+                tally(counts, "mod", is_pub, documented or inline_mod_doc(doc, masked, i))
+            elif kw != "mod":
+                tally(counts, RUST_KIND[kw], is_pub, documented)
+        if m.group() == "{":
+            if im and im.group("kw") == "mod":
+                kind_of_block = "mod"
+            elif im and im.group("kw") == "trait":
+                kind_of_block = "trait"
+            elif RUST_BLOCK_IMPL.match(header):
+                kind_of_block = "traitimpl" if RUST_FOR.search(header) else "impl"
+            stack.append((kind_of_block, is_pub_item))
+        elif m.group() == "}":
+            if stack:
+                stack.pop()
+        last = i
+    return loc
+
+
+def RUST_ATTR_STRIP(text):
+    """Drop leading attributes so the item keyword starts the header."""
+    prev = None
+    while prev != text:
+        prev, text = text, re.sub(r"^\s*#!?\[(?:[^\[\]]|\[[^\[\]]*\])*\]", "", text)
+    return text
+
+
+def locate(masked, start, end, kw, name):
+    """Offset of the item keyword (after any attributes) inside masked[start:end]."""
+    m = re.search(r"(?<![A-Za-z0-9_])" + re.escape(kw) + r"\s+(?:mut\s+)?" + re.escape(name) + r"(?![A-Za-z0-9_])",
+                  masked[start:end])
+    return start + (m.start() if m else 0)
+
+
+def inline_mod_doc(doc, masked, brace):
+    """An inline `mod x { //! ... }` documents itself with an inner comment right after the brace."""
+    k = bisect.bisect_left([c[0] for c in doc.inner], brace)
+    return k < len(doc.inner) and not masked[brace + 1 : doc.inner[k][0]].strip()
+
+
+# --------------------------------------------------------------------------------------------------
+# TypeScript (and the .mjs/.js scripts)
+# --------------------------------------------------------------------------------------------------
+
+TS_DECL = re.compile(
+    r"[ \t]*(?P<exp>export[ \t]+)?(?:default[ \t]+)?(?:declare[ \t]+)?(?:async[ \t]+)?"
+    r"(?P<kw>function\b\*?|(?:abstract[ \t]+)?class\b|interface\b|type\b|(?:const[ \t]+)?enum\b|const\b|let\b|var\b)"
+    r"[ \t]*\*?[ \t]*(?P<name>[A-Za-z_$][\w$]*)"
+)
+TS_METHOD = re.compile(
+    r"[ \t]*(?:(?:public|private|protected|static|async|override|readonly|abstract|declare)[ \t]+)*"
+    r"(?:(?:get|set)[ \t]+)?(?:\*[ \t]*)?(?P<name>[#A-Za-z_$][\w$]*)[ \t]*(?:<[^>(\n]*>)?[ \t]*\("
+)
+TS_NOT_METHOD = {"if", "for", "while", "switch", "catch", "return", "new", "else", "throw", "super", "typeof",
+                 "await", "function", "do", "with"}
+TS_CLASS_HEADER = re.compile(r"(?:^|\n)[ \t]*(?:export[ \t]+)?(?:default[ \t]+)?(?:declare[ \t]+)?(?:abstract[ \t]+)?class\b[^{};]*$")
+TS_FN_INIT = re.compile(r"\s*(?::[^=;]*)?=\s*(?:async\s+)?(?:function\b|[A-Za-z_$][\w$]*\s*=>|(?=\())")
+TS_ARROW_AFTER_PARENS = re.compile(r"\s*(?::[^=;{]*)?=>")
+NO_ATTR = re.compile(r"(?!)")  # TypeScript has no attribute syntax the scan must skip
+
+
+def scan_ts(src, counts):
+    masked, comments, loc = lex(src, "ts")
+    doc = Doc(masked, comments, NO_ATTR)
+    tally(counts, "mod", True, ts_module_documented(src, masked, comments, TS_DECL))
+
+    stack, pdepth, last = [], 0, 0
+    pos = 0
+    for line in masked.split("\n"):
+        start = pos
+        pos += len(line) + 1
+        top = stack[-1] if stack else None
+        if pdepth == 0 and (top is None or top == "class") and line.strip():
+            if top is None:
+                m = TS_DECL.match(line)
+                if m:
+                    kw = re.sub(r"\s+", " ", m.group("kw")).rstrip("*")
+                    exported = bool(m.group("exp"))
+                    if kw == "function":
+                        kind = "fn"
+                    elif kw in ("class", "abstract class", "interface", "type", "enum", "const enum"):
+                        kind = "type"
+                    else:  # const / let / var: a function when the initialiser is one
+                        kind = "fn" if ts_initialiser_is_fn(masked, start + m.end()) else "const"
+                    head = start + len(line) - len(line.lstrip())
+                    tally(counts, kind, exported, doc.item(head))
+            else:
+                m = TS_METHOD.match(line)
+                if m and m.group("name") not in TS_NOT_METHOD:
+                    head = start + len(line) - len(line.lstrip())
+                    tally(counts, "fn", True, doc.item(head))
+        for k, ch in enumerate(line):
+            if ch in "([":
+                pdepth += 1
+            elif ch in ")]":
+                pdepth = max(0, pdepth - 1)
+            elif ch == "{":
+                at = start + k
+                stack.append("class" if TS_CLASS_HEADER.search(masked[last:at]) else "other")
+                last = at + 1
+            elif ch == "}":
+                if stack:
+                    stack.pop()
+                last = start + k + 1
+            elif ch == ";":
+                last = start + k + 1
+    return loc
+
+
+def ts_initialiser_is_fn(masked, at):
+    """After `const name`, is the value a function expression or an arrow function?"""
+    m = TS_FN_INIT.match(masked, at)
+    if not m:
+        return False
+    if masked[m.end() : m.end() + 1] != "(":
+        return True
+    depth, j = 0, m.end()
+    while j < len(masked):
+        depth += {"(": 1, ")": -1}.get(masked[j], 0)
+        j += 1
+        if depth == 0:
+            break
+    return bool(TS_ARROW_AFTER_PARENS.match(masked, j))
+
+
+def ts_module_documented(src, masked, comments, decl_re):
+    """A leading doc block counts as the module's own unless it is the first declaration's comment."""
+    text = masked
+    if text.startswith("#!"):
+        text = "\n" + text.split("\n", 1)[-1]
+    docs = [c for c in comments if c[2] == "doc"]
+    if not docs:
+        return False
+    a, b, _ = docs[0]
+    if masked[:a].strip() and not masked.startswith("#!"):
+        return False
+    if re.search(r"@(module|file|fileoverview|packageDocumentation)\b", src[a:b]):
+        return True
+    gap = src[b:]
+    ws = len(gap) - len(gap.lstrip())
+    if gap[:ws].count("\n") >= 2 or gap[ws : ws + 2] in ("//", "/*"):
+        return True
+    line = masked[b + ws :].split("\n", 1)[0]
+    return not decl_re.match(line)
+
+
+# --------------------------------------------------------------------------------------------------
+# Swift
+# --------------------------------------------------------------------------------------------------
+
+SWIFT_ATTR = re.compile(r"@\w+(?:\([^()]*\))?")
+SWIFT_DECL = re.compile(
+    r"[ \t]*(?:@\w+(?:\([^()]*\))?[ \t]+)*"
+    r"(?P<mods>(?:(?:public|open|private|fileprivate|internal|final|static|class|mutating|nonmutating|override|lazy|"
+    r"required|convenience|nonisolated|indirect|weak|unowned|dynamic)(?:\([^)]*\))?[ \t]+)*)"
+    r"(?P<kw>func|class|struct|enum|protocol|actor|typealias|init|let|var)\b[ \t]*(?P<name>[A-Za-z_]\w*)?"
+)
+SWIFT_TYPE_HEADER = re.compile(r"(?:^|\n)[ \t]*(?:[\w@()]+[ \t]+)*(?:class|struct|enum|protocol|extension|actor)\b[^{};]*$")
+
+
+def scan_swift(src, counts):
+    masked, comments, loc = lex(src, "swift")
+    doc = Doc(masked, comments, SWIFT_ATTR)
+    docs = [c for c in comments if c[2] == "doc"]
+    tally(counts, "mod", True, bool(docs) and ts_module_documented(src, masked, comments, SWIFT_DECL))
+    stack, last, pos = [], 0, 0
+    for line in masked.split("\n"):
+        start = pos
+        pos += len(line) + 1
+        top = stack[-1] if stack else None
+        if line.strip() and (top is None or top == "type"):
+            m = SWIFT_DECL.match(line)
+            if m and (m.group("name") or m.group("kw") == "init"):
+                kw = m.group("kw")
+                kind = {"func": "fn", "init": "fn", "let": "const", "var": "const"}.get(kw, "type")
+                is_pub = bool(re.search(r"\b(public|open)\b", m.group("mods")))
+                head = start + len(line) - len(line.lstrip())
+                tally(counts, kind, is_pub, doc.item(head))
+        for k, ch in enumerate(line):
+            if ch == "{":
+                at = start + k
+                stack.append("type" if SWIFT_TYPE_HEADER.search(masked[last:at]) else "other")
+                last = at + 1
+            elif ch == "}":
+                if stack:
+                    stack.pop()
+                last = start + k + 1
+    return loc
+
+
+# --------------------------------------------------------------------------------------------------
+# Gathering units and reporting
+# --------------------------------------------------------------------------------------------------
+
+
+def tally(counts, kind, is_pub, documented):
+    """Record one item in its unit's counters."""
+    counts[kind][1] += 1
+    counts[kind][0] += bool(documented)
+    if is_pub:
+        counts["pub"][1] += 1
+        counts["pub"][0] += bool(documented)
+
+
+def new_counts():
+    return {k: [0, 0] for k in (*KINDS, "pub")}
+
+
+def tracked_files():
+    out = subprocess.run(["git", "-C", ROOT, "ls-files", "-z"], check=True, capture_output=True).stdout
+    return [p for p in out.decode().split("\0") if p]
+
+
+def unit_roots(files):
+    """Directories that own sources: Cargo.toml dirs for Rust, package.json dirs for TypeScript."""
+    cargo = {os.path.dirname(f) for f in files if f.endswith("/Cargo.toml") and not f.startswith("vendor/")}
+    pkg = {os.path.dirname(f) for f in files if f.endswith("/package.json") and not any(s in f for s in SKIP_DIRS)}
+    return cargo, pkg
+
+
+def owner(path, roots):
+    """Nearest ancestor directory in `roots`, or None."""
+    d = os.path.dirname(path)
+    while d:
+        if d in roots:
+            return d
+        d = os.path.dirname(d)
+    return None
+
+
+def collect():
+    files = tracked_files()
+    cargo, pkg = unit_roots(files)
+    units = {}
+    for f in files:
+        if any(f.startswith(s) or "/" + s in f for s in SKIP_DIRS) or f.endswith(".d.ts"):
+            continue
+        ext = f.rsplit(".", 1)[-1]
+        if ext == "rs":
+            key, scan = "rust:" + (owner(f, cargo) or "(none)"), scan_rust
+        elif ext in ("ts", "mjs", "js", "cjs"):
+            o = owner(f, pkg)
+            key, scan = "ts:" + (o or os.path.dirname(f) or "."), scan_ts
+        elif ext == "swift":
+            key, scan = "swift:" + os.path.dirname(f), scan_swift
+        else:
+            continue
+        try:
+            with open(os.path.join(ROOT, f), encoding="utf-8") as fh:
+                src = fh.read()
+        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+            continue
+        u = units.setdefault(key, {"files": 0, "code_lines": 0, "counts": new_counts()})
+        u["files"] += 1
+        u["code_lines"] += scan(src, u["counts"])
+    for u in units.values():
+        u["documented"] = sum(u["counts"][k][0] for k in KINDS)
+        u["total"] = sum(u["counts"][k][1] for k in KINDS)
+    return dict(sorted(units.items()))
+
+
+def pct(doc, total):
+    return 100.0 * doc / total if total else 100.0
+
+
+def render_table(units, baseline=None):
+    rows = [("unit", "files", "code", "mod", "fn", "type", "const", "pub", "doc/total", "%")]
+    if baseline is not None:
+        rows[0] += ("vs base",)
+    totals = new_counts()
+    tot_files = tot_code = 0
+    for key, u in units.items():
+        c = u["counts"]
+        row = (key, str(u["files"]), str(u["code_lines"]),
+               *(f"{c[k][0]}/{c[k][1]}" for k in (*KINDS, "pub")),
+               f"{u['documented']}/{u['total']}", f"{pct(u['documented'], u['total']):.1f}")
+        if baseline is not None:
+            b = baseline.get(key)
+            row += ("new" if not b else f"{pct(u['documented'], u['total']) - pct(b['documented'], b['total']):+.2f}",)
+        rows.append(row)
+        tot_files += u["files"]
+        tot_code += u["code_lines"]
+        for k in totals:
+            totals[k][0] += c[k][0]
+            totals[k][1] += c[k][1]
+    d = sum(totals[k][0] for k in KINDS)
+    t = sum(totals[k][1] for k in KINDS)
+    rows.append(("TOTAL", str(tot_files), str(tot_code), *(f"{totals[k][0]}/{totals[k][1]}" for k in (*KINDS, "pub")),
+                 f"{d}/{t}", f"{pct(d, t):.1f}") + (("",) if baseline is not None else ()))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    lines = []
+    for n, r in enumerate(rows):
+        lines.append("  ".join(c.ljust(widths[i]) if i == 0 else c.rjust(widths[i]) for i, c in enumerate(r)))
+        if n == 0:
+            lines.append("  ".join("-" * w for w in widths))
+    return "\n".join(lines)
+
+
+def load_baseline():
+    try:
+        with open(BASELINE, encoding="utf-8") as fh:
+            return json.load(fh)["units"]
+    except FileNotFoundError:
+        return {}
+
+
+def dropped(units, baseline):
+    """Units whose documented fraction is below the baseline's, compared exactly (no float rounding)."""
+    out = []
+    for key, b in baseline.items():
+        u = units.get(key)
+        if u and u["total"] and b["total"] and u["documented"] * b["total"] < b["documented"] * u["total"]:
+            out.append(key)
+    return out
+
+
+def compact(units):
+    return {k: {"documented": u["documented"], "total": u["total"]} for k, u in units.items()}
+
+
+def main(argv):
+    units = collect()
+    if "--json" in argv:
+        i = argv.index("--json")
+        payload = json.dumps({"units": units}, indent=2, sort_keys=True) + "\n"
+        if i + 1 < len(argv):
+            with open(argv[i + 1], "w", encoding="utf-8") as fh:
+                fh.write(payload)
+        else:
+            sys.stdout.write(payload)
+        return 0
+    baseline = load_baseline()
+    if "--update" in argv:
+        bad = dropped(units, baseline)
+        if bad and "--force" not in argv:
+            print("refusing to lower the baseline for: " + ", ".join(bad) + " (use --force if the owner approved)")
+            return 1
+        merged = compact(units) if "--force" in argv else {**baseline, **{
+            k: v for k, v in compact(units).items() if k not in baseline or k not in bad}}
+        with open(BASELINE, "w", encoding="utf-8") as fh:
+            json.dump({"units": dict(sorted(merged.items()))}, fh, indent=1, sort_keys=True)
+            fh.write("\n")
+        print(f"baseline written: {len(merged)} units")
+        return 0
+    if "--check" in argv:
+        bad = dropped(units, baseline)
+        print(render_table(units, baseline))
+        gone = sorted(set(baseline) - set(units))
+        if gone:
+            print("\nnote: baseline units no longer present (run --update --force to drop): " + ", ".join(gone))
+        if bad:
+            print("\nDOC COVERAGE FELL (D345). Every item you add needs a doc comment; coverage may never go down:")
+            for k in bad:
+                u, b = units[k], baseline[k]
+                print(f"  {k}: {u['documented']}/{u['total']} = {pct(u['documented'], u['total']):.2f}% "
+                      f"< baseline {b['documented']}/{b['total']} = {pct(b['documented'], b['total']):.2f}%")
+            return 1
+        print("\ndoc coverage ratchet: ok")
+        return 0
+    print(render_table(units))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
