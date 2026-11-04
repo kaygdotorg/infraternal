@@ -31,12 +31,18 @@ test("no palette row renders without a title, whole list and scoped to Settings"
   const blank = () => page.locator("#palette-results .result").evaluateAll((rows) => rows.filter((r) => !(r.querySelector(".result-label")?.textContent ?? "").trim()).map((r) => (r as HTMLElement).dataset.action));
   expect(await page.locator("#palette-results .result").count()).toBeGreaterThan(20);
   expect(await blank()).toEqual([]);
-  // Every settings entry the palette offers carries its section title.
-  await page.keyboard.type("settings");
-  const settings = await page.locator("#palette-results .result-label").allTextContents();
-  expect(settings.filter((t) => t.startsWith("Settings")).length).toBeGreaterThanOrEqual(8);
+  // Every settings entry the palette offers carries its component and group ("Appearance › Theme").
+  const settings: string[] = [];
+  for (const word of ["appearance", "terminal"]) {
+    await page.locator("#palette-input").fill(word);
+    // The wording of the settings loads on demand (D188) and the palette is refreshed when it arrives: wait for the group rows.
+    const rowsOf = page.locator('#palette-results .result[data-action^="canvas:settings:"]').filter({ hasText: "›" });
+    await expect.poll(() => rowsOf.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(4);
+    settings.push(...await rowsOf.allTextContents());
+  }
+  expect(settings.filter((t) => t.includes("›")).length).toBeGreaterThanOrEqual(8);
   await page.keyboard.press("Escape");
-  // The list scoped to the Settings view: its windows are named by their sections.
+  // The list scoped to the Settings view: its windows are named by their groups.
   await page.evaluate(() => {
     const p = (window as unknown as { __tracerClusters: { views(): Array<{ id: string; x: number; y: number }>; setCamera(x: number, y: number, z: number): void } }).__tracerClusters;
     const v = p.views().find((view) => view.id === "settings")!;
@@ -48,7 +54,7 @@ test("no palette row renders without a title, whole list and scoped to Settings"
   await expect(page.locator("#palette")).toBeVisible();
   const names = await page.locator("#palette-results .result-label").allTextContents();
   expect(names.length).toBeGreaterThanOrEqual(5);
-  expect(names).toContain("Appearance");
+  expect(names).toContain("Theme");
   expect(await blank()).toEqual([]);
 });
 

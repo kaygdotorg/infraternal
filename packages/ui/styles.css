@@ -1265,3 +1265,69 @@
 .ui-slider-value { flex: none; min-width: 5ch; text-align: right; color: var(--fg-2); font: var(--ui-type-label); font-variant-numeric: tabular-nums; letter-spacing: var(--ui-tracking); }
 @media (pointer: coarse) { .ui-slider-input { height: 2.75rem; } .ui-slider-input::-webkit-slider-thumb { width: 1.375rem; height: 1.375rem; margin-top: -0.5625rem; } .ui-slider-input::-moz-range-thumb { width: 1.375rem; height: 1.375rem; } }
 @media (prefers-reduced-motion: reduce) { .ui-slider-input::-webkit-slider-thumb, .ui-slider-input::-moz-range-thumb { transition: none; } }
+
+/* ---- A setting row (setting-row.ts, #304): the name, the one-line help, the value with its Reset, then the default and the
+   allowed range, in one column on one left edge (TASTE: one shared left edge for title, input, list and buttons). ----
+   Stacked, not side by side: a window can be a quarter of the screen wide (four to a row), and a field beside the name would
+   leave the name a sliver. The field and Reset share one centre line, and Reset keeps its place when it fades, so the field
+   never moves when the value changes. */
+.ui-setting-list { display: grid; margin: 0; padding: 0; }
+.ui-setting { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; padding: 0.5rem 0 0.75rem; }
+.ui-setting + .ui-setting { border-top: 1px solid var(--line); }
+.ui-setting-names { display: contents; }
+.ui-setting-title { grid-row: 1; display: flex; align-items: center; min-width: 0; min-height: var(--ui-control-h, 1.875rem); color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: normal; }
+.ui-setting-explain { grid-row: 2; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-setting-control { grid-row: 3; display: flex; align-items: center; gap: 0.25rem; margin: 0.375rem 0 0.25rem; height: var(--ui-control-h, 1.875rem); }
+.ui-setting-caption { grid-row: 4; color: var(--fg-3); font-size: var(--text-caption, 0.6875rem); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); }
+.ui-setting-input { width: 7rem; min-width: 0; height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0 0.625rem; border: 0; border-radius: 0.5rem; background: var(--hover); color: var(--fg); font: var(--ui-type-label); font-size: var(--text-input, 0.8125rem); line-height: normal; letter-spacing: var(--ui-tracking); text-align: left; transition: background-color 140ms ease, color 140ms ease; }
+.ui-setting-input:focus { outline: none; }
+[data-focus-ring="on"] .ui-setting-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-setting[data-invalid] .ui-setting-input { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.ui-setting-reset { display: grid; flex: none; place-items: center; width: calc(var(--ui-control-h, 1.875rem) - 0.25rem); height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0; border: 0; border-radius: 50%; background: none; color: var(--fg-2); cursor: pointer; transition: opacity 160ms ease, background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-setting-reset svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ui-setting-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
+.ui-setting-reset[data-shown="false"] { opacity: 0; pointer-events: none; }
+@media (hover: hover) and (pointer: fine) { .ui-setting-reset:hover { background: var(--hover); } }
+[data-focus-ring="on"] .ui-setting-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The refusal slides open under the row (height and opacity) and says what is allowed and what is still in use. */
+.ui-setting-refusal { display: grid; grid-column: 1 / -1; grid-row: 5; justify-self: stretch; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms ease; }
+.ui-setting-refusal > div { min-height: 0; overflow: hidden; }
+.ui-setting-refusal p { margin: 0; padding-top: 0.375rem; color: var(--danger); font-size: var(--text-secondary, 0.75rem); line-height: 1.4; letter-spacing: var(--ui-tracking); }
+.ui-setting[data-invalid] .ui-setting-refusal { grid-template-rows: 1fr; opacity: 1; }
+/* ⌘K jumped here: a faint fill that fades, never an outline (TASTE: selection is quiet). */
+.ui-setting[data-found] { border-radius: 0.5rem; animation: ui-setting-found 1800ms ease-out; }
+@keyframes ui-setting-found { from { background: var(--accent-soft); } to { background: transparent; } }
+/* Touch: the field and Reset are full 44 px targets (TASTE: touch follows iOS), and the text never drops below 16 px so iOS does not zoom. */
+@media (pointer: coarse) { .ui-setting-input { width: 7.5rem; height: var(--ui-control-h); font-size: 1rem; } .ui-setting-reset { width: var(--ui-control-h); height: var(--ui-control-h); } }
+@media (prefers-reduced-motion: reduce) { .ui-setting-refusal { transition: opacity 160ms ease; } }
+/* A choice (the shared segmented control) or a switch in a setting row: same place, same centre line as a typed field. */
+.ui-setting-switch { display: inline-flex; align-items: center; height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); cursor: pointer; }
+.ui-setting-field.ui-tabs { flex: none; }
+
+/* ---- The "?" preview (docs-preview.ts, bottom-sheet.ts, #304) ----
+   A popover anchored to the "?" (a bottom sheet on a phone): the title with the expand icon at its top right, one lead sentence, two to four
+   bullets, and sometimes a small table. Sizes are the type scale's; spacing is on the 4 px grid; the expand icon is the shared icon button. */
+.ui-dp-pop { padding: 0; width: max-content; }
+.ui-dp { display: grid; gap: 0.375rem; padding: 0.625rem 0.75rem 0.75rem; min-width: 12rem; }
+.ui-dp-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: calc(var(--ui-control-h, 1.875rem) - 0.375rem); }
+.ui-dp-title { min-width: 0; margin: 0; color: var(--fg); font: var(--ui-type-label); font-size: var(--text-body, 0.8125rem); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: 1.3; overflow-wrap: anywhere; }
+.ui-dp-expand { flex: none; margin-right: -0.25rem; }
+.ui-dp-lead { margin: 0; color: var(--fg); font-size: var(--text-body, 0.8125rem); font-weight: var(--fw-secondary, 400); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-dp-bullets { display: grid; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
+.ui-dp-bullet { position: relative; padding-left: 1rem; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-dp-bullet::before { content: ""; position: absolute; left: 0.125rem; top: 0.5em; width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--fg-3); }
+.ui-dp-empty { margin: 0; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.45; }
+.ui-dp-table-wrap { margin-top: 0.125rem; overflow-x: auto; }
+.ui-dp-table { width: 100%; border-collapse: collapse; font-size: var(--text-caption, 0.6875rem); line-height: 1.35; }
+.ui-dp-table th { padding: 0 0.5rem 0.25rem 0; color: var(--fg-3); font-weight: var(--fw-label, 500); text-align: left; text-transform: uppercase; letter-spacing: 0.02em; }
+.ui-dp-table td { padding: 0.25rem 0.5rem 0.25rem 0; border-top: 1px solid var(--line); color: var(--ui-text-secondary); vertical-align: top; }
+.ui-dp-table td:first-child { color: var(--fg); }
+.ui-dp-table th:last-child, .ui-dp-table td:last-child { padding-right: 0; }
+/* The bottom sheet: lifted from the bottom edge, clear of the home indicator, never past 70 % of the visual viewport. */
+.ui-sheet-scrim { position: absolute; z-index: 8; inset: 0; background: rgb(0 0 0 / 0.28); }
+.ui-sheet { position: absolute; z-index: 9; left: 0.5rem; right: 0.5rem; bottom: calc(0.5rem + env(safe-area-inset-bottom)); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border-radius: 1.25rem; outline: none; }
+.ui-sheet > .ui-dp-holder { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.ui-sheet-grab { display: grid; place-items: center; height: 1.5rem; cursor: grab; }
+.ui-sheet-handle { width: 2.25rem; height: 0.25rem; border-radius: 0.125rem; background: var(--fg-3); opacity: 0.6; }
+.ui-sheet .ui-dp { padding-top: 0.125rem; padding-bottom: 1rem; }
+@media (pointer: coarse) { .ui-dp-expand { margin-right: -0.375rem; } .ui-dp-lead { font-size: var(--text-body); } }
