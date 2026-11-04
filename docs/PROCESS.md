@@ -4,6 +4,9 @@
 Adopted by the owner on 2026-10-06 (P1). This file is the standing process.
 `CLAUDE.md` points here, and each job prompt includes the Definition of Done.
 
+The adopted [engineering practices](ENGINEERING.md) (D351) guide code and
+review; their checks complement this process.
+
 The principle: **machines enforce performance, people decide matters of
 judgment, and nothing waits on either.**
 
