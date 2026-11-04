@@ -580,9 +580,15 @@ impl TraefikChild {
     /// Returns operating-system errors while stopping or reaping the child, or a leaf that
     /// would not empty.
     pub fn stop(&mut self) -> io::Result<()> {
-        let leaf_killed = self.leaf.as_ref().is_some_and(|leaf| leaf.kill().is_ok());
-        if !leaf_killed && !self.child.try_wait().is_ok_and(|status| status.is_some()) {
-            // The child can exit between try_wait and kill; wait below is the authoritative reap.
+        if let Some(leaf) = &self.leaf {
+            // Best effort here; `remove` below kills again and reports a leaf that won't empty.
+            let _ = leaf.kill();
+        }
+        // Always signal the direct child as well. Rootless, a compromised child can move itself
+        // out of its leaf, and `cgroup.kill` then misses it; without this the wait below would
+        // block forever (#281, J172 P2-1). std still holds the unreaped child, so its PID can't
+        // have been reused. It can exit between try_wait and kill; wait is the authoritative reap.
+        if !self.child.try_wait().is_ok_and(|status| status.is_some()) {
             let _ = self.child.kill();
         }
         let _ = self.child.wait()?;

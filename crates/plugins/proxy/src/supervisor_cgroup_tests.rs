@@ -15,7 +15,7 @@ use super::{
     DYNAMIC_CONFIG_FILENAME, TraefikSupervisor, fake_traefik, generation_probe_server,
     generation_probe_settings, public_service, supervisor_fixture,
 };
-use crate::cgroup::ProxyCgroups;
+use crate::{cgroup::ProxyCgroups, supervisor::TraefikChild};
 use std::{
     io::BufRead,
     os::unix::fs::MetadataExt as _,
@@ -319,6 +319,77 @@ fn contained_fixture(name: &str) -> Option<(PathBuf, PathBuf, ProxyCgroups)> {
             None
         }
     }
+}
+
+/// Start a fake Traefik running `body` (after `c` holds its own cgroup path) in a fresh leaf.
+fn spawn_in_leaf(root: &Path, cgroups: &ProxyCgroups, body: &str) -> TraefikChild {
+    let executable = root.join("fake-traefik");
+    let config = root.join("traefik.toml");
+    let script = format!("#!/bin/sh\nc=$(/bin/sed -n 's/^0:://p' /proc/self/cgroup)\n{body}\n");
+    fake_traefik(&executable, script.as_bytes());
+    crate::config::write_proxy_config_atomic(&config, b"{}").expect("write config fixture");
+    TraefikChild::spawn_holding(
+        &executable,
+        &config,
+        &[],
+        None,
+        Some(cgroups),
+        std::sync::Arc::new(|_: String| {}),
+    )
+    .expect("spawn contained child")
+}
+
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| !rest.starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+// P2-1: rootless, the child owns its cgroup files and can move itself to the parent. Stop must
+// still finish and take the direct child, rather than wait for it forever. Rootful, the move is
+// refused and this is the ordinary stop.
+#[test]
+fn a_child_that_leaves_its_cgroup_is_still_stopped() {
+    let Some((root, _lock, cgroups)) = contained_fixture("escape") else {
+        return;
+    };
+    let marker = marker();
+    let _cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    let mut child = spawn_in_leaf(
+        &root,
+        &cgroups,
+        &format!(
+            "echo $$ > \"/sys/fs/cgroup${{c%/*}}/cgroup.procs\" 2>/dev/null\nexec /bin/sleep {marker}"
+        ),
+    );
+    let pid = child.id();
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the fake Traefik started"
+    );
+    let (done, finished) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let result = child.stop();
+        let _ = done.send(result.map_err(|error| error.to_string()));
+    });
+    let outcome = finished.recv_timeout(Duration::from_secs(10));
+    let still_alive = alive(pid);
+    sweep(&marker);
+    let _ = std::fs::remove_dir_all(&root);
+    let outcome = outcome.expect("stop must finish even when the child left its cgroup");
+    eprintln!("escape: stop={outcome:?} direct child alive={still_alive}");
+    assert!(outcome.is_ok(), "stop failed: {outcome:?}");
+    assert!(!still_alive, "the direct child must be stopped");
 }
 
 // P3-5: the leaf name carries the lock directory's device and inode, so two agents in one cgroup
