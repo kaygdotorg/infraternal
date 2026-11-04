@@ -43,6 +43,7 @@ fn install(fallback: bool) -> (Node, Config) {
             ipv6: "fd01::1".parse().unwrap(),
         },
         default_policy: DefaultPolicy::Deny,
+        exposure: None,
         peers: BTreeMap::from([(
             NodeId(2),
             PeerPolicy {

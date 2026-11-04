@@ -49,6 +49,7 @@ fn public_state(peers: u16) -> State {
             ipv6: "fd01::2".parse().unwrap(),
         },
         default_policy: DefaultPolicy::Deny,
+        exposure: None,
         peers: BTreeMap::new(),
         #[cfg(feature = "mesh-dns-spike")]
         peer_names: std::collections::BTreeMap::new(),

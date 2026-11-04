@@ -46,6 +46,7 @@ fn check(backend: Backend) {
             ipv6: "fd01::1".parse().unwrap(),
         },
         default_policy: DefaultPolicy::Deny,
+        exposure: None,
         peers: BTreeMap::new(),
         #[cfg(feature = "mesh-dns-spike")]
         peer_names: std::collections::BTreeMap::new(),

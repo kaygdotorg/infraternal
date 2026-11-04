@@ -40,6 +40,7 @@ uuid.workspace = true
 
 infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", optional = true }
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true }
+infraternal-plugin-proxy = { path = "../plugins/proxy", version = "0.1.0", optional = true }
 
 [features]
 # App windows are compiled only for an explicit desktop build (#146).
@@ -58,10 +59,11 @@ ssh = ["plugin-ssh", "dep:infraternal-agent", "dep:tokio", "infraternal-server?/
 # Private release profile for the early shim/SSH startup image.
 session-payload = ["ssh"]
 canvas = ["plugin-server", "infraternal-server/canvas"]
-default = ["canvas", "release", "remote", "ssh", "plugin-host-facts", "plugin-agent", "plugin-backup", "plugin-mesh", "plugin-relay", "plugin-server", "plugin-ssh"]
+default = ["canvas", "release", "remote", "ssh", "plugin-host-facts", "plugin-agent", "plugin-backup", "plugin-mesh", "plugin-proxy", "plugin-relay", "plugin-server", "plugin-ssh"]
 plugin-agent = ["dep:infraternal-agent", "dep:tokio", "tokio/rt-multi-thread"]
 plugin-backup = ["dep:infraternal-plugin-backup"]
 plugin-mesh = ["dep:infraternal-mesh", "dep:infraternal-plugin-mesh", "infraternal-server?/mesh", "plugin-agent", "infraternal-agent/mesh", "dep:tokio"]
+plugin-proxy = ["dep:infraternal-plugin-proxy", "plugin-agent", "infraternal-agent/proxy", "infraternal-server?/proxy"]
 # Preserve the production feature name without enabling a server role.
 mesh = ["plugin-mesh"]
 ee = ["infraternal-server?/ee", "infraternal-agent?/ee"]

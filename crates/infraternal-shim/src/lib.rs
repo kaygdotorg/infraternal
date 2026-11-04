@@ -1,7 +1,7 @@
 //! Long-lived local PTY sessions with frozen v1 resume semantics [13][17].
 //!
-//! Unsafe code is confined to the audited PTY/process, readiness and Ghostty FFI boundaries; data modules
-//! forbid it. Each boundary documents descriptor, pointer and fork invariants.
+//! Unsafe code is confined to the audited PTY/process, parent-bound child, readiness and Ghostty FFI boundaries;
+//! data modules forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 mod child;
@@ -100,6 +100,31 @@ pub fn prepare_child_without_control(command: &mut std::process::Command) {
     pty::prepare_child_without_control(command);
 }
 
+/// Ensure a Linux child exits if its infraternal owner exits before the child.
+///
+/// The pre-exec boundary installs the parent-death signal before checking the
+/// parent identity, closing the fork-to-exec race within the audited shim.
+#[cfg(target_os = "linux")]
+pub fn prepare_parent_bound_child(command: &mut std::process::Command) {
+    pty::prepare_parent_bound_child(command);
+}
+
+/// Prepare a proxy child with descriptor-only access and a dedicated rootful identity.
+///
+/// Descriptors are duplicated to reserved child slots before credentials are dropped. The
+/// working directory is entered while the parent still has permission to traverse its path.
+/// # Errors
+/// Rejects invalid descriptor mappings; operating-system setup errors are returned by spawn.
+#[cfg(unix)]
+pub fn prepare_proxy_child(
+    command: &mut std::process::Command,
+    working_directory: &std::fs::File,
+    descriptors: &[(std::os::fd::RawFd, std::os::fd::RawFd)],
+    identity: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    pty::prepare_proxy_child(command, working_directory, descriptors, identity)
+}
+
 /// Apply the same default child signal policy to a POSIX spawn launcher.
 /// # Errors
 /// Returns errors while configuring the spawn attributes, before spawning.
@@ -183,6 +208,17 @@ mod login_lifecycle;
 #[cfg(target_os = "linux")]
 pub fn process_exit_descriptor(pid: u32) -> std::io::Result<std::os::fd::OwnedFd> {
     pty::process_exit_descriptor(pid)
+}
+/// Signal the process behind a descriptor from [`process_exit_descriptor`].
+/// A PID reused after the named process exited is never signalled.
+/// # Errors
+/// Returns `ESRCH` once the process has exited, or a permission error.
+#[cfg(target_os = "linux")]
+pub fn signal_process_descriptor(
+    process: std::os::fd::BorrowedFd<'_>,
+    signal: nix::sys::signal::Signal,
+) -> std::io::Result<()> {
+    pty::signal_process_descriptor(process, signal)
 }
 #[cfg(feature = "ca-handoff")]
 pub mod openssl_secure;

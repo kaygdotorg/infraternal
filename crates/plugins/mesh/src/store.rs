@@ -24,7 +24,6 @@ struct State {
     server: NodeId,
     members: BTreeSet<NodeId>,
     /// Last derived origin zone lets a changed public hostname advance the existing config revision.
-    #[cfg(feature = "mesh-dns-spike")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     origin_dns_suffix: Option<String>,
 }
@@ -45,7 +44,6 @@ struct Loaded {
 #[derive(Clone)]
 pub(crate) struct Snapshot {
     loaded: Loaded,
-    #[cfg(feature = "mesh-dns-spike")]
     default_dns_suffix: String,
 }
 impl Snapshot {
@@ -57,7 +55,6 @@ impl Snapshot {
         let revision = self.loaded.revision;
         #[cfg(feature = "cutoff-measure")]
         let _compile = crate::cutoff_measure::Stage::new(node, revision, "compile");
-        #[cfg(feature = "mesh-dns-spike")]
         let compiled = configuration::compile_with_dns_suffix(
             coordinator,
             node,
@@ -65,8 +62,6 @@ impl Snapshot {
             endpoints,
             &self.default_dns_suffix,
         );
-        #[cfg(not(feature = "mesh-dns-spike"))]
-        let compiled = configuration::compile(coordinator, node, default, endpoints);
         let mut config = compiled.map_err(|error| match error {
             MeshError::UnknownNode => MeshApiError::NotFound,
             _ => storage_error("configuration compilation failed"),
@@ -423,7 +418,6 @@ pub struct Store {
     load_diagnostics: StorageDiagnostics,
     config_diagnostics: StorageDiagnostics,
     preview_diagnostics: StorageDiagnostics,
-    #[cfg(feature = "mesh-dns-spike")]
     default_dns_suffix: String,
 }
 impl Store {
@@ -432,23 +426,20 @@ impl Store {
         Self::with_public_origin(pool, "")
     }
 
-    /// Use the configured server origin to derive the default mesh DNS zone.
+    /// Use the configured server origin to derive the default proxy exposure suffix.
     ///
-    /// An explicit suffix persisted in Mesh settings still takes precedence; callers without an origin
-    /// retain `.internal` as the default. The resolver always serves `.internal` as an alias.
+    /// The optional Mesh DNS resolver remains controlled by `mesh-dns-spike`; carrying the public
+    /// suffix here lets publication use the accepted coordinator identity in ordinary builds.
+    /// An explicit Mesh suffix still takes precedence when that resolver feature is enabled.
     #[must_use]
     pub fn with_public_origin(pool: SqlitePool, public_origin: &str) -> Self {
-        #[cfg(feature = "mesh-dns-spike")]
         let default_dns_suffix = configuration::default_dns_suffix_from_origin(public_origin);
-        #[cfg(not(feature = "mesh-dns-spike"))]
-        let _ = public_origin;
         Self {
             pool,
             cache: std::sync::Arc::default(),
             load_diagnostics: StorageDiagnostics::new("mesh.coordinator.load"),
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
             preview_diagnostics: StorageDiagnostics::new("mesh.default.preview"),
-            #[cfg(feature = "mesh-dns-spike")]
             default_dns_suffix,
         }
     }
@@ -650,7 +641,6 @@ impl Store {
     pub(crate) async fn snapshot(&self) -> Result<Snapshot, crate::api::MeshApiError> {
         self.load().await.map(|loaded| Snapshot {
             loaded,
-            #[cfg(feature = "mesh-dns-spike")]
             default_dns_suffix: self.default_dns_suffix.clone(),
         })
     }
@@ -873,18 +863,19 @@ impl Store {
                 allocation,
                 server,
                 members: BTreeSet::new(),
-                #[cfg(feature = "mesh-dns-spike")]
                 origin_dns_suffix: Some(self.default_dns_suffix.clone()),
             }
         };
-        #[cfg(feature = "mesh-dns-spike")]
         let origin_dns_suffix_changed = {
             let previous = state
                 .origin_dns_suffix
                 .as_deref()
                 .unwrap_or(crate::dataplane::DEFAULT_DNS_SUFFIX);
+            #[cfg(feature = "mesh-dns-spike")]
             let changed = state.settings.dns_suffix == crate::dataplane::DEFAULT_DNS_SUFFIX
                 && previous != self.default_dns_suffix;
+            #[cfg(not(feature = "mesh-dns-spike"))]
+            let changed = previous != self.default_dns_suffix;
             state.origin_dns_suffix = Some(self.default_dns_suffix.clone());
             changed
         };
@@ -986,7 +977,6 @@ impl Store {
         // Freeze the edition fallback on first use. A later edition build must
         // not silently change an already-running mesh without the Access preview.
         sqlx::query("INSERT INTO mesh_dataplane(singleton,allocation_json,default_policy) VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET allocation_json=excluded.allocation_json,default_policy=COALESCE(mesh_dataplane.default_policy,excluded.default_policy)").bind(serde_json::to_string(&state).map_err(|_| storage_error("Mesh allocation invalid."))?).bind(if default==DefaultPolicy::Allow {"allow"} else {"deny"}).execute(&mut *tx).await.map_err(|error| storage_sql_error(error))?;
-        #[cfg(feature = "mesh-dns-spike")]
         let revision: i64 = if origin_dns_suffix_changed {
             sqlx::query_scalar("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision")
                 .fetch_one(&mut *tx)
@@ -998,11 +988,6 @@ impl Store {
                 .await
                 .map_err(|error| storage_sql_error(error))?
         };
-        #[cfg(not(feature = "mesh-dns-spike"))]
-        let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|error| storage_sql_error(error))?;
         tx.commit()
             .await
             .map_err(|error| storage_sql_error(error))?;

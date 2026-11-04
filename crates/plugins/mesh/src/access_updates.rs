@@ -27,6 +27,7 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
                     true
                 }
             }
+            && old.exposure == new.exposure
             && old.peers.len() == new.peers.len()
             && old
                 .peers

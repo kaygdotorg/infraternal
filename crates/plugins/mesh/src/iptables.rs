@@ -16,6 +16,8 @@ const TOOLS: [&str; 2] = [
 const CHAINS: [&str; 3] = ["IFM_IN", "IFM_OUT", "IFM_FWD"];
 const GUARD: &str = "IFM_GUARD";
 const DELIVERY: &str = "IFM_DELIVERY";
+// Only peers with an inbound TCP grant can reach an entry point. Traefik's exact-host
+// middleware then checks the source against that route's original backend-port grant.
 /// Restore is atomic per table, so adoption records interrupted tables separately.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ownership {
@@ -44,7 +46,15 @@ pub(crate) enum Update {
 /// # Errors
 /// Refuses missing `nf_tables` executables or failed restore batches.
 pub fn apply(config: &Config, installed: bool) -> io::Result<()> {
-    apply_with_aliases(config, installed, &[], false, config, Update::Full)
+    apply_with_aliases(
+        config,
+        installed,
+        &[],
+        false,
+        config,
+        &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+        Update::Full,
+    )
 }
 pub(crate) fn apply_with_aliases(
     config: &Config,
@@ -52,6 +62,7 @@ pub(crate) fn apply_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
     update: Update,
 ) -> io::Result<()> {
     // Ownership and backend validation belong to first installation/adoption.
@@ -73,6 +84,7 @@ pub(crate) fn apply_with_aliases(
             aliases,
             fence,
             connections,
+            proxy_ingress,
         );
         if update == Update::Full {
             script
@@ -248,7 +260,15 @@ fn execute(tool: &str, script: &str, preflight: bool) -> io::Result<()> {
 // Keep the complete per-family atomic restore batch visible together.
 #[cfg(test)]
 fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
-    render_with_aliases(config, ipv6, installed, &[], false, config)
+    render_with_aliases(
+        config,
+        ipv6,
+        installed,
+        &[],
+        false,
+        config,
+        &infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+    )
 }
 // A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
 #[allow(clippy::too_many_lines)]
@@ -259,6 +279,7 @@ fn render_with_aliases(
     aliases: &[crate::policy::model::Addresses],
     fence: bool,
     connections: &Config,
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
 ) -> String {
     let connections = if fence { connections } else { config };
     let mut script = String::from("*raw\n");
@@ -296,9 +317,30 @@ fn render_with_aliases(
     // Filter hooks see the translated destination. Run before conntrack or
     // peer grants, including packets which never entered the mesh interface.
     // Translation preserves the incoming interface; lo remains node-local [231].
+    let public_gate = if proxy_ingress.public_route_active {
+        String::new()
+    } else {
+        proxy_ingress
+            .public_listener_pair
+            .filter(|pair| {
+            pair.http != pair.https
+                && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                    .iter()
+                    .any(|range| range.contains(pair.http))
+                && infraternal_mesh::proxy_ports::PROXY_INGRESS_PORT_RANGES
+                    .iter()
+                    .any(|range| range.contains(pair.https))
+        })
+            .map_or_else(String::new, |pair| {
+                format!(
+                    "-A {DELIVERY} ! -i lo -m addrtype --dst-type LOCAL -p tcp -m multiport --dports {},{} -j DROP\n",
+                    pair.http, pair.https
+                )
+            })
+    };
     let _ = writeln!(
         script,
-        "-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
+        "{public_gate}-A {DELIVERY} -i {INTERFACE} -m comment --comment infraternal.mesh.v1 -j RETURN\n-A {DELIVERY} -i lo -j RETURN"
     );
     for address in &addresses {
         let _ = writeln!(script, "-A {DELIVERY} -d {address} -j DROP");
@@ -351,7 +393,27 @@ fn render_with_aliases(
             }
         }
     }
+    let proxy_sources: std::collections::BTreeSet<u128> =
+        crate::proxy_access::sources(connections, proxy_ingress)
+            .map(|peer| {
+                if ipv6 {
+                    u128::from(peer.peer.addresses.ipv6)
+                } else {
+                    u128::from(u32::from(peer.peer.addresses.ipv4))
+                }
+            })
+            .collect();
+    let selected_ports: Vec<u16> = crate::proxy_access::selected_ports(proxy_ingress)
+        .map(Vec::from)
+        .unwrap_or_default();
     render_connection_checks(&mut script, connections, ipv6, &groups);
+    render_proxy_connection_checks(
+        &mut script,
+        connections,
+        ipv6,
+        &proxy_sources,
+        &selected_ports,
+    );
     for chain in &CHAINS[..2] {
         // Retired original and reply indexes must not be recreated by loose
         // tracking of a continuation packet. Preserve established permitted
@@ -414,6 +476,21 @@ fn render_with_aliases(
                     }
                 });
                 let _ = writeln!(script, "-A {chain} {selector}{service} -j ACCEPT");
+            }
+        }
+        for (start, end) in address_ranges(proxy_sources.iter().copied()) {
+            let display = |address| display_address(address, ipv6);
+            let selector = if start == end {
+                format!("-s {}", display(start))
+            } else {
+                format!("-m iprange --src-range {}-{}", display(start), display(end))
+            };
+            for destination_port in &selected_ports {
+                let _ = writeln!(
+                    script,
+                    "-A {} {selector} -p tcp -m conntrack --ctorigdstport {destination_port} -j ACCEPT",
+                    CHAINS[0]
+                );
             }
         }
     }
@@ -479,6 +556,34 @@ fn prefixes(mut start: u128, end: u128, ipv6: bool) -> Vec<String> {
     }
     result
 }
+// A proxied flow is admitted by the listener-pair exception, not by a per-port
+// grant. Its later packets in both directions need the same source test, or
+// only the initiating SYN would pass [#281].
+fn render_proxy_connection_checks(
+    script: &mut String,
+    config: &Config,
+    ipv6: bool,
+    sources: &std::collections::BTreeSet<u128>,
+    ports: &[u16],
+) {
+    let local = if ipv6 {
+        config.addresses.ipv6.to_string()
+    } else {
+        config.addresses.ipv4.to_string()
+    };
+    for (start, end) in address_ranges(sources.iter().copied()) {
+        for prefix in prefixes(start, end, ipv6) {
+            for port in ports {
+                for (chain, packet_direction) in [(CHAINS[0], "ORIGINAL"), (CHAINS[1], "REPLY")] {
+                    let _ = writeln!(
+                        script,
+                        "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir {packet_direction} --ctorigsrc {prefix} --ctorigdst {local} --ctproto tcp --ctorigdstport {port} -j ACCEPT"
+                    );
+                }
+            }
+        }
+    }
+}
 fn render_connection_checks(script: &mut String, config: &Config, ipv6: bool, groups: &Groups) {
     let local = if ipv6 {
         config.addresses.ipv6.to_string()
@@ -542,6 +647,7 @@ mod tests {
             version: 1,
             addresses: address(1),
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             peers: ids
                 .iter()
                 .map(|id| {
@@ -611,6 +717,160 @@ mod tests {
         assert!(!rules.contains("-A IFM_IN -s 10.254.0.2 -p tcp --dport 22 -j ACCEPT"));
         assert!(rules.contains("-A IFM_OUT -d 10.254.0.2 -p tcp --dport 443 -j ACCEPT"));
     }
+    #[test]
+    fn proxy_listener_exception_is_closed_without_a_published_route() {
+        let mut config = config(&[2, 3]);
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(2)).expect("tcp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 3000,
+                },
+            ]));
+        config.peers.get_mut(&NodeId(3)).expect("udp peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Udp,
+                    number: 53,
+                },
+            ]));
+
+        let rules = render(&config, false, Ownership::default());
+        assert!(!rules.contains("--ctorigdstport 10080:10335"));
+        assert!(!rules.contains("--ctorigdstport 10082"));
+        assert!(!rules.contains(
+            "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport 10082 -j ACCEPT"
+        ));
+    }
+    #[test]
+    fn proxy_exception_uses_only_selected_pair_and_a_published_route_grant() {
+        let mut config = config(&[2, 3]);
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        for (node, port) in [(2, 3000), (3, 8080)] {
+            config.peers.get_mut(&NodeId(node)).expect("peer").inbound =
+                TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                    crate::policy::rules::Port {
+                        protocol: Protocol::Tcp,
+                        number: port,
+                    },
+                ]));
+        }
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: None,
+            public_route_active: false,
+            listener_pair: Some(selected),
+            backend_ports: std::collections::BTreeSet::from([8080]),
+        };
+        let rules = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+
+        assert!(rules.contains(&format!(
+            "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {} -j ACCEPT",
+            selected.http
+        )));
+        assert!(rules.contains(&format!(
+            "-A IFM_IN -s 10.254.0.3 -p tcp -m conntrack --ctorigdstport {} -j ACCEPT",
+            selected.https
+        )));
+        assert!(!rules.contains(&format!(
+            "-A IFM_IN -s 10.254.0.2 -p tcp -m conntrack --ctorigdstport {} -j ACCEPT",
+            selected.http
+        )));
+        assert!(!rules.contains("--ctorigdstport 10082"));
+    }
+
+    #[test]
+    fn proxied_flows_keep_passing_the_state_checks_after_their_syn() {
+        let mut config = config(&[2, 3]);
+        for peer in config.peers.values_mut() {
+            peer.inbound = TrafficPolicy::None;
+        }
+        config.peers.get_mut(&NodeId(3)).expect("peer").inbound =
+            TrafficPolicy::Ports(std::collections::BTreeSet::from([
+                crate::policy::rules::Port {
+                    protocol: Protocol::Tcp,
+                    number: 8080,
+                },
+            ]));
+        let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            listener_pair: Some(selected),
+            backend_ports: std::collections::BTreeSet::from([8080]),
+            ..Default::default()
+        };
+        let rules = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+        let state_drop = "-A IFM_IN -m conntrack --ctstate ESTABLISHED,RELATED -j DROP";
+        let before_drop = &rules[..rules.find(state_drop).expect("state drop")];
+        for port in [selected.http, selected.https] {
+            for (chain, direction) in [("IFM_IN", "ORIGINAL"), ("IFM_OUT", "REPLY")] {
+                assert!(
+                    before_drop.contains(&format!(
+                        "-A {chain} -m conntrack --ctstate ESTABLISHED,RELATED --ctdir {direction} --ctorigsrc 10.254.0.3/32 --ctorigdst 10.254.0.1 --ctproto tcp --ctorigdstport {port} -j ACCEPT"
+                    )),
+                    "{chain} must admit {direction} packets of a proxied flow to {port}"
+                );
+            }
+        }
+        assert!(!rules.contains("--ctorigsrc 10.254.0.2/32 --ctorigdst 10.254.0.1 --ctproto tcp"));
+    }
+
+    #[test]
+    fn wildcard_public_listener_is_blocked_until_a_public_route_is_applied() {
+        let config = config(&[]);
+        let pair = infraternal_mesh::proxy_ports::CONVENTIONAL_LISTENER_PAIR;
+        let mut ingress = infraternal_mesh::proxy_ports::MeshProxyIngress {
+            public_listener_pair: Some(pair),
+            ..Default::default()
+        };
+        let expected = format!(
+            "-A {DELIVERY} ! -i lo -m addrtype --dst-type LOCAL -p tcp -m multiport --dports {},{} -j DROP",
+            pair.http, pair.https
+        );
+        let closed = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+        assert!(closed.contains(&expected));
+
+        ingress.public_route_active = true;
+        let open = super::render_with_aliases(
+            &config,
+            false,
+            Ownership::default(),
+            &[],
+            false,
+            &config,
+            &ingress,
+        );
+        assert!(!open.contains(&expected));
+    }
+
     #[test]
     fn replacement_retains_established_rules_and_does_not_duplicate_hooks() {
         let mut config = config(&[2]);
