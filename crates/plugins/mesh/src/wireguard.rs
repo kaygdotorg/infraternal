@@ -133,6 +133,13 @@ fn hex_digit(value: u8) -> Option<u8> {
     }
 }
 
+/// Test seam (#260 J213 P2): runs once in [`Device::create`], after the new link exists and
+/// before this installation claims it, so a namespace test can race another creator into that
+/// window.
+#[cfg(feature = "test-support")]
+pub static AFTER_LINK_CREATED: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
+
 /// No timer or background thread: the socket exists only during one operation.
 pub struct Device;
 impl Device {
@@ -148,6 +155,10 @@ impl Device {
         attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         socket.request(16, 4 | 0x200 | 0x400, &payload)?;
+        #[cfg(feature = "test-support")]
+        if let Some(hook) = AFTER_LINK_CREATED.lock().ok().and_then(|mut hook| hook.take()) {
+            hook();
+        }
         // Creation does not run the generic alias setter. Mark the new link
         // explicitly before a later process may adopt it; never leave an unmarked success. The
         // owner key lets a restart prove the link is ours before its key is set (D340).
