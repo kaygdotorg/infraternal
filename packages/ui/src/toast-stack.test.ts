@@ -3,8 +3,11 @@ import { expect, test } from "bun:test";
 import { hiddenByCap, mountToast } from "./toast";
 import { withFakeDom, type FakeElement } from "./toast-fake-dom";
 
+/** Mounts a toast surface into a fake parent. */
 const mount = (parent: FakeElement) => mountToast(parent as unknown as HTMLElement);
+/** The `data-hidden` value of each card in a stack, oldest first. */
 const hiddenFlags = (stack: FakeElement) => stack.children.map((card) => card.dataset.hidden);
+/** How far back a card sits (its `--i` value): 0 is the front. */
 const depth = (card: FakeElement) => card.props.get("--i");
 
 test("hiddenByCap drops the oldest non-errors and never an error for a newer non-error", () => {

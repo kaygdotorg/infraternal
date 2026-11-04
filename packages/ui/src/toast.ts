@@ -16,6 +16,7 @@
 import { ICONS } from "./icons";
 import { tick } from "./tick";
 
+/** A text button on a toast: what it says and what it does when chosen. */
 export interface ToastAction {
   label: string;
   /** Preserve pointer versus keyboard activation when an action opens another shared surface. */
@@ -30,6 +31,7 @@ export interface ToastIconAction extends ToastAction {
   keepOpen?: boolean;
 }
 
+/** Everything one toast can show: the message, its actions, how long it stays and what happens when it closes. */
 export interface ToastMessage {
   message: string;
   /** The message with entity chips in it (`entityText`); it replaces `message` on screen, which stays the plain text. */
@@ -67,6 +69,9 @@ export interface ToastMessage {
   onClose?: () => void;
 }
 
+/**
+ * The handle `mountToast` returns: show toasts, move keyboard focus to their actions, dismiss them, and tear the surface down.
+ */
 export interface ToastController {
   /** Shows a toast (or updates the one with the same key) and returns its id for `dismiss(id)`. */
   show(value: ToastMessage): string;
@@ -77,6 +82,7 @@ export interface ToastController {
   dispose(): void;
 }
 
+/** Where the toast surface sits and how it relates to its neighbours. */
 export interface ToastOptions {
   /** Window notices anchor to the inline start of a positioned, unscrolled parent. */
   placement?: "viewport" | "parent";
@@ -88,11 +94,13 @@ export interface ToastOptions {
 const STACK_AFTER = 36;
 /** How many toasts are drawn at once. Older ones keep their clocks out of sight. */
 const VISIBLE = 3;
+/** How long a leaving toast keeps its place for the exit animation before it is removed. */
 const EXIT_MS = 190;
 /** The pointer leaving a card for its neighbour must not collapse the fanned-out stack. */
 const COLLAPSE_MS = 120;
 /** A touch drag this far down dismisses the toast. */
 const SWIPE_PX = 40;
+/** The space between two fanned-out toasts, in pixels. */
 const GAP_PX = 8;
 
 /**
@@ -109,6 +117,7 @@ export function hiddenByCap(errors: readonly boolean[], cap = VISIBLE): boolean[
   return hidden;
 }
 
+/** One toast on screen: its card and parts, its own clock, and the hooks to run when it closes. */
 interface Item {
   id: string;
   key: string;
