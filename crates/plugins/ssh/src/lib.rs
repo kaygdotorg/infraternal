@@ -15,6 +15,7 @@ mod lifecycle;
 pub mod mesh_admission;
 pub mod mesh_certificate;
 pub mod mesh_flow;
+pub mod mesh_issue;
 pub mod mesh_login;
 #[cfg(target_os = "linux")]
 pub mod mesh_port;
