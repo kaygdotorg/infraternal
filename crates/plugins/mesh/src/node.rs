@@ -738,7 +738,7 @@ impl Node {
         }
         match self.engine_kind {
             EngineKind::Kernel => {
-                Device::create(public_key)?;
+                let created = Device::create(public_key)?;
                 self.owned = true;
                 self.kernel_owner = Some(public_key);
                 if let Err(error) = Device::configure(&key, 0) {
@@ -770,11 +770,8 @@ impl Node {
                         Ok(identity)
                     }
                     Err(error) => {
-                        if let Some(link) = Device::active_link()?
-                            && proven_kernel_link(&link, Some(public_key))
-                        {
-                            Device::delete_ifindex(link.ifindex)?;
-                        }
+                        // Delete exactly the link this call created, never by the shared name.
+                        Device::delete_ifindex(created)?;
                         self.owned = false;
                         self.kernel_owner = None;
                         Err(error)

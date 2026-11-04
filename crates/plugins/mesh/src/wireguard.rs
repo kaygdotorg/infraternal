@@ -140,36 +140,85 @@ fn hex_digit(value: u8) -> Option<u8> {
 pub static AFTER_LINK_CREATED: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
 
+/// A link name no other caller uses: `infr` and 10 hex digits from the process id, a per-process
+/// counter and the clock, under the 15-byte limit. A collision only fails one creation (`EEXIST`).
+fn temporary_name() -> Vec<u8> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let mixed = (u64::from(std::process::id()) << 20)
+        ^ (u64::from(NEXT.fetch_add(1, Ordering::Relaxed)) << 8)
+        ^ u64::from(nanos);
+    let mut name = format!("infr{:010x}", mixed & 0xff_ffff_ffff).into_bytes();
+    name.push(0);
+    name
+}
+
+/// The index of the link named `name` (with its trailing NUL), from one route-netlink reply.
+fn index_of(socket: &mut Socket, name: &[u8]) -> io::Result<u32> {
+    let mut payload = vec![0; 16];
+    attribute(&mut payload, 3, name)?;
+    let reply = socket
+        .request(18, 4, &payload)?
+        .into_iter()
+        .next()
+        .ok_or(io::ErrorKind::NotFound)?;
+    netlink::u32_at(&reply, 4)
+}
+
 /// No timer or background thread: the socket exists only during one operation.
 pub struct Device;
 impl Device {
-    /// Create our interface only, marked with `owner`, the public key the caller will configure.
-    /// An existing interface is refused, never taken over.
+    /// Create our interface, marked with `owner`, the public key the caller will configure, and
+    /// return its index. An existing interface under the shared name is refused, never taken over.
+    ///
+    /// The link is made under a temporary name only this call knows, then renamed to the shared
+    /// name and marked in one request addressed by its index. Another installation that creates
+    /// the shared name in between keeps its link: our rename fails, and cleanup deletes only the
+    /// index we created (#260 J213 P2, D340).
     /// # Errors
-    /// Returns kernel errors including insufficient privileges and duplicate interface.
-    pub fn create(owner: PublicKey) -> io::Result<()> {
+    /// Returns kernel errors including insufficient privileges and a taken name (`AlreadyExists`).
+    pub fn create(owner: PublicKey) -> io::Result<u32> {
+        let temporary = temporary_name();
         let mut payload = vec![0; 16];
-        attribute(&mut payload, 3, b"infraternal0\0")?;
+        attribute(&mut payload, 3, &temporary)?;
         let mut linkinfo = Vec::new();
         attribute(&mut linkinfo, 1, b"wireguard\0")?;
         attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         socket.request(16, 4 | 0x200 | 0x400, &payload)?;
+        let ifindex = match index_of(&mut socket, &temporary) {
+            Ok(ifindex) => ifindex,
+            Err(error) => {
+                // Only this call knows the temporary name, so it names only our link.
+                let mut payload = vec![0; 16];
+                attribute(&mut payload, 3, &temporary)?;
+                let _ = socket.request(17, 4, &payload);
+                return Err(error);
+            }
+        };
         #[cfg(feature = "test-support")]
         if let Some(hook) = AFTER_LINK_CREATED.lock().ok().and_then(|mut hook| hook.take()) {
             hook();
         }
-        // Creation does not run the generic alias setter. Mark the new link
-        // explicitly before a later process may adopt it; never leave an unmarked success. The
+        // Creation does not run the generic alias setter, so the marker is set here, with the
+        // name, before a later process may adopt the link; never leave an unmarked success. The
         // owner key lets a restart prove the link is ours before its key is set (D340).
-        let mut marker = vec![0; 16];
-        attribute(&mut marker, 3, b"infraternal0\0")?;
-        attribute(&mut marker, 20, &owner_alias(KERNEL_OWNER_PREFIX, owner))?;
-        if let Err(error) = socket.request(16, 4, &marker) {
-            Self::delete()?;
-            return Err(error);
+        let mut claim = vec![0; 16];
+        claim[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+        attribute(&mut claim, 3, b"infraternal0\0")?;
+        attribute(&mut claim, 20, &owner_alias(KERNEL_OWNER_PREFIX, owner))?;
+        if let Err(error) = socket.request(16, 4, &claim) {
+            Self::delete_ifindex(ifindex)?;
+            return Err(if error.raw_os_error() == Some(17) {
+                io::ErrorKind::AlreadyExists.into()
+            } else {
+                error
+            });
         }
-        Ok(())
+        Ok(ifindex)
     }
     /// Verify the ownership marker before adopting kernel state after a process restart.
     /// # Errors
