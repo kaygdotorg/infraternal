@@ -5,6 +5,7 @@ use super::{
     Peer, PendingCall, TerminalOutput, encode_muxed_frame_into, process_command, write_frame,
 };
 
+/// One host tick of route-liveness proofs. First, attachments whose route proof expired are told so (`RouteExpired` when a route is available, otherwise `Reconnecting`); if their output queue is full they are detached instead. Then, for a local peer, one Ping per eligible attachment is written in a single batch; for a remote peer, eligible attachments are only queued for [`probe`], one write each. Attachments waiting for an acknowledgement or a rebind are skipped. Returns `false` if the connection can no longer be used (a detach failed, a frame could not be encoded, or the batch write failed or took over a second).
 pub(super) async fn tick(
     connection: &mut AgentConnection,
     attachments: &mut HashMap<u64, AttachmentState>,
