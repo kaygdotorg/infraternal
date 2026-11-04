@@ -1323,3 +1323,7 @@ fn a_squatter_on_the_health_port_cannot_acknowledge_routes() {
         "an ack from a process other than the child must not confirm a route"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[path = "supervisor_cgroup_tests.rs"]
+mod cgroup_containment;
