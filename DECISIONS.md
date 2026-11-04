@@ -3922,3 +3922,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Keys live in one list under Settings › Access**, every key with
        scope chips, uses, the last machine that joined, its expiry and
        revoke ("agreed").
+344. **Mesh SSH slice 1 (owner, 2026-11-04, #221; extends D235, D319):**
+     - SSH certificates are signed with the existing CA key, not a second
+       key with its own unlock ("correct").
+     - The server pushes login-access state to each machine, so logins keep
+       working while the server is unreachable ("agreed").
+     - In slice 1, an ordinary account on a machine the person added acts
+       as that person: "if i added it yes".
+     - Mesh SSH stays off by default until its security review ("correct").
