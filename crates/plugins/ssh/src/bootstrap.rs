@@ -805,6 +805,9 @@ impl Bootstrap {
                 } => permit,
             }
         };
+        // The slot lives in the attempt's resources, so a confirmation wait can
+        // hand it back (#305 P3-2); it is still dropped only with this future.
+        let admission = admission.map(|permit| resources.slot = Some(permit));
         let result = if let Err(error) = &admission {
             Err(error.clone())
         } else if *cancel.borrow() {
@@ -1241,7 +1244,7 @@ impl Bootstrap {
                         started,
                         &previous,
                         FreshMode::PutBack,
-                        resources.deadline.as_ref(),
+                        resources,
                     )
                     .await?;
                     let restored = previous
@@ -1286,13 +1289,7 @@ impl Bootstrap {
                                 FreshMode::Reenroll
                             };
                             self.confirm_start_fresh(
-                                batch,
-                                target,
-                                attempt,
-                                started,
-                                &previous,
-                                mode,
-                                resources.deadline.as_ref(),
+                                batch, target, attempt, started, &previous, mode, resources,
                             )
                             .await?;
                             // The person may have waited most of the attempt: the
@@ -1380,7 +1377,7 @@ impl Bootstrap {
                         } else {
                             FreshMode::Confirm
                         },
-                        resources.deadline.as_ref(),
+                        resources,
                     )
                     .await?;
                     None
@@ -1878,9 +1875,9 @@ impl Bootstrap {
         session: &dyn SshSession,
         previous: &PreviousAttempt,
         mode: FreshMode,
-        deadline: Option<&watch::Sender<Instant>>,
+        resources: &mut AttemptResources,
     ) -> Result<(), Failure> {
-        self.confirm_start_fresh(batch, target, attempt, started, previous, mode, deadline)
+        self.confirm_start_fresh(batch, target, attempt, started, previous, mode, resources)
             .await?;
         self.act_start_fresh(batch, target, attempt, started, session, previous, mode)
             .await
@@ -1891,6 +1888,8 @@ impl Bootstrap {
     /// The wait does not count toward the attempt's deadline: the deadline
     /// starts again in full once the person confirms, so a slow decision never
     /// leaves the stop and the new enrollment only seconds (#305 P2-1).
+    /// Nor does it hold an add-host slot: eight unanswered confirmations would
+    /// otherwise block every add-host on the server for the whole wait (#305 P3-2).
     #[allow(clippy::too_many_arguments)]
     async fn confirm_start_fresh(
         &self,
@@ -1900,7 +1899,7 @@ impl Bootstrap {
         started: Instant,
         previous: &PreviousAttempt,
         mode: FreshMode,
-        deadline: Option<&watch::Sender<Instant>>,
+        resources: &mut AttemptResources,
     ) -> Result<(), Failure> {
         if mode == FreshMode::Automatic {
             emit(
@@ -1940,13 +1939,25 @@ impl Bootstrap {
                     _ => previous.findings(target.mode, challenge),
                 })),
             );
-            if let Some(deadline) = deadline {
+            if let Some(deadline) = &resources.deadline {
                 deadline.send_replace(Instant::now() + CONFIRMATION_WAIT);
             }
+            let held = resources.slot.take().is_some();
             resumed.await.map_err(|_| {
                 Failure::install("Host provisioning stopped while waiting to start fresh.")
             })?;
-            if let Some(deadline) = deadline {
+            if held {
+                // Queue like any new add-host; the confirmation wait's limit
+                // still applies until the slot is ours again.
+                resources.slot = Some(
+                    self.concurrency
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| Failure::install("Bootstrap is shutting down."))?,
+                );
+            }
+            if let Some(deadline) = &resources.deadline {
                 deadline.send_replace(Instant::now() + self.deadline);
             }
         }
@@ -2095,6 +2106,9 @@ struct AttemptResources {
     /// The attempt's deadline. A confirmation pauses it and restarts it in full
     /// once the person confirms (#305 P2-1).
     deadline: Option<watch::Sender<Instant>>,
+    /// The server-wide add-host slot (`CONCURRENT_HOSTS`). Handed back while the
+    /// attempt waits for a person to confirm, taken again once they do (#305 P3-2).
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
     /// A stuck install set aside for Replace or Re-enroll; put back if this attempt fails.
     set_aside: Option<SetAside>,
     installation: Option<Installation>,

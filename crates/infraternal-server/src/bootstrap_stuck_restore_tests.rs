@@ -261,6 +261,18 @@ impl Run {
         stop: Stop,
         deadline: Option<Duration>,
     ) -> Self {
+        Self::start_many(f, home, check, digest, stop, deadline, 1)
+    }
+    /// Start one batch of `hosts` targets ("one", then "host-1", "host-2", ...).
+    fn start_many(
+        f: &Fixture,
+        home: &Arc<Home>,
+        check: Vec<u8>,
+        digest: [u8; 32],
+        stop: Stop,
+        deadline: Option<Duration>,
+        hosts: usize,
+    ) -> Self {
         let scripts = Arc::new(Mutex::new(Vec::new()));
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -288,13 +300,19 @@ impl Run {
             .start_authenticated(
                 "owner".into(),
                 Secret::new(f.cookie.as_bytes().to_vec()),
-                vec![Target {
-                    id: "one".into(),
-                    address: TargetAddress::Manual("user@fixture".into()),
-                    credential: None,
-                    mode: InstallMode::Rootless,
-                    root_consent: false,
-                }],
+                (0..hosts)
+                    .map(|index| Target {
+                        id: if index == 0 { "one".into() } else { format!("host-{index}") },
+                        address: TargetAddress::Manual(if index == 0 {
+                            "user@fixture".into()
+                        } else {
+                            format!("user@fixture-{index}")
+                        }),
+                        credential: None,
+                        mode: InstallMode::Rootless,
+                        root_consent: false,
+                    })
+                    .collect(),
                 None,
             )
             .unwrap();
@@ -475,6 +493,35 @@ async fn a_replace_cancelled_during_the_stop_is_put_back_as_found() {
 #[tokio::test]
 async fn a_reenroll_cancelled_during_the_stop_is_put_back_as_found() {
     cancel_during_the_stop(false).await;
+}
+
+#[tokio::test]
+async fn unanswered_confirmations_leave_the_add_host_slots_free() {
+    // #305 P3-2: each attempt waiting for a person hands its server-wide slot
+    // back, so one more stuck host than there are slots is still offered.
+    let f = fixture(true).await;
+    let home = Arc::new(Home::new());
+    let check = home_check(&home, Uuid::new_v4(), &[9; 32], "old.example");
+    let hosts = 9;
+    let run = Run::start_many(&f, &home, check, [7; 32], Stop::Join, None, hosts);
+    let mut changed = run.batch().subscribe();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let events = run.batch().events(0).1;
+            let offered: std::collections::HashSet<_> = events
+                .iter()
+                .filter(|event| event.leftovers.is_some())
+                .map(|event| event.target.clone())
+                .collect();
+            if offered.len() == hosts {
+                return;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("not every host was offered: {:?}", run.batch().events(0).1));
+    assert!(!run.ran("\nsupersede_stuck_install "), "nothing is stopped before a confirmation");
 }
 
 #[tokio::test]
