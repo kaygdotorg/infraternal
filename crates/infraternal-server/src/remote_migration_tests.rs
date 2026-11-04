@@ -95,12 +95,12 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let expected: Vec<i64> = (1..=38).collect();
+    let expected: Vec<i64> = (1..=40).collect();
     let versions: Vec<i64> = migrations
         .iter()
         .map(|migration| migration.version)
         .collect();
-    assert_eq!(versions, expected, "fresh releases apply 0001 through 0038");
+    assert_eq!(versions, expected, "fresh releases apply 0001 through 0040");
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -130,7 +130,7 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_one(&production)
             .await
             .unwrap();
-    assert_eq!((version, applied), (38, 38));
+    assert_eq!((version, applied), (40, 40));
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
             .fetch_one(&production)
@@ -166,6 +166,65 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             "startup hints start unclaimed on upgraded and fresh databases"
         );
     }
+}
+
+#[tokio::test]
+async fn machine_join_migration_preserves_nine_hundred_second_invitations_and_allows_six_hundred() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut deployed = sqlx::migrate!("./migrations");
+    deployed
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 32);
+    deployed.run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('owner','Owner',1,'fixture','owner','Owner')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let existing_host = uuid::Uuid::from_u128(1);
+    let machine_host = uuid::Uuid::from_u128(2);
+    for host in [existing_host, machine_host] {
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'owner','rootful',0,100)")
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO remote_join_tokens(host_id,mode,digest,issued_at,expires_at) VALUES (?,'rootful',?,100,1000)")
+        .bind(existing_host.as_bytes().as_slice())
+        .bind([1_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let old_invitation: (String, i64, i64, Option<i64>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT mode,issued_at,expires_at,consumed_at,expected_key_digest FROM remote_join_tokens WHERE host_id=?",
+    )
+    .bind(existing_host.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_invitation, ("rootful".into(), 100, 1000, None, None));
+    sqlx::query("INSERT INTO remote_join_tokens(host_id,mode,digest,issued_at,expires_at,expected_key_digest) VALUES (?,'rootful',?,200,800,?)")
+        .bind(machine_host.as_bytes().as_slice())
+        .bind([2_u8; 32].as_slice())
+        .bind([7_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .expect("a machine receipt uses the approved ten-minute expiry");
+    let machine_expiry: i64 =
+        sqlx::query_scalar("SELECT expires_at FROM remote_join_tokens WHERE host_id=?")
+            .bind(machine_host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(machine_expiry, 800);
 }
 
 #[tokio::test]
@@ -263,7 +322,7 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .fetch_all(&production)
             .await
             .unwrap();
-    assert_eq!(after.len(), 38);
+    assert_eq!(after.len(), 40);
     assert_eq!(&after[..28], before.as_slice());
     assert_eq!(after[28].0, 29);
     assert_eq!(after[29].0, 30);
@@ -275,6 +334,8 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
     assert_eq!(after[35].0, 36);
     assert_eq!(after[36].0, 37);
     assert_eq!(after[37].0, 38);
+    assert_eq!(after[38].0, 39);
+    assert_eq!(after[39].0, 40);
     let canvas: (i64, String, i64) = sqlx::query_as(
         "SELECT revision,document,initialized FROM canvas_heads WHERE account='owner'",
     )

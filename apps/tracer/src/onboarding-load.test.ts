@@ -1,5 +1,5 @@
 /** A failed fetch of the first-run setup code shows a retry card instead of a blank screen (#247, #249). */
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
 let importFails = true;
 const mounted: unknown[] = [];
@@ -8,7 +8,12 @@ mock.module("./on-demand", () => ({
   onDemand: <T>(load: () => Promise<T>) => (importFails ? Promise.reject(new Error("chunk")) : load()),
 }));
 mock.module("./onboarding-setup.on-demand", () => ({ mountSetup: (host: unknown) => { mounted.push(host); } }));
-mock.module("./auth", () => ({ AuthError: class extends Error {}, loginWithPasskey: async () => "u" }));
+// Bun's module mocks are process-wide and outlive this file. Keep the real `./auth` exports (above all its AuthError
+// class, which later files compare errors against with instanceof), stub only the passkey prompt, and hand the real
+// module back afterwards (#263: a stand-in AuthError here broke join-review's error mapping in the gate's batch).
+const realAuth = { ...(await import("./auth")) };
+mock.module("./auth", () => ({ ...realAuth, loginWithPasskey: async () => "u" }));
+afterAll(() => { mock.module("./auth", () => realAuth); });
 mock.module("./auth-motion", () => ({ swapCard: () => {} }));
 mock.module("./recovery-ui", () => ({ recoveryUiEnabled: () => false }));
 mock.module("../../../packages/ui/src/countup", () => ({ loading: () => ({ done() {} }) }));

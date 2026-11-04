@@ -894,7 +894,18 @@ mod tests {
                 "role": "node",
                 "components": [{"name": "server", "state": "Stopped"}]
             }),
-            "up" => json!({"started": []}),
+            "up" => json!({
+                "server": "https://infra.example.org",
+                "hostname": "workstation",
+                "mode": "system",
+                "key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "machine_key": "AAAA AAAA AAAA AAAA",
+                "user_code": "AbCdEfGhIjKlMnOp",
+                "approval_url": "https://infra.example.org/#join=AbCdEfGhIjKlMnOp",
+                "service": "infraternal-agent.service",
+                "status": "active",
+                "path": "/usr/local/bin/infraternal"
+            }),
             "skill" => json!({
                 "commands": [{"command": "status", "description": "Show status."}],
                 "skill": "# Status skill",

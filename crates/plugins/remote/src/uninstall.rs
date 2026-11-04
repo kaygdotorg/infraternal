@@ -132,7 +132,15 @@ pub fn validate(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
 fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) -> io::Result<()> {
     let paths = layout(context, home, uid)?;
     let base = std::fs::symlink_metadata(&paths.base)?;
-    if !base.is_dir() || base.uid() != uid || base.mode() & 0o777 != 0o700 {
+    // Only root's /var/lib/infraternal may also be 0711: `infraternal up` lays
+    // it out so others reach `bin/` without listing it (#263). Nothing makes a
+    // rootless base 0711, so it stays exactly 0700 (J145 P3-4).
+    let private = match base.mode() & 0o777 {
+        0o700 => true,
+        0o711 => uid == 0,
+        _ => false,
+    };
+    if !base.is_dir() || base.uid() != uid || !private {
         return Err(denied());
     }
     if public_file(&paths.base.join(".bootstrap-owner"), uid, 64)?.trim() != context.host {
@@ -906,6 +914,26 @@ mod tests {
     }
     /// #235: the server's CA and a joined node's data can share the rootless
     /// base; uninstall removes only setup's own entries and keeps the rest.
+    #[test]
+    fn a_traversable_rootless_base_is_refused() {
+        // J145 P3-4: 0711 is accepted only for root's /var/lib/infraternal.
+        use std::os::unix::fs::PermissionsExt;
+        let Some((home, context, uid)) = installation("rootless-711", false) else {
+            return;
+        };
+        let base = home.join(".local/share/infraternal");
+        assert!(
+            validate(&context, &home, uid).is_ok(),
+            "the 0700 fixture is valid"
+        );
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o711)).unwrap();
+        assert!(
+            validate(&context, &home, uid).is_err(),
+            "a 0711 rootless base"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn file_removal_keeps_what_setup_did_not_create() {
         let Some((home, context, _)) = installation("c", false) else {
