@@ -20,6 +20,8 @@ export interface PillModule {
   readonly capsule: HTMLElement;
   /** Repaints the pill for the current view and lock. */
   paint(): void;
+  /** The camera came to rest: the breadcrumb names the row now in view. */
+  settled(): void;
   dispose(): void;
 }
 
@@ -122,5 +124,5 @@ export function createPill(cx: Ctx): PillModule {
   capsule.addEventListener("pointerup", end, { signal });
   capsule.addEventListener("pointercancel", end, { signal });
 
-  return { capsule, paint, dispose() { crumbsGone = true; crumbs?.dispose(); conn.dispose(); rttWatch.disconnect(); linkWatch.disconnect(); } };
+  return { capsule, paint, settled: () => crumbs?.paint(), dispose() { crumbsGone = true; crumbs?.dispose(); conn.dispose(); rttWatch.disconnect(); linkWatch.disconnect(); } };
 }

@@ -47,6 +47,13 @@ export interface WindowModel {
   rows?: number;
   /** The band this window starts in, inside its group (D212). Only set for a window in a group; a plain column stacks its windows. */
   row?: number;
+  /**
+   * The window's own width in px, and the free space left of it, inside a row group (D212 amendment, D323). A window in a row group
+   * has the size the person gave IT: a drag changes this window and no other, and the column (track) is as wide as its widest
+   * window. Absent: the window fills its track.
+   */
+  w?: number;
+  ml?: number;
   /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
   noAccess?: boolean;
   /**

@@ -35,6 +35,15 @@ function bandTrack(h: number | undefined): string {
   return `max(10rem, ${h <= 1 ? `calc(var(--clh) * ${h})` : `${h}px`})`;
 }
 
+/**
+ * A row band's track in a row group: as tall as its tallest window (each window has the height it was given, so a drag on one
+ * changes only that one, and the row makes room). A window without a height holds the band at its floor.
+ */
+function ownBandTrack(hs: readonly (number | undefined)[]): string {
+  if (!hs.length || hs.some((h) => h === undefined)) return "minmax(10rem, 1fr)";
+  return `max(10rem, ${hs.map((h) => (h! <= 1 ? `calc(var(--clh) * ${h})` : `${h}px`)).join(", ")})`;
+}
+
 /** The height style of a window standing alone: a ratio of the column height, or pixels; none when it shares its column. */
 function heightStyle(h: number | undefined): string {
   return h === undefined ? "" : h <= 1 ? `calc(var(--clh) * ${h})` : `${h}px`;
@@ -44,7 +53,7 @@ function heightStyle(h: number | undefined): string {
  * Writes a style or attribute only when it differs. `arrange` runs on every drag and resize frame, and a write of the same
  * value still costs the browser a style pass for the element; at 57 windows that is most of the frame.
  */
-function put(el: HTMLElement, key: "gridColumn" | "gridRow" | "height" | "flex" | "width" | "gridTemplateColumns" | "gridTemplateRows", value: string): void {
+function put(el: HTMLElement, key: "gridColumn" | "gridRow" | "height" | "flex" | "width" | "gridTemplateColumns" | "gridTemplateRows" | "justifySelf" | "alignSelf" | "marginLeft", value: string): void {
   if (el.style[key] !== value) el.style[key] = value;
 }
 function data(el: HTMLElement, key: "span" | "rows" | "row", value: string | undefined): void {
@@ -75,6 +84,12 @@ export function readColumns(cx: Ctx, c: ViewRec): ColumnModel[] {
       // its band's height stays in the model.
       if (n.style.height.endsWith("px")) m.h = Math.round(parseFloat(n.style.height));
       else if (!n.style.height.includes("calc") && !colEl.parentElement?.classList.contains("cl-group")) delete m.h;
+      // A window of a row group has its own width and free space on its left: read back like its height.
+      if (colEl.dataset.group !== undefined && colEl.parentElement?.classList.contains("cl-group")) {
+        if (n.style.width.endsWith("px")) m.w = Math.round(parseFloat(n.style.width)); else delete m.w;
+        const left = Math.round(parseFloat(n.style.marginLeft) || 0);
+        if (left > 0) m.ml = left; else delete m.ml;
+      }
       if (n.dataset.span) m.span = Number(n.dataset.span); else delete m.span;
       if (n.dataset.rows) m.rows = Number(n.dataset.rows); else delete m.rows;
       if (n.dataset.row !== undefined) m.row = Number(n.dataset.row); else delete m.row;
@@ -143,8 +158,11 @@ export function arrange(cx: Ctx, c: ViewRec, cols: ColumnModel[]): void {
     const total = drawn.reduce((sum, w) => sum + w, 0) + COLUMN_GAP * (cols.length - 1);
     put(g, "width", `${total + SIDE}px`);
     put(g, "gridTemplateColumns", drawn.map((w) => `${w}px`).join(" "));
+    // A row group (every column names the same group): each window has its own size, and a track or band is as large as its largest.
+    const own = cols.every((col) => col.group !== undefined && col.group === cols[0]!.group);
     const bands = bandHeights(settled, run);
-    put(g, "gridTemplateRows", Array.from({ length: run.rows }, (_, r) => bandTrack(bands[r])).join(" "));
+    const bandOf = (r: number): string => !own ? bandTrack(bands[r]) : ownBandTrack(cols.flatMap((col) => col.wins.filter((w) => w.row === r && w.rows === 1).map((w) => w.h)));
+    put(g, "gridTemplateRows", Array.from({ length: run.rows }, (_, r) => bandOf(r)).join(" "));
     cols.forEach((col, j) => {
       for (const w of col.wins) {
         const rec = c.wins.get(w.id);
@@ -156,7 +174,12 @@ export function arrange(cx: Ctx, c: ViewRec, cols: ColumnModel[]): void {
         const root = rec.card.root;
         put(root, "gridColumn", `${j + 1} / span ${w.span}`);
         put(root, "gridRow", `${w.row + 1} / span ${w.rows}`);
-        put(root, "height", ""); put(root, "flex", "");
+        // In a row group the window keeps its own height and width, start-aligned in its cell; elsewhere it fills the cell.
+        put(root, "height", own ? heightStyle(m.h) : ""); put(root, "flex", "");
+        put(root, "alignSelf", own ? "start" : "");
+        put(root, "justifySelf", own && m.w !== undefined ? "start" : "");
+        put(root, "width", own && m.w !== undefined ? `${m.w}px` : "");
+        put(root, "marginLeft", own && m.ml ? `${m.ml}px` : "");
         markWin(root, m, true);
       }
     });

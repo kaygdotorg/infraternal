@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * The top breadcrumb of Settings (issue #304): three pills, Settings › Mesh › Keys, in the place of the session capsule while a
- * window of Settings is focused. It follows the focused window and each pill navigates:
+ * window of Settings is focused. It names the row in view (and the window of that row in view), and each pill navigates:
  *
  *   Settings  the list of views (the same list the capsule opens)
  *   Mesh      the components: choosing one flies to the first window of its row
@@ -87,7 +87,27 @@ export function createCrumbs(cx: Ctx): Crumbs {
     const row = rows.find((r) => r.groups.some((g) => g.windowId === windowId));
     return row ? { rows, row, group: row.groups.find((g) => g.windowId === windowId)! } : undefined;
   };
-  const here = (): ReturnType<typeof place> => place(state.activeWin?.model.id);
+  /**
+   * The Settings window in view: the one whose centre is nearest the centre of the screen. A view with rows of windows moves under the
+   * camera (a step to the next row, a scroll sideways) without anything being clicked, so the focused window cannot say where the
+   * person is. The drawn boxes decide, so a window narrowed by a drag or moved by the camera needs no bookkeeping.
+   */
+  const inView = (): string | undefined => {
+    const wins = views.get("settings")?.wins;
+    if (!wins) return undefined;
+    const screen = stage.getBoundingClientRect();
+    const mx = screen.left + screen.width / 2, my = screen.top + screen.height / 2;
+    let best: string | undefined, bestDistance = Infinity;
+    for (const [id, rec] of wins) {
+      const box = rec.card.root.getBoundingClientRect();
+      if (box.width === 0) continue;
+      const distance = Math.hypot(box.left + box.width / 2 - mx, box.top + box.height / 2 - my);
+      if (distance < bestDistance) { best = id; bestDistance = distance; }
+    }
+    return best;
+  };
+  /** While the camera flies, the window it flies to (the focused one) is where the person is going; at rest, what is in view. */
+  const here = (): ReturnType<typeof place> => place(camera.isMoving ? state.activeWin?.model.id : inView() ?? state.activeWin?.model.id);
 
   // ---- the menus ---------------------------------------------------------------------------------------
   let menu: { el: HTMLElement; anchor: HTMLElement } | undefined;

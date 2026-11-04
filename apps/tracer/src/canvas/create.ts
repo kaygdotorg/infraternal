@@ -113,7 +113,7 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
     onLod: () => { cx.pill.paint(); cx.visibility.lodChanged(); },
     onBand: () => cx.view.hideSummary(),
     onFrame: () => { cx.invalidate(); cx.memory.cull(); if (cx.details?.isOpen()) cx.details.close(true); if (cx.camera.isMoving && cx.camera.lod === "thumb") freezeTerminals(true); },
-    onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); freezeTerminals(false); },
+    onRest: () => { cx.mesh?.redraw(); cx.nav.updateCurrentView(); freezeTerminals(false); cx.pill.settled(); },
     onFlight: () => { cx.view.hideSummary(); hideTips(); },
   });
   (cx as { flip: Ctx["flip"] }).flip = createFlip(() => cx.camera.cam.z, () => cx.invalidate());
