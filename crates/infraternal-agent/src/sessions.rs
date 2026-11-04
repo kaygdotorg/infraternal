@@ -3,6 +3,8 @@
 //! Discovery recovers every live socket with bounded concurrent handshakes, each
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
 //! recovery of healthy sessions. Only refused sockets are removed as stale.
+//! Launching a shim is process creation, not a handshake: it fails when the
+//! launcher exits first, and only a hung start meets the longer launch bound.
 
 use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
@@ -35,6 +37,12 @@ use tokio::{
 // to 32 MiB while allowing any number of live sessions (D214).
 const DISCOVERY_HANDSHAKES: usize = 32 * 1024 * 1024 / MAX_FRAME;
 const HANDSHAKE: Duration = Duration::from_secs(2);
+// Starting a process through the init manager is not a handshake. On a loaded
+// host the scope, exec and shim startup took 3.5-5.1 s before a shim could
+// bind (#324); HANDSHAKE refused launches that were still progressing, and
+// their shells kept running. Process exit is the progress signal; this bound
+// only detects a hang, well inside the server's 60 s connect budget (#29).
+const LAUNCH: Duration = Duration::from_secs(30);
 
 /// Init manager selected once for session work, never periodically re-probed.
 #[derive(Clone, Copy, Debug)]
@@ -770,7 +778,8 @@ async fn launch_configured(
     if !program.is_empty() {
         command.arg("--command-stdin");
     }
-    if matches!(manager, Manager::Detached) && login.is_none() {
+    let detached = matches!(manager, Manager::Detached) && login.is_none();
+    if detached {
         command.arg("--detach");
     }
     if login.is_some() {
@@ -860,30 +869,70 @@ async fn launch_configured(
     // must close before awaiting Hello; only the privileged shim owns the lease.
     drop(command);
     drop(prestarted);
+    let session = await_launch(&path, id, &watch, &mut child, detached).await;
     // Scope launchers and directly owned login shims live until terminal exit.
     // Reap independently; waiting here would hold terminal.open until close.
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
-    timeout(HANDSHAKE, async {
-        loop {
-            // Retry only after directory readiness; healthy handshakes are async.
-            // There is no periodic connect loop while startup is pending.
-            match connect(path.clone(), id.into_bytes()).await {
-                Ok(session) => return Ok(session),
-                Err(error)
-                    if error.kind() == io::ErrorKind::NotFound
-                        || error.kind() == io::ErrorKind::ConnectionRefused => {}
-                Err(error) => return Err(error),
+    session
+}
+
+/// Wait for a launched shim's Hello. Progress, not a short clock, decides failure: the launcher's exit before the
+/// rendezvous refuses the open at once, and `LAUNCH` only detects a hung start (#324).
+async fn await_launch(
+    path: &Path,
+    id: uuid::Uuid,
+    watch: &Registration<Inotify>,
+    launcher: &mut tokio::process::Child,
+    detached: bool,
+) -> io::Result<Session> {
+    timeout(LAUNCH, wait_for_hello(path, id, watch, launcher, detached))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
+}
+
+async fn wait_for_hello(
+    path: &Path,
+    id: uuid::Uuid,
+    watch: &Registration<Inotify>,
+    launcher: &mut tokio::process::Child,
+    detached: bool,
+) -> io::Result<Session> {
+    let mut launcher_running = true;
+    loop {
+        // Retry only after directory readiness; healthy handshakes are async.
+        // There is no periodic connect loop while startup is pending. Once the
+        // socket exists, `connect` bounds the shim's Hello by `HANDSHAKE`.
+        match connect(path.to_path_buf(), id.into_bytes()).await {
+            Ok(session) => return Ok(session),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.kind() == io::ErrorKind::ConnectionRefused => {}
+            Err(error) => return Err(error),
+        }
+        tokio::select! {
+            readiness = watch.readable() => {
+                let mut readiness = readiness?;
+                if let Ok(result) =
+                    readiness.try_io(|fd| fd.read_events().map_err(io::Error::from))
+                {
+                    result?;
+                }
             }
-            let mut readiness = watch.readable().await?;
-            if let Ok(result) = readiness.try_io(|fd| fd.read_events().map_err(io::Error::from)) {
-                result?;
+            status = launcher.wait(), if launcher_running => {
+                let status = status?;
+                // A detaching shim's first process exits once the session process is forked; that is progress.
+                // Every other launcher is the shim itself (systemd-run execs it), so its exit is the shim's.
+                if !(detached && status.success()) {
+                    return Err(io::Error::other(format!(
+                        "shim exited before its rendezvous: {status}"
+                    )));
+                }
+                launcher_running = false;
             }
         }
-    })
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
+    }
 }
 
 #[cfg(test)]

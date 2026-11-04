@@ -36,7 +36,11 @@ def main():
             assert event['session_id'] == session and event['status'] == 0
             detach(client)
             path = root / 'sessions' / (uuid.UUID(session).hex + '.sock')
-            deadline = time.monotonic() + 5
+            # Retirement is asynchronous shim work behind a directory fsync; no
+            # viewer waits on it. Assert that it happens, not how fast: under a
+            # gate's build load it took up to 5.1 s (p50 0.22 s), and dev-02's
+            # fsync stalls reach 19.6 s, so this bound only detects a hang (#324).
+            deadline = time.monotonic() + 30
             while path.exists():
                 assert time.monotonic() < deadline, 'fixture terminal did not retire'
                 time.sleep(.005)
