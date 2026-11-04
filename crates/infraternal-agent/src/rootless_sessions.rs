@@ -43,8 +43,8 @@ impl Drop for Reservation {
 }
 
 /// Reserve ownership durably before spawn, without occupying the host reactor.
-/// The returned reservation owns the launch fence; cancellation keeps that fence
-/// inside the blocking task until its write and unsuccessful-record cleanup finish.
+/// The returned reservation owns the launch fence. Cancellation releases an
+/// unstarted job's fence; an executing write retains it through record cleanup.
 #[cfg(target_os = "linux")]
 pub(crate) async fn reserve(
     state: &Path,
@@ -52,28 +52,30 @@ pub(crate) async fn reserve(
     id: uuid::Uuid,
     person_guard: crate::logins::PersonGuard,
 ) -> io::Result<Reservation> {
+    let admission = crate::durable_io::admit()?;
     let state = state.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let directory = state.join("infraternal-login-locks");
-        let path = directory.join(format!("{}-{}.terminal", person.simple(), id.simple()));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&path)?;
-        let reservation = Reservation {
-            path: Some(path),
-            _person: person_guard,
-        };
-        #[cfg(test)]
-        crate::durable_tests::hold(&state);
-        file.sync_all()?;
-        File::open(directory)?.sync_all()?;
-        Ok(reservation)
-    })
-    .await
-    .map_err(io::Error::other)?
+    admission
+        .run(move || {
+            let directory = state.join("infraternal-login-locks");
+            let path = directory.join(format!("{}-{}.terminal", person.simple(), id.simple()));
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&path)?;
+            let reservation = Reservation {
+                path: Some(path),
+                _person: person_guard,
+            };
+            #[cfg(test)]
+            crate::durable_tests::hold(&state);
+            file.sync_all()?;
+            File::open(directory)?.sync_all()?;
+            Ok(reservation)
+        })
+        .await?
+        .0
 }
 
 /// Carry one person's fence through durable reservation, spawn and readiness.
@@ -96,22 +98,30 @@ pub(crate) async fn launch(
 /// Bound shell cleanup, then await directory durability outside that deadline.
 /// A supplied person fence stays owned until the blocking sync finishes, including
 /// when the caller is cancelled; a busy disk delays only this operation's reply.
+/// Admission is retained from marker publication so cleanup never needs another
+/// queue slot. Once cleanup starts, its bounded task finishes the directory sync.
 #[cold]
 pub(crate) async fn revoke(
     state: &Path,
     person: uuid::Uuid,
     person_guard: Option<crate::logins::PersonGuard>,
+    admission: crate::durable_io::Admission,
 ) -> io::Result<()> {
-    let failure = tokio::time::timeout(Duration::from_secs(5), cleanup(state, person))
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
     let state = state.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let _person = person_guard;
-        #[cfg(test)]
-        crate::durable_tests::hold(&state);
-        File::open(state.join("infraternal-login-locks"))?.sync_all()?;
-        failure.map_or(Ok(()), Err)
+    tokio::spawn(async move {
+        let failure = tokio::time::timeout(Duration::from_secs(5), cleanup(&state, person))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        admission
+            .run(move || {
+                let _person = person_guard;
+                #[cfg(test)]
+                crate::durable_tests::hold(&state);
+                File::open(state.join("infraternal-login-locks"))?.sync_all()?;
+                failure.map_or(Ok(()), Err)
+            })
+            .await?
+            .0
     })
     .await
     .map_err(io::Error::other)?
@@ -389,10 +399,15 @@ mod tests {
         let path = sessions::rendezvous(&root, uuid::Uuid::new_v4().into_bytes());
         let _listener = tokio::net::UnixListener::bind(path).unwrap();
         assert_eq!(
-            revoke(&root, uuid::Uuid::new_v4(), None)
-                .await
-                .unwrap_err()
-                .kind(),
+            revoke(
+                &root,
+                uuid::Uuid::new_v4(),
+                None,
+                crate::durable_io::admit().unwrap()
+            )
+            .await
+            .unwrap_err()
+            .kind(),
             io::ErrorKind::Unsupported
         );
         fs::remove_dir_all(root).unwrap();
@@ -414,21 +429,45 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&path).unwrap();
         let marker = path.with_extension("readiness");
         let person = uuid::Uuid::new_v4();
-        assert!(revoke(&root, person, None).await.is_err());
+        assert!(
+            revoke(&root, person, None, crate::durable_io::admit().unwrap())
+                .await
+                .is_err()
+        );
         fs::write(&marker, []).unwrap();
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(revoke(&root, person, None).await.is_ok());
+        assert!(
+            revoke(&root, person, None, crate::durable_io::admit().unwrap())
+                .await
+                .is_ok()
+        );
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(revoke(&root, person, None).await.is_err());
+        assert!(
+            revoke(&root, person, None, crate::durable_io::admit().unwrap())
+                .await
+                .is_err()
+        );
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&marker, b"invalid").unwrap();
-        assert!(revoke(&root, person, None).await.is_err());
+        assert!(
+            revoke(&root, person, None, crate::durable_io::admit().unwrap())
+                .await
+                .is_err()
+        );
         fs::remove_file(&marker).unwrap();
         fs::create_dir(&marker).unwrap();
-        assert!(revoke(&root, person, None).await.is_err());
+        assert!(
+            revoke(&root, person, None, crate::durable_io::admit().unwrap())
+                .await
+                .is_err()
+        );
         fs::remove_dir(&marker).unwrap();
         symlink("/dev/null", &marker).unwrap();
-        assert!(revoke(&root, person, None).await.is_err());
+        assert!(
+            revoke(&root, person, None, crate::durable_io::admit().unwrap())
+                .await
+                .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -503,7 +542,15 @@ mod durable_tests {
         fs::create_dir(root.join("sessions")).unwrap();
         crate::durable_tests::responsive(root.clone(), {
             let root = root.clone();
-            async move { revoke(&root, uuid::Uuid::new_v4(), None).await }
+            async move {
+                revoke(
+                    &root,
+                    uuid::Uuid::new_v4(),
+                    None,
+                    crate::durable_io::admit().unwrap(),
+                )
+                .await
+            }
         })
         .await
         .unwrap();

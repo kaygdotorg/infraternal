@@ -89,7 +89,7 @@ pub fn account(preferred: &str) -> io::Result<(User, bool)> {
     Ok((user, fallback))
 }
 
-/// The owned person fence travels with a pending durable write, even if its caller drops.
+/// A worker owns this fence once its durable write starts; cancelled waiters release it.
 pub(crate) type PersonGuard = nix::fcntl::Flock<std::fs::File>;
 
 /// Hold the launch fence through the shell's durable reservation and readiness.
@@ -476,20 +476,23 @@ fn permitted(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// Restore access only at the trusted server's explicit authority transition.
 /// # Errors
 /// Refuses unsafe marker or registry objects; ordinary opens never restore access.
+/// Returns `WouldBlock` when the durable queue is full, before opening a fence.
 pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
     restore_at(runtime_root(state), person).await
 }
 
-/// Serialize access restoration, retaining its fence until directory durability completes.
+/// Admit restoration before opening its fence and retain it through an executing sync.
 async fn restore_at(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    let admission = crate::durable_io::admit()?;
     let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
     let root = root.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let _person = person_guard;
-        restore_marker(&root, person)
-    })
-    .await
-    .map_err(io::Error::other)?
+    admission
+        .run(move || {
+            let _person = person_guard;
+            restore_marker(&root, person)
+        })
+        .await?
+        .0
 }
 
 /// Remove only a validated marker, then make that removal durable before restoring access.
@@ -523,6 +526,7 @@ fn restore_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// Login access restoration is a separate authority operation and is not implied by reconnect.
 /// # Errors
 /// Refuses unsafe registry paths or workers, and reports host cleanup failures.
+/// Returns `WouldBlock` before changing authority when the durable queue is full.
 pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::Result<()> {
     revoke_at(
         runtime_root(state),
@@ -540,19 +544,21 @@ async fn revoke_at(
     person: uuid::Uuid,
     rootless: bool,
 ) -> io::Result<()> {
+    let admission = crate::durable_io::admit()?;
     let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
     let state = root.to_owned();
-    // The task owns the fence, so cancellation cannot let a later authority
-    // transition overtake the file or directory fsync. Return it for cleanup.
-    let person_guard = tokio::task::spawn_blocking(move || {
-        revoke_marker(&state, person)?;
-        Ok::<_, io::Error>(person_guard)
-    })
-    .await
-    .map_err(io::Error::other)??;
+    // A worker takes the fence before touching the marker. Cancellation may
+    // discard an unstarted job, but cannot overtake a write already begun.
+    let (person_guard, admission) = admission
+        .run(move || {
+            revoke_marker(&state, person)?;
+            Ok::<_, io::Error>(person_guard)
+        })
+        .await?;
+    let person_guard = person_guard?;
     let registry = root.join("infraternal-login-locks");
     if rootless {
-        return crate::rootless_sessions::revoke(root, person, Some(person_guard)).await;
+        return crate::rootless_sessions::revoke(root, person, Some(person_guard), admission).await;
     }
     let prefix = format!("infraternal-login-{}-", person.simple());
     let mut failure = None;
@@ -990,6 +996,84 @@ async fn fallback(
 mod tests {
     //! Person identity remains distinct even when the OS account is shared.
     use super::*;
+
+    /// Contended publishers must leave a worker available for refusal markers.
+    /// Run explicitly as root in a private fixture; the watchdog only breaks a
+    /// deadlock and never supplies an elapsed-time success criterion.
+    #[test]
+    #[ignore = "root-only publication contention proof; run in a throwaway root clone"]
+    fn publisher_contention_does_not_starve_revocation() {
+        use std::{fs::File, os::unix::fs::PermissionsExt as _, sync::mpsc};
+        assert!(Uid::effective().is_root());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(2)
+            .build()
+            .unwrap();
+        let root = crate::durable_tests::directory();
+        let images = root.join("images");
+        let locks = root.join(".images-locks");
+        std::fs::create_dir(&locks).unwrap();
+        std::fs::set_permissions(&locks, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let publisher = nix::fcntl::Flock::lock(
+            File::open(locks).unwrap(),
+            nix::fcntl::FlockArg::LockExclusive,
+        )
+        .unwrap();
+        let (release, wait) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let fired = wait.recv_timeout(Duration::from_secs(30)).is_err();
+            drop(publisher);
+            fired
+        });
+        runtime.block_on(async {
+            use std::{future::Future as _, task::Context};
+            let mut releases = Vec::new();
+            let mut blockers = Vec::new();
+            for _ in 0..2 {
+                let (release, wait) = mpsc::channel();
+                let (entered, ready) = tokio::sync::oneshot::channel();
+                blockers.push(tokio::task::spawn_blocking(move || {
+                    entered.send(()).unwrap();
+                    let _ = wait.recv();
+                }));
+                ready.await.unwrap();
+                releases.push(release);
+            }
+            let mut first = Box::pin(crate::login_binary::accessible(
+                Path::new("/bin/true"),
+                &images,
+            ));
+            let mut second = Box::pin(crate::login_binary::accessible(
+                Path::new("/bin/true"),
+                &images,
+            ));
+            let mut context = Context::from_waker(std::task::Waker::noop());
+            assert!(first.as_mut().poll(&mut context).is_pending());
+            assert!(second.as_mut().poll(&mut context).is_pending());
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            let person = uuid::Uuid::new_v4();
+            revoke_at(&root, Manager::Detached, person, false)
+                .await
+                .unwrap();
+            assert!(permitted(&root, person).is_err());
+            let _ = release.send(());
+            for blocker in blockers {
+                blocker.await.unwrap();
+            }
+            let (first, second) = tokio::join!(first, second);
+            first.unwrap();
+            second.unwrap();
+        });
+        assert!(
+            !watchdog.join().unwrap(),
+            "publisher waiters starved revocation"
+        );
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn unsuccessful_launch_releases_writer_and_takes_adoption() {
         let mut command = tokio::process::Command::new("sh");
@@ -1351,6 +1435,98 @@ mod tests {
 mod durable_tests {
     //! Held durable writes must leave the shared reactor available to other work.
     use super::*;
+
+    /// A cancelled 1,024-person flood cannot leave a descriptor per queued save.
+    /// Two held Tokio workers reproduce the review's saturated shared pool;
+    /// all observations happen before either worker is allowed to finish.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelled_restore_flood_bounds_descriptors() {
+        use std::{future::Future as _, sync::mpsc, task::Context};
+        const CHILD: &str = "INFRATERNAL_DURABLE_FLOOD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "logins::durable_tests::cancelled_restore_flood_bounds_descriptors",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            eprint!(
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(2)
+            .build()
+            .unwrap();
+        let root = crate::durable_tests::directory();
+        let people: Vec<_> = (0..1024).map(|_| uuid::Uuid::new_v4()).collect();
+        let mut releases = Vec::new();
+        let mut blockers = Vec::new();
+        runtime.block_on(async {
+            for _ in 0..2 {
+                let (release, wait) = mpsc::channel();
+                let (entered, ready) = tokio::sync::oneshot::channel();
+                blockers.push(tokio::task::spawn_blocking(move || {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                }));
+                ready.await.unwrap();
+                releases.push(release);
+            }
+            let mut calls: Vec<_> = people
+                .iter()
+                .map(|person| Box::pin(restore_at(&root, *person)))
+                .collect();
+            let mut context = Context::from_waker(std::task::Waker::noop());
+            for call in &mut calls {
+                let _ = call.as_mut().poll(&mut context);
+            }
+            let submitted = owned_descriptors(&root);
+            drop(calls);
+            let cancelled = owned_descriptors(&root);
+            let retained = people.iter().filter(|person| {
+                let path = root.join("infraternal-login-locks")
+                    .join(format!("{}.person.lock", person.simple()));
+                std::fs::File::open(path).is_ok_and(|file| matches!(
+                    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock),
+                    Err((_, nix::errno::Errno::EWOULDBLOCK))
+                ))
+            }).count();
+            for release in releases { release.send(()).unwrap(); }
+            for blocker in blockers { blocker.await.unwrap(); }
+            eprintln!("flood=1024 submitted_fds={submitted} cancelled_fds={cancelled} retained_fences={retained}");
+            assert!(submitted <= 36, "unbounded descriptor admission: {submitted}");
+            assert!(cancelled <= 4, "cancelled queue retained descriptors: {cancelled}");
+            assert!(retained <= 2, "cancelled queue retained fences: {retained}");
+        });
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Count only descriptors owned by this flood, excluding concurrent tests.
+    #[cfg(target_os = "linux")]
+    fn owned_descriptors(root: &Path) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .filter(|path| path.starts_with(root))
+            .count()
+    }
 
     /// Revocation cannot reply before its held marker write finishes.
     #[tokio::test]

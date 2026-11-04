@@ -9,6 +9,7 @@ pub use control as daemon;
 #[path = "daemon_portable.rs"]
 pub mod control;
 mod daemon_writer;
+mod durable_io;
 #[cfg(test)]
 mod durable_tests;
 #[cfg(target_os = "linux")]
