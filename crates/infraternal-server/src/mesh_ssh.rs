@@ -230,6 +230,27 @@ impl MeshSshPlugin {
         (!user.is_empty() && user != "root").then(|| json!({ "name": user }))
     }
 
+    /// The client's mesh peers by name, so plain `ssh <name>.<suffix>` works
+    /// with no DNS: each peer's mesh machine name with its mesh IPv4 address
+    /// from this node's applied configuration.
+    async fn mesh_hosts(&self, config: &infraternal_plugin_mesh::dataplane::Config) -> Vec<Value> {
+        let names: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM mesh_nodes")
+            .fetch_all(&self.pool)
+            .await
+            .unwrap_or_default();
+        names
+            .into_iter()
+            .filter_map(|(id, name)| {
+                let peer = config
+                    .peers
+                    .get(&infraternal_plugin_mesh::policy::model::NodeId(
+                        u64::try_from(id).ok()?,
+                    ))?;
+                Some(json!({ "name": name, "address": peer.peer.addresses.ipv4 }))
+            })
+            .collect()
+    }
+
     /// Every issued certificate, person and host, is recorded for audit
     /// (J181 M6), by digest and without key material.
     async fn audit(&self, kind: &str, certificate: &Certificate) -> Result<(), ()> {
@@ -389,6 +410,7 @@ impl MeshSshPlugin {
                         "network": range.network,
                         "prefix": range.prefix,
                         "added_with": added_with,
+                        "hosts": self.mesh_hosts(&config).await,
                     });
                     channel
                         .call(

@@ -7,11 +7,17 @@
 //!   so mesh hosts are trusted through their host certificates with no
 //!   prompt, and `StrictHostKeyChecking yes` refuses any host without one.
 //!
-//! Slice 1 limits (#221 plan): bare names (`ssh db-01`) match only where the
-//! resolver adds the suffix before `ssh` sees the name, so the proof uses
-//! `<name>.<suffix>` or the address; and `-A` forwards this socket, whose
-//! forwarded connections never sign (`mesh_keys`), rather than the
-//! person's own agent.
+//! Mesh names need no DNS: each peer gets a `Host <name>.<suffix>` block
+//! with its mesh address as `HostName` and its name as `HostKeyAlias`, so
+//! plain `ssh <name>.<suffix>` connects to the mesh address and checks the
+//! host certificate under the mesh name. The shared block matches on
+//! `originalhost`, the name as typed, so it applies to mesh names and to
+//! typed mesh addresses alike.
+//!
+//! Slice 1 limits (#221): bare names (`ssh db-01`) are not mapped, because
+//! a short name could shadow a real host the person already reaches; and
+//! `-A` forwards this socket, whose forwarded connections never sign
+//! (`mesh_keys`), rather than the person's own agent.
 //!
 //! Every value written here comes from the server's validated mesh settings
 //! (a DNS suffix of `[a-z0-9-.]` labels and a canonical IPv4 range) or from
@@ -59,7 +65,28 @@ fn quoted_path(path: &Path) -> Option<String> {
     .then(|| format!("\"{path}\""))
 }
 
-/// The `ssh_config.d` file.
+/// One mesh peer the file maps by name.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshHost {
+    /// The peer's mesh machine name, a single DNS label.
+    pub name: String,
+    /// The peer's mesh IPv4 address.
+    pub address: Ipv4Addr,
+}
+
+/// A single lowercase DNS label: safe as an `ssh_config` pattern and value.
+fn valid_label(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// The `ssh_config.d` file with no named peers.
 #[must_use]
 pub fn client_config(
     suffix: &str,
@@ -67,6 +94,20 @@ pub fn client_config(
     prefix: u8,
     socket: &Path,
     known_hosts: &Path,
+) -> Option<String> {
+    client_config_with_hosts(suffix, network, prefix, socket, known_hosts, &[])
+}
+
+/// The `ssh_config.d` file, mapping each peer's `<name>.<suffix>` to its
+/// mesh address.
+#[must_use]
+pub fn client_config_with_hosts(
+    suffix: &str,
+    network: Ipv4Addr,
+    prefix: u8,
+    socket: &Path,
+    known_hosts: &Path,
+    hosts: &[MeshHost],
 ) -> Option<String> {
     let patterns = patterns(suffix, network, prefix)?.join(",");
     let socket = quoted_path(socket)?;
@@ -82,7 +123,16 @@ pub fn client_config(
         "# Other hosts keep their own settings. Remove with `infraternal mesh ssh off`."
     )
     .ok()?;
-    writeln!(file, "Match host \"{patterns}\"").ok()?;
+    for host in hosts {
+        if !valid_label(&host.name) {
+            return None;
+        }
+        let name = format!("{}.{suffix}", host.name);
+        writeln!(file, "Host {name}").ok()?;
+        writeln!(file, "    HostName {}", host.address).ok()?;
+        writeln!(file, "    HostKeyAlias {name}").ok()?;
+    }
+    writeln!(file, "Match originalhost \"{patterns}\"").ok()?;
     writeln!(file, "    IdentityAgent {socket}").ok()?;
     writeln!(file, "    UserKnownHostsFile {known_hosts}").ok()?;
     writeln!(file, "    StrictHostKeyChecking yes").ok()?;

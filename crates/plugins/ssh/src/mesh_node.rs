@@ -137,6 +137,9 @@ struct Client {
     /// (rootless) or by name (the add-host login account).
     #[serde(default)]
     added_with: Option<AddedWith>,
+    /// The mesh peers mapped by name in the client file.
+    #[serde(default)]
+    hosts: Vec<crate::mesh_client_config::MeshHost>,
 }
 
 /// How the server identifies the account the machine was added with.
@@ -418,12 +421,13 @@ impl MeshSshNode {
                 _ => return Err(PluginError::Rejected),
             }
         };
-        let config = crate::mesh_client_config::client_config(
+        let config = crate::mesh_client_config::client_config_with_hosts(
             &suffix,
             network,
             prefix,
             Path::new(SOCKET),
             known_hosts,
+            &input.hosts,
         )
         .ok_or(PluginError::Rejected)?;
         let known = crate::mesh_client_config::known_hosts(&suffix, network, prefix, ca)

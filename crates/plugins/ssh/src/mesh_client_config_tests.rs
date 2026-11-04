@@ -23,7 +23,7 @@ fn config() -> String {
 #[test]
 fn block_is_scoped_to_mesh_names_and_addresses() {
     let file = config();
-    assert!(file.contains("Match host \"*.internal,10.254.*\"\n"));
+    assert!(file.contains("Match originalhost \"*.internal,10.254.*\"\n"));
     assert!(file.contains(&format!("    IdentityAgent \"{SOCKET}\"\n")));
     assert!(file.contains("    StrictHostKeyChecking yes\n"));
     assert!(!file.contains("ForwardAgent yes"));
@@ -40,7 +40,7 @@ fn ranges_off_octet_boundaries_match_names_only() {
         Path::new(KNOWN),
     )
     .unwrap();
-    assert!(file.contains("Match host \"*.internal\"\n"));
+    assert!(file.contains("Match originalhost \"*.internal\"\n"));
 }
 
 /// Values that could escape are refused.
@@ -106,5 +106,74 @@ fn stock_ssh_applies_the_block_only_to_mesh_hosts() {
             "{other} must keep the person's own agent"
         );
     }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// Mesh names resolve through the file itself, with no DNS: plain
+/// `ssh <name>.<suffix>` reaches the peer's mesh address and checks its host
+/// certificate under that name, and unsafe names are refused.
+#[test]
+fn mesh_names_map_to_mesh_addresses_without_dns() {
+    let hosts = [MeshHost {
+        name: "db-01".into(),
+        address: Ipv4Addr::new(10, 254, 0, 9),
+    }];
+    let file = client_config_with_hosts(
+        "internal",
+        Ipv4Addr::new(10, 254, 0, 0),
+        16,
+        Path::new(SOCKET),
+        Path::new(KNOWN),
+        &hosts,
+    )
+    .unwrap();
+    assert!(file.contains(
+        "Host db-01.internal\n    HostName 10.254.0.9\n    HostKeyAlias db-01.internal\n"
+    ));
+    for bad in ["", "DB", "a b", "x\"y", "*", "-x", "a.b"] {
+        let hosts = [MeshHost {
+            name: bad.into(),
+            address: Ipv4Addr::new(10, 254, 0, 9),
+        }];
+        assert!(
+            client_config_with_hosts(
+                "internal",
+                Ipv4Addr::new(10, 254, 0, 0),
+                16,
+                Path::new(SOCKET),
+                Path::new(KNOWN),
+                &hosts
+            )
+            .is_none(),
+            "{bad:?}"
+        );
+    }
+    if std::process::Command::new("ssh")
+        .arg("-V")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("j175-names-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("config");
+    std::fs::write(&path, &file).unwrap();
+    let output = std::process::Command::new("ssh")
+        .args(["-G", "-F"])
+        .arg(&path)
+        .arg("db-01.internal")
+        .output()
+        .unwrap();
+    let settings = String::from_utf8(output.stdout).unwrap();
+    assert!(settings.contains("hostname 10.254.0.9"), "{settings}");
+    assert!(
+        settings.contains("hostkeyalias db-01.internal"),
+        "{settings}"
+    );
+    assert!(
+        settings.contains(&format!("identityagent {SOCKET}")),
+        "{settings}"
+    );
     std::fs::remove_dir_all(&directory).unwrap();
 }
