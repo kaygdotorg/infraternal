@@ -21,8 +21,10 @@
  */
 import { Spring } from "./spring";
 import { comboLabel, isOverridden, isTypingTarget, keyCaps, shortcutSections } from "./shortcuts";
+/** Re-exported for callers that already import the view: true for keystrokes that belong to a field or terminal. */
 export { isTypingTarget } from "./shortcuts";
 
+/** What {@link mountShortcutsView} needs: the `pill` that morphs, the `stage` that holds the panel, and `areas()`, the current areas most specific first. */
 export interface ShortcutsViewOptions {
   /** The pill that morphs (the session capsule). */
   pill: HTMLElement;

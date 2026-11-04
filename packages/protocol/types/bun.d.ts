@@ -19,11 +19,13 @@ declare module "bun:test" {
   export function expect<Value>(actual: Value): Matchers;
 }
 
+/** The part of Bun's file handle the tests read. */
 interface BunFile {
   arrayBuffer(): Promise<ArrayBuffer>;
   text(): Promise<string>;
 }
 
+/** The Bun globals the tests call: run a process synchronously, and open a file. */
 declare const Bun: {
   spawnSync(command: string[], options: { cwd: string; stdin: Uint8Array; maxBuffer: number }): {
     exitCode: number; stdout: Uint8Array; stderr: Uint8Array;

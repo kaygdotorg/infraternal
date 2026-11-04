@@ -31,6 +31,10 @@ const perfDir = process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf");
 /** The address the tests open. */
 const origin = `http://localhost:${port}`;
 
+/**
+ * The browser test setup: the specs in `test/`, one worker (they share one test-double server), no retries, and no traces or
+ * screenshots by default. The web server builds the app and serves it through the latency proxy on {@link port}.
+ */
 export default defineConfig({
   testDir: "./test",
   testMatch: "*.spec.ts",

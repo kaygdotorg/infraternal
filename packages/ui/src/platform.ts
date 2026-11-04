@@ -27,4 +27,5 @@ export function keysLabel(keys: string): string {
   return parts.map((part) => MAC_GLYPHS[part] ?? part).join("") + key;
 }
 
+/** The label of a shortcut for this platform: a written label goes through {@link keysLabel}, a {@link PlatformKeys} pair picks `mac` or `other`. */
 export const shortcutLabel = (keys: PlatformKeys | string): string => typeof keys === "string" ? keysLabel(keys) : isMacPlatform() ? keys.mac : keys.other;

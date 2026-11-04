@@ -14,6 +14,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("TRACER
 /** The address the capture opens. */
 const origin = `http://localhost:${port}`;
 
+/** The capture setup: runs `figures/capture.ts` against a docs-dataset build and its test-double server. */
 export default defineConfig({
   testDir: "./figures",
   testMatch: "capture.ts",

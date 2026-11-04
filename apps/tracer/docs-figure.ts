@@ -34,7 +34,9 @@ import { resolve } from "node:path";
 export const FIGURE_SIZES = ["desktop", "phone"] as const;
 /** The two colour schemes captured: dark ("ink") and light ("paper"). */
 export const FIGURE_SCHEMES = ["ink", "paper"] as const;
+/** One of {@link FIGURE_SIZES}. */
 export type FigureSize = (typeof FIGURE_SIZES)[number];
+/** One of {@link FIGURE_SCHEMES}. */
 export type FigureScheme = (typeof FIGURE_SCHEMES)[number];
 
 /** The size of one captured picture in CSS pixels (its file is this wide times the capture's scale). */
