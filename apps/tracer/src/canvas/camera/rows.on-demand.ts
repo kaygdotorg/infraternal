@@ -19,9 +19,6 @@ export interface Rows {
   follow(): void;
 }
 
-/** The group's own inset on its right. */
-const INSET = 14;
-
 export function createRows(cx: Ctx, stopsFor: (c: ViewRec) => Stops, goStop: (c: ViewRec, i: number) => void): Rows {
   const { camera, state, views } = cx;
   const grouped = (c: ViewRec): boolean => c.view.layout === "tiled" && c.view.cols.some((col) => col.group !== undefined);
@@ -43,16 +40,21 @@ export function createRows(cx: Ctx, stopsFor: (c: ViewRec) => Stops, goStop: (c:
     if (!grouped(c) || band === undefined) return undefined;
     // World x of a window's right edge from the layout (offsets inside the view's content), not from where it is drawn: the camera moves
     // while this is asked for, and a drawn box and the camera's position are not from the same frame.
-    const origin = cx.view.contentRect(c).x;
-    let right = -Infinity;
+    const content = cx.view.contentRect(c);
+    let right = -Infinity, widest = -Infinity;
     for (const col of c.view.cols) for (const w of col.wins) {
-      const root = w.row === band ? c.wins.get(w.id)?.card.root : undefined;
+      const root = c.wins.get(w.id)?.card.root;
       if (!root) continue;
       let x = 0, el: HTMLElement | null = root;
       while (el && el !== c.content) { x += el.offsetLeft; el = el.offsetParent as HTMLElement | null; }
-      if (el) right = Math.max(right, origin + x + root.offsetWidth);
+      if (!el) continue;
+      const edge = content.x + x + root.offsetWidth;
+      widest = Math.max(widest, edge);
+      if (w.row === band) right = Math.max(right, edge);
     }
-    return right === -Infinity ? undefined : Math.max(st.lefts[0]!, right + INSET - st.view);
+    // The row ends with the same inset the longest row ends with at the end of the view (the group's padding), so every row's last
+    // window sits the same distance from the screen's edge.
+    return right === -Infinity ? undefined : Math.max(st.lefts[0]!, right + (content.x + content.w - widest) - st.view);
   };
   const windowInView = (c: ViewRec): string | undefined => {
     const st = stopsFor(c), band = bandInView(c);

@@ -1353,8 +1353,14 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     for (let k = 0; k < 7; k++) await stepSideways(page, 1, size.isMobile);
     const right = await page.evaluate(() => document.querySelector('[data-window-id="s-appearance-layout"]')!.getBoundingClientRect().right);
     expect(right, "the last window of the row is whole on screen (sideways)").toBeLessThanOrEqual(size.viewport.width + 0.5);
-    expect(size.viewport.width - right, "and nothing but the group's inset is to its right").toBeLessThanOrEqual(18);
-    expect(size.viewport.width - right).toBeGreaterThanOrEqual(-0.5);
+    const gap = size.viewport.width - right;
+    expect(gap).toBeGreaterThanOrEqual(-0.5);
+    // Nothing but the group's inset is to its right: the same distance the longest row (You, five windows) ends at.
+    await goTo(page, "canvas:settings:you.devices");
+    for (let k = 0; k < 7; k++) await stepSideways(page, 1, size.isMobile);
+    const natural = size.viewport.width - (await page.evaluate(() => document.querySelector('[data-window-id="s-you-devices"]')!.getBoundingClientRect().right));
+    near(gap, natural, "the short row ends where the longest row ends");
+    await goTo(page, "canvas:settings:appearance.layout");
     if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await page.screenshot({ path: `${SHOTS}/row-end-${size.isMobile ? "p3" : "d2"}.png` }); }
     await context.close();
   });
