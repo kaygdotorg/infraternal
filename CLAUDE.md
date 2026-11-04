@@ -14,8 +14,9 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 
 ## Rules
 
-- License: AGPL-3.0-only. Every crate and package states it, except `ee/`
-  (commercial). Dependencies must be compatible with AGPL.
+- License: AGPL-3.0-only. Every crate and package states it. Commercial code
+  lives in its own repository, `kayg/infraternal-enterprise` (D277), never in
+  this one. Dependencies must be compatible with AGPL.
 - Vocabulary: "infraternal agent" means the host daemon. "AI agent" means
   Claude, Codex and similar tools. Never use "agent" alone in user-facing text
   when it could mean either.
