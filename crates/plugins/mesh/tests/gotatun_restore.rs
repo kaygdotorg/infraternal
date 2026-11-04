@@ -111,7 +111,13 @@ fn another_installation_never_adopts_a_persisted_tun() {
 fn add_marked_kernel_link() {
     for args in [
         &["link", "add", "infraternal0", "type", "wireguard"][..],
-        &["link", "set", "infraternal0", "alias", "infraternal.mesh.v1"][..],
+        &[
+            "link",
+            "set",
+            "infraternal0",
+            "alias",
+            "infraternal.mesh.v1",
+        ][..],
     ] {
         let status = std::process::Command::new("ip")
             .args(args)
@@ -123,7 +129,7 @@ fn add_marked_kernel_link() {
 
 /// The kernel-only upgrade rule (D163 amendment) pins the kernel engine only for a node whose
 /// state directory has held mesh state before. A fresh directory, such as a new or rootless
-/// infraternal agent on a host where another node runs kernel WireGuard, records nothing: that
+/// infraternal agent on a host where another node runs kernel `WireGuard`, records nothing: that
 /// durable write claimed another node's link as its own engine and put two fsyncs on every
 /// fresh start (#260).
 #[test]
@@ -136,7 +142,11 @@ fn only_a_node_with_prior_state_pins_the_kernel_engine() {
     let fresh = private_state("kernel-upgrade-fresh");
     let upgraded = private_state("kernel-upgrade-old");
     // The public snapshot an older kernel-only node left behind.
-    fs::write(upgraded.join("mesh-public.json"), br#"{"enabled":true,"config":null}"#).unwrap();
+    fs::write(
+        upgraded.join("mesh-public.json"),
+        br#"{"enabled":true,"config":null}"#,
+    )
+    .unwrap();
     fs::set_permissions(
         upgraded.join("mesh-public.json"),
         fs::Permissions::from_mode(0o600),
