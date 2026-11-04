@@ -67,6 +67,10 @@ pub(super) struct Attempt {
     destination: Option<(String, Option<String>)>,
     canary: Option<(EmbeddedAgent, [u8; 16], [u32; 2])>,
     retirement: Option<tokio::task::JoinHandle<Result<(), Failure>>>,
+    /// A Replace of a host this server already enrolled (#305). It took on no
+    /// restart-retirement obligation, since the host stays enrolled if the
+    /// attempt fails, so its completion has none to discharge.
+    replacement: bool,
 }
 // Cancellation before JoinMaterial reaches the installer has no Resources.host
 // to clean up. Release its unpublished ownership synchronously on every exit.
@@ -292,6 +296,7 @@ impl RemoteBackend {
                 destination: Some((address.to_owned(), lookup.map(str::to_owned))),
                 canary: None,
                 retirement: None,
+                replacement: false,
             },
         );
         Ok(())
@@ -722,6 +727,14 @@ impl Backend for RemoteBackend {
                 InstallMode::Root => 0,
             };
             self.reserve_attempt(authority, host, uid, address, lookup)?;
+            if let Some(attempt) = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .get_mut(&host)
+            {
+                attempt.replacement = true;
+            }
             let mut unpublished = Unpublished {
                 backend: self,
                 host,
@@ -883,11 +896,22 @@ impl Backend for RemoteBackend {
                 self.authorize(authority).await?;
             }
             self.uid(authority, host)?;
-            self.issuer
-                .store()
-                .complete_bootstrap(&authority.owner, host)
-                .await
-                .map_err(|_| unavailable())?;
+            // A Replace never recorded a retirement intent (the host stays
+            // enrolled if it fails); requiring one failed every Replace after
+            // its host had already committed (#305).
+            let replacement = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .get(&host)
+                .is_some_and(|attempt| attempt.replacement);
+            if !replacement {
+                self.issuer
+                    .store()
+                    .complete_bootstrap(&authority.owner, host)
+                    .await
+                    .map_err(|_| unavailable())?;
+            }
             self.completed_record(authority, host)
         })
     }
@@ -2425,6 +2449,7 @@ mod tests {
                 destination: None,
                 canary: None,
                 retirement: None,
+                replacement: false,
             },
         );
         f.backend.attempts.lock().unwrap().insert(
@@ -2437,6 +2462,7 @@ mod tests {
                 destination: None,
                 canary: None,
                 retirement: None,
+                replacement: false,
             },
         );
         let guard = Unpublished {
@@ -2631,6 +2657,7 @@ mod tests {
                         destination: Some((format!("user@host-{index}.example.invalid"), None)),
                         canary: None,
                         retirement: None,
+                        replacement: false,
                     },
                 );
             }
