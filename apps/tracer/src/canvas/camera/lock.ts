@@ -68,13 +68,12 @@ export function createNav(cx: Ctx): Nav {
   };
   const snapCam = (c: ViewRec, i: number, band?: number): Cam => {
     const st = stopsFor(c);
-    let idx = clamp(i, 0, st.lefts.length - 1), left = st.lefts[idx]!;
     ensureRows(c);
+    // In a view of rows the stops are the columns' up to the end of the row being shown, and then the end itself (the last window,
+    // whole on screen) if no column's stop reaches it. Stepping past it stays there.
     const limit = rows?.limit(c, st, band);
-    if (limit !== undefined && left > limit) {
-      left = limit;
-      idx = st.lefts.reduce((best, l, k) => (l <= limit ? k : best), 0);
-    }
+    const stops = limit === undefined ? st.lefts : [...st.lefts.filter((l) => l <= limit), ...(st.lefts.some((l) => Math.abs(l - limit) < 2) ? [] : [limit])];
+    const idx = clamp(i, 0, stops.length - 1), left = stops[idx]!;
     state.snapIdx = idx;
     return { cx: left + st.view / 2, cy: st.cy, z: st.z };
   };

@@ -49,17 +49,16 @@ export function createRows(cx: Ctx, stopsFor: (c: ViewRec) => Stops, goStop: (c:
     return right === -Infinity ? undefined : Math.max(st.lefts[0]!, right + INSET - st.view);
   };
   const windowInView = (c: ViewRec): string | undefined => {
-    const st = stopsFor(c);
-    const column = c.view.cols[st.owners[nearestStop(st, camera.cam.cx)] ?? -1];
-    const my = middle();
-    let best: string | undefined, bestD = Infinity;
-    for (const w of column?.wins ?? []) {
-      const box = c.wins.get(w.id)?.card.root.getBoundingClientRect();
-      if (!box || box.width === 0) continue;
-      const d = Math.abs(box.top + box.height / 2 - my);
-      if (d < bestD) { best = w.id; bestD = d; }
-    }
-    return best;
+    const st = stopsFor(c), band = bandInView(c);
+    const owner = st.owners[nearestStop(st, camera.cam.cx)] ?? -1;
+    // The window of the row in view that sits in the stop's column; a short row has none there, and its last window is the one in view.
+    let before: string | undefined, after: string | undefined;
+    c.view.cols.forEach((col, k) => {
+      const win = col.wins.find((w) => w.row === band);
+      if (!win) return;
+      if (k <= owner) before = win.id; else after ??= win.id;
+    });
+    return before ?? after;
   };
   const visibleShare = (el: HTMLElement): number => {
     const r = el.getBoundingClientRect(), s = cx.stage.getBoundingClientRect();
