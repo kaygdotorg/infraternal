@@ -7,7 +7,13 @@ use std::{
     process::ExitCode,
 };
 
-/// Human confirmation is accepted only from a TTY; automation must pass --yes.
+/// Decides whether the person has confirmed switching to the `edge` channel.
+///
+/// Only `edge` needs confirmation, so any other channel (or none) returns `false` and
+/// asks nothing. For `edge` the unreviewed-builds warning always goes to standard error.
+/// `--yes` confirms at once. Without it, both standard input and standard error must be a
+/// terminal, the person must type exactly `yes` (at most 128 bytes are read), and anything
+/// else, including a script with no terminal, counts as not confirmed.
 fn confirmed(channel: Option<&str>, yes: bool) -> bool {
     if channel != Some("edge") {
         return false;
@@ -32,6 +38,17 @@ fn confirmed(channel: Option<&str>, yes: bool) -> bool {
         && answer.trim() == "yes"
 }
 /// Refuse implicit server creation and use the same service as the socket API.
+///
+/// Runs `infraternal server release latest`, `infraternal server channel` (read the
+/// channel) or `infraternal server channel <stable|edge> [--yes]` (switch it), as selected
+/// by `definition`. `matches` carries `--data` (the server's data folder) and, for a switch,
+/// the channel and `--yes`.
+///
+/// It talks to the existing server's database directly and never creates one. Before opening
+/// it, it checks that the data folder and `infraternal.sqlite` belong to the current user,
+/// are private (no group or other access) and that the file is a regular file with one
+/// link; otherwise it refuses. Prints the result (JSON when `json_output`) and returns the
+/// exit code: success, or a refusal with the exit code and next step chosen by `classify`.
 #[allow(clippy::verbose_bit_mask)]
 pub(crate) fn run(
     definition: &infraternal_plugin_api::ActionDefinition,
@@ -128,6 +145,8 @@ pub(crate) fn run(
 }
 
 /// Each cause of a failed release read gets its own sentence, next step and exit code (D303).
+/// Maps a failure from the release service to a sentence for the person, a next step and
+/// an exit code. Raw error text is never shown, so nothing from the machine leaks into output.
 fn classify(error: &'static str) -> (&'static str, &'static str, Exit) {
     if error == EDGE_WARNING {
         (
@@ -150,6 +169,11 @@ fn classify(error: &'static str) -> (&'static str, &'static str, Exit) {
     }
 }
 
+/// Prints a successful release read and returns success.
+///
+/// The message is the service's own `message` when it has one, otherwise
+/// "Release channel: <channel>" (default `stable`), plus the verified version when known.
+/// The whole service answer is kept in the result under `release`.
 fn present(value: serde_json::Value, command: &str, json_output: bool) -> ExitCode {
     use crate::cli::output::{CommandResult, CommandState};
     let message = value.get("message").and_then(|v| v.as_str()).map_or_else(
@@ -175,6 +199,7 @@ fn present(value: serde_json::Value, command: &str, json_output: bool) -> ExitCo
     ExitCode::SUCCESS
 }
 
+/// Prints a failed release command with its next step and returns `exit`.
 fn refusal(command: &str, json_output: bool, message: &str, next: &str, exit: Exit) -> ExitCode {
     use crate::cli::output::{CommandResult, CommandState};
     let result =

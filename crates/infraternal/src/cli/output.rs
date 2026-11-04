@@ -630,6 +630,7 @@ fn print_with_phase<T: Serialize>(
 }
 
 /// Shares formatting-error and destination handling for every rendered result.
+#[cfg(feature = "plugin-server")]
 pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) {
     write_rendered(output, to_stderr, true);
 }

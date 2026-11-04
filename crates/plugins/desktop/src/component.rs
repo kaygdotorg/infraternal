@@ -1,4 +1,11 @@
 //! Runtime desktop component owns its helper process; disabling waits for native cleanup [D198,D201].
+//!
+//! [`DesktopComponent`] implements the plugin API's `ComponentPlugin` for the
+//! desktop helper. Enabling spawns the helper executable in its own process
+//! group; disabling retires the whole group: SIGTERM first, up to 12 seconds for
+//! the helper to restore any window geometry it changed, then SIGKILL, and
+//! only then does it report success. Waiting on the whole group matters because
+//! native child processes can outlive the helper itself.
 use crate::manifest::DESCRIPTOR;
 use infraternal_plugin_api::{
     ComponentPlugin, PluginDescriptor, PluginOperation, PluginState, PluginStatus,
@@ -11,14 +18,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The desktop helper as a switchable component. Dropping it retires the helper.
 pub struct DesktopComponent {
+    /// Private runtime directory passed to the helper as its first argument.
     runtime: PathBuf,
+    /// Helper executable to launch.
     executable: PathBuf,
+    /// The running helper, if any. Kept after a failed disable so that status and
+    /// a later disable can still see the leftover process group.
     child: Arc<Mutex<Option<Child>>>,
+    /// Pass `--once`: the helper exits after serving a single connection.
     once: bool,
+    /// Passed as `--companion-runtime` when set.
     companion_runtime: Option<PathBuf>,
 }
 impl DesktopComponent {
+    /// A long-running component: the helper serves connections until disabled.
+    /// `runtime` is the private directory for its socket; `executable` is the
+    /// helper binary. Nothing is started until `set_enabled(true)`.
     #[must_use]
     pub fn new(runtime: PathBuf, executable: PathBuf) -> Self {
         Self {
@@ -47,9 +64,12 @@ impl DesktopComponent {
     }
 }
 impl ComponentPlugin for DesktopComponent {
+    /// The static description of the desktop plugin.
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
+    /// `On` while the helper runs, `Stopping` when it has exited but its process
+    /// group still has members (or state cannot be read), otherwise `Off`.
     fn status(&self) -> PluginStatus {
         let state = self
             .child
@@ -70,6 +90,13 @@ impl ComponentPlugin for DesktopComponent {
             active_work: usize::from(state != PluginState::Off),
         }
     }
+    /// Starts or stops the helper on a blocking thread.
+    ///
+    /// Enabling is a no-op if the helper already runs; a dead one is retired
+    /// before a new one is spawned (stdio closed, own process group). On
+    /// non-macOS systems only one-shot components can be enabled. Disabling a
+    /// component that is off succeeds, so it is safe to repeat. Errors are fixed
+    /// user-safe messages; a failed disable keeps the child so it can be retried.
     fn set_enabled(&self, enabled: bool) -> PluginOperation<'_, ()> {
         let child = Arc::clone(&self.child);
         let runtime = self.runtime.clone();
@@ -125,11 +152,15 @@ impl ComponentPlugin for DesktopComponent {
         })
     }
 }
+/// The child's process-group id. It equals the child's pid because the child is
+/// spawned as its own group leader.
 fn group_id(child: &Child) -> Result<nix::unistd::Pid, &'static str> {
     i32::try_from(child.id())
         .map(nix::unistd::Pid::from_raw)
         .map_err(|_| "Desktop helper identity is unavailable.")
 }
+/// True if any process is still in the child's process group (probed with
+/// signal 0, which sends nothing).
 fn group_present(child: &Child) -> Result<bool, &'static str> {
     match nix::sys::signal::killpg(group_id(child)?, None) {
         Ok(()) => Ok(true),
@@ -137,6 +168,9 @@ fn group_present(child: &Child) -> Result<bool, &'static str> {
         Err(_) => Err("Desktop process group could not be inspected."),
     }
 }
+/// Non-blocking check: has the helper exited and its whole group disappeared?
+/// Also reaps any leftover zombie members of the group. Returns `false` while
+/// the helper still runs or group members remain.
 fn retired(child: &mut Child) -> Result<bool, &'static str> {
     if child
         .try_wait()
@@ -159,6 +193,12 @@ fn retired(child: &mut Child) -> Result<bool, &'static str> {
     }
     Ok(!group_present(child)?)
 }
+/// Stops the helper's whole process group and waits until it is gone.
+///
+/// Sends SIGTERM and polls for up to 12 seconds, then SIGKILL and polls for up
+/// to 3 more. If the helper had to be killed while still alive, success is
+/// downgraded to an error, because the helper never confirmed that it restored
+/// window geometry.
 fn retire(child: &mut Child) -> Result<(), &'static str> {
     if retired(child)? {
         return Ok(());

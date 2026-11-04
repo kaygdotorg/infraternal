@@ -589,7 +589,12 @@ fn attached_backpressure_and_detached_progress() {
         panic!("no Hello")
     };
     assert!(start.elapsed() < Duration::from_millis(300));
-    let stalled = wait_for_stalled_head(&session, stalled.max(seq.saturating_add(1024)), 1_000_000);
+    // Any byte past the consumed marker proves the flood began. The stall point
+    // itself is not a contract: an AF_UNIX stream refuses further writes after
+    // a fixed number of skbs (278 on the build VMs), whatever their size, and
+    // each Output frame carries one PTY read. When the shim keeps pace with a
+    // line-buffered `seq`, the unread socket fills with ~1 KiB of payload (#334).
+    let stalled = wait_for_stalled_head(&session, stalled.max(seq.saturating_add(1)), 1_000_000);
     assert!(
         stalled < 1_000_000,
         "attached producer must backpressure before completing"

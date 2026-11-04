@@ -16,6 +16,7 @@ const DISPLAY_NAME_MAX = 64;
 /** Shown under the username field from the start, so the rule is known before the first wrong key. */
 const USERNAME_RULE = "Use 2–32 lowercase letters, digits, _ or -.";
 
+/** The four setup steps with their title and the sentence under it, in order. */
 const SETUP_STEPS = [
   { title: "Make this server yours", lede: "Paste the one-time setup token. It is shown only on the server, so only you can claim it." },
   { title: "Who are you?", lede: "Your username labels your passkey and the audit log. Your display name is what the app shows." },
@@ -23,6 +24,7 @@ const SETUP_STEPS = [
   { title: "Save your recovery key", lede: "If you ever lose your passkeys, these 24 words get you back in. Store them somewhere safe and offline." },
 ] as const;
 
+/** Everything the wizard knows while it runs; values the user typed, progress, and the pending registration callbacks. */
 interface SetupState {
   token: string;
   username: string;
@@ -38,6 +40,13 @@ interface SetupState {
   instantCompletion?: boolean;
 }
 
+/**
+ * Draws the first-run setup wizard in `host`: paste the setup token, choose a name, create a passkey, save the recovery key.
+ * Called through {@link loadSetup}, which fetches this module only when a server needs setup.
+ * @param message text for the card's message line
+ * @param setupTokenCommand the command that prints the token on the server
+ * @param onAuthenticated called when the owner account exists and the browser is signed in; `firstSetup` is then true
+ */
 export function mountSetup(
   host: HTMLElement,
   message: string,

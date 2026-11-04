@@ -30,6 +30,10 @@ export interface LinkInfo {
   readonly heldKeys: number;
 }
 
+/**
+ * One terminal window's live link to its session, made by `SessionService.bind`. The window calls `mount` once, then drives visibility,
+ * focus and size through the other members. Optional members are offered only by bindings that can do them.
+ */
 export interface SessionBinding {
   /** Runtime attachment readiness; surviving inventory alone does not prove typing reaches the shim. */
   readonly connected?: boolean;
@@ -62,6 +66,7 @@ export interface SessionBinding {
   dispose(): void;
 }
 
+/** A host the person can open shells on, as the session list knows it. */
 export interface HostEntry {
   id: string;
   name: string;
@@ -72,6 +77,7 @@ export interface HostEntry {
   online?: boolean;
 }
 
+/** What the canvas asks of the sessions: bind a window to a session, make a model for a new shell, and list hosts. Implemented by the live service and by the mock. */
 export interface SessionService {
   /** Binds a terminal window's model to its session (opening one when the model names none). */
   bind(model: WindowModel, env: { view: ViewId; /** Repaints readiness without persisting connection state in layouts. */ connectionChanged?(): void; /** Open the existing window-header session picker. */ showSessions?: (event?: MouseEvent) => void; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void; /** The host refused to open a shell here; true when the window shows the reason itself (no toast then). */ refused?(message: string): boolean }): SessionBinding;

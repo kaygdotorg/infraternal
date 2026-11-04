@@ -41,6 +41,7 @@ import { prototypeFacts } from "./details-facts";
 import type { BranchSection, BranchedMenu } from "../../../../../../packages/ui/src/branched";
 import type { CoreScreen } from "../../../core-screen";
 
+/** A session as the prototype windows show it: its name, size and age, and the lines of its screen. */
 export interface CanvasSession {
   id: string;
   name: string;
@@ -53,6 +54,7 @@ export interface CanvasSession {
   screen: string[];
 }
 
+/** A host as the prototype windows show it. `card` is the host's window card. */
 export interface CanvasHost {
   id: string;
   user: string;
@@ -95,6 +97,7 @@ export interface CanvasWindowHandle {
   readonly card: WindowCard;
 }
 
+/** A window that holds a flow. `becomeHost` turns it into a finished host's terminal window; `remove` takes it off the canvas. */
 export interface CanvasFlowWindow extends CanvasWindowHandle {
   /** Turns this window into the terminal window of a finished host (title, mark, popover, preview). */
   becomeHost(host: CanvasHost): void;
@@ -102,6 +105,7 @@ export interface CanvasFlowWindow extends CanvasWindowHandle {
   remove(): void;
 }
 
+/** The prototype canvas. Windows are addressed by id. */
 export interface CanvasController {
   dispose(): void;
   /** Appends a window for a flow, activates it and pans to it. */
@@ -118,6 +122,7 @@ export interface CanvasController {
   readonly toast: ToastController;
 }
 
+/** One window on the prototype canvas, with its host, session, card and (when dragged) its own size. */
 interface CanvasWindow {
   id: string;
   flow?: boolean;
@@ -132,21 +137,32 @@ interface CanvasWindow {
   resize?: WindowResize;
 }
 
+/** The test double's endpoint for the prototype's hosts. */
 const HOSTS_URL = "/__mock/proto/windows";
+/** The gap between windows, in pixels. */
 const GAP = 12;
+/** How far in pixels a press may move and still count as a tap. */
 const TAP_SLOP = 8;
+/** How far in pixels a touch must travel before it counts as a pan. */
 const PAN_THRESHOLD = 10;
+/** How far in pixels two touches must spread or close before they count as a pinch. */
 const PINCH_THRESHOLD = 24;
+/** How long in milliseconds after the last movement the canvas counts as at rest. */
 const REST_DELAY = 140;
+/** The momentum friction: the share of speed kept each millisecond after a fling. */
 const DECELERATION = 0.998;
 /** Smallest dragged window: about 40 columns by 10 rows of the 14 px terminal face plus its chrome. */
 const MIN_COLUMNS = 40;
+/** The fewest rows a dragged window may have (see `MIN_COLUMNS`). */
 const MIN_ROWS = 10;
+/** The narrowest a dragged window may be, in pixels. */
 const MIN_WIDTH = 260;
 /** The column the docked sidebar takes from the canvas: its 292 px plus the 12 px gap (style.css). */
 const DOCK_WIDTH = 292 + 12;
 
+/** True while the primary pointer is coarse (a finger). */
 const coarse = matchMedia("(pointer: coarse)");
+/** True while the person asked for reduced motion. */
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 /** Mounts the canvas into the core screen's pane area and returns its disposer. */

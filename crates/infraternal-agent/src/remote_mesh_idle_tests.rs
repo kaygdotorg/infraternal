@@ -295,5 +295,6 @@ async fn mesh_idle_timer_cost_at_one_thousand_connections() {
     drop((connections, accepted, drivers));
 }
 
+#[cfg(target_os = "linux")]
 #[path = "remote_mesh_copy_cost_tests.rs"]
 mod copy_cost;

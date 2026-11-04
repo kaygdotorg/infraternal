@@ -21,8 +21,10 @@ import type { WinRec } from "../context";
 
 /** How long a moment stays (connection-indicator.ts settles "resumed" after 1.8 s and "approximate" after 3.2 s). */
 const RESUMED_MS = 1800;
+/** How long the "approximate" moment shows (see `RESUMED_MS`). */
 const APPROXIMATE_MS = 3200;
 
+/** What a window's connection indicator shows: the status dot, the indicator state, an optional sentence for offline, and the number of kept keys. */
 export interface LinkView {
   status: WindowStatus;
   state: ConnectionIndicatorState;
@@ -32,6 +34,7 @@ export interface LinkView {
   held: number;
 }
 
+/** What the indicator is decided from. `now` is a `performance.now()` time, used to end the short "resumed" and "approximate" moments. */
 export interface LinkInput {
   binding: Pick<SessionBinding, "connected" | "link"> | undefined;
   /** The window's session has ended. */
@@ -41,6 +44,10 @@ export interface LinkInput {
   now: number;
 }
 
+/**
+ * Decides the indicator. Order: an ended session or a refusal is offline; a binding that is not connected is connecting (the first
+ * attach) or reconnecting (it was connected before) with the count of kept keys; then the two short moments; else connected.
+ */
 export function linkView(input: LinkInput): LinkView {
   if (input.ended) return { status: "offline", state: "offline", detail: "This session has ended.", held: 0 };
   if (input.refusal !== undefined) return { status: "offline", state: "offline", detail: input.refusal, held: 0 };

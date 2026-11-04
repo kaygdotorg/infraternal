@@ -15,8 +15,11 @@ use infraternal_mesh::model::{Addresses, NodeId};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::BTreeMap, net::Ipv4Addr, sync::OnceLock};
 
+/// The one configuration every fuzz input is answered against, built once.
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
+/// A minimal node configuration: node 1 named `mesh-node`, suffix `internal`,
+/// no peers.
 fn config() -> Config {
     Config {
         local_key: None,

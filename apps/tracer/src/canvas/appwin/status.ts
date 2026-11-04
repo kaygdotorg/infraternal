@@ -15,6 +15,7 @@
  */
 import type { WindowStatus } from "../../../../../packages/ui/src/window-card";
 
+/** Where an app window's stream stands. Each kind is described on its own line. `permission`, `closed` and `unsupported` are final until the person acts. */
 export type StreamState =
   /** Nothing asked yet (the window exists, the stream has not started). */
   | { kind: "idle" }
@@ -45,6 +46,7 @@ export type ControlState =
   /** Someone is using the machine; remote input waits (D208 A3: local input wins for 2 s). */
   | { kind: "paused"; untilMs: number };
 
+/** What the window draws for a stream state: the dot, whether the last picture stays, and an optional card or strip. Made by `describe`. */
 export interface StateView {
   /** The pill's status dot. */
   dot: WindowStatus;
@@ -63,6 +65,7 @@ export function permissionHint(what: "Screen Recording" | "Accessibility", machi
     : `Controlling ${machine} needs Accessibility. On ${machine}, open System Settings, Privacy & Security, Accessibility and allow infraternal. You can still watch.`;
 }
 
+/** Turns a stream state into what the window shows, in plain words. `ctx` names the machine and app, and says whether this is a whole-screen window. */
 export function describe(state: StreamState, ctx: { machine: string; app: string; screen: boolean }): StateView {
   const subject = ctx.screen ? "the screen" : ctx.app;
   switch (state.kind) {

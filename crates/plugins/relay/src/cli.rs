@@ -1,14 +1,31 @@
-//! Declares the relay component actions shared by CLI help and generated skills.
+//! The command-line actions of the relay component: `relay up`, `relay down`
+//! and `relay status`.
+//!
+//! These declarations feed both the CLI help and the generated AI-agent
+//! skills, so each action carries a description, usage steps, input and output
+//! schemas, and an example. None of the commands work yet: each is marked "not
+//! available yet" until the relay runtime can be controlled from the CLI. The
+//! declarations are compiled in only for builds with placeholders enabled;
+//! other builds register the plugin with no actions.
 
 use infraternal_plugin_api::{
     ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, JsonSchema,
     PluginDefinition, SafetyNotes, placeholders,
 };
 
-/// Stable plugin owner used to materialize only the requested CLI definitions.
+/// The plugin id, `relay`. The CLI uses it to build only the definitions of the
+/// plugin that was asked for.
 pub const ID: &str = "relay";
 
-/// Register the relay component actions exposed by this plugin.
+/// Describes the relay plugin and its three actions.
+///
+/// - `relay up`: start relaying connections on this node (a write).
+/// - `relay down`: stop relaying; warns that active connections may be
+///   interrupted (a write, not destructive).
+/// - `relay status`: show whether the relay is running (a read).
+///
+/// Every action targets the node as a whole, takes no input and does not
+/// support dry runs. All are marked not available yet.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     PluginDefinition::new(

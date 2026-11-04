@@ -20,9 +20,12 @@
 /** How long after the last scroll event the bar stays up before it fades. */
 const HIDE_AFTER_MS = 800;
 
+/** The pending "hide the bar" timer for each surface that is scrolling. */
 const hideTimers = new WeakMap<Element, number>();
+/** Whether {@link installAutoScrollbars} has already added its listener. */
 let installed = false;
 
+/** Shows the bar on the scrolled surface and restarts its hide timer. */
 function onScroll(event: Event): void {
   const surface = event.target;
   // The document itself (page scroll) and terminal viewports are not surfaces this module styles.

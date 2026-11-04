@@ -5,11 +5,19 @@ use super::{Auth, B64, Deserialize, Engine, Error, Result, Row, Serialize, Value
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wrap {
+    /// Key-derivation salt; decodes to exactly 32 bytes.
     pub salt: String,
+    /// AES-GCM nonce; decodes to exactly 12 bytes.
     pub nonce: String,
+    /// Sealed 32-byte key followed by its 16-byte tag; decodes to exactly 48 bytes.
     pub ciphertext: String,
 }
 impl Wrap {
+    /// Checks that each field decodes to its exact length and that re-encoding gives
+    /// back the same text, so one envelope has exactly one accepted spelling.
+    ///
+    /// # Errors
+    /// Returns `Error::Invalid` for bad base64, a wrong length, or non-canonical text.
     pub(super) fn validate(&self) -> Result<()> {
         for (value, length) in [(&self.salt, 32), (&self.nonce, 12), (&self.ciphertext, 48)] {
             let decoded = B64.decode(value).map_err(|_| Error::Invalid)?;
@@ -52,6 +60,13 @@ impl Auth {
     }
 }
 
+/// Stores one envelope for `user` inside the caller's transaction, so it commits or
+/// rolls back together with the credential it belongs to. `kind` names the
+/// envelope type (for example a passkey or the recovery code) and `key` the
+/// credential id. The caller must have called [`Wrap::validate`] first.
+///
+/// # Errors
+/// Fails on a storage error, including a duplicate `(user, kind, key)` row.
 pub(super) async fn put_wrap(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     user: &str,

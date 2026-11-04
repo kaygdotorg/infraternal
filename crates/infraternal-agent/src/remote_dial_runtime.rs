@@ -12,9 +12,13 @@ use std::{
 /// A fresh endpoint on reconnect prevents cancellation from affecting a winner.
 pub(super) struct DialRuntime(Arc<Drivers>);
 impl DialRuntime {
+    /// Creates a runtime that has not spawned anything yet.
     pub(super) fn new() -> Self {
         Self(Arc::new(Drivers(Mutex::new(Vec::new()))))
     }
+    /// The QUIC runtime to give to the endpoint of this one dial attempt. It
+    /// delegates to Tokio but records every task the endpoint spawns, so dropping
+    /// this `DialRuntime` can abort them.
     pub(super) fn runtime(&self) -> Arc<dyn Runtime> {
         self.0.clone()
     }
@@ -35,6 +39,10 @@ impl Drop for DialRuntime {
     }
 }
 
+/// The recording runtime: time, timers and sockets come from Tokio unchanged,
+/// but `spawn` keeps each task's handle. Finished handles are pruned on every
+/// spawn, which keeps the list short because an endpoint makes one outgoing
+/// connection.
 #[derive(Debug)]
 struct Drivers(Mutex<Vec<tokio::task::JoinHandle<()>>>);
 impl Runtime for Drivers {

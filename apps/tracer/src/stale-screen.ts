@@ -53,18 +53,29 @@ export function staleWaitMs(roundTripMs: number | undefined): number {
   return Math.min(STALE_WAIT_MAX_MS, Math.round(STALE_WAIT_MIN_MS + 2 * roundTripMs));
 }
 
+/** The timer the watch uses, injected so tests can run it without waiting. `after` returns a handle that `cancel` accepts. */
 export interface StaleScreenScheduler {
   after(ms: number, run: () => void): unknown;
   cancel(handle: unknown): void;
 }
 
+/**
+ * The state machine behind the "screen may be out of date" note. Create one per terminal with a `show` callback that
+ * puts the note up (`true`) or takes it down (`false`). Call `begin` when a replay has painted, `output` for every
+ * byte count that arrives afterwards, and `reset` when the screen is replaced or the link drops.
+ */
 export class StaleScreenWatch {
+  /** The replay fence while the watch is running; `undefined` when it is idle. */
   private baseline: bigint | undefined;
+  /** The pending timer, if the wait has not run out. */
   private handle: unknown;
+  /** Whether the note is up now. */
   private shownNow = false;
 
+  /** `show` is called with `true` when the note should appear and `false` when it should go. */
   constructor(private readonly show: (shown: boolean) => void, private readonly scheduler: StaleScreenScheduler) {}
 
+  /** True while the note is up. */
   get shown(): boolean { return this.shownNow; }
   /** True between the replay painting and the first newer output (or the end of the wait with the note up). */
   get watching(): boolean { return this.baseline !== undefined; }

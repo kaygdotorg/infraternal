@@ -7,27 +7,41 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 
+/// The 16-byte id of the session a datagram belongs to.
 type Identity = [u8; 16];
+/// Reads the session id out of a complete datagram, or `None` if the packet is not valid.
 type Decoder = fn(&[u8]) -> Option<Identity>;
+/// One plugin's datagram registration: its stream definition, its packet decoder and the
+/// lanes (one per session) currently admitted, each with its admission ticket and queue.
 struct Provider {
     definition: &'static WireStreamDef,
     decode: Decoder,
     maximum: usize,
     lanes: HashMap<Identity, (u64, mpsc::Sender<Bytes>)>,
 }
+/// The hub's shared state: providers by capability bit, the next admission ticket and the
+/// total number of admitted lanes.
 struct State {
     providers: HashMap<u64, Provider>,
     next_ticket: u64,
     count: usize,
 }
+/// The hub's lock-protected state plus a watch channel that publishes the lane count.
 struct Inner {
     state: Mutex<State>,
     active: watch::Sender<usize>,
 }
-/// Construction owns metadata only. The enclosing transport starts its sole
-/// datagram reader on the first registration and joins it when the last retires.
+/// Routes the datagrams of one connection to the plugin lanes that were admitted for them.
+///
+/// A lane is registered with [`DatagramHub::register`] after its reliable stream is bound, and
+/// the transport feeds every incoming packet to [`DatagramHub::push`]. A packet for a session
+/// that has no lane is dropped; packets never create routes. Clones share the same hub.
+///
+/// Construction owns metadata only. The enclosing transport starts its sole datagram reader
+/// on the first registration and joins it when the last lane retires.
 #[derive(Clone)]
 pub struct DatagramHub(Arc<Inner>);
+/// An empty hub with no providers.
 impl Default for DatagramHub {
     fn default() -> Self {
         Self(Arc::new(Inner {
@@ -40,14 +54,22 @@ impl Default for DatagramHub {
         }))
     }
 }
+/// Why [`DatagramHub::register`] refused a lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdmissionError {
+    /// The stream definition is invalid or has no datagram decoder, its datagram tag clashes
+    /// with another plugin's, or the hub's lock is poisoned.
     Invalid,
+    /// A lane for this session id is already registered.
     Duplicate,
+    /// The hub, or this plugin's stream definition, is at its lane limit.
     Limit,
 }
-/// Admission, not packet contents, chooses this UUID and capability. Dropping
-/// the lease withdraws its exact generation before releasing queued packets.
+/// The receiving end of one admitted datagram lane.
+///
+/// Admission, not packet contents, chooses this UUID and capability. Call
+/// [`DatagramReceiver::receive`] to get the next packet for the session. Dropping the lease
+/// withdraws its exact generation before releasing queued packets.
 pub struct DatagramReceiver {
     hub: DatagramHub,
     capability: u64,
@@ -55,8 +77,11 @@ pub struct DatagramReceiver {
     ticket: u64,
     receive: mpsc::Receiver<Bytes>,
 }
-/// Detached synchronous withdrawal for one route generation. It retains no
-/// queued payloads and cannot withdraw a replacement with the same identity.
+/// A handle that can withdraw one lane without owning its queue, from synchronous code.
+///
+/// It retains no queued payloads and cannot withdraw a replacement lane registered later with
+/// the same session id, because it matches the lane's admission ticket. Get one from
+/// [`DatagramReceiver::retirement`].
 pub struct DatagramRetirement {
     hub: DatagramHub,
     capability: u64,
@@ -64,11 +89,18 @@ pub struct DatagramRetirement {
     ticket: u64,
 }
 impl DatagramHub {
+    /// A watch on how many lanes are admitted right now, so the transport can start its
+    /// datagram reader with the first lane and stop it after the last.
     #[must_use]
     pub fn active(&self) -> watch::Receiver<usize> {
         self.0.active.subscribe()
     }
-    /// The caller must first establish host authority and reliable stream binding.
+    /// Admits a datagram lane for the session `identity` and returns the receiver of its packets.
+    ///
+    /// The caller must first establish host authority and reliable stream binding. `definition`
+    /// must declare a datagram tag and decoder, and `identity` is the session id the decoder will
+    /// find in that session's packets. Each lane queues at most four packets.
+    ///
     /// # Errors
     /// Refuses undeclared datagrams, duplicate identities and bounded capacity.
     pub fn register(
@@ -143,6 +175,7 @@ impl DatagramHub {
     }
 }
 impl DatagramReceiver {
+    /// A handle that withdraws this lane, for code that cannot own the receiver.
     #[must_use]
     pub fn retirement(&self) -> DatagramRetirement {
         DatagramRetirement {
@@ -152,6 +185,8 @@ impl DatagramReceiver {
             ticket: self.ticket,
         }
     }
+    /// Waits for the next packet of this session. Returns `None` once the lane is withdrawn
+    /// and its queue is empty.
     pub async fn receive(&mut self) -> Option<Bytes> {
         self.receive.recv().await
     }

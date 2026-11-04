@@ -14,12 +14,17 @@ pub static WIRE: WireStreamDef = WireStreamDef {
     datagram_tag: Some(0x45),
     datagram_identity: Some(datagram_identity),
 };
+/// Session id carried by a lane's opening `Attach` packet, or `None` for anything else.
 fn opening_identity(packet: &[u8]) -> Option<[u8; 16]> {
     wire_identity(packet, true)
 }
+/// Session id carried by a datagram `Fragment` packet, or `None` for anything else.
 fn datagram_identity(packet: &[u8]) -> Option<[u8; 16]> {
     wire_identity(packet, false)
 }
+/// Reads the session id from one complete packet. `opening` selects `Attach`
+/// (true) or `Fragment` (false). Returns `None` when the packet does not decode,
+/// has trailing bytes after the frame, or is the other message kind.
 fn wire_identity(packet: &[u8], opening: bool) -> Option<[u8; 16]> {
     let decoded = decode_frame(packet).ok()?;
     if decoded.wire_len != packet.len() {

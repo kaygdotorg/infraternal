@@ -1,4 +1,14 @@
 //! Exact-version `ScreenCaptureKit` adapter; selected-app filters cannot expose other apps [D204,D208 A4].
+//!
+//! [`MacCapture`] implements the platform-neutral [`Capture`] trait on macOS. It
+//! builds a content filter for one window (through its owning application, so
+//! menus and sheets that app opens are included) or for one whole display, starts
+//! a `ScreenCaptureKit` stream, and keeps only the newest completed frame so a
+//! slow consumer never builds a backlog.
+//!
+//! Every framework failure is mapped to one generic "Desktop capture is
+//! unavailable." error on purpose: the text may reach a remote user, and the
+//! framework's own messages can name windows or applications.
 use crate::{
     capture::{Capture, CapturedFrame, Rect},
     protocol::{Size, Target},
@@ -12,10 +22,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Collapses any framework error into the single generic capture error, dropping
+/// the original detail so window titles or application names are never leaked.
 fn unavailable(_: impl std::fmt::Display) -> io::Error {
     io::Error::other("Desktop capture is unavailable.")
 }
 
+/// One completed frame from the stream. Only its capture timestamp is kept; the
+/// pixels stay inside the framework and are fetched separately by
+/// [`Capture::copy_pixels`].
 pub struct Surface {
     capture_ticks: u64,
 }
@@ -25,18 +40,33 @@ impl CapturedFrame for Surface {
     }
 }
 
+/// A running `ScreenCaptureKit` stream for one window or display.
+///
+/// Dropping it stops the stream.
 pub struct MacCapture {
     stream: SCStream,
+    /// False once [`Capture::stop`] has run, so stopping twice is harmless.
     running: bool,
+    /// Newest completed frame, written by the framework's callback thread and
+    /// emptied by [`Capture::take_latest`]. A newer frame replaces an older one.
     latest: Arc<Mutex<Option<Surface>>>,
+    /// Top-left of the display in global points; the source rectangle is
+    /// expressed relative to it.
     display_origin: (f64, f64),
     filter: SCContentFilter,
     config: SCStreamConfiguration,
+    /// Output size in pixels.
     size: Size,
+    /// Captured area in global points.
     rect: Rect,
+    /// True for window targets, which need background fill around the window.
     window: bool,
 }
 
+/// Builds the stream configuration: BGRA output of `size` pixels showing `rect`
+/// (global points; `origin` is the display's top-left, subtracted to get display
+/// coordinates). The area is scaled to fit and centred, keeping its aspect ratio.
+/// Returns an error for an invalid size or rectangle.
 fn config(size: Size, rect: Rect, origin: (f64, f64)) -> io::Result<SCStreamConfiguration> {
     size.validate()?;
     if !rect.valid() {
@@ -71,6 +101,10 @@ fn config(size: Size, rect: Rect, origin: (f64, f64)) -> io::Result<SCStreamConf
 
 impl Capture for MacCapture {
     type Frame = Surface;
+    /// Finds the window (by id and owning process) or display, starts the stream,
+    /// and returns it. Fails with the generic unavailable error if the target is
+    /// gone, is on no display, or the framework refuses (for example without
+    /// screen-recording permission).
     fn start(target: &Target, size: Size, rect: Rect) -> io::Result<Self> {
         size.validate()?;
         let content = SCShareableContent::get().map_err(unavailable)?;
@@ -160,6 +194,8 @@ impl Capture for MacCapture {
             window: matches!(target, Target::Window { .. }),
         })
     }
+    /// Applies a new output size and captured area to the running stream and
+    /// discards the pending frame, which was rendered for the old geometry.
     fn resize(&mut self, size: Size, rect: Rect) -> io::Result<()> {
         let configuration = config(size, rect, self.display_origin)?;
         self.stream
@@ -173,6 +209,9 @@ impl Capture for MacCapture {
         }
         Ok(())
     }
+    /// Takes a one-off screenshot with the stream's filter and configuration and
+    /// returns it as tightly packed BGRA bytes (`width * height * 4`). For window
+    /// targets the empty margins are filled with an estimated background colour.
     fn copy_pixels(&self) -> io::Result<Vec<u8>> {
         use screencapturekit::screenshot_manager::{CGImageExt, SCScreenshotManager};
         // Stream buffers are framework-owned and their byte views require unsafe Rust.
@@ -186,9 +225,11 @@ impl Capture for MacCapture {
         }
         Ok(pixels)
     }
+    /// Returns the newest completed frame, if any arrived since the last call.
     fn take_latest(&self) -> Option<Surface> {
         self.latest.lock().ok()?.take()
     }
+    /// Stops the stream. Calling it again after the first time does nothing.
     fn stop(&mut self) -> io::Result<()> {
         if !self.running {
             return Ok(());
@@ -207,6 +248,12 @@ impl Drop for MacCapture {
 // Infer a flat background from the modal opaque color in a bounded 32x32 grid.
 // Composite transparent app-filtered gaps onto it before H.264 discards alpha;
 // neither a desktop image nor another application's pixels enter this estimate.
+//
+// `pixels` is a BGRA buffer of `size`; `rect` is the captured area, whose scaled
+// and centred position inside the buffer defines the "content" region. Outside
+// it the pixels are painted with the estimated colour; inside it, partly
+// transparent pixels are blended over that colour. Afterwards every pixel is
+// opaque. Returns an error if the buffer length does not match `size`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn fill_bands(pixels: &mut [u8], size: Size, rect: Rect) -> io::Result<()> {
     let width = size.width as usize;

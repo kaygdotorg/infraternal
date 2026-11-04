@@ -1,4 +1,9 @@
 //! Retains server-owned capture sessions across viewer and path lifetimes; runtime disable retires every retained frame [D104,D198,D232].
+//!
+//! A [`Registry`] is the lookup table from session id to live [`Session`]. The
+//! server inserts a session once its host is admitted; viewers can then attach
+//! by id. It is off until enabled, and turning it off closes every session,
+//! which drops all cached video.
 use crate::session::{Error, Session, SessionId, Viewer};
 use infraternal_plugin_api::streams::Authority;
 use std::{
@@ -6,6 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Registry contents, behind one mutex.
 struct State {
     enabled: bool,
     sessions: HashMap<SessionId, Arc<Session>>,
@@ -18,6 +24,7 @@ pub struct Registry {
     limit: usize,
 }
 impl Registry {
+    /// Creates a disabled, empty registry that holds at most `limit` sessions.
     #[must_use]
     pub fn new(limit: usize) -> Self {
         Self {
@@ -106,10 +113,12 @@ impl Registry {
         session.close();
         Ok(())
     }
+    /// Number of registered sessions.
     #[must_use]
     pub fn len(&self) -> usize {
         self.state.lock().map_or(0, |state| state.sessions.len())
     }
+    /// True when no session is registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0

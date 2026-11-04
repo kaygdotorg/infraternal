@@ -15,13 +15,18 @@ use zeroize::Zeroizing;
 
 // The direction byte completes unsupported QUIC versions 0x69703100/01.
 // A greased fixed bit can be zero, so a short-header-looking prefix is unsafe.
+/// First bytes of every path-proof packet. The leading `0x80` and the `ip1` text make it look like a QUIC long header with an unsupported version, so QUIC drops it if it ever reaches it.
 const PREFIX: &[u8; 4] = b"\x80ip1";
+/// Direction byte for a request.
 const REQUEST: u8 = 0;
+/// Direction byte for a response.
 const RESPONSE: u8 = 1;
+/// Bytes before the authenticator: prefix (4), direction (1) and sequence (8).
 const HEADER: usize = 13;
 /// Fixed wire bound: prefix, direction, sequence and SHA-256 authenticator.
 pub const PACKET_SIZE: usize = HEADER + 32;
 
+/// True if any `stride`-sized packet in a received batch starts with the proof prefix.
 pub(crate) fn contains_probes(bytes: &[u8], stride: usize) -> bool {
     bytes
         .chunks(stride.max(1))
@@ -80,6 +85,7 @@ impl PathKey {
             &bytes[..],
         ))))
     }
+    /// Builds a packet for `direction` and `sequence`, with an HMAC-SHA256 over the header as the authenticator.
     fn packet(&self, direction: u8, sequence: u64) -> [u8; PACKET_SIZE] {
         let mut packet = [0; PACKET_SIZE];
         packet[..4].copy_from_slice(PREFIX);
@@ -90,6 +96,7 @@ impl PathKey {
         packet
     }
 
+    /// Returns the sequence number if `bytes` is a correctly authenticated packet in `direction`; `None` for anything else.
     fn sequence(&self, bytes: &[u8], direction: u8) -> Option<u64> {
         let (response, sequence) = path_probe_header(bytes)?;
         if response != (direction == RESPONSE) {
@@ -118,9 +125,11 @@ pub(crate) struct Probe {
     timing: Option<(Duration, Duration)>,
 }
 impl Probe {
+    /// True if the key for connection `id` is already installed.
     pub fn has_key(&self, id: usize) -> bool {
         self.key.as_ref().is_some_and(|(current, _)| *current == id)
     }
+    /// Installs the key for connection `id`. Ignored if that connection's key is already there, so a concurrent second install cannot reset state.
     pub fn install_key(&mut self, id: usize, key: PathKey) {
         // A concurrent exporter for this same connection must not reset the
         // pending sequence or authenticated timing installed by the winner.
@@ -131,6 +140,7 @@ impl Probe {
             self.timing = None;
         }
     }
+    /// Starts a new watch and clears any pending request. Returns its generation number, which [`retire`](Self::retire) needs. Fails only if the counter would overflow.
     pub fn begin(&mut self) -> io::Result<u64> {
         self.generation = self.generation.checked_add(1).ok_or(io::ErrorKind::Other)?;
         self.pending = None;
@@ -138,6 +148,7 @@ impl Probe {
         self.destination = None;
         Ok(self.generation)
     }
+    /// Ends the watch `generation` started. Ignored if a newer watch has begun.
     pub fn retire(&mut self, generation: u64) {
         if self.generation == generation {
             self.pending = None;
@@ -145,6 +156,7 @@ impl Probe {
             self.destination = None;
         }
     }
+    /// Builds a request for `destination`. A new destination clears earlier state. A new sequence number is used only when no earlier request is still pending. Fails if no key is installed.
     pub fn request(&mut self, destination: SocketAddr) -> io::Result<[u8; PACKET_SIZE]> {
         if self.destination != Some(destination) {
             self.pending = None;
@@ -167,6 +179,7 @@ impl Probe {
     pub fn sent(&mut self, at: Instant) -> Instant {
         self.pending.get_or_insert((self.sequence, at)).1
     }
+    /// Handles a received packet. It counts only if it comes from the current destination, is authenticated as a response, and matches the pending sequence. Then it updates the smoothed round-trip time and variation.
     pub fn receive(&mut self, bytes: &[u8], source: SocketAddr) {
         if self.destination != Some(source) {
             return;
@@ -191,16 +204,19 @@ impl Probe {
             self.answered = Some((source, Instant::now()));
         }
     }
+    /// True if an authenticated response from `source` arrived at or after `since`.
     pub fn answered_since(&self, since: Instant, source: SocketAddr) -> bool {
         self.answered
             .is_some_and(|(physical, at)| physical == source && at >= since)
     }
+    /// How long to wait for an answer: smoothed round trip plus four times its variation plus `margin`. Without a measurement it is `fallback` plus 200 ms.
     pub fn allowance(&self, fallback: Duration, margin: Duration) -> Duration {
         self.timing
             .map_or(fallback + Duration::from_millis(200), |(rtt, variation)| {
                 rtt + variation * 4 + margin
             })
     }
+    /// Forgets the pending request, answer, destination and timing.
     pub fn cancel(&mut self) {
         self.pending = None;
         self.answered = None;

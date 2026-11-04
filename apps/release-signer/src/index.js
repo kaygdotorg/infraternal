@@ -35,13 +35,24 @@
  * Optional variable: NOTIFY_URL.
  */
 
+/** SSH signature namespace; a verifier must pass the same `-n` value or the signature is rejected. */
 const NAMESPACE = "infraternal-release";
-// Stable: x.y.z. Edge: edge-YYYYMMDDTHHMMSSZ (UTC; sorts by time as text).
+/** Accepted version strings. Stable: x.y.z. Edge: edge-YYYYMMDDTHHMMSSZ (UTC; sorts by time as text). */
 const VERSION_RE = /^(?:[0-9]+\.[0-9]+\.[0-9]+|edge-[0-9]{8}T[0-9]{6}Z)$/;
+/** The release channel ("edge" or "stable") a validated version string belongs to. */
 const channelOf = (version) => (version.startsWith("edge-") ? "edge" : "stable");
 const enc = new TextEncoder();
 
 export default {
+  /**
+   * Worker entry point. Routes:
+   * - `GET /pubkey`: returns the configured PUBLIC_KEY line (empty text if unset).
+   * - `POST /sign`: signs a release (see the module comment). Answers 401 for a bad caller
+   *   token, 400 for a malformed body or version, 409 when the request is refused
+   *   (already signed, empty release, rate limit) and 500 when signing fails. A 500 body
+   *   names the key problem but never contains key material.
+   * - anything else: 404.
+   */
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/pubkey") return text(env.PUBLIC_KEY ?? "");
@@ -60,10 +71,16 @@ export default {
   },
 };
 
+/** A request that is valid but must not be served (already signed, empty release, rate limit); mapped to HTTP 409. */
 class Refusal extends Error {}
 /** A problem with SIGNING_KEY or PUBLIC_KEY; its message is safe to return (no key bytes). */
 class KeyProblem extends Error {}
 
+/**
+ * Checks the `Authorization: Bearer` header against CALLER_TOKEN. Both sides are hashed and
+ * compared in constant time so the comparison does not leak how much of the token matched.
+ * An unset CALLER_TOKEN rejects every request.
+ */
 async function authorised(request, env) {
   const got = (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");
   const want = env.CALLER_TOKEN ?? "";
@@ -72,6 +89,14 @@ async function authorised(request, env) {
   return crypto.subtle.timingSafeEqual(a, b);
 }
 
+/**
+ * Signs one release and publishes its metadata; returns the index entry that was appended.
+ * Throws {@link Refusal} when the version already has a signature, the release folder has no
+ * files, or the previous signature was under a minute ago. Files are hashed here from the
+ * bucket, never taken from the caller. The signature objects are written before the index,
+ * so a release only appears in `index.json` once its `SHA256SUMS.sig` exists. The optional
+ * notification is best effort and cannot fail the signing.
+ */
 async function signRelease(env, version) {
   const prefix = `releases/${version}/`;
   if (await env.BUILDS.head(`${prefix}SHA256SUMS.sig`)) throw new Refusal("already signed");
@@ -112,6 +137,7 @@ async function signRelease(env, version) {
   return entry;
 }
 
+/** The public append-only release list from `releases/index.json`; empty before the first release. */
 async function readIndex(env) {
   const obj = await env.BUILDS.get("releases/index.json");
   return obj ? JSON.parse(await obj.text()) : [];
@@ -137,7 +163,13 @@ async function signingKey(env) {
   return key;
 }
 
-/** An OpenSSH signature (PROTOCOL.sshsig) over `message`, armored, hash sha512. */
+/**
+ * An OpenSSH signature (PROTOCOL.sshsig) over `message`, armored, hash sha512.
+ * @param key the imported Ed25519 private CryptoKey
+ * @param pub the SSH public key blob (see {@link publicBlob}), embedded in the signature
+ * @param message the bytes being signed (the SHA256SUMS text)
+ * @returns the `-----BEGIN SSH SIGNATURE-----` text that `ssh-keygen -Y verify` reads
+ */
 async function sshsig(key, pub, message) {
   const h = new Uint8Array(await crypto.subtle.digest("SHA-512", message));
   const signed = concat(enc.encode("SSHSIG"), str(enc.encode(NAMESPACE)), str(new Uint8Array(0)), str(enc.encode("sha512")), str(h));
@@ -188,6 +220,11 @@ function seedOf(pem) {
 /** A version-1 PKCS#8 wrapping of an Ed25519 seed (RFC 8410), the form every runtime imports. */
 const pkcs8v1 = (seed) => concat(new Uint8Array([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]), seed);
 
+/**
+ * Decodes an `ssh-ed25519 AAAA…` public key line into its 51-byte SSH blob (4-byte length,
+ * "ssh-ed25519", 4-byte length, 32-byte key). The last 32 bytes are the raw public key.
+ * Throws {@link KeyProblem} for any other key type or a malformed line.
+ */
 function publicBlob(line) {
   const parts = String(line ?? "").trim().split(/\s+/);
   if (parts[0] !== "ssh-ed25519" || !parts[1]) throw new KeyProblem("PUBLIC_KEY must be an ssh-ed25519 line");
@@ -196,18 +233,26 @@ function publicBlob(line) {
   if (blob.length !== 51) throw new KeyProblem("PUBLIC_KEY is not an Ed25519 public key");
   return blob;
 }
+/** The decoded base64 body of a PEM block, with the BEGIN/END lines and whitespace removed. Throws on invalid base64. */
 function pemBytes(pem) {
   const b64 = String(pem ?? "").replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
+/** A big-endian 32-bit integer, as the SSH wire format writes it. */
 const u32 = (n) => new Uint8Array([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]);
+/** An SSH "string": a big-endian length followed by the bytes. */
 const str = (bytes) => concat(u32(bytes.length), bytes);
+/** Joins byte arrays into one new array. */
 function concat(...parts) {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let i = 0; for (const p of parts) { out.set(p, i); i += p.length; }
   return out;
 }
+/** SHA-256 of `data` as bytes. */
 const digest = async (data) => new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+/** Lowercase hexadecimal text of `bytes`, as `sha256sum` prints it. */
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+/** A plain-text response with the given status (200 by default). */
 const text = (body, status = 200) => new Response(body, { status, headers: { "content-type": "text/plain" } });
+/** A 200 JSON response. */
 const json = (body) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });

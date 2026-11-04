@@ -59,8 +59,11 @@ import {
   type TargetView,
 } from "./provisioning-client";
 
+/** Where the mock server serves the discovery data. */
 const FIXTURES_URL = "/__mock/proto/addhost";
+/** The strong ease-out curve used for the wizard's motion. */
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+/** The name shown for each discovery source. */
 const SOURCE_LABELS: Record<HostSource, string> = {
   netbird: "NetBird",
   tailscale: "Tailscale",
@@ -88,22 +91,28 @@ const ICON = {
   retry: `<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/>`,
   rocket: `<path d="M12 15.5 8.5 12c1-4 3.5-7.2 8.5-8.5-1.3 5-4.5 7.5-5 12z"/><path d="M8.5 12 5.5 11.5 8 8.5h3M12 15.5l.5 3 3-2.5v-3M6.5 17.5c-1 .5-1.5 1.5-1.5 2.5 1 0 2-.5 2.5-1.5"/>`,
 } as const;
+/** An icon element from inner SVG markup on the 24 grid. */
 const svg = (paths: string, className = "ah-icon"): string => `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
 
+/** The wizard's screens, in the order a flow normally visits them. */
 type Step = "empty" | "discovery" | "credentials" | "root" | "progress" | "failure";
 /** A failed host as the server reported it: kind, its human text and its log tail. */
 type Failure = { kind: FailureKind; host: AddHostFixture; message: string; evidence: string; phase: number };
+/** Which way a step moves: forward, back, or replace in place. */
 type Direction = 1 | -1 | 0;
 /** One host of the batch. Everything about its progress is `view`, folded from server events. */
 type Job = { host: AddHostFixture; target: string; view: TargetView; run: ProvisioningRun | undefined };
 /** A finished batch whose failed hosts can still be retried on its open run. */
 type Review = { failures: Failure[]; run: ProvisioningRun };
 
+/** Escapes text for use in HTML. */
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
 }[char]!));
+/** Whether the user asks for reduced motion. */
 const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/** The platform of a discovered host, from its operating system. */
 function platformOf(host: AddHostFixture): HostPlatform {
   return hostPlatformFromOs(host.operatingSystem);
 }
@@ -118,6 +127,7 @@ function parseTarget(raw: string): { user: string | undefined; host: string; por
   return { user: match[1], host: match[2]!.toLowerCase(), port };
 }
 
+/** The label, tone and icon that describe how reachable a discovered host is. */
 function statusOf(host: AddHostFixture): { label: string; tone: "ok" | "warn" | "off" | "none"; icon: string } {
   if (host.alreadyAdded) return { label: "Added", tone: "none", icon: ICON.added };
   if (host.reachability === "ready") return { label: "Reached the host", tone: "ok", icon: ICON.ready };

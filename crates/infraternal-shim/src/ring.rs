@@ -16,6 +16,8 @@ pub struct Ring {
     charged: usize,
 }
 impl Ring {
+    /// Creates an empty ring that will keep at most `capacity` bytes. No memory is
+    /// allocated until output arrives, so idle sessions stay small.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -33,15 +35,21 @@ impl Ring {
     pub(crate) fn set_budget(&mut self, budget: Arc<crate::terminal_memory::HostBudget>) {
         self.budget = Some(budget);
     }
+    /// Bytes actually reserved by the backing buffer (not the bytes stored), which
+    /// is what the user's memory pool is charged for.
     #[must_use]
     #[cfg(feature = "process-per-user")]
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.bytes.capacity()
     }
+    /// The absolute offset one past the newest byte: the total number of bytes ever
+    /// appended. It only grows, and does not change when old bytes are dropped.
     #[must_use]
     pub fn head(&self) -> u64 {
         self.head
     }
+    /// The absolute offset of the oldest byte still retained. Reads below this
+    /// offset are no longer possible.
     #[must_use]
     pub fn start(&self) -> u64 {
         self.head - self.bytes.len() as u64

@@ -35,6 +35,7 @@ export interface InlineRenameOptions {
   close(): void;
 }
 
+/** The handle for a rename in progress. */
 export interface InlineRename {
   readonly input: HTMLInputElement;
   /** Ends the rename as if Enter (`true`) or Escape (`false`) was pressed. */
@@ -76,6 +77,7 @@ export function beginInlineRename(options: InlineRenameOptions): InlineRename {
   return { input, finish };
 }
 
+/** Options for {@link inlineRename}. */
 export interface InlineRenameInFlow {
   /** The current name, selected on open. */
   value: string;

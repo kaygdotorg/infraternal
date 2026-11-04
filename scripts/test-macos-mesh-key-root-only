@@ -1,0 +1,113 @@
+#!/bin/sh
+# Regression for #265 P1-1: a non-root local user must not obtain the Mesh
+# WireGuard private key, even by injecting code into the installed daemon
+# binary. Run as an ordinary (non-root) user on a Mac where the Mesh system
+# service has started at least once.
+#
+# The probe is a dylib loaded into the installed binary with
+# DYLD_INSERT_LIBRARIES. Its constructor tries both places a key has lived:
+# the root-only key file in the state directory, and the System keychain item
+# that slice-1 builds created. It reports only status codes and lengths, never
+# key bytes, then exits before the daemon's own code runs.
+#
+# Pass: the file open fails with EACCES and the keychain lookup fails.
+# Fail: either read succeeds (exit 1). Setup problems or a probe that did
+# not report exit 2; running as root exits 77.
+# The probe links Foundation so dyld initialises it before the constructor.
+set -eu
+
+binary=${1:-/private/var/lib/infraternal/bin/infraternal}
+key_file=${2:-/private/var/lib/infraternal/state/mesh-wireguard.key}
+
+if [ "$(/usr/bin/id -u)" -eq 0 ]; then
+    printf 'run this regression as an ordinary user, not root\n' >&2
+    exit 77
+fi
+if [ ! -f "$binary" ] || [ -L "$binary" ]; then
+    printf 'installed daemon binary not found: %s\n' "$binary" >&2
+    exit 2
+fi
+
+umask 077
+work=$(/usr/bin/mktemp -d /private/tmp/mesh-key-probe.XXXXXX)
+trap '/bin/rm -rf "$work"' EXIT HUP INT TERM
+
+cat >"$work/probe.c" <<'EOF'
+#define __STDC_WANT_LIB_EXT1__ 1
+#include <Security/Security.h>
+#include <errno.h>
+#include <string.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+__attribute__((constructor)) static void probe(void) {
+    const char *path = getenv("MESH_KEY_PROBE_FILE");
+    int file_errno = 0;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd >= 0) {
+        close(fd);
+    } else {
+        file_errno = errno;
+    }
+
+    SecKeychainRef keychain = NULL;
+    OSStatus status = SecKeychainOpen("/Library/Keychains/System.keychain", &keychain);
+    UInt32 length = 0;
+    void *secret = NULL;
+    if (status == errSecSuccess) {
+        status = SecKeychainFindGenericPassword(
+            keychain, 20, "org.infraternal.mesh", 21, "wireguard-private-key",
+            &length, &secret, NULL);
+    }
+    if (secret != NULL) {
+        memset_s(secret, length, 0, length);
+        SecKeychainItemFreeContent(NULL, secret);
+    }
+    if (keychain != NULL) {
+        CFRelease(keychain);
+    }
+    printf("MESH_KEY_PROBE euid=%u file_open=%s file_errno=%d keychain_status=%d keychain_len=%u\n",
+           (unsigned)geteuid(), fd >= 0 ? "ok" : "denied", file_errno, (int)status,
+           (unsigned)length);
+    fflush(stdout);
+    _exit(0);
+}
+EOF
+
+/usr/bin/env -u SDKROOT -u DEVELOPER_DIR -u TOOLCHAINS /usr/bin/clang \
+    -Wno-deprecated-declarations -dynamiclib -o "$work/probe.dylib" "$work/probe.c" \
+    -framework Security -framework CoreFoundation -framework Foundation
+result=$(MESH_KEY_PROBE_FILE="$key_file" DYLD_INSERT_LIBRARIES="$work/probe.dylib" \
+    "$binary" --version 2>&1 || true)
+printf '%s\n' "$result"
+
+line=$(printf '%s\n' "$result" | /usr/bin/grep '^MESH_KEY_PROBE ' || true)
+if [ -z "$line" ]; then
+    # No report means the probe never ran or crashed; that proves nothing.
+    printf 'INCONCLUSIVE: the injected probe did not report\n' >&2
+    exit 2
+fi
+failed=no
+case "$line" in
+*" file_open=ok "*)
+    printf 'FAIL: a non-root user opened the Mesh key file\n' >&2
+    failed=yes
+    ;;
+*" file_errno=13 "*) ;;
+*)
+    printf 'FAIL: unexpected key file result (want EACCES): %s\n' "$line" >&2
+    failed=yes
+    ;;
+esac
+case "$line" in
+*" keychain_status=0 "*)
+    printf 'FAIL: a non-root user read the Mesh key from the System keychain\n' >&2
+    failed=yes
+    ;;
+esac
+if [ "$failed" = yes ]; then
+    exit 1
+fi
+printf 'PASS: a non-root user cannot read the Mesh key through the daemon binary\n'

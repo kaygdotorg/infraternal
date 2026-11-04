@@ -1,6 +1,7 @@
 //! Collects bounded, low-cost machine facts for an infraternal agent [D120][D156].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+// Everything is behind the `agent` feature: builds without it expose no API.
 #[cfg(feature = "agent")]
 mod facts;
 #[cfg(feature = "agent")]

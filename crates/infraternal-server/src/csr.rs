@@ -46,6 +46,7 @@ impl ValidatedCsr {
 // OpenSSL caches signed request-info bytes, so re-encoding cannot establish
 // shortest nested lengths or mandatory PKCS10 fields. This allocation-free
 // preflight bounds nesting before OpenSSL parses and verifies possession.
+/// Checks the outer shape of the request before OpenSSL sees it: at most [`MAX_CSR_DER`] bytes, a single SEQUENCE with no trailing bytes, a bounded nesting depth, version 0, shortest-form lengths and an Ed25519 key algorithm with no parameters.
 fn validate_envelope(der: &[u8]) -> Result<(), CsrError> {
     if der.len() > MAX_CSR_DER {
         return Err(CsrError);
@@ -81,6 +82,7 @@ fn validate_envelope(der: &[u8]) -> Result<(), CsrError> {
     Ok(())
 }
 
+/// Accepts only the Ed25519 algorithm identifier with parameters absent, as RFC 8410 requires.
 fn ed25519_algorithm(input: &mut &[u8]) -> Result<(), CsrError> {
     // RFC 8410 requires absent parameters, including in signature algorithms.
     if take(input, 0x30)? != [6, 3, 0x2b, 0x65, 0x70] {
@@ -89,6 +91,7 @@ fn ed25519_algorithm(input: &mut &[u8]) -> Result<(), CsrError> {
     Ok(())
 }
 
+/// Reads one element that must have `tag` from the front of `input`, moves `input` past it and returns its body. Fails on any other tag.
 fn take<'a>(input: &mut &'a [u8], tag: u8) -> Result<&'a [u8], CsrError> {
     if input.first() != Some(&tag) {
         return Err(CsrError);
@@ -100,6 +103,7 @@ fn take<'a>(input: &mut &'a [u8], tag: u8) -> Result<&'a [u8], CsrError> {
 
 // Size <=4096 implies at most two length octets. Reject high-tag encodings:
 // PKCS10 names/attributes and Ed25519 fields need none of them.
+/// Splits off the first DER element and returns its tag, its body and the bytes after it. Rejects multi-byte tags, non-shortest or oversized lengths, and truncated input.
 fn element(input: &[u8]) -> Result<(u8, &[u8], &[u8]), CsrError> {
     let tag = *input.first().ok_or(CsrError)?;
     if tag & 0x1f == 0x1f || tag == 0 {
@@ -131,6 +135,7 @@ fn element(input: &[u8]) -> Result<(u8, &[u8], &[u8]), CsrError> {
     Ok((tag, body, &input[header + length..]))
 }
 
+/// Checks a DER SET is sorted by encoded bytes, as canonical DER requires.
 fn validate_set(mut input: &[u8]) -> Result<(), CsrError> {
     let mut previous: &[u8] = &[];
     while !input.is_empty() {
@@ -145,6 +150,7 @@ fn validate_set(mut input: &[u8]) -> Result<(), CsrError> {
     Ok(())
 }
 
+/// Walks the whole structure up to depth 16, rejecting non-canonical constructed or primitive forms and unknown context-specific types, so no ignored attribute can hide a non-canonical encoding.
 fn validate_tree(mut input: &[u8], depth: u8) -> Result<(), CsrError> {
     if depth > 16 {
         return Err(CsrError);
@@ -176,6 +182,7 @@ fn validate_tree(mut input: &[u8], depth: u8) -> Result<(), CsrError> {
 }
 
 // Validate accepted universal value types; attributes are ignored, not trusted.
+/// Checks that a universal-type value is in its single canonical DER form, for example minimal integers and `0x00`/`0xff` booleans.
 fn validate_value(tag: u8, body: &[u8]) -> Result<(), CsrError> {
     match tag {
         1 => {

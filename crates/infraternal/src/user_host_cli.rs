@@ -3,6 +3,10 @@ use crate::{ArgMatches, ExitCode, PathBuf, shim_integer};
 use infraternal_shim::{Config, run_host_accounted};
 use std::os::unix::fs::OpenOptionsExt;
 
+/// Runs the batch session-host launch for the measuring mode of the hidden shim command.
+///
+/// Returns success when the hosts finish without error. On a startup problem it prints
+/// `session host startup failed: <reason>` to standard error and returns failure.
 pub(super) fn run(matches: &ArgMatches) -> ExitCode {
     match start(matches) {
         Ok(()) => ExitCode::SUCCESS,
@@ -12,6 +16,16 @@ pub(super) fn run(matches: &ArgMatches) -> ExitCode {
         }
     }
 }
+/// Validates the options, then runs `host_sessions` session hosts in this process.
+///
+/// Every session gets an id: the 128-bit hex `session` value plus its index, so one command
+/// line names a whole contiguous batch. Real account shells are started, never the fixed
+/// readiness canary, so `readiness` and `detach` are refused. The target `uid` must be the
+/// current user: this mode cannot change login authority. When `host_accounting` is given, a
+/// new file is created for it with owner-only access and an existing file is never overwritten.
+///
+/// Fails with `InvalidInput` for a count outside 1..=1000, a session id that is not 32 hex
+/// digits, any unparsable number, or the refusals above, all before a terminal is created.
 fn start(matches: &ArgMatches) -> std::io::Result<()> {
     let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
     let count: usize = shim_integer(matches, "host_sessions", None).map_err(|_| invalid())?;

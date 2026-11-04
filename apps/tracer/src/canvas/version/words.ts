@@ -8,16 +8,19 @@ import type { KeyValueRow } from "../../../../../packages/ui/src/kv-list";
 import type { Fleet } from "./updates";
 import type { Licence, Target, Tier, VersionFacts } from "./source";
 
+/** One day in milliseconds. */
 const DAY = 86_400_000;
 /** A licence that ends within this many days tints the edition and says so in the panel. */
 export const SOON_DAYS = 14;
 
+/** The edition name shown for each licence tier. */
 export const TIER_NAME: Record<Tier, string> = { community: "Community", homelab: "Homelab", team: "Team", enterprise: "Enterprise" };
 
 /** "22 Oct 2026", always with the month spelled out. */
 export const dayName = (days: number, now = Date.now()): string =>
   new Date(now + days * DAY).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
 
+/** "1 host" or "2 hosts": the count with the matching word. */
 export const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
 /** The tier whose features run now: an ended licence is Community again. */
@@ -26,6 +29,7 @@ export const effectiveTier = (licence: Licence): Tier => (licence.days !== undef
 /** CE for Community, EE for any paid licence (the code under `ee/`, D31). */
 export const editionTag = (licence: Licence): "CE" | "EE" => (effectiveTier(licence) === "community" ? "CE" : "EE");
 
+/** Whether the licence needs a look: `"ended"` if it already ended, `"soon"` if it ends within `SOON_DAYS`, else `undefined` (also for a licence that never ends). */
 export const attention = (licence: Licence): "soon" | "ended" | undefined => {
   if (licence.days === undefined) return undefined;
   if (licence.days < 0) return "ended";
@@ -35,6 +39,7 @@ export const attention = (licence: Licence): "soon" | "ended" | undefined => {
 /** When the licence ends, in a few words: "in 7 days", "tomorrow", "today". */
 export const endsIn = (days: number): string => (days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`);
 
+/** The name of the edition that runs now. An ended licence reads "Community". */
 export const editionName = (licence: Licence): string => TIER_NAME[effectiveTier(licence)];
 
 /** The panel's heading: the product and its version, said once. */
@@ -81,6 +86,7 @@ export function targetNames(targets: Target[]): string {
   return names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
+/** How the Updates row reads in one state: its value, its mark (or none) and its tooltip. */
 export interface UpdatesLine { value: string; mark: NonNullable<KeyValueRow["mark"]> | undefined; tip: string }
 
 /** What the Updates row's value says for a state, and its warm tooltip (which names the action a press will do). */

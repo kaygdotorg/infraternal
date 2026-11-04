@@ -11,7 +11,9 @@ import { Spring } from "./spring";
 import { enhanceSwitch } from "./switch";
 import type { SettingsSection } from "./settings-overlay";
 
+/** One toolbar control: a stable `id`, the `label` shown in the list and its `icon` (inner SVG markup). */
 export interface ToolbarSettingsControl { id: string; label: string; icon: string }
+/** One toolbar row (the canvas row, the key row): its controls in order, and the ids of those currently hidden. */
 export interface ToolbarSettingsRow {
   id: string;
   title: string;
@@ -19,6 +21,7 @@ export interface ToolbarSettingsRow {
   controls: ToolbarSettingsControl[];
   hidden: Set<string>;
 }
+/** What the Toolbar section reads and calls; the toolbar's owner implements it. `customise` and `useAccount` switch between a device-only layout and the account's. */
 export interface ToolbarSettingsModel {
   rows(): ToolbarSettingsRow[];
   /** Where the layout in force comes from: the account (every device) or an override on this device. */
@@ -30,8 +33,10 @@ export interface ToolbarSettingsModel {
   reset(): void;
 }
 
+/** The six-dot drag handle, as inner SVG markup. */
 const GRIP = '<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="2.4"/>';
 
+/** The Settings section that edits the toolbar. Pass it to `createSettingsOverlay` in `sections`; it only edits the model. */
 export function toolbarSection(model: ToolbarSettingsModel): SettingsSection {
   return {
     id: "toolbar",

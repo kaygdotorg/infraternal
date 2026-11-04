@@ -22,6 +22,8 @@ fn command_for(action: &str) -> &str {
     }
 }
 
+/// Maps the state word the operator code reports ("starting", "stopped",
+/// "confirmation required", "refused") to a result state. Any other word means `Ready`.
 fn state_of(word: &str) -> CommandState {
     match word {
         "starting" => CommandState::Running,
@@ -35,6 +37,9 @@ fn state_of(word: &str) -> CommandState {
 /// A progress record of a command that is still working. In JSON mode it goes to standard
 /// error, so standard output carries exactly one envelope: the command's final result.
 /// People see it on standard output as they always did. Callers report only confirmed states.
+///
+/// `action` is the internal action id, `state` one of the words `state_of` knows, and
+/// `next` the suggested next command (empty for none).
 pub(crate) fn report(json: bool, action: &str, state: &str, message: &str, next: &str) {
     let mut result = CommandResult::new(command_for(action), state_of(state), message, json!({}));
     if !next.is_empty() {
@@ -44,6 +49,7 @@ pub(crate) fn report(json: bool, action: &str, state: &str, message: &str, next:
 }
 
 /// The final, successful result of a command: the one envelope on standard output.
+/// Arguments are the same as for `report`. Returns the success exit code.
 pub(crate) fn done(json: bool, action: &str, state: &str, message: &str, next: &str) -> ExitCode {
     let mut result = CommandResult::new(command_for(action), state_of(state), message, json!({}));
     if !next.is_empty() {
@@ -52,7 +58,11 @@ pub(crate) fn done(json: bool, action: &str, state: &str, message: &str, next: &
     emit(result, json, Exit::Ok)
 }
 
-/// Static refusals do not reflect a path, invitation, proof or private identity.
+/// The final result of a command that refused to run: state `Refused`, process exit code
+/// `exit`.
+///
+/// Refusals are static text: `message` and `next` must not reflect a path, invitation, proof
+/// or private identity, so the result is safe to log. An empty `next` omits the next step.
 pub(crate) fn refuse(json: bool, action: &str, message: &str, next: &str, exit: Exit) -> ExitCode {
     let mut result = CommandResult::new(
         command_for(action),

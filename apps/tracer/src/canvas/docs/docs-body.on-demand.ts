@@ -17,11 +17,15 @@
 import type { Ctx } from "../context";
 import { enhanceDoc } from "./doc-enhance";
 
+/** A docs page drawn in a window: its scroller, its article, and a promise that settles when the page text has loaded. */
 interface Mounted { scroller: HTMLElement; article: HTMLElement; ready: Promise<void> }
+/** The docs pages that are drawn now, by slug. */
 const mounted = new Map<string, Mounted>();
 /** A heading asked for before the window had its page: applied as soon as it has. */
 const wanted = new Map<string, string | undefined>();
+/** The stylesheet load, shared so the files are linked once. */
 let style: Promise<void> | undefined;
+/** Space in pixels left above a heading when the page scrolls to it. */
 const HEADING_AIR = 12;
 
 /** Links the reader's two stylesheets once; a missing file must not stop the page from showing. */
@@ -59,6 +63,10 @@ export function openDocsPage(cx: Ctx, slug: string, heading: string | undefined)
   return true;
 }
 
+/**
+ * Decides what a click on a link inside a docs page does. A heading link scrolls this window; a link to another docs page that has a window flies
+ * to that window; any other link opens in a new tab. Modified clicks (command, control, shift or a non-primary button) are left to the browser.
+ */
 function keepInCanvas(cx: Ctx, slug: string, page: Mounted, event: MouseEvent): void {
   const link = (event.target as Element | null)?.closest<HTMLAnchorElement>("a[href]");
   if (!link || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;

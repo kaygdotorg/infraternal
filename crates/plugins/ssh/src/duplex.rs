@@ -1,4 +1,10 @@
 //! Owns a full-duplex SSH command channel and its cancellation-safe child group for D255.
+//!
+//! A [`Duplex`] wraps an OpenSSH client process (a mux client of an already
+//! authenticated connection) and exposes its stdin and stdout as raw bytes.
+//! It does not parse or frame anything. The child runs in its own process
+//! group; dropping the `Duplex` kills that whole group, so a cancelled task
+//! cannot leave a stray SSH client behind. The child's stderr is never kept or printed.
 
 use crate::{
     model::{Failure, FailureKind},
@@ -15,14 +21,22 @@ use tokio::{
 /// A single reader and serialized writer share one authenticated SSH channel.
 /// Drop retires descendants before releasing the unreaped leader identity.
 pub struct Duplex {
+    /// Process group of the SSH client; killed as a unit on drop.
     group: Group,
+    /// Kept (unused) so the leader is not reaped before its group is retired.
     _child: Child,
+    /// Child stdout, locked so only one reader runs at a time.
     read: Mutex<ChildStdout>,
+    /// Child stdin, locked so whole frames are never interleaved.
     write: Mutex<ChildStdin>,
+    /// Task that drains and discards the child's stderr up to a fixed bound.
     diagnostics: JoinHandle<()>,
 }
 impl Duplex {
     /// Start a mux client of the already authenticated connection.
+    ///
+    /// `command` is configured by the caller; stdin, stdout and stderr are
+    /// replaced with pipes here.
     /// # Errors
     /// Refuses spawn or missing pipe descriptors without exposing diagnostics.
     pub fn spawn(command: &mut Command) -> Result<Self, Failure> {
@@ -61,6 +75,9 @@ impl Duplex {
     }
 
     /// Read a bounded canonical setup receipt without consuming protocol bytes.
+    ///
+    /// Reads one byte at a time up to and including the first `\n`, so nothing
+    /// after the line is taken. Fails if `limit` bytes arrive with no newline.
     /// # Errors
     /// Classifies a closed command channel as unreachable and refuses oversized receipts.
     pub async fn line(&self, limit: usize) -> Result<Vec<u8>, Failure> {
@@ -98,12 +115,14 @@ impl Duplex {
         self.write.lock().await.write_all(bytes).await
     }
 }
+/// Kills the child's process group and stops the stderr drain.
 impl Drop for Duplex {
     fn drop(&mut self) {
         self.group.retire();
         self.diagnostics.abort();
     }
 }
+/// Generic failure for missing pipes or oversized receipts; carries no child output.
 fn unavailable() -> Failure {
     Failure::install("The SSH terminal bridge pipes are unavailable.")
 }

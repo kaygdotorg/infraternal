@@ -3922,3 +3922,73 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Keys live in one list under Settings › Access**, every key with
        scope chips, uses, the last machine that joined, its expiry and
        revoke ("agreed").
+344. **Mesh SSH slice 1 (owner, 2026-11-04, #221; extends D235, D319):**
+     - SSH certificates are signed with the existing CA key, not a second
+       key with its own unlock ("correct").
+     - The server pushes login-access state to each machine, so logins keep
+       working while the server is unreachable ("agreed").
+     - In slice 1, an ordinary account on a machine the person added acts
+       as that person: "if i added it yes".
+     - Mesh SSH stays off by default until its security review ("correct").
+345. **Doc comments on all code are the documentation (owner, 2026-11-04;
+     extends the CLAUDE.md rule "Code comments are the documentation"):**
+     "our comments in the code should be self-explanatory. They should be
+     very user-friendly in the sense that they can be easily inferred, and
+     we should make it a rule that every piece of code written also means
+     that comment, documentation style comment is written there. And we
+     don't count the number of lines, code lines, when it comes to
+     documentation. So the lines of code is only for actual code, not for
+     the documentation above, and we can use that to create documentation
+     directly. I think that would be much nicer than having to write
+     documentation after the fact. But we still need a structure. So I
+     would say that you write the documentation now, I mean, we can decide
+     the structure later and repurpose existing documentation."
+     - Every module, type, function and exported symbol gets a
+       documentation-style comment in plain, friendly language: what it is
+       for and how to use it, plus the non-obvious invariants and reasons.
+     - Line counts and size measures cover code only, never comments. The
+       shipped JS and binaries already drop comments, so they cost nothing
+       at runtime.
+     - The documentation will be generated from these comments. Its
+       structure is decided later, reusing the existing docs; the comments
+       are written now.
+346. **GotaTun becomes the default now, to find bugs by using it (owner,
+     2026-11-04; amends D332's switch rule):** "if gotatun is stable, we
+     should switch our app to it already because we will find more bugs that
+     way", then: "is not that stability replaces perf. i am the only user and
+     using gotatun inside the app right now and basing everything on top of it
+     uncovers more bugs that we need to fix".
+     - GotaTun becomes the default Linux engine as soon as the integration
+       branch merges. The merge still needs its final security re-review and
+       a green `scripts/verify fast` (CLAUDE.md priority 2). It does not wait
+       for performance parity or for an extra soak.
+     - The kernel path stays an explicit opt-out per node.
+     - Performance is unchanged as a goal (D331, D332): reaching throughput
+       and loss-aware p99 parity with kernel WireGuard is still the target,
+       still measured, and still drives the latency work. Bugs found by
+       running on GotaTun are fixed as they appear.
+347. **Open questions, 2026-11-04 evening (owner):**
+     - **No more build compute:** "no more compute sadly". Work stays
+       within the current build slots (compute01 4, dev-02 2); use them
+       better instead.
+     - **Mesh SSH login identity (amends D344):** "agreed with your rec".
+       Only the account the machine was added with acts as the person. Other
+       ordinary accounts on that machine get only what grants give them.
+     - **Migration file names:** "yes pls anything to simplify and get
+       moving faster". New migrations are named by timestamp, so parallel
+       branches can't collide (#344 Q2). Existing numbered migrations stay.
+     - **GotaTun latency:** "p99 first". Loaded p99 is the latency target.
+       Median interactive latency isn't a separate goal for now.
+     - **API keys with no expiry (D343):** "nah let's not make it
+       complicated". "Never" means never: no inactivity end either.
+348. **GotaTun benchmark CPU pinning (owner, 2026-11-04; amends D332's
+     measurement setup):** "yeah can you pin it software wise? 2 cpus per
+     test in parallel is fine as long as no interference messes up the
+     benchmark". On the 4-vCPU perf VM, each side of a test (its infraternal
+     agent or engine, its load generator and its probe) is pinned in
+     software to its own 2 CPUs, through cpusets, for every case, kernel
+     WireGuard included, so the comparison stays fair. Before a pinned hold
+     counts, the setup proves there is no interference: no other runnable
+     work on those CPUs during the run, and run-to-run spread no worse than
+     the unpinned harness's. Earlier unpinned numbers stay valid for
+     history, but aren't compared directly with pinned ones.

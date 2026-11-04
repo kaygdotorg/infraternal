@@ -1,5 +1,15 @@
 //! Typed, bounded Linux netlink framing and synchronous kernel transactions [169], #129.
 //!
+//! Netlink is how a Linux process talks to the kernel's networking stack. A
+//! datagram holds messages, and a message holds attributes (type-length-value
+//! fields), all aligned to four bytes. This module builds and parses those
+//! pieces ([`messages`], [`attributes`], [`attribute`]), decodes the two kernel
+//! records the mesh needs ([`host_address`], [`connection_tuple`]) and runs
+//! request/reply exchanges over a [`Socket`].
+//!
+//! Every parser treats kernel data as untrusted bytes and returns an error
+//! rather than guess.
+//!
 //! No struct casts or unsafe pointers: native-endian scalar fields are checked
 //! before reading. Payloads are borrowed; malformed padding cannot desynchronize
 //! the next record. Only a kernel-origin reply for this request is accepted.
@@ -14,23 +24,38 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
 };
 
+/// Size in bytes of a netlink message header.
 const HEADER: usize = 16;
-/// Kernel netlink attributes use two high flag bits, outside the type number.
+/// Flag bit set in an attribute's type when its payload is itself a list of
+/// attributes. The kernel keeps two flag bits at the top of the 16-bit type;
+/// the rest is the type number.
 pub const NESTED: u16 = 1 << 15;
+/// Selects the type number, dropping the two flag bits.
 const TYPE_MASK: u16 = 0x3fff;
-/// Bounded datagram size; peer batching reserves the headers and never exceeds it.
+/// Largest datagram this module sends or accepts, in bytes. Callers that batch
+/// many peers into one request must leave room for the headers and stay under
+/// it.
 pub const DATAGRAM_BYTES: usize = 60 * 1024;
 
-/// A parsed netlink attribute; nested content is parsed with the same iterator.
+/// One netlink attribute, borrowed from the bytes it was parsed from. A nested
+/// payload can be parsed again with [`attributes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attribute<'a> {
+    /// The attribute type number, without the flag bits.
     pub kind: u16,
+    /// Whether the payload is a nested list of attributes.
     pub nested: bool,
+    /// The value bytes, without the four-byte attribute header or padding.
     pub payload: &'a [u8],
 }
-/// Parse checked aligned attributes without allocation.
+/// Splits `bytes` into its attributes without copying any payload.
+///
+/// The input must be a complete attribute list with each entry padded to four
+/// bytes.
+///
 /// # Errors
-/// Refuses truncated headers/payloads, short lengths and nonzero padding.
+/// Returns `InvalidData` for a truncated header or payload, a length below the
+/// header size, or padding bytes that are not zero.
 pub fn attributes(mut bytes: &[u8]) -> io::Result<Vec<Attribute<'_>>> {
     let mut result = Vec::new();
     while !bytes.is_empty() {
@@ -56,9 +81,16 @@ pub fn attributes(mut bytes: &[u8]) -> io::Result<Vec<Attribute<'_>>> {
     }
     Ok(result)
 }
-/// Decode one `WireGuard` `AllowedIP`; only host prefixes can own peer routes.
+/// Decodes one `WireGuard` allowed-IP entry (the nested attributes: address
+/// family, address, prefix length).
+///
+/// Returns `Some(address)` only for a host entry (`/32` for IPv4, `/128` for
+/// IPv6), `None` for a wider prefix. Only host entries can belong to a mesh
+/// peer, so a subnet is never reported as an address.
+///
 /// # Errors
-/// Refuses missing/duplicate fields, invalid scalar widths and family/prefix mismatches.
+/// Returns `InvalidData` for missing or repeated fields, wrong field widths,
+/// an unknown address family, or a prefix too long for its family.
 pub fn host_address(bytes: &[u8]) -> io::Result<Option<IpAddr>> {
     let mut family = None;
     let mut address = None;
@@ -94,17 +126,30 @@ pub fn host_address(bytes: &[u8]) -> io::Result<Option<IpAddr>> {
         _ => invalid(),
     }
 }
-/// Initiating endpoint and service from a checked connection-state tuple.
+/// Who started a connection and which service it targets, as recorded in the
+/// kernel's connection-tracking table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectionTuple {
+    /// Address of the side that started the connection.
     pub source: IpAddr,
+    /// Address of the side that was contacted. Same family as `source`.
     pub destination: IpAddr,
+    /// IP protocol number, for example 6 for TCP and 17 for UDP.
     pub protocol: u8,
+    /// Destination port. Always present for TCP and UDP, `None` for other
+    /// protocols.
     pub destination_port: Option<u16>,
 }
-/// Decode nested connection-state tuple attributes without assuming a protocol layout.
+/// Decodes the nested attributes of a connection-tracking tuple.
+///
+/// It reads the addresses, the protocol number and, if present, the
+/// destination port (sent in network byte order), and does not assume a layout
+/// for protocols it does not know.
+///
 /// # Errors
-/// Refuses duplicate selectors, mixed address families and invalid scalar widths.
+/// Returns `InvalidData` for repeated or missing fields, wrong field widths,
+/// source and destination from different address families, and TCP or UDP
+/// without a port.
 pub fn connection_tuple(bytes: &[u8]) -> io::Result<ConnectionTuple> {
     let mut ip = None;
     let mut protocol = None;
@@ -176,17 +221,27 @@ pub fn connection_tuple(bytes: &[u8]) -> io::Result<ConnectionTuple> {
     })
 }
 
-/// Parsed kernel message. Unknown types remain available for generic families.
+/// One netlink message, borrowed from the datagram it was parsed from.
+/// Message types this module does not know stay available, because generic
+/// netlink families define their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message<'a> {
+    /// The message type.
     pub kind: u16,
+    /// The message flags.
     pub flags: u16,
+    /// The sequence number that ties a reply to its request.
     pub sequence: u32,
+    /// The bytes after the 16-byte header, without padding.
     pub payload: &'a [u8],
 }
-/// Parse complete datagrams; a partial final message is never accepted.
+/// Splits a received datagram into its messages.
+///
+/// The whole datagram must parse; a partial final message is never accepted.
+///
 /// # Errors
-/// Refuses invalid lengths, unaligned truncation and nonzero padding.
+/// Returns `InvalidData` for a length shorter than the header, a message that
+/// runs past the end, or padding bytes that are not zero.
 pub fn messages(mut bytes: &[u8]) -> io::Result<Vec<Message<'_>>> {
     let mut result = Vec::new();
     while !bytes.is_empty() {
@@ -212,9 +267,12 @@ pub fn messages(mut bytes: &[u8]) -> io::Result<Vec<Message<'_>>> {
     }
     Ok(result)
 }
-/// Write one attribute with checked kernel-width length and zero alignment.
+/// Appends one attribute of type `kind` to `target`, padded with zeros to a
+/// four-byte boundary. To nest attributes, build the inner list first and add
+/// it with `kind | NESTED`.
+///
 /// # Errors
-/// Refuses payloads too large for the netlink u16 attribute length.
+/// Fails if the payload is too large for the attribute's 16-bit length field.
 pub fn attribute(target: &mut Vec<u8>, kind: u16, payload: &[u8]) -> io::Result<()> {
     let length = u16::try_from(payload.len().saturating_add(4)).map_err(io::Error::other)?;
     target.extend(length.to_ne_bytes());
@@ -223,15 +281,18 @@ pub fn attribute(target: &mut Vec<u8>, kind: u16, payload: &[u8]) -> io::Result<
     target.resize(align(target.len()), 0);
     Ok(())
 }
+/// Rounds `size` up to the next multiple of four.
 fn align(size: usize) -> usize {
     size.saturating_add(3) & !3
 }
+/// Shorthand for the `InvalidData` error returned for any malformed input.
 fn invalid<T>() -> io::Result<T> {
     Err(io::ErrorKind::InvalidData.into())
 }
-/// Read a checked native-endian u32 from a kernel payload.
+/// Reads a native-endian `u32` at byte `offset` of a kernel payload.
+///
 /// # Errors
-/// Refuses missing or truncated fields.
+/// Returns `InvalidData` if fewer than four bytes are available there.
 pub fn u32_at(bytes: &[u8], offset: usize) -> io::Result<u32> {
     let field = bytes
         .get(offset..offset.saturating_add(4))
@@ -241,7 +302,12 @@ pub fn u32_at(bytes: &[u8], offset: usize) -> io::Result<u32> {
     ))
 }
 
-/// One owned kernel socket. Requests complete with an ACK, never by guessed timing.
+/// A netlink socket to the kernel, in the network namespace where it was opened.
+///
+/// It handles one request at a time. A request is finished when the kernel
+/// acknowledges it or ends a dump, never by waiting for a guessed time.
+/// Receive calls give up after five seconds. The buffers that hold messages are
+/// wiped when dropped, because replies can carry key material.
 pub struct Socket {
     fd: OwnedFd,
     sequence: u32,
@@ -249,9 +315,12 @@ pub struct Socket {
     buffer: zeroize::Zeroizing<Vec<u8>>,
 }
 impl Socket {
-    /// Open and bind a route or generic netlink socket in the current namespace.
+    /// Opens and binds a raw netlink socket for `protocol` (for example route
+    /// or generic netlink) in the calling thread's network namespace.
+    ///
     /// # Errors
-    /// Reports kernel socket/bind errors.
+    /// Returns the operating system error if the socket cannot be created,
+    /// bound or configured.
     pub fn open(protocol: SockProtocol) -> io::Result<Self> {
         let fd = socket(
             AddressFamily::Netlink,
@@ -272,10 +341,18 @@ impl Socket {
             buffer: zeroize::Zeroizing::new(vec![0; 64 * 1024]),
         })
     }
-    /// Execute one bounded request and collect matching kernel payloads until ACK/DONE.
+    /// Sends one request and returns the payload of every reply message, in
+    /// order, until the kernel acknowledges or finishes the dump. The request
+    /// is always sent with the request flag added to `flags`.
+    ///
+    /// This keeps all replies in memory; use [`visit`](Socket::visit) for
+    /// large dumps.
+    ///
     /// # Errors
-    /// Refuses oversized requests, exhausted sequence numbers, malformed replies,
-    /// foreign senders, interrupted dumps and negative kernel ACKs.
+    /// Fails for an oversized request, an exhausted sequence counter, a
+    /// malformed reply, a reply that did not come from the kernel or did not
+    /// match this request, a dump that was interrupted, or an error code from
+    /// the kernel (returned as the matching operating system error).
     pub fn request(
         &mut self,
         kind: u16,
@@ -289,9 +366,14 @@ impl Socket {
         })?;
         Ok(replies)
     }
-    /// Stream matching replies through a bounded buffer, without retaining a host-wide dump.
+    /// Like [`request`](Socket::request), but passes each reply payload to
+    /// `visitor` as it arrives instead of collecting them, so a dump of the
+    /// whole host never has to fit in memory. The payload is only valid during
+    /// the call.
+    ///
     /// # Errors
-    /// Reports the same framing/kernel failures as request, or a visitor failure.
+    /// The same failures as `request`, or the first error `visitor` returns,
+    /// which stops the exchange.
     pub fn visit(
         &mut self,
         kind: u16,
@@ -353,9 +435,13 @@ impl Socket {
             }
         }
     }
-    /// Resolve the kernel's dynamic generic-netlink family identifier.
+    /// Looks up the numeric id the kernel assigned to a generic netlink family
+    /// such as `wireguard`. The id is chosen at load time, so it must be asked
+    /// for before use.
+    ///
     /// # Errors
-    /// Reports an unavailable family or malformed control reply.
+    /// `NotFound` if no such family is registered, `InvalidInput` for a name
+    /// containing a zero byte, and `InvalidData` for a malformed reply.
     pub fn family(&mut self, name: &str) -> io::Result<u16> {
         if name.as_bytes().contains(&0) {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -405,6 +491,8 @@ mod tests {
         assert!(attr[0].nested);
         assert_eq!(attributes(attr[0].payload).unwrap()[0].payload, &[1, 2, 3]);
     }
+    /// Builds an encoded connection tuple from address attributes and an optional
+    /// port.
     fn connection(protocol: u8, ip: &[(u16, &[u8])], port: Option<&[u8]>) -> Vec<u8> {
         let mut addresses = Vec::new();
         for (kind, bytes) in ip {
@@ -468,6 +556,7 @@ mod tests {
                 .is_ipv6()
         );
     }
+    /// Builds an encoded allowed-IP entry.
     fn allowed_ip(family: u16, address: &[u8], prefix: u8) -> Vec<u8> {
         let mut bytes = Vec::new();
         attribute(&mut bytes, 1, &family.to_ne_bytes()).unwrap();

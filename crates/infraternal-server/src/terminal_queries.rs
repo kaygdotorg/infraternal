@@ -5,8 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long a terminal query stays answerable.
 const WINDOW: Duration = Duration::from_secs(1);
+/// Most query positions tracked per session.
 pub(crate) const POSITIONS: usize = 64;
+/// Most sessions tracked at once.
 const SESSIONS: usize = 4096;
 
 #[cfg(test)]

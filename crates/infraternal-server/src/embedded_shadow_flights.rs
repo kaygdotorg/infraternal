@@ -6,11 +6,16 @@ use std::{
 };
 use tokio::task::{AbortHandle, Id, JoinError, JoinSet};
 
+/// Outcome of one finished shadow flight.
 pub(super) struct Completion {
+    /// Writer id the flight ran on.
     pub(super) stream: u32,
+    /// Terminal session the flight was for.
     pub(super) session: [u8; 16],
+    /// True if the flight finished without error.
     pub(super) success: bool,
 }
+/// All shadow flights of one connection: the running tasks, which writer owns which session, and finished results not yet applied.
 #[derive(Default)]
 pub(super) struct State {
     tasks: JoinSet<Completion>,
@@ -22,6 +27,7 @@ pub(super) struct State {
     local: Option<std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>>,
 }
 impl State {
+    /// True while any flight is running or a finished result is waiting to be applied.
     pub(super) fn active(&self) -> bool {
         !self.tasks.is_empty() || !self.completed.is_empty()
     }

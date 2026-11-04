@@ -5,6 +5,12 @@ import Foundation
 /// Resolve the system responsibility hook at runtime: it is shipped by macOS,
 /// but is not a public SDK contract. Missing support is an error, never a launch
 /// that silently charges permissions to the infraternal agent's launcher.
+/// Re-executes this process so macOS attributes its privacy permissions to this app bundle.
+///
+/// The first call replaces the process with a copy that has an extra `--responsible-child`
+/// argument; that copy sees the marker and returns normally. So when this returns, permissions
+/// are attributed correctly. It never returns on the first call, and throws a `POSIXError` if the
+/// re-execution could not happen (`ENOTSUP` when the system lacks the needed function).
 func establishResponsibility() throws {
     let marker = "--responsible-child"
     if CommandLine.arguments.contains(marker) { return }
@@ -40,6 +46,11 @@ func establishResponsibility() throws {
 }
 
 /// Publish this bundle's PID to the per-launch bridge record before it serves requests.
+/// Writes this process's ID to the file named after `--launch-pid-file`, if that option was given.
+///
+/// The path must be absolute and must not already exist (it is created owner-only, exclusively),
+/// so a stale or planted file is an error. Throws a `POSIXError` for a missing or relative path
+/// or an I/O failure. Does nothing when the option is absent.
 func recordLaunchPIDIfRequested() throws {
     let marker = "--launch-pid-file"
     guard let index = CommandLine.arguments.firstIndex(of: marker) else { return }

@@ -16,6 +16,10 @@ import { groupsLoaded } from "../layout/groups-handle";
 import { SCALE_REST, quarterDevicePx, restAt } from "../springs";
 import { endActivity, setActivity } from "../../perf-activity";
 
+/**
+ * Starts moving window `rec` by its pill. `first` is the pointer event that began the gesture and `start` its position. It does nothing
+ * unless the view is tiled. The gesture follows the pointer on `window` until release, then the card springs into its slot.
+ */
 export function beginMove(cx: Ctx, rec: WinRec, first: PointerEvent, start: { x: number; y: number }): void {
   const { camera, state, flip } = cx;
   const cam = camera.cam;
