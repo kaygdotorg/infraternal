@@ -106,8 +106,21 @@ pub(crate) fn registry_at(
     );
     #[cfg(feature = "proxy")]
     let proxy_plugin = proxy_plugin_at(state)?;
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    let mesh_service =
+        state.and_then(|state| MESH_SERVICE.get().and_then(|factory| factory(state)));
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    let mesh_observer = mesh_service
+        .as_ref()
+        .map(|service| service.observer.clone());
     #[cfg(all(feature = "proxy", feature = "mesh", target_os = "linux"))]
-    let mesh_plugin = connect_proxy_and_mesh(&proxy_plugin, mesh_plugin)?;
+    let mesh_plugin = connect_proxy_and_mesh(&proxy_plugin, mesh_plugin, mesh_observer)?;
+    #[cfg(all(not(feature = "proxy"), feature = "mesh", target_os = "linux"))]
+    let mesh_plugin = observe_mesh(mesh_plugin, mesh_observer);
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    if let Some(service) = mesh_service {
+        registry.register(service.plugin)?;
+    }
     #[cfg(feature = "proxy")]
     registry.register(Box::new(proxy_plugin))?;
     #[cfg(all(feature = "remote", target_os = "linux"))]
@@ -199,6 +212,91 @@ fn proxy_plugin_at(
         .map_err(|_| PluginError::Rejected)
 }
 
+/// Receives each accepted mesh configuration, reduced to a [`MeshView`].
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+pub type MeshObserver =
+    std::sync::Arc<dyn Fn(Option<infraternal_plugin_api::mesh_view::MeshView>) + Send + Sync>;
+
+/// A mesh-only service whose crate depends on this one (mesh SSH, #221).
+///
+/// This crate cannot name such a component without a dependency cycle, so the
+/// binary installs a factory once, before any infraternal agent starts, and
+/// every registry built afterwards includes the service. Registries built
+/// without a state directory (tests, CLI listings) never get one.
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+pub struct MeshService {
+    pub plugin: Box<dyn infraternal_plugin_api::AgentPlugin>,
+    pub observer: MeshObserver,
+}
+
+/// Builds the service for an infraternal agent's state directory.
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+pub type MeshServiceFactory = fn(&std::path::Path) -> Option<MeshService>;
+
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+static MESH_SERVICE: std::sync::OnceLock<MeshServiceFactory> = std::sync::OnceLock::new();
+
+/// Install the mesh service factory. Only the first call takes effect.
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+pub fn set_mesh_service(factory: MeshServiceFactory) {
+    let _ = MESH_SERVICE.set(factory);
+}
+
+/// Reduce an accepted mesh configuration to what mesh-only services use:
+/// this node's addresses and, per peer, whether its inbound policy (the one
+/// the kernel firewall enforces) admits TCP/22.
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+fn mesh_view(
+    config: &infraternal_plugin_mesh::dataplane::Config,
+) -> infraternal_plugin_api::mesh_view::MeshView {
+    use infraternal_plugin_api::mesh_view::{MeshPeer, MeshView};
+    use infraternal_plugin_mesh::policy::rules::{Port, Protocol};
+    use std::net::IpAddr;
+    let ssh = Port {
+        protocol: Protocol::Tcp,
+        number: 22,
+    };
+    MeshView {
+        node: config.node.0,
+        addresses: vec![
+            IpAddr::V4(config.addresses.ipv4),
+            IpAddr::V6(config.addresses.ipv6),
+        ],
+        interface: infraternal_plugin_mesh::wireguard::INTERFACE.to_owned(),
+        peers: config
+            .peers
+            .iter()
+            .map(|(node, peer)| {
+                (
+                    node.0,
+                    MeshPeer {
+                        addresses: vec![
+                            IpAddr::V4(peer.peer.addresses.ipv4),
+                            IpAddr::V6(peer.peer.addresses.ipv6),
+                        ],
+                        ssh_allowed: peer.inbound.allows(ssh),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Without the proxy, the mesh service is the only configuration observer.
+#[cfg(all(not(feature = "proxy"), feature = "mesh", target_os = "linux"))]
+fn observe_mesh(
+    mesh_plugin: infraternal_plugin_mesh::node_actions::MeshNodePlugin,
+    service: Option<MeshObserver>,
+) -> infraternal_plugin_mesh::node_actions::MeshNodePlugin {
+    let Some(service) = service else {
+        return mesh_plugin;
+    };
+    mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config| {
+        service(config.as_ref().map(mesh_view));
+        Ok(())
+    }))
+}
+
 /// Wire both directions between the proxy and Mesh plugins [#281].
 ///
 /// Mesh pushes each accepted configuration to the proxy controller, so a
@@ -210,6 +308,7 @@ fn proxy_plugin_at(
 fn connect_proxy_and_mesh(
     proxy_plugin: &infraternal_plugin_proxy::agent::ProxyAgentPlugin,
     mesh_plugin: infraternal_plugin_mesh::node_actions::MeshNodePlugin,
+    service: Option<MeshObserver>,
 ) -> Result<infraternal_plugin_mesh::node_actions::MeshNodePlugin, PluginError> {
     let proxy_controller = proxy_plugin.controller();
     proxy_controller
@@ -217,6 +316,9 @@ fn connect_proxy_and_mesh(
         .map_err(|_| PluginError::Rejected)?;
     Ok(mesh_plugin
         .with_configuration_observer(std::sync::Arc::new(move |config| {
+            if let Some(service) = &service {
+                service(config.as_ref().map(mesh_view));
+            }
             let context = config
                 .as_ref()
                 .and_then(|config| proxy_mesh_context(config).ok());

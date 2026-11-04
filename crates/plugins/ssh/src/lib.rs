@@ -18,6 +18,8 @@ pub mod mesh_certificate;
 pub mod mesh_flow;
 pub mod mesh_issue;
 pub mod mesh_login;
+#[cfg(all(feature = "session-bridge", target_os = "linux"))]
+pub mod mesh_node;
 #[cfg(target_os = "linux")]
 pub mod mesh_port;
 #[cfg(all(feature = "session-bridge", target_os = "linux"))]
