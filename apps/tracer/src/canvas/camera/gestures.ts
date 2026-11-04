@@ -206,14 +206,28 @@ export function installGestures(cx: Ctx): void {
   };
   const canvasWheel = (e: WheelEvent): void => {
     if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
-    if (free) free.wheel(e); else e.preventDefault(); // the free-canvas code is fetched when the lock first turns off
+    if (free) { free.wheel(e); return; }
+    // The free-canvas code is fetched when the lock first turns off and may still be on its way (a slow link, a busy machine). A wheel that lands
+    // in that gap is kept, not dropped, and played in order once the code arrives, so Ctrl+wheel right after the toggle still zooms.
+    e.preventDefault();
+    if (waiting.length < MAX_WAITING_WHEELS) waiting.push(e);
   };
+  /** Wheel events that arrived while the free-canvas code was loading; `loadFree` plays them when it lands. */
+  const waiting: WheelEvent[] = [];
+  /** A generous bound: a person's wheel in the load gap is a handful of events; this only stops a runaway stream from piling up. */
+  const MAX_WAITING_WHEELS = 64;
   // Panning, pinching and zooming a free canvas are not part of the first interaction: the canvas starts locked to windows
   // (D177), and everything below is fetched the first time the lock turns off (D188). A person cannot reach the free
   // canvas without that toggle, so the code is there before the first free gesture.
   let free: { wheel(e: WheelEvent): void } | undefined;
   const loadFree = (): void => {
-    if (!free) void onDemand(() => import("./gestures-free.on-demand")).then((m) => { if (!signal.aborted) free ??= m.installFreeGestures(cx); });
+    if (!free) void onDemand(() => import("./gestures-free.on-demand")).then((m) => {
+      if (signal.aborted) return;
+      free ??= m.installFreeGestures(cx);
+      // Play the wheel events that came in while loading, unless the lock came back on meanwhile (then they belong to no free canvas).
+      const held = waiting.splice(0);
+      if (!state.canvasLock) for (const e of held) free.wheel(e);
+    });
   };
   if (!state.canvasLock) loadFree();
   signal.addEventListener("abort", cx.nav.onLockChange(() => { if (!state.canvasLock) loadFree(); }), { once: true });
