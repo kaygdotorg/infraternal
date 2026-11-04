@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 #[test]
 fn replay_repairs_coalesce_at_the_source_interval() {
-    let scratch =
-        PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap()).join("desktop-replay-tests");
+    // Cargo provides this scratch directory to every integration test; the
+    // caller's environment need not export CARGO_TARGET_DIR (#334).
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("desktop-replay-tests");
     let status = std::process::Command::new("python3")
         .arg("tests/fixtures/replay-pacing.py")
         .arg(scratch)
