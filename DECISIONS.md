@@ -3930,3 +3930,25 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - In slice 1, an ordinary account on a machine the person added acts
        as that person: "if i added it yes".
      - Mesh SSH stays off by default until its security review ("correct").
+345. **Doc comments on all code are the documentation (owner, 2026-11-04;
+     extends the CLAUDE.md rule "Code comments are the documentation"):**
+     "our comments in the code should be self-explanatory. They should be
+     very user-friendly in the sense that they can be easily inferred, and
+     we should make it a rule that every piece of code written also means
+     that comment, documentation style comment is written there. And we
+     don't count the number of lines, code lines, when it comes to
+     documentation. So the lines of code is only for actual code, not for
+     the documentation above, and we can use that to create documentation
+     directly. I think that would be much nicer than having to write
+     documentation after the fact. But we still need a structure. So I
+     would say that you write the documentation now, I mean, we can decide
+     the structure later and repurpose existing documentation."
+     - Every module, type, function and exported symbol gets a
+       documentation-style comment in plain, friendly language: what it is
+       for and how to use it, plus the non-obvious invariants and reasons.
+     - Line counts and size measures cover code only, never comments. The
+       shipped JS and binaries already drop comments, so they cost nothing
+       at runtime.
+     - The documentation will be generated from these comments. Its
+       structure is decided later, reusing the existing docs; the comments
+       are written now.
