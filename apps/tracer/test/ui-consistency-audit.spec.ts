@@ -22,16 +22,22 @@ import { tracerEvidencePath } from "./evidence-path";
 
 test.skip(!process.env.UI_AUDIT, "the consistency audit is run on request");
 
+/** Names this run's evidence folder (for example `before` or `after`), so two phases can be compared side by side. */
 const LABEL = process.env.UI_AUDIT_LABEL ?? "run";
+/** Where this run writes its screenshots and census files. */
 const OUT = tracerEvidencePath("ui-audit", LABEL);
+/** The three review sizes from CLAUDE.md: a desktop window and two iPhones (touch). */
 const SIZES = [
   { name: "1440x900", width: 1440, height: 900, touch: false },
   { name: "393x852", width: 393, height: 852, touch: true },
   { name: "375x667", width: 375, height: 667, touch: true },
 ] as const;
+/** Both colour modes, since every screen is reviewed in dark (ink) and light (paper). */
 const THEMES = ["ink", "paper"] as const;
 
+/** Property name, then computed value, then how many elements use it and up to three example selectors. */
 type Census = Record<string, Record<string, { count: number; examples: string[] }>>;
+/** One screen's census plus the computed transitions of shared components built inside it. */
 interface Page_ { census: Census; probes: Record<string, string> }
 
 /** Counts the computed values of the properties the audit compares, for everything visible under `root`. */
@@ -84,6 +90,7 @@ async function census(page: Page, rootSelector: string): Promise<Page_> {
   }, rootSelector);
 }
 
+/** Opens the mock canvas at `scene` in `theme` with no background picture, and waits for it to be ready. */
 async function openCanvas(page: Page, theme: string, scene = 1): Promise<void> {
   await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=${theme}&bg=none`);
   await page.waitForFunction(() => (window as unknown as { __tracerClusters?: unknown }).__tracerClusters, null, { timeout: 30_000 });
