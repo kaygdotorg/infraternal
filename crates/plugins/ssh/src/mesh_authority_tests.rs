@@ -101,6 +101,8 @@ fn own_kayg() -> LoginGrant {
 fn mesh(ssh_allowed: bool) -> MeshView {
     MeshView {
         node: TARGET_NODE,
+        addresses: vec!["10.254.0.9".parse().unwrap()],
+        interface: "infraternal0".into(),
         peers: [(
             SOURCE_NODE,
             MeshPeer {

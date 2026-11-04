@@ -70,20 +70,7 @@ pub struct Snapshot {
     pub grants: BTreeMap<String, LoginGrant>,
 }
 
-/// One mesh peer as this node's applied configuration sees it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MeshPeer {
-    pub addresses: Vec<IpAddr>,
-    /// The peer's inbound policy on this node admits TCP/22.
-    pub ssh_allowed: bool,
-}
-
-/// This node's applied mesh configuration, reduced to what SSH needs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MeshView {
-    pub node: u64,
-    pub peers: BTreeMap<u64, MeshPeer>,
-}
+pub use infraternal_plugin_api::mesh_view::{MeshPeer, MeshView};
 
 /// Resolves an account name to its UID in this host's account database.
 pub type AccountLookup = fn(&str) -> Option<u32>;
