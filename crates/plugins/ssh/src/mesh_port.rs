@@ -75,6 +75,20 @@ impl MeshPort {
         })
     }
 
+    /// [`Self::bind`] for a component that is starting: a table our marker
+    /// owns for this address can only be left from a previous run of this
+    /// process's component (the caller holds no lease for it), so it is
+    /// recovered first, as the contract requires before admitting sessions.
+    /// A same-named table without our marker is still refused.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::bind`].
+    pub fn bind_after_restart(address: IpAddr, interface: &str) -> io::Result<Self> {
+        validate(address, interface)?;
+        Self::recover(address)?;
+        Self::bind(address, interface)
+    }
+
     /// Whether the port is stopped, direct or redirected.
     #[must_use]
     pub fn mode(&self) -> PortMode {

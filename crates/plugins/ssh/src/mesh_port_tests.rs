@@ -322,3 +322,28 @@ fn namespace_incoming_redirect_and_internal_port_refusal() {
         assert!(peer.0.wait().unwrap().success());
     }
 }
+
+/// A run that ended without cleanup leaves its owned table behind (measured
+/// on dev-02, #221): the next run of the component recovers it and binds,
+/// while a table without our marker is still never touched.
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn namespace_restart_recovers_a_retained_owned_table() {
+    ip(&["link", "set", "lo", "up"]);
+    ip(&["address", "add", "10.254.0.3/32", "dev", "lo"]);
+    let address: IpAddr = "10.254.0.3".parse().unwrap();
+    let _host = TcpListener::bind("0.0.0.0:22").unwrap();
+    // The previous run's rules, as if it stopped without removing them.
+    transaction(&render(address, "infraternal0", 40_000)).unwrap();
+    assert!(presence(address).unwrap());
+    assert!(MeshPort::bind(address, "infraternal0").is_err());
+    let mut port = MeshPort::bind_after_restart(address, "infraternal0").unwrap();
+    assert_eq!(port.mode(), PortMode::Redirect);
+    assert_delivery(&port, SocketAddr::new(address, 22));
+    port.stop().unwrap();
+    assert!(!presence(address).unwrap());
+    // A same-named table without our marker stays foreign.
+    transaction(&format!("create table inet {} {{ }}\n", table(address))).unwrap();
+    assert!(MeshPort::bind_after_restart(address, "infraternal0").is_err());
+    transaction(&format!("delete table inet {}\n", table(address))).unwrap();
+}

@@ -722,7 +722,9 @@ async fn supervise(
 /// Bind one mesh address on TCP/22 (exact bind or owned redirect).
 async fn bind(address: IpAddr, interface: String) -> Option<MeshPort> {
     // Binding may install an nft redirect: blocking work, off the reactor.
-    tokio::task::spawn_blocking(move || MeshPort::bind(address, &interface).ok())
+    // The supervisor stopped every port it held before binding again, so an
+    // owned table for this address is a previous run's leftover.
+    tokio::task::spawn_blocking(move || MeshPort::bind_after_restart(address, &interface).ok())
         .await
         .ok()
         .flatten()
