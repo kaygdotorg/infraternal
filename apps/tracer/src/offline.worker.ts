@@ -1,7 +1,12 @@
 /** Keeps only public app-shell assets that a signed-in page has already used, for offline layout drawing (D245). */
 /// <reference lib="webworker" />
 const worker = globalThis as unknown as ServiceWorkerGlobalScope;
+/** The name of the cache that holds the app-shell files; bump the version suffix to drop old entries. */
 const cacheName = "infraternal-drawing-v1";
+/**
+ * The URL when `input` is a same-origin script, stylesheet, font or WebAssembly file that has no query string and is not
+ * under `/v1/` (the API); otherwise `undefined`. This is the only kind of file the worker will ever cache.
+ */
 function staticUrl(input: string): URL | undefined {
   try {
     const url = new URL(input, worker.location.origin);

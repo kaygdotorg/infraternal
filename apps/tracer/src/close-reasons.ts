@@ -5,6 +5,10 @@
  * reason maps to a plain sentence about what happened to the person's terminal. Close reasons are untrusted input:
  * an unknown or empty reason gets the fallback, and its text is never copied into the page or the console.
  */
+/**
+ * The reasons we recognise, each with the sentence a person reads. Several reasons can share a sentence. Add a new
+ * server or infraternal agent reason here when one is added there; until then it shows the fallback.
+ */
 const KNOWN: Record<string, string> = {
   "detached": "This window was disconnected from its terminal. Open it again to reconnect.",
   "attachment ended": "This window was disconnected from its terminal. Open it again to reconnect.",
@@ -45,6 +49,7 @@ const KNOWN: Record<string, string> = {
   "tracer resume probe": "A connection check closed the connection.",
 };
 
+/** The sentence for a reason, or `undefined` when it is not in {@link KNOWN}. Looks up own keys only, so a reason like `constructor` cannot match. */
 const known = (key: string): string | undefined => Object.prototype.hasOwnProperty.call(KNOWN, key) ? KNOWN[key] : undefined;
 
 /** The plain sentence for a close reason. `fallback` says what happened when the reason is unknown. */
@@ -54,6 +59,7 @@ export function plainCloseReason(reason: string | undefined, fallback = "The ter
 
 /** Closes after which the window reattaches by itself, so none of them may read as an ending. */
 const REATTACHING = new Set(["detached", "attachment ended", "session ended"]);
+/** What the window says while it reattaches. */
 const REATTACH_STATUS = "Reconnecting to the terminal…";
 
 /**
@@ -71,6 +77,7 @@ export function recoveringReason(reason: string | undefined): string {
   return sentence ? `${sentence} Reconnecting…` : "Catching up…";
 }
 
+/** The length of one logging window: at most one console line per this time. */
 const CLOSE_NOTE_WINDOW_MS = 60_000;
 
 /**
@@ -80,10 +87,20 @@ const CLOSE_NOTE_WINDOW_MS = 60_000;
  * an unknown reason prints as "other".
  */
 export class CloseNotes {
+  /** When the current logging window began; minus infinity before the first close. */
   private windowStart = Number.NEGATIVE_INFINITY;
+  /** How many closes were counted without a line in this window. */
   private suppressed = 0;
 
-  /** `by` names who closed: "the server" for a named Close frame, "this page" for its own checks. */
+  /**
+   * The console line for a close, or `undefined` when this window already printed one (the close is then only counted).
+   * @param now the time in milliseconds
+   * @param code the WebSocket close code, if any
+   * @param reason the close reason; printed only when it is a known one, otherwise as "other"
+   * @param attempt the number of the reconnect attempt
+   * @param welcomed whether the connection had been fully established before it closed
+   * @param by who closed it: "the server" for a named Close frame, "this page" for its own checks
+   */
   note(now: number, code: number | undefined, reason: string | undefined, attempt: number, welcomed: boolean, by = "the server or network"): string | undefined {
     if (now - this.windowStart < CLOSE_NOTE_WINDOW_MS) {
       this.suppressed += 1;

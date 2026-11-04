@@ -18,16 +18,22 @@
  * an on-demand chunk (preview builds only).
  */
 
+/** What the app was doing: one tag per kind of work. `none` means idle. */
 export type ActivityTag = "none" | "pan" | "zoom" | "flight" | "drag" | "scroll" | "typing" | "output" | "split" | "sidebar";
 
+/** How many tag changes are remembered. */
 const HISTORY = 16;
+/** The history as a ring: the tag of each entry. `starts` and `untils` hold when it began and when it ends (`Infinity` while open). */
 const tags: ActivityTag[] = new Array<ActivityTag>(HISTORY).fill("none");
 const starts = new Float64Array(HISTORY);
 const untils = new Float64Array(HISTORY);
+/** The ring index of the newest entry. */
 let head = 0;
+/** How many entries of the ring are in use. */
 let count = 1;
 untils[0] = Infinity;
 
+/** Adds a history entry for `tag` beginning now and ending at `until` (a `performance.now` time). */
 function push(tag: ActivityTag, until: number): void {
   head = (head + 1) % HISTORY;
   tags[head] = tag;
@@ -68,7 +74,9 @@ export function activityIn(t0: number, t1: number): ActivityTag {
 /** Facts about the canvas only it knows (view, zoom, window counts), read by the meter at drop time. */
 export type PerfProbe = () => Record<string, string | number | boolean>;
 let probe: PerfProbe | undefined;
+/** Installs the function that reports the canvas's facts (or removes it with `undefined`). */
 export function setPerfProbe(next: PerfProbe | undefined): void { probe = next; }
+/** The probe's facts, or an empty object when none is installed or it throws. */
 export function readPerfProbe(): Record<string, string | number | boolean> {
   try { return probe?.() ?? {}; } catch { return {}; }
 }
@@ -78,9 +86,11 @@ export function readPerfProbe(): Record<string, string | number | boolean> {
  * messages arrive just before the stall?". One clock read and three typed-array writes per message; no allocation.
  */
 const WS_BUCKETS = 16;
+/** Message counts per 100 ms bucket; `wsBytes` is the byte total and `wsStamp` the bucket number each slot currently holds (-1 when unused). */
 const wsMsgs = new Uint32Array(WS_BUCKETS);
 const wsBytes = new Float64Array(WS_BUCKETS);
 const wsStamp = new Float64Array(WS_BUCKETS).fill(-1);
+/** Records one received WebSocket message of `bytes` bytes in the current 100 ms bucket. */
 export function noteWsMessage(bytes: number): void {
   const bucket = Math.floor(performance.now() / 100);
   const i = bucket % WS_BUCKETS;

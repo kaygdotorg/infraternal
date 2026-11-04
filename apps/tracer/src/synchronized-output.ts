@@ -1,17 +1,26 @@
 /** Tracks DEC private mode 2026 across PTY fragments and bounds how long its paint hold can last. */
+/** The ESC byte that starts every control sequence. */
 const ESCAPE = 0x1b;
+/** The DEC private mode number (`CSI ? 2026 h` to begin, `l` to end) with which a program asks for its output to be painted in one piece. */
 const SYNCHRONIZED_OUTPUT_MODE = 2026;
+/** The longest the paint may be held, in milliseconds, if the program never ends the mode. */
 const PAINT_HOLD_MS = 150;
+/** A control sequence longer than this is dropped, so a broken stream cannot keep the scanner busy or hold painting. */
 const MAX_CSI_BYTES = 4096;
 
 /** Clock and frame hooks keep release scheduling deterministic in tests. */
 export interface SynchronizedOutputScheduler {
+  /** Runs `callback` after `delayMs`; returns a handle for `clearTimeout`. */
   setTimeout(callback: () => void, delayMs: number): unknown;
+  /** Cancels a timer from `setTimeout`. */
   clearTimeout(timer: unknown): void;
+  /** Runs `callback` before the next paint; returns a handle for `cancelAnimationFrame`. */
   requestAnimationFrame(callback: () => void): number;
+  /** Cancels a frame from `requestAnimationFrame`. */
   cancelAnimationFrame(frame: number): void;
 }
 
+/** The real timers, used unless a test passes its own. */
 const browserScheduler: SynchronizedOutputScheduler = {
   setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
   clearTimeout: (timer) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>),
@@ -19,6 +28,7 @@ const browserScheduler: SynchronizedOutputScheduler = {
   cancelAnimationFrame: (frame) => globalThis.cancelAnimationFrame(frame),
 };
 
+/** Where the scanner is inside a control sequence: plain text, after ESC, inside CSI, OSC, or another string (and the ESC that may end one). */
 const enum SequenceState {
   Ground,
   Escape,
@@ -29,22 +39,52 @@ const enum SequenceState {
   ControlStringEscape,
 }
 
-/** The byte scanner skips ordinary text in native `indexOf` and examines only VT control sequences. */
+/**
+ * Watches terminal output for the synchronized-output mode so the caller can hold painting while a program draws.
+ * Feed every chunk to `feed` before it reaches the terminal parser.
+ *
+ * - While the mode is on, `holdsPaint` is true and the caller should write output but not paint.
+ * - When the mode ends, or the hold has lasted `timeoutMs` (the program may have died mid-draw), the hold ends: the
+ *   next animation frame calls `onReleaseFrame`, and a timeout also calls `onTimeout` first.
+ * - `requiresAtomicPaint` stays true from the start of a hold until the caller calls `finishAtomicPaint`, so the
+ *   output queued during the hold is painted together.
+ * - A full reset (`ESC c`) turns the mode off.
+ * `dispose()` cancels the timers. The byte scanner skips ordinary text in native `indexOf` and examines only VT control
+ * sequences.
+ */
 export class SynchronizedOutput {
   private state = SequenceState.Ground;
+  /** The CSI began with `?`, so its parameters are private modes. */
   private privateCsi = false;
+  /** The next byte is the first one after `CSI`, the only place a `?` counts. */
   private firstCsiByte = false;
+  /** Cleared by any byte that makes the sequence something other than plain `CSI ? n;n h/l`. */
   private csiValid = false;
+  /** Bytes of the current CSI seen so far, checked against {@link MAX_CSI_BYTES}. */
   private csiBytes = 0;
+  /** The parameter being read; capped just above 2026 so a long number cannot overflow. */
   private modeParameter = 0;
+  /** Whether the parameter being read has any digit. */
   private parameterHasDigits = false;
+  /** Whether any parameter of this CSI was 2026. */
   private containsSynchronizedMode = false;
+  /** Whether the program has the mode on. */
   private enabled = false;
+  /** Whether painting is held right now: the mode is on and the timeout has not run out. */
   private paintHeld = false;
+  /** Set when a hold starts; cleared by `finishAtomicPaint` or `reset`. */
   private atomicPaintPending = false;
+  /** The pending hold timeout. */
   private holdTimer: unknown;
+  /** The pending animation frame that calls `onReleaseFrame`. */
   private releaseFrame: number | undefined;
 
+  /**
+   * @param onTimeout called when the hold ran out before the program ended the mode
+   * @param onReleaseFrame called on the animation frame after a hold ended, when painting may resume
+   * @param timeoutMs the longest hold; defaults to 150 ms
+   * @param scheduler timers and frames; tests pass a fake
+   */
   constructor(
     private readonly onTimeout: () => void,
     private readonly onReleaseFrame: () => void,
@@ -52,10 +92,12 @@ export class SynchronizedOutput {
     private readonly scheduler: SynchronizedOutputScheduler = browserScheduler,
   ) {}
 
+  /** True while painting should wait. */
   get holdsPaint(): boolean {
     return this.paintHeld;
   }
 
+  /** True from the start of a hold until `finishAtomicPaint` is called. */
   get requiresAtomicPaint(): boolean {
     return this.atomicPaintPending;
   }
@@ -136,6 +178,7 @@ export class SynchronizedOutput {
     this.setEnabled(false);
   }
 
+  /** Cancels the timer and the pending frame and returns to the idle state. */
   dispose(): void {
     if (this.holdTimer !== undefined) this.scheduler.clearTimeout(this.holdTimer);
     this.holdTimer = undefined;
@@ -147,6 +190,7 @@ export class SynchronizedOutput {
     this.state = SequenceState.Ground;
   }
 
+  /** Begins reading a CSI sequence. */
   private startCsi(): void {
     this.state = SequenceState.Csi;
     this.privateCsi = false;
@@ -158,6 +202,7 @@ export class SynchronizedOutput {
     this.containsSynchronizedMode = false;
   }
 
+  /** Advances through one byte of a CSI. A final byte `h` or `l` of a private sequence that named 2026 turns the mode on or off. */
   private consumeCsiByte(byte: number): void {
     this.csiBytes += 1;
     if (this.csiBytes > MAX_CSI_BYTES) {
@@ -204,18 +249,21 @@ export class SynchronizedOutput {
     }
   }
 
+  /** Called at the end of a parameter; remembers whether it was 2026. */
   private finishParameter(): void {
     if (this.parameterHasDigits && this.modeParameter === SYNCHRONIZED_OUTPUT_MODE) {
       this.containsSynchronizedMode = true;
     }
   }
 
+  /** Finds `byte` in a string or byte array from `offset`, or -1. */
   private indexOf(data: Uint8Array | string, byte: number, offset: number): number {
     return typeof data === "string"
       ? data.indexOf(String.fromCharCode(byte), offset)
       : data.indexOf(byte, offset);
   }
 
+  /** Turns the mode on or off. Turning it on starts the hold and its timeout; turning it off releases a held paint through the release frame. */
   private setEnabled(enabled: boolean): void {
     if (enabled === this.enabled) return;
     this.enabled = enabled;

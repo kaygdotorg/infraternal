@@ -22,8 +22,10 @@
  */
 import { TICK_PATH } from "./tick";
 
+/** The state of one arc of the ring (see the module comment). */
 export type RingStageState = "pending" | "running" | "done" | "failed";
 
+/** Options for {@link createSetupRing} and {@link mountSetupRing}. */
 export interface SetupRingOptions {
   /** How many arcs the circle is split into (default 4). */
   segments?: number;
@@ -31,6 +33,7 @@ export interface SetupRingOptions {
   label?: string;
 }
 
+/** The ring's controller; `root` is its element. */
 export interface SetupRing {
   readonly root: HTMLElement;
   /** Sets every arc; extra states are ignored, missing ones are pending. */
@@ -43,9 +46,11 @@ export interface SetupRing {
   dispose(): void;
 }
 
+/** The SVG namespace for elements the ring creates. */
 const SVG_NS = "http://www.w3.org/2000/svg";
 /** Radius of the circle on the 24 px grid, and the gap between arcs in degrees (round caps add their own length). */
 const RADIUS = 8, GAP_DEG = 26;
+/** Whether the user asks for reduced motion, read at each use. */
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /** An arc from `from` to `to` degrees, clockwise from twelve o'clock. */

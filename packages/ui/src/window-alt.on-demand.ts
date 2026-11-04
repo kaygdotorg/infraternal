@@ -17,13 +17,24 @@ import { createIconMorph, SPLIT_MORPH, type IconMorph } from "./icon-morph";
 import { refreshTip } from "./tooltip";
 import type { WindowAction } from "./window-card";
 
+/** A window action that has an `alt` form (what the button does while Option or Alt is held). */
 export type AltAction = WindowAction & { alt: NonNullable<WindowAction["alt"]> };
+/** A header button together with its action. */
 export interface AltButton { button: HTMLButtonElement; action: AltAction }
 /** Where the pointer was when the card woke this module, and whether Option was already held. */
 export interface AltSeed { x: number; y: number; altKey: boolean }
 
+/** Pixels around the actions pill within which the pointer counts as "near" it. */
 const NEAR = 28;
 
+/**
+ * Starts watching Option/Alt for one window card. While the modifier is held near its actions, each button morphs to
+ * its alternate icon and label; releasing the key or blurring the window restores them.
+ * @param root the window card
+ * @param actions the element holding the buttons
+ * @param seed the pointer position and modifier state when the card woke this module
+ * @returns a handle whose `dispose()` removes the listeners and restores the buttons
+ */
 export function createWindowAlt(root: HTMLElement, actions: HTMLElement, buttons: AltButton[], seed: AltSeed): { dispose(): void } {
   // The morph replaces the button's drawing with its own shapes, which at rest are the same icon.
   const alts: Array<AltButton & { morph: IconMorph }> = buttons.map((entry) => ({ ...entry, morph: createIconMorph(entry.button.querySelector("svg")!, SPLIT_MORPH[entry.action.alt.morph]) }));

@@ -62,6 +62,7 @@ if (typeof document !== "undefined") {
   });
 }
 
+/** `navigator.keyboard` when it exists; `undefined` on the server and in browsers without the API. */
 function navigatorKeyboard(): KeyboardLockApi | undefined {
   return typeof navigator === "undefined" ? undefined : (navigator as Navigator & { keyboard?: KeyboardLockApi }).keyboard;
 }

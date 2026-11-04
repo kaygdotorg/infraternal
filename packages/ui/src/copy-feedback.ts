@@ -108,6 +108,10 @@ export async function writeClipboard(text: string): Promise<boolean> {
   return legacyCopy(text);
 }
 
+/**
+ * The fallback for browsers without the async clipboard API: copies `text` through a hidden, read-only textarea and
+ * `execCommand("copy")`. Returns whether the copy worked, and restores the focus and selection it borrowed.
+ */
 function legacyCopy(text: string): boolean {
   const area = document.createElement("textarea");
   area.value = text;

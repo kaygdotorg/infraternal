@@ -30,7 +30,9 @@ export const DOCS_PEOPLE: ReadonlyArray<readonly [string, string]> = [
   ["kayg", "maya"], ["asha", "sam"], ["ravi", "alex"], ["mira", "sam"],
 ];
 
+/** A pattern that matches `name` only as a whole word (not part of a longer word or a hyphenated name), with special characters escaped. */
 const WORD = (name: string): RegExp => new RegExp(`(?<![\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "g");
+/** The name replacements in the order they are applied: people first, then machines. */
 const RULES: ReadonlyArray<readonly [RegExp, string]> = [...DOCS_PEOPLE, ...DOCS_HOSTS].map(([from, to]) => [WORD(from), to] as const);
 /** Private addresses become the documentation range (RFC 5737), keeping the last number so two hosts stay two addresses. */
 const PRIVATE_ADDRESS = /\b(?:10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.(\d{1,3})\b/g;

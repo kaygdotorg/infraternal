@@ -9,18 +9,27 @@ import { swapCard } from "./auth-motion";
 import { loading } from "../../../packages/ui/src/countup";
 import { tick, springCheckbox } from "../../../packages/ui/src/tick";
 
+/** The valid recovery words, for checking what the user types. */
 const dictionary = new Set(wordlist);
+/** The title of each of the four steps: enter the key, wait, create a passkey, save the new key. */
 const titles = ["Use your recovery key", "Recovery started", "Create a new passkey", "Save your new recovery key"];
 
 /** Words are derived with Web Crypto and the passkey needs WebAuthn; browsers hide both on plain http
  * (anything but https or localhost). Without them no step can work, so say so instead of failing
  * with a generic message. */
 export const SECURE_CONNECTION_MESSAGE = "Recovery needs a secure connection (https)";
+/** True when the page can run recovery: a secure context with Web Crypto. */
 export function secureConnection(): boolean {
   return window.isSecureContext && typeof crypto !== "undefined" && crypto.subtle !== undefined;
 }
 
-/** Reuses auth card, pane motion, stepper ticks and saved-word controls from onboarding. */
+/**
+ * Draws the four-step recovery card in `host` and runs it. Words, the passkey request and other capabilities live only in
+ * this call's variables and are cleared when the user goes back. It reuses the auth card, pane motion, stepper ticks and
+ * saved-word controls from onboarding.
+ * @param back called when the user leaves the card to return to sign-in
+ * @param complete called when recovery has finished and the device is signed in, like {@link mountOnboarding}'s callback
+ */
 export function mountRecovery(host: HTMLElement, back: () => void,
   complete: (userId: string, firstSetup: boolean, displayName?: string, instant?: boolean) => void,
 ): void {
