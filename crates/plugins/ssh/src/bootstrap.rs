@@ -1313,9 +1313,7 @@ impl Bootstrap {
                                 )
                                 .await?;
                             if again != verdict {
-                                return Err(Failure::install(
-                                    "This host changed while it waited for your confirmation. Nothing was stopped; add it again to see what it needs now.",
-                                ));
+                                return Err(Failure::install(CHANGED_WHILE_WAITING));
                             }
                             let replaced = mode == FreshMode::Replace;
                             // Recorded before the stop: any later failure, even an
@@ -1345,7 +1343,15 @@ impl Bootstrap {
                                 // put the service back, and nothing is set aside.
                                 resources.set_aside = None;
                             }
-                            acted?;
+                            acted.map_err(|mut error| {
+                                // 75 here is the record changing since Check, for
+                                // example its agent starting while the person
+                                // decided; Check shows it again (#305 P2-2).
+                                if error.exit_status == Some(75) {
+                                    error.message = CHANGED_WHILE_WAITING;
+                                }
+                                error
+                            })?;
                             replaced.then_some(host)
                         }
                     }
@@ -2048,6 +2054,9 @@ async fn restore_previous(
 
 /// How long a confirmation may wait for the person. Closing the add-host
 /// window cancels it sooner; this only bounds a window left open.
+/// A confirmed Replace or Re-enroll whose host no longer matches what was confirmed.
+const CHANGED_WHILE_WAITING: &str = "This host changed while it waited for your confirmation. Nothing was stopped; add it again to see what it needs now.";
+
 const CONFIRMATION_WAIT: Duration = Duration::from_mins(15);
 
 /// How an earlier attempt is cleared before this one continues.

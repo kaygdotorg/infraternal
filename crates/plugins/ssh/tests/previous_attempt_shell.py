@@ -854,35 +854,46 @@ replace_stuck_install "$observed"
         ])
         self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
 
-    def test_an_upgrade_names_whether_its_agent_is_running_since_the_lease(self):
-        # #305 P2-2: the unit is active and its main process started after the
-        # journal's last lease write, so the upgrade's own START ran.
+    def test_an_upgrade_names_its_agent_live_whenever_the_unit_is_active(self):
+        # #305 P2-2: the upgrade's own START ran (the agent started after the
+        # lease) and the commit was lost.
         stage, _ = self.make_upgrade_fixture()
-        agent = subprocess.Popen(['sleep', '30'])
-        self.children.append(agent)
         os.utime(stage / 'lease', (1, 1))
-        body = f'''
-live_manager() {{
- if [ "$1" = show ]; then printf '%s\\n' {agent.pid}; return; fi
- mock_manager "$@"
-}}
-manager=live_manager
-inspect_previous
-'''
-        self.assertTrue(self.run_shell(body).stdout.decode().endswith(' live\n'))
-        # Started before the lease: an old agent, not the upgrade's.
+        self.assertTrue(self.run_shell('\ninspect_previous').stdout.decode().endswith(' live\n'))
+        # The commonest stuck shape: the session dropped before ACTIVATE (no
+        # stopping marker), so the old agent was never stopped. It started long
+        # before the lease and is still serving and connected.
+        self.assertFalse((stage / 'stopping').exists())
         now = datetime.datetime.now().timestamp() + 3600
         os.utime(stage / 'lease', (now, now))
-        self.assertTrue(self.run_shell(body).stdout.decode().endswith(' idle\n'))
+        self.assertTrue(self.run_shell('\ninspect_previous').stdout.decode().endswith(' live\n'))
         # Not running at all.
         self.manager_active.unlink()
-        self.assertTrue(self.run_shell(body).stdout.decode().endswith(' idle\n'))
+        self.assertTrue(self.run_shell('\ninspect_previous').stdout.decode().endswith(' idle\n'))
 
-    def test_a_restarting_agent_does_not_turn_a_confirmed_replacement_into_a_refusal(self):
+    def test_an_agent_that_starts_after_an_idle_confirmation_is_asked_about_again(self):
+        # #305 P2-2: the person confirmed an idle install; its agent started
+        # while they decided. Nothing is stopped and Check shows the warning.
         self.make_upgrade_fixture()
+        self.manager_active.unlink()
         expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
         self.assertTrue(expected.endswith(' idle'), expected)
-        result = self.run_shell(f'\nreplace_stuck_install "{expected[:-4]}live"\n')
+        self.manager_active.touch()
+        self.manager_log.unlink(missing_ok=True)
+        for action in ('replace_stuck_install', 'supersede_stuck_install'):
+            with self.subTest(action=action):
+                result = self.run_shell(f'\n{action} "{expected}"\n')
+                self.assertEqual(result.returncode, 75, result.stderr.decode())
+                self.assertEqual(self.mutating_calls(), [])
+                self.assertEqual(self.service_state(), (True, True))
+
+    def test_an_agent_that_stopped_after_a_live_confirmation_is_still_replaced(self):
+        # Confirmed with the live warning; stopping less than that is no surprise.
+        self.make_upgrade_fixture()
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        self.assertTrue(expected.endswith(' live'), expected)
+        self.manager_active.unlink()
+        result = self.run_shell(f'\nreplace_stuck_install "{expected}"\n')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_a_disabled_stopped_install_is_put_back_disabled_and_stopped(self):
