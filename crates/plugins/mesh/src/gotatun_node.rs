@@ -44,14 +44,33 @@ type CounterMap = BTreeMap<PublicKey, crate::wireguard::Counters>;
 #[cfg(feature = "relay")]
 const HANDSHAKE_WAIT: Duration = Duration::from_secs(5);
 
-/// Selects the node's data plane. Kernel `WireGuard` stays the default until the integrated
-/// `GotaTun` engine reaches kernel throughput in R4b (#260); `GotaTun` is selectable per node.
+/// Selects the node's data plane. `GotaTun` is the Linux default (D346), so the product runs on
+/// it and its bugs surface; kernel `WireGuard` stays an explicit per-machine opt-out. Reaching
+/// kernel throughput and loss-aware latency is still the goal (D331, D332), not a gate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EngineKind {
-    GotaTun,
     #[default]
+    GotaTun,
     Kernel,
+}
+
+/// Why a node runs its engine, shown by `mesh status` (D346).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineReason {
+    /// Nothing was chosen on this machine.
+    #[default]
+    Default,
+    /// The machine's `INFRATERNAL_MESH_ENGINE` names the engine.
+    Chosen,
+}
+
+/// The engine a node runs and why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineSelection {
+    pub engine: EngineKind,
+    pub reason: EngineReason,
 }
 
 impl EngineKind {
@@ -949,16 +968,17 @@ mod tests {
     };
     use std::{collections::BTreeMap, net::SocketAddr};
 
+    /// D346: `GotaTun` is the Linux default; kernel `WireGuard` stays selectable per machine.
     #[test]
-    fn linux_defaults_to_kernel_until_gotatun_reaches_parity() {
-        assert_eq!(EngineKind::default(), EngineKind::Kernel);
+    fn linux_defaults_to_gotatun_and_kernel_stays_selectable() {
+        assert_eq!(EngineKind::default(), EngineKind::GotaTun);
         assert_eq!(
             EngineKind::parse(None).expect("default"),
-            EngineKind::Kernel
+            EngineKind::GotaTun
         );
         assert_eq!(
-            EngineKind::parse(Some("gotatun")).expect("selectable engine"),
-            EngineKind::GotaTun
+            EngineKind::parse(Some("kernel")).expect("selectable engine"),
+            EngineKind::Kernel
         );
     }
 

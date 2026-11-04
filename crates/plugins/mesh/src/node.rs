@@ -1,5 +1,5 @@
 //! Owns the root-only Mesh node, staged public configuration and synchronous data-plane lifecycle [163,166,198].
-pub use crate::gotatun_node::EngineKind;
+pub use crate::gotatun_node::{EngineKind, EngineReason, EngineSelection};
 use crate::{
     dataplane::Config,
     firewall::Firewall,
@@ -110,6 +110,50 @@ fn proven_kernel_link(
         })
 }
 
+/// Retire this installation's own live link of the engine it no longer runs (D346): a node that
+/// ran kernel `WireGuard` as the old default moves to `GotaTun`, and an explicit opt-out moves
+/// back. The caller has proven `link` is ours.
+///
+/// The public key is kept both ways, so peers and the coordinator see no change. Kernel to
+/// `GotaTun`: the kernel's private key goes to the node's private key file before the link is
+/// deleted. `GotaTun` to kernel: the key file stays, and the kernel is configured from it. A
+/// disabled node keeps nothing; its link only goes.
+fn switch_engine(
+    store: &crate::node_state::Store,
+    link: crate::wireguard::ActiveLink,
+    enabled: bool,
+) -> io::Result<()> {
+    if link.engine == EngineKind::Kernel {
+        if enabled {
+            carry_kernel_key(store)?;
+        }
+        // Retire peers before the link deletion removes all routes, as `down` does.
+        Client::new()?.clear_peers()?;
+    }
+    Device::delete_ifindex(link.ifindex)
+}
+
+/// Copy the proven kernel link's private key into the key file, unless the file already holds it.
+/// A device without a key yet has no identity to carry, and the engine makes a new one.
+fn carry_kernel_key(store: &crate::node_state::Store) -> io::Result<()> {
+    let key = match Device::private_key() {
+        Ok(key) => key,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let (_, public) = crate::gotatun_node::secret_from_bytes(&key[..])?;
+    if Device::identity()?.0 != public {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    if let Some(existing) = store.read_private_key()? {
+        if crate::gotatun_node::secret_from_bytes(&existing)?.1 == public {
+            return Ok(());
+        }
+        store.remove_private_key()?;
+    }
+    store.write_private_key(&key[..])
+}
+
 fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<()> {
     if let Some(bound) = saved_config.as_ref().and_then(|config| config.local_key) {
         let bytes = node
@@ -145,6 +189,7 @@ pub use crate::dataplane::Identity;
 /// The component has no polling loop. Its idle netlink socket closes on explicit down.
 pub struct Node {
     engine_kind: EngineKind,
+    engine_reason: EngineReason,
     identity: Option<Identity>,
     enabled: bool,
     store: Option<crate::node_state::Store>,
@@ -171,6 +216,7 @@ impl Default for Node {
     fn default() -> Self {
         Self {
             engine_kind: EngineKind::default(),
+            engine_reason: EngineReason::Default,
             identity: None,
             enabled: true,
             store: None,
@@ -232,45 +278,43 @@ impl Node {
         Self::restore_requesting(path, Some(engine))
     }
 
-    // The requested engine wins over the recorded one; neither may replace a live link of the
-    // other kind.
+    // Only the machine's explicit choice selects the engine (D346). The recorded engine says
+    // which link this node created, for the ownership proofs; a node that recorded kernel
+    // because it was the default before D346 never chose it.
     fn restore_requesting(
         path: &std::path::Path,
         requested_engine: Option<EngineKind>,
     ) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
-        let recorded_engine = store.recorded_engine()?;
-        let mut engine_kind = requested_engine.or(recorded_engine).unwrap_or_default();
-        let active_link = Device::active_link()?;
-        let active_engine = active_link.map(|link| link.engine);
-        if active_engine == Some(EngineKind::Kernel)
-            && recorded_engine.is_none()
-            && requested_engine.is_none()
-        {
-            // Preserve nodes upgraded from the old kernel-only format until their
-            // owner selects GotaTun or runs an explicit down/up transition.
-            engine_kind = EngineKind::Kernel;
-            // Only a directory that has held node state is such a node. The link's
-            // name and marker are shared by every node on the host, so for a fresh
-            // directory the live link can be another node's: keep the choice in
-            // memory, as before the engine record existed, and claim nothing
-            // durably. Recording it would also put a file and a directory fsync in
-            // front of every fresh start (#260).
-            if store.holds_node_state()? {
+        let engine_kind = requested_engine.unwrap_or_default();
+        let engine_reason = if requested_engine.is_some() {
+            EngineReason::Chosen
+        } else {
+            EngineReason::Default
+        };
+        let snapshot_key = state.config.as_ref().and_then(|c| c.local_key);
+        let mut active_link = Device::active_link()?;
+        if let Some(link) = active_link.filter(|link| link.engine != engine_kind) {
+            // A link of the other engine: ours moves to the selected engine, another node's is
+            // left alone and keeps the name (D340).
+            let ours = proven_kernel_link(&link, kernel_owner_proof(&store, snapshot_key)?)
+                || proven_gotatun_link(&link, gotatun_owner_proof(&store, snapshot_key)?);
+            if ours {
+                switch_engine(&store, link, state.enabled)?;
                 store.record_engine(engine_kind)?;
+                active_link = Device::active_link()?;
             }
         }
-        if active_engine.is_some() && active_engine != Some(engine_kind) {
-            return Err(io::ErrorKind::AlreadyExists.into());
-        }
+        let active_engine = active_link.map(|link| link.engine);
+        let foreign_link = active_engine.is_some_and(|engine| engine != engine_kind);
         let routes = restore_routes(&store, &state)?;
-        let snapshot_key = state.config.as_ref().and_then(|c| c.local_key);
         let proof = gotatun_owner_proof(&store, snapshot_key)?;
         let persisted = active_link.filter(|link| proven_gotatun_link(link, proof));
         let kernel_proof = kernel_owner_proof(&store, snapshot_key)?;
         let adopted_kernel = active_link.filter(|link| proven_kernel_link(link, kernel_proof));
         let mut node = Self {
             engine_kind,
+            engine_reason,
             routes,
             enabled: state.enabled,
             store: Some(store),
@@ -338,7 +382,7 @@ impl Node {
                 node.save(Some(&config), true)?;
                 node.apply(config)?;
             }
-        } else if engine_kind == EngineKind::GotaTun && node.enabled {
+        } else if engine_kind == EngineKind::GotaTun && node.enabled && !foreign_link {
             restore_gotatun(&mut node, state.config.clone())?;
         } else if let Some(link) = persisted.filter(|_| !node.enabled) {
             // A stop inside down left our persisted TUN behind with disabled intent: finish
@@ -560,6 +604,14 @@ impl Node {
         self.peer_counters()
     }
 
+    /// The engine this node runs, and whether it is the default or the machine's choice (D346).
+    #[must_use]
+    pub fn engine_selection(&self) -> EngineSelection {
+        EngineSelection {
+            engine: self.engine_kind,
+            reason: self.engine_reason,
+        }
+    }
     /// Health of the running `GotaTun` engine; `None` under kernel `WireGuard` or when stopped.
     #[must_use]
     pub fn engine_health(&self) -> Option<crate::gotatun_node::EngineHealth> {
@@ -676,6 +728,7 @@ impl Node {
         }
         if let Some(engine) = EngineKind::from_environment()? {
             self.engine_kind = engine;
+            self.engine_reason = EngineReason::Chosen;
         }
         self.firewall.adopt()?;
         let (key, public_key) = self.local_key()?;

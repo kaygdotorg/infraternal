@@ -96,6 +96,19 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     if let Some(version) = value["version"].as_u64() {
         rows.push(("Rules", format!("version {version}")));
     }
+    if let Some(selection) = value.get("engine_selection").filter(|v| !v.is_null()) {
+        let engine = match selection["engine"].as_str() {
+            Some("gotatun") => "GotaTun (userspace)",
+            Some("kernel") => "kernel WireGuard",
+            _ => return Err(PluginError::Rejected),
+        };
+        let reason = match selection["reason"].as_str() {
+            Some("default") => "the default",
+            Some("chosen") => "chosen for this machine",
+            _ => return Err(PluginError::Rejected),
+        };
+        rows.push(("Data plane", format!("{engine}, {reason}")));
+    }
     let (tone, message) = engine_health(&value, &mut rows)?.unwrap_or((tone, message));
     Ok(Presented {
         tone,

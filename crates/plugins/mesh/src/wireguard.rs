@@ -646,6 +646,32 @@ impl Device {
             port.ok_or(io::ErrorKind::InvalidData)?,
         ))
     }
+    /// Read the kernel device's private key, only to carry this node's identity to `GotaTun`
+    /// when it leaves kernel `WireGuard` (D346). The caller must have proven the link is ours.
+    /// Every reply buffer is zeroized on drop, and so is the returned key.
+    /// # Errors
+    /// Refuses a device without a key, or a malformed dump.
+    pub(crate) fn private_key() -> io::Result<Zeroizing<[u8; 32]>> {
+        let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
+        let family = socket.family("wireguard")?;
+        let mut payload = header();
+        payload[0] = 0;
+        let mut key = Zeroizing::new([0; 32]);
+        let mut found = false;
+        for reply in socket.request(family, 0x300, &payload)? {
+            let reply = Zeroizing::new(reply);
+            for field in netlink::attributes(reply.get(4..).ok_or(io::ErrorKind::InvalidData)?)? {
+                if field.kind == 3 && field.payload.len() == 32 {
+                    key.copy_from_slice(field.payload);
+                    found = true;
+                }
+            }
+        }
+        if !found || *key == [0; 32] {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(key)
+    }
     /// Read public peer counters only. Private fields in the kernel dump are zeroized.
     /// # Errors
     /// Reports dump or malformed counter errors.

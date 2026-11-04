@@ -489,7 +489,7 @@ impl AgentPlugin for MeshNodePlugin {
                     json!({"state":"Off","version":null})
                 }
                 Request::Status => {
-                    json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node)})
+                    json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node)})
                 }
                 Request::Configure(chunk) => {
                     let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
@@ -550,6 +550,18 @@ fn engine_health(node: &Node) -> serde_json::Value {
 #[cfg(target_os = "macos")]
 fn engine_health(_node: &Node) -> serde_json::Value {
     serde_json::Value::Null
+}
+
+/// The engine this node runs and why (D346).
+#[cfg(target_os = "linux")]
+fn engine_selection(node: &Node) -> serde_json::Value {
+    json!(node.engine_selection())
+}
+
+/// The Mac node has one engine, `GotaTun`, and no choice to make.
+#[cfg(target_os = "macos")]
+fn engine_selection(_node: &Node) -> serde_json::Value {
+    json!({"engine":"gotatun","reason":"default"})
 }
 
 /// Both node types read the counters of the engine they run.

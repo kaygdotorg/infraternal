@@ -127,17 +127,17 @@ fn add_marked_kernel_link() {
     }
 }
 
-/// The kernel-only upgrade rule (D163 amendment) pins the kernel engine only for a node whose
-/// state directory has held mesh state before. A fresh directory, such as a new or rootless
-/// infraternal agent on a host where another node runs kernel `WireGuard`, records nothing: that
-/// durable write claimed another node's link as its own engine and put two fsyncs on every
-/// fresh start (#260).
+/// Restore records an engine only when it moves this node's own link to another engine (D346).
+/// A fresh directory, such as a new or rootless infraternal agent on a host where another node
+/// runs kernel `WireGuard`, and an older kernel-only directory both leave that node's link alone
+/// and write nothing: a durable record there claimed another node's link and put two fsyncs on
+/// every fresh start (#260).
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
-fn only_a_node_with_prior_state_pins_the_kernel_engine() {
+fn restore_records_no_engine_for_another_nodes_kernel_link() {
     assert!(
         std::env::var_os("INFRATERNAL_MESH_ENGINE").is_none(),
-        "the upgrade rule applies only when no engine is requested"
+        "this covers a machine with no engine choice"
     );
     let fresh = private_state("kernel-upgrade-fresh");
     let upgraded = private_state("kernel-upgrade-old");
@@ -154,13 +154,11 @@ fn only_a_node_with_prior_state_pins_the_kernel_engine() {
     .unwrap();
 
     add_marked_kernel_link();
+    let link = index();
     drop(Node::restore(&fresh));
-    let fresh_record = fs::read_to_string(fresh.join("mesh-engine.json")).ok();
-    if Device::owned().unwrap_or(false) {
-        Device::delete().unwrap();
-    }
-    add_marked_kernel_link();
     drop(Node::restore(&upgraded));
+    let kept = Device::owned().unwrap_or(false) && index() == link;
+    let fresh_record = fs::read_to_string(fresh.join("mesh-engine.json")).ok();
     let upgraded_record = fs::read_to_string(upgraded.join("mesh-engine.json")).ok();
     if Device::owned().unwrap_or(false) {
         Device::delete().unwrap();
@@ -168,14 +166,14 @@ fn only_a_node_with_prior_state_pins_the_kernel_engine() {
     fs::remove_dir_all(&fresh).unwrap();
     fs::remove_dir_all(&upgraded).unwrap();
 
+    assert!(kept, "restore changed another node's kernel link");
     assert_eq!(
         fresh_record, None,
-        "a fresh state directory recorded another node's kernel link as its engine"
+        "a fresh state directory recorded an engine"
     );
     assert_eq!(
-        upgraded_record.as_deref(),
-        Some("\"kernel\""),
-        "an upgraded kernel-only node lost its engine"
+        upgraded_record, None,
+        "an older directory recorded an engine for another node's link"
     );
 }
 
