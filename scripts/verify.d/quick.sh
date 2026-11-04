@@ -2,11 +2,13 @@
 #
 # It runs what fails most often, cheapest first, and stops at the first failure:
 #   1. cargo fmt --check (whole workspace; it needs no compilation)
+#   1b. the doc-coverage ratchet (D345): coverage per crate or package never goes down
 #   2. cargo clippy (workspace, same flags as the gate) when any Rust package changed against the
 #      merge base with origin/dev
 #   3. the unit tests (lib and bin targets) of the changed packages, never of a cargo-fuzz package
 #      (its bins loop forever, #329) and under a hard timeout that fails loudly instead of hanging
-#   4. the tracer typecheck, only when TypeScript changed
+#   4. the tracer typecheck, only when TypeScript changed; before it, "ui literals" (ui-literals.py):
+#      the change must not add pixel font sizes, pixel corner radii or pasted easing curves (#345)
 # It is NOT the gate. It does not check dependents of a changed crate, integration tests, the
 # static release builds, cargo-deny, the architecture checks or the size report. A green quick
 # run is never quoted as the gate; `scripts/verify fast` stays the gate (docs/PROCESS.md).
@@ -42,6 +44,10 @@ verify_quick() {
     rust_run_gate "fmt" cargo fmt --all --check
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 
+    # Whole-repo and cheap, so it always runs, whatever changed.
+    rust_run_gate "doc coverage ratchet" verify_doc_coverage
+    if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
+
     if ((whole)); then
         cargo_scope=(--workspace "${excludes[@]}")
     else
@@ -68,6 +74,9 @@ verify_quick() {
     fi
 
     if ((tracer)); then
+        # Under a second: counts only the files this change touches (see ui-literals.py), so it runs before the slow typecheck.
+        rust_run_gate "ui literals" python3 "${script_dir}/verify.d/ui-literals.py" "$base"
+        if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
         rust_run_gate "tracer typecheck" bash -c \
             'cd "$1/apps/tracer" && bun install --frozen-lockfile && bun run check' _ "$(cd -- "${script_dir}/.." && pwd)"
     fi

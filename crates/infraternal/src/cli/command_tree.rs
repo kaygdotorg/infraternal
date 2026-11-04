@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "plugin-mesh")]
+    #[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
     fn parser_uses_plugin_inputs_and_accepts_json_after_a_leaf_command() {
         let registry = registry().expect("action registry");
         let matches = build(&registry)
@@ -713,6 +713,19 @@ mod tests {
         assert_eq!(command.path, ["mesh", "up"]);
         assert!(matches.get_flag("json"));
         assert!(command.matches.get_flag("ssh"));
+    }
+
+    #[test]
+    #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    fn parser_uses_macos_mesh_service_input_and_accepts_json_after_a_leaf_command() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from(["infraternal", "mesh", "up", "--system-service", "--json"])
+            .expect("registered Mac system service input");
+        let command = selected(&matches);
+        assert_eq!(command.path, ["mesh", "up"]);
+        assert!(matches.get_flag("json"));
+        assert!(command.matches.get_flag("system_service"));
     }
 
     #[test]

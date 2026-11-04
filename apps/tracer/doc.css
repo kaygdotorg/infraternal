@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 /* The structure every docs page shares (docs-build.ts `renderDoc`): the title and its one-line summary, the table of contents,
    the body and the footer. The standalone pages (docs.css) and the canvas reader (docs-reader.css) both load it, so it only
-   uses the tokens both define (--fg, --fg-2, --text-secondary, --row, --fw-*) and no colour of its own.
+   uses the tokens both define (--fg, --fg-2, --text-secondary, --row, --fw-*, --ease-out) and no colour of its own.
 
    Measure: the text never runs wider than 70 characters of the page font, which is where a line of this monospace reads
    comfortably. Table of contents: where the page has room for it beside the text it is a sticky column on the right; where
@@ -24,7 +24,7 @@
 /* Inline code, and a fenced block. A block copies on a click (a double tap on a phone): the pointer says so, and the text gives way
    to the shared "Copied" confirmation (copy-feedback.ts `confirmInPlace`) in the same spot. Its rules are here because the
    standalone page does not load the app's stylesheet; in the app the same `.ui-copied` classes apply, scoped to `.doc-code`. */
-.doc code { padding: 1px 5px; border-radius: 6px; background: rgb(from var(--fg) r g b / 0.05); font: inherit; font-size: 0.93em; overflow-wrap: anywhere; }
+.doc code { padding: 1px 0.3125rem; border-radius: 0.375rem; background: rgb(from var(--fg) r g b / 0.05); font: inherit; font-size: 0.93em; overflow-wrap: anywhere; }
 .doc .doc-code { position: relative; margin: 0 0 1rem; }
 .doc pre { margin: 0; overflow-x: auto; padding: 0.75rem 1rem; border-radius: 0.75rem; background: rgb(from var(--fg) r g b / 0.05); line-height: 1.6; cursor: pointer; -webkit-overflow-scrolling: touch; transition: background-color 120ms ease; outline: none; }
 @media (hover: hover) { .doc pre:hover { background: rgb(from var(--fg) r g b / 0.08); } }
@@ -62,11 +62,11 @@
 .doc .why { margin: 0 0 1rem; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: 0.75rem; interpolate-size: allow-keywords; }
 .doc .why summary { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; min-height: var(--row); box-sizing: border-box; padding: 0.375rem 1rem; font-weight: var(--fw-label); cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
 .doc .why summary::-webkit-details-marker { display: none; }
-.doc .why summary::after { content: ""; flex: none; width: 0.4em; height: 0.4em; margin-right: 0.2em; border: solid var(--fg-2); border-width: 0 1.5px 1.5px 0; transform: translateY(-0.12em) rotate(45deg); transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.doc .why summary::after { content: ""; flex: none; width: 0.4em; height: 0.4em; margin-right: 0.2em; border: solid var(--fg-2); border-width: 0 1.5px 1.5px 0; transform: translateY(-0.12em) rotate(45deg); transition: transform 160ms var(--ease-out); }
 .doc .why[open] summary::after { transform: translateY(0.1em) rotate(-135deg); }
 .doc .why-body { padding: 0 1rem 0.5rem; color: var(--fg-2); font-weight: var(--fw-secondary); }
 .doc .why-body > :last-child { margin-bottom: 0.25rem; }
-.doc .why::details-content { block-size: 0; overflow: clip; transition: block-size 200ms cubic-bezier(0.23, 1, 0.32, 1), content-visibility 200ms allow-discrete; }
+.doc .why::details-content { block-size: 0; overflow: clip; transition: block-size 200ms var(--ease-out), content-visibility 200ms allow-discrete; }
 .doc .why[open]::details-content { block-size: auto; }
 @media (prefers-reduced-motion: reduce) { .doc .why summary::after, .doc .why::details-content { transition: none; } }
 
@@ -136,7 +136,7 @@
 .doc .toc-fold summary { display: flex; align-items: center; justify-content: space-between; min-height: var(--row); box-sizing: border-box; padding: 0.25rem 0; color: var(--fg); font-weight: var(--fw-label); cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
 .doc .toc-fold summary::-webkit-details-marker { display: none; }
 /* The chevron is drawn, not typed: a font glyph would not centre on the text's line. */
-.doc .toc-fold summary::after { content: ""; width: 0.4em; height: 0.4em; margin-right: 0.2em; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: translateY(-0.12em) rotate(45deg); transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.doc .toc-fold summary::after { content: ""; width: 0.4em; height: 0.4em; margin-right: 0.2em; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: translateY(-0.12em) rotate(45deg); transition: transform 160ms var(--ease-out); }
 .doc .toc-fold[open] summary::after { transform: translateY(0.1em) rotate(-135deg); }
 .doc .toc-fold > ol { padding-bottom: 0.5rem; }
 @media (prefers-reduced-motion: reduce) { .doc .toc-fold summary::after { transition: none; } }
@@ -164,7 +164,7 @@
 /* The list of pages under the front page: one row per page, the title over its one-line summary. */
 .doc .pages { margin: 0 0 1rem; padding: 0; list-style: none; }
 .doc .pages li { margin: 0; border-bottom: 1px solid rgb(from var(--fg) r g b / 0.1); }
-.doc .pages a { display: flex; flex-direction: column; gap: 2px; min-height: var(--row); box-sizing: border-box; padding: 10px 0; text-decoration: none; transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1); }
+.doc .pages a { display: flex; flex-direction: column; gap: 0.125rem; min-height: var(--row); box-sizing: border-box; padding: 0.625rem 0; text-decoration: none; transition: transform 120ms var(--ease-out); }
 .doc .pages a:active { transform: scale(0.98); }
 .doc .pages strong { font-weight: var(--fw-label); }
 .doc .pages span { color: var(--fg-2); font-size: var(--text-secondary); font-weight: var(--fw-secondary); }

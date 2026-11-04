@@ -3952,3 +3952,70 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - The documentation will be generated from these comments. Its
        structure is decided later, reusing the existing docs; the comments
        are written now.
+346. **GotaTun becomes the default now, to find bugs by using it (owner,
+     2026-11-04; amends D332's switch rule):** "if gotatun is stable, we
+     should switch our app to it already because we will find more bugs that
+     way", then: "is not that stability replaces perf. i am the only user and
+     using gotatun inside the app right now and basing everything on top of it
+     uncovers more bugs that we need to fix".
+     - GotaTun becomes the default Linux engine as soon as the integration
+       branch merges. The merge still needs its final security re-review and
+       a green `scripts/verify fast` (CLAUDE.md priority 2). It does not wait
+       for performance parity or for an extra soak.
+     - The kernel path stays an explicit opt-out per node.
+     - Performance is unchanged as a goal (D331, D332): reaching throughput
+       and loss-aware p99 parity with kernel WireGuard is still the target,
+       still measured, and still drives the latency work. Bugs found by
+       running on GotaTun are fixed as they appear.
+347. **Open questions, 2026-11-04 evening (owner):**
+     - **No more build compute:** "no more compute sadly". Work stays
+       within the current build slots (compute01 4, dev-02 2); use them
+       better instead.
+     - **Mesh SSH login identity (amends D344):** "agreed with your rec".
+       Only the account the machine was added with acts as the person. Other
+       ordinary accounts on that machine get only what grants give them.
+     - **Migration file names:** "yes pls anything to simplify and get
+       moving faster". New migrations are named by timestamp, so parallel
+       branches can't collide (#344 Q2). Existing numbered migrations stay.
+     - **GotaTun latency:** "p99 first". Loaded p99 is the latency target.
+       Median interactive latency isn't a separate goal for now.
+     - **API keys with no expiry (D343):** "nah let's not make it
+       complicated". "Never" means never: no inactivity end either.
+348. **GotaTun benchmark CPU pinning (owner, 2026-11-04; amends D332's
+     measurement setup):** "yeah can you pin it software wise? 2 cpus per
+     test in parallel is fine as long as no interference messes up the
+     benchmark". On the 4-vCPU perf VM, each side of a test (its infraternal
+     agent or engine, its load generator and its probe) is pinned in
+     software to its own 2 CPUs, through cpusets, for every case, kernel
+     WireGuard included, so the comparison stays fair. Before a pinned hold
+     counts, the setup proves there is no interference: no other runnable
+     work on those CPUs during the run, and run-to-run spread no worse than
+     the unpinned harness's. Earlier unpinned numbers stay valid for
+     history, but aren't compared directly with pinned ones.
+349. **`infra` alias, Themes approved, app-window icons, takeover proof
+     (owner, 2026-11-04):**
+     - **`infra` is a second name for the CLI:** "can we also alias the
+       infraternal CLI to infra? sounds neater. of course both should work -
+       infraternal is the actual command, infra is the symlink. don't know
+       if the symlink is the best way to do the alias (but we shoudn't
+       change the shell config)". The installers add `infra` next to
+       `infraternal` (a symlink or an equivalent link), never by editing
+       shell configuration. Help and messages read the same through either
+       name.
+     - **Themes round 4 (#323) is approved:** "approved, though you're
+       misisng the requested additional colour schemes and fonts." The
+       product build must include D329's additional colour schemes and
+       fonts.
+     - **App windows are never split** (amends D200 V7): "correct! but our
+       agent needs to get the correct icon from the app". The infraternal
+       agent reports each app's real icon with its window list, and the
+       canvas shows it.
+     - **Takeover with live terminals (D337):** "please built (b) our
+       current state is just waiting for b to be built so it can be
+       tested". The "prove the old server is mine" confirmation is built
+       next, so a machine whose old agent still runs terminals can be taken
+       over by its owner.
+     - **The app-window controls need mockups** with the buttons we will
+       actually use, and a test of the Mac side: "screenshots look pretty
+       good but i want mockups with the buttons we are going to use, has the
+       mac agent been tested?"
