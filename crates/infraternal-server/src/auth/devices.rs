@@ -81,13 +81,13 @@ const MAX_APPROVAL_CEREMONIES: usize = 1024;
 /// Approval passkey ceremonies, keyed by ceremony ID. Each is bound to
 /// the session that started it and the code it approves.
 #[derive(Default)]
-pub(super) struct ApprovalCeremonies(HashMap<String, ApprovalCeremony>);
+pub(super) struct ApprovalCeremonies(pub(super) HashMap<String, ApprovalCeremony>);
 
-struct ApprovalCeremony {
+pub(super) struct ApprovalCeremony {
     /// `sign_in` or `join_machine`, read when the ceremony started.
     kind: String,
     session_hash: String,
-    user_id: String,
+    pub(super) user_id: String,
     code_hash: String,
     expires: i64,
 }

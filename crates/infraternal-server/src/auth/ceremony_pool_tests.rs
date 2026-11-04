@@ -214,3 +214,190 @@ async fn the_anonymous_pool_never_holds_more_than_1024() {
         1
     );
 }
+
+/// Another person with a live session, holding a copy of the fixture's
+/// passkey so identified ceremonies can start for them.
+async fn person(f: &Fixture, index: usize) -> (String, String) {
+    let user = Uuid::new_v4().to_string();
+    let name = format!("person{index}");
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,0,'unused',?,?)")
+        .bind(&user)
+        .bind(&name)
+        .bind(&name)
+        .bind(&name)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO passkeys(id,user_id,credential,prf_input) SELECT ?||id,?,credential,prf_input FROM passkeys WHERE user_id=?")
+        .bind(format!("{index}-"))
+        .bind(&user)
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let token = random();
+    let mut tx = f.auth.pool.begin().await.unwrap();
+    insert_session(&mut tx, &token, &user, "person's browser", NOW, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (user, token)
+}
+
+/// A pending CLI sign-in code (the kind any signed-in person may approve).
+async fn sign_in_code(f: &Fixture) -> String {
+    let started = f
+        .auth
+        .device_start("cli", vec!["hosts:read".into()], v4_network(900), NOW)
+        .await
+        .unwrap();
+    str_field(&started, "user_code").to_owned()
+}
+
+/// Approval ceremonies and identified ceremonies each person holds.
+async fn held(f: &Fixture, user: &str) -> (usize, usize) {
+    let approvals = f
+        .auth
+        .approval_ceremonies
+        .lock()
+        .await
+        .0
+        .values()
+        .filter(|ceremony| ceremony.user_id == user)
+        .count();
+    let pending = f.auth.pending.lock().await;
+    let identified = pending
+        .logins
+        .values()
+        .filter(|login| matches!(&login.state, LoginState::Identified(_, who) if who == user))
+        .count()
+        + pending
+            .registrations
+            .values()
+            .filter(|r| r.user == user)
+            .count();
+    (approvals, identified)
+}
+
+#[tokio::test]
+async fn one_person_cannot_fill_the_approval_or_identified_pools() {
+    // J161 P3-2: one session repeating approval starts on its own sign-in
+    // code refused every approval and fresh tap on the server.
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let code = sign_in_code(&f).await;
+    let (other, token) = person(&f, 1).await;
+    for attempt in 0..1100 {
+        f.auth
+            .device_approve_start(&token, &code, NOW)
+            .await
+            .unwrap_or_else(|error| panic!("approval start {attempt}: {error:?}"));
+        f.auth
+            .login_start(&other, NOW)
+            .await
+            .unwrap_or_else(|error| panic!("fresh tap {attempt}: {error:?}"));
+    }
+    assert_eq!(held(&f, &other).await, (5, 5));
+    // The owner's add-passkey registrations are bounded the same way.
+    for attempt in 0..1100 {
+        f.auth
+            .add_start(&f.session, NOW)
+            .await
+            .unwrap_or_else(|error| panic!("add start {attempt}: {error:?}"));
+    }
+    assert_eq!(held(&f, &f.user).await, (0, 5));
+    // Nobody else's slots were spent.
+    assert!(
+        f.auth
+            .device_approve_start(&f.session, &code, NOW)
+            .await
+            .is_ok()
+    );
+    assert!(f.auth.login_start(&f.user, NOW).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_persons_newest_approval_ceremony_survives_their_cap() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    let code = sign_in_code(&f).await;
+    let cookie = format!("__Host-infraternal={}", f.session);
+    let mut starts = Vec::new();
+    for _ in 0..6 {
+        let (status, _, start) = call(
+            &app,
+            v4_network(1),
+            "device-approve-start",
+            Some(&cookie),
+            &json!({"code": code}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        starts.push(start);
+    }
+    let finish = |start: &Value, proof: Value| json!({"code": code, "ceremony": start["ceremony"], "proof": proof});
+    let oldest = finish(&starts[0], f.software.login(&starts[0], ORIGIN, true));
+    let (status, _, _) = call(
+        &app,
+        v4_network(1),
+        "device-approve-finish",
+        Some(&cookie),
+        &oldest,
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "the evicted ceremony still approved"
+    );
+    let newest = finish(&starts[5], f.software.login(&starts[5], ORIGIN, true));
+    let (status, _, _) = call(
+        &app,
+        v4_network(1),
+        "device-approve-finish",
+        Some(&cookie),
+        &newest,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_approval_and_identified_pools_keep_their_server_caps() {
+    // 205 people at five ceremonies each still fill each 1024 pool.
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let code = sign_in_code(&f).await;
+    let mut started = 0;
+    for index in 0..205 {
+        let (_, token) = person(&f, index).await;
+        for _ in 0..5 {
+            if started == 1024 {
+                break;
+            }
+            f.auth
+                .device_approve_start(&token, &code, NOW)
+                .await
+                .unwrap_or_else(|error| panic!("start {started}: {error:?}"));
+            started += 1;
+        }
+    }
+    let (newcomer, token) = person(&f, 999).await;
+    assert!(matches!(
+        f.auth.device_approve_start(&token, &code, NOW).await,
+        Err(Error::Throttled)
+    ));
+    assert!(matches!(
+        f.auth.login_start(&newcomer, NOW).await,
+        Err(Error::Denied)
+    ));
+    // Expiry frees both pools.
+    assert!(
+        f.auth
+            .device_approve_start(&token, &code, NOW + CEREMONY)
+            .await
+            .is_ok()
+    );
+}
