@@ -117,6 +117,14 @@ pub fn protect_login_process_at(path: &std::path::Path) -> std::io::Result<()> {
     pty::protect_login_process_at(path)
 }
 
+/// Let the child inherit only standard input, output and error: every other
+/// descriptor is marked close-on-exec after fork (an allowlist, #328 P1).
+/// Hooks the caller registers afterwards may still admit a named descriptor.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn inherit_only_standard_descriptors(command: &mut std::process::Command) {
+    pty::only_standard_descriptors(command);
+}
+
 /// Apply child signal policy and close the trusted fd3 before direct exec.
 /// This avoids an intermediate shell changing `/proc/self/exe` for anonymous images.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

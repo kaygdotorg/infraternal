@@ -11,7 +11,9 @@
 //! (`__session-shell`). That entry is a fresh single-threaded process, where
 //! the documented calls are safe, and it:
 //!
-//! 1. checks that it is the session leader of its controlling PTY;
+//! 1. closes every descriptor above standard error while still root, so
+//!    nothing the root chain held reaches the shell, and checks that it is
+//!    the session leader of its controlling PTY;
 //! 2. records the login name (`setlogin`), joins the account's groups
 //!    (`initgroups`), drops to the account's gid and uid, and verifies that
 //!    root cannot be regained;
@@ -218,6 +220,10 @@ fn exec(request: &Request) -> io::Error {
 }
 
 fn prepare(request: &Request) -> io::Result<Command> {
+    // Still root and single-threaded: close everything but the PTY's standard
+    // handles before anything else, so no descriptor the root chain held (a
+    // root-authenticated socket, a root-only file) can reach the shell (#328 P1).
+    crate::pty::close_above_stderr()?;
     let pid = unistd::getpid();
     // Only the shim's PTY child reaches this entry legitimately: it is the
     // leader of a fresh session whose controlling terminal is standard input.

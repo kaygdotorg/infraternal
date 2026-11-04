@@ -1128,6 +1128,169 @@ fn linux_prctl(
     }
 }
 
+/// Let the next program inherit only standard input, output and error.
+///
+/// Registers a post-fork hook that marks every descriptor above 2 close-on-exec.
+/// This is an allowlist: a descriptor reaches the program only if it is one of
+/// the three standard handles, or if a hook registered *after* this one admits
+/// it by name (the Linux login handoff does, through `inherit_descriptor`). It
+/// does not rely on every opener having set CLOEXEC, which on macOS is a second
+/// syscall racing other threads' forks (#328 P1). Marking rather than closing
+/// keeps Command's private exec-error pipe working until exec succeeds.
+pub(crate) fn only_standard_descriptors(command: &mut Command) {
+    // SAFETY: the hook makes only async-signal-safe syscalls on stack storage,
+    // with no allocation, lock or captured state.
+    unsafe {
+        command.pre_exec(cloexec_above_stderr);
+    }
+}
+
+/// Mark descriptors 3 and above close-on-exec (Linux): one `close_range` call
+/// on kernels 5.11 and later, otherwise a walk up to the descriptor limit.
+#[cfg(target_os = "linux")]
+fn cloexec_above_stderr() -> io::Result<()> {
+    const CLOSE_RANGE_CLOEXEC: nix::libc::c_uint = 1 << 2;
+    // SAFETY: scalar-argument syscall; the kernel retains nothing.
+    let marked = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_close_range,
+            3_u32,
+            u32::MAX,
+            CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if marked == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if !matches!(
+        error.raw_os_error(),
+        Some(nix::libc::ENOSYS | nix::libc::EINVAL)
+    ) {
+        return Err(error);
+    }
+    let mut limit = nix::libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes this live record and keeps no pointer.
+    if unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Older kernels only. A descriptor cannot be opened above the current limit;
+    // the cap keeps a huge configured limit from stalling the fork.
+    let last = nix::libc::c_int::try_from(limit.rlim_cur.min(1 << 20)).unwrap_or(1 << 20);
+    for descriptor in 3..last {
+        set_cloexec(descriptor)?;
+    }
+    Ok(())
+}
+
+/// Mark descriptors 3 and above close-on-exec (macOS), listed exactly by
+/// `proc_pidinfo(PROC_PIDLISTFDS)`. Fails closed if the list does not fit.
+#[cfg(target_os = "macos")]
+fn cloexec_above_stderr() -> io::Result<()> {
+    each_descriptor_above_stderr(set_cloexec)
+}
+
+/// Close every descriptor above standard error in this process (macOS). For
+/// the single-threaded session-shell entry, while it still runs as root.
+#[cfg(target_os = "macos")]
+pub(crate) fn close_above_stderr() -> io::Result<()> {
+    each_descriptor_above_stderr(|descriptor| {
+        // SAFETY: closing a listed descriptor this process owns; nothing in
+        // this fresh single-threaded entry holds it.
+        if unsafe { nix::libc::close(descriptor) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(nix::libc::EBADF) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Call `action` for each open descriptor above 2, from one kernel listing
+/// into stack storage (safe after fork: no allocation). When more descriptors
+/// are open than the listing holds, every number up to the process's
+/// descriptor limit is visited instead, so none is ever skipped.
+#[cfg(target_os = "macos")]
+fn each_descriptor_above_stderr(
+    mut action: impl FnMut(nix::libc::c_int) -> io::Result<()>,
+) -> io::Result<()> {
+    const PROC_PIDLISTFDS: nix::libc::c_int = 1; // <sys/proc_info.h>
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct FdInfo {
+        descriptor: i32,
+        kind: u32,
+    }
+    // 16 KiB of stack: within Clippy's large-array bound and fork-safe.
+    const SLOTS: usize = 2048;
+    let mut list = [FdInfo {
+        descriptor: -1,
+        kind: 0,
+    }; SLOTS];
+    let size = i32::try_from(std::mem::size_of_val(&list)).map_err(io::Error::other)?;
+    // SAFETY: the kernel writes at most `size` bytes of proc_fdinfo records
+    // (8 bytes each, layout matching FdInfo) and reports how many it wrote.
+    let written = unsafe {
+        nix::libc::proc_pidinfo(
+            nix::libc::getpid(),
+            PROC_PIDLISTFDS,
+            0,
+            list.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let count = usize::try_from(written).map_err(io::Error::other)? / std::mem::size_of::<FdInfo>();
+    if count >= SLOTS {
+        // The listing may be truncated: walk every possible number instead.
+        // SAFETY: getdtablesize takes no arguments and only reads limits.
+        let limit = unsafe { nix::libc::getdtablesize() };
+        let highest = list.iter().map(|entry| entry.descriptor).max().unwrap_or(0);
+        for descriptor in 3..=limit.max(highest) {
+            action(descriptor)?;
+        }
+        return Ok(());
+    }
+    for entry in &list[..count] {
+        if entry.descriptor > 2 {
+            action(entry.descriptor)?;
+        }
+    }
+    Ok(())
+}
+
+/// Set close-on-exec on one descriptor; an already-closed one is fine.
+fn set_cloexec(descriptor: nix::libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl on a scalar descriptor is async-signal-safe.
+    let flags = unsafe { nix::libc::fcntl(descriptor, nix::libc::F_GETFD) };
+    if flags < 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(nix::libc::EBADF) {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
+    // SAFETY: as above.
+    if unsafe {
+        nix::libc::fcntl(
+            descriptor,
+            nix::libc::F_SETFD,
+            flags | nix::libc::FD_CLOEXEC,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Keep the public direct-exec policy on the same audited descriptor boundary.
 pub(super) fn prepare_child_without_control(command: &mut Command) {
     prepare_isolated_child(command);
@@ -1187,6 +1350,103 @@ fn reset_child_signals() -> io::Result<()> {
     nix::sys::signal::SigSet::empty()
         .thread_set_mask()
         .map_err(errno)
+}
+
+/// The standard-descriptor allowlist (#328 P1): a planted descriptor without
+/// close-on-exec must not reach a child, on its own or through a PTY shell.
+#[cfg(test)]
+mod descriptor_allowlist_tests {
+    use super::*;
+
+    /// These tests fork while descriptors are planted; run them one at a time.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A descriptor with no CLOEXEC flag, as a careless or racing opener leaves
+    /// it, at a high number no other test's descriptors will reuse.
+    fn planted() -> (File, File) {
+        let file = File::open("/dev/null").unwrap();
+        let copy = fcntl(&file, FcntlArg::F_DUPFD(50)).unwrap(); // no CLOEXEC
+        // SAFETY: F_DUPFD returned a fresh descriptor owned by nothing else.
+        (file, unsafe { File::from_raw_fd(copy) })
+    }
+
+    /// Whether `/bin/sh` in a child holds the descriptor open.
+    fn child_reads(descriptor: i32, allowlist: bool) -> bool {
+        let mut command = Command::new("/bin/sh");
+        // `[` is a builtin: it checks the shell's own descriptor table. (dash
+        // cannot redirect from descriptors above 9.)
+        command.args(["-c", &format!("[ -e /dev/fd/{descriptor} ]")]);
+        command.stderr(Stdio::null());
+        if allowlist {
+            only_standard_descriptors(&mut command);
+        }
+        command.status().unwrap().success()
+    }
+
+    #[test]
+    fn only_standard_descriptors_reach_the_child() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_file, copy) = planted();
+        let descriptor = copy.as_raw_fd();
+        assert!(
+            child_reads(descriptor, false),
+            "the fixture must plant a live descriptor"
+        );
+        assert!(
+            !child_reads(descriptor, true),
+            "a planted descriptor reached the child"
+        );
+    }
+
+    /// The real PTY shell builder applies the allowlist (Linux; on macOS the
+    /// child is the private session-shell entry, covered by the Mac proof).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pty_program_inherits_only_its_terminal() {
+        use std::io::Read as _;
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_file, copy) = planted();
+        // Keep the terminal open until the marker is read: Linux may drop
+        // output that is still pending when the terminal hangs up.
+        let probe = format!(
+            "exec 2>/dev/null; if [ -e /dev/fd/{} ]; then echo DESCRIPTOR-LEAKED; \
+             else echo DESCRIPTOR-CLEAN; fi; sleep 30",
+            copy.as_raw_fd()
+        );
+        let program = ["/bin/sh", "-c", probe.as_str()].map(std::ffi::OsString::from);
+        let mut pty =
+            Pty::spawn_with_command(Uid::effective().as_raw(), 80, 24, false, &program, None)
+                .unwrap();
+        let mut output = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !output
+            .windows(16)
+            .any(|w| w == b"DESCRIPTOR-CLEAN" || w.starts_with(b"DESCRIPTOR-LEAKE"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no probe output: {output:?}"
+            );
+            let mut chunk = [0; 256];
+            match pty.master.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&chunk[..n]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        let _ = pty.child.kill();
+        let _ = pty.child.wait();
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("DESCRIPTOR-CLEAN"), "{text}");
+    }
 }
 
 /// Real exec regressions for leg-B isolation and controller-owned sessions.
@@ -1375,6 +1635,7 @@ fn linux_command(
     // Descriptor 0 is Command's installed slave; privilege order prevents
     // retaining supplementary root groups after dropping uid.
     prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
     unsafe {
         command.pre_exec(move || {
             restore_child_thp(child_thp)?;
@@ -1426,6 +1687,7 @@ fn darwin_command(
         command.env("ZDOTDIR", directory);
     }
     prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
     lead_terminal(&mut command);
     Ok(command)
 }
@@ -1471,6 +1733,7 @@ fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Co
         command.env("ZDOTDIR", directory);
     }
     prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
     lead_terminal(&mut command);
     Ok(command)
 }
@@ -1537,6 +1800,7 @@ fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Co
     // Descriptor 0 is Command's installed slave; privilege order prevents
     // retaining supplementary root groups after dropping uid.
     prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
     unsafe {
         command.pre_exec(move || {
             unistd::setsid().map_err(errno)?;

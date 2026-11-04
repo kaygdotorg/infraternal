@@ -912,6 +912,10 @@ async fn launch_configured(
             .arg(exe);
         command
     };
+    // The shim (and its launcher) inherit only the standard handles plus what
+    // the login handoff below admits by name; never a stray agent descriptor,
+    // such as a shim or plugin connection authenticated as root (#328 P1).
+    infraternal_shim::inherit_only_standard_descriptors(command.as_std_mut());
     command
         .args([
             "__shim",
