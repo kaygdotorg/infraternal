@@ -149,3 +149,31 @@ pub fn duplicate_inherited(fd: RawFd) -> io::Result<OwnedFd> {
     // solely by this call. OwnedFd closes it only after its registration drops.
     Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 }
+
+/// Run one non-blocking `kevent` call (zero timeout), retrying when a signal
+/// interrupts it.
+///
+/// macOS never restarts `kevent` after a signal handler runs, whatever the
+/// handler's `SA_RESTART` flag, and the infraternal agent's runtime handles
+/// SIGCHLD while it waits for a launching shim (#324). An `EINTR` from a
+/// kqueue drain must not end the agent (#328). Repeating a registration is
+/// idempotent; callers already accept `ENOENT` when deleting a filter twice.
+/// # Errors
+/// Returns every other `kevent` error unchanged.
+#[cfg(target_os = "macos")]
+pub fn kevent_now(
+    queue: &nix::sys::event::Kqueue,
+    changes: &[nix::sys::event::KEvent],
+    events: &mut [nix::sys::event::KEvent],
+) -> nix::Result<usize> {
+    let now = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    loop {
+        match queue.kevent(changes, events, Some(now)) {
+            Err(nix::errno::Errno::EINTR) => {}
+            result => return result,
+        }
+    }
+}

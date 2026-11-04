@@ -587,11 +587,6 @@ pub(crate) struct DirectoryEvents {
 }
 #[cfg(target_os = "macos")]
 impl DirectoryEvents {
-    /// A zero timeout: register or drain kqueue events without blocking.
-    const NOW: nix::libc::timespec = nix::libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
     /// The kqueue identifier of the one-shot bind/listen bridge timer.
     const TIMER: usize = 1;
 
@@ -616,7 +611,7 @@ impl DirectoryEvents {
             0,
             0,
         );
-        queue.kevent(&[watch], &mut [], Some(Self::NOW))?;
+        infraternal_shim::readiness::kevent_now(&queue, &[watch], &mut [])?;
         Ok(Self {
             queue: Registration::new(queue)?,
             _directory: directory,
@@ -634,9 +629,7 @@ impl DirectoryEvents {
             millis,
             0,
         );
-        self.queue
-            .get_ref()
-            .kevent(&[timer], &mut [], Some(Self::NOW))?;
+        infraternal_shim::readiness::kevent_now(self.queue.get_ref(), &[timer], &mut [])?;
         Ok(())
     }
 
@@ -654,7 +647,7 @@ impl DirectoryEvents {
                     0,
                     0,
                 ); 8];
-                match queue.kevent(&[], &mut events, Some(Self::NOW))? {
+                match infraternal_shim::readiness::kevent_now(queue, &[], &mut events)? {
                     0 => Err(io::ErrorKind::WouldBlock.into()),
                     _ => Ok(()),
                 }
