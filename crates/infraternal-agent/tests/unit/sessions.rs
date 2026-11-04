@@ -600,11 +600,15 @@ async fn failed_launch_stops_the_process_it_started_and_no_other() {
 
 /// What a stand-in detached shim does on the rendezvous: bind after `bind_delay`, stay silent on the first
 /// `silent` connections (a loaded host missing the 2 s Hello), then answer and report a received `CloseSession`.
+/// With `retire` it then removes its socket as a real shim does on exit; without it, it stays live. The
+/// launcher script records its session name, then runs `launcher_body`.
 fn detached_fixture(
     state: &std::path::Path,
     root: &std::path::Path,
     bind_delay: std::time::Duration,
     silent: usize,
+    retire: bool,
+    launcher_body: &str,
 ) -> (
     std::path::PathBuf,
     tokio::task::JoinHandle<()>,
@@ -617,7 +621,7 @@ fn detached_fixture(
     fs::write(
         &exe,
         format!(
-            "#!/bin/sh\necho \"$3\" > '{}'\nexit 0\n",
+            "#!/bin/sh\necho \"$3\" > '{}'\n{launcher_body}\n",
             name_file.display()
         ),
     )
@@ -664,8 +668,12 @@ fn detached_fixture(
         while let Ok(frame) = reader.read(&mut peer).await {
             if frame == Frame::CloseSession {
                 let _ = closed_tx.send(());
-                // A real shim retires its socket after closing.
-                let _ = fs::remove_file(&path);
+                // A real shim retires its socket after closing; a live one has not yet.
+                if retire {
+                    let _ = fs::remove_file(&path);
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                }
                 return;
             }
         }
@@ -707,7 +715,8 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(&state, &root, std::time::Duration::ZERO, 2);
+    let (exe, shim, closed) =
+        detached_fixture(&state, &root, std::time::Duration::ZERO, 2, true, "exit 0");
     let error = launch_detached(&exe, &state, None)
         .await
         .err()
@@ -728,7 +737,8 @@ async fn cancelling_the_launch_does_not_cancel_its_cleanup() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(&state, &root, std::time::Duration::ZERO, 1);
+    let (exe, shim, closed) =
+        detached_fixture(&state, &root, std::time::Duration::ZERO, 1, true, "exit 0");
     let launched = tokio::time::timeout(
         std::time::Duration::from_millis(700),
         launch_detached(&exe, &state, None),
@@ -749,8 +759,14 @@ async fn a_shim_that_binds_after_the_launch_gave_up_is_still_closed() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) =
-        detached_fixture(&state, &root, std::time::Duration::from_millis(1500), 0);
+    let (exe, shim, closed) = detached_fixture(
+        &state,
+        &root,
+        std::time::Duration::from_millis(1500),
+        0,
+        true,
+        "exit 0",
+    );
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
     let result = launch_detached(&exe, &state, None).await;
     LAUNCH_BOUND.with(|bound| bound.set(None));
@@ -804,5 +820,193 @@ async fn a_stopped_person_launch_retires_its_terminal_record() {
         records(),
         0,
         "a stopped launch left its person record behind"
+    );
+}
+
+/// Wait, bounded, until every launch cleanup in the process has ended. The tracker is process-wide, so a
+/// parallel test's cleanup is waited for too; each one is bounded.
+async fn cleanups_idle() {
+    for _ in 0..1200 {
+        if super::CLEANUPS
+            .pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("launch cleanups did not end");
+}
+
+/// A state directory with the person-terminal record directory a person launch writes into.
+fn person_locks(state: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let locks = state.join("infraternal-login-locks");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&locks)
+        .unwrap();
+    locks
+}
+
+/// How many person-terminal records `locks` holds.
+fn person_records(locks: &std::path::Path) -> usize {
+    fs::read_dir(locks)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".terminal"))
+        .count()
+}
+
+/// J200 round 2, P1 (shutdown): the runtime is dropped while the failed launch's cleanup is queued and has
+/// never been polled. Dropping the task must not leave the owned launcher running: the drop fallback runs
+/// the cleanup to its end on its own thread.
+#[test]
+fn runtime_shutdown_with_a_queued_cleanup_still_stops_the_owned_launcher() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let pid_file = root.join("launcher.pid");
+    let exe = root.join("hung-shim");
+    fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    let result = runtime.block_on(launch_detached(&exe, &state, None));
+    LAUNCH_BOUND.with(|bound| bound.set(None));
+    assert!(result.is_err(), "a shim that never binds fails the launch");
+    // The cleanup task was spawned by the failing launch, and block_on returned without polling it.
+    drop(runtime);
+    let pid: i32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    for _ in 0..200 {
+        if !alive(pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        !alive(pid),
+        "runtime shutdown discarded the cleanup and left launcher {pid} running"
+    );
+}
+
+/// J200 round 2, P1 (proof): the launcher has already forked the shim lineage (a child) and is still waiting
+/// on it, and the shim binds after the launch gave up. Reaping the launcher would not stop the terminal, so
+/// cleanup must not kill it, and must not delete the live terminal's socket or person record unless the shim
+/// itself is seen to exit. This shim answers the close but stays live.
+#[tokio::test(flavor = "current_thread")]
+async fn a_forked_launcher_is_not_proof_the_live_terminal_is_dead() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let locks = person_locks(&state);
+    let launcher_pid = root.join("launcher.pid");
+    let descendant_pid = root.join("descendant.pid");
+    let body = format!(
+        "sleep 300 &\necho $! > '{}'\necho $$ > '{}'\nwait",
+        descendant_pid.display(),
+        launcher_pid.display()
+    );
+    let (exe, shim, closed) = detached_fixture(
+        &state,
+        &root,
+        std::time::Duration::from_millis(1000),
+        0,
+        false,
+        &body,
+    );
+    LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
+    LAUNCH_BOUND.with(|bound| bound.set(None));
+    assert!(
+        result.is_err(),
+        "a shim that has not bound fails the launch"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), closed)
+        .await
+        .expect("the late shim was never asked to close")
+        .unwrap();
+    cleanups_idle().await;
+    let read = |file: &std::path::Path| -> i32 {
+        fs::read_to_string(file).unwrap().trim().parse().unwrap()
+    };
+    let (launcher, descendant) = (read(&launcher_pid), read(&descendant_pid));
+    let sockets = fs::read_dir(state.join("sessions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".sock"))
+        .count();
+    let records = person_records(&locks);
+    let launcher_alive = alive(launcher);
+    // Stop the stand-in processes by their own pids before asserting.
+    for pid in [launcher, descendant] {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    shim.abort();
+    assert_eq!(
+        sockets, 1,
+        "the live terminal's rendezvous was deleted on the launcher's exit alone"
+    );
+    assert_eq!(
+        records, 1,
+        "the live terminal's person record was deleted without proof it stopped"
+    );
+    assert!(
+        launcher_alive,
+        "the launcher still waiting on its shim lineage was killed"
+    );
+}
+
+/// The other half of the proof rule: when the shim itself is seen to exit after an authenticated close, the
+/// person record is retired.
+#[tokio::test(flavor = "current_thread")]
+async fn the_shims_own_observed_exit_retires_the_person_record() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let locks = person_locks(&state);
+    let (exe, shim, closed) = detached_fixture(
+        &state,
+        &root,
+        std::time::Duration::from_millis(800),
+        0,
+        true,
+        "exit 0",
+    );
+    LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
+    LAUNCH_BOUND.with(|bound| bound.set(None));
+    assert!(
+        result.is_err(),
+        "a shim that has not bound fails the launch"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), closed)
+        .await
+        .expect("the late shim was never asked to close")
+        .unwrap();
+    cleanups_idle().await;
+    shim.await.unwrap();
+    assert_eq!(
+        person_records(&locks),
+        0,
+        "a proven shim exit left its person record behind"
     );
 }

@@ -48,6 +48,12 @@ const LAUNCH: Duration = Duration::from_secs(30);
 /// here, on its own bound, after the caller has stopped waiting.
 #[cfg(target_os = "linux")]
 const CLEANUP: Duration = Duration::from_secs(10);
+/// The cleanup budget when the runtime is already shutting down: the process is stopping, so wait less.
+#[cfg(target_os = "linux")]
+const SHUTDOWN_CLEANUP: Duration = Duration::from_secs(2);
+/// How long a stopping infraternal agent waits for launch cleanups still running.
+#[cfg(target_os = "linux")]
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(4);
 
 /// The hang bound for one launch. Tests shorten it per thread to reach the failure path.
 #[cfg(target_os = "linux")]
@@ -927,6 +933,7 @@ async fn launch_configured(
     let mut launch = Launch {
         child: Some(child),
         watch: Some(watch),
+        state: state.to_path_buf(),
         path,
         id,
         manager,
@@ -967,8 +974,10 @@ async fn launch_configured(
 struct Launch {
     /// The launcher this call spawned; `None` once it has been handed to its reaper (success).
     child: Option<tokio::process::Child>,
-    /// Rendezvous directory watch, kept so cleanup can wait for a late bind.
+    /// Rendezvous directory watch for this launch's own Hello wait.
     watch: Option<Registration<Inotify>>,
+    /// The state directory, so cleanup can watch the rendezvous directory itself.
+    state: PathBuf,
     /// This launch's own rendezvous socket.
     path: PathBuf,
     /// This launch's own session id, the only identity cleanup may address.
@@ -977,26 +986,22 @@ struct Launch {
     manager: Manager,
     /// The simple-form session id used in the scope name.
     name: String,
-    /// Whether the shim detaches, so its launcher exits before it binds.
+    /// Whether the shim detaches, so its launcher is not the shim and exits before it binds.
     detached: bool,
-    /// The person-terminal record this launch wrote, retired once cleanup is proven.
+    /// The person-terminal record this launch wrote, retired only once the terminal is proven dead.
     record: Option<PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
 impl Drop for Launch {
-    /// Start the cleanup on its own task. Without a runtime (shutdown) the launcher is still killed.
+    /// Hand everything to a tracked cleanup task. With no runtime to run it on, finish it here.
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        let Some(child) = self.child.take() else {
             return;
         };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            let _ = child.start_kill();
-            return;
-        };
-        let job = Abandoned {
+        let parts = Parts {
             child,
-            watch: self.watch.take(),
+            state: std::mem::take(&mut self.state),
             path: std::mem::take(&mut self.path),
             id: self.id,
             manager: self.manager,
@@ -1004,17 +1009,26 @@ impl Drop for Launch {
             detached: self.detached,
             record: self.record.take(),
         };
-        runtime.spawn(abandon_launch(job));
+        let job = Abandoned {
+            parts: Some(parts),
+            _pending: Pending::new(),
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(abandon_launch(job));
+            }
+            Err(_) => drop(job),
+        }
     }
 }
 
-/// Everything cleanup needs, owned, so it outlives the future that started the launch.
+/// Everything cleanup addresses, all of it this launch's own.
 #[cfg(target_os = "linux")]
-struct Abandoned {
+struct Parts {
     /// The launcher this launch spawned, unreaped, so its pid cannot be reused.
     child: tokio::process::Child,
-    /// Rendezvous directory watch for a shim that binds after the launch gave up.
-    watch: Option<Registration<Inotify>>,
+    /// The state directory holding the rendezvous directory.
+    state: PathBuf,
     /// This launch's own rendezvous socket.
     path: PathBuf,
     /// This launch's own session id.
@@ -1023,50 +1037,237 @@ struct Abandoned {
     manager: Manager,
     /// The simple-form session id used in the scope name.
     name: String,
-    /// Whether the shim detaches, so its launcher exits before it binds.
+    /// Whether the shim detaches, so its launcher is not the shim.
     detached: bool,
-    /// The person-terminal record to retire once exit is proven.
+    /// The person-terminal record to retire once the terminal is proven dead.
     record: Option<PathBuf>,
 }
 
-/// Stop what a failed or cancelled launch started, by identity and never by name pattern: the launcher
-/// child this call spawned and has not reaped (so its pid cannot be reused), its own scope, and the
-/// shim on its own rendezvous, authenticated by the session id in Hello. The shim's exit hangs up its
-/// PTY, which ends the shell. Another session is never addressed: every handle is this launch's own.
-/// Each wait has its own bound. Once exit is proven, the launch's person record is retired, because
-/// nothing else could: a missing socket alone never proves exit, and revocation refuses while a
-/// record has no terminal to stop.
+/// A cleanup owned apart from the caller's future. If it is dropped before it finished (the runtime shut
+/// down with it queued or suspended), `Drop` runs the same cleanup to completion on a dedicated thread.
+#[cfg(target_os = "linux")]
+struct Abandoned {
+    /// What is left to clean up; `None` once cleanup has run to its end.
+    parts: Option<Parts>,
+    /// Counts this cleanup in the process-wide tracker until it is dropped.
+    _pending: Pending,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Abandoned {
+    /// The shutdown path: finish a cleanup that never completed, on its own thread and runtime, with a
+    /// short budget. No part of it depends on the runtime that was just dropped.
+    fn drop(&mut self) {
+        let Some(mut parts) = self.parts.take() else {
+            return;
+        };
+        let worker = std::thread::Builder::new()
+            .name("launch-cleanup".into())
+            .spawn(move || {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(cleanup(&mut parts, SHUTDOWN_CLEANUP)),
+                    // No reactor: stopping a launcher that never forked is still safe and needs none.
+                    Err(_) => {
+                        let _ = parts.child.start_kill();
+                    }
+                }
+            });
+        if let Ok(worker) = worker {
+            let _ = worker.join();
+        }
+    }
+}
+
+/// Cleanups queued or running, so a stopping agent can wait for them.
+#[cfg(target_os = "linux")]
+struct Cleanups {
+    /// Cleanups not yet dropped.
+    pending: std::sync::atomic::AtomicUsize,
+    /// Woken when the last pending cleanup is dropped.
+    idle: tokio::sync::Notify,
+}
+
+#[cfg(target_os = "linux")]
+static CLEANUPS: Cleanups = Cleanups {
+    pending: std::sync::atomic::AtomicUsize::new(0),
+    idle: tokio::sync::Notify::const_new(),
+};
+
+/// One cleanup in the tracker; dropping it ends the count.
+#[cfg(target_os = "linux")]
+struct Pending;
+
+#[cfg(target_os = "linux")]
+impl Pending {
+    /// Count a new cleanup.
+    fn new() -> Self {
+        CLEANUPS
+            .pending
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Pending {
+    /// End the count and wake a draining agent when it was the last one.
+    fn drop(&mut self) {
+        if CLEANUPS
+            .pending
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            CLEANUPS.idle.notify_waiters();
+        }
+    }
+}
+
+/// Wait, bounded, for launch cleanups still running. A stopping infraternal agent calls this so a
+/// runtime that outlives it finishes what it queued; a runtime that does not is covered by
+/// `Abandoned::drop`.
+#[cold]
+#[inline(never)]
+pub(crate) async fn drain_cleanups() {
+    #[cfg(target_os = "linux")]
+    {
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_DRAIN;
+        loop {
+            let mut idle = std::pin::pin!(CLEANUPS.idle.notified());
+            idle.as_mut().enable();
+            if CLEANUPS.pending.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, idle).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Run one abandoned launch's cleanup on its own task. See `cleanup` for what it may do.
 #[cfg(target_os = "linux")]
 async fn abandon_launch(mut job: Abandoned) {
-    let launcher_alive = matches!(job.child.try_wait(), Ok(None));
-    let mut proven = false;
-    if launcher_alive {
-        // A scope wrapper, a direct shim, or a detaching shim that has not forked yet: SIGKILL reaches
-        // only this unreaped child, and reaping it is the proof it is gone.
-        let _ = job.child.start_kill();
-        stop_scope(job.manager, &job.name).await;
-        proven = timeout(HANDSHAKE, job.child.wait())
-            .await
-            .is_ok_and(|status| status.is_ok());
-        if proven {
-            let _ = fs::remove_file(&job.path);
-            let _ = fs::remove_file(job.path.with_extension("stop"));
-        }
-    } else {
-        stop_scope(job.manager, &job.name).await;
-        if job.detached {
-            if let Some(watch) = &job.watch {
-                proven = close_detached(&job.path, job.id, watch).await;
-            }
-        } else {
-            // The launcher is the shim (systemd-run execs it): its exit is the shim's, scope already stopped.
-            proven = true;
-        }
+    if let Some(parts) = job.parts.as_mut() {
+        cleanup(parts, CLEANUP).await;
     }
-    if proven && let Some(record) = &job.record {
+    job.parts = None;
+}
+
+/// Stop what a failed or cancelled launch started, by identity and never by name: the launcher child
+/// this launch spawned and has not reaped, its own scope, and the shim on its own rendezvous, authenticated
+/// by the session id in Hello. The shim's exit hangs up its PTY, which ends the shell.
+///
+/// A terminal counts as dead only on proof, and the launcher's exit is not proof when the shim detaches:
+/// the launcher is then the first of three processes and the shim a grandchild with no handle here.
+/// - A non-detaching launcher IS the shim: killed and reaped through its own child.
+/// - A detaching launcher that has provably never forked (stopped, with no children) cannot have started
+///   a shim: killed and reaped.
+/// - Otherwise only the shim's own authenticated exit counts (`close_detached`).
+/// Without proof the rendezvous and the person record are left alone: a live terminal keeps its discovery
+/// and its revocation attribution. A detached shim's socket is never unlinked here.
+#[cfg(target_os = "linux")]
+async fn cleanup(parts: &mut Parts, budget: Duration) {
+    let proven = if parts.detached {
+        stop_detached(parts, budget).await
+    } else {
+        stop_scope(parts.manager, &parts.name).await;
+        let _ = parts.child.start_kill();
+        let reaped = reaped(&mut parts.child, HANDSHAKE).await;
+        if reaped {
+            // The process that owned them is reaped; these are its own leftovers.
+            let _ = fs::remove_file(&parts.path);
+            let _ = fs::remove_file(parts.path.with_extension("stop"));
+        }
+        reaped
+    };
+    if proven && let Some(record) = parts.record.take() {
         let _ = fs::remove_file(record);
     }
-    let _ = timeout(HANDSHAKE, job.child.wait()).await;
+}
+
+/// Stop a detaching launch; whether its terminal is proven dead.
+#[cfg(target_os = "linux")]
+async fn stop_detached(parts: &mut Parts, budget: Duration) -> bool {
+    if matches!(parts.child.try_wait(), Ok(None)) && never_forked(&mut parts.child).await {
+        // Stopped with no children and then killed: no shim lineage exists, and none can start.
+        return reaped(&mut parts.child, HANDSHAKE).await;
+    }
+    close_detached(&parts.state, &parts.path, parts.id, budget).await
+}
+
+/// Whether a running launcher has provably never forked. It is frozen with `SIGSTOP` (it is this launch's
+/// own unreaped child, so the pid cannot name another process) until the kernel reports it stopped; only then
+/// is its child list read, because a running process could fork between the read and the kill. An empty
+/// list means no shim lineage exists, and the launcher is then killed. Anything else, or any doubt, resumes
+/// it and answers `false`.
+#[cfg(target_os = "linux")]
+async fn never_forked(child: &mut tokio::process::Child) -> bool {
+    use nix::sys::signal::{Signal, kill};
+    let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
+        return false;
+    };
+    let pid = nix::unistd::Pid::from_raw(pid);
+    if kill(pid, Signal::SIGSTOP).is_err() {
+        return false;
+    }
+    let mut stopped = false;
+    for _ in 0..200 {
+        if process_stopped(pid.as_raw()) {
+            stopped = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    if stopped && matches!(has_children(pid.as_raw()), Ok(false)) {
+        let _ = child.start_kill();
+        return true;
+    }
+    let _ = kill(pid, Signal::SIGCONT);
+    false
+}
+
+/// Whether the kernel reports `pid` as stopped (`T`) or traced-stopped (`t`).
+#[cfg(target_os = "linux")]
+fn process_stopped(pid: i32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit(')')
+            .next()
+            .is_some_and(|rest| rest.trim_start().starts_with(['T', 't']))
+    })
+}
+
+/// Whether any thread of `pid` has a child, from the kernel's per-thread child lists. Unreadable lists
+/// (a kernel without them) are an error: no proof.
+#[cfg(target_os = "linux")]
+fn has_children(pid: i32) -> io::Result<bool> {
+    for task in fs::read_dir(format!("/proc/{pid}/task"))? {
+        let children = fs::read_to_string(task?.path().join("children"))?;
+        if !children.trim().is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Reap an owned child within `bound`, by polling its status: this does not depend on the child
+/// reaper of whichever runtime spawned it, which may already be gone at shutdown.
+#[cfg(target_os = "linux")]
+async fn reaped(child: &mut tokio::process::Child, bound: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Stop this launch's own scope; the name holds only the fresh session id. A missing manager is a no-op.
@@ -1090,20 +1291,24 @@ async fn stop_scope(manager: Manager, name: &str) {
     .await;
 }
 
-/// Ask a detached shim, whose launcher has exited, to close its session, however late it binds or
-/// answers. Returns whether its exit was observed: socket gone or sealed by an exit record.
+/// Ask a detached shim to close its session, however late it binds or answers, within `budget`. The
+/// directory watch is made before the first connect, so a bind cannot slip between the two. Returns
+/// whether the shim's own exit was observed: its rendezvous gone or sealed by an exit record, after an
+/// authenticated close.
 #[cfg(target_os = "linux")]
-async fn close_detached(path: &Path, id: uuid::Uuid, watch: &Registration<Inotify>) -> bool {
-    let deadline = tokio::time::Instant::now() + CLEANUP;
+async fn close_detached(state: &Path, path: &Path, id: uuid::Uuid, budget: Duration) -> bool {
+    let Ok(watch) = socket_readiness(state) else {
+        return false;
+    };
+    let deadline = tokio::time::Instant::now() + budget;
     while tokio::time::Instant::now() < deadline {
         match connect_sequenced(path.to_path_buf(), id.into_bytes()).await {
             Ok(mut session) => {
-                if session.caps & infraternal_shim::frame::CLOSE_SESSION == 0
-                    || send(&mut session.peer, &Frame::CloseSession).await.is_err()
-                {
-                    return false;
-                }
-                return exit_observed(path).await;
+                let closed = session.caps & infraternal_shim::frame::CLOSE_SESSION != 0
+                    && timeout(HANDSHAKE, send(&mut session.peer, &Frame::CloseSession))
+                        .await
+                        .is_ok_and(|sent| sent.is_ok());
+                return closed && exit_observed(path).await;
             }
             // Slow, not gone: ask again.
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
@@ -1112,10 +1317,8 @@ async fn close_detached(path: &Path, id: uuid::Uuid, watch: &Registration<Inotif
                 if error.kind() == io::ErrorKind::NotFound
                     || error.kind() == io::ErrorKind::ConnectionRefused =>
             {
-                let Ok(ready) = tokio::time::timeout_at(deadline, watch.readable()).await else {
-                    return false;
-                };
-                let Ok(mut ready) = ready else {
+                let Ok(Ok(mut ready)) = tokio::time::timeout_at(deadline, watch.readable()).await
+                else {
                     return false;
                 };
                 if let Ok(result) = ready.try_io(|fd| fd.read_events().map_err(io::Error::from))

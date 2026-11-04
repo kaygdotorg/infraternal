@@ -705,8 +705,26 @@ impl<C: Channel> Drop for RetireChannel<'_, C> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// Run the channel to its end, then give launch cleanups still in flight a bounded window to finish,
+/// so a runtime that outlives this agent does not drop them half done.
 async fn run_channel<const SESSION_ONLY: bool>(
+    socket: &impl Channel,
+    state: PathBuf,
+    execution_uid: Option<u32>,
+    renewal: Option<&RenewalIdentity>,
+    plugins: Option<crate::plugin_control::Registry>,
+    original: Option<Session>,
+) -> io::Result<()> {
+    let result =
+        run_channel_inner::<SESSION_ONLY>(socket, state, execution_uid, renewal, plugins, original)
+            .await;
+    sessions::drain_cleanups().await;
+    result
+}
+
+/// The channel loop itself, before the shutdown drain.
+#[allow(clippy::too_many_lines)]
+async fn run_channel_inner<const SESSION_ONLY: bool>(
     socket: &impl Channel,
     state: PathBuf,
     execution_uid: Option<u32>,
