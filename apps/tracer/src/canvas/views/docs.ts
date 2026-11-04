@@ -9,6 +9,7 @@
 import type { Metrics } from "../layout/geometry";
 import type { ViewModel } from "../model/types";
 
+/** The Docs view's id. */
 export const DOCS_VIEW = "docs";
 /**
  * A window's id is `d-<slug>`; the slug is the page's address under `/docs/`, a slash between section and page included

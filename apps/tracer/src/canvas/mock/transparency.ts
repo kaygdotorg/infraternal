@@ -9,6 +9,7 @@ import type { CoreScreen } from "../../core-screen";
 import { CARD_LEVELS, LEVEL_NAMES, THEMES, WINDOW_LEVELS, overlayMaterial } from "../../../../../packages/ui/src/themes";
 import { el } from "../dom";
 
+/** The sample terminal rows (host, command, tone) drawn behind the comparison. */
 const BUSY: Array<[string, string, string]> = [
   ["git", "log --oneline -12", "ok"], ["", "3fa4460 tracer, ui: the dots sit on the gradient", ""], ["", "cdddcb4 tracer: Mesh grants are edited by dragging", ""],
   ["cargo", "test -p infraternal --release", "ok"], ["", "running 48 tests", ""], ["", "test agent::resume_after_reconnect ... ok", "ok"], ["", "test vt::wide_cells_align ... FAILED", "bad"],
@@ -16,6 +17,7 @@ const BUSY: Array<[string, string, string]> = [
   ["htop", "", "ok"], ["", "  PID USER      PR  NI    VIRT    RES  %CPU %MEM", ""], ["", " 2113 kayg      20   0  912340  88112   3.2  1.1 infraternal", ""],
 ];
 
+/** Shows the comparison over the stage and returns the function that closes it. Escape or the close button also closes it. */
 export function mountTransparencyCompare(core: CoreScreen): () => void {
   const stage = core.stage;
   const root = el("section", "cl-compare");

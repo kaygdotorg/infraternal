@@ -4,6 +4,7 @@ import type { Ctx } from "../context";
 import type { IncomingShare, SharingAdapter } from "./adapter";
 import type { SharingController, SharingModule } from "./sharing.on-demand";
 
+/** The sharing actions the canvas calls, re-exported so callers need not import the on-demand module. */
 export type { SharingModule } from "./sharing.on-demand";
 
 /**

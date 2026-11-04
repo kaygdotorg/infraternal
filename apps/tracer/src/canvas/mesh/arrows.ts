@@ -13,6 +13,7 @@
  * from in at most 180 ms, ease-out, no overshoot. Only path data and the head transform change; no layout is touched.
  */
 import type { Pt, Rect } from "../layout/geometry";
+/** The geometry types, re-exported for the mesh modules. */
 export type { Pt, Rect };
 
 /** The SVG namespace, needed to create SVG elements. */
