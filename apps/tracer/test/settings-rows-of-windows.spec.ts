@@ -604,6 +604,8 @@ test("close-ups of the action group at DPR 2 and 3 (desktop and phone), alignmen
     const kind = size === SIZES.phone ? "sheet" : "popover";
     const previewShot = async (name: string, windowId: string): Promise<void> => {
       await page.locator(`[data-window-id="${windowId}"] .ui-window-action[data-action="docs"]`).click({ timeout: 15_000 });
+      // The preview's code loads on the first press (D188): wait for it, not for a fixed time.
+      await expect(page.locator(kind === "popover" ? ".ui-dp-pop" : ".ui-sheet")).toBeVisible({ timeout: 15_000 });
       await page.waitForTimeout(550);
       await checkPreview(page, kind, windowId);
       expect(await page.locator(".tip:visible").count(), `no tooltip over the ${name} preview`).toBe(0);
