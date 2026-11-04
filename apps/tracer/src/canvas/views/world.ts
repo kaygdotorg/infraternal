@@ -23,7 +23,7 @@ import { onDemand, whenIdle } from "../../on-demand";
 import type { EarlyPress, ViewPointer } from "./view-pointer.on-demand";
 import { restPx } from "../springs";
 import { viewIcon } from "./icons";
-import { groupsLoaded } from "../layout/groups-handle";
+import { groupsLoaded, loadGroups, type Groups } from "../layout/groups-handle";
 
 
 export interface ViewsModule {
