@@ -19,38 +19,64 @@ use std::{
 /// An unsuccessful spawn removes its reservation; after spawn the record must
 /// survive cancellation, so a later revocation can find the detached shim.
 #[cfg(target_os = "linux")]
-pub(crate) struct Reservation(Option<PathBuf>);
+pub(crate) struct Reservation {
+    /// A failed or cancelled launch removes its unconsumed reservation first.
+    path: Option<PathBuf>,
+    /// Release the person fence only after the record cleanup above.
+    _person: crate::logins::PersonGuard,
+}
 #[cfg(target_os = "linux")]
 impl Reservation {
+    /// Keep the durable record after spawn; the launch fence still covers readiness.
     pub(crate) fn spawned(&mut self) {
-        self.0 = None;
+        self.path = None;
     }
 }
 #[cfg(target_os = "linux")]
 impl Drop for Reservation {
+    /// Remove an unconsumed record before the owned person fence is released.
     fn drop(&mut self) {
-        if let Some(path) = &self.0 {
+        if let Some(path) = &self.path {
             let _ = fs::remove_file(path);
         }
     }
 }
 
+/// Reserve ownership durably before spawn, without occupying the host reactor.
+/// The returned reservation owns the launch fence; cancellation keeps that fence
+/// inside the blocking task until its write and unsuccessful-record cleanup finish.
 #[cfg(target_os = "linux")]
-pub(crate) fn reserve(state: &Path, person: uuid::Uuid, id: uuid::Uuid) -> io::Result<Reservation> {
-    let directory = state.join("infraternal-login-locks");
-    let path = directory.join(format!("{}-{}.terminal", person.simple(), id.simple()));
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW)
-        .open(&path)?;
-    let reservation = Reservation(Some(path));
-    file.sync_all()?;
-    File::open(directory)?.sync_all()?;
-    Ok(reservation)
+pub(crate) async fn reserve(
+    state: &Path,
+    person: uuid::Uuid,
+    id: uuid::Uuid,
+    person_guard: crate::logins::PersonGuard,
+) -> io::Result<Reservation> {
+    let state = state.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let directory = state.join("infraternal-login-locks");
+        let path = directory.join(format!("{}-{}.terminal", person.simple(), id.simple()));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&path)?;
+        let reservation = Reservation {
+            path: Some(path),
+            _person: person_guard,
+        };
+        #[cfg(test)]
+        crate::durable_tests::hold(&state);
+        file.sync_all()?;
+        File::open(directory)?.sync_all()?;
+        Ok(reservation)
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
+/// Carry one person's fence through durable reservation, spawn and readiness.
 #[cold]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch(
@@ -62,12 +88,38 @@ pub(crate) async fn launch(
     cols: u16,
     rows: u16,
 ) -> io::Result<Session> {
-    let _person = crate::logins::rootless_launch_guard(state, person).await?;
-    sessions::launch_rootless_person(exe, state, manager, uid, cols, rows, person).await
+    let person_guard = crate::logins::rootless_launch_guard(state, person).await?;
+    sessions::launch_rootless_person(exe, state, manager, uid, cols, rows, person, person_guard)
+        .await
 }
 
+/// Bound shell cleanup, then await directory durability outside that deadline.
+/// A supplied person fence stays owned until the blocking sync finishes, including
+/// when the caller is cancelled; a busy disk delays only this operation's reply.
 #[cold]
-pub(crate) async fn revoke(state: &Path, person: uuid::Uuid) -> io::Result<()> {
+pub(crate) async fn revoke(
+    state: &Path,
+    person: uuid::Uuid,
+    person_guard: Option<crate::logins::PersonGuard>,
+) -> io::Result<()> {
+    let failure = tokio::time::timeout(Duration::from_secs(5), cleanup(state, person))
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let state = state.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _person = person_guard;
+        #[cfg(test)]
+        crate::durable_tests::hold(&state);
+        File::open(state.join("infraternal-login-locks"))?.sync_all()?;
+        failure.map_or(Ok(()), Err)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Authenticate and reap attributable shells, retaining cleanup failures.
+#[cold]
+async fn cleanup(state: &Path, person: uuid::Uuid) -> io::Result<Option<io::Error>> {
     let directory = state.join("infraternal-login-locks");
     let prefix = format!("{}-", person.simple());
     // Older inherited-account shims have no person record. Never acknowledge
@@ -144,8 +196,7 @@ pub(crate) async fn revoke(state: &Path, person: uuid::Uuid) -> io::Result<()> {
             Err(error) => failure = Some(error),
         }
     }
-    File::open(directory)?.sync_all()?;
-    failure.map_or(Ok(()), Err)
+    Ok(failure)
 }
 
 #[cold]
@@ -324,6 +375,7 @@ mod tests {
         }
     }
 
+    /// An unattributed terminal must prevent a successful person cleanup reply.
     #[tokio::test]
     async fn unattributed_older_terminal_never_confirms_person_cleanup() {
         let root = PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -337,7 +389,7 @@ mod tests {
         let path = sessions::rendezvous(&root, uuid::Uuid::new_v4().into_bytes());
         let _listener = tokio::net::UnixListener::bind(path).unwrap();
         assert_eq!(
-            revoke(&root, uuid::Uuid::new_v4())
+            revoke(&root, uuid::Uuid::new_v4(), None)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -346,6 +398,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Only a trusted, private readiness record exempts an otherwise unattributed terminal.
     #[tokio::test]
     async fn only_private_empty_readiness_markers_exempt_unattributed_sockets() {
         use std::os::unix::fs::{PermissionsExt, symlink};
@@ -361,21 +414,21 @@ mod tests {
         let _listener = tokio::net::UnixListener::bind(&path).unwrap();
         let marker = path.with_extension("readiness");
         let person = uuid::Uuid::new_v4();
-        assert!(revoke(&root, person).await.is_err());
+        assert!(revoke(&root, person, None).await.is_err());
         fs::write(&marker, []).unwrap();
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(revoke(&root, person).await.is_ok());
+        assert!(revoke(&root, person, None).await.is_ok());
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(revoke(&root, person).await.is_err());
+        assert!(revoke(&root, person, None).await.is_err());
         fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&marker, b"invalid").unwrap();
-        assert!(revoke(&root, person).await.is_err());
+        assert!(revoke(&root, person, None).await.is_err());
         fs::remove_file(&marker).unwrap();
         fs::create_dir(&marker).unwrap();
-        assert!(revoke(&root, person).await.is_err());
+        assert!(revoke(&root, person, None).await.is_err());
         fs::remove_dir(&marker).unwrap();
         symlink("/dev/null", &marker).unwrap();
-        assert!(revoke(&root, person).await.is_err());
+        assert!(revoke(&root, person, None).await.is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -410,5 +463,50 @@ mod tests {
             .join(".cache/codex-scratch/real-logins")
             .join(format!("{}.sock", uuid::Uuid::new_v4().simple()));
         assert!(stop(path, [0; 16]).await.is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod durable_tests {
+    //! Reservations and cleanup remain durable without occupying the reactor.
+    use super::*;
+
+    /// A reserved terminal is not reported until the held write has completed.
+    #[tokio::test]
+    async fn reservation_durable_write_leaves_the_reactor_responsive() {
+        let root = crate::durable_tests::directory();
+        fs::create_dir(root.join("infraternal-login-locks")).unwrap();
+        let person = uuid::Uuid::new_v4();
+        let reservation = crate::durable_tests::responsive(root.clone(), {
+            let root = root.clone();
+            async move {
+                fs::set_permissions(
+                    root.join("infraternal-login-locks"),
+                    std::os::unix::fs::PermissionsExt::from_mode(0o700),
+                )?;
+                let guard = crate::logins::rootless_launch_guard(&root, person).await?;
+                reserve(&root, person, uuid::Uuid::new_v4(), guard).await
+            }
+        })
+        .await
+        .unwrap();
+        assert!(reservation.path.as_ref().unwrap().exists());
+        drop(reservation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Cleanup cannot report success before its directory write is durable.
+    #[tokio::test]
+    async fn cleanup_durable_write_leaves_the_reactor_responsive() {
+        let root = crate::durable_tests::directory();
+        fs::create_dir(root.join("infraternal-login-locks")).unwrap();
+        fs::create_dir(root.join("sessions")).unwrap();
+        crate::durable_tests::responsive(root.clone(), {
+            let root = root.clone();
+            async move { revoke(&root, uuid::Uuid::new_v4(), None).await }
+        })
+        .await
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

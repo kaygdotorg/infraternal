@@ -696,6 +696,7 @@ pub async fn launch_with_login(
     .await
 }
 
+/// Launch an attributed shell, transferring its person fence to the durable reservation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch_rootless_person(
     exe: &Path,
@@ -705,6 +706,7 @@ pub(crate) async fn launch_rootless_person(
     cols: u16,
     rows: u16,
     person: uuid::Uuid,
+    person_guard: crate::logins::PersonGuard,
 ) -> io::Result<Session> {
     launch_configured(
         exe,
@@ -719,14 +721,15 @@ pub(crate) async fn launch_rootless_person(
         None,
         None,
         false,
-        Some(person),
+        Some((person, person_guard)),
         false,
         &[],
     )
     .await
 }
 
-// Keep the ordered authentication/launch/handshake setup together.
+/// Keep authentication, durable ownership and launch readiness in one ordered path.
+/// A rootless reservation retains its person fence through readiness or failed-launch cleanup.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
 async fn launch_configured(
@@ -742,7 +745,7 @@ async fn launch_configured(
     login_worker_parent: Option<i32>,
     login_worker_proc: Option<&std::fs::File>,
     readiness: bool,
-    person: Option<uuid::Uuid>,
+    person: Option<(uuid::Uuid, crate::logins::PersonGuard)>,
     retain_output: bool,
     program: &[String],
 ) -> io::Result<Session> {
@@ -763,9 +766,12 @@ async fn launch_configured(
     let id = uuid::Uuid::new_v4();
     let name = id.simple().to_string();
     let path = state.join("sessions").join(format!("{name}.sock"));
-    let mut reservation = person
-        .map(|person| crate::rootless_sessions::reserve(state, person, id))
-        .transpose()?;
+    let mut reservation = match person {
+        Some((person, guard)) => {
+            Some(crate::rootless_sessions::reserve(state, person, id, guard).await?)
+        }
+        None => None,
+    };
     let watch = socket_readiness(state)?;
     let mut command = if matches!(manager, Manager::Detached) {
         isolated(exe)
@@ -980,7 +986,7 @@ async fn launch_configured(
     login_worker_parent: Option<i32>,
     login_worker_proc: Option<&std::fs::File>,
     readiness: bool,
-    person: Option<uuid::Uuid>,
+    person: Option<(uuid::Uuid, crate::logins::PersonGuard)>,
     retain_output: bool,
     program: &[String],
 ) -> io::Result<Session> {

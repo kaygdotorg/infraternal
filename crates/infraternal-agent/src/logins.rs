@@ -89,11 +89,14 @@ pub fn account(preferred: &str) -> io::Result<(User, bool)> {
     Ok((user, fallback))
 }
 
+/// The owned person fence travels with a pending durable write, even if its caller drops.
+pub(crate) type PersonGuard = nix::fcntl::Flock<std::fs::File>;
+
 /// Hold the launch fence through the shell's durable reservation and readiness.
 pub(crate) async fn rootless_launch_guard(
     state: &Path,
     person: uuid::Uuid,
-) -> io::Result<nix::fcntl::Flock<std::fs::File>> {
+) -> io::Result<PersonGuard> {
     let guard = acquire(state, &format!("{}.person", person.simple())).await?;
     permitted(state, person)?;
     Ok(guard)
@@ -157,7 +160,7 @@ pub async fn ensure(
         return Ok(None);
     }
     let image =
-        crate::login_binary::accessible(exe, Path::new("/var/cache/infraternal-login-bin"))?;
+        crate::login_binary::accessible(exe, Path::new("/var/cache/infraternal-login-bin")).await?;
     let exe = image.path();
     let _lock = acquire(root, &name).await?;
     let endpoint = root.join(&name).join("login.sock");
@@ -477,9 +480,21 @@ pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
     restore_at(runtime_root(state), person).await
 }
 
+/// Serialize access restoration, retaining its fence until directory durability completes.
 async fn restore_at(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _person = person_guard;
+        restore_marker(&root, person)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Remove only a validated marker, then make that removal durable before restoring access.
+fn restore_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
-    let _person = acquire(root, &format!("{}.person", person.simple())).await?;
     let registry = root.join("infraternal-login-locks");
     let marker = registry.join(format!("{}.revoked", person.simple()));
     let metadata = match std::fs::symlink_metadata(&marker) {
@@ -498,6 +513,8 @@ async fn restore_at(root: &Path, person: uuid::Uuid) -> io::Result<()> {
     }
     // Serialize with both open and cleanup. A successful restore removes only
     // this person's validated marker, never a symlink target or another person.
+    #[cfg(test)]
+    crate::durable_tests::hold(root);
     std::fs::remove_file(marker)?;
     std::fs::File::open(registry)?.sync_all()
 }
@@ -516,50 +533,30 @@ pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::R
     .await
 }
 
+/// Save the refusal before shell cleanup, keeping one person fence through both stages.
 async fn revoke_at(
     root: &Path,
     manager: Manager,
     person: uuid::Uuid,
     rootless: bool,
 ) -> io::Result<()> {
-    use std::{
-        fs::{self, OpenOptions},
-        os::unix::fs::{MetadataExt, OpenOptionsExt},
-    };
-    let _person = acquire(root, &format!("{}.person", person.simple())).await?;
+    let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
+    let state = root.to_owned();
+    // The task owns the fence, so cancellation cannot let a later authority
+    // transition overtake the file or directory fsync. Return it for cleanup.
+    let person_guard = tokio::task::spawn_blocking(move || {
+        revoke_marker(&state, person)?;
+        Ok::<_, io::Error>(person_guard)
+    })
+    .await
+    .map_err(io::Error::other)??;
     let registry = root.join("infraternal-login-locks");
-    let marker = registry.join(format!("{}.revoked", person.simple()));
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
-        .open(marker)?;
-    let meta = file.metadata()?;
-    if !meta.is_file()
-        || meta.uid() != Uid::effective().as_raw()
-        || meta.mode() & 0o777 != 0o600
-        || meta.len() != 0
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "unsafe login revocation marker",
-        ));
-    }
-    file.sync_all()?;
-    std::fs::File::open(&registry)?.sync_all()?;
     if rootless {
-        return tokio::time::timeout(
-            Duration::from_secs(5),
-            crate::rootless_sessions::revoke(root, person),
-        )
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        return crate::rootless_sessions::revoke(root, person, Some(person_guard)).await;
     }
     let prefix = format!("infraternal-login-{}-", person.simple());
     let mut failure = None;
-    for entry in fs::read_dir(&registry)? {
+    for entry in std::fs::read_dir(&registry)? {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
@@ -580,6 +577,39 @@ async fn revoke_at(
     }
     crate::login_auth::forget(person);
     failure.map_or(Ok(()), Err)
+}
+
+/// Validate and durably publish a person's refusal before any shell is stopped.
+fn revoke_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    use std::{
+        fs::OpenOptions,
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+    };
+    let registry = root.join("infraternal-login-locks");
+    let marker = registry.join(format!("{}.revoked", person.simple()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(marker)?;
+    let meta = file.metadata()?;
+    if !meta.is_file()
+        || meta.uid() != Uid::effective().as_raw()
+        || meta.mode() & 0o777 != 0o600
+        || meta.len() != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unsafe login revocation marker",
+        ));
+    }
+    #[cfg(test)]
+    crate::durable_tests::hold(root);
+    file.sync_all()?;
+    std::fs::File::open(&registry)?.sync_all()?;
+    Ok(())
 }
 
 async fn request_stop(
@@ -1314,5 +1344,78 @@ mod tests {
         assert_ne!(name(person, 1000), name(person, 1001));
         assert!(account("--root").is_err());
         assert!(account("bad/account").is_err());
+    }
+}
+
+#[cfg(test)]
+mod durable_tests {
+    //! Held durable writes must leave the shared reactor available to other work.
+    use super::*;
+
+    /// Revocation cannot reply before its held marker write finishes.
+    #[tokio::test]
+    async fn login_durable_writes_leave_the_reactor_responsive() {
+        let root = crate::durable_tests::directory();
+        let person = uuid::Uuid::new_v4();
+        crate::durable_tests::responsive(root.clone(), {
+            let root = root.clone();
+            async move { revoke_at(&root, Manager::Detached, person, false).await }
+        })
+        .await
+        .unwrap();
+        assert!(permitted(&root, person).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Restoring access must leave the reactor free until directory durability completes.
+    #[tokio::test]
+    async fn restore_durable_write_leaves_the_reactor_responsive() {
+        let root = crate::durable_tests::directory();
+        let person = uuid::Uuid::new_v4();
+        revoke_at(&root, Manager::Detached, person, false)
+            .await
+            .unwrap();
+        crate::durable_tests::responsive(root.clone(), {
+            let root = root.clone();
+            async move { restore_at(&root, person).await }
+        })
+        .await
+        .unwrap();
+        permitted(&root, person).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A later open or restore cannot overtake a cancelled revocation write.
+    #[tokio::test]
+    async fn cancelled_durable_write_keeps_the_person_fenced() {
+        let root = crate::durable_tests::directory();
+        let person = uuid::Uuid::new_v4();
+        let lock = root
+            .join("infraternal-login-locks")
+            .join(format!("{}.person.lock", person.simple()));
+        crate::durable_tests::cancellation_keeps_fence(
+            root.clone(),
+            {
+                let root = root.clone();
+                async move { revoke_at(&root, Manager::Detached, person, false).await }
+            },
+            lock.clone(),
+        )
+        .await;
+        // Join actual disk completion without the production lock-acquisition
+        // deadline: this test checks ordering even on a very busy filesystem.
+        drop(
+            tokio::task::spawn_blocking(move || {
+                nix::fcntl::Flock::lock(
+                    std::fs::File::open(lock).unwrap(),
+                    nix::fcntl::FlockArg::LockExclusive,
+                )
+                .unwrap()
+            })
+            .await
+            .unwrap(),
+        );
+        assert!(permitted(&root, person).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -12,15 +12,25 @@ use std::{
 /// Rootless workers already use their own executable and need no additional copy.
 /// # Errors
 /// Refuses arbitrary links, untrusted ownership, writable published images and changing sources.
-pub(crate) fn accessible(exe: &Path, root: &Path) -> io::Result<Published> {
-    if nix::unistd::Uid::effective().is_root() {
-        publish(exe, root)
-    } else {
-        Ok(Published {
-            path: exe.to_path_buf(),
-            _launch: None,
-        })
-    }
+pub(crate) async fn accessible(exe: &Path, root: &Path) -> io::Result<Published> {
+    let exe = exe.to_owned();
+    let root = root.to_owned();
+    // Copying, publisher locks and every publication/pruning fsync belong to
+    // the blocking pool. Readiness still retains Published's image lock.
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        crate::durable_tests::hold(&root);
+        if nix::unistd::Uid::effective().is_root() {
+            publish(&exe, &root)
+        } else {
+            Ok(Published {
+                path: exe,
+                _launch: None,
+            })
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 fn private_directory(path: &Path, uid: u32) -> io::Result<()> {
@@ -864,5 +874,33 @@ mod tests {
             result.is_ok(),
             "abandoned staging name refused a restarted publisher: {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod durable_tests {
+    //! Binary publication cannot stall other reactor work during a cold login.
+    use super::*;
+
+    /// The publication path, including its directory locks, runs outside the reactor.
+    #[tokio::test]
+    async fn image_durable_write_leaves_the_reactor_responsive() {
+        let parent = crate::durable_tests::directory();
+        let root = parent.join("images");
+        let source = parent.join("source");
+        fs::copy(std::env::current_exe().unwrap(), &source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        let image = crate::durable_tests::responsive(root.clone(), {
+            let root = root.clone();
+            async move { accessible(&source, &root).await }
+        })
+        .await
+        .unwrap();
+        assert!(image.path().exists());
+        if nix::unistd::Uid::effective().is_root() {
+            assert_eq!(image.path().parent(), Some(root.as_path()));
+        }
+        drop(image);
+        fs::remove_dir_all(parent).unwrap();
     }
 }
