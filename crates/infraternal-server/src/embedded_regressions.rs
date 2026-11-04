@@ -739,8 +739,7 @@ async fn real_agent_open_uses_uid_and_character_dimensions() {
                     px_w: 800,
                     px_h: 600
                 },
-                person: None,
-                account: None,
+                login: None,
                 readiness: false,
                 reply
             },
@@ -1403,8 +1402,11 @@ async fn trusted_person_account_and_fallback_metadata_cross_real_socket() {
                     px_w: 0,
                     px_h: 0
                 },
-                person: Some(person),
-                account: Some("alice".into()),
+                login: Some(PersonLogin {
+                    person,
+                    account: Some("alice".into()),
+                    grant: LoginGrant::default(),
+                }),
                 readiness: false,
                 reply
             },
@@ -1431,6 +1433,11 @@ async fn trusted_person_account_and_fallback_metadata_cross_real_socket() {
     assert_eq!(input["uid"], 0);
     assert_eq!(input["person"], person.to_string());
     assert_eq!(input["account"], "alice");
+    // The host checks the account it opens against this grant (D235 Q14).
+    assert_eq!(
+        input["grant"],
+        serde_json::json!({"any_account": false, "accounts": [], "own_username": null})
+    );
     let json = serde_json::to_vec(&serde_json::json!({"session_id":"01010101010101010101010101010101", "account":"root","requested_account":"alice","fallback":true,"note":"No user alice here, opened as root"})).unwrap();
     assert!(
         process_incoming(
@@ -1466,8 +1473,11 @@ async fn prepare_uses_connection_uid_and_authenticated_person_without_terminal()
     assert!(
         process_command(
             Command::PrepareLogin {
-                person,
-                account: Some("alice".into()),
+                login: PersonLogin {
+                    person,
+                    account: Some("alice".into()),
+                    grant: LoginGrant::default(),
+                },
                 reply
             },
             &mut link,
@@ -1505,8 +1515,11 @@ async fn canceled_preparations_release_control_capacity_and_late_replies_preserv
         assert!(
             process_command(
                 Command::PrepareLogin {
-                    person: uuid::Uuid::new_v4(),
-                    account: Some("alice".into()),
+                    login: PersonLogin {
+                        person: uuid::Uuid::new_v4(),
+                        account: Some("alice".into()),
+                        grant: LoginGrant::default(),
+                    },
                     reply
                 },
                 &mut link,
@@ -1538,8 +1551,7 @@ async fn canceled_preparations_release_control_capacity_and_late_replies_preserv
                     px_w: 0,
                     px_h: 0
                 },
-                person: None,
-                account: None,
+                login: None,
                 readiness: false,
                 reply
             },

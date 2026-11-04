@@ -64,6 +64,10 @@ struct Open {
     person: Option<uuid::Uuid>,
     #[serde(default)]
     account: Option<String>,
+    /// Login access for `person` on this host (D235 Q14). A person open
+    /// without one is refused, so an older server cannot skip the check.
+    #[serde(default)]
+    grant: Option<infraternal_plugin_api::login_access::LoginGrant>,
     #[serde(default)]
     readiness: bool,
     uid: u32,
@@ -377,6 +381,23 @@ fn spawn_revocation(
     })
 }
 
+/// Refuse a person's open unless their login access grant allows the account
+/// this host resolved [D235, D319].
+fn login_access_allows(
+    grant: Option<&infraternal_plugin_api::login_access::LoginGrant>,
+    user: &nix::unistd::User,
+) -> io::Result<()> {
+    let ordinary = infraternal_plugin_api::login_access::OrdinaryUids::host();
+    if grant.is_some_and(|grant| grant.allows(&user.name, user.uid.as_raw(), ordinary)) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "no login access to this account",
+        ))
+    }
+}
+
 // Account resolution, login fencing and shell creation form one ordered admission path.
 #[allow(clippy::too_many_lines)]
 async fn open_requested(
@@ -417,6 +438,10 @@ async fn open_requested(
                 false,
             )
         };
+        // The account database here decides which account opens, including
+        // D231's fallback to root, so the grant is checked against that
+        // result, before any login unit exists for it.
+        login_access_allows(input.grant.as_ref(), &user)?;
         let endpoint = crate::logins::ensure(exe, state, manager, person, &user).await?;
         json.account = Some(user.name);
         json.fallback = Some(fallback);
