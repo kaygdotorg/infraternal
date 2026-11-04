@@ -75,7 +75,8 @@ const APPROVAL_LIFETIME: i64 = 600;
 pub(super) struct PendingSources(HashMap<Network, Vec<i64>>);
 
 /// Most approval ceremonies waiting for a passkey at once (each lives
-/// for one ceremony lifetime).
+/// for one ceremony lifetime). Each person holds at most
+/// [`super::webauthn::PER_PERSON_CEREMONIES`] of them.
 const MAX_APPROVAL_CEREMONIES: usize = 1024;
 
 /// Approval passkey ceremonies, keyed by ceremony ID. Each is bound to
@@ -325,6 +326,23 @@ impl Auth {
         .ok_or(Error::Denied)?;
         let mut ceremonies = self.approval_ceremonies.lock().await;
         ceremonies.0.retain(|_, ceremony| ceremony.expires > now);
+        // One person holds at most a few; their own oldest makes room, and
+        // its passkey ceremony goes with it (#263, J161 P3-2).
+        let mut mine: Vec<_> = ceremonies
+            .0
+            .iter()
+            .filter(|(_, ceremony)| ceremony.user_id == session.user_id)
+            .map(|(id, ceremony)| (ceremony.expires, id.clone()))
+            .collect();
+        if mine.len() >= super::webauthn::PER_PERSON_CEREMONIES {
+            mine.sort_unstable();
+            let excess = mine.len() + 1 - super::webauthn::PER_PERSON_CEREMONIES;
+            let mut pending = self.pending.lock().await;
+            for (_, id) in &mine[..excess] {
+                ceremonies.0.remove(id);
+                pending.logins.remove(id);
+            }
+        }
         if ceremonies.0.len() >= MAX_APPROVAL_CEREMONIES {
             return Err(Error::Throttled);
         }

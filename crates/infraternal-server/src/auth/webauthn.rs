@@ -54,6 +54,7 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
+        make_room_for_person(&mut pending, &user);
         if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
@@ -303,6 +304,7 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
+        make_room_for_person(&mut pending, user);
         if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
@@ -634,6 +636,49 @@ fn evict_from_heaviest_network(p: &mut Pending, mine: usize) -> Result<()> {
         .ok_or(Error::Throttled)?;
     p.logins.remove(&oldest);
     Ok(())
+}
+
+/// Most ceremonies one person holds in each identified pool (registrations
+/// with identified logins, and approval ceremonies). It is the innermost
+/// source cap for pending approvals (one address or IPv6 /64 in
+/// `devices::SOURCE_CAPS`): the number this server already allows for one
+/// person retrying a few times. Filling a 1024 pool then takes 205 people.
+pub(super) const PER_PERSON_CEREMONIES: usize = 5;
+
+/// Keep `user` under [`PER_PERSON_CEREMONIES`] identified ceremonies by
+/// dropping their own oldest, so one session (a page script, a stolen cookie,
+/// a limited account) can never spend anybody else's slots, and a person
+/// retrying never refuses themself (#263, J161 P3-2). Rejected: refusing the
+/// person at their cap, which lets a stolen cookie keep the owner's own taps
+/// refused for a whole ceremony lifetime.
+fn make_room_for_person(p: &mut Pending, user: &str) {
+    let registrations = p
+        .registrations
+        .iter()
+        .filter(|(_, r)| r.user == user)
+        .map(|(id, r)| (r.expires, id, true));
+    let logins = p
+        .logins
+        .iter()
+        .filter(|(_, l)| matches!(&l.state, LoginState::Identified(_, who) if who == user))
+        .map(|(id, l)| (l.expires, id, false));
+    let mut held: Vec<_> = registrations.chain(logins).collect();
+    if held.len() < PER_PERSON_CEREMONIES {
+        return;
+    }
+    held.sort_unstable();
+    let excess = held.len() + 1 - PER_PERSON_CEREMONIES;
+    let evict: Vec<_> = held[..excess]
+        .iter()
+        .map(|&(_, id, registration)| (id.clone(), registration))
+        .collect();
+    for (id, registration) in evict {
+        if registration {
+            p.registrations.remove(&id);
+        } else {
+            p.logins.remove(&id);
+        }
+    }
 }
 
 /// Registrations plus identified logins: the pool only signed-in people and
