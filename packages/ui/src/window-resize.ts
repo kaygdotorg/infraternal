@@ -25,6 +25,7 @@
 import type { WindowCard } from "./window-card";
 import { Spring } from "./spring";
 
+/** An edge or corner handle: compass points, "n" for north (top). */
 export type ResizeEdge = "n" | "e" | "s" | "w" | "ne" | "nw" | "se" | "sw";
 
 /** Geometry and limits at the moment a gesture starts, in CSS pixels. */
@@ -40,6 +41,7 @@ export interface ResizeStart {
   areaHeight: number;
 }
 
+/** The geometry a gesture asks the host to apply. */
 export interface ResizeFrame {
   width: number;
   height: number;
@@ -48,6 +50,10 @@ export interface ResizeFrame {
   shiftX: number;
 }
 
+/**
+ * What the consumer provides to {@link attachWindowResize}: the options in the first group, then `begin`, `apply` and `end`.
+ * The engine only calls back; it never lays out the window itself.
+ */
 export interface WindowResizeHost {
   /**
    * Locks width / height to this ratio. A gesture then moves the window by one measure (the
@@ -82,6 +88,7 @@ export interface WindowResizeHost {
   onTouchMode?(active: boolean): void;
 }
 
+/** The handle returned by {@link attachWindowResize}. `exitTouchMode()` hides the touch handles; `dispose()` removes the handles and listeners. */
 export interface WindowResize {
   /** True while the touch handles are showing. */
   readonly touchMode: boolean;
@@ -134,7 +141,9 @@ export function settleResize(apply: (frame: ResizeFrame) => void, from: ResizeFr
 }
 
 const EDGES: ResizeEdge[] = ["n", "e", "s", "w", "ne", "nw", "se", "sw"];
+/** How long (ms) a touch must be held on the header to start touch resizing. */
 const HOLD_MS = 450;
+/** How far (px) the finger may move during the hold before it counts as a scroll and cancels it. */
 const HOLD_SLOP = 8;
 
 /** Adds the resize handles to `card` and wires the gestures. */

@@ -31,15 +31,26 @@ import { SESSION_ICON } from "../views/icons";
 import type { Ctx } from "../context";
 import type { Method, PrivilegeService, Probe } from "../sessions/privilege";
 
+/** Icon paths (a question mark in a circle) for the "what does this change" button. */
 const QUESTION = '<path d="M9.2 9.4a2.9 2.9 0 1 1 4.3 2.5c-.9.5-1.5 1.1-1.5 2.1M12 17.6v.01"/><circle cx="12" cy="12" r="9"/>';
+/** Icon paths (a cross) for the "not now" button. */
 const CROSS = '<path d="m7 7 10 10M17 7 7 17"/>';
+/** Icon paths (a tick) for the "continue" button. */
 const TICK = '<path d="m5.5 12.5 4 4 9-9"/>';
 
+/** What a consent pane needs: the canvas, the privilege service, the account name to show for a host, and a callback that repaints the row after a change. */
 export interface PrivilegeCardEnv { cx: Ctx; service: PrivilegeService; loginOf(host: string): string; /** Repaints the row (its mark and value) after a change. */ refresh(): void }
+/** The consent pane for one machine. `toggle` opens or closes it, `close` closes it, `isOpen` says which, `dispose` removes it and its timers. */
 export interface PrivilegeCard { readonly el: HTMLElement; toggle(): void; close(): void; isOpen(): boolean; dispose(): void }
 
+/** Joins names for a sentence: "a", "a and b", "a, b and c". */
 const listJoin = (names: string[]): string => names.length < 2 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 
+/**
+ * Builds the consent pane for `host`, closed. Nothing is asked of the machine until the person presses the tick on the consent step.
+ * It handles one machine, or every machine in the current selection that allows sudo when several are selected. The password is
+ * sent to the service once and never stored or logged by the pane.
+ */
 export function createPrivilegeCard(host: string, env: PrivilegeCardEnv): PrivilegeCard {
   installTooltipStyles();
   const { cx, service } = env;
@@ -243,6 +254,10 @@ export interface AccessLevel {
   dispose(): void;
 }
 
+/**
+ * Makes the "Access level" row builder. It keeps one pane for each machine while its details are open. `row` returns the row for a host
+ * ("Full access" with a tick, or "Limited" with a press that opens the consent), and `dispose` closes every pane and stops listening.
+ */
 export function createAccessLevel(cx: Ctx, service: PrivilegeService): AccessLevel {
   const cards = new Map<string, { card: PrivilegeCard; box: { refresh: () => void; login: string } }>();
   const cardFor = (host: string): { card: PrivilegeCard; box: { refresh: () => void; login: string } } => {

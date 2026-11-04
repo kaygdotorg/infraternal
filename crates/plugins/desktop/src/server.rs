@@ -1,4 +1,24 @@
 //! Owns admitted app-window sessions independently of browser logins and joins captures on feature disable [D104,D198,D208,D232].
+//!
+//! [`DesktopServer`] is the server-side plugin for desktop streaming. It does
+//! three jobs:
+//!
+//! - Answers the `desktop.*` actions a browser sends over its plugin socket:
+//!   list windows (paging through the host's inventory), start, stop, status and
+//!   clock, plus taking control of a stream and choosing parameter sets.
+//! - Owns every admitted capture session. Each `start` spawns one worker task
+//!   that asks the infraternal agent on the chosen host to prepare the source,
+//!   then keeps a data lane open to it (reconnecting after a failure) and relays
+//!   video and input through `crate::relay`. A session belongs to its host and
+//!   owner, not to the browser login that started it, so reloading the page does
+//!   not end it.
+//! - Serves viewers. A browser attaches to a session on a numbered stream of its
+//!   socket; a per-stream task forwards the newest frame, and passes input, size
+//!   changes and keyframe repairs back to the session.
+//!
+//! Disabling the feature, or stopping the server, closes every session and waits
+//! for each worker to finish native cleanup. A start that is cancelled half-way
+//! withdraws its session at once; the worker still finishes retirement.
 use crate::{
     protocol::Start,
     registry::Registry,
@@ -30,8 +50,11 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+/// The binary stream definition used for desktop data lanes; see `crate::wire`.
 pub use crate::wire::WIRE;
 
+/// Access rules backed by the enrolled host: only the host's owner may view or
+/// control, and only while the host still permits access.
 // The current enrolled-host authority is owner-only, matching terminal host
 // selection. Each viewer separately retains its own login projection in Session.
 // Host revocation withdraws this shared admission without per-frame SQLite reads.
@@ -57,18 +80,27 @@ impl AccessRules for HostAccessRules {
         }
     }
 }
+/// Everything the server keeps for one live session.
 struct Record {
     session: Arc<Session>,
+    /// The host the capture runs on; checked again on stop and status calls.
     host: Arc<dyn NodeHost>,
     worker: Arc<Worker>,
 }
-// Keep the join handle in shared state while awaiting it. Cancelling a stop
-// or feature switch then leaves the same worker available to the next join.
+/// The task that prepares, runs and retires one session's source.
+///
+/// Keep the join handle in shared state while awaiting it. Cancelling a stop
+/// or feature switch then leaves the same worker available to the next join.
 struct Worker {
+    /// `None` once the worker has been joined.
     handle: tokio::sync::Mutex<Option<JoinHandle<Result<(), Error>>>>,
+    /// True once the source was retired successfully on the host. A worker whose
+    /// retirement failed stays in the table so a later stop can retry it.
     retired: Arc<AtomicBool>,
 }
 impl Worker {
+    /// True when the worker has ended and its source is confirmed retired, so the
+    /// record can be dropped and its slot reused. Never blocks.
     fn finished(&self) -> bool {
         self.retired.load(Ordering::Acquire)
             && self
@@ -76,6 +108,11 @@ impl Worker {
                 .try_lock()
                 .is_ok_and(|handle| handle.as_ref().is_none_or(JoinHandle::is_finished))
     }
+    /// Waits for the worker to end and returns its retirement result.
+    ///
+    /// Safe to call repeatedly and from several places: if the worker is already
+    /// joined but retirement had failed, it asks the host to stop the source
+    /// again; if retirement already succeeded it returns `Ok` immediately.
     async fn join(&self, host: &dyn NodeHost, id: SessionId) -> Result<(), Error> {
         let mut handle = self.handle.lock().await;
         let result = match handle.as_mut() {
@@ -93,18 +130,25 @@ impl Worker {
         result
     }
 }
+/// Mutable server state, behind one mutex that is never held across an `await`.
 struct State {
+    /// Whether the feature is switched on; sessions can only start while it is.
     enabled: bool,
+    /// Maximum number of sessions, counting ones still shutting down.
     limit: usize,
     records: HashMap<SessionId, Record>,
 }
+/// The desktop plugin for the server. Cloning is cheap and shares all state.
+///
 /// Construction has no worker, helper connection, listener or timer.
 #[derive(Clone)]
 pub struct DesktopServer {
+    /// Lookup of sessions that viewers can attach to.
     registry: Arc<Registry>,
     state: Arc<Mutex<State>>,
 }
 impl DesktopServer {
+    /// Creates a disabled server that allows up to `limit` sessions at once.
     #[must_use]
     pub fn new(limit: usize) -> Self {
         Self {
@@ -116,8 +160,14 @@ impl DesktopServer {
             })),
         }
     }
+    /// Starts a capture session on `host` and returns its id once the host has
+    /// prepared the source.
+    ///
     /// Server-generated identities are prepared by an authorized start action; Attach
     /// is solely a lookup and can never cause capture on an unknown identity.
+    /// The id is random and chosen here, and the host must echo it back. If the
+    /// caller drops this future before it finishes, the session is withdrawn
+    /// at once and the worker still retires the source in the background.
     /// # Errors
     /// Refuses disabled state, host admission, invalid geometry or helper failure.
     pub async fn start(
@@ -223,7 +273,10 @@ impl DesktopServer {
         rollback.armed = false;
         Ok(id)
     }
+    /// Stops session `id` for `user` and waits until its source is retired.
+    ///
     /// Stop requires the session's immutable owning host and current admission.
+    /// Calling it again, or concurrently, joins the same worker.
     /// # Errors
     /// Refuses unknown sessions, another owner or a failed native retirement.
     pub async fn stop(&self, id: SessionId, user: &str) -> Result<(), Error> {
@@ -247,6 +300,8 @@ impl DesktopServer {
             .remove(&id);
         Ok(())
     }
+    /// Attaches the socket's user to a session as a viewer.
+    ///
     /// Attach is fail-closed and retains the originating viewer's login lease.
     /// # Errors
     /// Refuses unknown sessions and current view access rule or login failures.
@@ -258,6 +313,19 @@ impl DesktopServer {
         self.registry
             .attach_authorized(id, host.user_id().to_owned(), host.authority())
     }
+    /// Runs one browser action and returns its JSON result.
+    ///
+    /// - `desktop.windows`: asks the host for its window list page by page and
+    ///   joins the pages. Fails if the total grows too large, a cursor repeats,
+    ///   or there are over 256 pages.
+    /// - `desktop.session.start`: starts a session (delivery `reliable` or
+    ///   `datagram`) and returns its id.
+    /// - `desktop.session.stop`: stops one.
+    /// - `desktop.session.status` / `desktop.session.clock`: forwards the query to
+    ///   the host that owns the session, after checking the caller owns it.
+    ///
+    /// Any other action is invalid (control and parameter changes are handled by
+    /// the socket, which knows the attached viewer).
     async fn execute(
         &self,
         host: &dyn SocketHost,
@@ -363,15 +431,20 @@ impl DesktopServer {
     }
 }
 impl Plugin for DesktopServer {
+    /// The static description of the desktop server plugin.
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
+    /// Switches the feature on or off. Turning it off makes the registry refuse
+    /// new attachments; running sessions are closed later by `stopped`.
     fn configure(&self, enabled: bool) {
         if let Ok(mut state) = self.state.lock() {
             state.enabled = enabled;
             let _ = self.registry.set_enabled(enabled);
         }
     }
+    /// Waits for every session worker to finish its native cleanup, then drops
+    /// the finished records.
     fn stopped(&self) -> Operation<'_, ()> {
         Box::pin(async {
             let workers: Vec<_> = self
@@ -399,6 +472,15 @@ impl Plugin for DesktopServer {
             }
         })
     }
+    /// Serves one browser plugin socket until it closes.
+    ///
+    /// Reads multiplexed frames from `requests`. Stream 0 carries action calls
+    /// (at most 32 in flight); other streams carry viewers, which attach to a
+    /// session on a reliable lane and then send only small `Input`, `Size` and
+    /// `Repair` messages. Anything malformed or over a limit ends the socket.
+    /// All work runs inside the host's authorization scope, which is re-entered
+    /// for each new burst of activity so an idle socket holds nothing. On exit,
+    /// every viewer and call task is released before returning.
     fn run(
         &self,
         host: Arc<dyn SocketHost>,
@@ -523,9 +605,13 @@ impl Drop for State {
         }
     }
 }
+/// Guard held while `start` waits for the host. If `start` is cancelled or fails
+/// before disarming it, the session is removed from the registry so no viewer
+/// can attach to a half-started session.
 struct Preparation {
     registry: Arc<Registry>,
     id: SessionId,
+    /// Set to false once the session is fully started.
     armed: bool,
 }
 impl Drop for Preparation {
@@ -535,6 +621,8 @@ impl Drop for Preparation {
         }
     }
 }
+/// Asks the host to stop and clean up session `id`'s source, giving it 5
+/// seconds. This is the step that restores the native desktop state.
 async fn stop_source(host: &dyn NodeHost, id: SessionId) -> Result<(), Error> {
     let bytes = serde_json::to_vec(&json!({"session_id":uuid::Uuid::from_bytes(id)}))
         .map_err(|_| Error::Invalid)?;
@@ -547,6 +635,14 @@ async fn stop_source(host: &dyn NodeHost, id: SessionId) -> Result<(), Error> {
     .map_err(|()| Error::Unavailable)?;
     Ok(())
 }
+/// Runs a prepared session until it is stopped, then retires its source.
+///
+/// Repeatedly opens a data lane to the host and relays through
+/// `crate::relay::run`. After a failed lane it waits 200 ms and prepares the
+/// source again, continuing the sequence numbers (`sequence_floor`) and the last
+/// size the viewer asked for. Stops when the session is closed, the host
+/// withdraws admission, or sequence numbers run out. There is no timer while a
+/// lane is healthy. `preparation` is the JSON used for the first start.
 async fn capture(
     session: Arc<Session>,
     host: Arc<dyn NodeHost>,
@@ -610,6 +706,8 @@ async fn capture(
     session.close();
     stop_source(host.as_ref(), session.id()).await
 }
+/// Parses a browser action body as a JSON object of type `T`. Rejects bodies
+/// over the control size limit, or not starting with `{`.
 fn parse<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Error> {
     if input.len() > crate::protocol::MAX_CONTROL
         || input.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{')
@@ -618,24 +716,38 @@ fn parse<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Error> {
     }
     serde_json::from_slice(input).map_err(|_| Error::Invalid)
 }
+/// Body of `desktop.windows`: which host to list.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HostInput {
     host_id: String,
 }
+/// Body of `desktop.session.start`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartInput {
     host_id: String,
+    /// What to capture and at what size.
     start: Start,
+    /// `"reliable"` or `"datagram"`.
     delivery: String,
 }
+/// Body of the actions that address an existing session.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionInput {
     session_id: uuid::Uuid,
 }
 
+/// Handles one action call from a socket and sends its result frame.
+///
+/// `desktop.session.control` and `desktop.session.parameters` are routed to the
+/// attached viewer through `controller` (its command channel); they fail with a
+/// forbidden error if the stream is not attached on this socket, and with a busy
+/// error if the viewer's queue is full. Every other action goes to
+/// `DesktopServer::execute`. Failures reach the browser as one fixed
+/// "unavailable" body, never the internal error. The reply is given 1 second to
+/// be sent.
 // The socket owns every admitted action task. Cancelling its worker cancels
 // preparations and waits through the server-held lifecycle guards.
 async fn socket_call(
@@ -717,19 +829,29 @@ async fn socket_call(
         .map_err(|_| ())?
         .map_err(|_| ())
 }
+/// Body of `desktop.session.control` and `desktop.session.parameters`.
 // Only this socket's attached viewer can acquire control; UUIDs cannot forge a lease.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ViewerInput {
+    /// The socket stream the viewer is attached on.
     stream_id: u32,
+    /// Wanted parameter-set choice; required for `parameters`, absent for `control`.
     #[serde(default)]
     parameters: Option<crate::parameter_sets::Parameters>,
 }
+/// The socket's handle on one running viewer task.
+///
+/// Dropping it tells the task to stop.
 // A control task may retain a sender after Close. Its sender cannot retain
 // the viewer lease: every map removal publishes retirement independently.
 struct ViewerHandle {
+    /// Task id, used to tell this attachment apart from a later one that reuses
+    /// the same stream number.
     task: tokio::task::Id,
+    /// Commands for the viewer task.
     requests: mpsc::Sender<ViewerCommand>,
+    /// Set to true to retire the viewer.
     stop: watch::Sender<bool>,
 }
 impl Drop for ViewerHandle {
@@ -737,6 +859,8 @@ impl Drop for ViewerHandle {
         self.stop.send_replace(true);
     }
 }
+/// Authority for the final `Close` packet of a stream: it is allowed until the
+/// viewer is retired.
 // Final Close packets retain attachment retirement independently of the stream ID.
 struct ViewerCompletion(watch::Receiver<bool>);
 impl infraternal_plugin_api::streams::Authority for ViewerCompletion {
@@ -752,14 +876,20 @@ impl infraternal_plugin_api::streams::Authority for ViewerCompletion {
         })
     }
 }
+/// What the socket asks a viewer task to do.
 enum ViewerCommand {
+    /// A raw frame from the browser (`Input`, `Size` or `Repair`).
     Wire(Bytes),
+    /// Make this viewer the session's controller; the result goes back on the channel.
     Control(oneshot::Sender<Result<(), Error>>),
+    /// Request a keyframe and apply the given parameter-set choice when it
+    /// arrives; the result of requesting the keyframe goes back on the channel.
     Parameters(
         crate::parameter_sets::Parameters,
         oneshot::Sender<Result<(), Error>>,
     ),
 }
+/// Tells the browser that `stream` has no viewer (close code 4403). Best effort.
 async fn send_viewer_close(replies: &ReplySender, stream: u32) {
     let mut wire = Vec::new();
     if encode_muxed_frame_into(
@@ -775,6 +905,15 @@ async fn send_viewer_close(replies: &ReplySender, stream: u32) {
         let _ = replies.send(Bytes::from(wire)).await;
     }
 }
+/// The task behind one attached viewer: forwards commands from the browser to
+/// the session and the session's frames back to the browser on `stream`.
+///
+/// Input and size changes wait for room in the host queue but give way to a
+/// stop. Frames are sent one at a time, each waiting for its socket write (1
+/// second limit), so a slow browser never accumulates a queue; the latest-frame
+/// source skips ahead instead. Keyframes carry only the parameter sets chosen
+/// with the `Parameters` command. Returns `Ok` on normal end and `Err` on a
+/// protocol or delivery failure.
 async fn viewer_loop(
     mut viewer: crate::session::Viewer,
     stream: u32,
@@ -839,12 +978,15 @@ async fn viewer_loop(
     }
 }
 
+/// One page of a host's window inventory, as returned by `desktop.source.windows`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InventoryPage {
     inventory: Value,
+    /// Where to continue, or `None` on the last page.
     cursor: Option<String>,
 }
+/// Checks that the host's reply to `desktop.source.start` names session `id`.
 fn validate_prepared(bytes: &[u8], id: SessionId) -> Result<(), Error> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
     if value

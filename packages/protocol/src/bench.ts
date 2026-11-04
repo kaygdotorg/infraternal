@@ -1,4 +1,10 @@
-/** Measures browser-codec hot-path decode cost with the runtime's high-resolution timer. */
+/**
+ * Measures browser-codec hot-path decode cost with the runtime's high-resolution timer.
+ *
+ * Run it directly with Bun. It encodes a 1-byte `Input` frame and a 64-byte `Output` frame
+ * once, then decodes each repeatedly and prints the median nanoseconds per decode. It
+ * asserts nothing: speed belongs in the performance harness, not in functional tests.
+ */
 
 import { decodeFrame, encodeFrame } from "./codec";
 
@@ -12,6 +18,10 @@ const sixtyFourByteOutput = encodeFrame({
 runBenchmark("wire/decode/input_1b", oneByteInput);
 runBenchmark("wire/decode/output_64b", sixtyFourByteOutput);
 
+/**
+ * Decodes `frame` for a warm-up of 100,000 calls, then takes five 250 ms samples and prints
+ * the median ns/decode and the overall decodes per second under `name`.
+ */
 function runBenchmark(name: string, frame: Uint8Array): void {
   for (let warmup = 0; warmup < 100_000; warmup += 1) {
     decodeFrame(frame);

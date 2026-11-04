@@ -1,4 +1,17 @@
 //! Owner-selected QUIC carries both measured delivery candidates; stale writes retire only video [D232].
+//!
+//! Two ways to move one encoded video frame between the server and a peer over an
+//! already-authenticated QUIC connection:
+//!
+//! - Reliable: each frame is written to a dedicated stream, preceded by a small
+//!   header ([`Sender::Reliable`], read back with [`ReliableReader`]).
+//! - Datagram: each frame is cut into fixed-size fragments sent as unreliable
+//!   datagrams ([`Sender::Datagram`]); the receiver rebuilds them with
+//!   [`crate::datagram::Reassembler`].
+//!
+//! Both give a frame about 250 ms (the assembly timeout) from the moment it was
+//! queued. A frame that is already too old is skipped rather than sent, so
+//! latency never grows; the caller then asks for a keyframe.
 use crate::{
     datagram::Reassembler,
     session::{ASSEMBLY_TIMEOUT, Error, SessionId, Video},
@@ -10,18 +23,23 @@ use std::{io, time::Instant};
 /// Report drops distinctly from network errors so the producer asks for IDR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sent {
+    /// The whole frame was handed to the transport.
     Complete,
+    /// The frame was too old, or took too long, and was dropped on purpose.
     Stale,
 }
 /// One caller owns the dedicated video lane and one reusable encoded buffer.
 /// The existing authenticated connection and access rule admission stay with its owner.
 pub enum Sender<'a> {
+    /// Frames go over a dedicated QUIC send stream.
     Reliable(&'a mut quinn::SendStream),
+    /// Frames go as QUIC datagrams on `connection`, tagged with `session`.
     Datagram {
         connection: &'a quinn::Connection,
         session: SessionId,
     },
 }
+/// Resets the stream on drop unless the write finished.
 // A caller may cancel before the internal deadline. A partial reliable frame
 // then owns a poisoned lane: resetting in Drop prevents the next write from
 // being spliced into its abandoned body. The authenticated connection survives.
@@ -37,6 +55,7 @@ impl Drop for FrameWrite<'_> {
     }
 }
 impl Sender<'_> {
+    /// Which delivery mode this sender uses.
     #[must_use]
     pub const fn mode(&self) -> Delivery {
         match self {
@@ -147,12 +166,17 @@ impl Sender<'_> {
 /// A healthy idle stream has no application timer; an active frame has 250ms.
 pub struct ReliableReader {
     receive: quinn::RecvStream,
+    /// Bytes of the frame being read (header first, then body).
     buffer: Vec<u8>,
+    /// How many bytes of `buffer` are filled.
     filled: usize,
+    /// Header length once it is fully read; 0 while the header is still incomplete.
     prefix: usize,
+    /// Set from the first byte of a frame; none while the stream is idle.
     deadline: Option<tokio::time::Instant>,
 }
 impl ReliableReader {
+    /// Wraps a QUIC receive stream.
     #[must_use]
     pub const fn new(receive: quinn::RecvStream) -> Self {
         Self {

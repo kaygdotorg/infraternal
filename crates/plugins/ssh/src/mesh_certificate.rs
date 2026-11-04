@@ -19,14 +19,20 @@ use crate::mesh_admission::{
 /// Current registration, resolved from authority rather than SSH request text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
+    /// The person the certificate is registered to.
     pub person: String,
+    /// Mesh node the registration is bound to.
     pub source_node: u64,
+    /// Exact client address the registration allows.
     pub source_address: IpAddr,
 }
 
 /// The caller holds one guard through verification, admission and session open.
 pub trait CertificateAccess: CurrentAccess {
+    /// Fingerprint of the one certificate authority key whose signatures are accepted.
     fn trusted_ca(&self) -> &Fingerprint;
+    /// Look up the current registration for a certificate digest (see [`digest`]).
+    /// `None` means unknown or revoked.
     fn identity(&self, certificate_digest: &[u8; 32]) -> Option<Identity>;
 }
 
@@ -44,6 +50,13 @@ pub fn digest(certificate: &Certificate) -> Result<[u8; 32], Refusal> {
 /// from the signed person principal: explicit login rules may allow a person to
 /// use an account whose name differs from theirs. No key-id/serial convention
 /// creates authority. A later session open must call this again.
+///
+/// Checks, in order: the digest is registered; the certificate is a user
+/// certificate, lists the registered person as a principal, is signed by the
+/// trusted CA and valid at `now`, and has exactly one critical option,
+/// `source-address`, naming only the registered address (a single-host prefix is
+/// allowed). Then [`admit_certificate_claims`] checks time bounds, source and
+/// access. Returns the registered identity on success.
 /// # Errors
 /// Returns fixed internal refusal codes; never expose these to an unsigned peer.
 pub fn verify(
@@ -84,6 +97,9 @@ pub fn verify(
     Ok(identity)
 }
 
+/// True only if the `source-address` option names exactly `expected`: a bare
+/// address, or with a full-length prefix (`/32` for IPv4, `/128` for IPv6).
+/// Wider networks, lists and other hosts are rejected.
 fn exact_source(source: &str, expected: IpAddr) -> bool {
     let (address, prefix) = source
         .split_once('/')

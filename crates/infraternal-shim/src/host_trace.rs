@@ -7,28 +7,52 @@ use std::{
     io::{self, Write},
 };
 
+/// Maximum number of trace records kept. Further records are counted as dropped
+/// instead of growing memory.
 const LIMIT: usize = 65_536;
 
+/// A point in the input/output path where a trace record is taken. The numeric
+/// value is written to the trace file, so existing numbers must not change.
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub(crate) enum Stage {
+    /// Bytes were read from the connected client.
     PeerRead = 1,
+    /// Client input entered the input queue; `extra` is the writer id.
     InputQueued = 2,
+    /// A write of queued input to the pseudo-terminal began.
     PtyWriteStart = 3,
+    /// A write to the pseudo-terminal finished; `extra` is the writer id.
     PtyWriteDone = 4,
+    /// Output was read from the pseudo-terminal.
     PtyRead = 5,
+    /// The terminal emulator finished parsing the output.
     ParseDone = 6,
+    /// An output frame was built; `extra` is its encoded queue bytes.
     FrameBuilt = 7,
+    /// A write of a frame to the client socket began.
     SocketWriteStart = 8,
+    /// A write to the client socket finished; `extra` is the encoded queue bytes.
     SocketWriteDone = 9,
+    /// Taking a screen snapshot began.
     SnapshotStart = 10,
+    /// The screen snapshot is complete.
     SnapshotDone = 11,
+    /// Applying a terminal resize began.
     ResizeStart = 12,
+    /// The resize is complete.
     ResizeDone = 13,
+    /// Building an output frame began.
     FrameBuildStart = 14,
+    /// A round of output processing began; `extra` is the count cap for the round.
     OutputRoundStart = 15,
+    /// A read was refused for lack of budget; `extra` holds reason bits
+    /// (1 = count, 2 = elapsed).
     ReadBudgetDenied = 16,
 }
+/// One numeric trace entry: monotonic time in nanoseconds, session id, byte
+/// offset, descriptor, byte count, stage and the stage-specific `extra` value.
+/// It holds no terminal bytes, environment or paths.
 #[derive(Clone, Copy)]
 struct Record {
     ns: u64,
@@ -43,6 +67,9 @@ struct Record {
     extra: usize,
     stage: Stage,
 }
+/// The per-thread recorder state: whether tracing is on, the session and
+/// descriptor currently being served, the bounded record list and a count of
+/// records dropped because it was full.
 #[derive(Default)]
 struct Trace {
     enabled: bool,
@@ -51,6 +78,7 @@ struct Trace {
     dropped: u64,
 }
 impl Trace {
+    /// Stores a record, or counts it as dropped once `LIMIT` records are held.
     fn push(&mut self, record: Record) {
         if self.records.len() < LIMIT {
             self.records.push(record);
@@ -58,6 +86,8 @@ impl Trace {
             self.dropped = self.dropped.saturating_add(1);
         }
     }
+    /// Writes a summary line and then one JSON line per record to `writer`, and
+    /// empties the buffer and the dropped counter.
     fn dump(&mut self, writer: &mut impl Write) -> io::Result<()> {
         writeln!(
             writer,
@@ -99,6 +129,9 @@ pub(crate) fn initialize(file: Option<&mut std::fs::File>) -> io::Result<()> {
     Ok(())
 }
 
+/// Turns tracing on or off for this thread. Turning on reserves room for
+/// `LIMIT` records up front so recording never allocates; turning off frees the
+/// buffer. Fails if the reservation fails.
 pub(crate) fn enable(enabled: bool) -> io::Result<()> {
     TRACE.with_borrow_mut(|trace| {
         if enabled {
@@ -124,6 +157,9 @@ pub(crate) fn enable(enabled: bool) -> io::Result<()> {
 pub(crate) fn context(session: [u8; 16], fd: i32) {
     TRACE.with_borrow_mut(|trace| trace.context = trace.enabled.then_some((session, fd)));
 }
+/// Records that `bytes` at `offset` were written to the pseudo-terminal by
+/// `writer` (as a `PtyWriteDone`), using the session set by `context`. Does
+/// nothing when tracing is off or no context is set.
 pub(crate) fn credit(writer: u32, offset: u64, bytes: usize) {
     let context = TRACE.with_borrow(|trace| trace.context);
     if let Some((session, fd)) = context {
@@ -137,6 +173,9 @@ pub(crate) fn credit(writer: u32, offset: u64, bytes: usize) {
         );
     }
 }
+/// Adds one record for `stage` with the current monotonic time. Does nothing
+/// when tracing is off. If the clock cannot be read, the record is counted as
+/// dropped and tracing switches off.
 pub(crate) fn record(
     stage: Stage,
     session: [u8; 16],
@@ -164,6 +203,7 @@ pub(crate) fn record(
         }
     });
 }
+/// Writes and clears everything recorded so far; see `Trace::dump`.
 pub(crate) fn dump(writer: &mut impl Write) -> io::Result<()> {
     TRACE.with_borrow_mut(|trace| trace.dump(writer))
 }
@@ -184,6 +224,8 @@ pub(crate) fn flush(file: &mut std::fs::File) -> io::Result<()> {
     writer.flush()
 }
 
+/// Test helper: the `(writer, offset, bytes)` of every recorded
+/// `PtyWriteDone`.
 #[cfg(test)]
 pub(crate) fn credited_ranges() -> Vec<(usize, u64, usize)> {
     TRACE.with_borrow(|trace| {

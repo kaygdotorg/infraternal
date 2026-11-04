@@ -17,6 +17,7 @@
  */
 import type { KeyValueRow } from "./kv-list";
 
+/** One entry of the settings list: a stable `id`, the `title`, an `icon` and `render`, which fills the pane and may return a function that cleans up when the pane closes. */
 export interface SettingsSection {
   id: string;
   title: string;
@@ -25,11 +26,13 @@ export interface SettingsSection {
   render(container: HTMLElement): (() => void) | void;
 }
 
+/** `stage` is the element the overlay card is mounted in; `sections` is the list shown, the first being the default. */
 export interface SettingsOverlayOptions {
   stage: HTMLElement;
   sections: SettingsSection[];
 }
 
+/** The handle returned by {@link createSettingsOverlay}. `open` falls back to the first section for an unknown id; `source` says whether the keyboard or the pointer asked, because keyboard changes skip the animation. */
 export interface SettingsOverlay {
   readonly isOpen: boolean;
   open(section: string, source: "pointer" | "keyboard"): void;
@@ -37,6 +40,7 @@ export interface SettingsOverlay {
   dispose(): void;
 }
 
+/** The build facts the About section lists. */
 export interface AboutInfo {
   name: string;
   version: string;
@@ -45,8 +49,11 @@ export interface AboutInfo {
   built: string;
 }
 
+/** The strong ease-out curve of the open and close motion. */
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+/** The About section's icon, as inner SVG markup. */
 const INFO_ICON = '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>';
+/** The close button's icon, as inner SVG markup. */
 const CLOSE_ICON = '<path d="m7 7 10 10M17 7 7 17"/>';
 
 /** "2026-10-08 14:03 UTC" from an ISO string; the empty string stays empty. */
@@ -83,6 +90,7 @@ export function aboutSection(info: AboutInfo): SettingsSection {
   };
 }
 
+/** Builds the overlay in `options.stage`; nothing is shown until `open` is called. */
 export function createSettingsOverlay(options: SettingsOverlayOptions): SettingsOverlay {
   const { stage, sections } = options;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");

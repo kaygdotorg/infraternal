@@ -22,7 +22,9 @@ export const ICON = {
   fingerprint: `<path d="M6 9.5a6 6 0 0 1 12 0v1.8M9 20c.5-1.4.8-3 .8-4.7v-4a2.2 2.2 0 0 1 4.4 0v4c0 2 .4 3.4 1.2 4.7M12 14v3.5c0 1 .2 1.9.5 2.5M6 13c0 2.2-.3 4.2-1 5.5M18 14.5c0 1.5.1 3.2.7 4.5"/>`,
 } as const;
 
+/** Wraps icon path markup from `ICON` in an `<svg>` on the 24 px grid. The svg is `aria-hidden`: the control around it carries the name. */
 export const svg = (paths: string, className = "ah-icon"): string => `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
+/** Escapes `& < > " '` so text can be put safely into an HTML string. */
 export const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
 }[char]!));

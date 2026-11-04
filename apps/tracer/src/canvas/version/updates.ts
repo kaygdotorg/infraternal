@@ -49,6 +49,10 @@ export function effective(settled: Fleet, facts: Pick<VersionFacts, "version" | 
   return behind.length ? { kind: "available", targets: behind } : settled;
 }
 
+/**
+ * The Updates row's controller. `view()` is what to paint, `settled()` is the last answer that was not work in progress, `action()` says what a
+ * press does, and `press()` checks or proceeds. `onChange` fires after every change.
+ */
 export interface FleetController {
   /** The state to paint now. */
   view(): Fleet;
@@ -62,6 +66,7 @@ export interface FleetController {
   dispose(): void;
 }
 
+/** What the controller needs: the version source, an optional way to tell the person something, and test seams for the timer and the shortest spinner time. */
 export interface FleetOptions {
   source: VersionSource;
   /** Shown to the person once, in plain words, when something they asked for could not be done. */
@@ -71,6 +76,10 @@ export interface FleetOptions {
   minBusyMs?: number;
 }
 
+/**
+ * Makes the controller. A press while work is running does nothing. A check asks the server and every host together. If the answer is
+ * instant, the spinner still shows for at least `minBusyMs` (700 by default). After an update it checks again.
+ */
 export function createFleetController(options: FleetOptions): FleetController {
   const { source } = options;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { window.setTimeout(resolve, ms); }));

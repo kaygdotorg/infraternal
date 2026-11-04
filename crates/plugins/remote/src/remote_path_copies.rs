@@ -19,6 +19,7 @@ pub(crate) struct CopyClock {
     receiver: Option<Waker>,
 }
 impl CopyClock {
+    /// Schedules the next copy for `deadline`. An earlier existing deadline wins, and the endpoint's receive task is woken so the new timer is registered.
     pub fn arm(&mut self, deadline: tokio::time::Instant) {
         if let Some(timer) = &mut self.timer {
             if deadline >= timer.deadline() {
@@ -34,6 +35,7 @@ impl CopyClock {
             receiver.wake_by_ref();
         }
     }
+    /// Registers the waker and reports whether the timer has fired (clearing it). Call it from the endpoint's receive poll.
     pub fn poll(&mut self, cx: &mut Context<'_>) -> bool {
         use std::future::Future as _;
         if !self

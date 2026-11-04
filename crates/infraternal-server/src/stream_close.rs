@@ -23,26 +23,35 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Length of one rate-limit window. Within a window an account gets one log line per reason category; the rest are counted.
 const CLOSE_WINDOW: Duration = Duration::from_secs(60);
+/// [`CLOSE_WINDOW`] in whole seconds, for the summary line.
 const CLOSE_WINDOW_SECONDS: u64 = 60;
 // Each live window costs about 250 bytes; this bounds the table near 2 MiB.
+/// Most (account, category) windows tracked at once.
 const MAX_TRACKED_WINDOWS: usize = 8192;
 // Closes arrive at socket-event rate, not frame rate. 1,024 records (about 200 KiB,
 // allocated on the first close) absorb a mass disconnect while the thread writes;
 // beyond that a close is dropped and counted rather than waited for.
+/// Most close records waiting for the logger thread. When full, new closes are dropped and counted.
 const QUEUE_CAPACITY: usize = 1024;
 /// The session field of a close that names no session the account owns. Session ids
 /// are random 128-bit values, so the all-zero id is never a real one.
 pub(crate) const NO_SESSION: [u8; 16] = [0; 16];
 
+/// Why a terminal stream closed. Every reason is a fixed, static set of strings, so nothing a client sends can reach the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CloseReason {
+    /// Coarse group used for rate limiting and for reading the log (for example `flow_control_refusal`).
     pub(crate) category: &'static str,
+    /// Specific cause within the category.
     pub(crate) kind: &'static str,
+    /// Plain-language explanation that may be shown to the person using the browser.
     pub(crate) client_text: &'static str,
 }
 
 impl CloseReason {
+    /// Builds a reason from its three fixed strings.
     const fn new(category: &'static str, kind: &'static str, client_text: &'static str) -> Self {
         Self {
             category,
@@ -52,61 +61,73 @@ impl CloseReason {
     }
 }
 
+/// The browser closed its WebSocket.
 pub(crate) const CLIENT_WENT_AWAY: CloseReason = CloseReason::new(
     "client_went_away",
     "websocket_closed",
     "browser closed the connection",
 );
+/// The infraternal agent on the host ended the terminal stream.
 pub(crate) const AGENT_STREAM_ENDED: CloseReason = CloseReason::new(
     "agent_stream_ended",
     "terminal_stream_closed",
     "the infraternal agent ended the terminal stream",
 );
+/// The infraternal agent's connection to the server was lost.
 pub(crate) const AGENT_CONNECTION_DROPPED: CloseReason = CloseReason::new(
     "agent_connection_dropped",
     "server_link_lost",
     "the infraternal agent lost its connection to the server",
 );
+/// The host could not accept the terminal attachment.
 pub(crate) const AGENT_CONNECTION_REFUSED: CloseReason = CloseReason::new(
     "agent_connection_refused",
     "terminal_attach_unavailable",
     "the host could not accept the terminal attachment",
 );
+/// The terminal's input queue overflowed its flow-control limit.
 pub(crate) const INPUT_QUEUE_FULL: CloseReason = CloseReason::new(
     "flow_control_refusal",
     "input_queue_full",
     "terminal input exceeded the flow-control limit",
 );
+/// The browser reader fell too far behind and must reconnect.
 pub(crate) const READER_FELL_BEHIND: CloseReason = CloseReason::new(
     "flow_control_refusal",
     "reader_fell_behind",
     "the terminal reader fell behind and is reconnecting",
 );
+/// The terminal on the host stopped responding.
 pub(crate) const TERMINAL_ROUTE_IDLE: CloseReason = CloseReason::new(
     "idle",
     "terminal_route_unresponsive",
     "the terminal on the host stopped responding",
 );
+/// The terminal output credit exceeded its limit.
 pub(crate) const CREDIT_REFUSED: CloseReason = CloseReason::new(
     "flow_control_refusal",
     "credit_exceeded",
     "terminal output credit exceeded its limit",
 );
+/// The server could not keep up with connection replies.
 pub(crate) const REPLY_QUEUE_FULL: CloseReason = CloseReason::new(
     "flow_control_refusal",
     "control_reply_queue_full",
     "the server could not keep up with connection replies",
 );
+/// A terminal frame exceeded the size limit.
 pub(crate) const FRAME_TOO_LARGE: CloseReason = CloseReason::new(
     "size_limit",
     "frame_too_large",
     "a terminal frame exceeded the size limit",
 );
+/// The terminal stream sent a frame that is not valid protocol.
 pub(crate) const PROTOCOL_ERROR: CloseReason = CloseReason::new(
     "protocol_error",
     "invalid_frame",
     "the terminal stream sent an invalid protocol frame",
 );
+/// The server refused a terminal attachment.
 pub(crate) const ATTACH_REFUSED: CloseReason = CloseReason::new(
     "auth_resume_refusal",
     "terminal_attach_refused",
@@ -120,16 +141,19 @@ pub(crate) const ATTACH_UNOWNED: CloseReason = CloseReason::new(
     "unowned_session_attach",
     "the account has no such terminal session",
 );
+/// The server refused to resume a connection.
 pub(crate) const RESUME_REFUSED: CloseReason = CloseReason::new(
     "auth_resume_refusal",
     "connection_resume_refused",
     "the server refused to resume the connection",
 );
+/// The server stopped receiving replies on the connection.
 pub(crate) const IDLE_TIMEOUT: CloseReason = CloseReason::new(
     "idle",
     "liveness_timeout",
     "the server stopped receiving connection replies",
 );
+/// The server could not write to the connection.
 pub(crate) const SERVER_WRITE_FAILED: CloseReason = CloseReason::new(
     "server_transport_error",
     "websocket_write_failed",
@@ -144,26 +168,34 @@ pub(crate) const AUTHORITY_UNAVAILABLE: CloseReason = CloseReason::new(
     "authority_unavailable",
     "the server was too busy to confirm the session",
 );
+/// The server hit an internal error and could not continue the stream.
 pub(crate) const SERVER_PROCESSING_FAILED: CloseReason = CloseReason::new(
     "server_processing_error",
     "terminal_stream_processing_failed",
     "the server could not continue the terminal stream",
 );
+/// Used in a summary line when a window saw closes with different reasons.
 const MIXED_REASON: CloseReason = CloseReason::new(
     "multiple",
     "multiple_close_reasons",
     "the stream closed repeatedly for different reasons",
 );
 
+/// Which side ended the stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseWho {
+    /// The browser.
     Browser,
+    /// The server.
     Server,
+    /// The infraternal agent on the host.
     InfraternalAgent,
+    /// More than one side, in a summary line.
     Multiple,
 }
 
 impl CloseWho {
+    /// Name written to the log.
     const fn as_str(self) -> &'static str {
         match self {
             Self::Browser => "browser",
@@ -181,6 +213,7 @@ impl CloseWho {
 pub(crate) struct CloseOwner(u64);
 
 impl CloseOwner {
+    /// Derives the rate-limit key from an authenticated user id.
     pub(crate) fn of(user_id: &str) -> Self {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -193,26 +226,44 @@ impl CloseOwner {
 /// `owner` keys the rate limit and is never written.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CloseRecord {
+    /// Rate-limit key for the owning account. Never logged.
     pub(crate) owner: CloseOwner,
+    /// Which side ended the stream.
     pub(crate) who: CloseWho,
+    /// Why it ended.
     pub(crate) reason: CloseReason,
+    /// Host the terminal runs on, if remote.
     pub(crate) host_id: Option<uuid::Uuid>,
+    /// Terminal session id, or [`NO_SESSION`].
     pub(crate) session_id: [u8; 16],
+    /// Stream number on the browser's WebSocket.
     pub(crate) browser_stream_id: u32,
+    /// Stream number on the infraternal agent's connection; 0 if none.
     pub(crate) agent_stream_id: u32,
+    /// Output position the server had sent.
     pub(crate) out_seq: u64,
+    /// Input bytes the host had acknowledged.
     pub(crate) input_acked: u64,
+    /// Input bytes the server had sent.
     pub(crate) input_sent: u64,
+    /// Output credit outstanding, in bytes.
     pub(crate) output_credit_bytes: u64,
+    /// Close code the infraternal agent gave, if any.
     pub(crate) agent_close_code: Option<u16>,
+    /// Short fixed text for the infraternal agent's close, if any.
     pub(crate) agent_close_reason: Option<&'static str>,
+    /// Close code on the browser stream, if any.
     pub(crate) browser_stream_close_code: Option<u16>,
+    /// Short fixed text for the browser stream's close, if any.
     pub(crate) browser_stream_close_reason: Option<&'static str>,
+    /// WebSocket close code, if any.
     pub(crate) websocket_code: Option<u16>,
+    /// WebSocket close reason text, if any.
     pub(crate) websocket_reason: Option<&'static str>,
 }
 
 impl CloseRecord {
+    /// Starts a record for a close. Cursor, credit and close-code fields start at zero or `None`; set them before recording.
     pub(crate) fn new(
         owner: CloseOwner,
         who: CloseWho,
@@ -248,9 +299,13 @@ impl CloseRecord {
 #[derive(Clone)]
 pub(crate) struct StreamCloseLog(Arc<Inner>);
 
+/// Shared state: the lazily created queue, the dropped-close counter and the fallback for a dead logger.
 struct Inner {
+    /// Sender to the logger thread; `None` inside means it failed to start.
     queue: OnceLock<Option<SyncSender<CloseRecord>>>,
+    /// Closes dropped since the last summary.
     dropped: Arc<AtomicU64>,
+    /// Fallback used when the logger thread is gone.
     degraded: Degraded,
 }
 
@@ -260,11 +315,14 @@ struct Inner {
 /// it runs only when the logger is already broken.
 #[derive(Default)]
 struct Degraded {
+    /// True once the one-time stderr notice has been printed.
     announced: std::sync::atomic::AtomicBool,
+    /// When the last fallback summary was written.
     last_summary: Mutex<Option<Instant>>,
 }
 
 impl Degraded {
+    /// Counts a close that nothing can log, prints the stderr notice once, and writes a drop summary at most once per window.
     fn note(&self, dropped: &AtomicU64, now: Instant) {
         if !self.announced.swap(true, Ordering::Relaxed) {
             // stderr, not tracing: the subscriber is what the dead thread was writing through.
@@ -288,6 +346,7 @@ impl Degraded {
 static IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl StreamCloseLog {
+    /// Creates the shared logger. The thread starts on the first close, not now.
     pub(crate) fn new() -> Self {
         Self(Arc::new(Inner {
             queue: OnceLock::new(),

@@ -14,11 +14,17 @@ use zeroize::Zeroizing;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WrappedCa {
+    /// SHA-256 digest of the issuer certificate this copy belongs to (32 bytes).
     pub(crate) issuer_fingerprint: Vec<u8>,
+    /// Administrator this copy was sealed for.
     pub(crate) member: String,
+    /// Membership generation the copy was sealed for; always at least 1.
     pub(crate) epoch: u64,
+    /// Public salt for the browser's key derivation (32 bytes).
     pub(crate) salt: Vec<u8>,
+    /// Random AES-GCM nonce (12 bytes).
     nonce: Vec<u8>,
+    /// Encrypted 32-byte Ed25519 seed followed by its 16-byte tag (48 bytes).
     ciphertext: Vec<u8>,
 }
 impl WrappedCa {
@@ -148,6 +154,9 @@ impl WrappedCa {
         super::CertificateAuthority::from_material(material.clone())?;
         Ok(material)
     }
+    /// Associated data that AES-GCM authenticates with the seed: a version label, the
+    /// member name (length-prefixed), the generation, the issuer fingerprint and the
+    /// salt. Changing any public field of a copy therefore makes `open` fail.
     fn binding(&self) -> Result<Vec<u8>, CaError> {
         let length = u16::try_from(self.member.len()).map_err(|_| CaError)?;
         let mut bytes = b"infraternal-ca-copy-v1\0".to_vec();

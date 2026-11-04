@@ -1,4 +1,9 @@
-//! Public-only persistence boundary: validate canonical inputs and rebuild all derived coordinator indices.
+//! Saving and restoring a [`Coordinator`].
+//!
+//! A checkpoint holds only the canonical inputs: settings, membership with
+//! public keys, rules and version counters. Everything derived from them
+//! (name table, grants, compiled peer views) is rebuilt on restore, never
+//! trusted from the file. No private key is ever part of a checkpoint.
 use super::Coordinator;
 use crate::{
     address::{AddressAllocator, Route},
@@ -9,28 +14,50 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-/// Public-only checkpoint; derived indices/views are rebuilt and acknowledgements are re-established.
-/// Persistence belongs to slice 2. Save atomically before publishing diffs to avoid identity changes.
+
+/// The saved state of a [`Coordinator`], containing public data only.
+///
+/// Derived indices and views are rebuilt on restore, and delivery
+/// acknowledgements start over. Writing it to disk belongs to slice 2. Save it
+/// atomically *before* publishing the diffs that depend on it, so a crash can
+/// never leave nodes holding addresses the saved state does not know about.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoordinatorCheckpoint {
+    /// The deployment settings.
     pub settings: MeshSettings,
+    /// The node that is the server. It must also appear in `members`.
     pub server: NodeId,
+    /// The address allocator, including its never-reuse counter.
     pub allocation: AddressAllocator,
+    /// Every member, the server included.
     pub members: Vec<MemberCheckpoint>,
+    /// All policy rules. Rules that mention a removed node are kept and stay
+    /// dormant until that node rejoins.
     pub rules: Vec<Arrow>,
+    /// The policy version each member should be at. One entry per member,
+    /// none above `generation`.
     pub desired_versions: BTreeMap<NodeId, u64>,
+    /// The coordinator-wide policy version counter. It only grows.
     pub generation: u64,
 }
 
-/// Retained public rotation state. The node independently persists both corresponding private keys.
+/// One member in a [`CoordinatorCheckpoint`], with its key rotation state.
+///
+/// Only public keys are kept here. The node itself stores the matching private
+/// keys.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberCheckpoint {
+    /// The member's inventory facts. Its `public_key` must equal `keys.current`.
     pub node: Node,
+    /// The keys accepted for the member now.
     pub keys: PeerKeys,
+    /// When the previous key stops being accepted, on the deployment clock.
+    /// Set exactly when `keys.previous` is set.
     pub retire_after: Option<u64>,
 }
 
 impl Coordinator {
+    /// Captures the coordinator's current state so it can be saved.
     #[must_use]
     pub fn checkpoint(&self) -> CoordinatorCheckpoint {
         CoordinatorCheckpoint {
@@ -55,11 +82,19 @@ impl Coordinator {
             generation: self.generation,
         }
     }
-    /// Restore canonical inputs, stable addresses and public overlaps without trusting derived indices.
-    /// Acknowledgements intentionally reset: every node confirms its applied view after reconnect.
+    /// Rebuilds a coordinator from a saved checkpoint.
+    ///
+    /// Addresses and key overlaps are kept exactly as saved. Derived data is
+    /// recomputed instead of trusted. Delivery acknowledgements are reset on
+    /// purpose: every node confirms the view it has applied after it
+    /// reconnects. `routes` are the host's current routes, checked against the
+    /// deployment ranges as in [`crate::address::conflicts`].
+    ///
     /// # Errors
-    /// Rejects invalid settings/routes, mismatched allocation, duplicate identities/keys/names/rules,
-    /// inconsistent rotation state, absent server membership, or impossible desired versions.
+    /// Rejects invalid settings or routes, an allocation that does not match
+    /// the settings or members, duplicate identities, keys, names or rules,
+    /// inconsistent rotation state, a missing server, and desired versions
+    /// that cannot exist.
     pub fn restore(checkpoint: CoordinatorCheckpoint, routes: &[Route]) -> Result<Self, MeshError> {
         // Allocation depends only on address settings. DNS and rotation policy may change
         // independently without invalidating stable addresses from the original allocation.

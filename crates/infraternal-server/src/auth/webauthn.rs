@@ -54,7 +54,7 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
-        if pending.registrations.len() + pending.logins.len() >= 1024 {
+        if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
         pending.registrations.insert(
@@ -303,7 +303,7 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
-        if pending.registrations.len() + pending.logins.len() >= 1024 {
+        if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
         pending.logins.insert(
@@ -312,6 +312,7 @@ impl Auth {
                 state: LoginState::Identified(state, user.into()),
                 expires: now + CEREMONY,
                 binding: None,
+                network: None,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -319,6 +320,19 @@ impl Auth {
 
     /// Start identity-free UV authentication without publishing any credential list.
     pub async fn discoverable_login_start(&self, now: i64) -> Result<Value> {
+        self.discoverable_login_start_from(now, None).await
+    }
+
+    /// Anonymous ceremonies have their own pool, so they can never refuse an
+    /// identified ceremony (a signed-in owner's fresh tap or approval), and an
+    /// HTTP caller's network holds at most [`ANONYMOUS_CEREMONIES_PER_NETWORK`]
+    /// of it (#263, J145 P2-1).
+    pub(crate) async fn discoverable_login_start_from(
+        &self,
+        now: i64,
+        source: Option<std::net::IpAddr>,
+    ) -> Result<Value> {
+        let network = source.map(crate::runtime::browser_network);
         let (options, state) = self
             .webauthn
             .start_discoverable_authentication()
@@ -334,8 +348,21 @@ impl Auth {
         let id = random();
         let mut pending = self.pending.lock().await;
         prune(&mut pending, now);
-        if pending.registrations.len() + pending.logins.len() >= 1024 {
+        let anonymous = pending
+            .logins
+            .values()
+            .filter(|login| matches!(login.state, LoginState::Discoverable(_)));
+        let (total, mine) = anonymous.fold((0, 0), |(total, mine), login| {
+            (
+                total + 1,
+                mine + usize::from(network.is_some() && login.network == network),
+            )
+        });
+        if total >= PENDING_CEREMONIES {
             return Err(Error::Denied);
+        }
+        if mine >= ANONYMOUS_CEREMONIES_PER_NETWORK {
+            return Err(Error::Throttled);
         }
         pending.logins.insert(
             id.clone(),
@@ -343,6 +370,7 @@ impl Auth {
                 state: LoginState::Discoverable(state),
                 expires: now + CEREMONY,
                 binding: None,
+                network,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -556,6 +584,23 @@ impl Auth {
         )
         .await
     }
+}
+
+/// Most ceremonies of each pool (identified and registration; anonymous).
+const PENDING_CEREMONIES: usize = 1024;
+/// Most pending anonymous ceremonies one enclosing network (IPv6 /48, IPv4
+/// /24) may hold. Filling the anonymous pool then takes 32 such networks, the
+/// same residual the owner accepted for pending approvals (#76913).
+const ANONYMOUS_CEREMONIES_PER_NETWORK: usize = 32;
+
+/// Registrations plus identified logins: the pool only signed-in people and
+/// setup can start ceremonies in.
+fn identified_ceremonies(p: &Pending) -> usize {
+    p.registrations.len()
+        + p.logins
+            .values()
+            .filter(|login| matches!(login.state, LoginState::Identified(..)))
+            .count()
 }
 
 pub(super) fn prune(p: &mut Pending, now: i64) {

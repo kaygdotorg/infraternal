@@ -1,4 +1,11 @@
 //! Owns one admitted capture lane while the server-held session outlives its viewers [D104,D208,D232].
+//!
+//! [`run`] connects a session to one data lane to the host. Video coming in on
+//! the lane (whole frames on a reliable lane, or fragments on a datagram lane,
+//! rebuilt with [`crate::datagram::Reassembler`]) is published to the session,
+//! and commands queued for the host (input, resize, keyframe requests, control)
+//! are written to the lane. When the lane ends, the session stays alive in the
+//! registry so a replacement lane can take over.
 use crate::{
     datagram::Reassembler,
     delivery::receive_datagram,
@@ -25,6 +32,12 @@ impl Drop for Lease {
 /// Run only after existing host admission and capture action have succeeded.
 /// Returns on peer loss; the registry retains the session for a replacement lane.
 /// Input is never replayed: commands queued for this lease are consumed or discarded.
+///
+/// On start it releases any held input and asks for a keyframe, then re-sends the
+/// current controller's takeover if there is one. It ends with `Ok` when the
+/// session stops or the command channel closes, and with an error when the lane
+/// fails or the host no longer permits access. A repair request is sent whenever
+/// frames are lost.
 /// # Errors
 /// Reports malformed capture, ended authority or unavailable transport without payloads.
 pub async fn run(
@@ -39,6 +52,9 @@ pub async fn run(
         .map_err(|()| crate::session::Error::Unavailable)
 }
 
+/// The body of [`run`], with failures reduced to a unit error. Waits on the
+/// stop signal, queued commands, lane packets and (only while a frame is
+/// incomplete) the reassembly deadline.
 async fn run_inner(
     session: Arc<Session>,
     host: Arc<dyn NodeHost>,
@@ -135,6 +151,12 @@ async fn run_inner(
     }
 }
 
+/// Writes one host command to the lane, if the session still allows it.
+///
+/// The write happens inside the host's authorization scope and must finish within
+/// the assembly timeout, so stale input is never delivered late. `wire` is a
+/// reusable encode buffer. After a successful write, a resize is recorded so a
+/// reconnect can restore the size.
 async fn send(
     session: &Session,
     host: &dyn NodeHost,

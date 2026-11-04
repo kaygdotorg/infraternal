@@ -1,7 +1,10 @@
 /** Formats terminal link destinations for the shared point-anchored tooltip. */
 
+/** The most characters (graphemes) shown before the middle is replaced by an ellipsis. */
 const LINK_TOOLTIP_MAX = 56;
+/** Matches the scheme and host of a link (or `mailto:` address, or `file://`), which must never be shortened. */
 const LINK_ORIGIN = /^(?:https?:\/\/[^/?#]+|mailto:[^?#]*|file:\/\/)/iu;
+/** A canvas context made on first use to measure text; `null` when canvas is unavailable, then widths are estimated. */
 let textMeasure: CanvasRenderingContext2D | null | undefined;
 
 /** Keeps the complete scheme and host, shortening the path only at grapheme boundaries. */

@@ -28,6 +28,9 @@ impl CaCopies {
         private_directory(&directory).map_err(|_| CaError)?;
         Ok(Self { directory })
     }
+    /// File name of one member's copy. The member name is hashed, so it never reaches
+    /// the file system as a path component. Refuses an empty or over-256-byte member
+    /// and generation 0 (generations start at 1).
     fn path(&self, member: &str, generation: u64) -> Result<PathBuf, CaError> {
         if member.is_empty() || member.len() > 256 || generation == 0 {
             return Err(CaError);

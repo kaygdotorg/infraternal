@@ -365,3 +365,119 @@ async fn ordinary_native_writer_negotiates_queue_backpressure_without_shared_sel
         assert_eq!(session.caps, advertised);
     }
 }
+
+/// A stand-in shim: bind the session rendezvous after `delay`, publish it like the shim (chmod after listen), and
+/// answer one Hello for `id`.
+fn fake_shim(
+    state: &std::path::Path,
+    id: uuid::Uuid,
+    delay: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    use infraternal_shim::frame::Frame;
+    let path = state.join(format!("sessions/{}.sock", id.simple()));
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        super::send(
+            &mut peer,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                session: id.into_bytes(),
+                pid: 1,
+                cols: 80,
+                rows: 24,
+                created: 0,
+                head: 0,
+                start: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            super::Reader::default().read(&mut peer).await.unwrap(),
+            Frame::Attach(0)
+        );
+    })
+}
+
+fn launcher(program: &str, args: &[&str]) -> tokio::process::Child {
+    tokio::process::Command::new(program)
+        .args(args)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap()
+}
+
+/// #324: a loaded host took 3.5-5.1 s from launcher spawn to a bound shim. While the launcher lives, that is a slow
+/// start, not a refusal; the per-connection HANDSHAKE must not decide it.
+#[tokio::test(flavor = "current_thread")]
+async fn slow_shim_start_is_not_refused_while_its_launcher_lives() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let watch = super::socket_readiness(&state).unwrap();
+    let mut child = launcher("sleep", &["60"]);
+    let shim = fake_shim(
+        &state,
+        id,
+        super::HANDSHAKE + std::time::Duration::from_millis(500),
+    );
+    let path = state.join(format!("sessions/{}.sock", id.simple()));
+    let session = super::await_launch(&path, id, &watch, &mut child, false)
+        .await
+        .expect("a live launcher's slow start must reach Hello");
+    assert_eq!(session.id, id.into_bytes());
+    shim.await.unwrap();
+}
+
+/// The longer bound is only for hangs: a launcher that exits before the rendezvous refuses the open at once.
+#[tokio::test(flavor = "current_thread")]
+async fn launcher_exit_before_rendezvous_refuses_without_waiting_for_the_bound() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let path = state.join(format!("sessions/{}.sock", id.simple()));
+    let watch = super::socket_readiness(&state).unwrap();
+    for (program, args) in [("sh", &["-c", "exit 3"][..]), ("true", &[][..])] {
+        let mut child = launcher(program, args);
+        let error = super::await_launch(&path, id, &watch, &mut child, false)
+            .await
+            .err()
+            .expect("an exited shim cannot answer");
+        assert_ne!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+        assert!(
+            error.to_string().contains("exited before its rendezvous"),
+            "{error}"
+        );
+    }
+    // A detaching shim's failed first process is a refusal too.
+    let mut child = launcher("sh", &["-c", "exit 3"]);
+    let error = super::await_launch(&path, id, &watch, &mut child, true)
+        .await
+        .err()
+        .expect("a failed detach cannot answer");
+    assert_ne!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+}
+
+/// A detaching shim's first process exits successfully once it has forked the session process; keep waiting.
+#[tokio::test(flavor = "current_thread")]
+async fn detached_launcher_success_keeps_waiting_for_the_session_process() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let watch = super::socket_readiness(&state).unwrap();
+    let mut child = launcher("true", &[]);
+    // Order the exit before the bind so the test covers the case, not a timing guess.
+    let status = child.wait().await.unwrap();
+    assert!(status.success());
+    let shim = fake_shim(&state, id, std::time::Duration::from_millis(50));
+    let path = state.join(format!("sessions/{}.sock", id.simple()));
+    let session = super::await_launch(&path, id, &watch, &mut child, true)
+        .await
+        .expect("the detached session process answers after its launcher exits");
+    assert_eq!(session.id, id.into_bytes());
+    shim.await.unwrap();
+}

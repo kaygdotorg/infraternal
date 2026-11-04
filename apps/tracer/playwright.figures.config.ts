@@ -8,10 +8,13 @@
  */
 import { defineConfig } from "playwright/test";
 
+/** The port of the capture server; `TRACER_TEST_PORT`, default 4641. */
 const port = Number(process.env.TRACER_TEST_PORT ?? "4641");
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("TRACER_TEST_PORT must be an integer TCP port");
+/** The address the capture opens. */
 const origin = `http://localhost:${port}`;
 
+/** The capture setup: runs `figures/capture.ts` against a docs-dataset build and its test-double server. */
 export default defineConfig({
   testDir: "./figures",
   testMatch: "capture.ts",

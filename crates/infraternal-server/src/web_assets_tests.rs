@@ -145,3 +145,32 @@ async fn spa_and_mutable_assets_revalidate_and_missing_brotli_uses_gzip() {
     assert_eq!(fallback.headers()[header::CONTENT_ENCODING], "gzip");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn no_other_site_may_frame_the_app() {
+    // J134 P3-1: the approval page is the SPA's index, served for any path.
+    let (root, app) = fixture();
+    for path in [
+        "/",
+        "/index.html",
+        "/approve/anything",
+        "/chunk-1234abcd.js",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()[header::CONTENT_SECURITY_POLICY],
+            "frame-ancestors 'none'",
+            "{path}"
+        );
+        assert_eq!(
+            response.headers()[header::X_FRAME_OPTIONS],
+            "DENY",
+            "{path}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -16,6 +16,7 @@ export interface IncomingShare {
   views: Array<{ key: string; name: string; snapshot: ViewModel }>;
 }
 
+/** What sharing needs from an instance: who the person is, who they can send to, and how to send, update and receive layouts. */
 export interface SharingAdapter {
   /** The signed-in username. */
   me(): string;

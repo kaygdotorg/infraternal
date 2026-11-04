@@ -64,12 +64,21 @@ pub struct FileDnsTokenCustody {
 impl FileDnsTokenCustody {
     /// Open the private proxy secret directory beneath an owner-only infraternal state directory.
     ///
+    /// Nothing is created here. Agent start runs this before the supervisor's first dial, and
+    /// creating plus fsyncing the directory took seconds under IO load for a proxy that may
+    /// never be used. `put` creates the directory durably the first time a secret is written.
+    /// A directory that already exists is still validated, so an unsafe one fails closed.
+    ///
     /// # Errors
-    /// Returns an I/O error when the state directory or private custody directory is unsafe.
+    /// Returns an I/O error when the state directory or an existing custody directory is unsafe.
     pub fn open(state: &Path) -> io::Result<Self> {
         validate_state_directory(state)?;
         let root = state.join(SECRET_DIRECTORY);
-        ensure_private_directory(&root)?;
+        match fs::symlink_metadata(&root) {
+            Ok(_) => normalize_private_directory(&root)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         Ok(Self { root })
     }
 
@@ -85,7 +94,13 @@ impl FileDnsTokenCustody {
             validate_provider(provider)?;
         }
 
-        for entry in fs::read_dir(&self.root)? {
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            // Never written to: no credential material exists to remove.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
             let entry = entry?;
             let directory = entry.path();
             normalize_private_directory(&directory)?;
@@ -105,6 +120,9 @@ impl FileDnsTokenCustody {
         validate_provider(provider)?;
         let directory = self.root.join(provider);
         if create {
+            // The store root is created on first write (see `open`); the parent entry of each
+            // new directory is fsynced by `ensure_private_directory`, so the chain is durable.
+            ensure_private_directory(&self.root)?;
             ensure_private_directory(&directory)?;
         } else {
             normalize_private_directory(&directory)?;

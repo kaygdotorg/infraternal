@@ -2,14 +2,20 @@
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
+/// The exit notice a host sends. Unknown fields are rejected.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Exit {
+    /// Notice type, sent as `type`.
     #[serde(rename = "type")]
     kind: String,
+    /// Terminal session that exited.
     session_id: uuid::Uuid,
+    /// Exit status of the shell.
     status: i32,
+    /// Last output position the shell produced.
     final_seq: u64,
+    /// True if the session was retired rather than exited. Defaults to false.
     #[serde(default)]
     retired: bool,
 }

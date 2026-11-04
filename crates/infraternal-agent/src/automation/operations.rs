@@ -57,6 +57,8 @@ pub(super) fn load(state: &Path) -> io::Result<Names> {
     }
 }
 fn save(state: &Path, names: &Names) -> io::Result<()> {
+    #[cfg(test)]
+    tests::hold_publication(state);
     let bytes = serde_json::to_vec(names)?;
     if bytes.len() > 1_048_576 {
         return Err(io::ErrorKind::OutOfMemory.into());
@@ -135,6 +137,11 @@ fn similar(a: &str, b: &str) -> bool {
     })
 }
 
+/// Durable work that must finish before a successful reply is sent.
+pub(super) type Publication = tokio::task::JoinHandle<io::Result<()>>;
+
+/// Run one verb. `new` leaves its name publication in `pending`; the caller
+/// awaits it outside the action deadline before replying.
 pub(super) async fn run(
     state: &Path,
     uid: u32,
@@ -142,6 +149,7 @@ pub(super) async fn run(
     input: &Value,
     mut live: Vec<Session>,
     names: Names,
+    pending: &mut Option<Publication>,
 ) -> io::Result<Reply> {
     if verb == "list" {
         let mut rows: Vec<_> = live.iter().map(|s| row(s, &names)).collect();
@@ -163,7 +171,7 @@ pub(super) async fn run(
         ));
     }
     if verb == "new" {
-        return create(state, uid, input, &live, names).await;
+        return create(state, uid, input, &live, names, pending).await;
     }
     let target = input["target"]
         .as_str()
@@ -267,6 +275,7 @@ async fn create(
     input: &Value,
     live: &[Session],
     mut names: Names,
+    pending: &mut Option<Publication>,
 ) -> io::Result<Reply> {
     let name = input["name"].as_str().ok_or(io::ErrorKind::InvalidInput)?;
     if live
@@ -299,18 +308,39 @@ async fn create(
     )
     .await?;
     names.insert(id(&session), json!({"name": name, "uid": uid}));
-    if let Err(error) = save(state, &names) {
+    let reply = Reply::ok(
+        "Session created.",
+        json!({"session": row(&session, &names)}),
+    );
+    *pending = Some(publish(state, names, session.path.clone(), session.id));
+    Ok(reply)
+}
+
+/// Make a created session's name durable without running its two fsyncs on the
+/// infraternal agent's reactor. That reactor is the only thread serving every
+/// terminal on this host, and on a disk busy with writeback the syncs took up
+/// to 32 s on a build VM: `sessions new` went unanswered past 15 s, and every
+/// other terminal froze for as long (#334). The spawned task owns completion,
+/// so a dropped caller cannot skip the cleanup of a name that failed to persist.
+fn publish(
+    state: &Path,
+    names: Names,
+    session: std::path::PathBuf,
+    session_id: [u8; 16],
+) -> Publication {
+    let state = state.to_owned();
+    tokio::spawn(async move {
+        let saved = tokio::task::spawn_blocking(move || save(&state, &names))
+            .await
+            .unwrap_or_else(|error| Err(io::Error::other(error)));
         // A failed name publication cannot leave a successful unnamed create.
-        if let Ok(mut cleanup) = sessions::connect_sequenced(session.path.clone(), session.id).await
+        if saved.is_err()
+            && let Ok(mut cleanup) = sessions::connect_sequenced(session, session_id).await
         {
             let _ = send(&mut cleanup.peer, &Frame::CloseSession).await;
         }
-        return Err(error);
-    }
-    Ok(Reply::ok(
-        "Session created.",
-        json!({"session": row(&session, &names)}),
-    ))
+        saved
+    })
 }
 async fn send_text(session: Session, input: &Value) -> io::Result<Reply> {
     let text = input["text"].as_str().ok_or(io::ErrorKind::InvalidInput)?;
@@ -354,8 +384,78 @@ async fn send_text(session: Session, input: &Value) -> io::Result<Reply> {
 
 #[cfg(test)]
 mod tests {
-    //! A bounded transport page must not turn into a cap on the available sessions.
+    //! A bounded transport page must not turn into a cap on the available sessions,
+    //! and durable name publication must never occupy the shared reactor.
     use super::*;
+
+    /// Holds `save` for one armed state directory, standing in for an fsync that
+    /// the disk does not complete, until the test or its watchdog releases it.
+    #[derive(Default)]
+    struct Gate {
+        armed: Option<std::path::PathBuf>,
+        entered: bool,
+        released: bool,
+    }
+    static GATE: std::sync::Mutex<Gate> = std::sync::Mutex::new(Gate {
+        armed: None,
+        entered: false,
+        released: false,
+    });
+    static GATE_CHANGED: std::sync::Condvar = std::sync::Condvar::new();
+
+    pub(super) fn hold_publication(state: &Path) {
+        let mut gate = GATE.lock().unwrap();
+        if gate.armed.as_deref() != Some(state) {
+            return;
+        }
+        gate.entered = true;
+        GATE_CHANGED.notify_all();
+        while !gate.released {
+            gate = GATE_CHANGED.wait(gate).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_name_publication_leaves_the_reactor_serving_other_work() {
+        let state = crate::test_state_root().join(format!("n{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir(&state).unwrap();
+        *GATE.lock().unwrap() = Gate {
+            armed: Some(state.clone()),
+            ..Gate::default()
+        };
+        // Detects a hang only: it frees a publication that holds the reactor,
+        // so the assertion below can report it instead of deadlocking.
+        let watchdog = std::thread::spawn(|| {
+            let gate = GATE.lock().unwrap();
+            let (mut gate, waited) = GATE_CHANGED
+                .wait_timeout_while(gate, std::time::Duration::from_secs(30), |gate| {
+                    !gate.released
+                })
+                .unwrap();
+            let fired = waited.timed_out();
+            gate.released = true;
+            GATE_CHANGED.notify_all();
+            fired
+        });
+        let mut names = Names::new();
+        let session = uuid::Uuid::from_u128(7);
+        names.insert(session.to_string(), json!({"name": "build", "uid": 1000}));
+        let publication = publish(&state, names, "/unused".into(), session.into_bytes());
+        // This loop runs on the same current-thread reactor. It can observe the
+        // held publication only if that publication is not occupying the reactor.
+        while !GATE.lock().unwrap().entered {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        GATE.lock().unwrap().released = true;
+        GATE_CHANGED.notify_all();
+        publication.await.unwrap().unwrap();
+        assert!(
+            !watchdog.join().unwrap(),
+            "the name publication held the reactor until the watchdog released it"
+        );
+        assert_eq!(load(&state).unwrap()[&session.to_string()]["name"], "build");
+        fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn private_names_keep_the_existing_shape_and_strict_validation() {
         let id = uuid::Uuid::from_u128(1).to_string();
@@ -404,9 +504,17 @@ mod tests {
             let input = after
                 .as_ref()
                 .map_or_else(|| json!({}), |after: &String| json!({"after": after}));
-            let page = run(Path::new("/unused"), 1000, "list", &input, live, names)
-                .await
-                .unwrap();
+            let page = run(
+                Path::new("/unused"),
+                1000,
+                "list",
+                &input,
+                live,
+                names,
+                &mut None,
+            )
+            .await
+            .unwrap();
             assert!(
                 serde_json::to_vec(&page).unwrap().len()
                     <= infraternal_plugin_api::MAX_ACTION_BYTES

@@ -4,6 +4,10 @@
  */
 declare const __RECOVERY_UI_MODE__: "off" | "preview" | "1";
 
+/**
+ * Whether the recovery screens may be shown. The build decides: `off` never, `1` always, and `preview` only on the mock
+ * address `?mock=1&proto=recovery`. Pass a query string to test a different address.
+ */
 export function recoveryUiEnabled(search = location.search): boolean {
   if (__RECOVERY_UI_MODE__ === "1") return true;
   if (__RECOVERY_UI_MODE__ !== "preview") return false;

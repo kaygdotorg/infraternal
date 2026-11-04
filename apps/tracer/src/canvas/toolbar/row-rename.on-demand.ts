@@ -14,6 +14,7 @@ import { beginInlineRename, placeOverName, type InlineRename } from "../../../..
 import type { Ctx } from "../context";
 import { renameHost } from "../mesh/rename.on-demand";
 
+/** Saves a new name for a sidebar row. A session is renamed through the inventory; a host or Mesh node through the Mesh. Rejects if renaming is not available. */
 export function renameRow(cx: Ctx, id: string, name: string): Promise<void> {
   if (id.startsWith("s:")) {
     const [host, sid] = id.slice(2).split("/");

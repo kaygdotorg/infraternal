@@ -130,7 +130,7 @@ fn proxy_ids() -> io::Result<(u32, u32)> {
     let ids = if let Some(ids) = lookup()? {
         ids
     } else {
-        let id = choose_id(&IdDatabases::read()?, &ids_in_use()?)?;
+        let id = choose_id(&IdDatabases::read()?, &ids_in_use()?, &SystemDirectory)?;
         let created = create_account(id);
         // A concurrent creator (another agent process) may have won; its account is as good,
         // and it passes the same checks below.
@@ -147,7 +147,13 @@ fn proxy_ids() -> io::Result<(u32, u32)> {
     };
     check_in_range(ids.0, ids.1)?;
     let databases = IdDatabases::read()?;
-    check_unique(&databases.passwd, &databases.groups, ids.0, ids.1)?;
+    check_unique(
+        &databases.passwd,
+        &databases.groups,
+        ids.0,
+        ids.1,
+        &SystemDirectory,
+    )?;
     Ok(*PROXY_IDS.get_or_init(|| ids))
 }
 
@@ -174,8 +180,41 @@ impl IdDatabases {
     }
 }
 
+/// The system's user and group lookup (NSS), which also answers for accounts that live in a
+/// directory service (LDAP, SSSD) and so never appear in `/etc/passwd` or `/etc/group`.
+trait Directory {
+    /// The name of the user with this UID, if any. An error means the lookup could not answer.
+    fn user(&self, uid: u32) -> io::Result<Option<String>>;
+    /// The name of the group with this GID, if any.
+    fn group(&self, gid: u32) -> io::Result<Option<String>>;
+}
+
+struct SystemDirectory;
+
+impl Directory for SystemDirectory {
+    fn user(&self, uid: u32) -> io::Result<Option<String>> {
+        nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+            .map(|user| user.map(|user| user.name))
+            .map_err(io::Error::from)
+    }
+
+    fn group(&self, gid: u32) -> io::Result<Option<String>> {
+        nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(gid))
+            .map(|group| group.map(|group| group.name))
+            .map_err(io::Error::from)
+    }
+}
+
 /// The lowest ID in the range that no account, group, subordinate range or process uses.
-fn choose_id(databases: &IdDatabases, in_use: &std::collections::BTreeSet<u32>) -> io::Result<u32> {
+///
+/// The files are read directly for the primary-group and subordinate ranges that lookups do not
+/// expose; the `directory` lookup adds accounts the files do not list. A lookup that fails
+/// counts as taken: an ID is never given away on a guess.
+fn choose_id(
+    databases: &IdDatabases,
+    in_use: &std::collections::BTreeSet<u32>,
+    directory: &dyn Directory,
+) -> io::Result<u32> {
     let taken = |id: u32| {
         // passwd: UID (field 2) and primary GID (field 3); group: GID (field 2).
         field_ids(&databases.passwd, 2).any(|(_, entry)| entry == id)
@@ -184,6 +223,8 @@ fn choose_id(databases: &IdDatabases, in_use: &std::collections::BTreeSet<u32>) 
             || subordinate_covers(&databases.subuid, id)
             || subordinate_covers(&databases.subgid, id)
             || in_use.contains(&id)
+            || directory.user(id).map_or(true, |name| name.is_some())
+            || directory.group(id).map_or(true, |name| name.is_some())
     };
     PROXY_ID_RANGE
         .clone()
@@ -381,9 +422,26 @@ fn create_account(id: u32) -> io::Result<()> {
     ))
 }
 
-fn check_unique(passwd: &str, groups: &str, user: u32, group: u32) -> io::Result<()> {
+fn check_unique(
+    passwd: &str,
+    groups: &str,
+    user: u32,
+    group: u32,
+    directory: &dyn Directory,
+) -> io::Result<()> {
     fn shares<'a>(mut entries: impl Iterator<Item = (&'a str, u32)>, id: u32) -> bool {
         entries.any(|(name, entry)| entry == id && name != PROXY_ACCOUNT)
+    }
+    // The name the system resolves for our IDs must be ours alone, also when the other owner
+    // is in a directory service. A failed lookup refuses.
+    let foreign = |name: io::Result<Option<String>>| {
+        name.map_or(true, |name| name.is_some_and(|name| name != PROXY_ACCOUNT))
+    };
+    if foreign(directory.user(user)) || foreign(directory.group(group)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the proxy account's ID is shared with an account or group of the system's user directory",
+        ));
     }
     // Another member, by list or by primary group, could traverse the 0750 proxy directory and
     // read its 0640 config.
@@ -455,16 +513,103 @@ mod tests {
 
     use super::*;
 
+    /// A fake lookup: the listed IDs belong to directory-service accounts and groups.
+    #[derive(Default)]
+    struct FakeDirectory {
+        users: Vec<(u32, &'static str)>,
+        groups: Vec<(u32, &'static str)>,
+        broken: bool,
+    }
+
+    impl Directory for FakeDirectory {
+        fn user(&self, uid: u32) -> io::Result<Option<String>> {
+            if self.broken {
+                return Err(io::Error::other("directory unreachable"));
+            }
+            Ok(self
+                .users
+                .iter()
+                .find(|(id, _)| *id == uid)
+                .map(|(_, n)| (*n).to_owned()))
+        }
+
+        fn group(&self, gid: u32) -> io::Result<Option<String>> {
+            if self.broken {
+                return Err(io::Error::other("directory unreachable"));
+            }
+            Ok(self
+                .groups
+                .iter()
+                .find(|(id, _)| *id == gid)
+                .map(|(_, n)| (*n).to_owned()))
+        }
+    }
+
+    #[test]
+    fn ids_held_by_a_directory_service_are_never_chosen_or_shared() {
+        let databases = IdDatabases {
+            passwd: String::new(),
+            groups: String::new(),
+            subuid: String::new(),
+            subgid: String::new(),
+        };
+        let none = std::collections::BTreeSet::new();
+        let directory = FakeDirectory {
+            users: vec![(60_514, "ldap-alice")],
+            groups: vec![(60_515, "ldap-staff")],
+            broken: false,
+        };
+        assert_eq!(
+            choose_id(&databases, &none, &directory).expect("a free ID"),
+            60_516,
+            "a UID or a GID known only to the directory is skipped"
+        );
+        let unreachable = FakeDirectory {
+            broken: true,
+            ..FakeDirectory::default()
+        };
+        assert!(
+            choose_id(&databases, &none, &unreachable).is_err(),
+            "a lookup that cannot answer never hands out an ID"
+        );
+
+        let passwd = "infraternal-proxy:x:60514:60514::/nonexistent:/usr/sbin/nologin\n";
+        let groups = "infraternal-proxy:x:60514:\n";
+        let ours = FakeDirectory {
+            users: vec![(60_514, PROXY_ACCOUNT)],
+            groups: vec![(60_514, PROXY_ACCOUNT)],
+            broken: false,
+        };
+        check_unique(passwd, groups, 60_514, 60_514, &ours).expect("our own account is fine");
+        assert!(check_unique(passwd, groups, 60_514, 60_514, &directory).is_err());
+        let shared_group = FakeDirectory {
+            groups: vec![(60_514, "ldap-staff")],
+            ..FakeDirectory::default()
+        };
+        assert!(check_unique(passwd, groups, 60_514, 60_514, &shared_group).is_err());
+        assert!(check_unique(passwd, groups, 60_514, 60_514, &unreachable).is_err());
+    }
+
     #[test]
     fn a_proxy_id_shared_with_another_account_or_group_is_refused() {
         let passwd = "root:x:0:0::/root:/bin/sh\ninfraternal-proxy:x:60514:60514::/nonexistent:/usr/sbin/nologin\n";
         let groups = "root:x:0:\ninfraternal-proxy:x:60514:\n";
-        check_unique(passwd, groups, 60_514, 60_514).expect("a dedicated identity");
+        check_unique(passwd, groups, 60_514, 60_514, &FakeDirectory::default())
+            .expect("a dedicated identity");
         let nonroot = format!("{passwd}nonroot:x:60514:65532::/home/nonroot:/bin/sh\n");
-        assert!(check_unique(&nonroot, groups, 60_514, 60_514).is_err());
+        assert!(check_unique(&nonroot, groups, 60_514, 60_514, &FakeDirectory::default()).is_err());
         let shared_group = format!("{groups}docker:x:60514:\n");
-        assert!(check_unique(passwd, &shared_group, 60_514, 60_514).is_err());
-        assert!(check_unique(passwd, groups, 0, 60_514).is_err());
+        assert!(
+            check_unique(
+                passwd,
+                &shared_group,
+                60_514,
+                60_514,
+                &FakeDirectory::default()
+            )
+            .is_err()
+        );
+        assert!(check_unique(passwd, groups, 0, 60_514, &FakeDirectory::default()).is_err());
     }
 
     #[test]
@@ -473,12 +618,12 @@ mod tests {
         let groups = "infraternal-proxy:x:60514:\n";
         let listed = "infraternal-proxy:x:60514:alice\n";
         assert!(
-            check_unique(passwd, listed, 60_514, 60_514).is_err(),
+            check_unique(passwd, listed, 60_514, 60_514, &FakeDirectory::default()).is_err(),
             "a listed member could read the proxy's group-readable config"
         );
         let primary = format!("{passwd}alice:x:1000:60514::/home/alice:/bin/sh\n");
         assert!(
-            check_unique(&primary, groups, 60_514, 60_514).is_err(),
+            check_unique(&primary, groups, 60_514, 60_514, &FakeDirectory::default()).is_err(),
             "a user whose primary group is the proxy group is a member too"
         );
     }
@@ -496,12 +641,13 @@ mod tests {
         };
         let processes = [999, 60_519].into_iter().collect();
         assert_eq!(
-            choose_id(&databases, &processes).expect("a free ID"),
+            choose_id(&databases, &processes, &FakeDirectory::default()).expect("a free ID"),
             60_520
         );
 
         let full = PROXY_ID_RANGE.collect();
-        let error = choose_id(&databases, &full).expect_err("an exhausted range is refused");
+        let error = choose_id(&databases, &full, &FakeDirectory::default())
+            .expect_err("an exhausted range is refused");
         assert!(error.to_string().contains("60514-60999"), "{error}");
     }
 

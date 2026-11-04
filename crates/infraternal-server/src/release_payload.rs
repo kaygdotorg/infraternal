@@ -9,15 +9,20 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+/// Which release binary to fetch.
 #[derive(Clone, Copy)]
 enum Artifact {
+    /// The full binary.
     Full,
+    /// The smaller session-only binary. Optional: its absence is not an error.
     Session,
 }
 impl Artifact {
+    /// True if a missing artifact should be tolerated.
     fn optional(self) -> bool {
         matches!(self, Self::Session)
     }
+    /// Release asset name for this artifact; `label` is the target label.
     fn name(self, label: &str) -> String {
         match self {
             Self::Full => format!("infraternal-{label}-musl"),

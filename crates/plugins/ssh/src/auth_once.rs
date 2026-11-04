@@ -1,4 +1,14 @@
 //! Scopes browser-unwrapped key/password inputs to one target attempt and consumes each secret at most once.
+//!
+//! A person can paste a private key, its passphrase or a password in the
+//! browser for a single connection attempt. [`OneUseAuth`] carries those bytes
+//! from the request to [`OneUseAuth::layer`], which wraps the normal
+//! [`AuthProvider`] chain. The wrapper offers each secret to the SSH
+//! transport exactly once, then erases it. It never stores the secret on disk,
+//! never serializes it and has no `Debug` output. Unused secrets expire after
+//! 60 seconds. If a one-use secret was supplied but already spent or expired,
+//! the wrapper answers "no credential" instead of falling back to the stored
+//! one of the same kind, so a typed secret never silently switches to another.
 
 use crate::{
     auth_order::{AuthProvider, NetworkProvider},
@@ -12,12 +22,16 @@ use std::sync::{Arc, Mutex};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OneUseAuth {
+    /// Private key bytes (at most 24576, no NUL).
     #[serde(default)]
     pub key: Option<Secret>,
+    /// Passphrase for `key`; only valid together with a key.
     #[serde(default)]
     pub passphrase: Option<Secret>,
+    /// Account password (single line, at most 16384 bytes).
     #[serde(default)]
     pub password: Option<Secret>,
+    /// When the bytes arrived; set at deserialization, starts the 60 second expiry.
     #[serde(skip, default = "std::time::Instant::now")]
     received: std::time::Instant,
 }
@@ -26,7 +40,9 @@ pub struct OneUseAuth {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetAuth {
+    /// Id of the existing target the secrets are for.
     pub target: String,
+    /// The transient secrets for that target.
     pub auth: OneUseAuth,
 }
 
@@ -58,6 +74,8 @@ impl OneUseAuth {
         Ok(())
     }
 
+    /// Time left before the plaintext expires (60 seconds after arrival, zero once past).
+    ///
     /// Plaintext waiting for a scheduler slot expires without entering a helper.
     #[must_use]
     pub fn remaining(&self) -> std::time::Duration {
@@ -79,15 +97,24 @@ impl OneUseAuth {
     }
 }
 
+/// The one-use layer over a base provider. Network and server-key questions go
+/// straight to `base`; user key and password are answered from the secrets here.
 struct Once {
+    /// Deadline after which both secrets are erased.
     expires: std::time::Instant,
+    /// A key was supplied, so the base provider's key is never consulted, even after it is spent.
     has_key: bool,
+    /// Same for the password.
     has_password: bool,
+    /// Fallback provider for everything not supplied as a one-use secret.
     base: Arc<dyn AuthProvider>,
+    /// Key and optional passphrase; `take`n on first use.
     key: Mutex<Option<(Secret, Option<Secret>)>>,
+    /// Password; `take`n on first use.
     password: Mutex<Option<Secret>>,
 }
 impl Once {
+    /// True once the deadline passed; on that first observation both secrets are erased.
     fn expired(&self) -> bool {
         if std::time::Instant::now() < self.expires {
             return false;

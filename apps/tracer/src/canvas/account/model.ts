@@ -22,6 +22,7 @@ export interface Recovery {
   verifiedAt?: number | null | undefined;
 }
 
+/** The person the card is about. Every field after `username` is optional: `undefined` means "this model cannot say", and the card draws no row for it. */
 export interface Person {
   /** Optional in the data (an imported person may have none): the card then shows the username as the name. */
   name: string;
@@ -39,10 +40,13 @@ export interface Person {
   devices?: number | undefined;
 }
 
+/** The one interface the person's card reads. Implementations: `identityModel` for the product, and the mock's test double. */
 export interface AccountModel {
+  /** The current person. Returns the same object each time, so fields may change in place; listen with `onChange`. */
   person(): Person;
   /** Refresh on open, never during idle preparation or first paint. */
   refresh?(): Promise<void>;
+  /** Calls `run` whenever the person changes. Returns a function that stops the listening. */
   onChange(run: () => void): () => void;
   /**
    * Saves a change of the name, the email or the picture. Absent when the server cannot store them yet: the card then

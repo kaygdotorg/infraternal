@@ -3,6 +3,7 @@ import type { DetailsFacts } from "../../windows/details-source";
 import type { KeyValueRow } from "../../../../../../packages/ui/src/kv-list";
 import type { CanvasHost, CanvasSession } from "./canvas";
 
+/** Builds the details popover's facts for a prototype window. The numbers are invented test data. */
 export function prototypeFacts(host: CanvasHost, session: CanvasSession, hostLabel: string, icons: { machine: string; connection: string; session: string }): DetailsFacts {
   const machine: KeyValueRow[] = [
     { key: "Kernel", value: host.kernel },

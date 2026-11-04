@@ -14,6 +14,11 @@ import type { Grant } from "../model/types";
 import type { MeshApiOptions } from "./api";
 import type { MeshSource } from "./source";
 
+/**
+ * Returns a `MeshSource` right away. Until the real adapter has loaded it reports status "loading" and empty data (or "error" if the
+ * load failed; `retry` loads again). After that every call goes to the adapter. Edits made before it has loaded throw, but the view that makes
+ * them cannot be on screen then. `dispose` also disposes the adapter.
+ */
 export function createLazyMeshApi(options: MeshApiOptions): MeshSource {
   const listeners = new Set<() => void>();
   const failures = new Set<(message: string) => void>();

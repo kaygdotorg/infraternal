@@ -21,6 +21,10 @@ import { ICON, iconFor } from "../views/icons";
 import { SCALE_REST, restAt } from "../springs";
 import { previewLine } from "./preview";
 
+/**
+ * The floating terminal. At most one is open. `open(rec)` floats a window; `close(instant)` closes it without moving the camera; `expand`
+ * flies it into its slot in Console; `info` gives its size in cells and pixels once measured; `dispose` removes it.
+ */
 export interface FloatModule {
   open(rec: WinRec): void;
   close(instant?: boolean): void;
@@ -32,6 +36,7 @@ export interface FloatModule {
   dispose(): void;
 }
 
+/** Makes the floating terminal for the canvas `cx`. It also adds the small "N sessions in Console" badge to the stage. */
 export function createFloat(cx: Ctx): FloatModule {
   const { stage, camera, state, views } = cx;
   void ({} as ViewRec);

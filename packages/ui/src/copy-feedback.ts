@@ -108,12 +108,17 @@ export async function writeClipboard(text: string): Promise<boolean> {
   return legacyCopy(text);
 }
 
+/**
+ * The fallback for browsers without the async clipboard API: copies `text` through a hidden, read-only textarea and
+ * `execCommand("copy")`. Returns whether the copy worked, and restores the focus and selection it borrowed.
+ */
 function legacyCopy(text: string): boolean {
   const area = document.createElement("textarea");
   area.value = text;
   area.setAttribute("readonly", "");
   area.setAttribute("aria-hidden", "true");
   // Off-screen but selectable; 16 px keeps iOS from zooming. Restores the focus it borrowed.
+  // ui-literal: the 16 px is required (iOS zooms into any focused field under 16 px) and the field is invisible, so it takes no token.
   area.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;pointer-events:none";
   const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const selection = document.getSelection();

@@ -22,6 +22,16 @@ use std::{
 pub struct Socket {
     descriptor: Registration<OwnedFd>,
 }
+#[cfg(target_os = "linux")]
+#[inline]
+fn nonblocking_send_flags() -> MsgFlags {
+    MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL
+}
+#[cfg(target_os = "macos")]
+#[inline]
+fn nonblocking_send_flags() -> MsgFlags {
+    MsgFlags::MSG_DONTWAIT
+}
 impl Socket {
     /// Register readiness once on the runtime's reactor.
     /// # Errors
@@ -33,8 +43,11 @@ impl Socket {
                 "leg B requires an inherited fd >= 3",
             ));
         }
+        let descriptor = duplicate_inherited(fd)?;
+        #[cfg(target_os = "macos")]
+        socket2::SockRef::from(&descriptor).set_nosigpipe(true)?;
         Ok(Self {
-            descriptor: Registration::new(duplicate_inherited(fd)?)?,
+            descriptor: Registration::new(descriptor)?,
         })
     }
 
@@ -63,12 +76,8 @@ impl Socket {
         while sent < bytes.len() {
             let mut ready = self.descriptor.writable().await?;
             match ready.try_io(|fd| {
-                send(
-                    fd.as_raw_fd(),
-                    &bytes[sent..],
-                    MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
-                )
-                .map_err(io::Error::from)
+                send(fd.as_raw_fd(), &bytes[sent..], nonblocking_send_flags())
+                    .map_err(io::Error::from)
             }) {
                 Ok(Ok(0)) => return Err(io::ErrorKind::WriteZero.into()),
                 Ok(Ok(n)) => sent += n,

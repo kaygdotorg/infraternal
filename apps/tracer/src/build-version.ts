@@ -7,6 +7,7 @@
 declare const __BUILD_COMMIT__: string | undefined;
 declare const __BUILD_DATE__: string | undefined;
 
+/** The build's identity: `full` and `short` commit id (`dev` outside a git checkout) and the ISO `built` time. */
 export interface BuildVersion {
   short: string;
   full: string;
@@ -14,6 +15,7 @@ export interface BuildVersion {
   built: string;
 }
 
+/** Reads the commit and date that the build injected. A commit that is not 7 to 40 hexadecimal characters counts as unknown and reads `dev`. */
 export function buildVersion(): BuildVersion {
   const full = typeof __BUILD_COMMIT__ === "string" && /^[0-9a-f]{7,40}$/.test(__BUILD_COMMIT__) ? __BUILD_COMMIT__ : "dev";
   const built = typeof __BUILD_DATE__ === "string" ? __BUILD_DATE__ : "";

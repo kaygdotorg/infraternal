@@ -922,11 +922,20 @@ fi
             "default.target"
         };
         // Existing data must be private to the execution uid before any read or write.
+        // Only the root base may also be 0711: that is `infraternal up`'s
+        // /var/lib/infraternal, where others pass through to its 0755 `bin/`
+        // but cannot list it (#263). Nothing makes the rootless base 0711, so it
+        // stays exactly 0700 (J145 P3-4).
+        let private_modes = if mode == InstallMode::Root {
+            "700|711"
+        } else {
+            "700"
+        };
         // The shared routines read their control flags with defaults; a login
         // environment must never preset them (an inherited setup_check=yes would
         // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent=\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] && [ \"$(stat -c '%a' \"$base\")\" = 700 ] || exit 71\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent=\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -1862,6 +1871,45 @@ fn invalid_setup() -> Failure {
 mod tests {
     //! Pins the check-time transfer record and the script compaction rules (#189).
     use super::*;
+
+    #[test]
+    fn only_the_root_base_may_be_traversable() {
+        // J145 P3-4: the rootless base stays exactly 0700.
+        use std::os::unix::fs::PermissionsExt;
+        let home =
+            std::env::temp_dir().join(format!("infraternal-base-modes-{}", std::process::id()));
+        let base = home.join(".local/share/infraternal");
+        std::fs::create_dir_all(&base).unwrap();
+        let script = Installation::unprivileged_script(
+            InstallMode::Rootless,
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            "exit 0",
+        );
+        let run = || {
+            std::process::Command::new("sh")
+                .args(["-c", &script])
+                .env("HOME", &home)
+                .status()
+                .unwrap()
+                .code()
+        };
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(run(), Some(0), "a private rootless base is accepted");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o711)).unwrap();
+        assert_eq!(run(), Some(71), "a 0711 rootless base is refused");
+        let root = Installation::unprivileged_script(
+            InstallMode::Root,
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            "exit 0",
+        );
+        assert!(
+            root.contains("in 700|711) ;;"),
+            "the root base keeps `up`'s 0711"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn transfer_caps_accept_only_the_fixed_record() {

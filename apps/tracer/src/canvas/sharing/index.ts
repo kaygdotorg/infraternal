@@ -4,8 +4,13 @@ import type { Ctx } from "../context";
 import type { IncomingShare, SharingAdapter } from "./adapter";
 import type { SharingController, SharingModule } from "./sharing.on-demand";
 
+/** The sharing actions the canvas calls, re-exported so callers need not import the on-demand module. */
 export type { SharingModule } from "./sharing.on-demand";
 
+/**
+ * Makes the small sharing handle that stays with the canvas. The real sharing code loads when the first share arrives or the person starts
+ * to share; a failed load shows an error toast and is tried again by the next action. The newest incoming snapshot is held until then.
+ */
 export function createSharingHandle(cx: Ctx, adapter: SharingAdapter): SharingModule {
   let real: SharingController | undefined;
   let loading: Promise<SharingController | undefined> | undefined;

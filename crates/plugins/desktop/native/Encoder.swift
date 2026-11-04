@@ -1,15 +1,27 @@
 /// Role: hardware VideoToolbox encoding from owned BGRA or retained IOSurface buffers [D200 V2,D204].
+/// Pictures go in as 32-bit BGRA pixels (one `CVPixelBuffer`) and come out as H.264 or HEVC in Annex B
+/// form (start-code separated NAL units), ready to send to a browser decoder. Hardware encoding is
+/// required; there is no software fallback. Timestamps are `mach_absolute_time` ticks unless a name
+/// ends in `_ns`.
 import CoreMedia
 import CoreVideo
 import Foundation
 import IOSurface
 import VideoToolbox
 
+/// Converts `mach_absolute_time` ticks to nanoseconds using the machine's timebase.
 func nanos(_ ticks: UInt64) -> UInt64 {
     var info = mach_timebase_info_data_t(); mach_timebase_info(&info)
     return UInt64(Double(ticks) * Double(info.numer) / Double(info.denom))
 }
 
+/// Converts one encoded sample from the encoder's length-prefixed form into Annex B.
+///
+/// Each NAL unit gets a 00 00 00 01 start code in place of its 4-byte length. On a keyframe the
+/// codec's parameter sets are put first, each passed through `parameters` (an H.264 SPS is rewritten there for low-delay decoding).
+/// Returns the bytes and whether the sample is a keyframe. Throws `HelperFailure.invalid` for
+/// malformed or oversized data (the 4 MiB limit is the access-unit budget shared with the wire
+/// protocol) and `HelperFailure.unavailable` when the sample cannot be read.
 private func annexB(_ sample: CMSampleBuffer, parameters: LowDelayParameterSets) throws -> (Data, Bool) {
     guard let block = CMSampleBufferGetDataBuffer(sample), let format = CMSampleBufferGetFormatDescription(sample) else { throw HelperFailure.unavailable }
     let size = CMBlockBufferGetDataLength(block)
@@ -59,17 +71,34 @@ private func annexB(_ sample: CMSampleBuffer, parameters: LowDelayParameterSets)
     return (result,key)
 }
 
+/// Hands one frame's result from the encoder's callback thread to the thread waiting for it.
+///
+/// The callback fills in the fields and then signals `done`; the signal is what makes those
+/// writes visible to the waiter, so read the fields only after `completedPayload` returns.
 final class EncodeResult {
+    /// Signaled exactly once when the callback has finished, successfully or not.
     let done = DispatchSemaphore(value:0)
+    /// Rewrites the codec's parameter sets while the callback converts the sample.
     let parameters: LowDelayParameterSets
+    /// When true the callback records timestamps for the opt-in measurement output.
     let measure: Bool
+    /// `mach_absolute_time` when the callback started; only set when `measure` is true.
     var callbackBegan: UInt64 = 0
+    /// `mach_absolute_time` when the callback ended; only set when `measure` is true.
     var callbackFinished: UInt64 = 0
     init(parameters: LowDelayParameterSets, measure: Bool = false) {
         self.parameters = parameters; self.measure = measure
     }
+    /// One byte (1 for a keyframe, 0 otherwise) followed by the Annex B picture. `nil` on failure or drop.
     var payload: Data?
+    /// True when the encoder skipped the frame (rate control). That is not an error.
     var dropped = false
+    /// Waits for the callback and returns its payload.
+    ///
+    /// Returns `nil` when the encoder dropped the frame. Throws `HelperFailure.unavailable` if the
+    /// callback does not run before `timeout` or produced no payload (the caller must then discard
+    /// the session).
+    /// - Parameter timeout: The absolute deadline to wait until.
     func completedPayload(timeout: DispatchTime) throws -> Data? {
         guard done.wait(timeout: timeout) == .success else {
             fputs("ENCODER callback_timeout\n",stderr); throw HelperFailure.unavailable
@@ -82,6 +111,11 @@ final class EncodeResult {
     }
 }
 
+/// The VideoToolbox output callback. It runs on a VideoToolbox thread, once per submitted frame.
+///
+/// Its context is an unretained `EncodeResult`; the submitter keeps that object alive until the
+/// callback has signaled or the session was invalidated. Failures are logged to standard error
+/// and leave `payload` empty rather than throwing.
 let encodedCallback: VTCompressionOutputCallback = { _, context, status, flags, sample in
     guard let context else { return }
     // The submitter retains this object until completion or invalidation.
@@ -103,18 +137,44 @@ let encodedCallback: VTCompressionOutputCallback = { _, context, status, flags, 
     } catch { fputs("ENCODER conversion_error=\(error)\n",stderr) }
 }
 
+/// One hardware video-encoding session for a window or display of a fixed size.
+///
+/// Call `configure` first (again whenever the size, codec or frame rate changes), then `encode`
+/// or `encodeSurface` per picture. Use from one thread at a time. A failure that may leave the
+/// session in an unknown state stops it; the next `configure` rebuilds it.
 final class Encoder {
+    /// Opt-in timing output, enabled by the `INFRATERNAL_DESKTOP_MEASURE` environment variable.
     private let measure = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
+    /// Parameter-set rewriter; reset whenever the session stops.
     private let parameters = LowDelayParameterSets()
+    /// The live compression session, or `nil` when stopped.
     private var session: VTCompressionSession?
+    /// Configured picture width in pixels; 0 before `configure`.
     private(set) var width = 0
+    /// Configured picture height in pixels; 0 before `configure`.
     private(set) var height = 0
 
+    /// Codec of the current session.
     private var codec: CMVideoCodecType = kCMVideoCodecType_H264
+    /// Expected frames per second, used for the per-frame duration.
     private var frameRate = 120
+    /// Bit rate last applied to the session, to avoid re-applying an unchanged one. 0 when unset.
     private var lastBitrate = 0
+    /// Chooses the bit rate from congestion feedback.
     private var adaptation = AdaptiveBitrate(maximum: 500_000)
 
+    /// Creates (or keeps) a low-latency hardware session for the given picture size.
+    ///
+    /// If the session already matches size, codec and frame rate, nothing happens. Otherwise the old
+    /// session is stopped and a new one built with no frame reordering, no periodic keyframes (they
+    /// waste bandwidth on a still desktop) and sRGB colour tagging. Throws `HelperFailure.invalid`
+    /// for sizes outside 2...4096 per side, more than 4 Mi pixels, or a frame rate outside 1...240;
+    /// throws `HelperFailure.unavailable` if no hardware encoder is available.
+    /// - Parameters:
+    ///   - width: Pixels.
+    ///   - height: Pixels.
+    ///   - hevc: Use HEVC instead of H.264.
+    ///   - fps: Expected frames per second.
     func configure(width: Int, height: Int, hevc: Bool = false, fps: Int = 120) throws {
         guard width >= 2, height >= 2, width <= 4096, height <= 4096, width*height <= 4*1024*1024 else { throw HelperFailure.invalid }
         guard (1...240).contains(fps) else { throw HelperFailure.invalid }
@@ -158,13 +218,23 @@ final class Encoder {
         } catch { stop(); throw error }
     }
 
+    /// Sets one session property, logging and throwing `HelperFailure.unavailable` on failure.
     private func set(_ key: CFString, _ value: CFTypeRef) throws {
         guard let session else { throw HelperFailure.unavailable }
         let status = VTSessionSetProperty(session,key:key,value:value)
         if status != noErr { fputs("ENCODER property=\(key) status=\(status)\n",stderr); throw HelperFailure.unavailable }
     }
 
+    /// Reusable input buffer for `encode`; recreated when the size changes.
     private var pixel: CVPixelBuffer?
+    /// Encodes raw pixels sent over the control channel.
+    ///
+    /// `command` needs `capture_ticks` (the capture time as `UInt64` ticks), `sharp` (spend a bigger
+    /// bit budget on a keyframe) and `width`/`height`, which must equal the configured size.
+    /// `pixels` is tightly packed BGRA, `width * height * 4` bytes, top row first. If the encoder
+    /// drops the frame it is submitted once more as a forced keyframe. Returns the same layout as
+    /// `encodeSurface`. Throws `HelperFailure.invalid` for a bad command or size and
+    /// `HelperFailure.unavailable` for encoder failures or repeated drops.
     func encode(_ command: [String: Any], pixels: Data) throws -> Data {
         guard let ticks = command["capture_ticks"] as? UInt64, let sharp = command["sharp"] as? Bool,
               let w = command["width"] as? Int, let h = command["height"] as? Int,
@@ -193,6 +263,17 @@ final class Encoder {
 
     // The caller retains the framework buffer until callback completion. There is
     // no IOSurface ID lookup, base-address lock, pixel copy or cross-process handoff.
+    /// Encodes one picture that is already a pixel buffer, without copying it.
+    ///
+    /// The caller keeps `pixel` alive until this returns. Waits up to two seconds for the encoder; a
+    /// timeout stops the session and throws. Returns an 8-byte big-endian capture time in
+    /// nanoseconds, then the payload byte (1 for a keyframe) and the Annex B picture. Returns `nil`
+    /// when the encoder dropped the frame, so the caller can retry or skip it.
+    /// - Parameters:
+    ///   - pixel: The picture; its size must equal the configured size.
+    ///   - ticks: Capture time in `mach_absolute_time` ticks.
+    ///   - force: Make this frame a keyframe.
+    ///   - bitrate: Average bit rate in bits per second to use from this frame on.
     func encodeSurface(_ pixel: CVPixelBuffer, ticks: UInt64, force: Bool, bitrate: Int) throws -> Data? {
         guard CVPixelBufferGetWidth(pixel) == width, CVPixelBufferGetHeight(pixel) == height, let session else { throw HelperFailure.invalid }
         let begin = mach_absolute_time()
@@ -237,8 +318,10 @@ final class Encoder {
         return withUnsafeBytes(of:&stamp) { Data($0) } + payload
     }
 
+    /// Tells the bit-rate controller that the viewer connection is congested.
     func congestion() { _ = adaptation.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
 
+    /// Ends the session and forgets all buffers and parameter sets. Safe to call when already stopped.
     func stop() {
         if let session { VTCompressionSessionInvalidate(session) }
         session = nil; pixel = nil; lastBitrate = 0; parameters.reset()

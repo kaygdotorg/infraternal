@@ -6,6 +6,10 @@ import { detailsFacts } from "../windows/details-facts";
 import { readExtendedInfo } from "../windows/extended-info";
 import type { SessionInventory } from "./inventory";
 
+/**
+ * Makes the details source for the popover: it reads the host's facts, the connection and the session when the popover is asked for, and keeps
+ * the last snapshot of each window. Only terminal windows have facts.
+ */
 export function createLiveDetails(options: {
   host: { name: string; user?: string };
   connection: MuxConnection;
@@ -89,6 +93,7 @@ export function createLiveDetails(options: {
   };
 }
 
+/** Returns `value` if it is a non-empty string of at most 256 characters without control characters, else `undefined`. */
 function shortText(value: unknown): string | undefined {
   return typeof value === "string"
     && value.length > 0
@@ -98,6 +103,7 @@ function shortText(value: unknown): string | undefined {
     : undefined;
 }
 
+/** Returns `value` if it is a finite number from 0 to `max`, else `undefined`. */
 function boundedNumber(value: unknown, max = Number.MAX_SAFE_INTEGER): number | undefined {
   return typeof value === "number"
     && Number.isFinite(value)
@@ -107,6 +113,7 @@ function boundedNumber(value: unknown, max = Number.MAX_SAFE_INTEGER): number | 
     : undefined;
 }
 
+/** Reads a used/total pair of bytes. Returns `undefined` unless the total is above zero and the used amount is not larger than it. */
 function capacity(value: unknown): HostFactsSnapshot["memory"] {
   if (!value || typeof value !== "object") return undefined;
   const row = value as Record<string, unknown>;

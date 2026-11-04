@@ -12,6 +12,8 @@ use infraternal_plugin_remote::wire_datagrams::NativeDatagrams;
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
+/// One compiled native provider and its stream budget. `capacity` holds one
+/// permit per concurrent stream the provider's definition allows.
 struct Route {
     entry: WireProviderEntry,
     capacity: Arc<Semaphore>,
@@ -20,6 +22,11 @@ struct Route {
 /// connection limit. Inert retained lane clones cannot retain these permits.
 pub(crate) struct Routes(Vec<Route>);
 impl Routes {
+    /// Builds the route table from the compiled provider entries.
+    ///
+    /// Each definition is validated first. Fails with an error if a definition is
+    /// invalid or if two entries share a capability bit or an opening tag, because
+    /// either would make routing ambiguous.
     pub(crate) fn new(entries: Vec<WireProviderEntry>) -> io::Result<Self> {
         let mut routes: Vec<Route> = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -37,6 +44,8 @@ impl Routes {
         }
         Ok(Self(routes))
     }
+    /// The union of every route's capability bits: what this connection can offer
+    /// the peer during negotiation.
     pub(crate) fn capabilities(&self) -> u64 {
         self.0
             .iter()
@@ -44,6 +53,7 @@ impl Routes {
     }
 }
 
+/// Test helper that serves one stream with standby priming switched off.
 #[cfg(test)]
 pub(crate) async fn serve(
     bound: BoundStream,
@@ -153,6 +163,8 @@ pub(crate) async fn serve_negotiated(
             )
         })
 }
+/// Admits a datagram route for this stream's identity, or `None` if the
+/// transport has no datagram budget. Reliable streams still work without it.
 fn datagrams_available(
     datagrams: &Arc<NativeDatagrams>,
     definition: &'static infraternal_plugin_api::streams::WireStreamDef,
@@ -160,6 +172,8 @@ fn datagrams_available(
 ) -> Option<Arc<dyn infraternal_plugin_api::streams::DatagramLane>> {
     datagrams.admit(definition, identity).ok()
 }
+/// Guard that retires the channel on drop unless disarmed (set to `None`) once
+/// the stream has been handed to a provider. Covers every early-error return.
 struct Retire<'a>(Option<&'a NativeChannel>);
 impl Drop for Retire<'_> {
     fn drop(&mut self) {
@@ -168,6 +182,7 @@ impl Drop for Retire<'_> {
         }
     }
 }
+/// Guard that retires the provider's lane when serving ends or is cancelled.
 struct RetireLane(Arc<dyn WireLane>);
 impl Drop for RetireLane {
     fn drop(&mut self) {

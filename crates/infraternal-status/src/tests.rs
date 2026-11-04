@@ -59,6 +59,50 @@ fn manager_completion_handles_an_already_exited_child_and_a_deadline() {
     assert!(started.elapsed() < Duration::from_secs(1));
 }
 
+std::thread_local! {
+    /// Manager program for queries made on this test's thread; production
+    /// always runs `systemctl`. Thread-local, so parallel tests cannot see it.
+    pub(super) static MANAGER_PROGRAM: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A fresh start needs a second observation, and both share one deadline: a
+/// 2.5 s second answer fits a 4 s budget, but a per-observation split (2 s
+/// each) would cut it (#312, #334). This lives in this small unit binary
+/// rather than the CLI matrix, where a cold 470 MB debug binary under gate load
+/// can spend the margin on its own page faults.
+#[test]
+#[cfg(target_os = "linux")]
+fn one_deadline_spans_both_observations_of_a_fresh_start() {
+    use nix::sys::time::TimeValLike;
+    use std::{os::unix::fs::PermissionsExt, time::Duration, time::Instant};
+
+    let fixture = Fixture::new();
+    let seen = fixture.root.join("first-observation");
+    let started = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .unwrap()
+        .num_microseconds();
+    let manager = fixture.root.join("systemctl");
+    fs::write(
+        &manager,
+        format!(
+            "#!/bin/sh\nif [ -e '{seen}' ]; then /bin/sleep 2.5; fi\n: > '{seen}'\nprintf '%s\\n' ActiveState=active SubState=running MainPID=42 NRestarts=0 ExecMainStartTimestampMonotonic={started}\n",
+            seen = seen.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&manager, fs::Permissions::from_mode(0o755)).unwrap();
+    MANAGER_PROGRAM.with(|program| *program.borrow_mut() = Some(manager));
+    let result = super::manager_activity_before(
+        Scope::System,
+        "infraternal-server.service",
+        Instant::now() + Duration::from_secs(4),
+    );
+    MANAGER_PROGRAM.with(|program| *program.borrow_mut() = None);
+    assert!(seen.exists(), "the manager was never asked");
+    assert_eq!(result, Ok(Activity::Active));
+}
+
 struct Fixture {
     root: std::path::PathBuf,
 }

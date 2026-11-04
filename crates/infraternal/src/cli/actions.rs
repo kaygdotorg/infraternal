@@ -143,6 +143,12 @@ fn cli_plugin() -> PluginDefinition {
         ],
     );
     let mut plugin = plugin;
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    {
+        plugin.actions.push(up_action());
+        plugin.actions.push(up_system_action());
+    }
+    #[cfg(not(all(feature = "remote", target_os = "linux")))]
     plugin
         .actions
         .extend(infraternal_plugin_api::placeholders(|| [up_action()]));
@@ -273,23 +279,68 @@ fn status_action() -> ActionDefinition {
 }
 
 fn up_action() -> ActionDefinition {
-    let up_data = JsonSchema::object(
-        [(
-            "started".to_owned(),
-            JsonSchema::array(JsonSchema::string("Component name."), "Started components."),
-        )],
-        ["started".to_owned()],
-    );
-    ActionDefinition::new(
-        ["up"],
-        "Start the configured node components.",
-        "Use this command when this node should bring its configured components online.",
+    let data = JsonSchema::object(
         [
-            "Review the configured components with status.",
-            "Start the node components when lifecycle management is available.",
+            (
+                "server".to_owned(),
+                JsonSchema::string("The joined server."),
+            ),
+            (
+                "hostname".to_owned(),
+                JsonSchema::string("This machine's name."),
+            ),
+            (
+                "mode".to_owned(),
+                JsonSchema::string("The installed service mode."),
+            ),
+            (
+                "key_fingerprint".to_owned(),
+                JsonSchema::string("The approved machine key fingerprint."),
+            ),
+            (
+                "machine_key".to_owned(),
+                JsonSchema::string("The short form of the approved machine key."),
+            ),
+            (
+                "user_code".to_owned(),
+                JsonSchema::string("The browser approval code."),
+            ),
+            (
+                "approval_url".to_owned(),
+                JsonSchema::string("The browser approval link."),
+            ),
+            (
+                "service".to_owned(),
+                JsonSchema::string("The installed service name."),
+            ),
+            (
+                "status".to_owned(),
+                JsonSchema::string("The observed service status."),
+            ),
+            (
+                "path".to_owned(),
+                JsonSchema::string("The installed command path."),
+            ),
         ],
-        JsonSchema::empty_object(),
-        JsonSchema::command_result_with(up_data),
+        [],
+    );
+    let action = ActionDefinition::new(
+        ["up"],
+        "Add this Linux machine to a server.",
+        "Use this command on a Linux machine that should join an existing server.",
+        [
+            "Approve this machine with a fresh passkey in the browser before the request expires.",
+            "This command installs the Linux system service with one sudo prompt.",
+            "After approval, it enrolls this machine over HTTPS and reports service status.",
+        ],
+        JsonSchema::object(
+            [(
+                "server".to_owned(),
+                JsonSchema::string("HTTPS origin of the server."),
+            )],
+            ["server".to_owned()],
+        ),
+        JsonSchema::command_result_with(data),
         ActionContract::new(
             ActionTarget::Global,
             ActionEffect::Write,
@@ -297,11 +348,39 @@ fn up_action() -> ActionDefinition {
             DryRun::Unsupported,
         ),
     )
-    .not_available_yet()
+    .with_cli_handler(CliHandler::Up)
+    .with_cli_positionals(["server"])
     .with_example(
-        "up",
-        "Request startup of this node's configured components.",
+        "up https://infra.example.org",
+        "Add this machine to the server.",
+    );
+    #[cfg(not(all(feature = "remote", target_os = "linux")))]
+    let action = action.not_available_yet();
+    action
+}
+
+#[cfg(all(feature = "remote", target_os = "linux"))]
+fn up_system_action() -> ActionDefinition {
+    ActionDefinition::new(
+        ["__up-system"],
+        "Run the elevated half of a machine join.",
+        "Use this internal command only when infraternal starts system enrollment through sudo.",
+        ["Keep the server origin public and pass enrollment secrets only through memory or private input."],
+        JsonSchema::object(
+            [("server".to_owned(), JsonSchema::string("HTTPS origin of the server."))],
+            ["server".to_owned()],
+        ),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Write,
+            "cli.up",
+            DryRun::Unsupported,
+        ),
     )
+    .with_cli_handler(CliHandler::UpSystem)
+    .with_cli_positionals(["server"])
+    .hidden()
 }
 
 fn skill_action() -> ActionDefinition {
@@ -995,8 +1074,14 @@ mod default_build_tests {
         let registry = registry().expect("registry");
         assert!(registry.actions().all(|a| a.action.availability
             != infraternal_plugin_api::ActionAvailability::NotAvailableYet),);
+        #[cfg(all(feature = "remote", target_os = "linux"))]
+        assert!(registry.find(&["up"]).is_some(), "Linux remote up is built");
+        #[cfg(not(all(feature = "remote", target_os = "linux")))]
+        assert!(
+            registry.find(&["up"]).is_none(),
+            "up is not built on this target"
+        );
         let commands: &[&[&str]] = &[
-            &["up"],
             &["relay", "up"],
             &["mesh", "list"],
             #[cfg(not(feature = "plugin-proxy"))]

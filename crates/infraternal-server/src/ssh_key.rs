@@ -45,6 +45,7 @@ impl SshKeyMaterial {
             .map_err(|_| SshKeyError)
     }
 
+    /// Raw 32-byte Ed25519 public key.
     fn public(&self) -> Result<Vec<u8>, SshKeyError> {
         self.0.raw_public_key().map_err(|_| SshKeyError)
     }
@@ -93,8 +94,11 @@ pub trait SshKeySource: Send + Sync {
 /// Settings may copy only this public half while the private key is locked.
 #[derive(Clone, Serialize)]
 pub struct PublicSshKey {
+    /// The public key in `ssh-ed25519 <base64> infraternal-server` form, safe to paste into an authorized-keys file.
     pub public_key: String,
+    /// SHA-256 fingerprint of the key, shown as `SHA256:<base64>`.
     pub fingerprint: String,
+    /// True while the private half is locked and cannot sign.
     pub locked: bool,
 }
 

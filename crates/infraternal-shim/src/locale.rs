@@ -10,6 +10,12 @@ use std::{
 // session creation does not repeat filesystem reads or locale inventory work.
 static HOST_LANG: OnceLock<Option<OsString>> = OnceLock::new();
 
+/// The locale variables (`LANG` and every `LC_*`) to give a new session, as
+/// name/value pairs.
+///
+/// Inherited values are passed through as they are. If the environment has no
+/// `LANG`, the host's configured language is added, but only when that locale is
+/// installed. The host lookup runs once per process and its result is reused.
 pub(super) fn environment() -> Vec<(OsString, OsString)> {
     let inherited = std::env::vars_os()
         .filter(|(name, _)| is_locale_name(name))
@@ -28,22 +34,28 @@ pub(super) fn environment() -> Vec<(OsString, OsString)> {
     variables
 }
 
+/// True for `LANG` and any name starting with `LC_`.
 fn is_locale_name(name: &OsStr) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
     is_lang_name(name) || name.as_bytes().starts_with(b"LC_")
 }
 
+/// True only for the exact name `LANG`.
 fn is_lang_name(name: &OsStr) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
     name.as_bytes() == b"LANG"
 }
 
+/// The best installed language for the host, or `None`. Reads the system's
+/// locale configuration and checks each candidate against the installed locales.
 fn host_language() -> Option<String> {
     let files = system_locale_files();
     let contents = files.iter().map(String::as_str).collect::<Vec<_>>();
     select_language(&contents, locale_is_installed)
 }
 
+/// Contents of the system locale configuration files that exist
+/// (`/etc/default/locale` and `/etc/locale.conf`), in that order.
 #[cfg(target_os = "linux")]
 fn system_locale_files() -> Vec<String> {
     ["/etc/default/locale", "/etc/locale.conf"]
@@ -54,6 +66,9 @@ fn system_locale_files() -> Vec<String> {
 
 // macOS stores the user's region locale in AppleLocale. Query it only when the
 // launch context supplied no LANG; inherited LC_* overrides remain untouched.
+/// One synthetic `LANG=<locale>` line built from the user's `AppleLocale`
+/// setting, or nothing if it cannot be read. It is only asked for when no `LANG`
+/// was inherited.
 #[cfg(target_os = "macos")]
 fn system_locale_files() -> Vec<String> {
     let Ok(output) = Command::new("/usr/bin/defaults")
@@ -79,11 +94,14 @@ fn system_locale_files() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Other platforms have no locale configuration to read.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn system_locale_files() -> Vec<String> {
     Vec::new()
 }
 
+/// Picks the first `LANG` value in `configs` that `installed` accepts. If none
+/// qualifies, falls back to `C.UTF-8` when it is installed; otherwise `None`.
 fn select_language(configs: &[&str], mut installed: impl FnMut(&str) -> bool) -> Option<String> {
     for config in configs {
         for locale in configured_languages(config) {
@@ -95,6 +113,8 @@ fn select_language(configs: &[&str], mut installed: impl FnMut(&str) -> bool) ->
     installed("C.UTF-8").then(|| "C.UTF-8".to_owned())
 }
 
+/// Yields every `LANG=value` assignment found in `contents`, skipping lines
+/// whose value is not a plain, safe locale name (see `locale_value`).
 fn configured_languages(contents: &str) -> impl Iterator<Item = String> + '_ {
     contents.lines().filter_map(|line| {
         let (name, value) = line.split_once('=')?;
@@ -104,6 +124,10 @@ fn configured_languages(contents: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
+/// Cleans one assignment value: trims, removes matching quotes and a trailing
+/// `#` comment. Returns `None` when it is empty, has stray text after a closing
+/// quote, or contains characters other than letters, digits and `._@+-`, so
+/// nothing odd is ever passed to a shell's environment.
 fn locale_value(value: &str) -> Option<String> {
     let value = value.trim();
     let value = if let Some(quote) = value
@@ -134,6 +158,8 @@ fn locale_value(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+/// True if `locale` is installed, comparing without case or punctuation. The
+/// installed list is read once per process.
 fn locale_is_installed(locale: &str) -> bool {
     static INSTALLED: OnceLock<Option<HashSet<String>>> = OnceLock::new();
     INSTALLED
@@ -142,6 +168,8 @@ fn locale_is_installed(locale: &str) -> bool {
         .is_some_and(|locales| locales.contains(&normalize_locale(locale)))
 }
 
+/// The set of normalized names printed by `locale -a`, run with a cleared
+/// environment, or `None` if the command is missing or fails.
 fn installed_locales() -> Option<HashSet<String>> {
     let output = Command::new("/usr/bin/locale")
         .arg("-a")
@@ -164,6 +192,8 @@ fn installed_locales() -> Option<HashSet<String>> {
     )
 }
 
+/// Lowercases and strips everything but letters and digits, so `C.UTF-8` and
+/// `C.utf8` compare equal.
 fn normalize_locale(locale: &str) -> String {
     // `locale -a` commonly spells C.UTF-8 as C.utf8; punctuation and case do
     // not distinguish those installed aliases from the configured spelling.
@@ -174,6 +204,8 @@ fn normalize_locale(locale: &str) -> String {
         .collect()
 }
 
+/// Test helper: the same decision as `environment`, with the inherited
+/// variables, configuration text and installed check supplied by the caller.
 #[cfg(test)]
 fn select_environment(
     mut inherited: Vec<(OsString, OsString)>,
@@ -189,6 +221,8 @@ fn select_environment(
     inherited
 }
 
+/// Turns a macOS locale identifier such as `en_US` into a POSIX one, adding
+/// `.UTF-8` when it has no encoding. `None` if the identifier is not a safe name.
 #[cfg(any(target_os = "macos", test))]
 fn macos_locale_to_posix(identifier: &str) -> Option<String> {
     let locale = locale_value(identifier)?;

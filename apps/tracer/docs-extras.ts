@@ -25,22 +25,26 @@ import { ICON_ALERT, ICON_HELP, ICON_INFO } from "../../packages/ui/src/icons";
 /** The most characters a quick-facts block may hold: a sentence or two, because the "?" preview shows it whole. */
 export const FACTS_MAX = 320;
 
+/** The plain text of an HTML fragment: tags removed, common entities decoded and spaces collapsed. */
 const plain = (html: string): string => html.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0*39;/g, "'").replace(/\s+/g, " ").trim();
 
 /** Pieces of HTML that are code, which no reading aid may touch: `[^1]` in a code span is the code's own text. */
 const CODE_PIECES = /(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/;
+/** Applies `change` to the parts of `html` that are not code and returns the whole, so reading aids never rewrite a code sample. */
 function outsideCode(html: string, change: (text: string) => string): string {
   return html.split(CODE_PIECES).map((piece, i) => (i % 2 === 1 ? piece : change(piece))).join("");
 }
 
 // ---- callouts, reasoning and quick facts -----------------------------------------------------------------------------------------
 
+/** Inner SVG markup (24 grid, stroked) for the callout kinds, used by {@link KINDS}. */
 const ICON_WARN = `<path d="M12 4.5l8.5 14.5h-17z"/><path d="M12 10.5v3.5M12 16.8v.01"/>`;
 const ICON_BULB = `<path d="M9 18h6M10 21h4"/><path d="M12 3.5a5.5 5.5 0 0 0-3.2 10c.5.4.7.9.7 1.5h5c0-.6.2-1.1.7-1.5a5.5 5.5 0 0 0-3.2-10z"/>`;
 /** A bolt, for the quick facts: the short version of a section. */
 const ICON_BOLT = `<path d="M13 3.5L5.5 13.5H11l-1 7 7.5-10H12z"/>`;
 const ICON_STOP = `<path d="M8.2 3.5h7.6l4.7 4.7v7.6l-4.7 4.7H8.2l-4.7-4.7V8.2z"/><path d="M12 8v5M12 16.2v.01"/>`;
 
+/** A callout kind: the title shown on the callout and its icon. */
 interface Kind { title: string; icon: string }
 /** The alert kinds a page may use; the key is the marker in capitals, as GitHub writes it. */
 const KINDS: Record<string, Kind> = {
@@ -53,6 +57,7 @@ const KINDS: Record<string, Kind> = {
   WHY: { title: "Why it works this way", icon: ICON_HELP },
 };
 
+/** Wraps inner SVG markup in a decorative 24 by 24 icon. */
 const iconSvg = (paths: string): string => `<svg viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
 
 /**
@@ -121,6 +126,7 @@ export function quotes(html: string): string {
 
 // ---- citations -------------------------------------------------------------------------------------------------------------------
 
+/** The "back to the text" arrow of a citation. */
 const BACK = iconSvg(`<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>`);
 
 /**

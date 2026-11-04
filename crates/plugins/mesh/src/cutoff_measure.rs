@@ -1,8 +1,19 @@
-//! Opt-in cutoff stage diagnostics for locked-VM benchmarks (`INFRATERNAL_CUTOFF_MEASURE=1`); shipping builds retain no timer or logger [242,256].
+//! Opt-in timing of the stages of a policy cutoff, for benchmarks on locked VMs [242,256].
+//!
+//! Set `INFRATERNAL_CUTOFF_MEASURE=1` to turn it on. Otherwise nothing is
+//! timed and nothing is printed, so shipping builds carry no timer or logger.
+//! Output goes to standard error, one line per stage, and contains only public
+//! values: node number, policy version, a fixed stage name and microseconds.
 use crate::policy::model::NodeId;
 use std::{io::Write as _, time::Instant};
 
-/// A scoped measurement records only public node/revision coordinates and a static stage label.
+/// Times one stage of applying a policy version to one node.
+///
+/// Create it when the stage starts and let it drop when the stage ends. If
+/// measuring is enabled, dropping it prints
+/// `CUTOFF_STAGE node=<n> version=<v> phase=<name> us=<microseconds>` to
+/// standard error. It records only the node number, version and a static
+/// stage label, never any data.
 pub(crate) struct Stage {
     node: NodeId,
     version: u64,
@@ -10,6 +21,8 @@ pub(crate) struct Stage {
     started: Option<Instant>,
 }
 impl Stage {
+    /// Starts timing `phase` for `node` at policy `version`. Does nothing
+    /// unless `INFRATERNAL_CUTOFF_MEASURE` is exactly `1`.
     pub(crate) fn new(node: NodeId, version: u64, phase: &'static str) -> Self {
         Self {
             node,
@@ -38,7 +51,11 @@ impl Drop for Stage {
     }
 }
 
-/// Cross-process clock shared with packet timestamps; diagnostic failures never change enforcement.
+/// The current `CLOCK_MONOTONIC` time in nanoseconds, so stage timings can be
+/// compared with packet timestamps taken by other processes.
+///
+/// Returns `None` when measuring is off or the clock cannot be read. A failure
+/// here only loses a diagnostic; it never changes what is enforced.
 #[cfg(feature = "agent")]
 pub(crate) fn monotonic_ns() -> Option<u64> {
     if std::env::var_os("INFRATERNAL_CUTOFF_MEASURE").as_deref() != Some(std::ffi::OsStr::new("1"))

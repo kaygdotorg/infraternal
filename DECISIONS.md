@@ -3768,3 +3768,227 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        as a new host with a new key and retires the old infraternal agent
        (#305). The owner treats the failing re-add of `code` as a bug ("bug
        is not fixed?"), so this path is built.
+336. **Morning answers (owner, 2026-11-04):**
+     - Traefik containment (#281, docs/design/proxy-containment.md): a
+       cgroup per Traefik child now, measured first: "let's do it".
+     - GotaTun keeps ring (D289): "keep ring and optimise".
+     - Each passkey tap is bound to the one action shown on screen, not to
+       "any tap in the last 5 minutes" (#303): "agreed".
+     - Toasts stack the way svelte-sonner stacks, rather than replacing one
+       another: "the calternal thread took that base of svelte-sonner and
+       rewrote it to be smaller and to its needs. it behaves the same way
+       though so stack them." Errors are never hidden by later info toasts.
+     - The rootless refusal message gets shorter, and people need UI to
+       choose which account they log in as on each host: "i agree but we
+       also adjacently need some UI around what user one prefers on hosts
+       as I wouldnt want to login as root all the time".
+337. **Taking over machines from another server; more morning answers
+     (owner, 2026-11-04, #305, #265, #263, #303):**
+     - Take over a machine that belongs to another server only when its old
+       install is not actually working: "we should allow takeovers if the
+       node is no longer connected, is in a broken state, any indicator
+       that it's not actually working - allow take over. WE should not
+       allow takeovers if there are actual terminals running + connected to
+       the previous server, in which case we need to design some UI and
+       machinery around proving that the old server is mine too."
+     - The set-aside old install is not kept: "None, delete it."
+     - Open terminals on a replaced install: "can't they just be
+       inherited?" They are adopted by the new infraternal agent rather than
+       ended, wherever that is safe.
+     - Mac shells join the person's session only for a screen or VNC
+       login, because macOS unlocks the keychain only then: "yeah sadly, I
+       think vnc login/screen login is the way to go".
+     - The Mac node letting the coordinator reach every port until slice 3
+       is accepted: "yeah okay temporarily is fine then".
+     - Many machines at once belong to setup keys or API keys that bring a
+       machine up without approval: "this sort of thing is better suited
+       for the "setup keys" feature / api keys feature where we can bring
+       them up with an API key and they don't need approval anymore."
+     - Keys from before D333 end within 24 h at upgrade ("i am the only
+       user so no problem"), and a key's lifetime is a hard end ("yes").
+338. **Appearance presets round 3 (owner, 2026-11-04, #323; amends D322):**
+     - The built-in presets become Solid 100% tint, 0% blur; Tinted 75%
+       tint, 25% blur; Frosted 50% tint, 50% blur ("let's change our
+       default presets to these values").
+     - Order of the Appearance controls: "UI Size, Colour (please use
+       singular or plural consistenly), Backgrounds (I feel like we should
+       give the user options in Solid too like we do in Gradients), Tint,
+       Blur, Grain, Fonts".
+     - Colour rows align vertically. "instead of light/dark, just show the
+       light/dark colours in two circles and the user can select any one."
+     - "if the window is wide enough Tint Blur Grain should appear in 3
+       columns rather than rows with their sliders under them. because if
+       the window is very wide, the slider will be evry wide too".
+     - Gradient and background swatches drop their text labels: "the names
+       for colours can be displayed in warm tooltips, we just need a subtle
+       way to indicate which one is custom."
+     - The preview card's first terminal line must not be clipped at the
+       bottom.
+339. **More answers (owner, 2026-11-04):**
+     - A root install requested through MCP does not run until the owner
+       approves it. The server answers the AI agent with "approval needed",
+       a short code and a link. An Inbox item asks for a passkey tap bound
+       to that one install, the agent waits, and the request expires after
+       about 10 minutes: "this is the correct way", "the flow is great".
+     - Removing a host in the browser falls under the 15-minute admin
+       window (D333): "yes it should".
+     - Machine names: always the reported hostname. Only an empty name or
+       `localhost` falls back to `<os>-<first 6 characters of the id>`.
+       Collisions get a short suffix (`raspberrypi-2`). The DNS name comes as
+       soon as there is a real name: "agreed".
+     - Person-to-machine visibility rules belong to the EE edition: "yes
+       person to machine rules is ee area."
+340. **More answers (owner, 2026-11-04):**
+     - The Mac enforces access rules in infraternal's own userspace packet
+       path, inside GotaTun's packet flow, not with pf. It is scheduled right
+       after the Mac mesh node merges: "yes".
+     - The sign-in pool leftovers from #263 get one follow-up after
+       `infraternal up` merges: "agree".
+     - MCP progress for add-host and MCP over HTTP come after #303 and the
+       adapter merge, progress first: "agree".
+     - The website and docs, and the enterprise repository
+       (https://git.kayg.org/kayg/infraternal-enterprise), are grilled
+       later.
+     - The GotaTun fork is pushed to both GitHub and
+       https://git.kayg.org/kayg/gotatun-fork instead of relying on a pull
+       mirror: "why not push to both remotes?"
+     - The kernel mesh path gets the same ownership check GotaTun got:
+       "sure".
+341. **Appearance round 4 (owner, 2026-11-04, #323; amends D322, D338):**
+     - Presets are called Themes: "can it be called "Themes" instead of
+       Presets?" Colour keeps its name.
+     - Tint, Blur and Grain sit under one heading: "put the 3 sliders
+       tint / grain / glur under a "Windows" heading".
+     - Grain lies on the windows, not on the canvas background: "grain
+       should be applied to the window, not the background?"
+     - The grain scale is tamed the way blur's is (0 px to 24 px): "how
+       much is 100% grain btw? it looks like too much, can our slider be
+       tamed a little like we did with blur 0 being 0 and 100% being
+       24px?" 0% stays none; the job proposes the new maximum with
+       captures.
+     - A new theme copies the selected one and starts from there
+       (confirmed).
+     - Boot machines (#156) stay deferred, and their UI is grilled later:
+       "I would like to grill the UI when we get close to defininig /
+       building the architecture."
+342. **App windows on the canvas, and joining with keys (owner grill,
+     2026-11-04, #146, D337):**
+     - **The card:** an app window keeps the terminal's card, but has its own
+       controls at the top right: "that's fine but what i am saying we need
+       controls for app windows which are obviously different than the
+       terminal ones at the top right". Which controls is a follow-up
+       question.
+     - **Shape:** bars in the window's background colour, never cropping
+       ("bars over cropping yes").
+     - **A closed app window** keeps its card with "<App> was closed" and a
+       Close window button; the layout never changes on its own ("agreed").
+     - **Control** shows in the pill, not over the picture ("agreed").
+     - **The first click** selects the window; the second reaches the app,
+       as for terminals ("agreed").
+     - **Phone:** a tap is a click on the machine and a long press is a
+       right-click ("agreed").
+     - **Joining with keys:** no separate key type. API keys get scopes, and
+       a join permission does the job: "we shouldn't add more types, we can
+       rather scope API keys and a join permission gets us the same kinda
+       security?"
+     - **The join permission's properties:** "this should be very
+       customisable / the "join" permission should have several properties
+       like the ones you said: reusable, expiry, along with user to assign,
+       tags to assign / of course access wil be determined by our grants".
+       One-time by default with a 24 h expiry; reusable is a choice
+       ("agreed and unlimited expiry keys are allowed"). Machines can be
+       marked ephemeral, removed after a while offline ("yes").
+     - **Creating** such a key needs a passkey tap bound to its exact
+       settings. **Revoking** it stops new joins; machines that joined stay,
+       with a separate action to remove them ("agreed").
+343. **App-window controls, keys on the command line, key lists (owner,
+     2026-11-04, #146; extends D342):**
+     - **Clipboard is automatic both ways:** "pasteing my clipboard to the
+       mac should be automatic and if i am in the screen copying something,
+       copying that to my browser/app should be atuomatic too".
+     - **Top-right controls:** Send keys ("this is fine") and Bring to front
+       on the machine ("also fine"). For the others: "the others need
+       inspiration from screens 5 and/or jump desktop".
+     - **1:1 or fit, reconnect and frame rate are settings, not controls:**
+       "these feel like a different toolbar/pill somewhere that aren't about
+       controls as much as htey are about settings".
+     - **Several windows of one app:** one row per window in the picker
+       ("agreed").
+     - **A key on the command line:** `--setup-key=env:NAME`,
+       `--setup-key=file:PATH` and `--setup-key=-` (stdin), never the literal
+       key: "this format is way better than i what i suggested yeah".
+     - **Any API key may have no expiry**, not only join keys ("this is
+       correct", on "any key may have no expiry").
+     - **Keys live in one list under Settings › Access**, every key with
+       scope chips, uses, the last machine that joined, its expiry and
+       revoke ("agreed").
+344. **Mesh SSH slice 1 (owner, 2026-11-04, #221; extends D235, D319):**
+     - SSH certificates are signed with the existing CA key, not a second
+       key with its own unlock ("correct").
+     - The server pushes login-access state to each machine, so logins keep
+       working while the server is unreachable ("agreed").
+     - In slice 1, an ordinary account on a machine the person added acts
+       as that person: "if i added it yes".
+     - Mesh SSH stays off by default until its security review ("correct").
+345. **Doc comments on all code are the documentation (owner, 2026-11-04;
+     extends the CLAUDE.md rule "Code comments are the documentation"):**
+     "our comments in the code should be self-explanatory. They should be
+     very user-friendly in the sense that they can be easily inferred, and
+     we should make it a rule that every piece of code written also means
+     that comment, documentation style comment is written there. And we
+     don't count the number of lines, code lines, when it comes to
+     documentation. So the lines of code is only for actual code, not for
+     the documentation above, and we can use that to create documentation
+     directly. I think that would be much nicer than having to write
+     documentation after the fact. But we still need a structure. So I
+     would say that you write the documentation now, I mean, we can decide
+     the structure later and repurpose existing documentation."
+     - Every module, type, function and exported symbol gets a
+       documentation-style comment in plain, friendly language: what it is
+       for and how to use it, plus the non-obvious invariants and reasons.
+     - Line counts and size measures cover code only, never comments. The
+       shipped JS and binaries already drop comments, so they cost nothing
+       at runtime.
+     - The documentation will be generated from these comments. Its
+       structure is decided later, reusing the existing docs; the comments
+       are written now.
+346. **GotaTun becomes the default now, to find bugs by using it (owner,
+     2026-11-04; amends D332's switch rule):** "if gotatun is stable, we
+     should switch our app to it already because we will find more bugs that
+     way", then: "is not that stability replaces perf. i am the only user and
+     using gotatun inside the app right now and basing everything on top of it
+     uncovers more bugs that we need to fix".
+     - GotaTun becomes the default Linux engine as soon as the integration
+       branch merges. The merge still needs its final security re-review and
+       a green `scripts/verify fast` (CLAUDE.md priority 2). It does not wait
+       for performance parity or for an extra soak.
+     - The kernel path stays an explicit opt-out per node.
+     - Performance is unchanged as a goal (D331, D332): reaching throughput
+       and loss-aware p99 parity with kernel WireGuard is still the target,
+       still measured, and still drives the latency work. Bugs found by
+       running on GotaTun are fixed as they appear.
+347. **Open questions, 2026-11-04 evening (owner):**
+     - **No more build compute:** "no more compute sadly". Work stays
+       within the current build slots (compute01 4, dev-02 2); use them
+       better instead.
+     - **Mesh SSH login identity (amends D344):** "agreed with your rec".
+       Only the account the machine was added with acts as the person. Other
+       ordinary accounts on that machine get only what grants give them.
+     - **Migration file names:** "yes pls anything to simplify and get
+       moving faster". New migrations are named by timestamp, so parallel
+       branches can't collide (#344 Q2). Existing numbered migrations stay.
+     - **GotaTun latency:** "p99 first". Loaded p99 is the latency target.
+       Median interactive latency isn't a separate goal for now.
+     - **API keys with no expiry (D343):** "nah let's not make it
+       complicated". "Never" means never: no inactivity end either.
+348. **GotaTun benchmark CPU pinning (owner, 2026-11-04; amends D332's
+     measurement setup):** "yeah can you pin it software wise? 2 cpus per
+     test in parallel is fine as long as no interference messes up the
+     benchmark". On the 4-vCPU perf VM, each side of a test (its infraternal
+     agent or engine, its load generator and its probe) is pinned in
+     software to its own 2 CPUs, through cpusets, for every case, kernel
+     WireGuard included, so the comparison stays fair. Before a pinned hold
+     counts, the setup proves there is no interference: no other runnable
+     work on those CPUs during the run, and run-to-run spread no worse than
+     the unpinned harness's. Earlier unpinned numbers stay valid for
+     history, but aren't compared directly with pinned ones.

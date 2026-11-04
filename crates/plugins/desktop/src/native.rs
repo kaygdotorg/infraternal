@@ -1,4 +1,24 @@
 //! Owns the `LaunchServices` companion channel with bounded I/O and process cleanup [D203,#146].
+//!
+//! The helper does not touch the screen itself. A small signed companion app
+//! does, because macOS privacy grants (screen recording, accessibility) belong
+//! to an installed app bundle. [`Native`] starts that companion and talks to it
+//! with the framed messages from [`crate::protocol`].
+//!
+//! On macOS the companion is started through `LaunchServices` (`open`), so it
+//! runs under the bundle's own identity. It connects back over a private Unix
+//! socket in a fresh 0700 directory and writes its pid to a private file; the
+//! pid is tracked with a kernel exit watch and double-checked against the
+//! process's command line before it is ever signalled, so a recycled pid is
+//! never killed. In unit tests (and on other systems) a plain child process
+//! with piped stdin and stdout stands in.
+//!
+//! Every exchange is bounded by a deadline and by a cancellation flag. The
+//! private protocol has no request ids, so after any failed exchange the
+//! companion is retired rather than reused; a late reply could otherwise
+//! answer the wrong command. Retiring first closes the channel, which lets the
+//! companion restore any window geometry it changed, and only then escalates to
+//! signals.
 use crate::protocol::{self, Kind};
 use std::{
     fs,
@@ -33,11 +53,18 @@ use std::os::unix::net::UnixListener;
 #[cfg(any(not(target_os = "macos"), test))]
 use std::process::ChildStdin;
 
+/// One message from the companion (its kind and body), or the error that ended
+/// the exchange.
 type Reply = io::Result<(Kind, Vec<u8>)>;
 
+/// The write side of the companion channel, abstracting a pipe (tests) and a
+/// Unix socket (macOS) so the deadline-aware writer works with both.
 trait CompanionInput: Write + Send {
+    /// File descriptor to poll for writability.
     fn poll_fd(&self) -> BorrowedFd<'_>;
+    /// Writes without ever blocking; returns `WouldBlock` when the channel is full.
     fn write_nonblocking(&mut self, bytes: &[u8]) -> io::Result<usize>;
+    /// Signals end-of-input to the companion, which makes it restore and exit.
     fn close_write(&self);
 }
 
@@ -69,23 +96,34 @@ impl CompanionInput for UnixStream {
     }
 }
 
+/// The processes behind a running companion.
 struct CompanionLaunch {
+    /// The process we spawned: the companion itself in tests, or the `open`
+    /// waiter on macOS (which is not the companion and exits on its own).
     launcher: Child,
+    /// The separately launched companion process (macOS `LaunchServices` only).
     #[cfg(target_os = "macos")]
     companion: Option<TrackedCompanion>,
 }
 
+/// A companion process started by `LaunchServices`, watched by pid with a
+/// `kqueue` exit event and only signalled while it still looks like ours.
 #[cfg(target_os = "macos")]
 struct TrackedCompanion {
     pid: nix::unistd::Pid,
+    /// Private socket path the companion was told to connect to.
     socket_path: PathBuf,
+    /// Private pid file the companion was told to write.
     pid_path: PathBuf,
+    /// Delivers the process-exit event.
     exit_queue: Kqueue,
     exited: bool,
 }
 
 #[cfg(target_os = "macos")]
 impl TrackedCompanion {
+    /// Starts watching `pid` for exit. The watch is registered before returning
+    /// so an exit can never be missed. Fails if the process is already gone.
     fn new(pid: u32, socket_path: &Path, pid_path: &Path) -> io::Result<Self> {
         let pid = i32::try_from(pid)
             .map_err(|_| io::Error::other("Desktop companion launch identity is invalid."))?;
@@ -115,6 +153,9 @@ impl TrackedCompanion {
         Ok(tracked)
     }
 
+    /// True if the tracked pid still belongs to our companion: running as this
+    /// user, with this launch's socket and pid-file paths on its command line.
+    ///
     /// The private per-launch socket and PID-file arguments identify this exact
     /// same-bundle process if its numeric PID is later reused.
     fn matches_current_launch(&self) -> io::Result<bool> {
@@ -141,6 +182,7 @@ impl TrackedCompanion {
             && has_process_argument(command, "--launch-pid-file", &self.pid_path))
     }
 
+    /// Waits up to `timeout` for the process to exit. Returns whether it has.
     fn wait_for_exit(&mut self, timeout: Duration) -> io::Result<bool> {
         if self.exited {
             return Ok(true);
@@ -168,6 +210,8 @@ impl TrackedCompanion {
         }
     }
 
+    /// Sends `signal` only if the pid still matches this launch. Returns whether
+    /// a signal was delivered.
     fn signal_if_current(&self, signal: nix::sys::signal::Signal) -> io::Result<bool> {
         if !self.matches_current_launch()? {
             return Ok(false);
@@ -180,6 +224,8 @@ impl TrackedCompanion {
     }
 }
 
+/// True if `command` (a process command line) contains the argument `name`
+/// immediately followed by `value`.
 #[cfg(target_os = "macos")]
 fn has_process_argument(command: &str, name: &str, value: &Path) -> bool {
     let Some(value) = value.to_str() else {
@@ -194,6 +240,8 @@ fn has_process_argument(command: &str, name: &str, value: &Path) -> bool {
     false
 }
 
+/// A one-shot `kqueue` event that fires when process `pid` exits. A `pid` of 0
+/// makes an empty slot for receiving results.
 #[cfg(target_os = "macos")]
 fn process_exit_event(pid: usize) -> KEvent {
     KEvent::new(
@@ -206,6 +254,7 @@ fn process_exit_event(pid: usize) -> KEvent {
     )
 }
 
+/// A zero timeout, which makes `kevent` poll without waiting.
 #[cfg(target_os = "macos")]
 fn zero_timeout() -> nix::libc::timespec {
     nix::libc::timespec {
@@ -214,6 +263,7 @@ fn zero_timeout() -> nix::libc::timespec {
     }
 }
 
+/// Converts a `Duration` to a C `timespec`, saturating on overflow.
 #[cfg(target_os = "macos")]
 fn duration_timespec(duration: Duration) -> nix::libc::timespec {
     nix::libc::timespec {
@@ -222,17 +272,23 @@ fn duration_timespec(duration: Duration) -> nix::libc::timespec {
     }
 }
 
+/// A freshly started companion and its channel, before [`Native`] wraps them.
 struct SpawnedCompanion {
     launch: CompanionLaunch,
     input: Box<dyn CompanionInput>,
     output: Box<dyn Read + Send>,
+    /// A second handle to the socket, used to unblock the reader thread
+    /// (shutting it down makes a pending read return).
     reader_interrupt: Option<UnixStream>,
+    /// Directory holding the launch socket and pid file; deleted on drop.
     private_directory: Option<PrivateDirectory>,
 }
 
+/// A directory (mode 0700, under `/tmp`) that is deleted when dropped.
 struct PrivateDirectory(PathBuf);
 
 impl PrivateDirectory {
+    /// Makes a unique `/tmp/it-c-XXXXXX` directory readable only by this user.
     #[cfg(target_os = "macos")]
     fn create() -> io::Result<Self> {
         let path = nix::unistd::mkdtemp("/tmp/it-c-XXXXXX")?;
@@ -250,6 +306,9 @@ impl Drop for PrivateDirectory {
     }
 }
 
+/// Starts `executable` as a plain child with piped stdin/stdout (test and
+/// non-macOS path). `encoder` and `surface` choose the companion's mode. The
+/// stdin pipe is made non-blocking so writes can honour deadlines.
 #[cfg(any(not(target_os = "macos"), test))]
 fn spawn_direct(executable: &Path, encoder: bool, surface: bool) -> io::Result<SpawnedCompanion> {
     // Scripted pipe companions are used by crate tests only. Production macOS
@@ -336,6 +395,10 @@ pub fn companion_app_bundle(executable: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
+/// Runs the companion once with `--check-permissions` and returns its JSON
+/// answer: exactly two boolean fields, `device_control` and `screen_recording`,
+/// telling which macOS privacy permissions are granted.
+///
 /// # Errors
 /// Returns an error if `LaunchServices` fails, the companion exits, or its privacy state is invalid.
 pub fn check_permissions(executable: &Path) -> io::Result<Vec<u8>> {
@@ -385,6 +448,9 @@ pub fn check_permissions(executable: &Path) -> io::Result<Vec<u8>> {
     Ok(output)
 }
 
+/// Reads the pid the companion wrote to its pid file. `None` means not published
+/// yet (missing or incomplete). A file that is not private to this user is an
+/// error, since its contents cannot be trusted.
 #[cfg(all(target_os = "macos", not(test)))]
 fn read_companion_pid(path: &Path) -> io::Result<Option<u32>> {
     let metadata = match fs::symlink_metadata(path) {
@@ -404,6 +470,9 @@ fn read_companion_pid(path: &Path) -> io::Result<Option<u32>> {
     parse_companion_pid(&fs::read_to_string(path)?, std::process::id())
 }
 
+/// Parses pid-file contents. Returns `None` while the line is incomplete, the
+/// pid when valid, and an error for non-numbers, pid 0/1, or our own pid
+/// (which would make cleanup signal ourselves).
 fn parse_companion_pid(contents: &str, current_pid: u32) -> io::Result<Option<u32>> {
     // The companion publishes a newline only after its complete PID is written.
     // Ignore a partial file so cleanup can never signal a PID prefix.
@@ -424,6 +493,9 @@ fn parse_companion_pid(contents: &str, current_pid: u32) -> io::Result<Option<u3
     Ok(Some(pid))
 }
 
+/// Builds the `open` command that starts the companion bundle as a new instance
+/// without activating it, with no stdin and stdout, passing it the private socket
+/// and pid-file paths. With `measure`, timing output is enabled in the companion.
 #[cfg(all(target_os = "macos", not(test)))]
 fn launch_services_command(
     bundle: &Path,
@@ -477,6 +549,8 @@ fn launch_stderr_path(measure: bool, configured: Option<&Path>) -> PathBuf {
         .map_or_else(|| PathBuf::from("/dev/fd/2"), Path::to_path_buf)
 }
 
+/// Accepts one connection from a non-blocking listener, if one is waiting. The
+/// returned stream is switched back to blocking mode.
 #[cfg(target_os = "macos")]
 #[cfg_attr(test, allow(dead_code))]
 fn accept_blocking(listener: &UnixListener) -> io::Result<Option<UnixStream>> {
@@ -492,12 +566,16 @@ fn accept_blocking(listener: &UnixListener) -> io::Result<Option<UnixStream>> {
     }
 }
 
+/// State while waiting for a just-launched companion to connect back.
 #[cfg(all(target_os = "macos", not(test)))]
 struct LaunchHandshake<'a> {
     pid_path: &'a Path,
     socket_path: &'a Path,
+    /// Pid read from the pid file, once published.
     companion_pid: Option<u32>,
+    /// Exit watch, created as soon as the pid is known.
     companion: Option<TrackedCompanion>,
+    /// Milliseconds from launch until the pid appeared (for measured runs).
     pid_ready_ms: Option<f64>,
     started: Instant,
     measure: bool,
@@ -505,6 +583,8 @@ struct LaunchHandshake<'a> {
 
 #[cfg(all(target_os = "macos", not(test)))]
 impl LaunchHandshake<'_> {
+    /// Picks up the pid file if it appeared, and starts the exit watch once the
+    /// pid is known.
     fn update_companion_pid(&mut self) -> io::Result<()> {
         if self.companion_pid.is_none() {
             let pid = read_companion_pid(self.pid_path)?;
@@ -521,6 +601,10 @@ impl LaunchHandshake<'_> {
         Ok(())
     }
 
+    /// Tries to accept the companion's connection. Returns `None` if nobody has
+    /// connected yet. A connection is accepted only if it is from this user and
+    /// the companion has published a pid that matches the one being watched;
+    /// otherwise it is an error.
     fn accept(&mut self, listener: &UnixListener) -> io::Result<Option<UnixStream>> {
         self.update_companion_pid()?;
         let Some(stream) = accept_blocking(listener)? else {
@@ -554,6 +638,9 @@ impl LaunchHandshake<'_> {
     }
 }
 
+/// Splits the accepted socket into a write handle, a read handle and an
+/// interrupt handle. If cloning fails, the launch is retired and the error
+/// returned, so nothing is left running.
 #[cfg(all(target_os = "macos", not(test)))]
 fn finish_launch_connection(
     launcher: Child,
@@ -590,6 +677,10 @@ fn finish_launch_connection(
     })
 }
 
+/// Starts the companion through `LaunchServices` and waits up to 5 seconds for
+/// it to connect to a private socket. The wait polls every 5 ms and gives up
+/// early if the `open` process exits first. On any failure the launch is
+/// retired before the error is returned.
 #[cfg(all(target_os = "macos", not(test)))]
 fn spawn_via_launch_services(
     executable: &Path,
@@ -668,6 +759,11 @@ fn spawn_via_launch_services(
     }
 }
 
+/// Ends a `LaunchServices` launch and waits for it. Gives both processes up to 3
+/// seconds to exit on their own (they usually do once the channel is closed),
+/// then sends the companion SIGTERM and finally SIGKILL (only if it is still
+/// verifiably ours), and kills and reaps the `open` waiter. Returns true only
+/// if the companion is confirmed gone and the waiter was reaped.
 #[cfg(target_os = "macos")]
 fn retire_launch_services(mut launcher: Child, mut companion: Option<TrackedCompanion>) -> bool {
     let mut launcher_exited = matches!(launcher.try_wait(), Ok(Some(_)));
@@ -710,36 +806,63 @@ fn retire_launch_services(mut launcher: Child, mut companion: Option<TrackedComp
     companion_exited && launcher_reaped
 }
 
+/// A running native companion and the request/reply channel to it.
+///
+/// Calls are strictly one at a time and each has a 3-second deadline. After a
+/// failed call the companion is sealed (see [`Native::is_stopped`]) and a new
+/// [`Native`] must be spawned. Dropping it closes the channel and waits for the
+/// companion to finish restoring and exit.
 pub struct Native {
+    /// Processes to retire; `None` once sealed.
     child: Option<CompanionLaunch>,
+    /// Kept only so the directory is deleted when this value is dropped.
     _private_directory: Option<PrivateDirectory>,
+    /// Write side; `None` once sealed.
     input: Option<Box<dyn CompanionInput>>,
     reader_interrupt: Option<UnixStream>,
+    /// Replies from the reader thread. One slot, so the thread blocks (and the
+    /// companion with it) rather than queueing unread replies.
     replies: Option<Receiver<Reply>>,
     reader: Option<JoinHandle<()>>,
+    /// Set by the owner to abort an exchange in progress.
     cancellation: Option<Arc<AtomicBool>>,
+    /// Background cleanup of a sealed companion; joined on drop.
     retirement: Option<JoinHandle<bool>>,
+    /// Encoder-only mode: cannot show a control indicator or inject input.
     encoder: bool,
+    /// Companion captures the surface itself and streams video unprompted.
     surface: bool,
+    /// Newest unread video frame that arrived while waiting for a reply.
     video: Option<Vec<u8>>,
+    /// True if a video frame was replaced before being read and no keyframe has
+    /// followed, so the stream has a hole until the next one.
     video_gap: bool,
 }
 impl Native {
+    /// Starts a full control companion (windows, input and capture).
+    ///
     /// # Errors
     /// Reports launch failure or an unavailable companion channel.
     pub fn spawn(executable: &Path) -> io::Result<Self> {
         Self::spawn_mode(executable, false, false)
     }
+    /// Starts a companion that only encodes pixels it is given with [`Native::encode`].
+    ///
     /// # Errors
     /// Starts only encoding; it cannot create a control indicator or inject input.
     pub fn spawn_encoder(executable: &Path) -> io::Result<Self> {
         Self::spawn_mode(executable, true, false)
     }
+    /// Starts a companion that captures and encodes in its own process and
+    /// streams the video back (read it with [`Native::surface_video`]).
+    ///
     /// # Errors
     /// Starts same-process companion capture, keeping H.264 on the public path.
     pub fn spawn_surface(executable: &Path) -> io::Result<Self> {
         Self::spawn_mode(executable, false, true)
     }
+    /// Launches the companion in the chosen mode and starts the reader thread
+    /// that turns its output into replies.
     fn spawn_mode(executable: &Path, encoder: bool, surface: bool) -> io::Result<Self> {
         #[cfg(all(target_os = "macos", not(test)))]
         let spawned = spawn_via_launch_services(executable, encoder, surface)?;
@@ -790,6 +913,8 @@ impl Native {
     pub fn is_stopped(&self) -> bool {
         self.input.is_none() || self.child.is_none()
     }
+    /// Sends one message and returns the companion's reply.
+    ///
     /// # Errors
     /// Reports companion errors or a three-second deadline covering write and reply.
     pub fn call(&mut self, kind: Kind, payload: &[u8]) -> Reply {
@@ -801,6 +926,11 @@ impl Native {
         }
         self.response(deadline, !self.encoder)
     }
+    /// Sends one BGRA image (`width * height * 4` bytes, at most 4 Mi pixels) to
+    /// the encoder and returns its reply. `capture_ticks` is the capture time
+    /// carried through to the encoded frame; `sharp` asks for the higher-quality
+    /// setting. The same 3-second deadline applies to the whole exchange.
+    ///
     /// # Errors
     /// Requires one bounded owned BGRA image and a responsive encoder.
     pub fn encode(
@@ -840,6 +970,8 @@ impl Native {
         }
         self.response(deadline, false)
     }
+    /// A writer for the companion's input that fails after `deadline` or on
+    /// cancellation. Errors if the companion is already sealed.
     fn writer(&mut self, deadline: Instant) -> io::Result<DeadlineWriter<'_>> {
         let input = self
             .input
@@ -852,6 +984,9 @@ impl Native {
             cancellation: self.cancellation.as_deref(),
         })
     }
+    /// Seals the companion after a failed exchange: drops the reply channel,
+    /// closes its input, kills the launcher at once and cleans up in the
+    /// background. Used when the channel state is unknown (partial write, timeout).
     fn stop_now(&mut self) {
         self.replies.take();
         if let Some(input) = self.input.take() {
@@ -864,6 +999,8 @@ impl Native {
             self.retirement = Some(thread::spawn(move || retire_owned(launch)));
         }
     }
+    /// Like [`Native::stop_now`] but gentle: it does not kill the launcher first,
+    /// so the companion can see end-of-input and restore what it changed.
     fn retire_control(&mut self) {
         self.replies.take();
         if let Some(input) = self.input.take() {
@@ -876,11 +1013,16 @@ impl Native {
             self.retirement = Some(thread::spawn(move || retire_owned(launch)));
         }
     }
+    /// Shuts the socket down so a reader thread stuck in a read returns.
     fn interrupt_reader(&mut self) {
         if let Some(stream) = self.reader_interrupt.take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
+    /// Waits for the reply to the request just sent. In surface mode, video
+    /// frames arriving first are kept (only the newest) rather than treated as
+    /// the reply. On failure the companion is sealed: gently when `graceful` is
+    /// true (and the failure was not a cancellation), otherwise at once.
     fn response(&mut self, deadline: Instant, graceful: bool) -> Reply {
         let reply = loop {
             match self.receive_response(deadline) {
@@ -913,10 +1055,16 @@ impl Native {
         }
         reply
     }
+    /// Returns whether a frame was skipped since the last call (and clears the
+    /// flag). The caller then needs a new keyframe.
+    ///
     /// An overwritten encoded delta requires a new IDR at the forwarding boundary.
     pub fn take_surface_gap(&mut self) -> bool {
         std::mem::take(&mut self.video_gap)
     }
+    /// Waits up to 100 ms for the next video frame from the companion. Returns
+    /// `None` on a quiet timeout, so the caller can check for cancellation.
+    ///
     /// # Errors
     /// Returns only native video; bounded idle waits let the owning worker observe retirement.
     pub fn surface_video(&mut self) -> io::Result<Option<Vec<u8>>> {
@@ -932,6 +1080,8 @@ impl Native {
             }
         }
     }
+    /// Takes the next message from the reader thread, waiting until `deadline`
+    /// (in short slices, so cancellation is noticed within about 20 ms).
     fn receive_response(&self, deadline: Instant) -> Reply {
         let replies = self
             .replies
@@ -953,6 +1103,9 @@ impl Native {
     }
 }
 
+/// How long a wait may still last. Errors with `ConnectionAborted` if
+/// cancelled, or `TimedOut` if `deadline` has passed. With a cancellation flag
+/// the result is capped at 20 ms so callers re-check it often.
 fn remaining(deadline: Instant, cancellation: Option<&AtomicBool>) -> io::Result<Duration> {
     if cancellation.is_some_and(|stop| stop.load(Ordering::Acquire)) {
         // write_all retries Interrupted automatically; cancellation must end it.
@@ -975,6 +1128,9 @@ fn remaining(deadline: Instant, cancellation: Option<&AtomicBool>) -> io::Result
     })
 }
 
+/// A `Write` over the companion's input that never blocks past a deadline: it
+/// tries a non-blocking write, waits for writability in short slices, and
+/// gives up on timeout or cancellation.
 struct DeadlineWriter<'a> {
     input: &'a mut dyn CompanionInput,
     deadline: Instant,
@@ -1032,6 +1188,8 @@ impl Drop for Native {
     }
 }
 
+/// Waits up to 3 seconds for a plain child to exit, then kills it, and reaps it.
+/// Returns whether reaping succeeded.
 fn retire_child(mut child: Child) -> bool {
     let deadline = Instant::now() + Duration::from_secs(3);
     while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
@@ -1041,6 +1199,8 @@ fn retire_child(mut child: Child) -> bool {
     child.wait().is_ok()
 }
 
+/// Retires a launch the right way for how it was started. Returns true if
+/// everything is confirmed gone.
 #[cfg(target_os = "macos")]
 fn retire_owned(launch: CompanionLaunch) -> bool {
     if let Some(companion) = launch.companion {

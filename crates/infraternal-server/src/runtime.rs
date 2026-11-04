@@ -633,6 +633,8 @@ async fn build_router_core(
         config.data_dir.join("ssh-trust"),
     )
     .await?;
+    #[cfg(feature = "remote")]
+    let auth_api_issuer = issuer.clone();
     #[cfg(all(feature = "ssh", feature = "remote"))]
     let integration = issuer.map(|issuer| (issuer, hosts.clone()));
     #[cfg(all(feature = "ssh", not(feature = "remote")))]
@@ -703,10 +705,14 @@ async fn build_router_core(
             .await
             .map_err(ServerError::Listener)?;
     }
+    #[cfg(feature = "remote")]
+    let auth_api = auth::router_with_invitation_issuer(auth.clone(), auth_api_issuer);
+    #[cfg(not(feature = "remote"))]
+    let auth_api = auth::router(auth.clone());
     let app = Router::new()
         .route("/healthz", get(health))
         .with_state(pool)
-        .merge(auth::router(auth.clone()))
+        .merge(auth_api)
         .merge(websocket::router(ws_state))
         .merge(ca_api);
     #[cfg(feature = "remote")]
@@ -924,9 +930,7 @@ async fn health(State(pool): State<SqlitePool>) -> Response {
 /// Canonical client address from the listener and explicitly trusted proxy policy.
 /// Plugins may bound work by it; untrusted forwarding headers never set this value.
 #[derive(Clone, Copy)]
-pub(crate) struct ClientAddress(
-    #[cfg_attr(not(feature = "remote"), allow(dead_code))] pub(crate) IpAddr,
-);
+pub(crate) struct ClientAddress(pub(crate) IpAddr);
 
 /// Per-source auth admission trusts forwarding data only from configured peers.
 #[derive(Clone)]
@@ -992,10 +996,15 @@ async fn source_admission(
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    // Every auth caller is accounted to its network, never its address: an
+    // IPv6 caller rotating hosts inside one /64 must neither reset its budget
+    // nor fill the shared map and refuse everyone else (#263, J134 P2-1).
+    // Device-code requests have no process-wide ceiling, so this per-network
+    // budget is their only request limit.
     let mut buckets = policy.buckets.lock().await;
     if let Err(response) = admit_temporal_request(
         &mut buckets,
-        (source, device),
+        (device_source(source), device),
         now,
         if device { 10 } else { 30 },
     ) {
@@ -1005,20 +1014,38 @@ async fn source_admission(
     next.run(request).await
 }
 
-/// Bounded refusal reasons share ordinary auth's exact HTTP response without
-/// allocating a boxed response for each refused request.
+/// The network an auth caller is accounted to: the IPv4 address,
+/// or the /64 of an IPv6 address (one interface allocation; hosts inside it
+/// rotate freely). IPv4-mapped IPv6 addresses count as their IPv4 address.
+pub(crate) fn device_source(source: IpAddr) -> IpAddr {
+    match source {
+        IpAddr::V4(_) => source,
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or_else(
+            || IpAddr::V6((u128::from(v6) & !u128::from(u64::MAX)).into()),
+            IpAddr::V4,
+        ),
+    }
+}
+
+/// The enclosing network anonymous browser callers share a budget in: the
+/// IPv4 /24, or the IPv6 /48 (a site or tunnel-broker allocation). One such
+/// network can spend only its own budget, never everyone's (#263, J145 P2-1).
+pub(crate) fn browser_network(source: IpAddr) -> IpAddr {
+    match device_source(source) {
+        IpAddr::V4(v4) => IpAddr::V4((u32::from(v4) & 0xffff_ff00).into()),
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !((1_u128 << 80) - 1)).into()),
+    }
+}
+
+/// A spent window shares ordinary auth's exact HTTP response without
+/// allocating a boxed response for each refused request. A full map never
+/// refuses: it evicts (see [`admit_temporal_request`]).
 pub(crate) enum TemporalRefusal {
-    Capacity,
     Budget,
 }
 impl IntoResponse for TemporalRefusal {
     fn into_response(self) -> Response {
         match self {
-            Self::Capacity => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "source admission capacity exhausted",
-            )
-                .into_response(),
             Self::Budget => (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::RETRY_AFTER, "60")],
@@ -1029,18 +1056,32 @@ impl IntoResponse for TemporalRefusal {
     }
 }
 
+/// Most principals one fixed-window budget map holds.
+const TEMPORAL_PRINCIPALS: usize = 4096;
+
 /// Shared fixed-window auth budget. Expired entries are reclaimed without an
-/// idle worker; the bounded map refuses new principals when full. Keys must be
-/// server-attributed (trusted source address or live authenticated user ID).
-pub(crate) fn admit_temporal_request<K: Eq + std::hash::Hash>(
+/// idle worker. When the map is full, the principal with the oldest window is
+/// evicted, so a flood of new principals can never refuse a different caller
+/// (#263, J134 P2-1). Eviction only hands the evicted principal a fresh
+/// window early, so a flood buys at most one extra window per 4096 principals
+/// it brings. Keys must be server-attributed (trusted source network or live
+/// authenticated user ID).
+pub(crate) fn admit_temporal_request<K: Eq + std::hash::Hash + Clone>(
     buckets: &mut HashMap<K, SourceBucket>,
     principal: K,
     now: i64,
     limit: u8,
 ) -> Result<(), TemporalRefusal> {
     buckets.retain(|_, bucket| now.saturating_sub(bucket.window) < 60);
-    if !buckets.contains_key(&principal) && buckets.len() >= 4096 {
-        return Err(TemporalRefusal::Capacity);
+    if !buckets.contains_key(&principal) && buckets.len() >= TEMPORAL_PRINCIPALS {
+        // The same O(n) pass as the retain above, only on a full map.
+        if let Some(oldest) = buckets
+            .iter()
+            .min_by_key(|(_, bucket)| bucket.window)
+            .map(|(key, _)| key.clone())
+        {
+            buckets.remove(&oldest);
+        }
     }
     let bucket = buckets.entry(principal).or_insert(SourceBucket {
         window: now,
@@ -1176,6 +1217,27 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[tokio::test]
+    async fn loopback_https_port_initializes_auth_with_the_server_database() {
+        let data_dir = temp_dir();
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("open private server database");
+        let auth = crate::auth::Auth::new(pool.clone(), "localhost", "https://localhost:443")
+            .await
+            .expect("initialize auth against the server database");
+        let mut setup_announced = false;
+        auth.bootstrap(super::unix_seconds().expect("current server time"), |_| {
+            setup_announced = true;
+        })
+        .await
+        .expect("bootstrap auth against the server database");
+        assert!(setup_announced, "new server database should need setup");
+        drop(auth);
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary server database");
     }
 
     #[test]
@@ -1600,6 +1662,301 @@ mod reviewer_admission {
     }
 }
 
+#[cfg(test)]
+mod device_code_admission_tests {
+    //! Public device-code requests: one caller must not refuse another (#263, J122 P2).
+    use super::*;
+    use axum::body::Body;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    async fn post(app: &Router, action: &str, source: &str, body: &Value) -> (StatusCode, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/auth/{action}"))
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", source)
+                    .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 5000))))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn app() -> Router {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let auth = Auth::new(pool, "auth.example.test", "https://auth.example.test")
+            .await
+            .unwrap();
+        let admission = SourceAdmission {
+            behind_proxy: true,
+            trusted_proxies: vec!["192.0.2.0/24".parse().unwrap()],
+            buckets: Arc::default(),
+        };
+        auth::router(auth).layer(from_fn_with_state(admission, source_admission))
+    }
+
+    fn join_start() -> Value {
+        json!({
+            "kind": "join_machine",
+            "device": "workstation",
+            "request": {
+                "host_id": "00000000-0000-0000-0000-000000000001",
+                "hostname": "workstation",
+                "mode": "system",
+                "execution_uid": 0,
+                "key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn device_floods_from_other_sources_leave_a_new_source_its_whole_budget() {
+        let app = app().await;
+        // Six sources spend their full per-source device budget on guessed tokens.
+        for source in 1..=6 {
+            for _ in 0..10 {
+                let (status, _) = post(
+                    &app,
+                    "device-redeem",
+                    &format!("198.51.100.{source}"),
+                    &json!({"token": "A".repeat(43)}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+        }
+        // A seventh caller still starts and polls both sign-in and machine join.
+        let fresh = "203.0.113.7";
+        let (status, started) = post(&app, "device-start", fresh, &join_start()).await;
+        assert_eq!(status, StatusCode::OK, "machine join start was refused");
+        let poll = json!({"token": started["poll_token"]});
+        assert_eq!(
+            post(&app, "device-redeem", fresh, &poll).await.0,
+            StatusCode::UNAUTHORIZED,
+            "a pending machine join poll must not be throttled by other sources"
+        );
+        let sign_in = json!({"device": "laptop", "scopes": ["hosts:read"]});
+        let (status, started) = post(&app, "device-start", fresh, &sign_in).await;
+        assert_eq!(status, StatusCode::OK, "sign-in start was refused");
+        assert_eq!(
+            post(
+                &app,
+                "device-redeem",
+                fresh,
+                &json!({"token": started["poll_token"]})
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn one_ipv6_network_shares_one_device_budget() {
+        let app = app().await;
+        let guess = json!({"token": "A".repeat(43)});
+        for host in 1..=10 {
+            let (status, _) = post(
+                &app,
+                "device-redeem",
+                &format!("2001:db8:1:2::{host}"),
+                &guess,
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        // Rotating the interface identifier inside the same /64 does not buy more requests.
+        assert_eq!(
+            post(&app, "device-redeem", "2001:db8:1:2::ffff", &guess)
+                .await
+                .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // A different /64 keeps its own budget.
+        assert_eq!(
+            post(&app, "device-redeem", "2001:db8:1:3::1", &guess)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// Fresh IPv4 and IPv6 callers can still start an `up` after a flood.
+    async fn assert_fresh_sources_start(app: &Router, flood: &str) {
+        for fresh in ["203.0.113.9", "2001:db8:ffff::9"] {
+            let (status, _) = post(app, "device-start", fresh, &join_start()).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{flood}: fresh {fresh} device-start"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_ipv6_network_rotating_browser_calls_cannot_refuse_other_callers() {
+        // J134 P2-1: 4096 login-starts, one per address inside one /64.
+        let app = app().await;
+        let mut admitted = 0;
+        for host in 0..4096_u32 {
+            let source = format!("2001:db8:1:2::{:x}:{:x}", host >> 16, host & 0xffff);
+            if post(&app, "login-start", &source, &json!({})).await.0
+                != StatusCode::TOO_MANY_REQUESTS
+            {
+                admitted += 1;
+            }
+        }
+        // The whole /64 shares one 30/minute browser budget.
+        assert_eq!(admitted, 30);
+        assert_fresh_sources_start(&app, "one /64").await;
+    }
+
+    /// A browser call from `source` with the app's own Origin.
+    async fn browser(app: &Router, action: &str, source: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/auth/{action}"))
+                    .header("content-type", "application/json")
+                    .header("origin", "https://auth.example.test")
+                    .header("x-forwarded-for", source)
+                    .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 5000))))
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn four_networks_cannot_lock_everyone_out_of_sign_in() {
+        // J145 P2-1: four networks at 30/minute each used to spend the one
+        // server-wide 120/minute browser budget, and then nobody without a
+        // live session could start a passkey sign-in.
+        for (label, flood, inside) in [
+            (
+                "ipv4",
+                [
+                    "198.51.100.1",
+                    "198.51.101.1",
+                    "198.51.102.1",
+                    "198.51.103.1",
+                ],
+                None,
+            ),
+            (
+                "ipv6-one-/56",
+                [
+                    "2001:db8:5:100::1",
+                    "2001:db8:5:101::1",
+                    "2001:db8:5:102::1",
+                    "2001:db8:5:103::1",
+                ],
+                Some("2001:db8:5:200::1"),
+            ),
+        ] {
+            let app = app().await;
+            assert_eq!(
+                browser(&app, "login-start", "203.0.113.50").await,
+                StatusCode::OK
+            );
+            let mut admitted = 0;
+            for source in flood {
+                for _ in 0..40 {
+                    if browser(&app, "login-start", source).await == StatusCode::OK {
+                        admitted += 1;
+                    }
+                }
+            }
+            assert!(
+                admitted >= 32,
+                "{label}: the flood itself was admitted {admitted}"
+            );
+            for fresh in ["203.0.113.9", "2001:db8:ffff::9"] {
+                assert_eq!(
+                    browser(&app, "login-start", fresh).await,
+                    StatusCode::OK,
+                    "{label}: fresh {fresh} login-start"
+                );
+            }
+            // A new /64 inside the flooded /48 shares that /48's spent budget.
+            if let Some(inside) = inside {
+                assert_eq!(
+                    browser(&app, "login-start", inside).await,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "{label}: {inside} is inside the flooded /48"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn one_network_holds_at_most_its_share_of_anonymous_ceremonies() {
+        // Without a server-wide budget, the pending anonymous ceremonies are
+        // bounded per enclosing network instead.
+        let app = app().await;
+        let mut admitted = 0;
+        for subnet in 0..8 {
+            for _ in 0..30 {
+                let source = format!("2001:db8:6:{subnet:x}00::1");
+                if browser(&app, "login-start", &source).await == StatusCode::OK {
+                    admitted += 1;
+                }
+            }
+        }
+        assert_eq!(
+            admitted, 32,
+            "one /48 holds 32 pending anonymous ceremonies"
+        );
+        assert_eq!(
+            browser(&app, "login-start", "2001:db8:7::1").await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_admission_map_evicts_instead_of_refusing_new_callers() {
+        // 4096 distinct /64s fill the shared map; a newcomer still gets in.
+        let app = app().await;
+        for network in 0..4096_u32 {
+            let source = format!("2001:db8:{:x}:{:x}::1", network >> 8, network & 0xff);
+            assert_ne!(
+                post(
+                    &app,
+                    "device-redeem",
+                    &source,
+                    &json!({"token": "A".repeat(43)})
+                )
+                .await
+                .0,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{source}"
+            );
+        }
+        assert_fresh_sources_start(&app, "4096 networks").await;
+    }
+}
+
 #[cfg(all(test, feature = "remote"))]
 #[path = "remote_demo_tests.rs"]
 mod remote_demo_tests;
@@ -1629,19 +1986,18 @@ mod temporal_admission_tests {
         assert!(admit_temporal_request(&mut buckets, 1, 61, 30).is_ok());
         assert_eq!(buckets.len(), 1);
         buckets.clear();
-        for principal in 0..4096 {
-            assert!(admit_temporal_request(&mut buckets, principal, 1, 30).is_ok());
-        }
-        assert_eq!(
-            admit_temporal_request(&mut buckets, 4096, 1, 30)
-                .unwrap_err()
-                .into_response()
-                .status(),
-            StatusCode::TOO_MANY_REQUESTS
-        );
+        // Principal 0 holds the oldest window; 1..4096 open later in the same minute.
         assert!(admit_temporal_request(&mut buckets, 0, 1, 30).is_ok());
+        for principal in 1..4096 {
+            assert!(admit_temporal_request(&mut buckets, principal, 2, 30).is_ok());
+        }
+        // A full map admits a new principal by evicting the oldest window,
+        // never by refusing the newcomer (#263, J134 P2-1).
+        assert!(admit_temporal_request(&mut buckets, 4096, 2, 30).is_ok());
         assert_eq!(buckets.len(), 4096);
-        assert!(admit_temporal_request(&mut buckets, 4096, 61, 30).is_ok());
+        assert!(!buckets.contains_key(&0));
+        assert!(buckets.contains_key(&4096));
+        assert!(admit_temporal_request(&mut buckets, 4096, 62, 30).is_ok());
         assert_eq!(buckets.len(), 1);
     }
 

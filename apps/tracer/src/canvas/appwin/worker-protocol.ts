@@ -36,6 +36,7 @@ export type FromWorker =
   /** Emitted only by explicitly enabled, content-free stage measurements. */
   | { t: "trace"; frame: FrameTrace };
 
+/** Counters of the decode worker's work, for measurement only. */
 export interface WorkerStats {
   received: number;
   decoded: number;

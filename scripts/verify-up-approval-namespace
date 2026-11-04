@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Run `up` with the public HTTPS listener available and legacy 7443 traffic blocked (#263, #291).
+set -euo pipefail
+: "${INFRATERNAL_BIN:?set the compiled CLI/server binary}"
+: "${TRACER_DIST:?set the production tracer build of this checkout, apps/tracer/dist}"
+: "${CARGO_TARGET_DIR:?set the target directory of this run}"
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+# The approval page and its passkey ceremony (J134 P3-2) live in this
+# checkout since J82's page was folded in, so the dist must be built from it.
+if [[ "$(realpath "$TRACER_DIST")" != "$(realpath "$repo_dir/apps/tracer/dist")" ]]; then
+    printf 'TRACER_DIST must be the production dist built from this checkout\n' >&2
+    exit 1
+fi
+
+# The non-root CLI check (J134 P2-4) needs a second uid, which an
+# unprivileged user namespace cannot map (one uid only, no newuidmap). Run
+# this script as real root for the full proof; an unprivileged run must say
+# UP_E2E_SKIP_NONROOT=1 and then reports the check as skipped.
+if [[ "$(id -u)" == 0 ]]; then
+    namespace_user=()
+    nonroot_check=1
+elif [[ "${UP_E2E_SKIP_NONROOT:-}" == 1 ]]; then
+    namespace_user=(--user --map-root-user)
+    nonroot_check=0
+else
+    printf 'run as root for the non-root CLI check, or set UP_E2E_SKIP_NONROOT=1\n' >&2
+    exit 1
+fi
+control="$(mktemp -d /tmp/up.XXXXXX)"
+chmod 700 "$control"
+mkdir -m 700 "$control/bin" "$control/runtime" "$control/root"
+mkdir -p -m 700 "$control/root/usr/local/bin" "$control/root/var/lib" \
+    "$control/root/etc/systemd/system" "$control/root/etc/ssl/certs"
+mkdir -p -m 700 "$control/root/bin" "$control/root/nix/store" \
+    "$control/root/tmp/decoy" "$control/root/proc" "$control/root/dev" \
+    "$control/root/home/up"
+# `up` and its root helper both run in this private root, where every
+# directory is owned by the namespace's root, so the trusted-program checks
+# (#263) run unrelaxed against these root-owned sudo and systemctl fakes.
+mkdir -m 755 "$control/root/usr/bin"
+# Real systems keep these 0755; the non-root check needs to pass through them.
+# The private root is the chroot's `/`; `$control` itself stays 0700.
+chmod 755 "$control/root" "$control/root/bin" "$control/root/usr" "$control/root/usr/local" \
+    "$control/root/usr/local/bin" "$control/root/var" "$control/root/var/lib"
+touch "$control/root/bin/sh" "$control/root/infraternal"
+touch "$control/root/dev/null"
+mkdir -m 755 "$control/root/run"
+mkdir -m 700 "$control/root/run/infraternal"
+touch "$control/root/tmp/systemctl-calls" "$control/root/tmp/decoy-calls" \
+    "$control/systemctl-calls"
+printf '127.0.0.1 localhost\n::1 localhost\n' > "$control/root/etc/hosts"
+printf 'hosts: files dns\n' > "$control/root/etc/nsswitch.conf"
+cp -- /etc/ssl/certs/ca-certificates.crt \
+    "$control/root/etc/ssl/certs/ca-certificates.crt"
+export UP_E2E_CONTROL_DIR="$control"
+export UP_SUDO_CALLS="$control/root/tmp/sudo-calls"
+export UP_SYSTEMCTL_CALLS="$control/systemctl-calls"
+export UP_SERVICE_SYSTEMCTL_CALLS="$control/root/tmp/systemctl-calls"
+export UP_DECOY_CALLS="$control/root/tmp/decoy-calls"
+export UP_HELPER_OUTPUT="$control/root/tmp/helper-output"
+export UP_TEST_CA_BUNDLE="$control/root/etc/ssl/certs/ca-certificates.crt"
+export UP_PRIVATE_ROOT="$control/root"
+export INFRATERAL_TEST_STATE_ROOT="$control/test-state"
+export INFRATERAL_UP_EVIDENCE_DIR="${INFRATERAL_UP_EVIDENCE_DIR:-$control/evidence}"
+mkdir -m 700 "$INFRATERAL_TEST_STATE_ROOT"
+mkdir -p -m 700 "$INFRATERAL_UP_EVIDENCE_DIR"
+trap 'rm -rf -- "$control"' EXIT
+
+# The trusted fake sudo: drops `-- <executable>` and runs the helper as the
+# namespace's root. It keeps the caller's hostile PATH, as a sudo policy
+# with env_keep=PATH would; the helper must not use it.
+cat >"$control/root/usr/bin/sudo" <<'SUDO'
+#!/bin/sh
+set -eu
+printf 'sudo\n' >> /tmp/sudo-calls
+[ "${1-}" = "--" ] || exit 2
+shift
+[ "$#" -ge 2 ] || exit 2
+shift
+if SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt SSL_CERT_DIR=/etc/ssl/certs \
+    TMPDIR=/tmp /infraternal "$@" >/tmp/helper-output; then
+    status=0
+else
+    status=$?
+fi
+while IFS= read -r line; do printf '%s\n' "$line"; done </tmp/helper-output
+exit "$status"
+SUDO
+cat >"$control/root/usr/bin/systemctl" <<'SYSTEMCTL'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> /tmp/systemctl-calls
+if [ "${1-}" = "is-active" ]; then printf 'active\n'; fi
+SYSTEMCTL
+# Decoys first on PATH: running either one is a failure the test reports.
+for decoy in sudo systemctl; do
+    printf '#!/bin/sh\nprintf "%%s %%s\\n" "$0" "$*" >> /tmp/decoy-calls\nexit 1\n' \
+        >"$control/root/tmp/decoy/$decoy"
+done
+chmod 755 "$control/root/usr/bin/sudo" "$control/root/usr/bin/systemctl" \
+    "$control/root/tmp/decoy/sudo" "$control/root/tmp/decoy/systemctl"
+# The server's embedded infraternal agent probes systemctl through PATH.
+cat >"$control/bin/systemctl" <<'SYSTEMCTL'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$UP_SYSTEMCTL_CALLS"
+if [ "${1-}" = "is-active" ]; then printf 'active\n'; fi
+SYSTEMCTL
+chmod 700 "$control/bin/systemctl"
+export PATH="$control/bin:$PATH"
+
+unshare "${namespace_user[@]}" --net --mount --uts \
+    bash -s -- "$control" "$repo_dir" "$nonroot_check" <<'NAMESPACE'
+set -euo pipefail
+control="$1"
+repo_dir="$2"
+nonroot_check="$3"
+mount --make-rprivate /
+ip link set lo up
+ip rule del pref 0
+ip rule add pref 10 ipproto tcp dport 7443 blackhole
+ip rule add pref 11 ipproto tcp sport 7443 blackhole
+ip rule add pref 12 ipproto udp dport 7443 blackhole
+ip rule add pref 13 ipproto udp sport 7443 blackhole
+ip rule add pref 100 lookup local
+hostname up-e2e-node
+# Keep every installer ancestor under this mapped-UID-0 root; do not relax its ownership checks.
+mount --bind /nix/store "$control/root/nix/store"
+bash_path="$(readlink -f "$(command -v bash)")"
+mount --bind "$bash_path" "$control/root/bin/sh"
+mount --bind "$INFRATERNAL_BIN" "$control/root/infraternal"
+# Command::output redirects child stdin from /dev/null inside the chroot.
+mount --bind /dev/null "$control/root/dev/null"
+mount --bind "$control/root/run/infraternal" /run/infraternal
+run_state="$(stat -c '%u:%a' /run/infraternal)"
+if [[ "$run_state" != "0:700" ]]; then
+    printf 'namespace runtime preflight: /run/infraternal expected 0:700, found %s\n' "$run_state" >&2
+    exit 1
+fi
+mount --bind "$control/root/usr/local" /usr/local
+mount --bind "$control/root/var/lib" /var/lib
+mount --bind "$control/root/etc/systemd/system" /etc/systemd/system
+mount --bind "$control/root/etc/ssl/certs" /etc/ssl/certs
+printf 'namespace_network app_listener=tcp443 blocked_agent_port=tcp_udp7443\n'
+cd "$repo_dir/apps/tracer"
+bun x playwright test -c playwright.real.config.ts real/up-approval.spec.ts
+if [[ "$nonroot_check" != 1 ]]; then
+    printf 'nonroot_cli=skipped (unprivileged run)\n'
+    exit 0
+fi
+# The invoking user runs the CLI through the PATH link, and cannot list the
+# private base or the infraternal agent's state (J134 P2-4).
+nobody=(chroot --userspec=65534:65534 "$control/root")
+version="$("${nobody[@]}" /usr/local/bin/infraternal --version)"
+printf 'nonroot_cli uid=65534 version=%s\n' "$version"
+# The chroot has only bash, so list with a glob. A directory nobody may read
+# expands to nothing; root listing the same directory proves it is not empty.
+lists() {
+    "$@" /bin/sh -c 'shopt -s nullglob dotglob; entries=("$1"/*); [ "${#entries[@]}" -gt 0 ]' sh "$directory"
+}
+# uid 65534 must be able to run the shell, or every refusal below is vacuous.
+"${nobody[@]}" /bin/sh -c true
+for directory in /var/lib/infraternal /var/lib/infraternal/agent; do
+    if ! lists chroot "$control/root"; then
+        printf 'nonroot_cli: root sees nothing in %s, so the check proves nothing\n' "$directory" >&2
+        exit 1
+    fi
+    if lists "${nobody[@]}"; then
+        printf 'nonroot_cli: uid 65534 could list %s\n' "$directory" >&2
+        exit 1
+    fi
+done
+printf 'nonroot_state=private base=%s agent=%s\n' \
+    "$(stat -c '%a' "$control/root/var/lib/infraternal")" \
+    "$(stat -c '%a' "$control/root/var/lib/infraternal/agent")"
+NAMESPACE

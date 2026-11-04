@@ -10,6 +10,13 @@ use std::{
     os::fd::{AsRawFd, OwnedFd},
 };
 
+/// Watches every session shim process for exit through one epoll queue that the
+/// daemon's reactor polls, so no per-shim task or timer is needed.
+///
+/// Each shim is represented by an owned pidfd, kept in `shims` by session id.
+/// `queue` is created lazily on the first successful registration. `unavailable`
+/// latches once the kernel reports it has no pidfd support; after that nothing is
+/// registered and callers fall back to reconciling on lifecycle events only.
 #[derive(Default)]
 pub(crate) struct ProcessExits {
     queue: Option<Registration<Epoll>>,
@@ -23,6 +30,13 @@ impl ProcessExits {
         self.watch_with(id, pid, infraternal_shim::process_exit_descriptor)
     }
 
+    /// Implements `watch` with an injectable pidfd opener so tests can simulate
+    /// kernels and failures.
+    ///
+    /// Returns `Ok(false)` if the process is already gone (`ESRCH`), `Ok(true)` when
+    /// it is now watched, or when pidfds are unsupported (`ENOSYS`/`EINVAL`, which
+    /// latches `unavailable`). Other errors, such as running out of descriptors, are
+    /// returned as errors and do not disable tracking.
     fn watch_with(
         &mut self,
         id: [u8; 16],
@@ -66,10 +80,17 @@ impl ProcessExits {
         Ok(true)
     }
 
+    /// Stops watching every session for which `live` returns false. Dropping the
+    /// pidfd also removes it from the epoll queue.
     pub(crate) fn retain(&mut self, live: impl Fn(&[u8; 16]) -> bool) {
         self.shims.retain(|id, _| live(id));
     }
 
+    /// Waits until at least one watched shim has exited and returns the session ids
+    /// of the ones that did.
+    ///
+    /// Each exit is reported once (the registration is one-shot). If no shim was ever
+    /// registered the future never completes. Cancel-safe: dropping it loses no event.
     pub(crate) async fn changed(&self) -> io::Result<Vec<[u8; 16]>> {
         let Some(queue) = &self.queue else {
             return std::future::pending().await;
