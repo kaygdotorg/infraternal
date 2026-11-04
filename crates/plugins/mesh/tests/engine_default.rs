@@ -1,0 +1,101 @@
+//! `GotaTun` is the Linux default engine, kernel `WireGuard` an explicit per-machine opt-out, and
+//! a node that never chose moves to `GotaTun` with its identity kept (D346, #260).
+#![cfg(all(feature = "agent", target_os = "linux"))]
+#![allow(clippy::unwrap_used)]
+
+use infraternal_plugin_mesh::{
+    node::{EngineKind, Node},
+    wireguard::{Device, INTERFACE},
+};
+use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+fn private_state(name: &str) -> std::path::PathBuf {
+    let state = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    state
+}
+
+fn remove_link() {
+    let _ = Command::new("ip").args(["link", "del", INTERFACE]).status();
+}
+
+/// Which engine holds the shared link name, read from the link itself.
+fn running_engine() -> Option<&'static str> {
+    if Device::owned_tun().unwrap_or(false) {
+        Some("gotatun")
+    } else if Device::owned().unwrap_or(false) {
+        Some("kernel")
+    } else {
+        None
+    }
+}
+
+fn no_choice_in_environment() {
+    assert!(
+        std::env::var_os("INFRATERNAL_MESH_ENGINE").is_none(),
+        "these tests cover a machine with no engine choice in its environment"
+    );
+}
+
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn a_new_node_runs_gotatun_by_default() {
+    no_choice_in_environment();
+    let state = private_state("engine-default-new");
+    let result = (|| {
+        let mut node = Node::restore(&state)?;
+        node.up()?;
+        let engine = running_engine();
+        node.down()?;
+        Ok::<_, std::io::Error>(engine)
+    })();
+    remove_link();
+    fs::remove_dir_all(&state).unwrap();
+    assert_eq!(result.unwrap(), Some("gotatun"));
+}
+
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn kernel_stays_an_explicit_opt_out_across_restarts() {
+    let state = private_state("engine-opt-out");
+    let result = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let first = node.up()?.public_key;
+        let started = running_engine();
+        drop(node);
+        let mut restarted = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let again = restarted.up()?.public_key;
+        let kept = running_engine();
+        restarted.down()?;
+        Ok::<_, std::io::Error>((started, kept, first == again))
+    })();
+    remove_link();
+    fs::remove_dir_all(&state).unwrap();
+    assert_eq!(result.unwrap(), (Some("kernel"), Some("kernel"), true));
+}
+
+/// A node that ran kernel `WireGuard` only because it was the default before D346 restarts on
+/// `GotaTun` with the same public key, so its peers and the coordinator see no change.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn a_node_that_never_chose_moves_to_gotatun_and_keeps_its_key() {
+    no_choice_in_environment();
+    let state = private_state("engine-upgrade");
+    let result = (|| {
+        let mut old = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let key = old.up()?.public_key;
+        drop(old);
+        // What the earlier release left: a kernel engine record it wrote because kernel was
+        // the default, not because anyone chose it.
+        let mut upgraded = Node::restore(&state)?;
+        let again = upgraded.up()?.public_key;
+        let engine = running_engine();
+        upgraded.down()?;
+        Ok::<_, std::io::Error>((engine, key == again))
+    })();
+    remove_link();
+    fs::remove_dir_all(&state).unwrap();
+    assert_eq!(result.unwrap(), (Some("gotatun"), true));
+}

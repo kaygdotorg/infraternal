@@ -428,6 +428,23 @@ mod tests {
         );
     }
     #[test]
+    fn status_names_the_running_engine_and_why() {
+        let default = serde_json::json!({"state":"On","peer_count":1,
+            "engine_selection":{"engine":"gotatun","reason":"default"}});
+        let shown = status(default, 100).expect("default engine").body;
+        assert!(
+            shown.contains("Data plane  GotaTun (userspace), the default"),
+            "{shown}"
+        );
+        let chosen = serde_json::json!({"state":"On","peer_count":1,
+            "engine_selection":{"engine":"kernel","reason":"chosen"}});
+        let shown = status(chosen, 100).expect("chosen engine").body;
+        assert!(
+            shown.contains("Data plane  kernel WireGuard, chosen for this machine"),
+            "{shown}"
+        );
+    }
+    #[test]
     fn legacy_status_remains_readable_and_invalid_link_is_refused() {
         assert!(status(serde_json::json!({"state":"On","peer_count":0}), 80).is_ok());
         assert!(status(serde_json::json!({"state":"On","peer_count":0,"server_link":{"kind":"Mesh","reason":"MeshProven","endpoint":"invalid input"}}), 80).is_err());

@@ -822,6 +822,33 @@ mod tests {
         assert!(stopped.is_ok(), "mesh cleanup failed: {stopped:?}");
     }
 
+    /// D346: with no per-machine choice, the status reports `GotaTun` as the default.
+    #[test]
+    fn status_reports_the_default_engine_when_nothing_was_chosen() {
+        assert!(
+            std::env::var_os("INFRATERNAL_MESH_ENGINE").is_none(),
+            "this test covers a machine with no engine choice"
+        );
+        let directory =
+            std::env::temp_dir().join(format!("mesh-engine-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("state directory");
+        std::fs::set_permissions(
+            &directory,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let mut plugin = MeshNodePlugin::new(&directory);
+        let status = plugin.call("mesh.status", b"{}");
+        let _ = std::fs::remove_dir_all(&directory);
+        let status: serde_json::Value =
+            serde_json::from_slice(&status.expect("status")).expect("status JSON");
+        assert_eq!(
+            status["engine_selection"],
+            serde_json::json!({"engine":"gotatun","reason":"default"})
+        );
+    }
+
     #[test]
     fn node_actions_register_without_kernel_work_and_hide_machine_calls() {
         let mut registry = infraternal_plugin_api::PluginRegistry::default();
