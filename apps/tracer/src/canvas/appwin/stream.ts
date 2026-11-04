@@ -236,6 +236,9 @@ export class AppStream {
   private async start(generation: number, last: boolean): Promise<boolean> {
     try {
       if (!this.size) return true;
+      // What the machine is told here is what a later hand resize is compared with, even when the box moved (and was only
+      // looked at) while this start waited for the connection.
+      this.pushedSize = this.size;
       const start = {
         host_id: this.o.hostId,
         start: {

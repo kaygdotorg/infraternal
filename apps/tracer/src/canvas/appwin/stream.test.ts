@@ -207,6 +207,32 @@ test("a drag's looking sizes do not hide its final size: the settle is compared 
   } finally { f.stream.dispose(); }
 });
 
+test("a size the box took while the start waited for the connection counts as told to the machine", async () => {
+  const frames: string[] = [];
+  const connection: StreamOptions["connection"] = {
+    isWelcomed: true, onWelcome: () => () => undefined,
+    async call(action) { frames.push(action); return action === "desktop.session.start" ? { session_id: "00000000-0000-0000-0000-000000000146" } : {}; },
+    openStream(handler) { queueMicrotask(() => handler.onWelcome(false)); return 1; }, closeStream() {},
+    send() { return true; },
+  };
+  const worker = { postMessage() {}, terminate() {}, onerror: null as ((event: Event) => void) | null };
+  const stream = new AppStream({ connection, hostId: "host", target: { type: "screen", displayId: 1 }, coarse: false,
+    events: { state() {}, control() {}, picture() {}, surface() {}, shape() {} }, makeWorker: () => worker as unknown as Worker });
+  try {
+    stream.setVisible(true); // on screen, so the stream attaches as soon as it starts (and a lease could be asked for)
+    const opening = stream.open({ width: 800, height: 600, density: 1 });
+    // The box moves (only looked at) before the start is sent; the start carries the new size ...
+    stream.resize({ width: 900, height: 600, density: 1 }, false);
+    await opening;
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // ... so a hand resize to that very size has nothing to tell the machine: no lease is asked for.
+    stream.resize({ width: 900, height: 600, density: 1 }, true);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(frames).toContain("desktop.session.start");
+    expect(frames).not.toContain("desktop.session.control");
+  } finally { stream.dispose(); }
+});
+
 test("following the machine's own shape sends no size at all (looking never moves it)", async () => {
   const f = await fixture();
   try {
