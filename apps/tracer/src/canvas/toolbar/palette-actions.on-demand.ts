@@ -3,7 +3,7 @@ import type { Ctx, WinRec } from "../context";
 import { beginRename } from "../mesh/rename.on-demand";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
-import { openWindowDocs } from "../windows/docs-action.on-demand";
+import { onDemand } from "../../on-demand";
 
 /** Flies to a Settings window (canvas-locked, snapped to its column). */
 export function openSettings(cx: Ctx, section: string, source?: string): void {
@@ -30,7 +30,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
   else if (kind === "overview") cx.nav.showOverview();
   else if (kind === "settings") openSettings(cx, value ?? "appearance", detail?.source);
-  else if (kind === "windowdocs") { if (active) openWindowDocs(cx, active); }
+  else if (kind === "windowdocs") { if (active) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, active); }); }
   else if (kind === "share") void cx.sharing?.open();
   else if (kind === "unlink") cx.sharing?.unlinkCurrent();
   else if (kind === "split") { if (active && isTerminal(active)) void cx.win.split(active, value === "right" ? "right" : "down"); }
