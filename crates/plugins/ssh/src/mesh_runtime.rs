@@ -66,7 +66,11 @@ impl SessionRuntime for ShimRuntime {
             size.rows,
         )
         .await
-        .map_err(|_| Refusal::LoginAccess)?;
+        .map_err(|error| {
+            // The kind only: never the account, the person or any path.
+            eprintln!("mesh SSH: a shell could not open ({:?})", error.kind());
+            Refusal::LoginAccess
+        })?;
         Ok(bridge(session, size))
     }
 }
@@ -100,8 +104,9 @@ async fn pump(
     mut controls: mpsc::Receiver<Control>,
 ) -> Option<u32> {
     let mut peer = session.peer;
+    // The launch already attached this link (`sessions::connect` sends
+    // `Attach(0)`); the shim refuses a second Attach and drops the link.
     let start = [
-        Frame::Attach(0),
         resize(size),
         // From the start of this new session: the first prompt included.
         Frame::ReadFrom(0),

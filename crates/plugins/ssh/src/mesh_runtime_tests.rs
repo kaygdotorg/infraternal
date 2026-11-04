@@ -43,10 +43,8 @@ async fn shell_output_input_resize_and_exit_cross_the_bridge() {
         ..
     } = attachment;
     let mut reader = Reader::default();
-    assert!(matches!(
-        expect(&mut shim, &mut reader).await,
-        Frame::Attach(0)
-    ));
+    // A launched session is already attached; a second Attach would make the
+    // real shim drop the link (measured on dev-02, #221).
     assert!(matches!(
         expect(&mut shim, &mut reader).await,
         Frame::Resize {
@@ -111,7 +109,7 @@ async fn control_flows_while_output_is_blocked() {
     let (bridge_end, mut shim) = UnixStream::pair().unwrap();
     let attachment = bridge(session(bridge_end), TerminalSize::default());
     let mut reader = Reader::default();
-    for _ in 0..3 {
+    for _ in 0..2 {
         expect(&mut shim, &mut reader).await;
     }
     // Nobody reads the SSH side: more output than the bridge buffer holds.
