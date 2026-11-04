@@ -63,8 +63,28 @@ impl Manager {
         }
     }
 
+    /// The manager for this launch. `cell` keeps only a probe that answered;
+    /// a probe that timed out stands for this launch alone.
+    pub async fn resolve(cell: &tokio::sync::OnceCell<Self>) -> Self {
+        Self::resolve_with(cell, Self::probe).await
+    }
+
+    pub(crate) async fn resolve_with<F, Fut>(cell: &tokio::sync::OnceCell<Self>, probe: F) -> Self
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<Self>>,
+    {
+        // `get_or_try_init` serializes concurrent first launches and leaves the
+        // cell empty on `Err`, so the next launch probes again.
+        cell.get_or_try_init(|| async { probe().await.ok_or(()) })
+            .await
+            .copied()
+            .unwrap_or(Self::Detached)
+    }
+
     /// Probe the applicable manager without trusting environment hints alone.
-    pub async fn detect() -> Self {
+    /// `None` means no answer within `HANDSHAKE`; a refusal is an answer.
+    pub async fn probe() -> Option<Self> {
         let root = Uid::effective().is_root();
         let mut command = isolated(Path::new("systemctl"));
         if !root {
@@ -81,10 +101,12 @@ impl Manager {
                 .status(),
         )
         .await;
-        if available.is_ok_and(|result| result.is_ok_and(|status| status.success())) {
-            if root { Self::System } else { Self::User }
-        } else {
-            Self::Detached
+        match available {
+            Err(_) => None,
+            Ok(Ok(status)) if status.success() => {
+                Some(if root { Self::System } else { Self::User })
+            }
+            Ok(_) => Some(Self::Detached),
         }
     }
 }

@@ -334,7 +334,7 @@ fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) 
     opens.spawn(async move {
         let result = async {
             task.plugins.admit("terminal.open", task.context).await?;
-            let manager = *task.manager.get_or_init(Manager::detect).await;
+            let manager = Manager::resolve(&task.manager).await;
             open_requested(&task.exe, &task.state, manager, task.input, task.prepare)
                 .await
                 .map_err(|error| open_refusal(&error))
@@ -355,7 +355,7 @@ fn spawn_revocation(
 ) -> tokio::task::JoinHandle<()> {
     use infraternal_plugin_api::admission::OpenRefusal;
     tokio::spawn(async move {
-        let manager = *manager.get_or_init(Manager::detect).await;
+        let manager = Manager::resolve(&manager).await;
         let result = if restore {
             crate::logins::restore(&state, person).await
         } else {
@@ -753,7 +753,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
         if !SESSION_ONLY {
             let warm = manager.clone();
             tokio::spawn(async move {
-                warm.get_or_init(Manager::detect).await;
+                Manager::resolve(&warm).await;
             });
         }
         running

@@ -481,3 +481,33 @@ async fn detached_launcher_success_keeps_waiting_for_the_session_process() {
     assert_eq!(session.id, id.into_bytes());
     shim.await.unwrap();
 }
+
+/// #324: a probe with no answer stands for one launch (Detached) and is not remembered; the next launch asks again.
+#[tokio::test(flavor = "current_thread")]
+async fn unanswered_manager_probe_is_not_remembered() {
+    use super::Manager;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let cell = tokio::sync::OnceCell::new();
+    let probes = AtomicUsize::new(0);
+    let first = Manager::resolve_with(&cell, || async {
+        probes.fetch_add(1, Ordering::SeqCst);
+        None
+    })
+    .await;
+    assert!(matches!(first, Manager::Detached));
+    assert!(cell.get().is_none(), "a stall must not be cached");
+    let second = Manager::resolve_with(&cell, || async {
+        probes.fetch_add(1, Ordering::SeqCst);
+        Some(Manager::User)
+    })
+    .await;
+    assert!(matches!(second, Manager::User), "{second:?}");
+    // An answer is kept: no third probe.
+    let third = Manager::resolve_with(&cell, || async {
+        probes.fetch_add(1, Ordering::SeqCst);
+        None
+    })
+    .await;
+    assert!(matches!(third, Manager::User));
+    assert_eq!(probes.load(Ordering::SeqCst), 2);
+}
