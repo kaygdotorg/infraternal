@@ -99,3 +99,51 @@ fn a_node_that_never_chose_moves_to_gotatun_and_keeps_its_key() {
     fs::remove_dir_all(&state).unwrap();
     assert_eq!(result.unwrap(), (Some("gotatun"), true));
 }
+
+const PIN_CHILD: &str = "INFRATERNAL_ENGINE_PIN_CHILD";
+
+/// Child half, run with `INFRATERNAL_MESH_ENGINE=gotatun`: restore with kernel chosen in code.
+/// Exit 0 when kernel runs, 1 when `GotaTun` runs, 2 on an error.
+#[test]
+#[ignore = "Child-only fixture for the engine precedence proof."]
+fn explicit_engine_child() {
+    if std::env::var_os(PIN_CHILD).is_none() {
+        return;
+    }
+    let state = private_state("engine-pin-child");
+    let engine = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        node.up()?;
+        let engine = running_engine();
+        node.down()?;
+        Ok::<_, std::io::Error>(engine)
+    })();
+    remove_link();
+    let _ = fs::remove_dir_all(&state);
+    std::process::exit(match engine {
+        Ok(Some("kernel")) => 0,
+        Ok(_) => 1,
+        Err(error) => {
+            eprintln!("explicit engine child failed: {error}");
+            2
+        }
+    });
+}
+
+/// An engine chosen in code wins over `INFRATERNAL_MESH_ENGINE` (#260 J213 P3): the variable
+/// selects the engine only where the code leaves the choice to the machine (`Node::restore`).
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn an_engine_chosen_in_code_wins_over_the_environment() {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "explicit_engine_child", "--nocapture"])
+        .env(PIN_CHILD, "1")
+        .env("INFRATERNAL_MESH_ENGINE", "gotatun")
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the environment overrode the engine chosen in code (1 = GotaTun ran, 2 = error)"
+    );
+}
