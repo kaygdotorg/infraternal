@@ -20,14 +20,21 @@ import { boxOf } from "./layout/geometry";
 import { endSplit } from "./layout/droplet-handle";
 import type { Backdrop } from "./backdrop";
 
+/** What the canvas does to hold less memory: culling far views, marking windows on screen, and reacting to a hidden page. */
 export interface Memory {
   /** Culls views by the camera's visible area; cheap enough for every frame. */
   cull(): void;
   /** Marks a window `data-onscreen` while it intersects the canvas (Frosted windows blur only those). Returns the stop. */
   watch(window: HTMLElement): () => void;
+  /** Stops the observers and any pending frame. */
   dispose(): void;
 }
 
+/**
+ * Makes the memory manager for the canvas `cx`. `backdrop` (optional) is released when the page is hidden. The rules (far views are not painted,
+ * windows a screen away are parked, a hidden page gives everything back) are described in the module comment. Listeners end when
+ * the canvas's abort signal fires.
+ */
 export function createMemory(cx: Ctx, backdrop: Backdrop | undefined): Memory {
   const { world, camera, views, signal } = cx;
   const far = new WeakSet<ViewRec>();
