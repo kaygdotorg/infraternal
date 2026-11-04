@@ -13,6 +13,7 @@ const SOURCE_NODE: u64 = 7;
 const TARGET_NODE: u64 = 9;
 
 struct NoRuntime;
+#[allow(clippy::unused_async_trait_impl)]
 impl SessionRuntime for NoRuntime {
     async fn open(
         &self,

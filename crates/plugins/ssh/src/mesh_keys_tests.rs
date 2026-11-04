@@ -249,10 +249,10 @@ async fn stock_ssh_add_lists_the_certificate() {
     let path = directory.join("agent.sock");
     let _ = std::fs::remove_file(&path);
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let served = Arc::clone(&identity);
+    let shared = Arc::clone(&identity);
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve(stream, move || Some(Arc::clone(&served))).await
+        serve(stream, move || Some(Arc::clone(&shared))).await
     });
     let output = tokio::task::spawn_blocking({
         let path = path.clone();
@@ -273,10 +273,14 @@ async fn stock_ssh_add_lists_the_certificate() {
         listed.starts_with("ssh-ed25519-cert-v01@openssh.com "),
         "{listed}"
     );
-    let fingerprint = identity
-        .certificate
-        .public_key()
-        .fingerprint(HashAlg::Sha256);
-    assert!(!fingerprint.to_string().is_empty());
+    // The listed key is this certificate, not some other key in the line.
+    let listed_key = russh::keys::Certificate::from_openssh(listed.trim()).unwrap();
+    assert_eq!(
+        listed_key.public_key().fingerprint(HashAlg::Sha256),
+        identity
+            .certificate
+            .public_key()
+            .fingerprint(HashAlg::Sha256)
+    );
     std::fs::remove_dir_all(&directory).unwrap();
 }

@@ -25,8 +25,8 @@ use crate::{
     mesh_server,
 };
 use infraternal_plugin_api::{
-    ActionDef, AgentPlugin, Dependency, PluginDescriptor, PluginError, SchemaRef,
-    action::{DryRun, Effect, Permission, Target},
+    ActionDef, AgentPlugin, Dependency, DryRun, Effect, Permission, PluginDescriptor, PluginError,
+    SchemaRef, Target,
 };
 use russh::keys::{Algorithm, Certificate, PrivateKey};
 use serde::Deserialize;

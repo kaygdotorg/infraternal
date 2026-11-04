@@ -20,7 +20,7 @@ fn sign_with(ca: &PrivateKey) -> impl Fn(&[u8]) -> Option<[u8; 64]> + '_ {
     }
 }
 
-fn person_request<'a>(subject: &'a PublicKey, lifetime: u64) -> PersonRequest<'a> {
+fn person_request(subject: &PublicKey, lifetime: u64) -> PersonRequest<'_> {
     PersonRequest {
         subject,
         person: "0b5c8a64-7d1f-4c43-9d0e-0c6a8a5b7f10",
@@ -55,13 +55,7 @@ fn person_certificate_has_exactly_the_verified_shape() {
             .unwrap(),
         "10.254.0.7/32"
     );
-    assert!(
-        certificate
-            .extensions()
-            .get("permit-pty")
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(certificate.extensions().get("permit-pty").unwrap(), "");
     assert_eq!(certificate.extensions().len(), 1);
     assert_eq!(certificate.public_key(), subject.key_data());
     // Back-dated for clock skew, but never longer than the admission bound.

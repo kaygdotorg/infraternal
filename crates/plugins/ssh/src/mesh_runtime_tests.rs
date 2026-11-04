@@ -122,12 +122,8 @@ async fn control_flows_while_output_is_blocked() {
         .await
         .unwrap();
     // The signal still reaches the shim although output is backed up.
-    loop {
-        match expect(&mut shim, &mut reader).await {
-            Frame::Signal(15) => break,
-            other => panic!("unexpected {other:?}"),
-        }
-    }
+    let frame = expect(&mut shim, &mut reader).await;
+    assert!(matches!(frame, Frame::Signal(15)), "unexpected {frame:?}");
     drop(attachment);
 }
 

@@ -35,7 +35,7 @@ fn patterns(suffix: &str, network: Ipv4Addr, prefix: u8) -> Option<Vec<String>> 
         return None;
     }
     let mut patterns = vec![format!("*.{suffix}")];
-    if prefix % 8 == 0 && (8..=24).contains(&prefix) {
+    if prefix.is_multiple_of(8) && (8..=24).contains(&prefix) {
         let octets = network.octets();
         let fixed = usize::from(prefix / 8);
         let mut glob = octets[..fixed]
