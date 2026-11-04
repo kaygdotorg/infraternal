@@ -15,6 +15,7 @@ mod lifecycle;
 pub mod mesh_admission;
 pub mod mesh_authority;
 pub mod mesh_certificate;
+pub mod mesh_client_config;
 pub mod mesh_flow;
 pub mod mesh_issue;
 pub mod mesh_keys;
