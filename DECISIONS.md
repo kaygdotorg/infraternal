@@ -3806,3 +3806,21 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        them up with an API key and they don't need approval anymore."
      - Keys from before D333 end within 24 h at upgrade ("i am the only
        user so no problem"), and a key's lifetime is a hard end ("yes").
+338. **Appearance presets round 3 (owner, 2026-11-04, #323; amends D322):**
+     - The built-in presets become Solid 100% tint, 0% blur; Tinted 75%
+       tint, 25% blur; Frosted 50% tint, 50% blur ("let's change our
+       default presets to these values").
+     - Order of the Appearance controls: "UI Size, Colour (please use
+       singular or plural consistenly), Backgrounds (I feel like we should
+       give the user options in Solid too like we do in Gradients), Tint,
+       Blur, Grain, Fonts".
+     - Colour rows align vertically. "instead of light/dark, just show the
+       light/dark colours in two circles and the user can select any one."
+     - "if the window is wide enough Tint Blur Grain should appear in 3
+       columns rather than rows with their sliders under them. because if
+       the window is very wide, the slider will be evry wide too".
+     - Gradient and background swatches drop their text labels: "the names
+       for colours can be displayed in warm tooltips, we just need a subtle
+       way to indicate which one is custom."
+     - The preview card's first terminal line must not be clipped at the
+       bottom.
