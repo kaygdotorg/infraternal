@@ -1,0 +1,575 @@
+//! A Traefik child that double-forks must leave nothing behind, after a stop and after an
+//! infraternal agent crash [#281 J152 P3-4, D336].
+//!
+//! The fake Traefik starts a grandchild with `setsid`, so it leaves the child's process group
+//! and session and carries no parent-death signal: only the cgroup can still find it. The
+//! grandchild runs `sleep` with a unique duration, which is how the test finds it without
+//! asking the code under test.
+//!
+//! Without delegation the supervisor falls back to reaping the direct child, and the
+//! grandchild survives. These tests then report what they saw and pass, unless
+//! `INFRATERNAL_REQUIRE_PROXY_CGROUP=1` says this run must prove containment (the root run in
+//! a `Delegate=yes` unit does).
+
+use super::{
+    DYNAMIC_CONFIG_FILENAME, TraefikSupervisor, fake_traefik, generation_probe_server,
+    generation_probe_settings, public_service, supervisor_fixture,
+};
+use crate::{cgroup::ProxyCgroups, supervisor::TraefikChild};
+use std::{
+    io::BufRead,
+    os::unix::fs::MetadataExt as _,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+const CRASH_HELPER: &str = "INFRATERNAL_PROXY_CRASH_HELPER";
+// libtest prints "test <name> ... " on the same line as captured-off output, so the parent
+// looks for this token anywhere in a line.
+const HELPER_READY: &str = "proxy-crash-helper-ready";
+
+fn must_contain() -> bool {
+    std::env::var_os("INFRATERNAL_REQUIRE_PROXY_CGROUP").is_some_and(|value| value == "1")
+}
+
+/// Whether this process contains its Traefik children (rootful or rootless).
+fn contained() -> bool {
+    crate::cgroup::containment().kind().starts_with("cgroup")
+}
+
+/// The leaf-name prefix the agent uses for the supervisor owning `lock_directory`.
+fn leaf_prefix(lock_directory: &Path) -> String {
+    let metadata = std::fs::metadata(lock_directory).expect("lock directory");
+    format!("proxy-{:x}-{:x}-", metadata.dev(), metadata.ino())
+}
+
+/// This process's own cgroup directory.
+fn own_cgroup_directory() -> Option<PathBuf> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let relative = own.lines().find_map(|line| line.strip_prefix("0::"))?;
+    Some(PathBuf::from(format!("/sys/fs/cgroup{relative}")))
+}
+
+/// A `sleep` duration no other process on the machine is running.
+fn marker() -> String {
+    let id = uuid::Uuid::new_v4().as_u128();
+    format!("{}.{}", 3000 + id % 1000, id % 1_000_000)
+}
+
+fn fake_double_forking_traefik(path: &Path, marker: &str) {
+    let script = format!(
+        "#!/bin/sh\n/usr/bin/setsid /bin/sleep {marker} </dev/null >/dev/null 2>&1 &\nexec /bin/sleep 120\n"
+    );
+    fake_traefik(path, script.as_bytes());
+}
+
+/// Live (non-zombie) processes running `sleep <marker>`.
+fn grandchildren(marker: &str) -> Vec<u32> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let args: Vec<_> = cmdline.split(|b| *b == 0).collect();
+        let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit_once(") ")
+                    .map(|(_, rest)| rest.starts_with('Z'))
+            })
+            .unwrap_or(true);
+        if !zombie && args.len() >= 2 && args[1] == marker.as_bytes() {
+            found.push(pid);
+        }
+    }
+    found
+}
+
+fn wait_for(mut done: impl FnMut() -> bool, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    done()
+}
+
+fn proxy_leaves(lock_directory: &Path) -> Vec<PathBuf> {
+    let Some(own) = own_cgroup_directory() else {
+        return Vec::new();
+    };
+    let prefix = leaf_prefix(lock_directory);
+    std::fs::read_dir(own)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Kills whatever is left when the test ends, even when an assertion failed first, so a run
+/// without delegation (or a failing one) leaves no process behind.
+struct Cleanup {
+    marker: String,
+    agent: Option<std::process::Child>,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if let Some(agent) = self.agent.as_mut() {
+            let _ = agent.kill();
+            let _ = agent.wait();
+        }
+        sweep(&self.marker);
+    }
+}
+
+/// Kill whatever the fallback left behind, so a run without delegation stays clean.
+fn sweep(marker: &str) {
+    for pid in grandchildren(marker) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap_or(i32::MAX)),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+fn verdict(name: &str, survivors: &[u32], leaves: &[std::path::PathBuf]) {
+    let containment = crate::cgroup::containment();
+    eprintln!(
+        "{name}: containment={} survivors={survivors:?} leaves={leaves:?}",
+        containment.kind()
+    );
+    if contained() || must_contain() {
+        assert!(contained(), "this run must contain the proxy");
+        assert!(
+            survivors.is_empty(),
+            "{name}: processes outlived the proxy: {survivors:?}"
+        );
+        assert!(
+            leaves.is_empty(),
+            "{name}: proxy cgroups were left: {leaves:?}"
+        );
+    }
+}
+
+#[test]
+fn a_stopped_child_leaves_no_forked_process_behind() {
+    let root = std::env::temp_dir().join(format!("proxy-cg-stop-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let executable = root.join("fake-traefik");
+    let marker = marker();
+    let _cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    fake_double_forking_traefik(&executable, &marker);
+    let probe = generation_probe_server(state.join(DYNAMIC_CONFIG_FILENAME), false);
+    let supervisor = TraefikSupervisor::start(
+        generation_probe_settings(&root, &state, &lock_directory, executable, probe.address),
+        std::sync::Arc::new(|_: String| {}),
+    )
+    .expect("start supervisor");
+    supervisor
+        .replace(vec![public_service()])
+        .expect("start the child");
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the fake Traefik forked its grandchild"
+    );
+    if contained() {
+        assert_eq!(proxy_leaves(&lock_directory).len(), 1, "one leaf per child");
+    }
+    drop(supervisor);
+    // cgroup.kill is synchronous up to "populated 0"; the fallback gets the same grace.
+    wait_for(|| grandchildren(&marker).is_empty(), Duration::from_secs(2));
+    let survivors = grandchildren(&marker);
+    let leaves = proxy_leaves(&lock_directory);
+    sweep(&marker);
+    drop(probe);
+    let _ = std::fs::remove_dir_all(&root);
+    verdict("stop", &survivors, &leaves);
+}
+
+/// Runs only inside the re-executed test binary: an infraternal agent that is about to crash.
+#[test]
+fn proxy_crash_helper() {
+    let Some(root) = std::env::var_os(CRASH_HELPER) else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let state = root.join("state");
+    let lock_directory = root.join("private");
+    let executable = root.join("fake-traefik");
+    let probe = generation_probe_server(state.join(DYNAMIC_CONFIG_FILENAME), false);
+    let supervisor = TraefikSupervisor::start(
+        generation_probe_settings(&root, &state, &lock_directory, executable, probe.address),
+        std::sync::Arc::new(|_: String| {}),
+    )
+    .expect("start helper supervisor");
+    supervisor
+        .replace(vec![public_service()])
+        .expect("start the helper's child");
+    println!("\n{HELPER_READY}");
+    thread::sleep(Duration::from_secs(120));
+}
+
+#[test]
+fn an_agent_crash_leaves_no_forked_process_behind_once_the_next_agent_starts() {
+    let root = std::env::temp_dir().join(format!("proxy-cg-crash-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let executable = root.join("fake-traefik");
+    let marker = marker();
+    let mut cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    fake_double_forking_traefik(&executable, &marker);
+
+    // The "agent" is this test binary, re-executed to run only the helper, then SIGKILLed.
+    let mut agent = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "supervisor_tests::cgroup_containment::proxy_crash_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CRASH_HELPER, &root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start the crashing agent");
+    let output = agent.stdout.take().expect("agent output");
+    cleanup.agent = Some(agent);
+    let mut ready = false;
+    for line in std::io::BufReader::new(output).lines() {
+        if line.is_ok_and(|line| line.contains(HELPER_READY)) {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "the crashing agent started its child");
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the fake Traefik forked its grandchild"
+    );
+    let agent = cleanup.agent.as_mut().expect("agent handle");
+    agent.kill().expect("crash the agent");
+    agent.wait().expect("reap the crashed agent");
+    // The parent-death signal takes the direct child; the detached grandchild stays.
+    thread::sleep(Duration::from_millis(200));
+    let orphaned = grandchildren(&marker);
+    assert!(
+        !orphaned.is_empty(),
+        "the crash left an orphan, so the restart has something to stop"
+    );
+
+    let restarted = TraefikSupervisor::start(
+        generation_probe_settings(
+            &root,
+            &state,
+            &lock_directory,
+            root.join("fake-traefik"),
+            "127.0.0.1:9".parse().expect("unused probe"),
+        ),
+        std::sync::Arc::new(|_: String| {}),
+    );
+    wait_for(|| grandchildren(&marker).is_empty(), Duration::from_secs(2));
+    let survivors = grandchildren(&marker);
+    let leaves = proxy_leaves(&lock_directory);
+    drop(restarted);
+    sweep(&marker);
+    let _ = std::fs::remove_dir_all(&root);
+    verdict("crash", &survivors, &leaves);
+}
+
+// --- J172 review findings (#281 comment 77452) ---
+
+/// Detect containment for a fresh fixture, or skip (fail when the run must contain).
+fn contained_fixture(name: &str) -> Option<(PathBuf, PathBuf, ProxyCgroups)> {
+    let root = std::env::temp_dir().join(format!("proxy-cg-{name}-{}", uuid::Uuid::new_v4()));
+    let (_, lock_directory) = supervisor_fixture(&root);
+    match ProxyCgroups::detect(&lock_directory) {
+        Ok(cgroups) => Some((root, lock_directory, cgroups)),
+        Err(reason) => {
+            assert!(
+                !must_contain(),
+                "{name}: this run must contain the proxy: {reason}"
+            );
+            eprintln!("{name}: skipped, no containment here: {reason}");
+            let _ = std::fs::remove_dir_all(&root);
+            None
+        }
+    }
+}
+
+/// Start a fake Traefik running `body` (after `c` holds its own cgroup path) in a fresh leaf.
+fn spawn_in_leaf(root: &Path, cgroups: &ProxyCgroups, body: &str) -> TraefikChild {
+    let executable = root.join("fake-traefik");
+    let config = root.join("traefik.toml");
+    let script = format!("#!/bin/sh\nc=$(/bin/sed -n 's/^0:://p' /proc/self/cgroup)\n{body}\n");
+    fake_traefik(&executable, script.as_bytes());
+    crate::config::write_proxy_config_atomic(&config, b"{}").expect("write config fixture");
+    TraefikChild::spawn_holding(
+        &executable,
+        &config,
+        &[],
+        None,
+        Some(cgroups),
+        std::sync::Arc::new(|_: String| {}),
+    )
+    .expect("spawn contained child")
+}
+
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| !rest.starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+// P2-1: rootless, the child owns its cgroup files and can move itself to the parent. Stop must
+// still finish and take the direct child, rather than wait for it forever. Rootful, the move is
+// refused and this is the ordinary stop.
+#[test]
+fn a_child_that_leaves_its_cgroup_is_still_stopped() {
+    let Some((root, _lock, cgroups)) = contained_fixture("escape") else {
+        return;
+    };
+    let marker = marker();
+    let _cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    let mut child = spawn_in_leaf(
+        &root,
+        &cgroups,
+        &format!(
+            "echo $$ > \"/sys/fs/cgroup${{c%/*}}/cgroup.procs\" 2>/dev/null\nexec /bin/sleep {marker}"
+        ),
+    );
+    let pid = child.id();
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the fake Traefik started"
+    );
+    let (done, finished) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let result = child.stop();
+        let _ = done.send(result.map_err(|error| error.to_string()));
+    });
+    let outcome = finished.recv_timeout(Duration::from_secs(10));
+    let still_alive = alive(pid);
+    sweep(&marker);
+    let _ = std::fs::remove_dir_all(&root);
+    let outcome = outcome.expect("stop must finish even when the child left its cgroup");
+    eprintln!("escape: stop={outcome:?} direct child alive={still_alive}");
+    assert!(outcome.is_ok(), "stop failed: {outcome:?}");
+    assert!(!still_alive, "the direct child must be stopped");
+}
+
+// P3-1: a child-made cgroup inside the leaf must not make the leaf impossible to remove, neither
+// on stop nor when the next agent adopts a leftover leaf.
+#[test]
+fn a_cgroup_made_inside_the_leaf_never_blocks_removal() {
+    let Some((root, lock_directory, cgroups)) = contained_fixture("nested") else {
+        return;
+    };
+    let marker = marker();
+    let _cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    let mut child = spawn_in_leaf(
+        &root,
+        &cgroups,
+        &format!("/bin/mkdir -p \"/sys/fs/cgroup$c/a/b\" 2>/dev/null\nexec /bin/sleep {marker}"),
+    );
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the fake Traefik started"
+    );
+    let leaf = child.cgroup().expect("contained child").to_owned();
+    let nested = leaf.join("a").exists();
+    let stopped = child.stop();
+    eprintln!(
+        "nested: made={nested} stop={stopped:?} leaf left={}",
+        leaf.exists()
+    );
+    // A leftover leaf with a nested cgroup, as a crash would leave it, adopted at next start.
+    let leftover = cgroups.create_leaf().expect("second leaf");
+    let leftover_path = leftover.path().to_owned();
+    let made = std::fs::create_dir_all(leftover_path.join("x").join("y")).is_ok();
+    drop(leftover);
+    let adopted = ProxyCgroups::detect(&lock_directory)
+        .expect("same containment")
+        .adopt_orphans();
+    eprintln!(
+        "nested: leftover made={made} adopt={adopted:?} left={}",
+        leftover_path.exists()
+    );
+    sweep(&marker);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        stopped.is_ok(),
+        "stop must remove a leaf with nested cgroups: {stopped:?}"
+    );
+    assert!(!leaf.exists(), "the leaf must be gone");
+    assert!(
+        adopted.is_ok(),
+        "adoption must remove nested cgroups: {adopted:?}"
+    );
+    assert!(!leftover_path.exists(), "the leftover leaf must be gone");
+}
+
+// P3-2: rootless, a compromised child can leave its cgroup, so status must not claim more.
+#[test]
+fn rootless_status_says_what_is_really_contained() {
+    let containment = crate::cgroup::containment();
+    if !contained() {
+        assert!(!must_contain(), "this run must contain the proxy");
+        return;
+    }
+    let text = containment.describe();
+    eprintln!("status: kind={} text={text}", containment.kind());
+    if nix::unistd::Uid::effective().is_root() {
+        assert_eq!(containment.kind(), "cgroup");
+    } else {
+        assert_eq!(containment.kind(), "cgroup-rootless");
+        assert!(!text.contains("stops everything"), "{text}");
+        assert!(text.contains("compromised"), "{text}");
+    }
+}
+
+// P3-3: the root cgroup has no cgroup.kill on any kernel; the reason must say where we are.
+#[test]
+fn the_root_cgroup_is_named_as_the_fallback_reason() {
+    let root = std::env::temp_dir().join(format!("proxy-cg-rootcg-{}", uuid::Uuid::new_v4()));
+    let (_, lock_directory) = supervisor_fixture(&root);
+    let reason = ProxyCgroups::at(PathBuf::from("/sys/fs/cgroup"), &lock_directory)
+        .expect_err("the root cgroup holds no proxy leaves");
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!("root cgroup: {reason}");
+    assert!(reason.contains("root cgroup"), "{reason}");
+}
+
+// P3-4: when delegation is gone (a unit lost Delegate=yes), leaves from an earlier contained run
+// must still be killed on start; killing our own tagged leaves needs no delegation.
+#[test]
+fn leftover_cgroups_are_reaped_even_without_delegation() {
+    let Some(own) = own_cgroup_directory() else {
+        return;
+    };
+    let writable = nix::unistd::access(&own, nix::unistd::AccessFlags::W_OK).is_ok()
+        && own.join("cgroup.kill").exists();
+    if !writable {
+        eprintln!("leftover: skipped, {} is not ours to write", own.display());
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("proxy-cg-left-{}", uuid::Uuid::new_v4()));
+    let (state, lock_directory) = supervisor_fixture(&root);
+    let marker = marker();
+    let _cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    let leaf = own.join(format!("{}7", leaf_prefix(&lock_directory)));
+    std::fs::create_dir(&leaf).expect("plant a leftover leaf");
+    let mut planted = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!("echo $$ > \"$1/cgroup.procs\" && exec /usr/bin/setsid /bin/sleep {marker}"),
+            "planted",
+        ])
+        .arg(&leaf)
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("start a process in the leftover leaf");
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the planted process runs"
+    );
+    let started = TraefikSupervisor::start(
+        generation_probe_settings(
+            &root,
+            &state,
+            &lock_directory,
+            root.join("fake-traefik"),
+            "127.0.0.1:9".parse().expect("unused probe"),
+        ),
+        std::sync::Arc::new(|_: String| {}),
+    );
+    wait_for(|| grandchildren(&marker).is_empty(), Duration::from_secs(2));
+    let survivors = grandchildren(&marker);
+    let leaf_left = leaf.exists();
+    drop(started);
+    sweep(&marker);
+    let _ = planted.wait();
+    if leaf.exists() {
+        let _ = std::fs::write(leaf.join("cgroup.kill"), "1");
+        thread::sleep(Duration::from_millis(100));
+        let _ = std::fs::remove_dir(&leaf);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!(
+        "leftover: containment={} survivors={survivors:?} leaf left={leaf_left}",
+        crate::cgroup::containment().kind()
+    );
+    assert!(
+        survivors.is_empty(),
+        "a leftover proxy process survived the start"
+    );
+    assert!(!leaf_left, "the leftover leaf survived the start");
+}
+
+// P3-5: the leaf name carries the lock directory's device and inode, so two agents in one cgroup
+// whose lock directories share an inode on different filesystems never adopt each other's leaves.
+#[test]
+fn the_leaf_name_carries_device_and_inode() {
+    let Some((root, lock_directory, cgroups)) = contained_fixture("tag") else {
+        return;
+    };
+    let expected = leaf_prefix(&lock_directory);
+    let leaf = cgroups.create_leaf().expect("leaf");
+    let name = leaf
+        .path()
+        .file_name()
+        .expect("leaf name")
+        .to_string_lossy()
+        .into_owned();
+    let removed = leaf.remove();
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!("tag: {name}");
+    assert!(removed.is_ok());
+    assert!(name.starts_with(&expected), "{name}");
+}

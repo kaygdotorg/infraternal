@@ -14,7 +14,12 @@
  * - At a point: `at` places it at a pointer position (a right-click) instead of under the anchor: it opens down and
  *   right of the point, flips to the other side when it would leave the screen, and is kept one inset inside the
  *   screen. The anchor then only names the thing the menu is about (it gets `aria-expanded` and the focus back).
- * - Dismissal: a press outside (the anchor toggles it itself) or Escape closes it.
+ * - Dismissal: a press outside (the anchor toggles it itself) or Escape closes it, and so does the anchor leaving the visible area.
+ * - It moves with its anchor (TASTE: anchored popovers move with their anchor). An anchor inside a window gets its popover INSIDE that
+ *   window, positioned in the window's own coordinates, so whatever moves the window moves the popover in the same frame and by the same
+ *   amount: the camera's pan and zoom, a column's scroll, a layout change. Following from script is always a frame behind, and a native
+ *   scroll on the compositor is behind by more; mounting it in the window cannot lag. An anchor outside any window (the sidebar's
+ *   footer) floats over the screen, which does not move.
  */
 import { currentUiScale } from "./ui-scale";
 export type PopoverSource = "pointer" | "keyboard";
@@ -83,15 +88,40 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
     root.style.transformOrigin = `${Math.round(at.x - left)}px ${flip ? "100%" : "0"}`;
   };
+  // Inside the anchor's window, unless the popover opens upward from a screen-level anchor (see the header comment).
+  const inside = above || options.at ? null : anchor.closest<HTMLElement>(".ui-window");
   const place = (): void => {
     if (options.at) { placeAt(options.at); return; }
     const box = anchor.getBoundingClientRect();
-    const host = anchor.closest(".ui-window");
+    if (inside) {
+      // The window's own coordinates: `zoom` is whatever scale sits above the window (the camera), so every number below is in the
+      // window's layout pixels, and the popover scales and moves with it. Positions are relative to the window's padding box.
+      const hr = inside.getBoundingClientRect();
+      const zoom = hr.width / inside.offsetWidth || 1;
+      const frame = getComputedStyle(inside);
+      const bl = parseFloat(frame.borderLeftWidth) || 0, bt = parseFloat(frame.borderTopWidth) || 0;
+      const aLeft = (box.left - hr.left) / zoom - bl, aRight = (box.right - hr.left) / zoom - bl, aBottom = (box.bottom - hr.top) / zoom - bt;
+      const innerW = inside.clientWidth, innerH = inside.clientHeight;
+      const room = Math.min((options.maxWidth ?? 400) * currentUiScale(), innerW - INSET * 2);
+      if (options.hug) { root.style.width = ""; root.style.maxWidth = `${Math.round(room)}px`; }
+      const width = options.hug ? Math.min(room, root.offsetWidth) : room;
+      const wanted = options.align === "end" ? aRight - width : aLeft;
+      const left = Math.round(Math.max(INSET, Math.min(wanted, innerW - INSET - width)));
+      const top = Math.round(aBottom + INSET);
+      // The visible area only ever shrinks it (a window taller than the screen, a key tray).
+      const visible = Math.min(options.bottomLimit?.() ?? Infinity, (window.visualViewport?.height ?? innerHeight) - INSET);
+      const bottom = Math.min(innerH - INSET, (visible - hr.top) / zoom - bt);
+      root.style.left = `${left}px`;
+      if (!options.hug) root.style.width = `${Math.round(room)}px`;
+      root.style.top = `${top}px`;
+      root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
+      root.style.transformOrigin = `${Math.round(aLeft + (aRight - aLeft) / 2 - left)}px 0`;
+      return;
+    }
     const screen = stage.getBoundingClientRect();
     // An anchor outside any window (the sidebar's footer, the "+" beside the top pill) is bounded by the screen it floats over.
-    const win = host?.getBoundingClientRect() ?? screen;
-    const frame = parseFloat(getComputedStyle(host ?? anchor).borderLeftWidth) || 0;
-    const inset = INSET + frame;
+    const win = screen;
+    const inset = INSET;
     const room = Math.min((options.maxWidth ?? 400) * currentUiScale(), win.width - inset * 2);
     if (options.hug) { root.style.width = ""; root.style.maxWidth = `${Math.round(room)}px`; }
     const width = options.hug ? Math.min(room, root.offsetWidth) : room;
@@ -118,7 +148,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   // Placed before it is attached: the measurements are read while no new content is pending, so the browser
   // lays out once, after the single write below.
   place();
-  stage.append(root);
+  (inside ?? stage).append(root);
   if (source === "pointer") {
     if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
     else root.animate([{ opacity: 0, transform: `translateY(${above ? 4 : -4}px) scale(0.96)` }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
@@ -152,5 +182,19 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   }, { capture: true, signal: events.signal });
   window.addEventListener("resize", place, { signal: events.signal });
   window.visualViewport?.addEventListener("resize", place, { signal: events.signal });
+  if (inside) {
+    // A press inside the popover is not a press on the window behind it (a terminal would take focus and, on a phone, the keyboard).
+    root.addEventListener("click", (event) => event.stopPropagation(), { signal: events.signal });
+    // The window changing size moves the anchor within it.
+    const resized = new ResizeObserver(place);
+    resized.observe(inside);
+    events.signal.addEventListener("abort", () => resized.disconnect());
+    // The anchor leaving the visible area (the canvas panned away, the window closed) closes it: a popover with nothing to point at is clutter.
+    // Only a button that WAS on screen and has left it closes the popover: one opened for a button that was never in view (a script, a test) is not dismissed by that.
+    let seen = false;
+    const watched = new IntersectionObserver((entries) => { for (const entry of entries) { if (entry.isIntersecting) seen = true; else if (seen) close("pointer"); } });
+    watched.observe(anchor);
+    events.signal.addEventListener("abort", () => watched.disconnect());
+  }
   return { root, place, close };
 }

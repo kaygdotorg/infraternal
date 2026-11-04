@@ -25,6 +25,17 @@ test("a view taller than the viewport is scaled down so it fits", () => {
   expect(st.z).toBe(0.5);
 });
 
+test("each stop names the column it is for: the first of columns that share it, the last at the right edge", () => {
+  const r = { x: 0, y: 0, w: 3 * 400 + 24, h: 700 };
+  const st = stopsFor(view([400, 400, 400]), r, 500, 700);
+  expect(st.owners).toEqual([0, 1, 2]);
+  // Two columns narrower than the viewport rest at the same left edge (the first stop is clamped to the content): the first owns it.
+  const crowded = stopsFor(view([200, 200, 200, 200, 200, 200]), { x: 0, y: 0, w: 6 * 200 + 5 * 24, h: 700 }, 700, 700);
+  expect(crowded.owners.length).toBe(crowded.lefts.length);
+  expect(crowded.owners[0]).toBe(0);
+  expect(crowded.owners[crowded.owners.length - 1]).toBe(5);
+});
+
 test("nearestStop picks the stop whose centre is closest", () => {
   const st = stopsFor(view([400, 400, 400]), { x: 0, y: 0, w: 1224, h: 700 }, 500, 700);
   const centre = (i: number): number => st.lefts[i]! + st.view / 2;

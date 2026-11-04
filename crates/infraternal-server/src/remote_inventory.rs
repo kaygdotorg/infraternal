@@ -1,6 +1,9 @@
 //! Adapts the existing enrollment ledger and transport registry to the removable admitted-host inventory [198], #194.
 use crate::remote_runtime::RemoteHosts;
-use infraternal_plugin_api::{Operation, host_name::machine_name};
+use infraternal_plugin_api::{
+    Operation,
+    host_name::{fallback_machine_name, machine_name},
+};
 use infraternal_plugin_remote::inventory::{Changes, Inventory};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -168,8 +171,10 @@ impl Inventory for Source {
                 let id = Uuid::from_slice(&id).map_err(|_| ())?;
                 let user = address.split_once('@').map(|(user, _)| user);
                 let name = machine_name(&address)
-                    .or(hostname)
-                    .unwrap_or_else(|| "unnamed".to_owned());
+                    .or_else(|| hostname.as_deref().and_then(machine_name))
+                    .unwrap_or_else(|| {
+                        fallback_machine_name(os.as_deref(), &id.simple().to_string())
+                    });
                 let online = self.hosts.online(id).await;
                 let value = json!({"id":id,"name":name,"user":if mode == "rootful" {Some("root")} else {user},"os":os,"address":if address.is_empty(){None}else{Some(&address)},"online":online});
                 let size = serde_json::to_vec(&value).map_err(|_| ())?.len();

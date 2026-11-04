@@ -144,6 +144,8 @@ export interface Adapters {
   /** Streams of app windows and screens from machines (D207, D208); absent in mockups, and the feature is then not offered at all. */
   appWindows?: AppWindowsAdapter;
   startupHints?: import("./sessions/startup-hints").StartupHints;
+  /** Which docs heading explains a window ("?" in its action group, `⌥⌘/`, ⌘K); absent, and none of the three is offered (#304). */
+  docs?: import("./docs/docs-adapter").DocsAdapter;
 }
 
 /** Loads the app-window runtime only after the desktop stream is wanted and supported. */

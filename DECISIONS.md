@@ -4019,3 +4019,48 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        actually use, and a test of the Mac side: "screenshots look pretty
        good but i want mockups with the buttons we are going to use, has the
        mac agent been tested?"
+350. **App-window controls, round 1 (owner, 2026-11-04, #146; extends D342,
+     D343, D349):**
+     - **Top right:** Send keys stays. Bring to front is questioned ("send
+       keys is a good action but what is bring to front? we need to refine
+       this"). The owner pointed to the Screens 5 App Store screenshots as a
+       reference. The final set is asked as a follow-up.
+     - **Send keys:** a short list on desktop. "on phone it should replace
+       the terminal row in the toolbar."
+     - **Settings** (1:1 or fit, frame rate, reconnect) sit behind a gear in
+       the window's pill, "but global defaults need to be in Settings →
+       Remote Desktop → MacOS".
+     - **Frame rate:** "Automatic" or "Save data" ("agreed").
+     - **Phone layout:** "i think for both terminal and mac, we should bring
+       the machine pill down. headers are the wrong place for mobile. what
+       you're suggesting belongs to the phone toolbar row." On a phone, the
+       machine pill moves down to the bottom toolbar area, for terminals
+       and app windows alike, and Full screen and Close live in the phone
+       toolbar row, not a header.
+     - **Picker rows:** "<Icon> <App> <Window Title> <Optional Number>". The
+       number appears only when two windows of one app share a title.
+351. **App-window top right, and engineering practices adopted (owner,
+     2026-11-04, #146, #344):**
+     - **App-window top right:** Send keys plus ⋯. The ⋯ menu holds
+       Screenshot, View only, Close window on the machine (with a
+       confirmation) and Settings. Bring to front is dropped, because input
+       already brings the app forward (D208 A3): "correct, that's all for
+       now. we can change it later as needs arise."
+     - **Engineering practices (#344) are adopted:** "yes this is way better
+       than arbitrary rules because these are grounded in experience". They
+       live in `docs/ENGINEERING.md`, enforced through review plus cheap
+       checks ("agreed"). Specifically:
+       - an event-loop lag probe in tests and the benchmark harness only,
+         never in shipped builds ("agreed");
+       - a root gate step for changes that touch root-install, proxy, mesh
+         or shim code ("agreed but isn't that what test.ssh.kayg.org
+         for?"). The test server stays the real-environment check for
+         browser and passkey flows; the root gate covers root-only code
+         paths on every change;
+       - clippy's `too_many_lines` and `too_many_arguments` are turned off
+         ("sure");
+       - D345 doc comments are checked on the diff ("correct");
+       - a new fixed sleep in a test needs a written reason, flagged on the
+         diff ("agreed");
+       - the fuzz targets run nightly on dev-02, about 1 h, with crashes
+         filed as issues ("agreed").
