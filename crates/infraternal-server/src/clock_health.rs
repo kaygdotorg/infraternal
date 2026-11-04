@@ -8,10 +8,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// The clock is sampled once a second.
 const SAMPLE_PERIOD: Duration = Duration::from_secs(1);
+/// A longer gap between samples (a stalled or suspended process) resets health.
 const MAX_SAMPLE_GAP: Duration = Duration::from_secs(5);
+/// How far the wall clock may move apart from the monotonic clock per sample.
 const MAX_DRIFT: Duration = Duration::from_millis(250);
 
+/// The previous sample and how many stable samples followed it.
 #[derive(Default)]
 struct Samples {
     previous: Option<(SystemTime, Instant)>,
@@ -92,6 +96,8 @@ impl ClockHealth {
         self.healthy.load(Ordering::Acquire).then_some(epoch)
     }
 
+    /// Accept a sample only if the wall clock moved forward by about one monotonic second. Three stable samples in a
+    /// row mark the clock healthy; any unstable one resets the count.
     fn observe(&self, wall: SystemTime, monotonic: Instant) {
         let mut samples = self
             .samples
@@ -124,14 +130,17 @@ impl ClockHealth {
     }
 }
 
+/// The absolute difference between two durations.
 fn duration_difference(left: Duration, right: Duration) -> Duration {
     left.abs_diff(right)
 }
 
+/// Startup, stability and regression checks for clock health.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The clock starts untrusted and needs three stable samples.
     #[test]
     fn clock_starts_unknown_and_needs_three_stable_samples() {
         let health = ClockHealth::default();
@@ -147,6 +156,7 @@ mod tests {
         }
     }
 
+    /// A backwards wall step or a long sample gap makes the clock untrusted again.
     #[test]
     fn backwards_wall_time_and_long_sample_gaps_return_to_unknown() {
         let health = ClockHealth::default();

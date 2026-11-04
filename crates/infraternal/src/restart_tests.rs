@@ -198,6 +198,7 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     assert!(!directory.state().join("restart/control.sock").exists());
 }
 
+/// A same-user status request reads the CA lock, and an unavailable socket is reported as such.
 #[tokio::test]
 async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socket() {
     let directory = Directory::new();
@@ -221,6 +222,7 @@ async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socke
     assert!(server.await.is_err_and(|error| error.is_cancelled()));
 }
 
+/// The control endpoint accepts a read-only status request frame.
 #[tokio::test]
 async fn private_control_endpoint_accepts_a_read_only_status_request_frame() {
     let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();

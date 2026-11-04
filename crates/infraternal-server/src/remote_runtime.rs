@@ -728,6 +728,7 @@ impl RemoteListeners {
         Self::start_configured(address, identity, roots, store, hosts, Some(recovery)).await
     }
 
+    /// Start the listener with or without the recovery service.
     async fn start_configured(
         address: SocketAddr,
         identity: &Identity,

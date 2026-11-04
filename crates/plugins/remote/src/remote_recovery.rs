@@ -236,6 +236,8 @@ pub async fn exchange(
     }
 }
 
+/// What the host sends to recover: its ID, the predecessor certificate, a fresh CSR for the same key and the request
+/// ID that binds them.
 struct ClientProof {
     host_id: Uuid,
     predecessor_fingerprint: [u8; 32],
@@ -246,6 +248,7 @@ struct ClientProof {
     not_after: i64,
 }
 
+/// Build the recovery proof material from the current (expired) identity. Only Ed25519 identities can recover.
 fn prepare_proof(identity: &remote_tls::Identity) -> io::Result<ClientProof> {
     use openssl::{
         hash::MessageDigest,
@@ -288,6 +291,7 @@ fn prepare_proof(identity: &remote_tls::Identity) -> io::Result<ClientProof> {
     })
 }
 
+/// The host ID from the certificate's single `urn:infraternal:host:` URI name.
 fn host_id(certificate: &openssl::x509::X509) -> io::Result<Uuid> {
     let mut host = None;
     for name in certificate.subject_alt_names().ok_or_else(denied)? {
@@ -303,6 +307,7 @@ fn host_id(certificate: &openssl::x509::X509) -> io::Result<Uuid> {
     host.ok_or_else(denied)
 }
 
+/// Seconds since the Unix epoch for an ASN.1 time.
 fn epoch_seconds(time: &openssl::asn1::Asn1TimeRef) -> io::Result<i64> {
     let epoch = openssl::asn1::Asn1Time::from_unix(0).map_err(|_| denied())?;
     let difference = epoch.diff(time).map_err(|_| denied())?;
@@ -312,6 +317,7 @@ fn epoch_seconds(time: &openssl::asn1::Asn1TimeRef) -> io::Result<i64> {
         .ok_or_else(denied)
 }
 
+/// Parse a certificate only if its DER is canonical and within the size bound.
 fn canonical_certificate(der: &[u8]) -> io::Result<openssl::x509::X509> {
     if der.len() > 8192 {
         return Err(denied());
@@ -342,6 +348,7 @@ pub async fn write_response<C: Channel + ?Sized>(
     write_frame(channel, &payload).await
 }
 
+/// Write one bounded recovery request frame.
 async fn write_request<C: Channel + ?Sized>(
     channel: &C,
     request: &RecoveryRequest,
@@ -359,6 +366,7 @@ pub async fn read_response<C: Channel + ?Sized>(channel: &C) -> io::Result<Recov
     serde_json::from_slice(&payload).map_err(|_| denied())
 }
 
+/// Write one length-prefixed frame with a 5 s bound; empty or oversized payloads are refused.
 async fn write_frame<C: Channel + ?Sized>(channel: &C, payload: &[u8]) -> io::Result<()> {
     if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
         return Err(denied());
@@ -372,6 +380,7 @@ async fn write_frame<C: Channel + ?Sized>(channel: &C, payload: &[u8]) -> io::Re
         .map_err(|_| io::ErrorKind::TimedOut)?
 }
 
+/// Read one length-prefixed frame, refusing an oversized length before reading the payload.
 async fn read_frame<C: Channel + ?Sized>(channel: &C) -> io::Result<Vec<u8>> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut length = [0; 4];
@@ -388,6 +397,7 @@ async fn read_frame<C: Channel + ?Sized>(channel: &C) -> io::Result<Vec<u8>> {
     .map_err(|_| io::ErrorKind::TimedOut)?
 }
 
+/// Fill `target` completely from the channel, or fail.
 async fn read_exact<C: Channel + ?Sized>(channel: &C, mut target: &mut [u8]) -> io::Result<()> {
     while !target.is_empty() {
         let read = channel.read(target).await?;
@@ -399,14 +409,17 @@ async fn read_exact<C: Channel + ?Sized>(channel: &C, mut target: &mut [u8]) -> 
     Ok(())
 }
 
+/// Every refusal is the same opaque error.
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
 
+/// Transcript binding, frame bounds and time conversion checks for certificate recovery.
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// ASN.1 times convert to Unix seconds counted from the epoch.
     #[test]
     fn unix_time_conversion_uses_time_after_epoch() {
         let expected = 1_900_000_000;
@@ -414,6 +427,7 @@ mod tests {
         assert_eq!(epoch_seconds(time.as_ref()).unwrap(), expected);
     }
 
+    /// The request ID and the proof transcript change when any public field changes.
     #[test]
     fn request_identity_and_proof_transcript_bind_every_public_field() {
         let host = Uuid::from_u128(42);
@@ -482,6 +496,7 @@ mod tests {
         assert!(base.starts_with(b"infraternal/remote-recovery/proof/v1\0"));
     }
 
+    /// The challenge message covers every request field under its own signing domain.
     #[test]
     fn challenge_message_binds_every_request_field_under_its_own_domain() {
         let host = Uuid::from_u128(42);
@@ -502,6 +517,7 @@ mod tests {
         assert!(base.starts_with(b"infraternal/remote-recovery/challenge/v1\0"));
     }
 
+    /// An in-memory channel over a duplex stream.
     struct Duplex(tokio::sync::Mutex<tokio::io::DuplexStream>);
 
     impl Channel for Duplex {
@@ -516,6 +532,7 @@ mod tests {
         }
     }
 
+    /// The parser refuses unknown fields and oversized frames before decoding them.
     #[tokio::test]
     async fn recovery_parser_rejects_unknown_fields_and_oversized_frames_before_decode() {
         let (channel, mut peer) = tokio::io::duplex(4096);

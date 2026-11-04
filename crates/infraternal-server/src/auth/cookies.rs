@@ -5,7 +5,9 @@
 //! because the bearer value is still checked against the live session row before use.
 use axum::http::{HeaderMap, header};
 
+/// The single cookie name sessions used before versioned names; still read when no versioned cookie is present.
 const LEGACY_SESSION_NAME: &str = "__Host-infraternal";
+/// Versioned session cookies are named `<prefix><login sequence>-<absolute expiry>`.
 const SESSION_NAME_PREFIX: &str = "__Host-infraternal-session-";
 
 /// One parsed browser session capability and its ordering hint.
@@ -162,6 +164,7 @@ pub(crate) fn session_tokens(headers: &HeaderMap) -> Option<Vec<&str>> {
     Some(tokens)
 }
 
+/// The login sequence and expiry from a versioned cookie name, only in canonical decimal form.
 fn parse_session_name(name: &str) -> Option<(i64, i64)> {
     let suffix = name.strip_prefix(SESSION_NAME_PREFIX)?;
     let (sequence, expires_text) = suffix.split_once('-')?;
@@ -177,6 +180,7 @@ fn parse_session_name(name: &str) -> Option<(i64, i64)> {
     Some((login_sequence, expires))
 }
 
+/// A session bearer is exactly 43 URL-safe base64 characters.
 fn valid_token(token: &str) -> bool {
     token.len() == 43
         && token
@@ -190,7 +194,9 @@ mod tests {
     use axum::http::HeaderValue;
     const PREFIX: &str = "__Host-infraternal=";
     const TOKEN: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG";
+    /// A bearer for an older login generation.
     const OLDER: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF1";
+    /// A bearer for a newer login generation.
     const NEWER: &str = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF2";
 
     #[test]
@@ -237,6 +243,7 @@ mod tests {
         assert!(capability(&headers, PREFIX).is_none());
     }
 
+    /// The newest cookie wins by sequence, then expiry, whatever the header order.
     #[test]
     fn session_selection_uses_sequence_then_expiry_across_header_order() {
         let older = format!("{SESSION_NAME_PREFIX}7-1900000000={OLDER}");
@@ -256,6 +263,7 @@ mod tests {
         }
     }
 
+    /// A legacy cookie is used only without versioned ones, and two cookies with the same newest key are refused.
     #[test]
     fn session_selection_migrates_legacy_and_rejects_ambiguous_latest() {
         let mut legacy = HeaderMap::new();
@@ -283,6 +291,7 @@ mod tests {
         assert!(session(&ambiguous).is_none());
     }
 
+    /// Only valid session cookie shapes are reported as observed names.
     #[test]
     fn observed_names_only_accept_valid_session_cookie_shapes() {
         let mut headers = HeaderMap::new();

@@ -27,6 +27,7 @@ export async function authorityStatus(): Promise<AuthorityStatus> {
   return status;
 }
 
+/** Whether one root's status from the server has the documented shape and a known warning level. */
 function validRootStatus(value: unknown): value is AuthorityRootStatus {
   if (typeof value !== "object" || value === null) return false;
   const root = value as Partial<AuthorityRootStatus>;

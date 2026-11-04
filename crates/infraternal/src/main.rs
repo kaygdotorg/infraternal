@@ -708,6 +708,7 @@ fn status_result(
     (result, down)
 }
 
+/// The CA line `infraternal status` prints: lock state, root generation and expiry warning, or why it is unknown.
 #[cfg(feature = "remote")]
 fn ca_status_display(status: &infraternal_server::ca_status::CaStatus) -> (String, String) {
     if !status.available {
@@ -786,11 +787,13 @@ fn ca_status_display(status: &infraternal_server::ca_status::CaStatus) -> (Strin
     )
 }
 
+/// How `infraternal status` renders CA lock and expiry.
 #[cfg(all(test, feature = "remote"))]
 mod ca_status_tests {
     use super::ca_status_display;
     use infraternal_server::ca_status::{CaStatus, RootStatus};
 
+    /// A CA status with one root and the given lock state, time left and warning level.
     fn status(locked: Option<bool>, remaining_seconds: Option<i64>, warning: &str) -> CaStatus {
         CaStatus {
             available: true,
@@ -808,6 +811,7 @@ mod ca_status_tests {
         }
     }
 
+    /// Status shows the root generation, the expiry warning and the lock state.
     #[test]
     fn status_reports_root_generation_expiry_warning_and_lock_state() {
         let (state, detail) = ca_status_display(&status(Some(false), Some(90 * 86_400), "90d"));
@@ -822,6 +826,7 @@ mod ca_status_tests {
         assert!(detail.contains("expiry warning expired"));
     }
 
+    /// An untrusted server clock prints no expiry countdown.
     #[test]
     fn unknown_server_clock_does_not_render_a_false_expiry_countdown() {
         let (state, detail) = ca_status_display(&status(None, None, "unknown"));

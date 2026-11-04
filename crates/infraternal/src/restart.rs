@@ -41,6 +41,7 @@ impl Control {
         )
     }
 
+    /// Start the control endpoint with a shared clock-health signal, so status can report CA expiry.
     pub(crate) fn start_with_clock(
         data: &Path,
         clock_health: std::sync::Arc<infraternal_server::clock_health::ClockHealth>,
@@ -220,6 +221,7 @@ async fn send_status(
     socket.write_all(&payload).await
 }
 
+/// What the private control endpoint can be asked: status, or a restart into a binary.
 enum ControlRequest {
     Status,
     Restart { binary: PathBuf, reload: bool },

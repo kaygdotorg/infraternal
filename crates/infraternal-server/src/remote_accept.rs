@@ -144,6 +144,7 @@ pub(crate) async fn quic(
         });
     }
 }
+/// What every accepted TCP connection needs: TLS, the host registry, the store, limits and, when enabled, recovery.
 #[derive(Clone)]
 struct TcpContext {
     tls: Arc<openssl::ssl::SslAcceptor>,
@@ -153,6 +154,7 @@ struct TcpContext {
     recovery: Option<Arc<crate::remote_recovery::Service>>,
 }
 
+/// One connection's admission: its source, whether that source is known, its first-byte permits and its deadline.
 struct TcpAdmission {
     address: IpAddr,
     known_source: bool,
@@ -235,6 +237,8 @@ pub(crate) async fn tcp(
     }
 }
 
+/// Accept one TCP connection: run TLS, and send the recovery ALPN to the recovery service, everything else to mTLS
+/// admission. Recovery never reaches host admission.
 async fn handle_tcp_connection(
     socket: tokio::net::TcpStream,
     context: TcpContext,

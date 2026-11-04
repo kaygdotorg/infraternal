@@ -5,7 +5,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use openssl::{asn1::Asn1Time, hash::MessageDigest, x509::X509};
 use serde::{Deserialize, Serialize};
 
+/// Seconds in a day.
 const DAY: i64 = 86_400;
+/// At most two roots are trusted at once: the current one and, during a rollover, its successor (D168 groundwork).
 const MAX_TRUST_ROOTS: usize = 2;
 
 /// Public certificate metadata. It contains no signing material or host-specific data.
@@ -115,6 +117,8 @@ pub fn from_roots(
     })
 }
 
+/// Public status for one root: fingerprint, certificate, notAfter, and the time left with its warning level. Without a
+/// trusted clock the time left is absent and the level is `unknown`.
 fn root_status(
     issuer: &X509,
     generation: u64,
@@ -138,6 +142,7 @@ fn root_status(
     })
 }
 
+/// Lowercase hex of a digest.
 fn hex_fingerprint(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -148,6 +153,7 @@ fn hex_fingerprint(bytes: &[u8]) -> String {
     encoded
 }
 
+/// The root's notAfter in Unix seconds.
 fn epoch_seconds(issuer: &X509) -> Result<i64, crate::ca::CaError> {
     let epoch = Asn1Time::from_unix(0).map_err(|_| crate::ca::CaError)?;
     let difference = epoch
@@ -159,6 +165,8 @@ fn epoch_seconds(issuer: &X509) -> Result<i64, crate::ca::CaError> {
         .ok_or(crate::ca::CaError)
 }
 
+/// The warning level for the time left: 365, 90, 30 or 7 days before expiry, then expired (D168, #285).
+/// Each threshold is inclusive.
 fn warning_level(remaining: i64) -> &'static str {
     if remaining <= 0 {
         "expired"
@@ -175,6 +183,7 @@ fn warning_level(remaining: i64) -> &'static str {
     }
 }
 
+/// Warning thresholds, clock failure and root-set bounds for CA status.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +194,7 @@ mod tests {
         x509::{X509, X509NameBuilder},
     };
 
+    /// A self-signed test root that expires at `not_after`.
     fn root(not_after: i64) -> X509 {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
@@ -206,6 +216,7 @@ mod tests {
         certificate.build()
     }
 
+    /// Each threshold is inclusive, and an untrusted clock reports `unknown`.
     #[test]
     fn warning_thresholds_are_inclusive_and_clock_failure_stays_unknown() {
         assert_eq!(warning_level(365 * DAY), "365d");
@@ -216,6 +227,7 @@ mod tests {
         assert_eq!(warning_level(366 * DAY), "none");
     }
 
+    /// A missing CA source never reports an unlocked or initialized CA.
     #[test]
     fn absent_source_never_reports_unlocked_or_initialized() {
         let status = from_source(None, None).unwrap();
@@ -225,6 +237,7 @@ mod tests {
         assert!(status.roots.is_empty());
     }
 
+    /// Both roots are kept in order even when the clock is untrusted.
     #[test]
     fn public_status_retains_both_ordered_roots_without_a_healthy_clock() {
         let current = root(1_900_000_000);
@@ -245,6 +258,7 @@ mod tests {
         assert_ne!(status.roots[0].certificate_der, "");
     }
 
+    /// A root set with duplicates or more than two roots is refused.
     #[test]
     fn public_status_rejects_ambiguous_or_oversized_root_sets() {
         let current = root(1_900_000_000);

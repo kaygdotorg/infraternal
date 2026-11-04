@@ -117,6 +117,8 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
     );
 }
 
+/// The embedded migration history is contiguous, and both a production database and a fresh one reach the latest
+/// version.
 #[tokio::test]
 async fn release_migration_history_is_complete_for_production_and_fresh_schemas() {
     let migrations = sqlx::migrate!("./migrations");

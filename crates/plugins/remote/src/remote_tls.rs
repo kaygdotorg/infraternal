@@ -120,8 +120,11 @@ fn denied() -> io::Error {
 
 const ALPN: &[u8] = b"\x0dinfraternal/1";
 const PROTOCOL: &[u8] = b"infraternal/1";
+/// The ALPN wire form of the recovery protocol.
 const RECOVERY_ALPN: &[u8] = b"\x1dinfraternal/remote-recovery/1";
+/// The certificate-free recovery protocol (#285). It may only ever reach the recovery service.
 const RECOVERY_PROTOCOL: &[u8] = b"infraternal/remote-recovery/1";
+/// What a recovery-aware listener offers: the normal protocol first, then recovery.
 const ALPN_WITH_RECOVERY: &[u8] = b"\x0dinfraternal/1\x1dinfraternal/remote-recovery/1";
 const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -393,6 +396,7 @@ fn finish(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> io::Result
     })
 }
 
+/// Wrap an accepted TLS stream as a channel that can be retired.
 fn channel(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> TcpTls {
     let (reader, writer) = tokio::io::split(stream);
     TcpTls {

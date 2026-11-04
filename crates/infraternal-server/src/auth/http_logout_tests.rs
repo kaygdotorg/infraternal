@@ -5,8 +5,11 @@ use axum::http::{HeaderMap, HeaderValue, header};
 use serde_json::json;
 use sqlx::sqlite::SqlitePoolOptions;
 
+/// The test server's public origin.
 const ORIGIN: &str = "https://auth.example.test";
+/// A fixed test time, so expiries are deterministic.
 const NOW: i64 = 1_800_000_000;
+/// The 30-day sliding session lifetime.
 const SESSION: i64 = 30 * 86_400;
 
 /// A successful response prepared before logout must not restore its ended cookie afterward.
@@ -94,6 +97,7 @@ async fn logout_ends_all_referenced_sessions_before_delayed_responses_refresh_co
     }
 }
 
+/// Logout revokes every presented bearer even when two cookies share the newest ordering key.
 #[tokio::test]
 async fn logout_revokes_every_presented_session_when_cookie_selection_is_ambiguous() {
     let pool = SqlitePoolOptions::new()

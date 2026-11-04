@@ -190,6 +190,7 @@ fn session_cookie(token: &str, login_sequence: i64, expires: i64) -> super::Resu
     ))
     .map_err(|_| Error::Invalid)
 }
+/// A `Set-Cookie` value that deletes the named session cookie in the browser.
 fn expired_session_cookie(name: &str) -> super::Result<HeaderValue> {
     HeaderValue::from_str(&format!(
         "{name}=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict; Path=/"
@@ -247,6 +248,7 @@ async fn refresh_session_cookie(
     response
 }
 
+/// Expire every observed session cookie name except `keep`, the one this response sets.
 fn retire_observed_cookies(response: &mut Response, names: Vec<&str>, keep: &str) {
     for name in names {
         if name == keep {
@@ -258,6 +260,7 @@ fn retire_observed_cookies(response: &mut Response, names: Vec<&str>, keep: &str
     }
 }
 
+/// Expire every observed session cookie name.
 fn retire_observed(response: &mut Response, names: Vec<&str>) {
     retire_observed_cookies(response, names, "");
 }

@@ -25,16 +25,24 @@ use std::{
 };
 use uuid::Uuid;
 
+/// An expired host may recover for exactly 90 days after its certificate's notAfter, by server time (#285).
 const RECOVERY_GRACE: i64 = 90 * 24 * 60 * 60;
+/// A recovery challenge must be answered within five minutes.
 const CHALLENGE_LIFETIME: i64 = 5 * 60;
 /// Only the predecessor key can open an operation, so this cap bounds one host's own
 /// retries with different CSRs. It is not what keeps other parties out.
 const MAX_PENDING_OPERATIONS_PER_HOST: i64 = 4;
+/// Recovery requests one source address may make per window, before any work.
 const MAX_SOURCE_ATTEMPTS: u16 = 24;
+/// Signed recovery requests one host may make per window.
 const MAX_HOST_ATTEMPTS: u16 = 12;
+/// The rate window for both budgets.
 const RATE_WINDOW: Duration = Duration::from_secs(60);
+/// Most source addresses tracked at once; past it, only expired buckets are dropped and new sources wait.
 const MAX_SOURCE_BUCKETS: usize = 4096;
+/// Most hosts tracked at once, with the same rule.
 const MAX_HOST_BUCKETS: usize = 10_000;
+/// An Ed25519 signature is exactly 64 bytes.
 const MAX_SIGNATURE_BYTES: usize = 64;
 
 /// Bound recovery traffic in two stages.
@@ -48,6 +56,7 @@ pub(crate) struct Limiter {
     hosts: Mutex<HashMap<Uuid, Bucket>>,
 }
 
+/// Attempts counted since the start of one rate window.
 #[derive(Clone, Copy)]
 struct Bucket {
     start: Instant,
@@ -55,6 +64,7 @@ struct Bucket {
 }
 
 impl Limiter {
+    /// Charge the source address before any parsing or storage work.
     fn admit_source(&self, source: IpAddr) -> bool {
         bucket_admits(
             &self.sources,
@@ -77,6 +87,8 @@ impl Limiter {
     }
 }
 
+/// Count one attempt for `key`, starting a new window when the old one has passed. A full map first drops expired
+/// buckets, then refuses new keys rather than evicting live ones.
 fn bucket_admits<K: Eq + std::hash::Hash + Copy>(
     buckets: &Mutex<HashMap<K, Bucket>>,
     key: K,
@@ -122,6 +134,7 @@ pub(crate) struct Service {
     limiter: Arc<Limiter>,
 }
 
+/// A challenge request after its public fields were parsed, with the server time it is judged at.
 #[derive(Clone)]
 struct ChallengeInput {
     host: Uuid,
@@ -132,6 +145,7 @@ struct ChallengeInput {
     now: i64,
 }
 
+/// A proof request: the CSR and the predecessor key's signature over the challenge transcript.
 struct ProofRequest {
     host: Uuid,
     predecessor: [u8; 32],
@@ -141,11 +155,13 @@ struct ProofRequest {
     signature: Vec<u8>,
 }
 
+/// The registered predecessor certificate the request names.
 struct RegisteredIdentity {
     fingerprint: [u8; 32],
     not_after: i64,
 }
 
+/// The stored recovery operation a repeated challenge request is compared against.
 #[derive(sqlx::FromRow)]
 struct ChallengeOperationRow {
     request_id: Vec<u8>,
@@ -159,6 +175,7 @@ struct ChallengeOperationRow {
     certificate_fingerprint: Option<Vec<u8>>,
 }
 
+/// The stored recovery operation a proof must match.
 #[derive(sqlx::FromRow)]
 struct ProofOperationRow {
     csr_digest: Vec<u8>,
@@ -172,6 +189,7 @@ struct ProofOperationRow {
     certificate_fingerprint: Option<Vec<u8>>,
 }
 
+/// What a replayed proof is checked against once its certificate was committed.
 #[derive(sqlx::FromRow)]
 struct CommittedCertificateRow {
     csr_digest: Vec<u8>,
@@ -181,6 +199,7 @@ struct CommittedCertificateRow {
     certificate_fingerprint: Option<Vec<u8>>,
 }
 
+/// The issuer and lifetime a proof was verified against.
 struct VerifiedProof {
     issuer_fingerprint: [u8; 32],
     issuer_generation: u64,
@@ -224,6 +243,8 @@ impl Service {
         channel.retire();
     }
 
+    /// Answer one recovery request. The source budget and a trusted server clock come first; every failure is the same
+    /// opaque denial.
     async fn process(&self, source: IpAddr, request: RecoveryRequest) -> RecoveryResponse {
         if !self.limiter.admit_source(source) {
             return RecoveryResponse::Denied;
@@ -237,6 +258,7 @@ impl Service {
         }
     }
 
+    /// Route a parsed request to the challenge or proof step at server time `now`.
     async fn process_at(
         &self,
         request: RecoveryRequest,
@@ -284,6 +306,7 @@ impl Service {
         }
     }
 
+    /// Issue or resume a challenge. The request must be signed by the predecessor key before any per-host state changes.
     async fn challenge_at(&self, input: ChallengeInput) -> Result<RecoveryResponse, Denied> {
         if input.request != request_id(input.host, &input.predecessor, &input.digest) {
             return Err(Denied);
@@ -402,6 +425,8 @@ impl Service {
         }
     }
 
+    /// Answer a repeated challenge request: return the committed certificate's challenge, or the same unexpired challenge
+    /// for the same CSR and issuer. Any mismatch is denied.
     async fn resume_challenge(
         &self,
         connection: &mut sqlx::SqliteConnection,
@@ -472,6 +497,7 @@ impl Service {
         Err(Denied)
     }
 
+    /// Verify a proof, sign a 7-day leaf for the predecessor's key and commit it, or replay the committed certificate.
     async fn prove_at(&self, request: ProofRequest, now: i64) -> Result<RecoveryResponse, Denied> {
         if now < 0 {
             return Err(Denied);
@@ -521,6 +547,7 @@ impl Service {
             .await
     }
 
+    /// Load the stored operation this proof answers.
     async fn load_proof_operation(
         &self,
         request: &ProofRequest,
@@ -540,6 +567,8 @@ impl Service {
         .ok_or(Denied)
     }
 
+    /// Check the proof against its operation: the CSR digest, the challenge, its lifetime, the issuer and the predecessor
+    /// key's signature over the transcript.
     async fn verify_proof(
         &self,
         request: &ProofRequest,
@@ -600,6 +629,7 @@ impl Service {
         })
     }
 
+    /// The proof's key must still be the registered key of the named predecessor certificate, with the same notAfter.
     async fn require_registered_identity(
         &self,
         request: &ProofRequest,
@@ -627,6 +657,7 @@ impl Service {
         }
     }
 
+    /// The certificate recorded for this operation must still be live, and its host unrevoked.
     async fn require_issued_certificate(
         &self,
         request: &ProofRequest,
@@ -644,6 +675,8 @@ impl Service {
         available.then_some(()).ok_or(Denied)
     }
 
+    /// In one transaction: store the signed leaf on its operation, record it as a host certificate, and drop the
+    /// predecessor's other pending operations, so only the proved request survives.
     async fn commit_certificate(
         &self,
         request: &ProofRequest,
@@ -749,6 +782,7 @@ impl Service {
     }
 }
 
+/// Parse a proof's CSR and key and check the request ID, sizes and key type before any storage is read.
 fn validate_proof_request(request: &ProofRequest) -> Result<(ValidatedCsr, [u8; 32]), Denied> {
     if request.request
         != request_id(
@@ -771,6 +805,7 @@ fn validate_proof_request(request: &ProofRequest) -> Result<(ValidatedCsr, [u8; 
     Ok((csr, public_key))
 }
 
+/// Inside the commit transaction, the predecessor and the issued certificate must both still be unrevoked.
 async fn require_recorded_certificate(
     connection: &mut sqlx::SqliteConnection,
     request: &ProofRequest,
@@ -791,6 +826,7 @@ async fn require_recorded_certificate(
     available.then_some(()).ok_or(Denied)
 }
 
+/// The leaf must carry the predecessor's key, be valid now and last exactly 7 days, inside the recovery window.
 fn validate_signed_leaf(
     old_key: &[u8],
     not_after: i64,
@@ -809,6 +845,7 @@ fn validate_signed_leaf(
     }
 }
 
+/// The CA that signs recovery leaves, with the issuer fingerprint and generation a proof is bound to.
 struct ActiveIssuer {
     authority: CertificateAuthority,
     fingerprint: [u8; 32],
@@ -878,6 +915,7 @@ async fn existing_operation(
     .map_err(|_| Denied)
 }
 
+/// The challenge response sent to the host.
 fn challenge_response(
     challenge: [u8; 32],
     public_key_fingerprint: [u8; 32],
@@ -894,6 +932,7 @@ fn challenge_response(
     }
 }
 
+/// The current issuer, or a denial while the CA is locked.
 fn active_issuer(source: &dyn CaKeySource) -> Result<ActiveIssuer, Denied> {
     let material = source.load().map_err(|_| Denied)?;
     let certificate = material.issuer().clone();
@@ -925,6 +964,7 @@ fn active_issuer(source: &dyn CaKeySource) -> Result<ActiveIssuer, Denied> {
     })
 }
 
+/// The single, uninformative recovery failure.
 struct Denied;
 
 /// Check the inclusive expiry-to-grace window using server time.
@@ -938,6 +978,7 @@ pub fn eligible(now: i64, not_after: i64) -> bool {
             .is_some_and(|deadline| now <= deadline)
 }
 
+/// Recovery window, rate limits, challenge authentication and proof replacement checks.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,8 +989,10 @@ mod tests {
     };
     use std::sync::Arc;
 
+    /// The per-host pending-operation cap the tests exercise.
     const TEST_PENDING_LIMIT: usize = 4;
 
+    /// A CA source that is always unlocked.
     struct Unlocked(crate::ca::CaMaterial);
 
     impl crate::ca_memory::AdministratorCaUnlock for Unlocked {
@@ -958,6 +1001,7 @@ mod tests {
         }
     }
 
+    /// An enrolled host with an expired certificate, its key and an unlocked recovery service.
     struct RecoveryFixture {
         service: Service,
         pool: sqlx::SqlitePool,
@@ -968,6 +1012,7 @@ mod tests {
         now: i64,
     }
 
+    /// Build the fixture: enroll a host, expire its certificate and start the clock monitor.
     async fn recovery_fixture() -> RecoveryFixture {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
         let clock = Arc::new(ClockHealth::default());
@@ -1055,10 +1100,12 @@ mod tests {
         }
     }
 
+    /// A challenge request for `digest`, signed by the host's predecessor key.
     fn challenge_input(fixture: &RecoveryFixture, digest: [u8; 32]) -> ChallengeInput {
         challenge_signed_by(fixture, &fixture.identity_key, digest)
     }
 
+    /// The challenge, issuer fingerprint, generation and notAfter from a challenge response.
     fn challenge_receipt(response: &RecoveryResponse) -> ([u8; 32], [u8; 32], u64, i64) {
         match response {
             RecoveryResponse::Challenge {
@@ -1080,6 +1127,7 @@ mod tests {
         }
     }
 
+    /// Run a challenge that must be accepted.
     async fn accepted_challenge(service: &Service, input: ChallengeInput) -> RecoveryResponse {
         match service.challenge_at(input).await {
             Ok(response) => response,
@@ -1087,6 +1135,7 @@ mod tests {
         }
     }
 
+    /// The wire request for a challenge input.
     fn challenge_request(input: &ChallengeInput) -> RecoveryRequest {
         RecoveryRequest::Challenge {
             host_id: input.host,
@@ -1097,6 +1146,7 @@ mod tests {
         }
     }
 
+    /// How many unproved, unexpired operations the fixture host has.
     async fn pending_count(fixture: &RecoveryFixture) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM remote_certificate_recovery WHERE host_id=? AND certificate_der IS NULL AND expires_at>? ")
             .bind(fixture.host.as_bytes().as_slice())
@@ -1106,6 +1156,7 @@ mod tests {
             .unwrap()
     }
 
+    /// A second, different unproved challenge for the same predecessor leaves the first operation as it was.
     #[tokio::test]
     async fn a_different_unproved_challenge_preserves_the_original_operation() {
         let fixture = recovery_fixture().await;
@@ -1133,6 +1184,7 @@ mod tests {
         assert_eq!(stored_nonce.as_slice(), original_nonce.as_slice());
     }
 
+    /// A challenge signed by any key but the predecessor's is denied and stores nothing.
     #[tokio::test]
     async fn a_challenge_not_signed_by_the_predecessor_key_records_nothing() {
         let fixture = recovery_fixture().await;
@@ -1146,6 +1198,7 @@ mod tests {
         assert_eq!(pending_count(&fixture).await, 0);
     }
 
+    /// Forged challenges spend neither the host's budget nor its pending slots, so the real host still recovers.
     #[tokio::test]
     async fn forged_challenges_cannot_lock_the_registered_host_out() {
         let fixture = recovery_fixture().await;
@@ -1176,6 +1229,7 @@ mod tests {
         assert_eq!(pending_count(&fixture).await, 1);
     }
 
+    /// Pending challenges per host are capped, and a new one never evicts an existing one.
     #[tokio::test]
     async fn pending_challenges_are_bounded_per_host_without_evicting_existing_ones() {
         let fixture = recovery_fixture().await;
@@ -1202,6 +1256,7 @@ mod tests {
         );
     }
 
+    /// A valid proof removes the predecessor's other pending challenges.
     #[tokio::test]
     async fn a_valid_proof_replaces_other_pending_challenges_for_its_predecessor() {
         let fixture = recovery_fixture().await;
@@ -1287,6 +1342,7 @@ mod tests {
         assert_eq!(pending_count(&fixture).await, 0);
     }
 
+    /// The recovery window uses server time and includes the exact 90-day boundary.
     #[test]
     fn recovery_uses_server_time_and_accepts_the_exact_ninety_day_boundary() {
         let not_after = 1_800_000_000_i64;
@@ -1301,6 +1357,7 @@ mod tests {
         assert!(!eligible(not_after, -1));
     }
 
+    /// The limiter counts attempts per key and resets after the monotonic window.
     #[test]
     fn limiter_bounds_attempts_per_key_with_a_monotonic_window() {
         let now = Instant::now();
@@ -1312,6 +1369,7 @@ mod tests {
         assert!(bucket_admits(&buckets, source, now + RATE_WINDOW, 4, 2));
     }
 
+    /// An untrusted server clock denies recovery before the CA material is consulted.
     #[tokio::test]
     async fn uncertain_clock_denies_recovery_before_consulting_signing_material() {
         use crate::ca::{CaError, CaKeySource, CaMaterial};

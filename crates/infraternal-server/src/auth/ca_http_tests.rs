@@ -77,6 +77,7 @@ async fn ca_http_exact_origin_and_live_cookie_are_required() {
     assert!(f.source.load().is_err());
 }
 
+/// CA status over HTTP includes each root's public expiry and reports an untrusted clock as unknown.
 #[tokio::test]
 async fn ca_http_status_includes_public_root_expiry_and_unknown_clock_state() {
     let (f, app) = http_fixture().await;

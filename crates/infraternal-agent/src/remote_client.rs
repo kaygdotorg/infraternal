@@ -386,6 +386,7 @@ async fn dial_preferred(
     }
 }
 
+/// Of two dial errors, report the server's refusal of this identity if either was one, so recovery can start.
 fn prefer_auth_error(first: io::Error, second: io::Error) -> io::Error {
     if first.kind() == io::ErrorKind::PermissionDenied {
         first

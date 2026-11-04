@@ -25,6 +25,7 @@ pub(crate) fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) 
     identities_for_name("localhost")
 }
 
+/// A CA source that is always unlocked.
 struct RecoveryUnlock(crate::ca::CaMaterial);
 impl crate::ca_memory::AdministratorCaUnlock for RecoveryUnlock {
     fn unlock(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
@@ -32,6 +33,7 @@ impl crate::ca_memory::AdministratorCaUnlock for RecoveryUnlock {
     }
 }
 
+/// Keeps the certificate the agent would publish, so the test can inspect it.
 #[derive(Default)]
 struct RecoveryPublisher(std::sync::Mutex<Option<X509>>);
 impl infraternal_agent::remote_renewal::CertificatePublisher for RecoveryPublisher {
@@ -41,6 +43,7 @@ impl infraternal_agent::remote_renewal::CertificatePublisher for RecoveryPublish
     }
 }
 
+/// Write one length-prefixed recovery request frame.
 async fn write_recovery_request(
     channel: &impl Channel,
     request: &infraternal_plugin_remote::remote_recovery::RecoveryRequest,
@@ -168,6 +171,7 @@ struct RecoveryTlsFixture {
     pool: sqlx::SqlitePool,
 }
 
+/// Issue a host identity that has already expired, and return it with its key.
 async fn expired_identity(
     pool: &sqlx::SqlitePool,
     host: Uuid,
@@ -211,6 +215,7 @@ async fn expired_identity(
     )
 }
 
+/// A challenge request signed by the expired identity's key.
 fn recovery_challenge_request(
     fixture: &RecoveryTlsFixture,
 ) -> infraternal_plugin_remote::remote_recovery::RecoveryRequest {
@@ -244,6 +249,7 @@ fn recovery_challenge_request(
     }
 }
 
+/// Recover over the real TLS listener with the registered key, and return the new certificate.
 async fn recover_over_tls_with_registered_key(fixture: &RecoveryTlsFixture) -> X509 {
     let recovery_tls =
         remote_tls::recovery_client_config(std::slice::from_ref(&fixture.root)).unwrap();
@@ -303,6 +309,7 @@ async fn recover_over_tls_with_registered_key(fixture: &RecoveryTlsFixture) -> X
     recovered.certificate
 }
 
+/// Repeating a completed recovery returns the same certificate and never a second one.
 async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recovered: &X509) {
     let challenge_request = recovery_challenge_request(fixture);
     let recovery_tls =

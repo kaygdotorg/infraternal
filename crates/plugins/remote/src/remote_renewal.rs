@@ -238,6 +238,8 @@ fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Resu
     validate_at(certificate, identity, roots, None, false)
 }
 
+/// Verify a certificate chain at `verify_at` (now when absent). When recovering, the new certificate must also not
+/// start before the expired one ended.
 fn validate_at(
     certificate: &X509,
     identity: &Identity,
@@ -292,6 +294,7 @@ fn validate_at(
     Ok(())
 }
 
+/// Seconds since the Unix epoch for an ASN.1 time.
 fn epoch_seconds(time: &openssl::asn1::Asn1TimeRef) -> io::Result<i64> {
     let epoch = Asn1Time::from_unix(0).map_err(|_| denied())?;
     let difference = epoch.diff(time).map_err(|_| denied())?;
@@ -327,6 +330,7 @@ fn denied() -> io::Error {
 mod tests {
     use super::*;
 
+    /// ASN.1 times convert to Unix seconds counted from the epoch.
     #[test]
     fn unix_time_conversion_uses_time_after_epoch() {
         let expected = 1_900_000_000;
