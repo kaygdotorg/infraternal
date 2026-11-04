@@ -43,8 +43,9 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 // only detects a hang, well inside the server's 60 s connect budget (#29).
 #[cfg(target_os = "linux")]
 const LAUNCH: Duration = Duration::from_secs(30);
-// How long a failed launch keeps trying to close the shim it started. A shim
-// that missed its Hello is slow rather than gone, so one attempt can miss too.
+/// How long a failed launch keeps trying to reach the detached shim it started. A shim that missed its
+/// Hello is slow rather than gone, and one that binds late has no socket yet, so cleanup waits for it
+/// here, on its own bound, after the caller has stopped waiting.
 #[cfg(target_os = "linux")]
 const CLEANUP: Duration = Duration::from_secs(10);
 
@@ -916,84 +917,233 @@ async fn launch_configured(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    // From here the launch owns a running process. Every failure below stops
-    // exactly that launch (`abandon_launch`); none may return with it running.
+    // From here the launch owns a running process, and the guard stops exactly
+    // that launch on EVERY way out other than success: an error, or the caller
+    // dropping this future (automation's 4 s deadline does). The cleanup runs on
+    // its own task and bound, so a cancelled caller cannot cancel it.
+    let record = reservation
+        .as_mut()
+        .and_then(|reservation| reservation.spawned());
+    let mut launch = Launch {
+        child: Some(child),
+        watch: Some(watch),
+        path,
+        id,
+        manager,
+        name,
+        detached,
+        record,
+    };
     let written = if program.is_empty() {
         Ok(())
     } else {
-        match child.stdin.take() {
+        match launch.child.as_mut().and_then(|child| child.stdin.take()) {
             Some(mut stdin) => stdin.write_all(&program_bytes).await,
             None => Err(io::ErrorKind::BrokenPipe.into()),
         }
     };
-    if let Some(reservation) = &mut reservation {
-        reservation.spawned();
-    }
     // Command's callbacks retain descriptor duplicates even after spawn. These
     // must close before awaiting Hello; only the privileged shim owns the lease.
     drop(command);
     drop(prestarted);
-    let session = match written {
-        Ok(()) => await_launch(&path, id, &watch, &mut child, detached).await,
-        Err(error) => Err(error),
+    written?;
+    let (Some(child), Some(watch)) = (launch.child.as_mut(), launch.watch.as_ref()) else {
+        return Err(io::Error::other("launch state was released early"));
     };
-    if session.is_err() {
-        abandon_launch(&path, id, manager, &name, &mut child).await;
-    }
+    let session = await_launch(&launch.path, id, watch, child, detached).await?;
     // Scope launchers and directly owned login shims live until terminal exit.
     // Reap independently; waiting here would hold terminal.open until close.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-    session
+    if let Some(mut child) = launch.child.take() {
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+    }
+    Ok(session)
 }
 
-/// Stop what a failed launch started, by identity and never by name pattern:
-/// its own scope, the shim answering on its own rendezvous (authenticated by the
-/// session id in Hello), and the launcher process this call spawned and has not
-/// yet reaped. The shim's exit hangs up its PTY, which ends the shell. Another
-/// session is never addressed: every handle here is this launch's id or child.
+/// A launch whose process has started and whose Hello has not yet been accepted.
+/// Dropping it, on failure or cancellation, hands the launch to `abandon_launch`.
 #[cfg(target_os = "linux")]
-async fn abandon_launch(
-    path: &Path,
+struct Launch {
+    /// The launcher this call spawned; `None` once it has been handed to its reaper (success).
+    child: Option<tokio::process::Child>,
+    /// Rendezvous directory watch, kept so cleanup can wait for a late bind.
+    watch: Option<Registration<Inotify>>,
+    /// This launch's own rendezvous socket.
+    path: PathBuf,
+    /// This launch's own session id, the only identity cleanup may address.
     id: uuid::Uuid,
+    /// The manager that placed the shim, naming the scope to stop.
     manager: Manager,
-    name: &str,
-    launcher: &mut tokio::process::Child,
-) {
-    // The shim that missed its Hello is slow, not gone: retry the close through
-    // its own authenticated session until `CLEANUP`, ending on any answer.
+    /// The simple-form session id used in the scope name.
+    name: String,
+    /// Whether the shim detaches, so its launcher exits before it binds.
+    detached: bool,
+    /// The person-terminal record this launch wrote, retired once cleanup is proven.
+    record: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Launch {
+    /// Start the cleanup on its own task. Without a runtime (shutdown) the launcher is still killed.
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            let _ = child.start_kill();
+            return;
+        };
+        let job = Abandoned {
+            child,
+            watch: self.watch.take(),
+            path: std::mem::take(&mut self.path),
+            id: self.id,
+            manager: self.manager,
+            name: std::mem::take(&mut self.name),
+            detached: self.detached,
+            record: self.record.take(),
+        };
+        runtime.spawn(abandon_launch(job));
+    }
+}
+
+/// Everything cleanup needs, owned, so it outlives the future that started the launch.
+#[cfg(target_os = "linux")]
+struct Abandoned {
+    /// The launcher this launch spawned, unreaped, so its pid cannot be reused.
+    child: tokio::process::Child,
+    /// Rendezvous directory watch for a shim that binds after the launch gave up.
+    watch: Option<Registration<Inotify>>,
+    /// This launch's own rendezvous socket.
+    path: PathBuf,
+    /// This launch's own session id.
+    id: uuid::Uuid,
+    /// The manager that placed the shim.
+    manager: Manager,
+    /// The simple-form session id used in the scope name.
+    name: String,
+    /// Whether the shim detaches, so its launcher exits before it binds.
+    detached: bool,
+    /// The person-terminal record to retire once exit is proven.
+    record: Option<PathBuf>,
+}
+
+/// Stop what a failed or cancelled launch started, by identity and never by name pattern: the launcher
+/// child this call spawned and has not reaped (so its pid cannot be reused), its own scope, and the
+/// shim on its own rendezvous, authenticated by the session id in Hello. The shim's exit hangs up its
+/// PTY, which ends the shell. Another session is never addressed: every handle is this launch's own.
+/// Each wait has its own bound. Once exit is proven, the launch's person record is retired, because
+/// nothing else could: a missing socket alone never proves exit, and revocation refuses while a
+/// record has no terminal to stop.
+#[cfg(target_os = "linux")]
+async fn abandon_launch(mut job: Abandoned) {
+    let launcher_alive = matches!(job.child.try_wait(), Ok(None));
+    let mut proven = false;
+    if launcher_alive {
+        // A scope wrapper, a direct shim, or a detaching shim that has not forked yet: SIGKILL reaches
+        // only this unreaped child, and reaping it is the proof it is gone.
+        let _ = job.child.start_kill();
+        stop_scope(job.manager, &job.name).await;
+        proven = timeout(HANDSHAKE, job.child.wait())
+            .await
+            .is_ok_and(|status| status.is_ok());
+        if proven {
+            let _ = fs::remove_file(&job.path);
+            let _ = fs::remove_file(job.path.with_extension("stop"));
+        }
+    } else {
+        stop_scope(job.manager, &job.name).await;
+        if job.detached {
+            if let Some(watch) = &job.watch {
+                proven = close_detached(&job.path, job.id, watch).await;
+            }
+        } else {
+            // The launcher is the shim (systemd-run execs it): its exit is the shim's, scope already stopped.
+            proven = true;
+        }
+    }
+    if proven && let Some(record) = &job.record {
+        let _ = fs::remove_file(record);
+    }
+    let _ = timeout(HANDSHAKE, job.child.wait()).await;
+}
+
+/// Stop this launch's own scope; the name holds only the fresh session id. A missing manager is a no-op.
+#[cfg(target_os = "linux")]
+async fn stop_scope(manager: Manager, name: &str) {
+    if matches!(manager, Manager::Detached) {
+        return;
+    }
+    let mut stop = isolated(Path::new("systemctl"));
+    if matches!(manager, Manager::User) {
+        stop.arg("--user");
+    }
+    let _ = timeout(
+        HANDSHAKE,
+        stop.args(["stop", &format!("infraternal-session-{name}.scope")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+}
+
+/// Ask a detached shim, whose launcher has exited, to close its session, however late it binds or
+/// answers. Returns whether its exit was observed: socket gone or sealed by an exit record.
+#[cfg(target_os = "linux")]
+async fn close_detached(path: &Path, id: uuid::Uuid, watch: &Registration<Inotify>) -> bool {
     let deadline = tokio::time::Instant::now() + CLEANUP;
-    while path.exists() && tokio::time::Instant::now() < deadline {
+    while tokio::time::Instant::now() < deadline {
         match connect_sequenced(path.to_path_buf(), id.into_bytes()).await {
             Ok(mut session) => {
-                if session.caps & infraternal_shim::frame::CLOSE_SESSION != 0 {
-                    let _ = send(&mut session.peer, &Frame::CloseSession).await;
+                if session.caps & infraternal_shim::frame::CLOSE_SESSION == 0
+                    || send(&mut session.peer, &Frame::CloseSession).await.is_err()
+                {
+                    return false;
                 }
-                break;
+                return exit_observed(path).await;
             }
+            // Slow, not gone: ask again.
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-            Err(_) => break,
+            // Not bound yet: sleep on the directory watch, never poll.
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.kind() == io::ErrorKind::ConnectionRefused =>
+            {
+                let Ok(ready) = tokio::time::timeout_at(deadline, watch.readable()).await else {
+                    return false;
+                };
+                let Ok(mut ready) = ready else {
+                    return false;
+                };
+                if let Ok(result) = ready.try_io(|fd| fd.read_events().map_err(io::Error::from))
+                    && result.is_err()
+                {
+                    return false;
+                }
+            }
+            Err(_) => return false,
         }
     }
-    if !matches!(manager, Manager::Detached) {
-        let mut stop = isolated(Path::new("systemctl"));
-        if matches!(manager, Manager::User) {
-            stop.arg("--user");
+    false
+}
+
+/// Whether the shim's exit shows within `HANDSHAKE` after a close request: the rendezvous is gone or
+/// carries a sealed exit record.
+#[cfg(target_os = "linux")]
+async fn exit_observed(path: &Path) -> bool {
+    let until = tokio::time::Instant::now() + HANDSHAKE;
+    loop {
+        if !path.exists() || matches!(infraternal_shim::ended::read(path), Ok(Some(_))) {
+            return true;
         }
-        // The scope is named for this launch's session id alone.
-        let _ = timeout(
-            HANDSHAKE,
-            stop.args(["stop", &format!("infraternal-session-{name}.scope")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await;
+        if tokio::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    // `kill` signals only a launcher still unreaped, so a reused pid is unreachable.
-    let _ = launcher.start_kill();
 }
 
 /// Wait for a launched shim's Hello. Progress, not a short clock, decides failure: the launcher's exit before the

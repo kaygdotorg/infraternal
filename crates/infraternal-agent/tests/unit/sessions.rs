@@ -513,10 +513,12 @@ async fn unanswered_manager_probe_is_not_remembered() {
 }
 
 thread_local! {
+    /// A per-thread shortening of the launch hang bound, so a test reaches the failure path in milliseconds.
     pub(super) static LAUNCH_BOUND: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
 }
 
+/// Whether `pid` is a live process; a zombie, which still answers `kill(0)`, counts as gone.
 fn alive(pid: i32) -> bool {
     // A zombie still answers kill(0); read the state instead.
     fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
@@ -596,15 +598,19 @@ async fn failed_launch_stops_the_process_it_started_and_no_other() {
     bystander.kill().await.unwrap();
 }
 
-/// #324/#334: a detached shim that binds but misses the 2 s Hello fails the launch ("operation failed") while its
-/// terminal lives on, unnamed. The cleanup must reach it even when the shim is still too slow for the first retry,
-/// and must close it through its own authenticated session (the id in Hello), not by name.
-#[tokio::test(flavor = "current_thread")]
-async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
-    use infraternal_shim::frame::{CLOSE_SESSION, Frame};
-    let directory = Directory::new();
-    let state = state(Some(directory.0.clone())).unwrap();
-    let root = fs::canonicalize(&directory.0).unwrap();
+/// What a stand-in detached shim does on the rendezvous: bind after `bind_delay`, stay silent on the first
+/// `silent` connections (a loaded host missing the 2 s Hello), then answer and report a received CloseSession.
+fn detached_fixture(
+    state: &std::path::Path,
+    root: &std::path::Path,
+    bind_delay: std::time::Duration,
+    silent: usize,
+) -> (
+    std::path::PathBuf,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    use infraternal_shim::frame::{CLOSE_SESSION, Frame, SEQUENCED_INPUT};
     // The detaching launcher: record the session name it was given, then exit successfully, as the real one does.
     let name_file = root.join("session.name");
     let exe = root.join("detaching-shim");
@@ -617,7 +623,6 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
     )
     .unwrap();
     fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
-
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     let sessions = state.join("sessions");
     let shim = tokio::spawn(async move {
@@ -629,21 +634,21 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         };
+        tokio::time::sleep(bind_delay).await;
         let id = uuid::Uuid::parse_str(&name).unwrap();
         let path = sessions.join(format!("{name}.sock"));
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        // The first two connections (the launch and the first cleanup try) get no Hello in time: a loaded host.
-        let mut silent = Vec::new();
-        for _ in 0..2 {
-            silent.push(listener.accept().await.unwrap().0);
+        let mut held = Vec::new();
+        for _ in 0..silent {
+            held.push(listener.accept().await.unwrap().0);
         }
         let (mut peer, _) = listener.accept().await.unwrap();
         super::send(
             &mut peer,
             &Frame::Hello {
                 version: 1,
-                caps: CLOSE_SESSION | infraternal_shim::frame::SEQUENCED_INPUT,
+                caps: CLOSE_SESSION | SEQUENCED_INPUT,
                 session: id.into_bytes(),
                 pid: 1,
                 cols: 80,
@@ -659,14 +664,24 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
         while let Ok(frame) = reader.read(&mut peer).await {
             if frame == Frame::CloseSession {
                 let _ = closed_tx.send(());
+                // A real shim retires its socket after closing.
+                let _ = fs::remove_file(&path);
                 return;
             }
         }
     });
+    (exe, shim, closed_rx)
+}
 
-    let result = super::launch_configured(
-        &exe,
-        &state,
+/// Launch through the public path with a detached manager, for the fixtures above.
+async fn launch_detached(
+    exe: &std::path::Path,
+    state: &std::path::Path,
+    person: Option<uuid::Uuid>,
+) -> std::io::Result<super::Session> {
+    super::launch_configured(
+        exe,
+        state,
         super::Manager::Detached,
         nix::unistd::Uid::effective().as_raw(),
         80,
@@ -677,16 +692,117 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
         None,
         None,
         false,
-        None,
+        person,
         false,
         &[],
     )
-    .await;
-    let error = result.err().expect("a missed Hello fails the launch");
+    .await
+}
+
+/// #324/#334: a detached shim that binds but misses the 2 s Hello fails the launch ("operation failed") while its
+/// terminal lives on, unnamed. The cleanup must reach it even when the shim is still too slow for the first retry,
+/// and must close it through its own authenticated session (the id in Hello), not by name.
+#[tokio::test(flavor = "current_thread")]
+async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let (exe, shim, closed) = detached_fixture(&state, &root, std::time::Duration::ZERO, 2);
+    let error = launch_detached(&exe, &state, None)
+        .await
+        .err()
+        .expect("a missed Hello fails the launch");
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
-    tokio::time::timeout(std::time::Duration::from_secs(20), closed_rx)
+    tokio::time::timeout(std::time::Duration::from_secs(20), closed)
         .await
         .expect("the failed launch left its detached session running")
         .unwrap();
     shim.await.unwrap();
+}
+
+/// J200 P1: the caller's own deadline (automation gives a launch 4 s) drops the launch future. Cleanup must not
+/// be cancelled with it: it owns its state and bound. The fixture answers only the cleanup's connection, so a
+/// close can arrive only if cleanup survived the cancellation.
+#[tokio::test(flavor = "current_thread")]
+async fn cancelling_the_launch_does_not_cancel_its_cleanup() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let (exe, shim, closed) = detached_fixture(&state, &root, std::time::Duration::ZERO, 1);
+    let launched = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        launch_detached(&exe, &state, None),
+    )
+    .await;
+    assert!(launched.is_err(), "the caller's deadline must expire first");
+    tokio::time::timeout(std::time::Duration::from_secs(20), closed)
+        .await
+        .expect("cancelling the launch left its detached session running")
+        .unwrap();
+    shim.await.unwrap();
+}
+
+/// J200 P2: a shim that binds after the launch gave up, inside the cleanup window, has no socket when cleanup
+/// starts. Cleanup must wait for it on the directory watch and close it, not skip because the path is absent.
+#[tokio::test(flavor = "current_thread")]
+async fn a_shim_that_binds_after_the_launch_gave_up_is_still_closed() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let (exe, shim, closed) =
+        detached_fixture(&state, &root, std::time::Duration::from_millis(1500), 0);
+    LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    let result = launch_detached(&exe, &state, None).await;
+    LAUNCH_BOUND.with(|bound| bound.set(None));
+    let error = result
+        .err()
+        .expect("a shim that has not bound fails the launch");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    tokio::time::timeout(std::time::Duration::from_secs(20), closed)
+        .await
+        .expect("a late-binding shim was never closed")
+        .unwrap();
+    shim.await.unwrap();
+}
+
+/// J200 P2 (person records): a person-terminal launch that fails and is stopped must retire its durable
+/// `.terminal` record, or revocation later refuses a person whose terminal no longer exists. The launcher here
+/// never binds; stopping it (an unreaped child of this launch) is the proof of exit.
+#[tokio::test(flavor = "current_thread")]
+async fn a_stopped_person_launch_retires_its_terminal_record() {
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let locks = state.join("infraternal-login-locks");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&locks)
+        .unwrap();
+    let exe = root.join("hung-shim");
+    fs::write(&exe, "#!/bin/sh\nexec sleep 300\n").unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+    let person = uuid::Uuid::new_v4();
+    LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    let result = launch_detached(&exe, &state, Some(person)).await;
+    LAUNCH_BOUND.with(|bound| bound.set(None));
+    assert!(result.is_err(), "a shim that never binds fails the launch");
+    let records = || {
+        fs::read_dir(&locks)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".terminal"))
+            .count()
+    };
+    for _ in 0..200 {
+        if records() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        records(),
+        0,
+        "a stopped launch left its person record behind"
+    );
 }

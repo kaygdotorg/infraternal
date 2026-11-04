@@ -6,22 +6,29 @@
 
 use crate::sessions::{self, Manager, Reader, Session};
 use infraternal_shim::frame::{Frame, SHELL_CLEANUP};
+#[cfg(target_os = "linux")]
+use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 /// An unsuccessful spawn removes its reservation; after spawn the record must
 /// survive cancellation, so a later revocation can find the detached shim.
+#[cfg(target_os = "linux")]
 pub(crate) struct Reservation(Option<PathBuf>);
+#[cfg(target_os = "linux")]
 impl Reservation {
-    pub(crate) fn spawned(&mut self) {
-        self.0 = None;
+    /// The shim has started: the record must now survive this reservation. Returns its path so a
+    /// launch that later fails can retire it once the terminal is proven stopped.
+    pub(crate) fn spawned(&mut self) -> Option<PathBuf> {
+        self.0.take()
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for Reservation {
     fn drop(&mut self) {
         if let Some(path) = &self.0 {
@@ -30,6 +37,7 @@ impl Drop for Reservation {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn reserve(state: &Path, person: uuid::Uuid, id: uuid::Uuid) -> io::Result<Reservation> {
     let directory = state.join("infraternal-login-locks");
     let path = directory.join(format!("{}-{}.terminal", person.simple(), id.simple()));
