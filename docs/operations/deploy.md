@@ -71,13 +71,17 @@ For systemd, generated installations with the remote feature include:
 [Service]
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
+Delegate=yes
 ```
 
 `systemctl reload infraternal-server` reopens the current install path and uses
 the same handoff policy. If the running inode was renamed over and appears as
 `(deleted)`, reload reopens the configured invocation path. Use `--binary` to
 select a separately staged path. `systemctl restart` is a cold stop/start. Keep
-`KillMode=process` so session shims survive replacement.
+`KillMode=process` so session shims survive replacement. `Delegate=yes` lets the
+infraternal agent run each Traefik process in its own cgroup under the unit, so
+stopping the proxy also stops anything it forked (#281, D336). Without it the
+proxy falls back to process-level reaping, and `infraternal mesh status` says so.
 
 An invalid restart target, failed reply or failed reload request is logged and
 leaves the live server running. Requests record kernel peer PID/UID, target and

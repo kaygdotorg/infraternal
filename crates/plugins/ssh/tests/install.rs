@@ -3721,3 +3721,109 @@ async fn every_setup_command_fits_one_kernel_argument_in_both_modes() {
         );
     }
 }
+
+/// A successful bootstrap publishes both CLI names and rollback retires its alias.
+#[tokio::test]
+async fn infra_alias_follows_bootstrap_and_is_removed_on_rollback() {
+    let fixture = Fixture::new();
+    let install = fixture.transaction();
+    install.stage(&fixture.binary).await.unwrap();
+    install.enroll_and_start(&fixture.join).await.unwrap();
+    let alias = fixture.root.join(".local/bin/infra");
+    assert_eq!(
+        std::fs::read_link(&alias).unwrap(),
+        std::path::Path::new("infraternal")
+    );
+    assert_eq!(
+        std::fs::read(&alias).unwrap(),
+        std::fs::read(&fixture.binary).unwrap()
+    );
+    install.rollback().await.unwrap();
+    assert!(alias.symlink_metadata().is_err());
+}
+
+/// A foreign alias, including a dangling symlink, must survive installation and rollback.
+#[tokio::test]
+async fn infra_alias_preserves_foreign_paths() {
+    for linked in [false, true] {
+        let fixture = Fixture::new();
+        let alias = fixture.root.join(".local/bin/infra");
+        std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        if linked {
+            std::os::unix::fs::symlink("missing-foreign-binary", &alias).unwrap();
+        } else {
+            std::fs::write(&alias, b"foreign binary").unwrap();
+        }
+        let install = fixture.transaction();
+        install.stage(&fixture.binary).await.unwrap();
+        install.enroll_and_start(&fixture.join).await.unwrap();
+        assert!(install.alias_skipped());
+        install.rollback().await.unwrap();
+        if linked {
+            assert_eq!(
+                std::fs::read_link(&alias).unwrap(),
+                std::path::Path::new("missing-foreign-binary")
+            );
+        } else {
+            assert_eq!(std::fs::read(&alias).unwrap(), b"foreign binary");
+        }
+    }
+}
+
+/// Compound setup must surface the same occupied-name receipt as individual steps.
+#[tokio::test]
+async fn infra_alias_compound_setup_reports_foreign_name() {
+    let fixture = Fixture::new();
+    let alias = fixture.root.join(".local/bin/infra");
+    std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::fs::write(&alias, b"foreign").unwrap();
+    let install = Installation::new(
+        Arc::new(Compound(Local {
+            root: fixture.root.clone(),
+        })),
+        &fixture.target,
+        &fixture.join,
+    )
+    .unwrap();
+    install.stage(&fixture.binary).await.unwrap();
+    install.setup(&fixture.join).await.unwrap();
+    assert!(install.alias_skipped());
+    install.rollback().await.unwrap();
+    assert_eq!(std::fs::read(alias).unwrap(), b"foreign");
+}
+
+/// Unvalidated receipt text must never turn into a setup warning or a successful parse.
+#[test]
+fn infra_alias_receipt_is_fixed_and_only_valid_during_install() {
+    use infraternal_plugin_ssh::install::{interrupted_setup_step, parse_setup};
+    let receipt = "STEP join\nSTEP install\nALIAS skipped\nSTEP start\nSTEP linger\nyes\nDONE\n";
+    assert!(parse_setup(receipt.as_bytes()).unwrap());
+    for invalid in [
+        receipt.replace("ALIAS skipped", "ALIAS arbitrary"),
+        receipt.replace("ALIAS skipped\n", "ALIAS skipped\nALIAS skipped\n"),
+        receipt.replace("STEP install\nALIAS skipped", "ALIAS skipped\nSTEP install"),
+    ] {
+        assert!(parse_setup(invalid.as_bytes()).is_err());
+    }
+    assert!(matches!(
+        interrupted_setup_step(b"STEP join\nSTEP install\nALIAS skipped\n"),
+        Some(infraternal_plugin_ssh::model::InstallStep::Install)
+    ));
+}
+
+/// A replaced alias belongs to its new owner even if bootstrap later rolls back.
+#[tokio::test]
+async fn infra_alias_replaced_after_install_survives_rollback() {
+    let fixture = Fixture::new();
+    let install = fixture.transaction();
+    install.stage(&fixture.binary).await.unwrap();
+    install.enroll_and_start(&fixture.join).await.unwrap();
+    let alias = fixture.root.join(".local/bin/infra");
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink("foreign", &alias).unwrap();
+    install.rollback().await.unwrap();
+    assert_eq!(
+        std::fs::read_link(alias).unwrap(),
+        std::path::Path::new("foreign")
+    );
+}

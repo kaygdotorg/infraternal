@@ -323,7 +323,31 @@ impl Install {
         Ok(())
     }
 
-    /// Publish the binary and unit, enable the service, and commit only after its active check.
+    /// Add the optional CLI alias, retaining every pre-existing path regardless of ownership.
+    ///
+    /// Alias ownership alone cannot grant rollback permission: an earlier install may
+    /// own it. Exclusive creation records our new inode; occupied aliases stay untracked.
+    fn alias(&mut self, binary: &Path) -> io::Result<()> {
+        let alias = binary.with_file_name("infra");
+        match self.link(Path::new("infraternal"), &alias) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(&alias)?;
+                if !metadata.file_type().is_symlink()
+                    || metadata.uid() != self.owner
+                    || fs::read_link(&alias)? != Path::new("infraternal")
+                {
+                    eprintln!(
+                        "infraternal: skipped infra; an existing path belongs to another command."
+                    );
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Publish the binary, alias and unit, committing only after the service's active check.
     pub(super) fn activate(mut self, source: &Path) -> io::Result<()> {
         self.binary(source)?;
         let path = self
@@ -342,6 +366,7 @@ impl Install {
                 ));
             }
         }
+        self.alias(&path)?;
         let unit = self
             .directory("etc/systemd/system", 0o755, false)?
             .join(SERVICE_NAME);

@@ -557,7 +557,7 @@ mod tests {
             .attach(host, PublicKey([2; 32]), None, false)
             .await
             .unwrap();
-        assert_eq!(names(&service).await, ["server", "unnamed"]);
+        assert_eq!(names(&service).await, ["server", "host-000000"]);
         sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,'root@minipc01')")
             .bind(uuid::Uuid::parse_str(host).unwrap().as_bytes().as_slice())
             .execute(&service.pool_for_tests())
@@ -568,7 +568,7 @@ mod tests {
         attach_once(&service, Channel::named(true, Some("monitor01"))).await;
         assert_eq!(names(&service).await, ["monitor01", "minipc01"]);
     }
-    /// A release-4-era host added by IP provides no usable name; a migrated UUID placeholder must become `unnamed`.
+    /// A release-4-era host added by IP provides no usable name; a migrated UUID placeholder must become the D339 fallback name.
     #[tokio::test]
     async fn legacy_host_daemon_and_ip_record_do_not_leave_a_uuid_mesh_name() {
         let service = service().await;
@@ -597,7 +597,7 @@ mod tests {
 
         attach_once(&service, Channel::legacy()).await;
 
-        assert_eq!(names(&service).await, ["server", "unnamed"]);
+        assert_eq!(names(&service).await, ["server", "host-000000"]);
     }
     #[tokio::test]
     async fn a_reported_hostname_names_a_host_added_by_address() {

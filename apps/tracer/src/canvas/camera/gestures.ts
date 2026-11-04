@@ -31,8 +31,8 @@ export function installGestures(cx: Ctx): void {
    * canvas and `closest` finds nothing: that swipe used to be lost (TASTE: every swipe moves). The column's box is found
    * from its geometry instead.
    */
-  const columnAt = (e: WheelEvent): HTMLElement | undefined =>
-    (e.target as Element).closest<HTMLElement>(".cl-col") ?? columnEls(views.get(state.currentView)!.colsEl).find((col) => { const r = columnRect(col); return e.clientX >= r.left && e.clientX <= r.right; });
+  const columnAt = (target: Element | null, x: number): HTMLElement | undefined =>
+    target?.closest<HTMLElement>(".cl-col") ?? columnEls(views.get(state.currentView)!.colsEl).find((col) => { const r = columnRect(col); return x >= r.left && x <= r.right; });
   const wheelG = { t: 0, x: 0, y: 0, fired: 0, axis: "", m: 0, fell: false, s: 0 };
   const snapWheel = (e: WheelEvent): void => {
     e.preventDefault();
@@ -66,7 +66,7 @@ export function installGestures(cx: Ctx): void {
         cx.nav.goStop(c, state.snapIdx + dir);
       }
     } else {
-      const colEl = columnAt(e);
+      const colEl = columnAt(e.target as Element, e.clientX);
       if (colEl) stepWindow(colEl, dir);
     }
   };
@@ -81,7 +81,7 @@ export function installGestures(cx: Ctx): void {
     if (!state.canvasLock || cx.inputLock.state || e.touches.length !== 2) return;
     const c = centroid(e);
     camera.takeOver();
-    two = { x: c.x, y: c.y, cx0: cam.cx, idx0: state.snapIdx, axis: "", stepped: false, col: (document.elementFromPoint(c.x, c.y) as Element | null)?.closest<HTMLElement>(".cl-col") ?? null, samples: [{ x: c.x, t: e.timeStamp }] };
+    two = { x: c.x, y: c.y, cx0: cam.cx, idx0: state.snapIdx, axis: "", stepped: false, col: columnAt(document.elementFromPoint(c.x, c.y), c.x) ?? null, samples: [{ x: c.x, t: e.timeStamp }] };
   }, { passive: true, capture: true, signal });
   viewport.addEventListener("touchmove", (e) => {
     if (!two || e.touches.length !== 2) return;

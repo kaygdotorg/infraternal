@@ -1297,6 +1297,7 @@ mod tests {
         );
     }
 
+    /// Both public names must reach the installed system image.
     #[test]
     fn system_install_copies_the_running_binary_links_path_and_enables_one_unit() {
         let temporary = TemporaryDirectory::new();
@@ -1333,6 +1334,10 @@ mod tests {
             fs::read_link(&link).unwrap(),
             Path::new("/var/lib/infraternal/bin/infraternal")
         );
+        assert_eq!(
+            fs::read_link(link.with_file_name("infra")).unwrap(),
+            Path::new("infraternal")
+        );
         let unit_text = fs::read_to_string(unit).unwrap();
         assert!(unit_text.contains("ExecStart=/var/lib/infraternal/bin/infraternal agent run"));
         assert!(unit_text.contains("--data /var/lib/infraternal/agent"));
@@ -1340,6 +1345,72 @@ mod tests {
             fs::read_to_string(calls).unwrap(),
             "daemon-reload\nenable --now infraternal-agent.service\nis-active infraternal-agent.service\n"
         );
+    }
+
+    /// A late service failure retires only the alias inode created by this attempt.
+    #[test]
+    fn rollback_after_alias_creation_preserves_preexisting_aliases() {
+        for kind in ["absent", "file", "directory", "foreign-link", "owned-link"] {
+            let temporary = TemporaryDirectory::new();
+            let commands = temporary.0.join("usr/local/bin");
+            fs::create_dir_all(&commands).unwrap();
+            let alias = commands.join("infra");
+            match kind {
+                "file" => fs::write(&alias, b"foreign infra").unwrap(),
+                "directory" => fs::create_dir(&alias).unwrap(),
+                "foreign-link" => std::os::unix::fs::symlink("foreign-command", &alias).unwrap(),
+                "owned-link" => std::os::unix::fs::symlink("infraternal", &alias).unwrap(),
+                _ => {}
+            }
+            let before = fs::symlink_metadata(&alias).ok();
+            let source = temporary.0.join("source");
+            fs::write(&source, b"binary").unwrap();
+            let systemctl = temporary.0.join("systemctl");
+            let reached = temporary.0.join("activation-reached");
+            fs::write(
+                &systemctl,
+                format!(
+                    "#!/bin/sh\n[ -e '{}' ] || [ -L '{}' ] || exit 2\nprintf reached > '{}'\nexit 1\n",
+                    alias.display(), alias.display(), reached.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(install_system_service(&temporary.0, &source, &systemctl, me()).is_err());
+            assert_eq!(fs::read(&reached).unwrap(), b"reached", "{kind}");
+            match before {
+                None => assert!(
+                    alias.symlink_metadata().is_err(),
+                    "new infra survived rollback"
+                ),
+                Some(before) => {
+                    use std::os::unix::fs::MetadataExt;
+                    let after = fs::symlink_metadata(&alias).unwrap();
+                    assert_eq!(
+                        (after.dev(), after.ino()),
+                        (before.dev(), before.ino()),
+                        "{kind}"
+                    );
+                    match kind {
+                        "file" => assert_eq!(fs::read(&alias).unwrap(), b"foreign infra"),
+                        "directory" => assert_eq!(fs::read_dir(&alias).unwrap().count(), 0),
+                        "foreign-link" => {
+                            assert_eq!(
+                                fs::read_link(&alias).unwrap(),
+                                Path::new("foreign-command")
+                            );
+                        }
+                        "owned-link" => {
+                            assert_eq!(fs::read_link(&alias).unwrap(), Path::new("infraternal"));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            assert!(!temporary.0.join("var").exists(), "{kind}");
+            assert!(!temporary.0.join("etc").exists(), "{kind}");
+            assert!(!commands.join("infraternal").exists(), "{kind}");
+        }
     }
 
     /// A fresh install exposes its CLI while keeping enrollment state private.
