@@ -146,7 +146,7 @@ async fn version_25_database() -> SqlitePool {
     pool
 }
 
-/// Upgrade of a realistic database: placeholders are marked as such, the owner's hand-set name survives, the
+/// Upgrade of a realistic database (placeholders end as D339 fallbacks, the shared id prefix suffixed): placeholders are marked as such, the owner's hand-set name survives, the
 /// first round of attaches (in an unlucky order: the host whose record collides first, the server last) names
 /// every machine, and a second round in the opposite order renames nothing and audits nothing.
 #[tokio::test]
@@ -160,9 +160,9 @@ async fn evidence_migrations_0026_and_0029_upgrade_a_realistic_database_without_
         name_rows(&pool).await,
         [
             ("server".into(), "placeholder".into(), Some("server".into())),
-            ("unnamed-2".into(), "placeholder".into(), Some(A.into())),
+            ("host-000000".into(), "placeholder".into(), Some(A.into())),
             ("minipc01".into(), "hand".into(), Some(B.into())),
-            ("unnamed-4".into(), "placeholder".into(), Some(C.into())),
+            ("host-000000-2".into(), "placeholder".into(), Some(C.into())),
         ]
     );
     let migration_revision: i64 =
@@ -179,9 +179,9 @@ async fn evidence_migrations_0026_and_0029_upgrade_a_realistic_database_without_
         name_rows(&pool).await,
         [
             ("server".into(), "placeholder".into(), Some("server".into())),
-            ("unnamed-2".into(), "placeholder".into(), Some(A.into())),
+            ("host-000000".into(), "placeholder".into(), Some(A.into())),
             ("minipc01".into(), "hand".into(), Some(B.into())),
-            ("unnamed-4".into(), "placeholder".into(), Some(C.into())),
+            ("host-000000-2".into(), "placeholder".into(), Some(C.into())),
         ]
     );
     assert_eq!(
@@ -219,7 +219,8 @@ async fn evidence_migrations_0026_and_0029_upgrade_a_realistic_database_without_
         .collect();
     assert_eq!(named, ["monitor01", "minipc01-2", "minipc01", "lab07"]);
     let audited = automatic_renames(&pool).await;
-    assert_eq!(audited, 5);
+    // Two from migration 0029, two from 0049, three from the first round of attaches.
+    assert_eq!(audited, 7);
     round([
         ("server", 1, Some("monitor01")),
         (B, 11, Some("raspberrypi")),
