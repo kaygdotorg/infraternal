@@ -430,7 +430,10 @@ async function touchPage(browser: Browser, scene: number): Promise<{ page: Page;
   // These specs test the geometry of the Comfortable phone width (a neighbour peeks in, a gap to tap: a tap at x=371 lands on the
   // slice of the next window, 10 px wide at the screen edge, and so leaves the focused terminal); full width, the
   // default (D191), has its own specs in real/phone.spec.ts.
-  await context.addInitScript(() => { try { localStorage.setItem("tracer.window-size.phone", "comfortable"); } catch { /* storage blocked */ } });
+  // These specs check gestures and geometry, not a look, so they run on the Solid theme. Under the default Tinted theme the windows' 6 px blur costs enough frames in
+  // software rendering (27 ms a frame on a phone-sized page instead of 17) that a held finger's moves coalesce and a drag or a long press is lost; the cost of the blur is
+  // measured on its own, with the frame times, on #323.
+  await context.addInitScript(() => { try { localStorage.setItem("tracer.window-size.phone", "comfortable"); localStorage.setItem("tracer.themes", JSON.stringify({ v: 1, selected: "solid", basics: { colors: "ink", font: "maple-mono-nf", uiSize: 100 }, themes: [] })); } catch { /* storage blocked */ } });
   const page = await context.newPage();
   await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
@@ -1067,10 +1070,6 @@ test("toolbar rows snap: a short drag springs back, a longer one commits, and th
   const t = await touchPage(browser, 3);
   try {
     const { page } = t;
-    // This checks the tray's geometry, not a look: it runs on the Solid theme. Under the default Tinted theme the windows' 6 px blur costs enough frames in
-    // software rendering that the held finger's moves coalesce and the drag does not commit (frame times are in #323); the cost of the blur is measured on its own.
-    await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: "solid" } })));
-    await page.waitForTimeout(600);
     await page.touchscreen.tap(200, 500); // a terminal has focus: both rows exist, the key row shows
     await expect(page.locator("#keytray")).toHaveAttribute("data-rows", "2");
     await page.waitForTimeout(900);
