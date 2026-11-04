@@ -19,6 +19,7 @@ import { readLocal as readPref, writeLocal as writePref } from "../../../package
 import { aboutSection, createSettingsOverlay, type SettingsSection } from "../../../packages/ui/src/settings-overlay";
 import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
+import { startThemes } from "./canvas/themes/controller";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { initialFont, rememberFont } from "./font-preference";
@@ -116,6 +117,12 @@ export interface CoreScreen {
   act(action: string): void;
   /** The appearance choices in force, and the sections of Settings that live in core (for the Settings view). */
   appearance(): { theme: string; font: string; card: number; windows: number; background: string };
+  /**
+   * Paints the image behind the windows from a theme (`canvas/themes`): any CSS image, or "" for none. Used with the background
+   * `themed` (`act("bg:themed")`), which shows the canvas backdrop like `mesh` does but never runs the mesh painter, because the
+   * theme draws its own gradient in plain CSS.
+   */
+  setBackdrop(image: string): void;
   settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
   /** The row that shows now. */
   toolbarRow(): "canvas" | "keys";
@@ -384,11 +391,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let shownFont = committedFont;
   let fontRequest = 0;
   // Plain (`none`): one solid colour with subtle dots. Soft: the theme's gentle gradient. Plain is the default (D191); a saved choice stays. Mesh: the full
-  // theme mesh. The dots sit on all three.
-  const validBackground = (v: string | null): v is "none" | "soft" | "mesh" => v === "none" || v === "soft" || v === "mesh";
+  // theme mesh. The dots sit on all three. `themed` (D322, #323) is a Theme's own background: it looks like mesh to the stylesheets, but the image is
+  // CSS written by `setBackdrop`, so the mesh painter (WebGL) never runs for it.
+  const validBackground = (v: string | null): v is "none" | "soft" | "mesh" | "themed" => v === "none" || v === "soft" || v === "mesh" || v === "themed";
   let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "none";
   /** The terminal paints no background of its own where a window shows the canvas through it (and over the mesh). */
-  const translucentTerminal = (): boolean => background === "mesh" || windowLevel > 1;
+  const translucentTerminal = (): boolean => background === "mesh" || background === "themed" || windowLevel > 1;
   /** Every terminal on the screen (they share the look), and the one that takes the keys. */
   const clients = new Set<TerminalClient>();
   let client: TerminalClient | undefined;
@@ -433,9 +441,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const active = THEMES[currentThemeId]!;
     stage.toggleAttribute("data-no-motion", instant);
     ROOT.dataset.theme = currentThemeId;
-    ROOT.dataset.bg = background;
+    // A theme's own background reads as mesh to every stylesheet (the same backdrop layers show it).
+    const shownBg = background === "themed" ? "mesh" : background;
+    ROOT.dataset.bg = shownBg;
     stage.dataset.theme = currentThemeId;
-    stage.dataset.bg = background;
+    stage.dataset.bg = shownBg;
     applyTheme(active, ROOT, cardLevel, windowLevel);
     window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
@@ -445,6 +455,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     const terminal = terminalTheme(active, translucentTerminal());
     window.setTimeout(() => { for (const c of clients) c.setTheme(terminal); }, 0);
     if (background === "mesh") return paintMesh();
+    // `themed`: the theme owns the image (`setBackdrop`); only the mesh painter's memory is let go, its sheet is left alone.
+    if (background === "themed") { meshKey = ""; void backdropModule?.then((renderer) => renderer.releaseBackdrop()); return Promise.resolve(); }
     releaseMesh();
     return Promise.resolve();
   };
@@ -489,16 +501,19 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     { group: "Sessions", glyph: "›_", label: "SSH shell", hint: hostName, action: "session:current" },
     { group: "Hosts", glyph: "●", label: hostName, hint: "current", action: "host:current" },
     ...Object.entries(THEMES).map(([id, theme]) => ({
-      group: "Theme", glyph: "◉", label: theme.name, hint: theme.dark ? "dark" : "light", action: `theme:${id}`, swatch: theme,
+      group: "Colour", glyph: "◉", label: theme.name, hint: theme.dark ? "dark" : "light", action: `theme:${id}`, swatch: theme,
     })),
     ...FONTS.map((font) => ({
       group: "Font", glyph: "Aa", label: font.label, hint: font.hint, action: `font:${font.id}`, previewFont: font,
     })),
-    { group: "Background", glyph: "□", label: "Background: Plain", hint: "one solid colour · subtle dots", action: "bg:none" },
-    { group: "Background", glyph: "▦", label: "Background: Soft", hint: "a gentle gradient · dots", action: "bg:soft" },
-    { group: "Background", glyph: "▦", label: "Background: Mesh", hint: "the theme's mesh · dots", action: "bg:mesh" },
-    ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Card transparency: ${name}`, hint: "popovers, palette, sidebar", action: `card:${i + 1}` })),
-    ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Window transparency: ${name}`, hint: "terminals and window cards", action: `windows:${i + 1}` })),
+    // Where the Themes exist (the product's screens) a theme owns the background, tint and blur, so these rows would fight it; the plain screen keeps them.
+    ...(options.settingsView ? [] : [
+      { group: "Background", glyph: "□", label: "Background: Plain", hint: "one solid colour · subtle dots", action: "bg:none" },
+      { group: "Background", glyph: "▦", label: "Background: Soft", hint: "a gentle gradient · dots", action: "bg:soft" },
+      { group: "Background", glyph: "▦", label: "Background: Mesh", hint: "the theme's mesh · dots", action: "bg:mesh" },
+      ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Card transparency: ${name}`, hint: "popovers, palette, sidebar", action: `card:${i + 1}` })),
+      ...LEVEL_NAMES.map((name, i) => ({ group: "Transparency", glyph: "◫", label: `Window transparency: ${name}`, hint: "terminals and window cards", action: `windows:${i + 1}` })),
+    ]),
     ...(options.addHostEntry ? [
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
@@ -1456,6 +1471,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       writeLocal("tracer.background", value!);
       swapLook();
       return true;
+    } else if (kind === "themes") {
+      // A row of the Themes group (`canvas/themes/controller.ts` offers the rows and listens): the palette closes, the controller switches the theme.
+      setPalette(false, source);
+      window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: value } }));
+      return true;
     } else if (kind === "settings") {
       setPalette(false, source);
       if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${value ?? "appearance"}`, source } }));
@@ -1527,6 +1547,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     inboxMount,
     act(action) { runAction(action, "pointer"); },
     appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),
+    setBackdrop(image) { setMeshImages(image || "none", "none"); },
     settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },
     toolbarRow: () => (rowIndex === 0 ? "canvas" : "keys"),
     lockToolbarRow(row) { rowLock = row; autoRow(); },
@@ -1639,9 +1660,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       keybar.removeEventListener("click", keybarClick);
       keytray.removeEventListener("keydown", keybarKeydown);
       window.clearTimeout(resizeTimer);
+      stopThemes?.();
       releaseMesh();
       delete ROOT.dataset.kb;
     },
   };
+  // The person's Themes (D322): the page shows the selected one from now on. Only the product's screens have Settings windows to edit them in.
+  const stopThemes = options.settingsView ? startThemes(api) : undefined;
   return api;
 }
