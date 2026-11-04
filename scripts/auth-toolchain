@@ -5,7 +5,8 @@
 # SHA-256 is in scripts/zig.sha256 (shared with nix/zig.nix). Inside the nix
 # development shell INFRATERNAL_ZIG names that same tarball, already fetched
 # and checked as a fixed-output derivation, and it is copied here instead of
-# downloaded again. Elsewhere the tarball is downloaded and checked.
+# downloaded again; it must be that verified store path, nothing else.
+# Elsewhere the tarball is downloaded and checked.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # Zig release names are <cpu>-<os>; macOS reports its CPU as arm64.
@@ -30,13 +31,23 @@ mkdir -p "$target_root/auth-tools"
 staging="$(mktemp -d "$target_root/auth-tools/download.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
 if [[ -n "${INFRATERNAL_ZIG:-}" ]]; then
-    [[ "$("$INFRATERNAL_ZIG/zig" version)" == "$version" ]] || {
+    # Only the nix output of nix/zig.nix may stand in for the checked download:
+    # a registered, verified store path with that derivation's name. A version
+    # string alone proves nothing, so any other directory is refused (#328 P3-2).
+    zig_store="$(realpath -- "$INFRATERNAL_ZIG" 2>/dev/null)" || zig_store=""
+    [[ "$zig_store" =~ ^/nix/store/[0-9a-df-np-sv-z]{32}-infraternal-zig-${version//./\\.}-unpacked$ ]] || {
+        printf 'INFRATERNAL_ZIG must be the nix store output of nix/zig.nix\n' >&2; exit 1; }
+    command -v nix-store >/dev/null || {
+        printf 'INFRATERNAL_ZIG needs nix-store to verify it\n' >&2; exit 1; }
+    nix-store --verify-path "$zig_store" >/dev/null 2>&1 || {
+        printf 'INFRATERNAL_ZIG failed nix store verification\n' >&2; exit 1; }
+    [[ "$("$zig_store/zig" version)" == "$version" ]] || {
         printf 'INFRATERNAL_ZIG is not Zig %s\n' "$version" >&2; exit 1; }
     # Copied, not linked: Zig finds its lib directory through its own resolved
     # path, and the native remap flags (.cargo/musl-cc.sh) cover only the
     # target directory. A link would put /nix/store paths into the binaries
     # and make nix-shell builds differ from downloaded-Zig builds.
-    cp -R -- "$INFRATERNAL_ZIG/." "$staging/"
+    cp -R -- "$zig_store/." "$staging/"
     chmod -R u+w -- "$staging"
 else
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \

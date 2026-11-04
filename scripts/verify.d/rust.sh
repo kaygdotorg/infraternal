@@ -237,6 +237,7 @@ rust_static_build_check() {
     done
 
     scripts/auth-toolchain || return $?
+    scripts/test-auth-toolchain-pin || return $?
     python3 scripts/test-musl-cc.py || return $?
     python3 scripts/test-native-metadata.py || return $?
     python3 scripts/test-rustc-paths.py || return $?

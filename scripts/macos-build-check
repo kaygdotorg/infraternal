@@ -25,6 +25,7 @@ target_root="${CARGO_TARGET_DIR:-$root/target}"
 # Some suites keep fixture state under the target directory, as in verify.
 export CARGO_TARGET_DIR="$target_root"
 scripts/auth-toolchain
+scripts/test-auth-toolchain-pin
 printf 'zig %s\n' "$("$target_root/auth-tools/zig/zig" version)"
 
 cargo build --locked --release -p infraternal
