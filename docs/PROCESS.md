@@ -100,11 +100,11 @@ untracked files. A collision between branches caught on integration needs a
 fresh timestamp before the migration has been applied anywhere.
 
 Existing numbered files remain unchanged. The fixed legacy-name list also
-reserves the already allocated 0041–0048 names; do not extend that list for
-new work. Never rename or edit a migration already applied to a database:
+reserves the already allocated 0041–0048 names and the merged 0049 name;
+do not extend that list for new work. Never rename or edit a migration already applied to a database:
 its version and original source checksum identify its history.
 
-SQLx sorts numeric versions, so timestamps follow 0048. It applies every
+SQLx sorts numeric versions, so timestamps follow 0049. It applies every
 unapplied version, including an earlier timestamp merged after a later one.
 Keep `ignore_missing = false` and checksum validation enabled. A merged build
 must contain every applied migration; running an older branch missing an

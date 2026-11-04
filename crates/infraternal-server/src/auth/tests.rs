@@ -3710,3 +3710,6 @@ mod api_expiry;
 
 #[path = "device_pending_tests.rs"]
 mod device_pending;
+
+#[path = "ceremony_pool_tests.rs"]
+mod ceremony_pool;

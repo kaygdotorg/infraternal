@@ -46,3 +46,4 @@
 0046_api_read_audit.sql
 0047_pre_d333_key_end.sql
 0048_session_tap_action.sql
+0049_machine_fallback_names.sql

@@ -5,7 +5,7 @@
 /// Takes the first DNS label, lowercased. Anything address-like gives nothing, so a numeric address never becomes
 /// a name and the caller can use another source: IPv4 in any spelling (shortened `10.69.69`, hex `0x0a.0x45`,
 /// octal), IPv6 in any spelling (bracketed, with a zone `%eth0` or `%25eth0`), and labels made only of digits.
-/// Invalid host labels and reserved labels for unnamed machines also give nothing.
+/// Invalid host labels and `localhost` also give nothing (D339: those fall back to [`fallback_machine_name`]).
 #[must_use]
 pub fn machine_name(source: &str) -> Option<String> {
     let host = source
@@ -29,11 +29,46 @@ pub fn machine_name(source: &str) -> Option<String> {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         || label.starts_with('-')
         || label.ends_with('-')
-        || is_unnamed_label(&label)
+        // D339: `localhost` says nothing about the machine, so it is treated like an empty name.
+        || label == "localhost"
     {
         return None;
     }
     Some(label)
+}
+
+/// The name of a machine that reports no usable hostname (D339): `<os>-<first 6 characters of the host id>`.
+///
+/// The id is the host's UUID without dashes, lowercased (any other id keeps its first six letters and digits, so
+/// the label is never empty or malformed), so the same machine always gets the same fallback and
+/// two machines differ unless their ids share six hex digits (the caller then suffixes the later one).
+/// `os` is whatever the machine reported (`Debian GNU/Linux`, `macOS`); unknown or missing gives `host`, which
+/// never claims an operating system the machine did not report.
+#[must_use]
+pub fn fallback_machine_name(os: Option<&str>, host_id: &str) -> String {
+    let id: String = host_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(6)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    format!("{}-{id}", os_family(os))
+}
+
+/// The short operating-system word used in fallback names.
+fn os_family(os: Option<&str>) -> &'static str {
+    let os = os.unwrap_or_default().to_ascii_lowercase();
+    if os.contains("mac") || os.contains("darwin") {
+        "macos"
+    } else if os.contains("windows") {
+        "windows"
+    } else if os.contains("bsd") {
+        "freebsd"
+    } else if os.contains("linux") || os.contains("debian") || os.contains("ubuntu") {
+        "linux"
+    } else {
+        "host"
+    }
 }
 
 /// Whether `host` is an IPv4 address in any spelling the C resolver accepts: one to four dot-separated numbers,
@@ -45,14 +80,6 @@ fn is_ipv4_spelling(host: &str) -> bool {
         None => !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
     };
     !host.is_empty() && host.split('.').count() <= 4 && host.split('.').all(number)
-}
-
-/// Labels reserved to describe machines whose actual name is not known.
-fn is_unnamed_label(name: &str) -> bool {
-    name == "unnamed"
-        || name
-            .strip_prefix("unnamed-")
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 #[cfg(test)]

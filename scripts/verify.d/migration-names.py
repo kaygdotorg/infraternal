@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Reject new sequential SQL migrations and duplicate numeric versions (D347).
 
-The fixed legacy list includes the eight already allocated 0041–0048 files.
+The fixed legacy list includes the eight already allocated 0041–0048 files
+and the merged 0049 file.
 It is independent of Git history, so this also works after a merge and in an
 archive. Do not extend it: create new files with scripts/new-migration.
 """

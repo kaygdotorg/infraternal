@@ -16,7 +16,7 @@ const LATER: i64 = 20_261_104_160_000;
 fn numbered_history() -> Migrator {
     let mut migrations = MIGRATIONS
         .iter()
-        .filter(|m| m.version <= 48)
+        .filter(|m| m.version <= 49)
         .cloned()
         .collect::<Vec<_>>();
     for version in 41..=48 {
@@ -45,7 +45,7 @@ fn timestamps(mut history: Migrator) -> Migrator {
     history
         .migrations
         .to_mut()
-        .extend(fixtures.iter().filter(|m| m.version > 48).cloned());
+        .extend(fixtures.iter().filter(|m| m.version > 49).cloned());
     history
 }
 
@@ -68,11 +68,11 @@ async fn checksums(pool: &SqlitePool) -> Vec<(i64, Vec<u8>)> {
 
 #[tokio::test]
 /// Filename resolution sorts integer versions, then a fresh database executes that order.
-async fn timestamp_versions_sort_after_0048() {
+async fn timestamp_versions_sort_after_0049() {
     let fixtures = sqlx::migrate!("./tests/fixtures/migration-timestamps");
     assert_eq!(
         fixtures.iter().map(|m| m.version).collect::<Vec<_>>(),
-        [48, EARLIER, LATER]
+        [48, 49, EARLIER, LATER]
     );
     let pool = database().await;
     fixtures.run(&pool).await.unwrap();
@@ -85,29 +85,35 @@ async fn timestamp_versions_sort_after_0048() {
 }
 
 #[tokio::test]
-/// An upgrade executes each new timestamp once and leaves all numbered checksums intact.
-async fn timestamp_upgrade_preserves_0001_through_0048() {
-    let pool = database().await;
-    let history = numbered_history();
-    history.run(&pool).await.unwrap();
-    let before = checksums(&pool).await;
-    assert_eq!(before.len(), 48);
-    let upgraded = timestamps(history);
-    upgraded.run(&pool).await.unwrap();
-    let once = checksums(&pool).await;
-    assert_eq!(&once[..48], before);
-    assert_eq!(once.len(), 50);
-    for ((version, checksum), source) in once.iter().zip(upgraded.iter()) {
-        assert_eq!(*version, source.version);
-        assert_eq!(checksum.as_slice(), source.checksum.as_ref());
+/// Upgrades from 0048 and 0049 execute new timestamps once and keep numbered checksums intact.
+async fn timestamp_upgrade_preserves_0001_through_0049() {
+    for previous in [48, 49] {
+        let pool = database().await;
+        let mut history = numbered_history();
+        history
+            .migrations
+            .to_mut()
+            .retain(|m| m.version <= previous);
+        history.run(&pool).await.unwrap();
+        let before = checksums(&pool).await;
+        assert_eq!(before.len(), usize::try_from(previous).unwrap());
+        let upgraded = timestamps(numbered_history());
+        upgraded.run(&pool).await.unwrap();
+        let once = checksums(&pool).await;
+        assert_eq!(&once[..before.len()], before);
+        assert_eq!(once.len(), 51);
+        for ((version, checksum), source) in once.iter().zip(upgraded.iter()) {
+            assert_eq!(*version, source.version);
+            assert_eq!(checksum.as_slice(), source.checksum.as_ref());
+        }
+        upgraded.run(&pool).await.unwrap();
+        assert_eq!(checksums(&pool).await, once);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM timestamp_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
     }
-    upgraded.run(&pool).await.unwrap();
-    assert_eq!(checksums(&pool).await, once);
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM timestamp_events")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 2);
 }
 
 #[tokio::test]
@@ -140,7 +146,7 @@ async fn timestamp_out_of_order_keeps_missing_and_checksum_checks() {
         later_branch.run(&pool).await,
         Err(MigrateError::VersionMissing(EARLIER))
     ));
-    for version in [1, 48, EARLIER, LATER] {
+    for version in [1, 48, 49, EARLIER, LATER] {
         let original = checksums(&pool).await;
         sqlx::query("UPDATE _sqlx_migrations SET checksum=x'00' WHERE version=?")
             .bind(version)

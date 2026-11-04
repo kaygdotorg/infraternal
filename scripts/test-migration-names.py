@@ -29,7 +29,7 @@ class MigrationNames(unittest.TestCase):
         guard = load("migration_names", ROOT / "scripts/verify.d/migration-names.py")
         legacy = guard.legacy_names()
         self.assertEqual(guard.check_names(legacy), [])
-        for name in ("0049_new.sql", "0041_other.sql", "1_renamed.sql", "0001_renamed.sql"):
+        for name in ("0050_new.sql", "0049_other.sql", "0041_other.sql", "1_renamed.sql", "0001_renamed.sql"):
             with self.subTest(name=name):
                 self.assertTrue(guard.check_names([name]))
         for names in (
