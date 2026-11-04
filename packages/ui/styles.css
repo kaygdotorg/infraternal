@@ -420,6 +420,19 @@
   --ui-row-h: 2rem;
   --ui-control-h: 1.875rem;
   --ui-icon: 1rem;
+  /* Corner radius scale, one set for every surface (windows, cards, popovers, controls). Defined on :root, not on .terminal-screen,
+     so the sign-in card, the docs pages and body-level popovers can read them too (#345). Steps in between are nested radii
+     (an inner corner is the outer radius minus the padding) or a one-off recorded where it is used. */
+  --r-sm: 0.5rem;
+  --r-md: 0.75rem;
+  --r-lg: 1.125rem;
+  --r-pill: 999px;
+  /* The product's one ease-out curve and the drawer curve. Motion reads these names, never a pasted curve (a Web Animations
+     `easing` option cannot read var(), so TypeScript keeps a constant with the same curve). */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --t-pop: 180ms;
+  --t-panel: 240ms;
 }
 @media (pointer: coarse) {
   :root { --ui-row-h: 2.75rem; --ui-control-h: 2.75rem; --ui-icon: 1.125rem; }

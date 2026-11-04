@@ -296,14 +296,6 @@ button { color: inherit; }
 .terminal-screen {
   --terminal-prediction-opacity: 0.74;
   --font-mono: var(--font-face);
-  --r-sm: 0.5rem;
-  --r-md: 0.75rem;
-  --r-lg: 1.125rem;
-  --r-pill: 999px;
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
-  --t-pop: 180ms;
-  --t-panel: 240ms;
   /* The canvas area's side margin is canvas geometry, so it stays in px (see canvas.css). In rem it widened with the UI size (20 px to
      33 px at 150 %), the area a third of which is a window's default width shrank, and windows grew by less than the type inside
      them: at 150 % the header pill ran out of room and cut host names. In px the area is the same width at every size and a
