@@ -378,22 +378,22 @@ fn hex(bytes: &[u8]) -> String {
         })
 }
 
-/// Apply the binding rule to restored state; `true` means the key must rotate.
+/// Apply the binding rule to saved state; `true` means the key must rotate.
 ///
-/// State bound to another enrolment loses its configuration and the key that
-/// enrolment knew; the node then registers a new key with its coordinator.
-/// Unbound state comes from a slice-1 build and is adopted once, so an
-/// upgrade keeps its peers; its key is retired separately (`macos_key`),
-/// because slice 1 exposed it to local users. Without a current enrolment (no
+/// Saved state that is not bound to the current enrolment loses its
+/// configuration and the key; the node then registers a new key with its
+/// coordinator. That includes unbound state: a slice-1 build wrote none, and a
+/// slice-1 Mac may have been joined to another coordinator before upgrading,
+/// so its peers cannot be trusted to be this enrolment's (J162 F3). Its key is
+/// a fresh one anyway, because the slice-1 key is retired (`macos_key`), so
+/// discarding the peers costs one coordinator round trip. A first start has no
+/// saved state and is not passed here. Without a current enrolment (no
 /// `identity.json`), nothing is compared.
 fn reconcile(mut state: SavedState, enrolment: Option<&Enrolment>) -> (SavedState, bool) {
     let Some(enrolment) = enrolment else {
         return (state, false);
     };
-    let rotate = state
-        .binding
-        .as_ref()
-        .is_some_and(|binding| binding != enrolment);
+    let rotate = state.binding.as_ref() != Some(enrolment);
     if rotate {
         state.config = None;
         // The old utun closed with the old process, which retired its routes.
@@ -1216,10 +1216,19 @@ impl Node {
     /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
     pub fn restore(state_directory: &Path, enrolment: Option<&Enrolment>) -> io::Result<Self> {
         let path = state_directory.join(PUBLIC_STATE);
-        let (state, rotate) = reconcile(read_public_state(&path)?.unwrap_or_default(), enrolment);
+        let (state, rotate) = match read_public_state(&path)? {
+            Some(saved) => reconcile(saved, enrolment),
+            None => (
+                SavedState {
+                    binding: enrolment.cloned(),
+                    ..SavedState::default()
+                },
+                false,
+            ),
+        };
         if rotate {
             tracing::warn!(
-                "Mesh state belongs to an earlier enrolment; discarding its peers and starting with a new WireGuard key"
+                "Mesh state is not bound to this enrolment; discarding its peers and starting with a new WireGuard key"
             );
             crate::macos_key::remove(state_directory)?;
         }
@@ -1831,13 +1840,17 @@ mod tests {
         assert_eq!(same.config, Some(config()));
     }
 
+    /// J162 F3: unbound (slice-1) state may hold another coordinator's peers.
     #[test]
-    fn unbound_slice_one_state_is_adopted_once() {
-        let current = enrolment(b"coordinator A");
+    fn unbound_state_is_discarded_like_another_enrolment() {
+        let current = enrolment(b"coordinator B");
         let (state, rotate) = reconcile(bound_state(None), Some(&current));
-        assert!(!rotate);
-        assert_eq!(state.config, Some(config()));
+        assert!(rotate);
+        assert!(state.config.is_none());
+        assert!(state.routes.is_empty());
+        assert!(state.interface.is_none());
         assert_eq!(state.binding, Some(current));
+        // Without identity.json there is nothing to compare against.
         let (state, rotate) = reconcile(bound_state(None), None);
         assert!(!rotate);
         assert!(state.binding.is_none());
