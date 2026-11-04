@@ -49,6 +49,8 @@ async function hostsLoaded(page: Page): Promise<void> {
 
 const plus = (page: Page) => page.getByRole("button", { name: "New window", exact: true });
 const appWindow = (page: Page) => page.locator(".ui-window[data-kind='app']");
+/** Gives the machine back the way a person does: the window loses typing focus (the pill's mark is not a button). */
+const letGo = (page: Page) => appWindow(page).locator(".aw-stage").evaluate((el) => (el as HTMLElement).blur());
 
 async function openEditor(page: Page): Promise<void> {
   await requireFixtureH264(page);
@@ -114,7 +116,7 @@ test("the picker lists every machine's shell, screen and windows, narrows with o
 test("an app window goes live in a worker, names itself, and the machine's window follows its box", async ({ page }) => {
   await openCanvas(page);
   await openEditor(page);
-  await expect(appWindow(page).locator(".ui-window-host")).toHaveText("Editor · stream.ts");
+  await expect(appWindow(page).locator(".ui-window-host")).toHaveText("stream.ts · Editor");
   await expect(appWindow(page)).toHaveAttribute("data-status", "live");
   const first = await machineState(page);
   expect(first.sessions).toHaveLength(1);
@@ -153,7 +155,7 @@ test("a window the machine keeps at its own size gives the canvas window its sha
   // Taking the machine's shape is looking: it never takes control or moves anything there.
   await page.waitForTimeout(800);
   expect((await machineState(page)).sessions.every((session) => !session.controller)).toBe(true);
-  await expect(appWindow(page).locator(".aw-control:not([data-leaving])")).toHaveCount(0);
+  await expect(appWindow(page).locator(".aw-pillmark")).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath("shape-wide.png") });
   // The person (or the window manager) makes the machine's window tall: the canvas window follows.
   await config(page, { windowShape: { width: 900, height: 1100 } });
@@ -171,15 +173,15 @@ test("looking never moves the machine: the activating press and a hover send not
   await page.mouse.move(b.x + 120, b.y + 160);
   await page.waitForTimeout(400);
   expect((await machineState(page)).inputs).toHaveLength(0);
-  await expect(page.locator(".aw-control")).toHaveCount(0);
+  await expect(page.locator(".aw-pillmark")).toHaveCount(0);
   await page.mouse.click(b.x + 120, b.y + 160);
-  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal");
   await expect.poll(async () => (await machineState(page)).inputs.map((i) => `${i.input.kind}:${i.input.state ?? ""}`)).toEqual(expect.arrayContaining(["mouse:1", "mouse:2"]));
   await page.keyboard.type("a");
   await expect.poll(async () => (await machineState(page)).inputs.filter((i) => i.input.kind === "text").map(i => i.input.scalar)).toEqual([97]);
-  // Letting go: the badge is a button, and leaving the window releases what is held.
-  await page.locator(".aw-control").click();
-  await expect(page.locator(".aw-control")).toHaveCount(0);
+  // Letting go: leaving the window (its keys and pointer) releases what is held, and the mark in the pill goes.
+  await letGo(page);
+  await expect(page.locator(".aw-pillmark")).toHaveCount(0);
 });
 
 test("view only says so in plain words", async ({ page }) => {
@@ -187,7 +189,7 @@ test("view only says so in plain words", async ({ page }) => {
   await openEditor(page);
   const b = (await appWindow(page).locator(".aw-stage").boundingBox())!;
   await page.mouse.click(b.x + 100, b.y + 100);
-  await expect(page.locator(".aw-control")).toContainText("View only");
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "View only");
   expect((await machineState(page)).inputs).toHaveLength(0);
 });
 
@@ -196,9 +198,9 @@ test("the machine's local-input pause shows for as long as it lasts, then contro
   await openEditor(page);
   const b = (await appWindow(page).locator(".aw-stage").boundingBox())!;
   await page.mouse.click(b.x + 100, b.y + 100);
-  await expect(page.locator(".aw-control")).toContainText("Paused while someone uses studio-mac", { timeout: 10_000 });
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Paused while someone uses studio-mac", { timeout: 10_000 });
   await config(page, { inputPauseMs: 0 });
-  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal", { timeout: 10_000 });
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal", { timeout: 10_000 });
 });
 
 test("every state is honest: closed, permission missing, connecting, reconnecting, unsupported", async ({ page, browser }) => {
@@ -210,9 +212,13 @@ test("every state is honest: closed, permission missing, connecting, reconnectin
   await expect(appWindow(page).locator(".aw-card")).toContainText("Opening Editor");
   await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
   await config(page, { startDelayMs: 0 });
-  // The socket drops: the picture stays, dimmed, with the word; it returns by itself.
+  // The socket drops: the picture stays, dimmed, and the pill's dot turns (TASTE: an icon with motion, never a text strip over
+  // the picture); it returns by itself.
   await page.request.post("/__mock/drop-sockets");
-  await expect(appWindow(page).locator(".cl-sx-strip")).toContainText("Reconnecting");
+  await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "dim");
+  await expect(appWindow(page).locator(".ui-window-conn")).toHaveAttribute("data-state", "reconnecting");
+  await expect(appWindow(page).locator(".cl-sx-strip")).toHaveCount(0);
+  await expect(appWindow(page).locator(".aw-card")).toHaveAttribute("data-shown", "false");
   await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
   // The app quits.
   await page.request.post("/__mock/appwin/end", { data: { window_id: 201 } });
@@ -257,15 +263,15 @@ test("a viewing attachment survives the real resize authority contract", async (
   await openEditor(page);
   await expect(appWindow(page)).toHaveAttribute("data-status", "live");
   expect((await machineState(page)).sessions[0]?.controller).toBe(false);
-  await expect(page.locator(".aw-control")).toHaveCount(0);
+  await expect(page.locator(".aw-pillmark")).toHaveCount(0);
 });
 
 test("letting go retires the native control lease while viewing continues", async ({ page }) => {
   await openCanvas(page);
   await openEditor(page);
   await appWindow(page).locator(".aw-stage").click({ position: { x: 120, y: 100 } });
-  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
-  await page.locator(".aw-control").click();
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal");
+  await letGo(page);
   await expect.poll(async () => (await machineState(page)).sessions[0]?.controller).toBe(false);
   await expect(appWindow(page)).toHaveAttribute("data-status", "live");
 });
@@ -275,7 +281,7 @@ test("layout text and a shortcut release reach the source without physical text 
   await openEditor(page);
   const stage = appWindow(page).locator(".aw-stage");
   await stage.click({ position: { x: 120, y: 100 } });
-  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal");
   await stage.evaluate(el => {
     for (const [code, key] of [["KeyA", "a"], ["KeyE", "é"], ["KeyQ", "🐈"]] as const) {
       for (const type of ["keydown", "keyup"]) el.dispatchEvent(new KeyboardEvent(type, { bubbles: true, code, key }));
@@ -296,10 +302,11 @@ test("CSS letterbox rejects new input and still releases a drag that leaves the 
   await page.mouse.move(handle.x + 230, handle.y + handle.height / 2, { steps: 8 });
   await page.mouse.up();
   const stage = appWindow(page).locator(".aw-stage");
-  // The resize explicitly acquires control. Wait for that handover before
-  // testing picture hit bounds; pending handover is a separate input state.
-  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
+  // The resize reached the machine without showing control (D208 A3); the click then takes control, and the mark appears.
+  await expect.poll(async () => (await machineState(page)).sizes.length).toBeGreaterThan(0);
+  await expect(page.locator(".aw-pillmark")).toHaveCount(0);
   await stage.click();
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal");
   await expect.poll(async () => (await machineState(page)).inputs.filter(i => i.input.kind === "mouse" && i.input.state === 2).length).toBe(1);
   const geometry = await stage.evaluate(el => {
     const canvas = el.querySelector("canvas")!;
