@@ -2210,7 +2210,9 @@ mod tests {
             )
             .unwrap();
         let mut changed = batch.subscribe();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        // A hang bound, not a speed check: the whole add-host runs here, and
+        // under the parallel suite on a loaded VM it has taken over 10 s.
+        tokio::time::timeout(TEST_HANG_BOUND, async {
             let mut confirmed = false;
             loop {
                 let events = batch.events(0).1;
