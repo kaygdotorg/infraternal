@@ -10,6 +10,8 @@ use infraternal_mesh::{
 use libfuzzer_sys::fuzz_target;
 use std::collections::BTreeSet;
 
+/// A valid node numbered `id`, with a key, a host name and one of four tags,
+/// used as building material for the fuzzed operations.
 fn node(id: u8) -> Node {
     Node {
         id: NodeId(u64::from(id)),

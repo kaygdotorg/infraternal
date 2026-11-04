@@ -29,6 +29,7 @@ const CATALOG = /\bdocs:\s*\{\s*page:\s*"([^"]+)"(?:\s*,\s*heading:\s*"([^"]+)")
 /** A link in a rendered docs page. */
 const HREF = /\shref="\/docs\/([a-z0-9][a-z0-9/-]*)?\/?(?:#([^"]+))?"/g;
 
+/** The 1-based line number of the character at `offset` in `text`. */
 const lineOf = (text: string, offset: number): number => text.slice(0, offset).split("\n").length;
 /** The front page is `index` in the index and `/docs/` in an address. */
 const slugOf = (path: string | undefined): string => path?.replace(/\/$/, "") || "index";

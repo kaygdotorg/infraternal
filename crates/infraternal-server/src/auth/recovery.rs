@@ -1,20 +1,28 @@
 //! Recovery delay, same-account live-session exemption and rotation isolation [25,D113].
 use super::{Auth, Authority, DAY, Error, Result, Row, Value, hash, random};
 
+/// Nanoseconds in a second; the recovery clock counts nanoseconds.
 const SECOND: i64 = 1_000_000_000;
 
 // The persisted epoch plus this process's uptime is a conservative elapsed clock.
 // Restart loads only committed progress: downtime and unrecorded uptime earn no
 // credit. MAX under the writer lock also supports overlapping Auth instances.
+/// Conservative recovery-delay clock. Elapsed time is the committed value plus this
+/// process's uptime, never moves backwards, and earns no credit for downtime.
 pub(super) struct Clock {
+    /// Elapsed nanoseconds already committed when this process started.
     epoch: i64,
+    /// When this process loaded the clock; uptime is measured from here.
     started: std::time::Instant,
+    /// Wakes the checkpoint task when a recovery starts.
     wake: std::sync::Arc<tokio::sync::Notify>,
+    /// Handle used to stop the checkpoint task when the clock is dropped.
     worker: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
     #[cfg(test)]
     pub(super) test_elapsed: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
 impl Clock {
+    /// Loads the committed elapsed time from the database. Fails if the clock row is missing.
     pub(super) async fn load(pool: &sqlx::SqlitePool) -> Result<Self> {
         let epoch = sqlx::query_scalar("SELECT elapsed FROM recovery_clock WHERE singleton=1")
             .fetch_one(pool)
@@ -29,6 +37,7 @@ impl Clock {
         })
     }
 
+    /// Current elapsed nanoseconds: committed value plus uptime. Errors on overflow.
     fn sample(&self) -> Result<i64> {
         #[cfg(test)]
         {
@@ -43,6 +52,8 @@ impl Clock {
     }
 
     // One writer-serialized measurement serves checkpoints and every authority check.
+    /// Writes the current elapsed time inside `tx` (never lowering the stored value) and returns it.
+    /// The first write takes the writer lock, so all checks see one serialized reading.
     async fn record(&self, tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<i64> {
         sqlx::query("UPDATE recovery_clock SET elapsed=elapsed WHERE singleton=1")
             .execute(&mut **tx)
@@ -55,6 +66,7 @@ impl Clock {
         .await?)
     }
 
+    /// Commits the current elapsed time so a restart keeps the progress.
     async fn checkpoint(&self, pool: &sqlx::SqlitePool) -> Result<()> {
         let mut tx = pool.begin().await?;
         self.record(&mut tx).await?;
@@ -62,6 +74,7 @@ impl Clock {
         Ok(())
     }
 
+    /// True if any recovery is still waiting out its delay.
     async fn active(pool: &sqlx::SqlitePool) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM recovery WHERE expires>(SELECT elapsed FROM recovery_clock WHERE singleton=1))")
             .fetch_one(pool).await?)
@@ -70,6 +83,7 @@ impl Clock {
     // The task owns only a weak clock reference while sleeping. Dropping the last
     // Auth aborts it, so neither the pool nor recovery timers outlive their owner.
     // With no active recovery it waits on notification, without an idle timer.
+    /// Starts the background task that saves progress every 60 seconds while a recovery is waiting, and sleeps on a notification otherwise.
     pub(super) fn start_checkpointing(self: &std::sync::Arc<Self>, pool: sqlx::SqlitePool) {
         let weak = std::sync::Arc::downgrade(self);
         let wake = self.wake.clone();

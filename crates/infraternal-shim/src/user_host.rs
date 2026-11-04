@@ -35,16 +35,28 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Most output bytes kept in a session's raw prefix before its terminal is
+/// created. Past this the terminal is built and the prefix replayed into it.
 const PREFIX_LIMIT: usize = 4096;
+/// Most resizes recorded against the raw prefix before the terminal is built.
 const RESIZE_LIMIT: usize = 32;
 // Event count alone can defer many large reflows to the first snapshot.
 // Bound destination cells without adding another per-session counter.
+/// Most total cells (columns x rows, summed over recorded resizes) deferred
+/// before the terminal is built, so a few huge reflows cannot pile up for the
+/// first snapshot.
 const RESIZE_CELL_LIMIT: usize = 64 * 1024;
 // A global output quantum keeps one thousand ready PTYs from postponing input.
+/// How many sessions' PTY output the reactor reads per scheduling round. One
+/// keeps a thousand busy PTYs from delaying input handling.
 const OUTPUTS_PER_ROUND: usize = 1;
+/// Read size for a PTY whose viewers are keeping up.
 const INTERACTIVE_READ_BYTES: usize = 4096;
+/// Largest single read from a PTY, and the budget given to a session that is
+/// allowed to read in a step.
 const BULK_READ_BYTES: usize = 16 * 1024;
 // Aggregate history is bounded at scale rather than multiplying defaults by 1000.
+/// Most scrollback, summed over all sessions of one host, that is shared out.
 const HOST_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 /// Smallest host pool [D270, #205]: every history share with its page
 /// headers, plus one full screen reservation so a single large geometry
@@ -60,8 +72,12 @@ const HOST_NATIVE_POOL_FRACTION: usize = 32;
 /// state while keeping the per-session reservation small at hundreds of
 /// sessions. Larger active geometries may raise it, up to 2 MiB.
 const SESSION_SCREEN_BYTES: usize = 256 * 1024;
+/// Most sessions one host serves; larger batches are refused.
 const MAX_SESSIONS: usize = 1000;
+/// Most wire bytes a session may hold queued for its viewers at once.
 const PEER_BYTES: usize = 4 * 1024 * 1024;
+/// Base memory budget of one session, to which its history and ring capacity
+/// are added. Exceeding it retires the session.
 const SESSION_BYTES: usize = 16 * 1024 * 1024;
 
 /// A complete origin prefix is retained until VT materialization, never an evicting tail.
@@ -75,6 +91,9 @@ struct LazyTerminal {
     /// Reserved when the session opens, even while terminal state is lazy.
     floor_reservation: Option<std::sync::Arc<crate::terminal_memory::HostFloor>>,
 }
+/// The deferred state behind `LazyTerminal`: the real terminal once built, the
+/// output prefix, the size it started at, and `(offset, cols, rows)` resizes
+/// against that prefix.
 struct LazyState {
     terminal: Option<Box<Terminal>>,
     prefix: Vec<u8>,
@@ -86,6 +105,8 @@ struct LazyState {
     panic_next_process: bool,
 }
 impl LazyTerminal {
+    /// Creates a lazy terminal at `cols` x `rows` with `history` bytes of
+    /// scrollback once built. Allocates nothing yet.
     fn new(cols: u16, rows: u16, history: usize) -> Self {
         Self {
             state: RefCell::new(LazyState {
@@ -103,6 +124,9 @@ impl LazyTerminal {
             floor_reservation: None,
         }
     }
+    /// Builds the real terminal if absent: starts at the original size, replays the
+    /// prefix with each resize at its offset, then drops the prefix. A failure leaves
+    /// the lazy state intact so it can be retried.
     fn materialize(&self) -> io::Result<()> {
         let mut state = self.state.borrow_mut();
         if state.terminal.is_none() {
@@ -126,6 +150,8 @@ impl LazyTerminal {
         }
         Ok(())
     }
+    /// Estimate of heap held by the prefix, the resize list and the terminal (if
+    /// built), for the session's memory budget.
     fn allocated_bytes(&self) -> usize {
         let state = self.state.borrow();
         state.prefix.capacity()
@@ -135,6 +161,8 @@ impl LazyTerminal {
                 .as_ref()
                 .map_or(0, |t| t.memory().0 + 8192 + std::mem::size_of::<Terminal>())
     }
+    /// Bytes this terminal counts against the user's pool: its reserved floor or
+    /// its actual native use, whichever is larger.
     fn pool_bytes(&self) -> usize {
         let state = self.state.borrow();
         let floor = self
@@ -147,9 +175,13 @@ impl LazyTerminal {
             .map_or(0, |terminal| terminal.memory().0);
         floor.max(native)
     }
+    /// The user's pool cap in bytes, or 0 without a pool.
     fn pool_limit_bytes(&self) -> usize {
         self.host.as_ref().map_or(0, |host| host.limit_bytes())
     }
+    /// Feeds output to the terminal, or appends it to the prefix while the
+    /// terminal is not built. If the prefix would pass `PREFIX_LIMIT` the terminal is
+    /// built first. Fails if that build fails.
     fn process(&mut self, bytes: &[u8]) -> io::Result<()> {
         #[cfg(test)]
         assert!(!self.state.get_mut().panic_next_process, "fixture VT fault");
@@ -168,6 +200,7 @@ impl LazyTerminal {
     }
 }
 impl SessionTerminal for LazyTerminal {
+    /// Builds the terminal if needed and returns its snapshot.
     fn snapshot(&self) -> io::Result<Vec<u8>> {
         self.materialize()?;
         self.state
@@ -177,6 +210,9 @@ impl SessionTerminal for LazyTerminal {
             .ok_or_else(|| io::Error::other("VT absent"))?
             .snapshot()
     }
+    /// The approximate snapshot of a built terminal. An unbuilt terminal returns a
+    /// terminal reset (`ESC c`), so a failed allocation can never pass as an exact
+    /// empty screen.
     fn approximate_snapshot(&self) -> Vec<u8> {
         // A failed allocation cannot masquerade as an exact empty screen.
         self.state
@@ -185,9 +221,14 @@ impl SessionTerminal for LazyTerminal {
             .as_ref()
             .map_or_else(|| b"\x1bc".to_vec(), |t| t.approximate_snapshot())
     }
+    /// Resizes without a ring to recover from.
     fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         self.resize_with_ring(cols, rows, None)
     }
+    /// Resizes the terminal. While unbuilt and within `RESIZE_LIMIT` and
+    /// `RESIZE_CELL_LIMIT`, the resize is only recorded at the current prefix offset
+    /// (an unchanged size with no output since the last resize is skipped).
+    /// Otherwise the terminal is built first and the resize applied to it.
     fn resize_with_ring(&mut self, cols: u16, rows: u16, ring: Option<&Ring>) -> io::Result<()> {
         let state = self.state.get_mut();
         // Native resize also ends synchronized output. Only an empty byte
@@ -234,6 +275,7 @@ impl SessionTerminal for LazyTerminal {
         self.rows = rows;
         Ok(())
     }
+    /// True once a built terminal can no longer give an exact snapshot.
     fn requires_approximation(&self) -> bool {
         self.state
             .borrow()
@@ -243,6 +285,11 @@ impl SessionTerminal for LazyTerminal {
     }
 }
 
+/// Everything for one hosted session: its socket, the PTY and child, the lazy
+/// terminal, the output ring, queued input and per-writer cursors, connected
+/// viewers (peers), and the exit state. `exit` is the child's status once seen;
+/// `drained` is set when the PTY has reached end of output; `deadline` is when a
+/// finished session's exit record stops being retained.
 struct Session {
     config: Config,
     listener: UnixListener,
@@ -280,6 +327,9 @@ fn may_coalesce_data_ack(peer: &Peer, head: u64, live: bool) -> bool {
 }
 
 impl Session {
+    /// Creates the session: binds its socket, spawns the PTY and child, and sets up
+    /// an empty ring and cursors. The startup directory is cleared from the config
+    /// once the socket is bound, since the socket owns the full path.
     fn new(mut config: Config, history: usize) -> io::Result<Self> {
         let (listener, path) = socket(&config)?;
         // The bound socket owns the complete pathname. Runtime geometry and
@@ -334,9 +384,11 @@ impl Session {
         session.ring.set_budget(host);
         Ok(session)
     }
+    /// Bytes buffered for all viewers of this session.
     fn peer_bytes(&self) -> usize {
         self.peers.iter().map(Peer::buffer_bytes).sum()
     }
+    /// Estimate of all heap held for this session, compared against its budget.
     fn allocated_bytes(&self) -> usize {
         self.terminal.allocated_bytes()
             + self.ring.allocated_bytes()
@@ -352,6 +404,9 @@ impl Session {
             + self.path.0.capacity()
             + std::mem::size_of::<Self>()
     }
+    /// Writes one JSON line describing the session's memory by component (for
+    /// diagnostics). `index` identifies the session and `reactor`, if given, is
+    /// extra reactor figures to embed.
     fn record_memory(
         &self,
         index: usize,
@@ -392,6 +447,9 @@ impl Session {
         }
         writeln!(writer, "}}")
     }
+    /// True when the reactor may read more PTY output: the PTY is not at end, and
+    /// either no viewer is following output or at least one follower is fully
+    /// caught up with nothing queued.
     fn can_read(&self) -> bool {
         !self.drained
             && (!self.peers.iter().any(|p| p.cursor.is_some())
@@ -399,6 +457,8 @@ impl Session {
                     p.pending.is_empty() && p.cursor.is_some_and(|s| s == self.ring.head())
                 }))
     }
+    /// True when `peer` has something to send: queued bytes, a reply, a request,
+    /// unseen ring output, or an exit notification that is due.
     fn can_write(&self, peer: &Peer) -> bool {
         !peer.pending.is_empty()
             || peer.input_reply.is_some()
@@ -413,6 +473,8 @@ impl Session {
         self.can_write(peer)
             && !may_coalesce_data_ack(peer, self.ring.head(), !self.drained && self.exit.is_none())
     }
+    /// Records the child's exit status once it has exited (negative signal number
+    /// when killed by a signal) and starts the exit record's retention clock.
     fn observe_exit(&mut self) -> io::Result<()> {
         if self.exit.is_none()
             && let Some(status) = self.pty.child.try_wait()?
@@ -426,6 +488,9 @@ impl Session {
         }
         Ok(())
     }
+    /// One maintenance pass for the session, with Ack coalescing off: flush peers,
+    /// apply the memory budgets, drop failed viewers and observe the exit. Returns
+    /// `Ok(true)` once the session has ended and its exit record was written.
     fn housekeeping(&mut self) -> io::Result<bool> {
         self.housekeeping_coalesced(false)
     }
@@ -653,6 +718,9 @@ impl Session {
         }
         Ok(false)
     }
+    /// One scheduling turn: handles the readiness flags from the listener, PTY
+    /// master and each viewer. `read_pty` lets it read up to `BULK_READ_BYTES` of
+    /// output; otherwise it reads none.
     #[allow(clippy::too_many_lines)]
     fn step(
         &mut self,
@@ -668,6 +736,7 @@ impl Session {
             if read_pty { BULK_READ_BYTES } else { 0 },
         )
     }
+    /// Like `step`, but with an explicit `read_budget` in bytes.
     #[allow(clippy::too_many_lines)]
     fn step_budget(
         &mut self,
@@ -897,6 +966,8 @@ fn open_host_sessions(
     Ok((sessions, refusals))
 }
 
+/// True if `error` is the "terminal memory for this user is full" refusal, so
+/// the caller can treat it as a normal refusal of a new session.
 fn pool_full_error(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::OutOfMemory
         && error
@@ -1006,6 +1077,9 @@ fn host_native_pool_bytes() -> usize {
     host_pool_bytes(available, None)
 }
 
+/// The user's pool size: a 1/32 share of available memory (the lower of
+/// `available` and `cgroup_limit`), clamped between `HOST_NATIVE_POOL_MIN` and
+/// `HOST_NATIVE_POOL_MAX`.
 fn host_pool_bytes(available: usize, cgroup_limit: Option<usize>) -> usize {
     let usable = cgroup_limit.map_or(available, |limit| available.min(limit));
     (usable / HOST_NATIVE_POOL_FRACTION).clamp(HOST_NATIVE_POOL_MIN, HOST_NATIVE_POOL_MAX)
@@ -1023,6 +1097,8 @@ fn usable_memory() -> Option<usize> {
     Some(limit.map_or(available, |limit| limit.min(available)))
 }
 
+/// `MemAvailable` from `/proc/meminfo` text, in bytes, or `None` if missing or
+/// unparsable.
 fn meminfo_available(info: &str) -> Option<usize> {
     let kib = info
         .lines()

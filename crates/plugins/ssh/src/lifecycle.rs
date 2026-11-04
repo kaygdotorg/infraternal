@@ -1,24 +1,39 @@
 //! Owns admission and cancellation for one node's SSH component without idle work [198].
+//!
+//! The SSH component can be switched on and off. While on, each piece of work
+//! takes an [`Activity`] lease; while off, no new lease or batch is admitted.
+//! Turning it off cancels registered batches and then waits until every lease is
+//! dropped, so "off" really means no SSH work is still running. No background
+//! task polls; waiting is done on watch channels.
 
 use crate::bootstrap::{BatchInner, lock};
 use infraternal_plugin_api::{PluginState, PluginStatus};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
+/// Mutable lifecycle facts, always read and written under one lock.
 struct State {
+    /// Whether new work is admitted.
     enabled: bool,
+    /// Number of live [`Activity`] leases.
     active: usize,
+    /// Batches to cancel on disable; weak, so finished batches do not linger.
     batches: Vec<Weak<BatchInner>>,
 }
 
 /// Shared by host attempts and their server adapters; construction performs no I/O.
 pub(crate) struct Lifecycle {
+    /// Enabled flag, lease count and batches.
     state: Mutex<State>,
+    /// Serializes `set_enabled` calls so enable and disable do not interleave.
     control: AsyncMutex<()>,
+    /// Broadcasts the enabled flag to adapters.
     enabled: watch::Sender<bool>,
+    /// Broadcasts the lease count so a disable can wait for zero.
     active: watch::Sender<usize>,
 }
 impl Lifecycle {
+    /// A new lifecycle that starts enabled, with no leases.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State {
@@ -31,6 +46,7 @@ impl Lifecycle {
             active: watch::channel(0).0,
         })
     }
+    /// Take a lease for one unit of work; refused with a message while disabled.
     pub(crate) fn admit(self: &Arc<Self>) -> Result<Activity, &'static str> {
         let mut state = lock(&self.state);
         if !state.enabled {
@@ -40,6 +56,8 @@ impl Lifecycle {
         self.active.send_replace(state.active);
         Ok(Activity(self.clone()))
     }
+    /// Remember a batch so that disabling cancels it; refused while disabled.
+    /// Holds only a weak reference and prunes dead ones.
     pub(crate) fn register(&self, batch: &Arc<BatchInner>) -> Result<(), &'static str> {
         let mut state = lock(&self.state);
         if !state.enabled {
@@ -49,9 +67,11 @@ impl Lifecycle {
         state.batches.push(Arc::downgrade(batch));
         Ok(())
     }
+    /// Watch the enabled flag; adapters drop their lease when it turns false.
     pub(crate) fn subscribe(&self) -> watch::Receiver<bool> {
         self.enabled.subscribe()
     }
+    /// `On` when enabled; otherwise `Stopping` while leases remain, else `Off`.
     pub(crate) fn status(&self) -> PluginStatus {
         let state = lock(&self.state);
         PluginStatus {
@@ -65,6 +85,12 @@ impl Lifecycle {
             active_work: state.active,
         }
     }
+    /// Turn the component on or off.
+    ///
+    /// Disabling closes admission at once, cancels registered batches and returns
+    /// only after all leases are gone. Enabling first waits for any previous
+    /// lifetime's leases to drain, so old and new work never overlap. Enabling
+    /// while already on does nothing.
     pub(crate) async fn set_enabled(&self, enabled: bool) {
         let _control = self.control.lock().await;
         if enabled && self.status().state == PluginState::On {
@@ -103,6 +129,7 @@ impl Lifecycle {
 
 /// Holds a component lifetime until its attempt, confirmation or socket has retired.
 /// Adapters must observe `Bootstrap::enabled_changes` and drop their lease when off.
+/// Dropping releases the lease and wakes any waiting disable.
 pub struct Activity(Arc<Lifecycle>);
 impl Drop for Activity {
     fn drop(&mut self) {

@@ -13,16 +13,21 @@ use std::{
 use tokio::sync::OwnedSemaphorePermit;
 use uuid::Uuid;
 
+/// Most hosts that may hold a parked fallback connection at once.
 const MAX_PARKED: usize = 1000;
 
+/// Set of hosts that currently have a parked connection. A host can hold at most one.
 #[derive(Default)]
 pub(crate) struct Slots(Mutex<HashSet<Uuid>>);
 
+/// Proof that a host holds its slot. Dropping it frees the slot.
 pub(crate) struct Parking {
+    /// Table the slot is returned to on drop.
     slots: Arc<Slots>,
     host: Uuid,
 }
 impl Drop for Parking {
+    /// Frees this host's slot.
     fn drop(&mut self) {
         self.slots
             .0
@@ -32,6 +37,7 @@ impl Drop for Parking {
     }
 }
 impl Slots {
+    /// Claims the slot for `host`. Fails with `WouldBlock` if that host already has one or the table is full.
     fn reserve(self: &Arc<Self>, host: Uuid) -> io::Result<Parking> {
         let mut slots = self
             .0
@@ -49,21 +55,27 @@ impl Slots {
 
 /// Handshake ownership transfers to a bounded identity slot only after admission.
 pub(crate) struct Admission {
+    /// Revocation and ledger checks for the connected host, kept for the whole parked lifetime.
     pub(crate) authority: AuthorityGuard,
+    /// Handshake permits, returned as soon as the connection is admitted so a parked one does not hold them.
     permits: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>,
+    /// Shared slot table the connection will park in.
     slots: Arc<Slots>,
+    /// Set once a native-priming hello succeeded; keeps the slot until the connection is promoted or dropped.
     pub(crate) priming: Option<Priming>,
 }
 
 /// A primed connection keeps its identity slot until actor promotion or drop.
 pub(crate) struct Priming {
     _parking: Parking,
+    /// Sends the signal that promotes the primed connection to the active one. Taken at most once.
     pub(crate) activation: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 pub(crate) use crate::remote_standby_request::{activation, wants_prime};
 
 impl Admission {
+    /// Starts an admission from the checked `authority`, the handshake `permits` and the shared `slots`.
     pub(crate) fn new(
         authority: AuthorityGuard,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),

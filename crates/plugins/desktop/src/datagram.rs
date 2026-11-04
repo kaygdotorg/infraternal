@@ -6,25 +6,41 @@ use std::time::Instant;
 /// A fixed fragment shape bounds bitmap bookkeeping even for adversarial input.
 /// QUIC's 1200-byte minimum path MTU leaves room for this payload and framing.
 pub const FRAGMENT_BYTES: usize = 1024;
+/// The frame currently being put back together from fragments.
 struct Assembly {
     sequence: u64,
     capture_ns: u64,
     keyframe: bool,
+    /// Output buffer, allocated at its full size up front (bounded by the maximum video size).
     bytes: Vec<u8>,
+    /// Bitmap with one bit per fragment already received.
     seen: Vec<u8>,
+    /// Number of distinct fragments received so far.
     received: usize,
+    /// When to give up on this frame.
     deadline: Instant,
 }
+/// Rebuilds video frames from datagram fragments for one session.
+///
+/// Fragments may be lost, duplicated or reordered. Only one frame is assembled at
+/// a time. When a frame is lost, later delta frames are discarded until a
+/// keyframe arrives, and a repair request is raised (see [`Reassembler::take_repair`]).
+///
 /// Admission binds this object to a server-owned UUID before any untrusted length is used.
 pub struct Reassembler {
     session: SessionId,
     assembly: Option<Assembly>,
+    /// Sequence number of the last frame delivered.
     last_sequence: u64,
+    /// Delta frames are skipped until a keyframe arrives.
     waiting_keyframe: bool,
+    /// A repair request is waiting to be taken.
     repair: bool,
+    /// Highest sequence a repair was already requested for.
     repair_sequence: Option<u64>,
 }
 impl Reassembler {
+    /// Creates an assembler that accepts fragments of session `session` only.
     #[must_use]
     pub const fn new(session: SessionId) -> Self {
         Self {
@@ -45,6 +61,7 @@ impl Reassembler {
             self.repair_sequence = Some(sequence);
         }
     }
+    /// Abandons the frame in progress, asks for a repair, and waits for a keyframe.
     fn lose(&mut self) {
         if let Some(frame) = self.assembly.take() {
             self.request_repair(frame.sequence);
@@ -66,6 +83,7 @@ impl Reassembler {
     pub fn take_repair(&mut self) -> bool {
         std::mem::take(&mut self.repair)
     }
+    /// Memory held by the frame being assembled, for accounting.
     #[must_use]
     pub fn retained_bytes(&self) -> usize {
         self.assembly

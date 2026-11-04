@@ -4,6 +4,12 @@ use infraternal_plugin_canvas::{model::Document, reducer::reduce};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
+/// Reads one JSON object per stdin line with a `document` and a list of
+/// `intents`. Replays the intents in order and writes one line per input: an
+/// array with, for each intent, `{"accepted": bool, "document": ...}` where the
+/// document is the state after that intent. Accepted `close` intents are
+/// remembered so later intents can be refused for already-closed windows.
+/// Panics on malformed input; this is a test tool, not a service.
 fn main() {
     let mut out = io::BufWriter::new(io::stdout().lock());
     for line in io::stdin().lock().lines() {

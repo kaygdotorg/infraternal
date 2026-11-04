@@ -8,6 +8,10 @@ use infraternal_protocol::{
     encode_muxed_frame_into,
 };
 
+/// Benchmarks encode and decode of the two hot frames, a 1-byte keystroke (`Input`) and 64 bytes
+/// of PTY output (`Output`), plus the multiplexed decoder for the smallest and largest stream ids.
+/// The `decode` cases do the minimum work needed to read the payload; `decode_full` builds the
+/// complete frame.
 fn wire_codec(c: &mut Criterion) {
     let keystroke = *b"k";
     let keystroke_frame = Frame::Input {
@@ -85,6 +89,8 @@ fn wire_codec(c: &mut Criterion) {
     }
 }
 
+/// Decodes a terminal data frame and returns just its sequence number and payload length.
+/// Only `Input` and `Output` frames are expected here, since those are all the fixtures hold.
 fn decode_summary(input: &[u8]) -> Result<(u64, usize), DecodeError> {
     let decoded = decode_frame(input)?;
     match decoded.frame {
@@ -94,6 +100,8 @@ fn decode_summary(input: &[u8]) -> Result<(u64, usize), DecodeError> {
     }
 }
 
+/// Short Criterion settings: 20 samples with brief warm-up and measurement, enough to compare
+/// runs of these very fast operations without a long wait.
 fn criterion_config() -> Criterion {
     Criterion::default()
         .sample_size(20)

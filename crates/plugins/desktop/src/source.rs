@@ -1,4 +1,21 @@
 //! Prepared UUIDs own desktop metadata while each admitted native leg owns one private helper and joined worker [D198,D203,D232].
+//!
+//! [`SourceBridge`] is the plugin the infraternal agent runs on a host that has
+//! windows to share. The server first "prepares" a session: the bridge records
+//! the target, size and a video sequence counter under the session's UUID, and
+//! starts nothing. Only when the server then opens a data lane for that UUID
+//! does the bridge start one private helper process and one worker task, which
+//! pump video out and input in until the lane ends, the session is stopped, or
+//! the plugin is switched off.
+//!
+//! It also answers one-off questions (window inventory, status, clock) by
+//! starting a short-lived helper, and pages large inventories with
+//! [`crate::source_inventory`]. Switching off, or stopping a session, waits for
+//! the helper to be fully retired before reporting success; a failed cleanup
+//! blocks re-enabling until it is joined again.
+//!
+//! Executable and runtime paths come from trusted node setup, never from action
+//! bodies.
 use crate::{
     protocol::{Kind, Start},
     source_inventory::Snapshot,
@@ -32,50 +49,77 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// What a prepared session remembers; it outlives any one helper or lane.
 pub(super) struct Metadata {
+    /// What is captured and the current output size (changes as the viewer resizes).
     pub start: Mutex<Start>,
+    /// Last video sequence number used. Shared with the worker so a later lane
+    /// carries on counting instead of repeating numbers.
     pub sequence: AtomicU64,
 }
+/// A session that has been prepared by the server.
 struct Prepared {
     metadata: Arc<Metadata>,
+    /// The worker of the current or latest lane, if a lane was ever served.
     worker: Option<Arc<Worker>>,
+    /// Set once a stop or switch-off began; the record accepts no new lane and
+    /// is removed when cleanup is confirmed.
     stopping: bool,
 }
+/// Everything behind the bridge's state lock (never held across an `await`).
 struct State {
     enabled: bool,
+    /// Transport capabilities negotiated with the server; `None` until known.
     native_caps: Option<u64>,
+    /// Maximum prepared sessions.
     limit: usize,
     prepared: HashMap<Uuid, Prepared>,
+    /// Worker of the latest short-lived inventory/status helper.
     inventory: Option<Arc<Worker>>,
+    /// The window inventory currently being paged through.
     snapshot: Option<Snapshot>,
 }
+/// Shared innards of [`SourceBridge`].
 struct Inner {
     config: Config,
     state: Mutex<State>,
+    /// Serializes enable/disable so two switches cannot interleave their cleanup.
     lifecycle: tokio::sync::Mutex<()>,
 }
 /// Construction and enable allocate metadata only. Executable/runtime paths
 /// come from trusted node setup and are never taken from remote action bodies.
 #[derive(Clone)]
 pub struct SourceBridge(Arc<Inner>);
+/// A request sent to a running worker's helper from outside, such as a status or
+/// clock query.
 pub(super) struct Control {
     pub kind: Kind,
+    /// Where to send the helper's answer, if the caller wants one.
     pub reply: Option<oneshot::Sender<Result<Value, PluginError>>>,
 }
+/// A spawned task that owns one helper process, with handles to cancel and join it.
 pub(super) struct Worker {
+    /// Set to true to ask the task to wind down.
     stop: watch::Sender<bool>,
+    /// The data lane, held so cancelling can retire it at once.
     lane: Mutex<Option<Arc<dyn WireLane>>>,
+    /// Channel for [`Control`] requests; `None` for inventory helpers.
     pub control: Option<mpsc::Sender<Control>>,
     join: tokio::sync::Mutex<Job>,
 }
+/// How a worker ended: the answer, and separately whether its helper was retired.
 // A rejected operation is distinct from a failed native retirement. Off/stop
 // still succeed after a denied request whose helper was never started.
 #[derive(Clone)]
 pub(super) struct Outcome {
+    /// What the operation produced.
     pub output: Result<Value, PluginError>,
+    /// Whether the helper was confirmed retired. Failure here is a fence: it
+    /// must be joined successfully before the source is used again.
     pub cleanup: Result<(), PluginError>,
 }
 impl Outcome {
+    /// A rejected operation whose helper cleanup result is `cleanup`.
     pub fn failed(cleanup: Result<(), PluginError>) -> Self {
         Self {
             output: Err(PluginError::Rejected),
@@ -83,11 +127,14 @@ impl Outcome {
         }
     }
 }
+/// The task handle and, once joined, its remembered result, so any number of
+/// callers can ask for the outcome.
 struct Job {
     handle: Option<JoinHandle<Outcome>>,
     result: Option<Outcome>,
 }
 impl Worker {
+    /// Wraps a spawned task with its cancel handle, lane and control channel.
     fn new(
         stop: watch::Sender<bool>,
         lane: Option<Arc<dyn WireLane>>,
@@ -104,6 +151,8 @@ impl Worker {
             }),
         })
     }
+    /// Asks the task to stop and retires its lane. Does not wait; use
+    /// [`Worker::retire`] for that. Safe to call repeatedly.
     fn cancel(&self) {
         self.stop.send_replace(true);
         if let Ok(mut lane) = self.lane.lock()
@@ -112,11 +161,15 @@ impl Worker {
             lane.retire();
         }
     }
+    /// True if the task has ended (or is being joined by someone else right now,
+    /// in which case this returns false). Never blocks.
     fn finished(&self) -> bool {
         self.join
             .try_lock()
             .is_ok_and(|job| job.handle.as_ref().is_none_or(JoinHandle::is_finished))
     }
+    /// Waits for the task to end and returns its outcome. The first caller does
+    /// the join; later callers get the same remembered result.
     async fn outcome(&self) -> Outcome {
         let mut job = self.join.lock().await;
         if let Some(handle) = job.handle.as_mut() {
@@ -134,21 +187,27 @@ impl Worker {
             cleanup: Ok(()),
         })
     }
+    /// Waits for the task and returns its output, but only if cleanup succeeded.
     async fn join(&self) -> Result<Value, PluginError> {
         let outcome = self.outcome().await;
         outcome.cleanup?;
         outcome.output
     }
+    /// Waits for the task and returns only whether its helper was retired.
     async fn retire(&self) -> Result<(), PluginError> {
         self.outcome().await.cleanup
     }
 }
+/// Retires the lane when dropped, so a lane is never left open if the serving
+/// future is dropped or returns early.
 struct WireLease(Arc<dyn WireLane>);
 impl Drop for WireLease {
     fn drop(&mut self) {
         self.0.retire();
     }
 }
+/// Cancels the worker when dropped. Held while awaiting it so that a cancelled
+/// caller does not leave the helper running.
 struct Wait(Arc<Worker>);
 impl Drop for Wait {
     fn drop(&mut self) {
@@ -156,6 +215,9 @@ impl Drop for Wait {
     }
 }
 impl SourceBridge {
+    /// Creates a disabled bridge. `runtime` is the base directory for helper
+    /// sockets, `executable` is the helper binary, and `limit` caps prepared
+    /// sessions (never more than the lane definition's maximum streams).
     #[must_use]
     pub fn new(runtime: PathBuf, executable: PathBuf, limit: usize) -> Self {
         Self(Arc::new(Inner {
@@ -174,12 +236,18 @@ impl SourceBridge {
             }),
         }))
     }
+    /// Registers session `id` for `start` and returns its current size and
+    /// sequence as JSON. Starts no helper.
+    ///
     /// # Errors
     /// Refuses disabled/bounded admission or a reused UUID with a foreign target.
     /// Re-preparation retains the current resized geometry and sequence.
     pub fn prepare(&self, id: Uuid, start: Start) -> Result<Value, PluginError> {
         self.prepare_with_floor(id, start, 0)
     }
+    /// Like [`SourceBridge::prepare`], but also makes sure the sequence counter is at
+    /// least `sequence_floor`.
+    ///
     /// Resume after a node process restart above the server's retained sequence.
     /// Known metadata keeps its current geometry and any higher local counter.
     /// # Errors
@@ -243,6 +311,9 @@ impl SourceBridge {
             json!({"session_id":id,"size":prepared.metadata.start.lock().map_err(|_| PluginError::Rejected)?.size,"sequence":prepared.metadata.sequence.load(Ordering::Acquire)}),
         )
     }
+    /// Ends session `id`: cancels its worker, waits until the helper is retired,
+    /// then forgets the session.
+    ///
     /// # Errors
     /// Reports joined helper retirement failure; unknown stops are idempotent.
     pub async fn stop(&self, id: Uuid) -> Result<(), PluginError> {
@@ -273,6 +344,8 @@ impl SourceBridge {
         }
         Ok(())
     }
+    /// Status JSON: enabled flag and counts, plus the size and sequence of
+    /// session `id` when given (an error if that session is unknown).
     fn status_value(&self, id: Option<Uuid>) -> Result<Value, PluginError> {
         let state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
         let active = state
@@ -301,6 +374,11 @@ impl SourceBridge {
         }
         Ok(value)
     }
+    /// Starts a short-lived helper, sends it one command of `kind` (list or
+    /// status), returns its JSON answer, and retires the helper.
+    ///
+    /// One send-and-reply budget of 3 seconds covers everything. Only one such
+    /// helper may run at a time; a second request is refused.
     async fn idle_request(&self, kind: Kind) -> Result<Value, PluginError> {
         let worker = {
             let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
@@ -347,6 +425,9 @@ impl SourceBridge {
         let wait = Wait(worker);
         wait.0.join().await
     }
+    /// Returns one page of the window inventory. Without a cursor it takes a
+    /// fresh inventory from a helper and returns its first page; with a cursor it
+    /// returns the next page of the current snapshot, if the cursor is valid.
     async fn windows(&self, cursor: Option<String>) -> Result<Value, PluginError> {
         if let Some(cursor) = cursor {
             let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
@@ -369,6 +450,9 @@ impl SourceBridge {
         state.snapshot = Some(snapshot);
         Ok(page)
     }
+    /// Reads the capture clock. Asks the running worker of session `id` (or any
+    /// running one when no id is given); if none is running, asks a short-lived
+    /// helper instead.
     async fn clock(&self, id: Option<Uuid>) -> Result<Value, PluginError> {
         let sender = {
             let state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
@@ -418,6 +502,7 @@ impl SourceBridge {
             Err(PluginError::Rejected)
         }
     }
+    /// Decodes and runs one `desktop.*` source action, returning its JSON result.
     async fn execute(&self, action: &str, input: &[u8]) -> Result<Value, PluginError> {
         match source_request::decode(action, input)? {
             SourceRequest::Enabled(enabled) => {
@@ -440,6 +525,8 @@ impl SourceBridge {
             SourceRequest::Clock(id) => self.clock(id).await,
         }
     }
+    /// Before a new lane for session `id`: fails if the previous worker is still
+    /// running, and otherwise joins it so its helper is known to be retired.
     async fn retire_previous(&self, id: Uuid) -> Result<(), ()> {
         let previous = self
             .0
@@ -461,6 +548,13 @@ impl SourceBridge {
         }
         Ok(())
     }
+    /// Serves one data lane: checks the lane and its opening `Attach` packet,
+    /// then starts a worker for the prepared session and waits for it to end.
+    ///
+    /// The lane is retired and an error returned for a wrong stream definition,
+    /// a malformed or trailing-bytes opening, a datagram request on a lane
+    /// without datagrams, an unknown or stopping session, a disabled bridge, or a
+    /// session whose previous worker is still running.
     async fn serve_leg(
         &self,
         definition: &'static WireStreamDef,
@@ -541,6 +635,8 @@ impl SourceBridge {
     }
 }
 impl AgentPlugin for SourceBridge {
+    /// Records what the connection to the server supports. If desktop lanes are
+    /// not supported, running workers are cancelled but prepared sessions are kept.
     fn transport_capabilities(&mut self, capabilities: u64) {
         if let Ok(mut state) = self.0.state.lock() {
             state.native_caps = Some(capabilities);
@@ -557,9 +653,13 @@ impl AgentPlugin for SourceBridge {
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
+    /// Always refused: every action here may wait on a helper, so they are all
+    /// served by `call_async`.
     fn call(&mut self, _: &str, _: &[u8]) -> Result<Vec<u8>, PluginError> {
         Err(PluginError::Rejected)
     }
+    /// Runs a source action. Returns `None` for actions this plugin does not
+    /// declare. A reply over the action size limit is an error.
     fn call_async(
         &mut self,
         action: &str,
@@ -592,6 +692,8 @@ impl AgentPlugin for SourceBridge {
     }
 }
 impl WireProvider for SourceBridge {
+    /// Serves a lane the server opened; see `serve_leg`. The lane is retired
+    /// when this future ends or is dropped.
     fn serve(
         &self,
         definition: &'static WireStreamDef,
@@ -604,9 +706,12 @@ impl WireProvider for SourceBridge {
     }
 }
 impl ComponentPlugin for SourceBridge {
+    /// The static description of the source plugin.
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
+    /// `On` when enabled; when disabled, `Stopping` while workers are still
+    /// ending and `Off` once none remain. `active_work` counts running workers.
     fn status(&self) -> PluginStatus {
         let Ok(state) = self.0.state.lock() else {
             return PluginStatus {
@@ -641,6 +746,12 @@ impl ComponentPlugin for SourceBridge {
             active_work,
         }
     }
+    /// Switches the source on or off.
+    ///
+    /// Enabling is refused (and leaves it off) while an earlier cleanup is still
+    /// unjoined. Disabling cancels every worker, waits for each helper to be
+    /// retired, and then forgets all prepared sessions; if any cleanup fails the
+    /// error is returned and the sessions stay marked as stopping.
     fn set_enabled(&self, enabled: bool) -> PluginOperation<'_, ()> {
         Box::pin(async move {
             let _lifecycle = self.0.lifecycle.lock().await;

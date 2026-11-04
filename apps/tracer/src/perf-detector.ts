@@ -15,12 +15,14 @@
 
 /** Intervals kept: about 8 s at 120 Hz. A power of two so the index wraps with a mask. */
 export const RING = 1024;
+/** Wraps a counter into the ring. */
 const MASK = RING - 1;
 /** Common display rates the median interval is snapped to. 30 is the iOS low-power cap. */
 const RATES = [30, 60, 90, 120, 144, 165, 240];
 /** Frames to see before a rate is trusted (nothing is called a drop before it). */
 const WARMUP = 30;
 
+/** An interval longer than this is a freeze. */
 export const FREEZE_MS = 100;
 /**
  * A browser throttles the frames of a page it considers hidden to about one a second (Chrome does it for a window
@@ -28,21 +30,32 @@ export const FREEZE_MS = 100;
  * this long that is part of a run of two or more is a throttled page: it is neither a drop nor a freeze.
  */
 export const THROTTLE_MS = 400;
+/** An interval longer than this multiple of the refresh interval is a drop. */
 export const DROP_FACTOR = 1.5;
 
+/** The verdict of one frame: {@link OK}, {@link DROP} or {@link FREEZE}. */
 export type FrameVerdict = 0 | 1 | 2;
+/** The three verdict values. */
 export const OK = 0, DROP = 1, FREEZE = 2;
 
+/**
+ * Classifies frame intervals as on time, dropped or frozen. Feed it the timestamp of every animation frame with
+ * `frame(t)`; call `estimate()` a few times a second so it knows the display rate; read the rest for the readout.
+ */
 export class FrameDetector {
+  /** The last 1024 frame intervals in milliseconds. */
   readonly ring = new Float32Array(RING);
   /** Intervals written so far (the ring index of the next one is `n & MASK`). */
   n = 0;
   /** Estimated display refresh in Hz; 0 until warm. */
   refresh = 0;
+  /** The previous frame's timestamp; 0 when there is none yet. */
   private last = 0;
   /** Consecutive intervals of at least THROTTLE_MS. */
   private longRun = 0;
+  /** The interval (ms) above which a frame is a drop; infinity until the display rate is known. */
   private dropAt = Infinity;
+  /** Reused buffer for sorting, so the median and percentile calls allocate nothing. */
   private readonly scratch = new Float32Array(RING);
 
   /** One frame callback's timestamp. Returns 0 when on time, 1 for a drop, 2 for a freeze. */

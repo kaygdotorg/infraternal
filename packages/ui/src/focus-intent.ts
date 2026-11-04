@@ -1,5 +1,7 @@
 /** Cancels deferred automatic focus when newer focus or input activity supersedes it. */
+/** The activity that means "the person has moved on" and cancels a deferred focus. */
 const events = ["focusin", "pointerdown", "keydown", "input"] as const;
+/** One shared tracker per target: `version` counts activity, `waits` counts open captures. */
 const trackers = new WeakMap<EventTarget, { version: number; waits: number; changed(): void }>();
 
 /** One set of passive listeners serves every pending surface; none remain once all waits finish. */

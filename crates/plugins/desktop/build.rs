@@ -1,5 +1,13 @@
 //! Build the small AppKit-session companion only for the explicit macOS desktop feature [D198,D203].
+//!
+//! Only when the `desktop` feature is on and the target is macOS, this script
+//! compiles the Swift sources in `native/` into one executable,
+//! `infraternal-desktop-native` in `OUT_DIR`, and adds the linker settings the
+//! Swift runtime needs. In every other build it does nothing. It needs the
+//! macOS Swift toolchain (`xcrun`, `swiftc`) and panics with a short message
+//! if that is missing.
 use std::{env, path::PathBuf, process::Command};
+/// Build-script entry point; see the module docs for what it does and when.
 fn main() {
     println!("cargo:rerun-if-changed=native");
     if env::var_os("CARGO_FEATURE_DESKTOP").is_none()

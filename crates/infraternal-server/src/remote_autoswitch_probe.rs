@@ -6,32 +6,51 @@ use std::{
     time::{Instant, SystemTime},
 };
 
+/// Most distinct first events the recorder keeps. Going over it makes the proof fail when read, instead of growing without bound.
 const MAX_EVENTS: usize = 8192;
+/// The one recorder currently capturing, held weakly so a finished proof is not kept alive.
 static ACTIVE: Mutex<Option<Weak<Mutex<Events>>>> = Mutex::new(None);
 // Observer integration tests share this owner without blocking an async runtime.
+/// Tests that use the recorder hold this lock so only one capture runs at a time.
 pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// A transport milestone worth recording.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Kind {
+    /// The TLS handshake finished.
     TlsHandshake,
+    /// The connection was admitted by the host ledger.
     LedgerAdmission,
+    /// The control stream became usable.
     ControlReady,
+    /// The control stream became usable over QUIC.
     QuicControlReady,
+    /// The control stream became usable over TCP.
     TcpControlReady,
+    /// A terminal detach found the writer already retired.
     TerminalDetachAlreadyRetired,
+    /// A terminal detach failed with a write error.
     TerminalDetachWriteError,
+    /// A terminal byte was seen.
     TerminalByte,
 }
 
+/// One recorded milestone. Holds identifiers and times only, never terminal content.
 #[derive(Clone, Debug)]
 pub(crate) struct Event {
+    /// Which milestone.
     pub(crate) kind: Kind,
+    /// Peer address (the physical one when a route table is set).
     pub(crate) peer: SocketAddr,
+    /// Stream or writer number.
     pub(crate) stream: u32,
+    /// Monotonic time, for measuring durations.
     pub(crate) monotonic: Instant,
+    /// Wall-clock time, for comparing with the kernel's handshake timestamp.
     pub(crate) wall: SystemTime,
 }
 
+/// Recorded milestones: the first event per (kind, peer, stream), plus counts.
 struct Events {
     include_peer: fn(SocketAddr) -> bool,
     routes: Option<Arc<infraternal_plugin_remote::remote_bindings::Bindings>>,
@@ -41,6 +60,7 @@ struct Events {
     peer_counts: BTreeMap<(Kind, SocketAddr), usize>,
 }
 impl Events {
+    /// Keeps the event if its peer passes the filter and it is the first of its key. Sets the overflow flag if [`MAX_EVENTS`] would be exceeded. Counts every kept callback.
     fn record(&mut self, mut event: Event) {
         if let Some(routes) = &self.routes {
             event.peer = routes.physical_peer(event.peer);
@@ -70,6 +90,7 @@ impl Events {
 /// or its event buffers alive, and a later proof starts with an empty recorder.
 pub(crate) struct Capture(Arc<Mutex<Events>>);
 impl Capture {
+    /// Begins a capture and makes it the active one. Only peers for which `include_peer` is true are recorded.
     pub(crate) fn start(include_peer: fn(SocketAddr) -> bool) -> Self {
         // Ordinary tests may open connections concurrently. Only this proof's
         // peer addresses can contribute milestones or consume its record bound.
@@ -122,6 +143,7 @@ impl Capture {
             .copied()
             .unwrap_or(0)
     }
+    /// Returns the recorded first events. Panics if the recorder overflowed.
     pub(crate) fn events(&self) -> Vec<Event> {
         let events = self
             .0
@@ -159,6 +181,7 @@ impl Capture {
     }
 }
 impl Drop for Capture {
+    /// Ends the capture if it is still the active one.
     fn drop(&mut self) {
         let mut active = ACTIVE
             .lock()
@@ -173,6 +196,7 @@ impl Drop for Capture {
     }
 }
 
+/// Records a milestone for the active capture; does nothing when none is running. Takes both clocks before the lock so lock waits do not skew the times.
 pub(crate) fn record(kind: Kind, peer: SocketAddr, stream: u32) {
     // Take both clocks before acquiring the recorder lock. Wall time compares
     // with the kernel's handshake timestamp; durations between callbacks use

@@ -21,6 +21,7 @@
 import { isResync, parseSetupEvent, type SetupEvent } from "./setup-stages";
 import type { SetupSignals, SetupSource } from "./setup-pill.on-demand";
 
+/** What `createSetupFeed` needs. `open` and `backoff` exist so tests can use a fake socket and instant reconnects. */
 export interface SetupFeedOptions {
   /** The canvas window that shows this host's setup. The server echoes it back; it is a presentation coordinate only. */
   windowId: string;
@@ -30,12 +31,20 @@ export interface SetupFeedOptions {
   backoff?: readonly number[];
 }
 
+/** Waits in milliseconds before each reconnect attempt. After this many failed attempts in a row the feed reports the status as lost. */
 const BACKOFF = [400, 1000, 2500, 5000, 5000] as const;
 
+/** The setup stream's WebSocket address on the page's own origin (`wss` on https, `ws` otherwise). */
 export function setupUrl(): string {
   return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/v1/bootstrap/setup/ws`;
 }
 
+/**
+ * Creates the feed. `subscribe(hostId, listener, signals)` opens the socket and returns a function that closes it. The listener gets
+ * each new event once, in order. `signals.reset` fires when the server asks for a resync, `signals.lost` when the status is gone for
+ * good (an error before any event, or the reconnect budget used up). `retry(hostId)` asks the server for another setup attempt; from
+ * the lost state it first resubscribes to fetch the retained status. Which attempts are allowed is the server's decision.
+ */
 export function createSetupFeed(options: SetupFeedOptions): SetupSource {
   const open = options.open ?? ((url: string) => new WebSocket(url));
   const delays = options.backoff ?? BACKOFF;

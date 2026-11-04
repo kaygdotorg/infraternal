@@ -23,10 +23,14 @@
  * retry starts again from the failed stage with new `running` events. When `ready` is `done` the ring completes.
  */
 export const SETUP_STAGES = ["install", "join", "start", "ready"] as const;
+/** One of the four background stages after the shell is up, in the order they happen. */
 export type SetupStageId = (typeof SETUP_STAGES)[number];
+/** Where one stage stands. `pending` = not started; `failed` = the attempt ended in this stage. */
 export type SetupStageState = "pending" | "running" | "done" | "failed";
+/** The finer step that failed, as the server names it. Several steps map onto one stage (see `stageOfStep`). */
 type FailedStep = "connect" | "upload" | "install" | "join" | "start" | "readiness";
 
+/** One setup message from the server, already checked and renamed for the UI. */
 export interface SetupEvent {
   hostId: string;
   stage: SetupStageId;
@@ -56,10 +60,14 @@ export interface SetupView {
   retryAvailable?: boolean;
 }
 
+/** A view with every stage pending: how a host starts before any event has arrived. */
 export const freshSetup = (): SetupView => ({ stages: SETUP_STAGES.map(() => "pending"), complete: false });
 
+/** The failed-step names the server may send. Any other name is ignored rather than trusted. */
 const STEPS: readonly string[] = ["connect", "upload", "install", "join", "start", "readiness"];
+/** A host id must look like a lower-case UUID, or the event is dropped. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** True for a plain object (not null, not an array). */
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** Reads one setup message defensively: the server's data is untrusted until shaped. Anything malformed is dropped. */
@@ -108,6 +116,7 @@ export function foldSetup(view: SetupView, event: SetupEvent): SetupView {
   };
 }
 
+/** The index in `SETUP_STAGES` of the failed stage, or -1 when no stage failed. */
 export const failedIndex = (view: SetupView): number => view.stages.indexOf("failed");
 
 /** Stage names for the pill's spoken label, in the words a person uses. */

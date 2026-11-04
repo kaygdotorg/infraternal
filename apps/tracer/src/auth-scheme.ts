@@ -15,6 +15,7 @@ import { THEMES } from "../../../packages/ui/src/themes";
 /** The pages' own backgrounds, also the meta theme colour, so the browser chrome blends in. */
 const PAGE = { light: "#f6f6f4", dark: "#101113" } as const;
 
+/** The theme id from `?theme=` or the saved `tracer.theme`, whichever is a known theme (the URL wins); `undefined` when neither is. */
 function savedTheme(): string | undefined {
   const asked = new URLSearchParams(location.search).get("theme");
   let saved: string | null = null;
@@ -29,9 +30,12 @@ export function authIsLight(): boolean {
   return matchMedia("(prefers-color-scheme: light)").matches;
 }
 
+/** The callback of the latest {@link useAuthScheme} caller, told when the scheme changes. */
 let listener: ((light: boolean) => void) | undefined;
+/** Whether the system and storage listeners are already installed; they are added once. */
 let bound = false;
 
+/** Writes the scheme to the root attribute and the browser chrome colour, and returns whether it is light. */
 function apply(): boolean {
   const light = authIsLight();
   const root = document.documentElement;

@@ -1,49 +1,86 @@
 /// Role: hardware-local input wins; tagged private-state remote input and visible control indicator [D208 A3].
+/// Remote events are posted from a private event source and tagged with `remoteTag`, so they can be
+/// told apart from the person sitting at the Mac. Any local keyboard or mouse use pauses remote
+/// input for two seconds and releases whatever remote keys and buttons were held.
 import AppKit
 import ApplicationServices
 
+/// Opt-in timing output, enabled by the `INFRATERNAL_DESKTOP_MEASURE` environment variable.
 private let measureInput = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
+/// Marker stored in the user-data field of every remote event: the ASCII bytes of `infrater`.
 private let remoteTag: Int64 = 0x696e667261746572
 // Releases restart the local pause even when the preceding press was long ago.
+/// Event kinds that count as local activity when asking the system how long ago the last one was.
 private let inputTypes: [CGEventType] = [.mouseMoved, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp,
     .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .scrollWheel, .keyDown, .keyUp, .flagsChanged]
 
+/// Watches real keyboard and mouse activity through event monitors and keeps a `LocalInputPause`.
+///
+/// Events tagged with `remoteTag` are ignored. One clock is shared by all control connections so
+/// the idle time survives reconnects.
 private final class LocalInputClock {
+    /// The idle state, seeded from the system's own idle counters so a fresh clock is not wrongly idle.
     private var pause = LocalInputPause(lastLocal: ProcessInfo.processInfo.systemUptime - (inputTypes.map { CGEventSource.secondsSinceLastEventType(.hidSystemState,eventType:$0) }.min() ?? 0))
+    /// Called on every local input event; used to release held remote input.
     var onLocal: (() -> Void)?
+    /// Monitor for events sent to other apps.
     private var global: Any?
+    /// Monitor for events sent to this process.
     private var local: Any?
+    /// Starts both event monitors.
     init() {
         let mask: NSEvent.EventTypeMask = [.mouseMoved,.leftMouseDown,.leftMouseUp,.rightMouseDown,.rightMouseUp,.otherMouseDown,.otherMouseUp,.leftMouseDragged,.rightMouseDragged,.otherMouseDragged,.scrollWheel,.keyDown,.keyUp,.flagsChanged]
         global = NSEvent.addGlobalMonitorForEvents(matching:mask) { [weak self] event in self?.observe(event) }
         local = NSEvent.addLocalMonitorForEvents(matching:mask) { [weak self] event in self?.observe(event); return event }
     }
+    /// Counts a local event, ignoring ones tagged as remote, and notifies `onLocal`.
     private func observe(_ event: NSEvent) {
         // Posting private-source events still changes the HID idle clock. Filter the
         // explicit tag instead, and retain this clock across control connections.
         if pause.observe(at: ProcessInfo.processInfo.systemUptime, remote: event.cgEvent?.getIntegerValueField(.eventSourceUserData) == remoteTag) { onLocal?() }
     }
+    /// Seconds since the last local input.
     var idle: Double { pause.idle(at: ProcessInfo.processInfo.systemUptime) }
+    /// Removes both event monitors.
     deinit { if let global { NSEvent.removeMonitor(global) }; if let local { NSEvent.removeMonitor(local) } }
 }
+/// The shared clock; created by the first `RemoteControl`, except in the `--encoder` process.
 private var clock: LocalInputClock?
+/// Seconds since the person at the Mac last used the keyboard or mouse.
+///
+/// Uses the shared clock when one exists, otherwise asks the system directly.
 func localIdleSeconds() -> Double {
     if let clock { return clock.idle }
     return inputTypes.map { CGEventSource.secondsSinceLastEventType(.hidSystemState,eventType:$0) }.min() ?? 0
 }
 
+/// Lets a remote viewer type, click and scroll on the Mac, and shows a visible indicator while it does.
+///
+/// Use from the main thread. Control is refused while the local user is active, and requires
+/// Accessibility and post-event permissions.
 final class RemoteControl {
+    /// The always-on-top panel saying the Mac is controlled.
     private var indicator: NSPanel?
+    /// Private event source: remote events do not alter the system's idle clock or the state of real keys.
     private let source = CGEventSource(stateID: .privateState)
+    /// Remote keys currently held down.
     private var keys: Set<CGKeyCode> = []
+    /// Remote mouse buttons currently held down (0 left, 1 right, 2 other).
     private var buttons: Set<UInt32> = []
+    /// Where the last remote pointer event landed, in screen points; used to release buttons there.
     private var lastPoint = CGPoint.zero
+    /// The app that receives remote keyboard events, which are sent to its process directly.
     private var owner: NSRunningApplication?
 
+    /// Creates the shared local-input clock unless this is the separate encoder process.
     init() { if clock == nil && !CommandLine.arguments.contains("--encoder") { clock = LocalInputClock() } }
 
+    /// True while the control indicator is on screen.
     var controlVisible: Bool { indicator?.isVisible == true }
 
+    /// Shows the control indicator (a small non-activating panel at the top right of the main
+    /// display) and arms held-input release. Does nothing if already visible. Throws
+    /// `HelperFailure.unavailable` if there is no screen or the panel cannot be shown.
     func begin() throws {
         if controlVisible { return }
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { throw HelperFailure.unavailable }
@@ -70,11 +107,14 @@ final class RemoteControl {
     }
 
     // Reading priority never acquires control, posts an event or starts a timer.
+    /// Reports `pause_remaining_ms` (0 to 2000) and `control_visible`. Only reads state; never takes
+    /// control or posts events.
     func status() -> [String: Any] {
         ["pause_remaining_ms": min(2000, max(0, 2-localIdleSeconds())*1000),
          "control_visible": indicator?.isVisible == true]
     }
 
+    /// Maps the wire modifier bits (1 shift, 2 control, 4 option, 8 command) to event flags.
     private func flags(_ bits: UInt8) -> CGEventFlags {
         var value: CGEventFlags = []
         if bits & 1 != 0 { value.insert(.maskShift) }; if bits & 2 != 0 { value.insert(.maskControl) }
@@ -82,6 +122,10 @@ final class RemoteControl {
         return value
     }
 
+    /// Tags and posts one event with the given modifiers.
+    ///
+    /// Keyboard events go straight to the target app's process; pointer events go through the system
+    /// event tap, which is only safe after the caller has checked what window is under the pointer.
     private func post(_ event: CGEvent, modifiers: UInt8) {
         event.flags = flags(modifiers)
         event.setIntegerValueField(.eventSourceUserData, value: remoteTag)
@@ -95,6 +139,18 @@ final class RemoteControl {
         } else { event.post(tap: .cghidEventTap) }
     }
 
+    /// Performs one remote input and returns a result dictionary.
+    ///
+    /// `input` has a `type`: `text` (`scalar`, a Unicode value), `key` (`keycode` 0...127 and `down`),
+    /// `mouse` (`x`, `y`, `button` 0...2, `state` 0 move, 1 down, 2 up) or `scroll` (`x`, `y`, `dx`,
+    /// `dy`), plus optional `modifiers` bits. `x` and `y` are in the encoded picture; they are
+    /// mapped through `geometry` (window mode) or `screen` and `output` (whole-screen mode).
+    ///
+    /// Returns `["accepted": true]`, or `accepted: false` with a `reason`: `local_input` (the user is
+    /// active; includes `pause_remaining_ms`), `letterbox` (outside the picture) or `occluded`
+    /// (another app's window is on top). Throws `HelperFailure.permission` without the needed
+    /// permissions, `HelperFailure.invalid` for malformed input and `HelperFailure.unavailable` if
+    /// the target cannot be activated within half a second.
     func inject(_ input: [String: Any], geometry: WindowGeometry?, screen: CGRect?, output: CGSize) throws -> [String: Any] {
         guard AXIsProcessTrusted(), CGPreflightPostEventAccess(), let source else { throw HelperFailure.permission }
         let idle = localIdleSeconds()
@@ -175,6 +231,8 @@ final class RemoteControl {
         return ["accepted": true]
     }
 
+    /// Lifts every remote key and button still held, so a dropped connection cannot leave a modifier
+    /// stuck or a drag in progress.
     private func releaseHeld() {
         // Release held remote keys/buttons on disconnect, even during a local-input pause,
         // to prevent sticky modifiers or drags. These tagged releases are cleanup, not new control.
@@ -188,14 +246,18 @@ final class RemoteControl {
 
     // Controller handover cleans held input even during a local-input pause;
     // capture and the local-activity monitor remain active for the new owner.
+    /// Hands over control: releases held input and forgets the target app. The indicator and the
+    /// local-activity monitor stay.
     func release() {
         releaseHeld(); owner = nil
     }
 
+    /// Turns control on (releasing anything held first) or off (`stop`).
     func setActive(_ active: Bool) throws {
         if active { releaseHeld(); owner = nil; try begin() } else { stop() }
     }
 
+    /// Releases held input and removes the indicator.
     func stop() {
         clock?.onLocal = nil
         releaseHeld(); owner = nil

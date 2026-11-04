@@ -1,11 +1,14 @@
 /** Shared sRGB helpers for curated theme contrast checks and mesh color tuning. */
 
+/** A colour in OKLab: perceptual lightness (0 to 1) and the two colour-opponent axes. */
 type Oklab = [lightness: number, a: number, b: number];
 
+/** sRGB channel (0 to 1) to linear light. */
 const toLinear = (value: number): number => value <= 0.04045
   ? value / 12.92
   : ((value + 0.055) / 1.055) ** 2.4;
 
+/** Linear light to an sRGB channel (0 to 1, not yet clipped). */
 const toSrgb = (value: number): number => value <= 0.0031308
   ? 12.92 * value
   : 1.055 * value ** (1 / 2.4) - 0.055;

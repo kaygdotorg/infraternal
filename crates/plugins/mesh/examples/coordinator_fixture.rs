@@ -14,6 +14,8 @@ struct Request {
     identities: Option<[Identity; 2]>,
     mode: String,
 }
+/// Adds `count` extra members to the store, each with a unique public key and
+/// no private key or traffic, so tests can measure a larger mesh.
 async fn seed_extra_members(
     store: &infraternal_plugin_mesh::store::Store,
     count: u64,

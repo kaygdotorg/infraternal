@@ -20,9 +20,12 @@
  * propagation, and they cost one attribute write per change of modality.
  */
 
+/** Selector for widgets in which arrow keys move focus between items. */
 const COMPOSITE = '[role="tablist"],[role="listbox"],[role="menu"],[role="menubar"],[role="radiogroup"],[role="tree"],[role="grid"],[role="toolbar"]';
+/** Keys that count as keyboard navigation inside a composite widget. */
 const NAVIGATION_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
 
+/** The disposer of the active tracker, or `undefined` when none is installed. */
 let installed: (() => void) | undefined;
 
 /** Installs the page-wide keyboard-modality tracker once and returns its disposer. */

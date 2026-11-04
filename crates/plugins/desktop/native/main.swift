@@ -1,4 +1,21 @@
 /// Role: signed AppKit-session companion; one private socket request/response, cleanup on EOF [D203,#146].
+/// This is the macOS helper process that the infraternal agent starts inside the logged-in desktop
+/// session, because only a process there can capture the screen and post input. It talks to the
+/// infraternal agent over one private Unix socket (`--socket PATH`; standard input and output when
+/// absent) using length-prefixed packets, and exits when that connection ends.
+///
+/// Packet layout: 4 bytes big-endian length (counting the two bytes after it), 1 byte version
+/// (always 1), 1 byte kind, then the body. Request bodies are JSON, except kind 101, which is a
+/// 4-byte JSON length, the JSON, then raw BGRA pixels. Requests: 1 inventory, 2 start, 3 resize,
+/// 4 input, 5 stop, 6 geometry check, 7 request keyframe, 8 release control, 9 congestion,
+/// 10 set control on or off, 101 encode these pixels. Replies: 65 inventory, 66 state after start or
+/// resize, 67 input result, 68 state, 69 error, 70 encoded video. Incoming packets are limited to
+/// 64 KiB (16 MiB for kind 101); outgoing ones to 64 KiB (4 MiB for video).
+///
+/// At launch the file also runs three command-line modes before anything else is set up:
+/// `--check-permissions` prints the privacy state and exits, `--capture-still ID PID PATH.png`
+/// saves a screenshot of one window under this app's own permissions, and `--launch-pid-file`
+/// (see `recordLaunchPIDIfRequested`). Other flags: `--surface-capture`, `--encoder`, `--hevc`.
 import AppKit
 import Foundation
 import Darwin
@@ -43,14 +60,27 @@ if let index = CommandLine.arguments.firstIndex(of: "--capture-still") {
     catch { exit(1) }
 }
 
+/// Opt-in timing output, enabled by the `INFRATERNAL_DESKTOP_MEASURE` environment variable.
 private let measureInputCommands = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
+/// True with `--surface-capture`: the window or screen is captured and encoded inside this process
+/// (see `SurfaceCapture`) rather than being sent as raw pixels.
 let surfaceMode = CommandLine.arguments.contains("--surface-capture")
+/// True with `--encoder`: this process only encodes pixels sent by the caller and does no capture.
 private let encoderMode = CommandLine.arguments.contains("--encoder")
+/// Where requests are read from: the private socket, or standard input without `--socket`.
 private var companionInput = FileHandle.standardInput
+/// Where replies are written: the private socket, or standard output without `--socket`.
 private var companionOutput = FileHandle.standardOutput
 
+/// Why an operation failed: `invalid` (malformed or out-of-range request), `permission` (Screen
+/// Recording or Accessibility missing) or `unavailable` (window closed, encoder or capture
+/// failed). The text sent to the caller is generic; details go to standard error.
 enum HelperFailure: Error { case invalid, permission, unavailable }
 
+/// Connects to the Unix socket named by `--socket PATH` and uses it for all packets.
+///
+/// Does nothing when the option is absent. Throws `HelperFailure.invalid` for a repeated option,
+/// a missing, relative or too long path, and a `POSIXError` when the connection fails.
 private func connectCompanionChannel() throws {
     let matches = CommandLine.arguments.indices.filter { CommandLine.arguments[$0] == "--socket" }
     guard !matches.isEmpty else { return }
@@ -96,6 +126,7 @@ catch {
     exit(1)
 }
 
+/// Reads exactly `count` bytes, blocking. Throws `HelperFailure.unavailable` at end of input.
 private func readExactly(_ count: Int) throws -> Data {
     var result = Data()
     while result.count < count {
@@ -106,6 +137,8 @@ private func readExactly(_ count: Int) throws -> Data {
     return result
 }
 
+/// Reads one request. Returns its kind and body. Throws `HelperFailure.invalid` for a wrong version
+/// or a length over the limit for that kind.
 private func readPacket() throws -> (UInt8, Data) {
     let header = try readExactly(6)
     let length = header.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
@@ -113,7 +146,10 @@ private func readPacket() throws -> (UInt8, Data) {
     return (header[5],try readExactly(Int(length)-2))
 }
 
+/// Serializes writes, because replies and video are sent from different threads.
 private let outputLock = NSLock()
+/// Writes one packet. Safe to call from any thread. Throws `HelperFailure.invalid` when the body
+/// exceeds the limit for its kind (4 MiB for video kind 70, 64 KiB otherwise).
 func sendPacket(_ kind: UInt8, _ body: Data) throws {
     guard body.count+2 <= (kind == 70 ? 4*1024*1024 : 64*1024) else { throw HelperFailure.invalid }
     var length = UInt32(body.count+2).bigEndian
@@ -122,19 +158,36 @@ func sendPacket(_ kind: UInt8, _ body: Data) throws {
     companionOutput.write(header + body)
 }
 
+/// Encodes a dictionary as JSON with sorted keys, so replies are deterministic.
 private func json(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]) }
 
+/// Everything the helper holds for the one active capture and control session.
+///
+/// It is only touched on the main thread: requests arrive on a background thread and are run with
+/// `DispatchQueue.main.sync`, because Accessibility and AppKit need the main run loop.
 private final class Session {
+    /// Set while a single window is shared.
     var geometry: WindowGeometry?
+    /// The shared area in screen points for a whole display or a surface capture.
     var screen: CGRect?
+    /// The display being shared, when sharing a whole screen.
     var displayID: UInt32?
+    /// Size in pixels of the encoded picture.
     var output: CGSize = .zero
+    /// Remote keyboard and mouse input.
     let control = RemoteControl()
+    /// The video encoder used in `--encoder` mode and for pixels sent by the caller.
     let encoder = Encoder()
+    /// Once a second, re-reads the window's frame and state so it is followed while idle.
     var timer: Timer?
+    /// The in-process capture and encode pipeline in `--surface-capture` mode.
     var surface: SurfaceCapture?
+    /// True between starting a surface capture and sending its first reply; the stream begins only after
+    /// that reply so video can never be mistaken for the answer to the start request.
     var surfacePending = false
 
+    /// Ends sharing: restores the window's size, stops input, capture and encoding, and clears the target.
+    /// Returns a state dictionary with `restored` telling whether the window was put back.
     func stop() -> [String: Any] {
         timer?.invalidate(); timer = nil
         let restored = geometry?.restore() ?? true
@@ -142,6 +195,13 @@ private final class Session {
         return ["state":"off","restored":restored]
     }
 
+    /// Runs one request and returns the reply kind and body. Throws `HelperFailure`.
+    ///
+    /// Kinds: 1 lists windows and displays; 2 starts sharing a `target` (`window` or `screen`) at
+    /// `size` and needs both permissions; 3 changes the output size; 4 posts input (see
+    /// `RemoteControl.inject`); 5 stops; 6 refreshes geometry and stamps the time; 7 asks the surface
+    /// capture for a keyframe; 8 lets go of held input; 9 reports congestion; 10 turns control on or
+    /// off.
     func command(_ kind: UInt8, _ body: [String: Any]) throws -> (UInt8, [String: Any]) {
         switch kind {
         case 1: return (65,try inventory())
@@ -210,6 +270,8 @@ private final class Session {
         }
     }
 
+    /// The current sharing state as a JSON-ready dictionary: geometry, output size and input status,
+    /// or just `off`.
     func state() -> [String: Any] {
         if let geometry { return geometry.json().merging(["state":"on","input":control.status()]) { _,new in new } }
         if let screen { return ["state":"on","input":control.status(),"actual":rectJSON(screen),"capture_rect":rectJSON(screen),"content_rect":rectJSON(fittedContent(screen,output)),"reason":"screen","width":output.width,"height":output.height,"source_backing_scale":backingScale(screen),"source_fps":sourceFrameRate(screen)] }
@@ -217,8 +279,11 @@ private final class Session {
     }
 }
 
+/// The AppKit application, in `accessory` mode: no Dock icon and no menu bar.
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+/// The one session. The reader loop below runs on a background thread and exits the app when the
+/// connection closes.
 private let session = Session()
 // Framework UI and AX lifecycle run on the logged-in session's main run loop.
 DispatchQueue.global(qos:.userInteractive).async {

@@ -41,6 +41,7 @@ import { checkReferences, referencesInPage, referencesInTree } from "./docs-anch
 import { citations, factsOf, readingAids, sourcesOf, type Facts } from "./docs-extras";
 import { figures, type FigureManifest, type FigureOptions } from "./docs-figure";
 
+/** The repository root, found from this file's place (`apps/tracer/`). */
 const root = resolve(import.meta.dirname, "../..");
 
 /** The one folder whose Markdown files become pages. */
@@ -52,6 +53,7 @@ export const APP_SOURCES = [resolve(root, "apps/tracer/src"), resolve(root, "pac
 /** Top-level names the build writes into the docs tree itself, so no page or section may take them. */
 const RESERVED = new Set(["fonts", "figures"]);
 
+/** Escapes text for use in HTML, including inside a double-quoted attribute. */
 const escapeHtml = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /**
@@ -68,6 +70,7 @@ export interface DocsIndexPage { slug: string; title: string; summary: string; s
 /** A heading with its level, which the table of contents needs and the index does not. */
 export interface OutlineHeading extends DocsHeading { level: 2 | 3 }
 
+/** The plain text of an HTML fragment: tags removed, common entities decoded and spaces collapsed. */
 const plain = (html: string): string => html.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0*39;/g, "'").trim();
 
 /** A heading's anchor: lower-case words joined by hyphens, numbered when the page already used it. */
@@ -223,7 +226,9 @@ ${body}${notes}
  */
 export interface SourcePage { slug: string; text: string; kind: "page" | "section"; parent?: string; former: string[] }
 
+/** A valid name of a page or section after its ordering prefix is removed: lower-case letters, digits and hyphens. */
 const NAME = /^[a-z0-9][a-z0-9-]*$/;
+/** Matches the `<!-- Former slugs: a, b/c -->` comment line of a moved page. */
 const FORMER_SLUGS = /<!--\s*Former slugs:\s*([^>]*?)\s*-->/i;
 
 /** The addresses a page used to have, from its `<!-- Former slugs: a, b/c -->` line. They are paths under `/docs/`, one or two names deep. */
@@ -290,6 +295,7 @@ export async function readUserDocs(dir: string): Promise<{ index: string | undef
   return { index, pages };
 }
 
+/** Wraps a page title and its body HTML in the full standalone docs page (head, theme colours and layout). */
 function page(title: string, body: string): string {
   // The two page colours are the sign-in card's (auth-scheme.ts PAGE), so the browser chrome blends in on a phone.
   return `<!doctype html>

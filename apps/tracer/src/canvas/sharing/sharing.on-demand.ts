@@ -16,6 +16,7 @@ import { copyForRecipient } from "./copy";
 import { buildShareDialog, type ShareChoice } from "./dialog";
 import type { IncomingShare, SharingAdapter } from "./adapter";
 
+/** The sharing actions the canvas calls. */
 export interface SharingModule {
   /** Opens (or closes) the share dialog with these views preselected. */
   open(preselect?: string[]): Promise<void>;
@@ -35,8 +36,10 @@ export interface SharingController extends SharingModule {
   receive(shares: IncomingShare[]): void;
 }
 
+/** A recipient id without its `user:` or `group:` prefix. */
 const labelOfRecipient = (id: string): string => id.replace(/^(user|group):/, "");
 
+/** Makes the loaded sharing implementation for `cx` over `adapter`. */
 export function createSharing(cx: Ctx, adapter: SharingAdapter): SharingController {
   const { stage, signal, state, views, toast, flip } = cx;
   const received = new Set<string>();

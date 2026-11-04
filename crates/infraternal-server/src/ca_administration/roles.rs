@@ -103,6 +103,12 @@ impl CaAdministration {
         .await
         .map_err(|_| CaError)?
     }
+    /// Applies the change in one writer transaction: re-checks the owner's session and
+    /// membership generation, that the proof was for a registered owner passkey made
+    /// within the last 300 seconds, and that the role really changes. A revoke must
+    /// leave another active administrator who still holds a copy for the current
+    /// issuer. The generation goes up by one, the old encrypted copy file is removed,
+    /// and the role row is written. A no-op change commits nothing.
     async fn membership_publish(
         &self,
         entry: PendingUnlock,
@@ -167,6 +173,7 @@ impl CaAdministration {
     }
     // A pending grant has no cold-start unwrap capability. Check public copy
     // bindings under the writer lock; no other administrator's key is requested.
+    /// Used before revoking an administrator: succeeds only if some other active administrator still has an encrypted copy for the current issuer. Compares public bindings only, so no other administrator's key is needed. Passes when no issuer is retained yet.
     async fn require_other_retained_copy(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

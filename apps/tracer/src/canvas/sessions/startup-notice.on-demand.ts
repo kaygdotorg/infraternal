@@ -11,6 +11,7 @@ import type { ToastController, ToastMessage } from "../../../../../packages/ui/s
 import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
 import { ICON_CHECK, ICON_HELP, ICON_X, ICONS } from "../../../../../packages/ui/src/icons";
 
+/** Everything the notice needs from the canvas, so this module stays free of canvas state. */
 export interface StartupNoticeInput {
   toast: ToastController;
   confirm: typeof mountConfirmTip;
@@ -31,6 +32,11 @@ export interface StartupNoticeInput {
   setTip: (tip: ReturnType<typeof mountConfirmTip>) => void;
 }
 
+/**
+ * Shows the notice that another multiplexer started by itself in a terminal, with the choices to switch it off, keep it, or read about it.
+ * Switching edits the named startup file after a confirmation (or, when the server proposed no edit, copies the line for the person to add);
+ * the success toast has a button that restores the file. Nothing is shown once `disposed()` is true.
+ */
 export function showStartupNotice(input: StartupNoticeInput): void {
   const { toast, confirm, call, session, multiplexer, other, proposal, docsUrl, openDocs, disposed, failure, setTip } = input;
   const line = proposal?.guard ?? `[ -n "$INFRATERNAL_SESSION" ] || ${multiplexer}`;

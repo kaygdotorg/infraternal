@@ -9,12 +9,19 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// The process-local time origin that all receipts are measured from.
 struct Clock {
     origin: Instant,
+    /// Process id, printed on each line so output from several processes can be told apart.
     pid: u32,
 }
+/// Set up once; holds `None` when measurement is off.
 static CLOCK: OnceLock<Option<Clock>> = OnceLock::new();
 
+/// The clock, or `None` when the `INFRATERNAL_DESKTOP_MEASURE` environment
+/// variable is not set. On first use with it set, this prints one
+/// `app_window_clock` line with the wall-clock time before and after taking the
+/// origin, which bounds the alignment error.
 fn clock() -> Option<&'static Clock> {
     CLOCK
         .get_or_init(|| {
@@ -37,11 +44,15 @@ fn clock() -> Option<&'static Clock> {
         .as_ref()
 }
 
+/// True when measurement is switched on.
 #[cfg(feature = "server")]
 pub(crate) fn enabled() -> bool {
     clock().is_some()
 }
 
+/// Prints one `app_window_stage` line to stderr: the stage name, the time since
+/// the origin, and the frame's capture time, sequence number and size. Does
+/// nothing when measurement is off. The video content is never recorded.
 pub(crate) fn record(stage: &'static str, capture_ns: u64, sequence: u64, bytes: usize) {
     if let Some(clock) = clock() {
         let at = clock.origin.elapsed().as_nanos();
@@ -52,11 +63,14 @@ pub(crate) fn record(stage: &'static str, capture_ns: u64, sequence: u64, bytes:
     }
 }
 
+/// [`record`] for a `Video` frame, using its own capture time, sequence and size.
 #[cfg(any(feature = "source", feature = "server"))]
 pub(crate) fn frame(stage: &'static str, frame: &crate::media::Video) {
     record(stage, frame.capture_ns, frame.sequence, frame.bytes.len());
 }
 
+/// Prints one `app_window_control` line for a control message of `kind` at `stage`.
+/// Does nothing when measurement is off.
 pub(crate) fn control(stage: &'static str, kind: crate::protocol::Kind) {
     if let Some(clock) = clock() {
         let at = clock.origin.elapsed().as_nanos();

@@ -106,6 +106,13 @@ impl CaAdministration {
         .await
         .map_err(|_| CaError)?
     }
+    /// Final step of bootstrap or re-wrap for the acting administrator. In one writer
+    /// transaction it re-checks the live session, membership generation and passkey
+    /// (proof at most 300 seconds old, user matching the session), then seals a copy
+    /// of the CA for the member. With no CA yet it creates the first one. If a CA exists
+    /// only cold, it refuses rather than mint a replacement. After the file work it
+    /// re-checks authority against the clock, installs the signing key and activates
+    /// the runtime. The transaction is rolled back at the end: it only holds the lock.
     async fn bootstrap_publish(
         &self,
         entry: PendingUnlock,
@@ -197,6 +204,10 @@ impl CaAdministration {
     }
     // Recover only public trust after an interrupted finalization. Keeping the
     // signing lock permits a new fresh proof; retained trust is never replaced.
+    /// Restores the public issuer after an interrupted finalization, from the `active`
+    /// directory under the CA state. Does nothing if an issuer is already known, there is
+    /// no bootstrap configuration, or nothing was published. It restores only public
+    /// trust, so the signing key stays locked until a fresh passkey proof.
     pub(super) async fn recover_published_issuer(&self) -> Result<(), CaError> {
         if self.source.retained_issuer()?.is_some() {
             return Ok(());

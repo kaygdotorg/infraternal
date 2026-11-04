@@ -13,10 +13,14 @@
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { createStartupHints, multiplexerName, type StartupHints } from "../sessions/startup-hints";
 
+/** The session id the demo's notice talks about. */
 const SESSION = "0123456789abcdef0123456789abcdef";
+/** The startup file the demo edits. */
 const FILE = ".zshrc";
 
+/** Where the demo prints what a shell would show. */
 interface Output { write(text: string): void }
+/** The running demo. `start` asks the question, `replay` asks it again, `entries` are its palette rows. */
 export interface StartupDemo {
   /** Waits for the live terminal, prints the shell start, then asks the question like the product does. */
   start(): void;
@@ -34,6 +38,7 @@ const terminalOutput: Output = {
   },
 };
 
+/** Builds the demo from the page's query (`mux=zellij`, `manual=1`). `out` is where the shell output goes; by default the live terminal's screen. */
 export function createStartupDemo(core: CoreScreen, query: URLSearchParams, out: Output = terminalOutput): StartupDemo {
   const multiplexer = query.get("mux") === "zellij" ? "zellij" : "tmux";
   const command = multiplexer === "zellij" ? "exec zellij attach --create main" : "exec tmux new-session -s main";

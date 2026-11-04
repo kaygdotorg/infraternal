@@ -17,19 +17,35 @@
  */
 import { Spring } from "./spring";
 
+/** Which way a step moves: 1 forward, -1 back, 0 replace in place (crossfade). */
 export type StepDirection = 1 | -1 | 0;
 
+/** How far (px) a pane travels sideways between its slot positions. */
 const SLIDE = 20;
+/** Spring timing of a pane's slide. */
 const PANE_SPRING = { visualDuration: 0.34 } as const;
+/** Spring timing of the viewport's height. */
 const HEIGHT_SPRING = { visualDuration: 0.36 } as const;
 
+/**
+ * Switches between the panes of a multi-step card with a slide and a height glide.
+ * Give it the viewport element that holds the panes; call {@link PaneStepper.show} for each step.
+ * @example
+ * const stepper = new PaneStepper(card.querySelector(".steps")!); stepper.show(paneOne, 0); stepper.show(paneTwo, 1);
+ */
 export class PaneStepper {
+  /** The pane on screen or arriving. */
   private current: HTMLElement | undefined;
+  /** One slot spring per pane that is on screen; a pane is removed from the DOM and from here when it has left. */
   private readonly panes = new Map<HTMLElement, Spring>();
+  /** Drives the viewport height while a step is moving. */
   private readonly height: Spring;
+  /** True while the viewport's height is being driven (and `is-moving` is set). */
   private moving = false;
+  /** The height (px) the glide is heading to. */
   private goal = 0;
 
+  /** Takes the viewport element and marks it with `ui-pane-viewport`. */
   constructor(private readonly viewport: HTMLElement) {
     viewport.classList.add("ui-pane-viewport");
     this.height = new Spring(0, (value) => {
@@ -65,6 +81,7 @@ export class PaneStepper {
     this.glideHeight(from, reduce);
   }
 
+  /** Fades `old` out and `pane` in without movement (reduced motion, or `direction` 0). */
   private crossfade(old: HTMLElement, pane: HTMLElement): void {
     this.panes.get(old)?.set(0, true);
     old.style.transform = "";
@@ -73,6 +90,7 @@ export class PaneStepper {
     this.track(pane, 0, true);
   }
 
+  /** The slot spring of `pane`, created at the centre when it has none. */
   private slotOf(pane: HTMLElement): Spring {
     return this.panes.get(pane) ?? this.track(pane, 0, true);
   }
@@ -97,13 +115,16 @@ export class PaneStepper {
     return spring;
   }
 
+  /** Removes a pane that has left the screen. */
   private drop(pane: HTMLElement): void {
     this.panes.delete(pane);
     pane.remove();
   }
 
+  /** The height the viewport should end at: the current pane's own height. */
   private target(): number { return this.current?.offsetHeight ?? 0; }
 
+  /** Animates the viewport from `from` to the current pane's height; settles at once under reduced motion or for a change under half a pixel. */
   private glideHeight(from: number, reduce: boolean): void {
     const to = this.target();
     if (reduce || Math.abs(to - from) < 0.5) { if (!this.moving) this.settleHeight(); return; }
@@ -117,6 +138,7 @@ export class PaneStepper {
     this.height.set(to);
   }
 
+  /** Returns the viewport to its natural height, so settled text sits on no clipped layer. */
   private settleHeight(): void {
     this.moving = false;
     this.viewport.style.height = "";

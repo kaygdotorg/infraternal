@@ -32,6 +32,7 @@ import type { VersionSource } from "./source";
 import type { FleetController } from "./updates";
 import { endLine, licenceLabel, licenceNote, panelTitle, peopleLine, seatsNearlyFull, effectiveTier, updatesLine } from "./words";
 
+/** Where the panel goes and what it reads: the sidebar and the footer it sits above, the pill that toggles it, the version source and the update controller. */
 export interface VersionPanelEnv {
   /** The sidebar, and the footer the card sits directly above. */
   parent: HTMLElement;
@@ -42,6 +43,7 @@ export interface VersionPanelEnv {
   fleet: FleetController;
 }
 
+/** The panel's handle. It starts closed; the pill toggles it. */
 export interface VersionPanel {
   readonly root: HTMLElement;
   isOpen(): boolean;
@@ -51,8 +53,14 @@ export interface VersionPanel {
   dispose(): void;
 }
 
+/** The panel's contents once they were first built: the key/value list, the note under it, the heading, and a function that stops its listeners. */
 interface Built { list: ReturnType<typeof createKeyValueList>; note: HTMLElement; heading: HTMLButtonElement; headingText: Text; stop(): void }
 
+/**
+ * Makes the panel as a sidebar card that grows out of the pill. The Updates row's value starts a check or the update; the heading copies the
+ * full build id; licence lines copy their own text. The contents are built when the panel first opens and repainted when the facts or the
+ * update state change. Call `dispose` to remove the card and its listeners.
+ */
 export function createVersionPanel(env: VersionPanelEnv): VersionPanel {
   const { source, fleet, anchor } = env;
   let built: Built | undefined;
