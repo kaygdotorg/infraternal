@@ -263,6 +263,7 @@ impl MeshNodePlugin {
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
+            proxy_containment: None,
             dump: None,
         }
     }
