@@ -41,12 +41,16 @@ export function createRows(cx: Ctx, stopsFor: (c: ViewRec) => Stops, goStop: (c:
   const limit = (c: ViewRec, st: Stops, given?: number): number | undefined => {
     const band = given ?? bandInView(c);
     if (!grouped(c) || band === undefined) return undefined;
-    // World x of a window's right edge, from where the camera is now and where the box is drawn (both move together during a flight).
-    const stage = cx.stage.getBoundingClientRect(), left = camera.cam.cx - st.view / 2;
+    // World x of a window's right edge from the layout (offsets inside the view's content), not from where it is drawn: the camera moves
+    // while this is asked for, and a drawn box and the camera's position are not from the same frame.
+    const origin = cx.view.contentRect(c).x;
     let right = -Infinity;
     for (const col of c.view.cols) for (const w of col.wins) {
-      const box = w.row === band ? c.wins.get(w.id)?.card.root.getBoundingClientRect() : undefined;
-      if (box && box.width > 0) right = Math.max(right, left + (box.right - stage.left) / camera.cam.z);
+      const root = w.row === band ? c.wins.get(w.id)?.card.root : undefined;
+      if (!root) continue;
+      let x = 0, el: HTMLElement | null = root;
+      while (el && el !== c.content) { x += el.offsetLeft; el = el.offsetParent as HTMLElement | null; }
+      if (el) right = Math.max(right, origin + x + root.offsetWidth);
     }
     return right === -Infinity ? undefined : Math.max(st.lefts[0]!, right + INSET - st.view);
   };
