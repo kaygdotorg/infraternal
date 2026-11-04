@@ -25,7 +25,7 @@ rust_run_gate() {
 # scripts/doc-coverage-baseline.json. The fixture test comes first so a broken scanner cannot
 # pass the ratchet by miscounting. Pure python, a few seconds, shared by `quick` and `fast`.
 verify_doc_coverage() {
-    python3 scripts/test-doc-coverage.py && python3 scripts/test-shape-lints.py && python3 scripts/doc-coverage --check
+    python3 scripts/test-doc-coverage.py && python3 scripts/doc-coverage --check
 }
 
 # Enforce D345 only on changed items; fixtures protect the shared lexer integration.
@@ -307,6 +307,7 @@ rust_verify_fast() {
     rust_run_gate "cargo-deny" cargo deny check
     rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
     rust_run_gate "doc coverage ratchet" verify_doc_coverage
+    rust_run_gate "shape lints off (D351)" python3 scripts/test-shape-lints.py
     rust_run_gate "doc comments on diff" verify_diff_docs
     rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
