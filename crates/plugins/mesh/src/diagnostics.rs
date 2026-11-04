@@ -35,7 +35,7 @@ pub(crate) fn storage_error(reason: &'static str) -> MeshApiError {
 /// Turns a database driver error into a logged, fixed reason, and returns the
 /// public storage error.
 ///
-/// The reason is chosen from the error's kind or SQLite result code (busy,
+/// The reason is chosen from the error's kind or database result code (busy,
 /// read-only, I/O, corrupt, full, constraint, missing table or column, pool
 /// problems, decode problems). SQL text, values, connection strings and
 /// free-form driver messages are never logged. A missing table or column is
