@@ -715,9 +715,18 @@ async fn run_channel<const SESSION_ONLY: bool>(
     plugins: Option<crate::plugin_control::Registry>,
     original: Option<Session>,
 ) -> io::Result<()> {
-    let result =
-        run_channel_inner::<SESSION_ONLY>(socket, state, execution_uid, renewal, plugins, original)
-            .await;
+    // Boxed: the wrapper holds its arguments, and the loop's state would be counted again on top of
+    // them inside every caller's future (clippy large_futures, already within bytes of its bound).
+    // One allocation per channel run, in place of the same bytes inline.
+    let result = Box::pin(run_channel_inner::<SESSION_ONLY>(
+        socket,
+        state,
+        execution_uid,
+        renewal,
+        plugins,
+        original,
+    ))
+    .await;
     if sessions::cleanups_pending() {
         // Boxed: the wait is rare, and its state must not grow every channel future.
         Box::pin(sessions::drain_cleanups()).await;
