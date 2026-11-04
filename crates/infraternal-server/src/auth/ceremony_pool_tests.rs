@@ -139,6 +139,35 @@ async fn a_fresh_network_signs_in_while_32_networks_fill_the_anonymous_pool() {
 }
 
 #[tokio::test]
+async fn a_burst_in_one_second_still_evicts_the_oldest() {
+    // Expiry has one-second resolution, so "oldest" must not depend on it:
+    // the whole pool fills inside one second here.
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    let mut first = Vec::new();
+    for round in 0..32 {
+        for network in 0..32 {
+            let (status, _, start) =
+                call(&app, v4_network(network), "login-start", None, &json!({})).await;
+            assert_eq!(status, StatusCode::OK);
+            if round == 0 {
+                first.push(str_field(&start, "ceremony").to_owned());
+            }
+        }
+    }
+    let (status, _, _) = call(&app, v4_network(700), "login-start", None, &json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let pending = f.auth.pending.lock().await;
+    let gone = first
+        .iter()
+        .filter(|id| !pending.logins.contains_key(*id))
+        .count();
+    assert_eq!(gone, 1, "the evicted ceremony was not a network's first");
+}
+
+#[tokio::test]
 async fn a_full_pool_answers_its_heaviest_network_with_429() {
     // When the caller's network already holds as many as any other, nothing
     // is evictable for it: it is told to come back, not that its passkey failed.
