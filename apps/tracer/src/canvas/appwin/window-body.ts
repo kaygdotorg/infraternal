@@ -141,8 +141,11 @@ export class AppBinding implements SessionBinding {
   private measure(first: boolean): void {
     if (this.disposed) return;
     const size = this.css();
-    if (size.width < 2 || size.height < 2) return;
+    // Nothing to follow yet (too small to measure, or the stream is not open): a person's pending resize has nothing to
+    // act on, and must not wait around for the machine's first shape report to be mistaken for it.
+    if (size.width < 2 || size.height < 2) { this.handPending = false; return; }
     if (!this.opened) {
+      this.handPending = false;
       // Open in the shape the machine listed: the first size the stream asks for is then already the right one. Tried
       // once; later shapes come only from the machine's own reports while it streams.
       const tried = this.listedShapeTried;
