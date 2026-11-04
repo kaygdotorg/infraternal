@@ -17,8 +17,10 @@ export interface Probe {
   reachable: boolean;
 }
 
+/** The result of a try: it worked, or it did not for one of three reasons (wrong secret, no answer in time, machine offline). */
 export type Outcome = { ok: true } | { ok: false; reason: "wrong" | "timeout" | "offline" };
 
+/** What an instance must provide for the privileged-access consent. See each member. */
 export interface PrivilegeService {
   /** Machines the person has selected together with this one (bulk consent), otherwise just this one. */
   selection(host: string): string[];
