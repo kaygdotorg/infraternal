@@ -265,8 +265,9 @@ def scan_rust(src, counts):
         is_pub_item = False
         if im and parent[0] in ("mod", "impl", "trait") and im.group("name") != "_":
             kw = im.group("kw")
-            # `head` (the keyword's offset, after any attributes) is where the doc comment must end.
-            head = locate(masked, stmt_start, i, im.group("kw"), im.group("name"))
+            # `head` is where the item itself starts (visibility included, attributes excluded): a doc
+            # comment must end right before it, possibly with attributes in between.
+            head = i - len(header.lstrip())
             is_pub = bool(im.group("pub")) or (parent[0] == "trait" and parent[1])
             is_pub_item = is_pub
             documented = doc.item(head) or bool(re.search(r"#\[\s*doc\b", masked[stmt_start:head]))
@@ -295,13 +296,6 @@ def RUST_ATTR_STRIP(text):
     while prev != text:
         prev, text = text, re.sub(r"^\s*#!?\[(?:[^\[\]]|\[[^\[\]]*\])*\]", "", text)
     return text
-
-
-def locate(masked, start, end, kw, name):
-    """Offset of the item keyword (after any attributes) inside masked[start:end]."""
-    m = re.search(r"(?<![A-Za-z0-9_])" + re.escape(kw) + r"\s+(?:mut\s+)?" + re.escape(name) + r"(?![A-Za-z0-9_])",
-                  masked[start:end])
-    return start + (m.start() if m else 0)
 
 
 def inline_mod_doc(doc, masked, brace):

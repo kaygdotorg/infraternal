@@ -2,6 +2,7 @@
 #
 # It runs what fails most often, cheapest first, and stops at the first failure:
 #   1. cargo fmt --check (whole workspace; it needs no compilation)
+#   1b. the doc-coverage ratchet (D345): coverage per crate or package never goes down
 #   2. cargo clippy (workspace, same flags as the gate) when any Rust package changed against the
 #      merge base with origin/dev
 #   3. the unit tests (lib and bin targets) of the changed packages
@@ -36,6 +37,10 @@ verify_quick() {
         "$base" "$whole" "${packages[*]}" "$tracer"
 
     rust_run_gate "fmt" cargo fmt --all --check
+    if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
+
+    # Whole-repo and cheap, so it always runs, whatever changed.
+    rust_run_gate "doc coverage ratchet" verify_doc_coverage
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 
     if ((whole)); then
