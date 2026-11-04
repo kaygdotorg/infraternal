@@ -16,7 +16,9 @@
  */
 import { tagNodeId } from "./source";
 
+/** A host as the layout sees it: its id and the tags it carries. */
 export interface LayoutHost { id: string; tags: readonly string[] }
+/** What the layout needs: the hosts, the tag names, the pinned positions and the card size. */
 export interface LayoutInput {
   /** Hosts, in any order. */
   hosts: readonly LayoutHost[];
@@ -26,13 +28,25 @@ export interface LayoutInput {
   nodeW: number;
   nodeH: number;
 }
+/** One node placed by the layout. `pinned` nodes sit where the person put them; `cluster` names the tag cluster the node belongs to. */
 export interface Placed { id: string; kind: "host" | "tag"; x: number; y: number; pinned: boolean; cluster: string }
+/** A tag and its hosts: the frame's rectangle, the host ids (not the tag's own node), and the tag node when the cluster has one. */
 export interface Cluster { id: string; label: string; x: number; y: number; w: number; h: number; /** Host ids (not the tag's own node). */ hosts: string[]; tagNode?: string }
+/** The result: every node placed, the size of the whole sheet, and the clusters. */
 export interface Layout { nodes: Placed[]; size: { w: number; h: number }; clusters: Cluster[] }
 
+/**
+ * Layout spacing in pixels: `GAP_X` and `GAP_Y` between cards, `FRAME` around a cluster's cards, `EDGE` around the sheet. `SMALL_HOSTS` is the
+ * largest count of hosts (and of tags) that keeps the plain two-column arrangement. `UNTAGGED` names the cluster of hosts with no tag.
+ */
 const GAP_X = 24, GAP_Y = 24, FRAME = 28, EDGE = 30, SMALL_HOSTS = 8, UNTAGGED = "untagged";
+/** Orders strings by plain comparison, so the layout never depends on arrival order. */
 const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
+/**
+ * Places the nodes and builds the clusters. Pure and stable: the same input always gives the same output, pinned nodes keep their
+ * position, and a pin outside the sheet makes the sheet larger. A small mesh keeps the plain arrangement; a larger one is packed in clusters.
+ */
 export function layoutMesh(input: LayoutInput): Layout {
   const { nodeW, nodeH, pins } = input;
   const tags = [...input.tags].sort(byName);
