@@ -30,16 +30,24 @@ use tokio::sync::Mutex;
 /// Configured server coordinates; no initialization or background work occurs at construction.
 #[derive(Clone)]
 pub struct BootstrapConfig {
+    /// Directory that holds the CA state, including the `active` directory once a CA is published.
     pub(crate) directory: PathBuf,
+    /// Common name given to the first host identity certificate created at bootstrap.
     pub(crate) name: String,
+    /// Address the deferred remote listener binds once the CA is unlocked.
     pub(crate) address: SocketAddr,
+    /// True if the remote listeners start only after bootstrap activates them.
     pub(crate) deferred: bool,
 }
 /// Owns deferred listeners with the router, so disabling/dropping remote leaves no work.
 pub(crate) struct BootstrapRuntime {
+    /// The configuration this runtime was built from.
     pub(crate) config: BootstrapConfig,
+    /// Registry of enrolled remote hosts.
     pub(crate) hosts: RemoteHosts,
+    /// Database-backed store for host enrollment and revocation.
     pub(crate) store: EnrollmentStore,
+    /// Listeners to start on activation; `None` once taken or when remote is off.
     listeners: Mutex<Option<RemoteListeners>>,
 }
 impl BootstrapRuntime {
@@ -117,6 +125,7 @@ pub fn retained_identity(directory: &Path) -> Result<(Identity, X509), CaError> 
     }
     Ok((Identity { certificate, key }, issuer))
 }
+/// Creates `path` with mode 0600, writes `bytes` and flushes to disk. Fails if the file already exists, so nothing is overwritten.
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), CaError> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -192,6 +201,7 @@ pub fn publish_first(
     }
     result
 }
+/// Creates a new CA and the first host identity certificate, valid from `now` for ten years (`now` must be non-negative). The identity's subject is `name` and is deliberately different from the issuer's, so path building does not treat the leaf as self-issued. Returns the CA material and the identity; nothing is written to disk.
 fn generate(name: &str, now: i64) -> Result<(CaMaterial, Identity), CaError> {
     let end = now
         .checked_add(315_360_000)
@@ -264,6 +274,7 @@ fn generate(name: &str, now: i64) -> Result<(CaMaterial, Identity), CaError> {
     ))
 }
 
+/// Creates a fresh Ed25519 key and a self-signed CA certificate for it, valid from `now` until `end`.
 fn generate_issuer(now: i64, end: i64) -> Result<(PKey<openssl::pkey::Private>, X509), CaError> {
     let key = PKey::generate_ed25519().map_err(|_| CaError)?;
     let mut subject = X509NameBuilder::new().map_err(|_| CaError)?;

@@ -5,7 +5,9 @@ use sqlx::{Row, Sqlite, Transaction};
 
 /// A copy's membership binding is public metadata, never a signing key.
 pub struct Membership {
+    /// User id of the administrator.
     pub(crate) user: String,
+    /// Role generation; it goes up every time the administrator role is granted or revoked.
     pub(crate) generation: i64,
 }
 

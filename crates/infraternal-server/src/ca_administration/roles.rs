@@ -173,6 +173,7 @@ impl CaAdministration {
     }
     // A pending grant has no cold-start unwrap capability. Check public copy
     // bindings under the writer lock; no other administrator's key is requested.
+    /// Used before revoking an administrator: succeeds only if some other active administrator still has an encrypted copy for the current issuer. Compares public bindings only, so no other administrator's key is needed. Passes when no issuer is retained yet.
     async fn require_other_retained_copy(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
