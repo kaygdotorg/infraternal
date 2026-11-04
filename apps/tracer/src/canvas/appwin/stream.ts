@@ -142,6 +142,15 @@ export class AppStream {
    * the server; this remembers the intent so the next welcome asks again by itself (no click needed).
    */
   private keepControl = false;
+  /**
+   * The server lets only the controller change the machine's window size, so a canvas resize has to hold the lease.
+   * That is bookkeeping, not the person taking over: `leased` says the lease is held for the size alone. It is never
+   * announced (`control` stays "none", so no badge and no "controlled" word), it never sends input, and it ends with
+   * every event that ends control (`setControl("none")` clears it).
+   */
+  private leased = false;
+  /** A quiet lease request is on its way: a drag-resize asks once, and the answer pushes the latest size. */
+  private leasing = false;
   private shapeTimer = 0;
   private shapeBusy = false;
   private lastShape: number | undefined;
@@ -165,6 +174,8 @@ export class AppStream {
     this.o.events.state(next);
   }
   private setControl(next: ControlState): void {
+    // Every route that ends control (dropped link, retired viewer, release) also ends a size-only lease.
+    if (next.kind === "none") this.leased = false;
     if (this.control.kind === next.kind && JSON.stringify(this.control) === JSON.stringify(next)) return;
     this.control = next;
     this.o.events.control(next);
@@ -404,21 +415,45 @@ export class AppStream {
   }
 
   /**
-   * The window body's layout size changed: the machine's window follows it (A2). `byHand` is a resize by the person,
-   * an explicit control action; a change that only took the machine's own shape sends its size if control is already
-   * held and otherwise waits for it.
+   * The window body's layout size changed: the machine's window follows it (D208 A2), quietly. Resizing a card or
+   * moving it into a column is layout, not input meant for the machine (A3), so it never shows control: the size goes
+   * under a size-only lease (`leased`) that nothing on the page announces. `byHand` is false for a change that only
+   * took the machine's own shape (looking): that sends its size only if control is already held and otherwise waits.
    */
   resize(css: { width: number; height: number; density: number }, byHand = true): void {
     const next = chooseSize(css.width, css.height, css.density);
     if (!sizeChanged(this.size, next)) return;
     this.size = next;
-    // Merely attaching uses Start's size; taking control sends the latest size.
-    if (this.control.kind === "controlled" || this.control.kind === "paused") this.pushSize();
-    else if (byHand) void this.takeControl();
+    // Merely attaching uses Start's size; holding any lease sends the latest size.
+    if (this.canPushSize()) this.pushSize();
+    else if (byHand) void this.leaseForSize();
+  }
+
+  /** Whether a lease is held, for input (announced) or for the size alone (quiet). */
+  private canPushSize(): boolean { return this.leased || this.control.kind === "controlled" || this.control.kind === "paused"; }
+
+  /**
+   * Holds the controller lease for the size alone, and pushes the latest size once it is held. Silent by design: a
+   * refusal is not "view only" (nobody tried to control), it just leaves the machine's window as it is. Asked again no
+   * sooner than `CONTROL_RETRY_MS` after a refusal, like real control.
+   */
+  private async leaseForSize(): Promise<void> {
+    if (this.leasing || this.leased || this.streamId === undefined || !this.attached || !this.o.connection.isWelcomed) return;
+    if (this.control.kind === "requesting" || performance.now() - this.controlRefusedAt < CONTROL_RETRY_MS) return;
+    const id = this.streamId;
+    this.leasing = true;
+    try {
+      await this.o.connection.call("desktop.session.control", { stream_id: id });
+      if (this.streamId !== id || this.disposed) return;
+      this.leased = true;
+      this.pushSize();
+    } catch {
+      if (this.streamId === id) this.controlRefusedAt = performance.now();
+    } finally { this.leasing = false; }
   }
 
   private pushSize(): void {
-    if (!this.size || this.streamId === undefined || !this.attached || (this.control.kind !== "controlled" && this.control.kind !== "paused")) return;
+    if (!this.size || this.streamId === undefined || !this.attached || !this.canPushSize()) return;
     this.o.connection.send(this.streamId, { type: "Desktop", message: { kind: "size", width: this.size.width, height: this.size.height, densityMilli: densityMilli(this.size) } });
   }
 
@@ -459,7 +494,7 @@ export class AppStream {
 
   /** The window lost focus: held keys and buttons are released on the machine, and the indicator goes quiet. */
   releaseControl(): void {
-    const held = this.control.kind === "controlled" || this.control.kind === "paused" || this.control.kind === "requesting";
+    const held = this.leased || this.control.kind === "controlled" || this.control.kind === "paused" || this.control.kind === "requesting";
     this.keepControl = false;
     this.setControl({ kind: "none" });
     window.clearTimeout(this.statusTimer);

@@ -143,6 +143,50 @@ test("viewing never sends controller-only resize before acquisition", async () =
   } finally { f.stream.dispose(); }
 });
 
+test("resizing the card follows on the machine but never shows control (D208 A2, A3)", async () => {
+  const seen: ControlState["kind"][] = [];
+  const f = await fixture(false, (control) => seen.push(control.kind));
+  try {
+    f.stream.resize({ width: 1000, height: 600, density: 1 });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // The real window follows: the size reached the machine under the size-only lease ...
+    expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size" && frame.message.width === 1000)).toBe(true);
+    // ... and nothing on the page was told about control: no badge, no "controlled", no "requesting".
+    expect(seen).toEqual([]);
+    expect(f.stream.controlState.kind).toBe("none");
+    // A second resize reuses the lease: it is one more size, not another handover.
+    f.stream.resize({ width: 1200, height: 600, density: 1 });
+    await Promise.resolve();
+    expect(f.actions.filter(action => action === "desktop.session.control")).toHaveLength(1);
+    expect(f.frames.filter(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size" && frame.message.width === 1200)).toHaveLength(1);
+    // Letting go ends the lease with the rest of control.
+    f.stream.releaseControl();
+    expect(f.closed.length).toBeGreaterThan(0);
+  } finally { f.stream.dispose(); }
+});
+
+test("a refused size-only lease is silent: the person never asked to control", async () => {
+  const seen: ControlState["kind"][] = [];
+  const f = await fixture(true, (control) => seen.push(control.kind));
+  try {
+    f.stream.resize({ width: 1000, height: 600, density: 1 });
+    f.answerControl(false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(seen).toEqual([]);
+    expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size")).toBe(false);
+  } finally { f.stream.dispose(); }
+});
+
+test("following the machine's own shape sends no size at all (looking never moves it)", async () => {
+  const f = await fixture();
+  try {
+    f.stream.resize({ width: 1000, height: 600, density: 1 }, false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions).not.toContain("desktop.session.control");
+    expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size")).toBe(false);
+  } finally { f.stream.dispose(); }
+});
+
 test("a resize queued during control confirmation reaches the machine before pending input", async () => {
   let binding: BindingProbe | undefined;
   let resize: (() => void) | undefined;
