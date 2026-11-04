@@ -1304,3 +1304,73 @@
 .ui-sheet-handle { width: 2.25rem; height: 0.25rem; border-radius: 0.125rem; background: var(--fg-3); opacity: 0.6; }
 .ui-sheet .ui-dp { padding-top: 0.125rem; padding-bottom: 1rem; }
 @media (pointer: coarse) { .ui-dp-expand { margin-right: -0.375rem; } .ui-dp-lead { font-size: var(--text-body); } }
+
+/* ---- The theme strip (theme-strip.ts, #323, D322) ----
+   One scroller of cards and a dotted add card. The strip bleeds to the pane's edges (its negative margin is the pane's side
+   padding) so the next card shows at the window's edge, and the first card still starts on the content edge: its padding and
+   `scroll-padding-inline` are that same padding, so a card that is scrolled to lands on it. A swipe at either end stays in the
+   strip (`overscroll-behavior-x`). The card is one face with its scheme's palette (--p-bg, --p-fg, --p-fg2, --p-accent) over its
+   background image (--p-bg-image); the numbers (--p-tint 0 to 100, --p-blur 0 to 100, --p-size, --p-font) are on the card. */
+.ui-theme-strip {
+  --ui-theme-pad: 1.125rem; --ui-theme-w: 11.5rem; --ui-theme-pv: 6.25rem;
+  --ui-theme-cap: calc(var(--text-body) * 1.25 + var(--text-secondary) * 1.25 + 1rem);
+  --ui-theme-h: calc(var(--ui-theme-pv) + var(--ui-theme-cap));
+  position: relative; /* the cards' offsetLeft is measured from the strip (theme-strip.ts reveal) */
+  display: flex; gap: 0.75rem; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
+  margin-inline: calc(-1 * var(--ui-theme-pad)); padding: 0.5rem var(--ui-theme-pad); /* room for the corner buttons (0.4375rem) and the focus ring */
+  scroll-padding-inline: var(--ui-theme-pad); scroll-snap-type: x proximity;
+}
+@media (pointer: coarse) { .ui-theme-strip { --ui-theme-w: 14rem; } }
+.ui-theme, .ui-theme-add { position: relative; flex: none; width: var(--ui-theme-w); height: var(--ui-theme-h); border-radius: 0.875rem; scroll-snap-align: start; }
+.ui-theme-pick { position: absolute; inset: 0; display: block; padding: 0; border: 0; border-radius: inherit; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow: hidden; isolation: isolate; transition: transform 140ms var(--ease-out, ease-out); }
+.ui-theme-pick:active { transform: scale(var(--ui-press-scale-soft, 0.98)); }
+/* The edge of the card and, when it is the selected one, the accent edge. Above the face. */
+.ui-theme-pick::after { content: ""; position: absolute; inset: 0; z-index: 3; border-radius: inherit; box-shadow: inset 0 0 0 1px rgb(128 128 128 / 0.32); pointer-events: none; }
+.ui-theme[data-selected] .ui-theme-pick::after { box-shadow: inset 0 0 0 2px var(--accent); }
+.ui-theme-half { position: absolute; inset: 0; background: var(--p-bg-image, none) center / cover no-repeat, var(--p-bg); color: var(--p-fg); }
+/* Real text behind the material, dense and heavy, so a blur that is too weak shows. The picture is not content: it is hidden
+   from assistive technology and never selectable. */
+.ui-theme-term { position: absolute; inset: 0 0 auto; height: var(--ui-theme-pv); display: flex; flex-direction: column; overflow: hidden; padding: 0.25rem 0.375rem; font: 600 0.5625rem/0.75rem ui-monospace, monospace; white-space: pre; user-select: none; }
+.ui-theme-term > span { display: block; }
+.ui-theme-glass {
+  /* Starts on the line between the first terminal line (0.25 to 1 rem) and the second: a pane that started inside a line cut it across. */
+  position: absolute; inset: 1rem 0.625rem auto; height: calc(var(--ui-theme-pv) - 1.5rem); display: flex; align-items: baseline; justify-content: center; gap: 0.5rem; padding-top: 0.5rem;
+  border-radius: 0.625rem; overflow: hidden;
+  /* The film grain of the theme's windows is on the glass, as it is on a window: a second background image under the text (the tile is made at the theme's amount). */
+  background: var(--p-grain-img, none) 0 0 / 6rem 6rem repeat, color-mix(in srgb, var(--p-bg) calc(var(--p-tint) * 1%), transparent);
+  -webkit-backdrop-filter: blur(calc(var(--p-blur) * 0.24px)); backdrop-filter: blur(calc(var(--p-blur) * 0.24px));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--p-fg) 14%, transparent);
+}
+/* The font and the UI size are the sample itself: set in the theme's font, and as large as the theme's size makes it. */
+.ui-theme-aa { font-family: var(--p-font); font-weight: var(--p-weight); font-size: calc(1.25rem * var(--p-size)); line-height: 1.2; }
+.ui-theme-prompt { color: var(--p-accent); font-family: var(--p-font); font-weight: var(--p-weight); font-size: calc(0.6875rem * var(--p-size)); }
+.ui-theme-cap {
+  position: absolute; inset: auto 0 0; height: var(--ui-theme-cap); display: grid; grid-template-columns: minmax(0, 1fr) auto; align-content: center; column-gap: 0.375rem; padding: 0 0.625rem;
+  background: var(--p-bg); border-top: 1px solid color-mix(in srgb, var(--p-fg) 10%, transparent);
+}
+.ui-theme-name { grid-area: 1 / 1; font-size: var(--text-body); font-weight: 500; line-height: 1.25; letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-theme-meta { grid-area: 2 / 1 / 3 / -1; color: var(--p-fg2); font-size: var(--text-secondary); line-height: 1.25; letter-spacing: var(--ui-tracking); text-wrap: balance; }
+.ui-theme-dots { grid-area: 1 / 2; display: flex; align-items: center; gap: 0.1875rem; }
+.ui-theme-dots i { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--dot); }
+/* The selected tick and the reset sit on the card's corners, half outside it, so neither covers the picture. */
+.ui-theme-tick { position: absolute; top: -0.3125rem; left: -0.3125rem; z-index: 4; display: none; pointer-events: none; width: 1.125rem; height: 1.125rem; place-items: center; border-radius: 50%; background: var(--accent); color: var(--accent-fg); }
+.ui-theme[data-selected] .ui-theme-tick { display: grid; }
+.ui-theme-tick svg, .ui-theme-reset svg { width: 0.75rem; height: 0.75rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ui-theme-reset { position: absolute; top: -0.4375rem; right: -0.4375rem; z-index: 4; display: grid; place-items: center; width: 1.5rem; height: 1.5rem; padding: 0; border: 0; border-radius: 50%; background: var(--bg); color: var(--fg); box-shadow: 0 0 0 1px rgb(128 128 128 / 0.4); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out); }
+.ui-theme-reset[hidden] { display: none; }
+.ui-theme-reset svg { width: 0.875rem; height: 0.875rem; stroke-width: 1.5; }
+.ui-theme-reset:active { transform: scale(var(--ui-press-scale, 0.97)); }
+/* A touch target of 44 px without a larger picture: the hit area reaches past the small button. */
+@media (pointer: coarse) { .ui-theme-reset::before { content: ""; position: absolute; inset: -0.6875rem; } }
+.ui-theme-add { display: grid; place-items: center; padding: 0; border: 1.5px dashed color-mix(in srgb, var(--fg) 30%, transparent); background: none; color: var(--fg-2); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out), color 140ms ease, border-color 140ms ease; }
+.ui-theme-add svg { width: 2.5rem; height: 2.5rem; fill: none; stroke: currentColor; stroke-width: 1.25; stroke-linecap: round; }
+.ui-theme-add:active { transform: scale(var(--ui-press-scale-soft, 0.98)); }
+@media (hover: hover) and (pointer: fine) { .ui-theme-add:hover { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 55%, transparent); } }
+[data-focus-ring="on"] .ui-theme-pick:focus-visible, [data-focus-ring="on"] .ui-theme-add:focus-visible, [data-focus-ring="on"] .ui-theme-reset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .ui-theme-pick, .ui-theme-add, .ui-theme-reset { transition: none; } }
+/* The strip's edges fade while there is more to scroll that way (theme-strip.ts sets data-fade). The fade is as wide as the strip's side
+   padding, so the card that starts on the content edge is never faded at rest, and a card cut at the edge goes soft instead of hard. */
+.ui-theme-strip[data-fade~="left"] { -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--ui-theme-pad)); mask-image: linear-gradient(90deg, transparent, #000 var(--ui-theme-pad)); }
+.ui-theme-strip[data-fade~="right"] { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - var(--ui-theme-pad)), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - var(--ui-theme-pad)), transparent); }
+.ui-theme-strip[data-fade="left right"] { -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--ui-theme-pad), #000 calc(100% - var(--ui-theme-pad)), transparent); mask-image: linear-gradient(90deg, transparent, #000 var(--ui-theme-pad), #000 calc(100% - var(--ui-theme-pad)), transparent); }
+

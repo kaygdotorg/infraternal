@@ -4,18 +4,15 @@
  *
  * The bodies of the Settings view's windows (D179): one panel per section, rendered into its window.
  *
- * The sections that belong to the app itself (appearance, toolbar, shortcuts, account, about) are rendered here from the
+ * The sections that belong to the app itself (window sizes, hosts, toolbar, shortcuts, account, about) are rendered here from the
  * shared panels in packages/ui and the core screen. Sections that need account or instance data (devices,
  * users, grants, discovery) come from a `SettingsSource`: the product supplies the ones whose server
  * API exists, a mockup supplies test-double panels. A section no source provides is not listed at all.
  */
-import { FONTS } from "../../../../../packages/ui/src/fonts";
-import { THEMES } from "../../../../../packages/ui/src/themes";
-import { renderAccount, renderAppearance, renderHosts, renderWindowSizes, type AppearanceApi, type HostsApi, type StatusActionPref, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
+import { renderAccount, renderHosts, renderWindowSizes, type HostsApi, type StatusActionPref, type WindowSizesApi } from "../../../../../packages/ui/src/settings-panels";
 import { askSignOut } from "../../sign-out";
 import type { AuthorityControl } from "../addhost/authority-unlock";
 import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } from "../window-sizes";
-import { readUiSize, setUiSize, UI_SIZE, UI_SIZE_EVENT } from "../../../../../packages/ui/src/ui-scale";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import { EXTENDED_INFO_EVENT, readExtendedInfo, writeExtendedInfo } from "../windows/extended-info";
@@ -53,14 +50,6 @@ function authorityPref(control: AuthorityControl): StatusActionPref {
 
 export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement): () => void {
   const { core } = cx;
-  const appearance: AppearanceApi = {
-    themes: Object.entries(THEMES).map(([id, t]) => ({ id, name: t.name, dark: t.dark, bg: t.bg, accent: t.accent })),
-    fonts: FONTS.map((f) => ({ id: f.id, label: f.label, hint: f.hint })),
-    state: () => core.appearance(),
-    act: (action) => core.act(action),
-    onChange(listener) { window.addEventListener("tracer:appearance", listener); return () => window.removeEventListener("tracer:appearance", listener); },
-    uiSize: { ...UI_SIZE, get: readUiSize, set: (percent: number) => { setUiSize(percent); }, onChange(listener: () => void) { window.addEventListener(UI_SIZE_EVENT, listener); return () => window.removeEventListener(UI_SIZE_EVENT, listener); } },
-  };
   // Plain names; the technical detail (the percentage) is in each option's subtitle (the plain-names rule).
   const windowSizes: WindowSizesApi = {
     groups: [
@@ -100,7 +89,6 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
   body.append(pane);
   const done = ((): (() => void) | void => {
     switch (section) {
-      case "appearance": return renderAppearance(pane, appearance);
       case "windows": return renderWindowSizes(pane, windowSizes);
       case "hosts": {
         // The Settings windows are drawn at load, before the server has said what it can do: the panel draws again when that
