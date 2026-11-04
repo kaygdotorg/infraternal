@@ -212,13 +212,17 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     wrap.hidden = items.length === 0;
     measure();
   };
-  /** One frame of reads, then one of writes: the fanned-out offsets and the stack's reserved height. */
+  /**
+   * One batched frame for the fanned-out offsets and the stack's reserved height. Only the front card is read
+   * here: a card behind it is clamped to the front's height by CSS, so its own natural height was taken once, in
+   * `show`, while it was the front.
+   */
   const measure = (): void => {
     if (frame || disposed) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
       const visible = live().filter((it) => it.card.dataset.hidden !== "true").reverse();
-      for (const it of visible) it.height = it.card.offsetHeight || it.height;
+      if (visible[0]) visible[0].height = visible[0].card.offsetHeight || visible[0].height;
       let lift = 0;
       for (const it of visible) { it.card.style.setProperty("--ey", `${-lift}px`); lift += it.height + GAP_PX; }
       const front = visible[0]?.height ?? 0;
@@ -446,6 +450,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       fill(it, value);
       it.card.dataset.open = it.card.dataset.open ?? "false";
       arrange();
+      // The newest toast is unclamped (it is the front), so this is its natural height: one forced layout per toast.
+      it.height = it.card.offsetHeight || it.height;
       clocks();
       // A fast receipt can dismiss this message before its first animation frame.
       const shown = it;
