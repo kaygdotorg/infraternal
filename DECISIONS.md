@@ -4039,3 +4039,28 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        toolbar row, not a header.
      - **Picker rows:** "<Icon> <App> <Window Title> <Optional Number>". The
        number appears only when two windows of one app share a title.
+351. **App-window top right, and engineering practices adopted (owner,
+     2026-11-04, #146, #344):**
+     - **App-window top right:** Send keys plus ⋯. The ⋯ menu holds
+       Screenshot, View only, Close window on the machine (with a
+       confirmation) and Settings. Bring to front is dropped, because input
+       already brings the app forward (D208 A3): "correct, that's all for
+       now. we can change it later as needs arise."
+     - **Engineering practices (#344) are adopted:** "yes this is way better
+       than arbitrary rules because these are grounded in experience". They
+       live in `docs/ENGINEERING.md`, enforced through review plus cheap
+       checks ("agreed"). Specifically:
+       - an event-loop lag probe in tests and the benchmark harness only,
+         never in shipped builds ("agreed");
+       - a root gate step for changes that touch root-install, proxy, mesh
+         or shim code ("agreed but isn't that what test.ssh.kayg.org
+         for?"). The test server stays the real-environment check for
+         browser and passkey flows; the root gate covers root-only code
+         paths on every change;
+       - clippy's `too_many_lines` and `too_many_arguments` are turned off
+         ("sure");
+       - D345 doc comments are checked on the diff ("correct");
+       - a new fixed sleep in a test needs a written reason, flagged on the
+         diff ("agreed");
+       - the fuzz targets run nightly on dev-02, about 1 h, with crashes
+         filed as issues ("agreed").
