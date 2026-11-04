@@ -413,7 +413,7 @@ pub fn forget(state: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
         Ok(_) => {}
     }
-    crate::macos_key::remove(state)?;
+    crate::macos_key::retire_key(state, crate::macos_key::RotationReason::EnrolmentChanged)?;
     match fs::remove_file(state.join(PUBLIC_STATE)) {
         Ok(()) => File::open(state)?.sync_all(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1230,7 +1230,10 @@ impl Node {
             tracing::warn!(
                 "Mesh state is not bound to this enrolment; discarding its peers and starting with a new WireGuard key"
             );
-            crate::macos_key::remove(state_directory)?;
+            crate::macos_key::retire_key(
+                state_directory,
+                crate::macos_key::RotationReason::EnrolmentChanged,
+            )?;
         }
         let mut stale_routes = state.routes.clone();
         if let Some(config) = &state.config {
@@ -1856,6 +1859,42 @@ mod tests {
         assert!(state.binding.is_none());
     }
 
+    fn rotation_reasons(directory: &TestDirectory) -> Vec<String> {
+        fs::read_to_string(directory.join(crate::macos_key::ROTATION_LOG))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                line.split(' ')
+                    .find_map(|field| field.strip_prefix("reason="))
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn restoring_unbound_state_removes_the_key_and_logs_why() {
+        let directory = test_directory();
+        let current = enrolment(b"coordinator B");
+        write_public_state(&directory.join(PUBLIC_STATE), &bound_state(None))
+            .expect("write slice-1 state");
+        write_key(&directory);
+
+        Node::restore(&directory.0, Some(&current)).expect("restore unbound state");
+        assert!(!directory.join(crate::macos_key::KEY_FILE).exists());
+        assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
+        let persisted = read_public_state(&directory.join(PUBLIC_STATE))
+            .expect("read state")
+            .expect("state persisted");
+        assert!(persisted.config.is_none());
+        assert_eq!(persisted.binding, Some(current.clone()));
+
+        // Once bound, a restart keeps everything and logs nothing more.
+        write_key(&directory);
+        Node::restore(&directory.0, Some(&current)).expect("restore bound state");
+        assert!(directory.join(crate::macos_key::KEY_FILE).is_file());
+        assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
+    }
+
     #[test]
     fn restore_under_a_new_enrolment_removes_the_old_key_and_records_the_binding() {
         let directory = test_directory();
@@ -1873,6 +1912,7 @@ mod tests {
 
         Node::restore(&directory.0, Some(&new)).expect("restore new enrolment");
         assert!(!directory.join(crate::macos_key::KEY_FILE).exists());
+        assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
         let persisted = read_public_state(&directory.join(PUBLIC_STATE))
             .expect("read state")
             .expect("state persisted");
@@ -1888,6 +1928,8 @@ mod tests {
         super::forget(&directory.0).expect("forget");
         assert!(!directory.join(PUBLIC_STATE).exists());
         assert!(!directory.join(crate::macos_key::KEY_FILE).exists());
+        // J162 F4: the coordinator must learn the new key, so the rotation is logged once.
+        assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
         super::forget(&directory.0).expect("forgetting twice succeeds");
         super::forget(&directory.join("absent")).expect("an absent directory is fine");
     }

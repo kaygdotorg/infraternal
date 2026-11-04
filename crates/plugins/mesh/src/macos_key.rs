@@ -32,20 +32,24 @@ use zeroize::Zeroizing;
 
 /// File name of the private key inside the node's state directory.
 pub const KEY_FILE: &str = "mesh-wireguard.key";
-const ROTATION_LOG: &str = "mesh-key-rotation.log";
+pub(crate) const ROTATION_LOG: &str = "mesh-key-rotation.log";
 const KEY_LENGTH: usize = 32;
 
 /// Why a key that the coordinator knew had to be replaced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RotationReason {
+pub enum RotationReason {
     /// A slice-1 keychain key existed; it was exposed to local users and is retired.
     LegacyKeyRetired,
+    /// The node was enrolled again (`agent join`, or state bound to another
+    /// enrolment), so the key the previous coordinator knew is dropped.
+    EnrolmentChanged,
 }
 
 impl RotationReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::LegacyKeyRetired => "legacy_keychain_key_retired",
+            Self::EnrolmentChanged => "enrolment_changed",
         }
     }
 }
@@ -74,14 +78,25 @@ pub fn load_or_create(state: &Path) -> io::Result<(StaticSecret, PublicKey)> {
     load_or_create_with(state, legacy::retire)
 }
 
-/// Delete the key so the next start generates a new one (`agent join`).
+/// Delete the key so the next start generates a new one, and log why.
+///
+/// The rotation log gets a line only when a key existed: removing nothing
+/// replaces nothing the coordinator knew.
 ///
 /// # Errors
-/// Refuses an exposed state directory and reports a failed removal.
-pub fn remove(state: &Path) -> io::Result<()> {
+/// Refuses an exposed state directory and reports a failed removal or log write.
+pub fn retire_key(state: &Path, reason: RotationReason) -> io::Result<()> {
     check_directory(state)?;
     match fs::remove_file(state.join(KEY_FILE)) {
-        Ok(()) => File::open(state)?.sync_all(),
+        Ok(()) => {
+            File::open(state)?.sync_all()?;
+            record_rotation(&state.join(ROTATION_LOG), reason)?;
+            tracing::warn!(
+                reason = reason.as_str(),
+                "Removed the Mesh WireGuard key; the next start registers a new one"
+            );
+            Ok(())
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
@@ -280,7 +295,9 @@ mod legacy {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{KEY_FILE, Legacy, ROTATION_LOG, legacy, load_or_create_with, remove};
+    use super::{
+        KEY_FILE, Legacy, ROTATION_LOG, RotationReason, legacy, load_or_create_with, retire_key,
+    };
     use std::{
         fs,
         os::unix::fs::{PermissionsExt, symlink},
@@ -469,9 +486,27 @@ mod tests {
     fn removing_the_key_makes_the_next_start_generate_a_new_one() {
         let state = state();
         let (_, first) = load_or_create_with(&state.0, || Legacy::Absent).expect("create key");
-        remove(&state.0).expect("remove key");
-        remove(&state.0).expect("removing an absent key succeeds");
+        retire_key(&state.0, RotationReason::EnrolmentChanged).expect("remove key");
+        retire_key(&state.0, RotationReason::EnrolmentChanged)
+            .expect("removing an absent key succeeds");
+        assert_eq!(
+            reasons(&state),
+            ["enrolment_changed"],
+            "only a real removal is logged"
+        );
         let (_, second) = load_or_create_with(&state.0, || Legacy::Absent).expect("new key");
         assert_ne!(first, second);
+    }
+
+    fn reasons(state: &TestDirectory) -> Vec<String> {
+        fs::read_to_string(state.0.join(ROTATION_LOG))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                line.split(' ')
+                    .find_map(|field| field.strip_prefix("reason="))
+            })
+            .map(str::to_owned)
+            .collect()
     }
 }

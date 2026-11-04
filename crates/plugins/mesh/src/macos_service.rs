@@ -14,8 +14,36 @@ const PLIST_DIRECTORY: &str = "/Library/LaunchDaemons";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SUDO: &str = "/usr/bin/sudo";
 const DATA_DIRECTORY: &str = "/var/lib/infraternal/agent";
-/// The system service's mesh state directory; `agent join` clears it when no `--state` is given.
+/// The system service's mesh state directory.
 pub const STATE_DIRECTORY: &str = "/var/lib/infraternal/state";
+
+/// The mesh state an `agent join` into `data` must forget, if any (#265, J162 F4).
+///
+/// A join replaces the enrolment in `data` only. The service's state belongs to
+/// the service's enrolment, so it is forgotten only when the join wrote the
+/// service's own data directory. A join into another directory (a test
+/// identity, say) forgets only an explicit `--state` of its own, never the
+/// service's. When this skips a join that did re-enrol the service (an unusual
+/// spelling of its path), the enrolment binding catches the mismatch at the
+/// service's next start, so skipping is the safe side.
+#[must_use]
+pub fn join_state_to_forget(data: &Path, state: Option<&Path>) -> Option<PathBuf> {
+    let service_state = Path::new(STATE_DIRECTORY);
+    let target = state.unwrap_or(service_state);
+    if same_directory(data, Path::new(DATA_DIRECTORY)) || !same_directory(target, service_state) {
+        Some(target.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Compare directories after resolving links (`/var` is `/private/var` on macOS).
+fn same_directory(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left.components().eq(right.components()),
+    }
+}
 
 /// Public launchd state; it contains no enrollment or key material.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -311,8 +339,39 @@ fn xml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{checked_launchctl, render_plist, trusted_binary_metadata};
+    use super::{
+        DATA_DIRECTORY, STATE_DIRECTORY, checked_launchctl, join_state_to_forget, render_plist,
+        trusted_binary_metadata,
+    };
     use std::path::Path;
+
+    /// J162 F4: a join for another data directory leaves the service's mesh state alone.
+    #[test]
+    fn agent_join_forgets_the_service_state_only_for_the_service_enrolment() {
+        let service = Path::new(STATE_DIRECTORY);
+        assert_eq!(
+            join_state_to_forget(Path::new(DATA_DIRECTORY), None).as_deref(),
+            Some(service)
+        );
+        assert_eq!(
+            join_state_to_forget(Path::new("/var/lib/infraternal/agent/"), None).as_deref(),
+            Some(service)
+        );
+        assert_eq!(
+            join_state_to_forget(Path::new(DATA_DIRECTORY), Some(service)).as_deref(),
+            Some(service)
+        );
+        assert_eq!(join_state_to_forget(Path::new("/tmp/x"), None), None);
+        assert_eq!(
+            join_state_to_forget(Path::new("/tmp/x"), Some(service)),
+            None
+        );
+        // A join with its own state directory still forgets that one.
+        assert_eq!(
+            join_state_to_forget(Path::new("/tmp/x"), Some(Path::new("/tmp/x-state"))).as_deref(),
+            Some(Path::new("/tmp/x-state"))
+        );
+    }
     use std::{os::unix::process::ExitStatusExt, process::Output};
 
     #[test]
