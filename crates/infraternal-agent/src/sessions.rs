@@ -44,6 +44,15 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 // only detects a hang, well inside the server's 60 s connect budget (#29).
 const LAUNCH: Duration = Duration::from_secs(30);
 
+/// The hang bound for one launch. Tests shorten it per thread to reach the failure path.
+fn launch_bound() -> Duration {
+    #[cfg(test)]
+    if let Some(bound) = tests::LAUNCH_BOUND.with(std::cell::Cell::get) {
+        return bound;
+    }
+    LAUNCH
+}
+
 /// Init manager selected once for session work, never periodically re-probed.
 #[derive(Clone, Copy, Debug)]
 pub enum Manager {
@@ -876,14 +885,16 @@ async fn launch_configured(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    if !program.is_empty() {
-        child
-            .stdin
-            .take()
-            .ok_or(io::ErrorKind::BrokenPipe)?
-            .write_all(&program_bytes)
-            .await?;
-    }
+    // From here the launch owns a running process. Every failure below stops
+    // exactly that launch (`abandon_launch`); none may return with it running.
+    let written = if program.is_empty() {
+        Ok(())
+    } else {
+        match child.stdin.take() {
+            Some(mut stdin) => stdin.write_all(&program_bytes).await,
+            None => Err(io::ErrorKind::BrokenPipe.into()),
+        }
+    };
     if let Some(reservation) = &mut reservation {
         reservation.spawned();
     }
@@ -891,13 +902,57 @@ async fn launch_configured(
     // must close before awaiting Hello; only the privileged shim owns the lease.
     drop(command);
     drop(prestarted);
-    let session = await_launch(&path, id, &watch, &mut child, detached).await;
+    let session = match written {
+        Ok(()) => await_launch(&path, id, &watch, &mut child, detached).await,
+        Err(error) => Err(error),
+    };
+    if session.is_err() {
+        abandon_launch(&path, id, manager, &name, &mut child).await;
+    }
     // Scope launchers and directly owned login shims live until terminal exit.
     // Reap independently; waiting here would hold terminal.open until close.
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
     session
+}
+
+/// Stop what a failed launch started, by identity and never by name pattern:
+/// its own scope, the shim answering on its own rendezvous (authenticated by the
+/// session id in Hello), and the launcher process this call spawned and has not
+/// yet reaped. The shim's exit hangs up its PTY, which ends the shell. Another
+/// session is never addressed: every handle here is this launch's id or child.
+async fn abandon_launch(
+    path: &Path,
+    id: uuid::Uuid,
+    manager: Manager,
+    name: &str,
+    launcher: &mut tokio::process::Child,
+) {
+    if path.exists()
+        && let Ok(mut session) = connect_sequenced(path.to_path_buf(), id.into_bytes()).await
+        && session.caps & infraternal_shim::frame::CLOSE_SESSION != 0
+    {
+        let _ = send(&mut session.peer, &Frame::CloseSession).await;
+    }
+    if !matches!(manager, Manager::Detached) {
+        let mut stop = isolated(Path::new("systemctl"));
+        if matches!(manager, Manager::User) {
+            stop.arg("--user");
+        }
+        // The scope is named for this launch's session id alone.
+        let _ = timeout(
+            HANDSHAKE,
+            stop.args(["stop", &format!("infraternal-session-{name}.scope")])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await;
+    }
+    // `kill` signals only a launcher still unreaped, so a reused pid is unreachable.
+    let _ = launcher.start_kill();
 }
 
 /// Wait for a launched shim's Hello. Progress, not a short clock, decides failure: the launcher's exit before the
@@ -909,9 +964,12 @@ async fn await_launch(
     launcher: &mut tokio::process::Child,
     detached: bool,
 ) -> io::Result<Session> {
-    timeout(LAUNCH, wait_for_hello(path, id, watch, launcher, detached))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
+    timeout(
+        launch_bound(),
+        wait_for_hello(path, id, watch, launcher, detached),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
 }
 
 async fn wait_for_hello(

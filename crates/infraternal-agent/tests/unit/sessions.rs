@@ -511,3 +511,87 @@ async fn unanswered_manager_probe_is_not_remembered() {
     assert!(matches!(third, Manager::User));
     assert_eq!(probes.load(Ordering::SeqCst), 2);
 }
+
+thread_local! {
+    pub(super) static LAUNCH_BOUND: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn alive(pid: i32) -> bool {
+    // A zombie still answers kill(0); read the state instead.
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with(['Z', 'X'])
+    })
+}
+
+/// #324: a launch that fails after its process started must stop that process, found by its pid and nothing
+/// else. The stand-in shim hangs without ever binding its rendezvous, so the launch fails on its bound.
+#[tokio::test(flavor = "current_thread")]
+async fn failed_launch_stops_the_process_it_started_and_no_other() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let pid_file = root.join("launcher.pid");
+    let exe = root.join("hung-shim");
+    fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 300\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+    // A bystander with the same program name: a kill by name would take it too.
+    let mut bystander = launcher("sleep", &["300"]);
+    let bystander_pid = i32::try_from(bystander.id().unwrap()).unwrap();
+
+    LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(500))));
+    let result = super::launch_configured(
+        &exe,
+        &state,
+        super::Manager::Detached,
+        nix::unistd::Uid::effective().as_raw(),
+        80,
+        24,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        false,
+        &[],
+    )
+    .await;
+    LAUNCH_BOUND.with(|bound| bound.set(None));
+    let error = result
+        .err()
+        .expect("a shim that never binds fails the launch");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+
+    let pid: i32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Reaping is asynchronous; give it a moment, not a clock assertion.
+    for _ in 0..200 {
+        if !alive(pid) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        !alive(pid),
+        "the failed launch left its process {pid} running"
+    );
+    assert!(alive(bystander_pid), "an unrelated process was stopped");
+    bystander.kill().await.unwrap();
+}
