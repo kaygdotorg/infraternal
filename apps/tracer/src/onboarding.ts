@@ -7,6 +7,13 @@ import { BRAND_MARK, KEY_MARK } from "./auth-marks";
 import { onDemand } from "./on-demand";
 
 /** Mounts one auth flow and calls onAuthenticated after the server sets its cookie. */
+/**
+ * Mounts one auth flow into `host`: first-run setup when the server says `setupRequired`, passkey sign-in otherwise.
+ * @param message text shown in the card's message line (for example why the user was signed out); may be empty
+ * @param onAuthenticated called once the server has set its session cookie. `firstSetup` is true after setup;
+ * `instant` is true when a keyboard started the flow, so the next screen skips its entrance animation.
+ * @param setupTokenCommand the command the setup card tells the user to run on the server
+ */
 export function mountOnboarding(
   host: HTMLElement,
   setupRequired: boolean,
@@ -18,7 +25,9 @@ export function mountOnboarding(
   else mountSignIn(host, message, onAuthenticated);
 }
 
+/** The shape of the lazily loaded setup module. */
 type SetupModule = typeof import("./onboarding-setup.on-demand");
+/** The callback every auth flow ends in; see {@link mountOnboarding}. */
 type Authenticated = (userId: string, firstSetup: boolean, welcomeName?: string, instant?: boolean) => void;
 
 /**
@@ -56,6 +65,10 @@ export function loadSetup(
 /** Shown when the setup code could not be fetched. */
 export const SETUP_LOAD_FAILED = "Could not load setup. Check your connection; it will retry.";
 
+/**
+ * Draws the sign-in card and wires it. The recovery card (when the build enables it) is fetched while the person reads,
+ * and returns here through `mountSignIn` with `from` -1 so the swap slides the other way.
+ */
 function mountSignIn(
   host: HTMLElement,
   message: string,
@@ -101,6 +114,11 @@ function mountSignIn(
   });
 }
 
+/**
+ * Runs the passkey sign-in for the button that was pressed. Ignores a press while one is running. A wait longer than
+ * 400 ms shows a count-up; a failure puts a plain-language message in the card and re-enables the button.
+ * @param instant true for keyboard activation, which skips motion
+ */
 async function beginLogin(
   button: HTMLButtonElement,
   host: HTMLElement,
@@ -124,10 +142,15 @@ async function beginLogin(
   }
 }
 
+/** True for a username of 2 to 32 characters from a to z, 0 to 9, underscore and hyphen. */
 export function validUsername(value: string): boolean {
   return /^[a-z0-9_-]{2,32}$/.test(value);
 }
 
+/**
+ * The message to show for a failed sign-in. A cancelled or timed-out passkey prompt gets a friendly sentence, a known
+ * {@link AuthError} keeps its own text, and anything else gets a generic line, so internal error text never reaches the page.
+ */
 export function safeAuthMessage(error: unknown): string {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {
     return "The passkey prompt was cancelled or timed out. Try again when you are ready.";
@@ -135,6 +158,7 @@ export function safeAuthMessage(error: unknown): string {
   return error instanceof AuthError ? error.message : "The request could not be completed. Try again.";
 }
 
+/** The name this device is registered under: the saved `tracer.device-name`, else the platform name plus "device". */
 export function deviceName(): string {
   try { return localStorage.getItem("tracer.device-name") || `${navigator.platform || "Browser"} device`; }
   catch { return "Browser device"; }

@@ -1,10 +1,18 @@
 /** Splits writes at every control boundary, without deciding which controls request answers [307]. */
+/**
+ * Finds where escape sequences end in a stream of terminal output, so a write can be split there and the renderer can
+ * answer a query (for example a cursor-position request) before the bytes after it are applied. Keep one instance per
+ * terminal stream and feed it every chunk in order.
+ */
 export class TerminalQueries {
   // Ground, ESC/intermediates, CSI, OSC, other string, ESC inside a string.
   private state = 0;
+  /** Stream offset of the ESC that began the current sequence. */
   private sequence = 0n;
+  /** Stream offset of an ESC seen inside a string, in case it begins a new sequence instead of ending the string. */
   private escapeSequence = 0n;
 
+  /** Forgets any half-read sequence; call it when the stream restarts. */
   reset(): void { this.state = 0; }
 
   /** The renderer alone decides which spans answer; retained state is constant even for huge strings. */
