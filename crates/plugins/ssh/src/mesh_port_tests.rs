@@ -36,8 +36,78 @@ fn both_families_preserve_the_destination_and_guard_the_internal_port() {
         )));
         assert!(rules.contains(&format!("{family} daddr {address} tcp dport 22022 drop")));
         assert!(!rules.contains("flush ruleset"));
-        assert!(!rules.contains("accept; }"));
+        // Chains default to accept; no rule may add an accept verdict of its own.
+        assert!(
+            !rules
+                .lines()
+                .filter(|line| line.starts_with("add rule"))
+                .any(|line| line.contains("accept"))
+        );
     }
+}
+
+/// nftables 1.0.9 (Ubuntu 24.04) applies `create table X { …; chain … }` as
+/// the table and its comment only, silently dropping the chains, and still
+/// exits 0: measured on dev-02 (#221 comment 78954). Every chain and rule is
+/// therefore its own command in the one atomic transaction, and the table
+/// creation alone keeps `create`, which fails if the table already exists.
+#[test]
+fn every_chain_and_rule_is_its_own_command() {
+    let script = render("10.254.0.1".parse().unwrap(), "infraternal0", 34711);
+    let table = "infraternal_ssh4_0afe0001";
+    let first = script.lines().next().unwrap();
+    assert_eq!(
+        first,
+        format!("create table inet {table} {{ comment \"infraternal.ssh.v1\"; }}")
+    );
+    for chain in ["incoming", "local", "guard"] {
+        assert!(
+            script.contains(&format!("add chain inet {table} {chain} {{ type ")),
+            "{chain}: {script}"
+        );
+        assert!(
+            script.contains(&format!("add rule inet {table} {chain} ")),
+            "{chain}: {script}"
+        );
+    }
+    assert!(!script.contains("chain incoming {\n"));
+}
+
+/// An install is accepted only if every chain and rule is really there, so a
+/// tool that drops statements silently cannot leave a bare table that admits
+/// mesh TCP/22 to the host's own sshd.
+#[test]
+fn an_install_missing_a_chain_or_rule_is_detected() {
+    let table = |items: &[serde_json::Value]| {
+        let mut all = vec![serde_json::json!({"metainfo": {"version": "1.0.9"}})];
+        all.push(serde_json::json!({"table": {"family": "inet", "name": "t", "comment": "infraternal.ssh.v1"}}));
+        all.extend_from_slice(items);
+        serde_json::json!({ "nftables": all })
+    };
+    let chain =
+        |name: &str| serde_json::json!({"chain": {"family": "inet", "table": "t", "name": name}});
+    let rule =
+        |name: &str| serde_json::json!({"rule": {"family": "inet", "table": "t", "chain": name}});
+    let complete = table(&[
+        chain("incoming"),
+        chain("local"),
+        chain("guard"),
+        rule("incoming"),
+        rule("local"),
+        rule("guard"),
+        rule("guard"),
+    ]);
+    assert!(installed(&complete));
+    assert!(!installed(&table(&[])));
+    assert!(!installed(&table(&[
+        chain("incoming"),
+        chain("local"),
+        chain("guard"),
+        rule("local"),
+        rule("guard"),
+        rule("guard"),
+    ])));
+    assert!(!installed(&serde_json::json!({})));
 }
 
 fn ip(args: &[&str]) {

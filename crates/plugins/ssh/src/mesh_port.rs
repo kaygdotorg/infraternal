@@ -61,6 +61,12 @@ impl MeshPort {
         };
         if redirected {
             transaction(&render(address, interface, listener.local_addr()?.port()))?;
+            // Never run with a partial install: a bare table would let mesh
+            // TCP/22 reach the host's own sshd. Remove it and refuse.
+            if let Err(error) = verify_installed(address) {
+                let _ = Self::recover(address);
+                return Err(error);
+            }
         }
         Ok(Self {
             listener: Some(listener),
@@ -221,27 +227,88 @@ fn render(address: IpAddr, interface: &str, port: u16) -> String {
         IpAddr::V4(address) => format!("{address}:{port}"),
         IpAddr::V6(address) => format!("[{address}]:{port}"),
     };
-    let mut script = format!(
-        "create table inet {} {{\n comment \"{MARKER}\";\n",
-        table(address)
+    let table = table(address);
+    // One command per table, chain and rule, all in one atomic `nft -f`
+    // transaction. nftables 1.0.9 drops chains nested inside
+    // `create table X { … }` silently and still succeeds (#221 comment
+    // 78954). `create` keeps refusing an existing table, so we never adopt one.
+    let mut script = format!("create table inet {table} {{ comment \"{MARKER}\"; }}\n");
+    let _ = writeln!(
+        script,
+        "add chain inet {table} incoming {{ type nat hook prerouting priority dstnat; policy accept; }}"
     );
     let _ = writeln!(
         script,
-        " chain incoming {{ type nat hook prerouting priority dstnat; policy accept; iifname \"{interface}\" {family} daddr {address} tcp dport 22 dnat {family} to {destination}; }}"
+        "add rule inet {table} incoming iifname \"{interface}\" {family} daddr {address} tcp dport 22 dnat {family} to {destination}"
     );
     // DNAT back to the same address supports node-local traffic without moving
     // the listener onto loopback or intercepting ordinary host SSH destinations.
     let _ = writeln!(
         script,
-        " chain local {{ type nat hook output priority dstnat; policy accept; {family} daddr {address} tcp dport 22 dnat {family} to {destination}; }}"
+        "add chain inet {table} local {{ type nat hook output priority dstnat; policy accept; }}"
+    );
+    let _ = writeln!(
+        script,
+        "add rule inet {table} local {family} daddr {address} tcp dport 22 dnat {family} to {destination}"
     );
     // The internal port is not a second externally usable SSH service. Only a
     // conntracked flow originally addressed to this node's TCP/22 may reach it.
     let _ = writeln!(
         script,
-        " chain guard {{ type filter hook input priority -11; policy accept; {family} daddr {address} tcp dport {port} ct original {family} daddr {address} ct original proto-dst 22 return; {family} daddr {address} tcp dport {port} drop; }}\n}}"
+        "add chain inet {table} guard {{ type filter hook input priority -11; policy accept; }}"
+    );
+    let _ = writeln!(
+        script,
+        "add rule inet {table} guard {family} daddr {address} tcp dport {port} ct original {family} daddr {address} ct original proto-dst 22 return"
+    );
+    let _ = writeln!(
+        script,
+        "add rule inet {table} guard {family} daddr {address} tcp dport {port} drop"
     );
     script
+}
+
+/// Whether a listed table (`nft -j list table`) holds every chain and rule
+/// [`render`] installs: the three chains, with one rule each in `incoming`
+/// and `local` and two in `guard`. Anything less is a failed install.
+fn installed(listing: &serde_json::Value) -> bool {
+    let Some(items) = listing["nftables"].as_array() else {
+        return false;
+    };
+    let chains: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["chain"]["name"].as_str())
+        .collect();
+    let rules = |chain: &str| {
+        items
+            .iter()
+            .filter(|item| item["rule"]["chain"].as_str() == Some(chain))
+            .count()
+    };
+    ["incoming", "local", "guard"]
+        .iter()
+        .all(|chain| chains.contains(chain))
+        && rules("incoming") == 1
+        && rules("local") == 1
+        && rules("guard") == 2
+}
+
+/// Read our table back after installing it.
+fn verify_installed(address: IpAddr) -> io::Result<()> {
+    let output = Command::new(NFT)
+        .args(["-j", "list", "table", "inet", &table(address)])
+        .stderr(Stdio::null())
+        .output()?;
+    let listing: serde_json::Value = if output.status.success() {
+        serde_json::from_slice(&output.stdout).map_err(io::Error::other)?
+    } else {
+        serde_json::Value::Null
+    };
+    if installed(&listing) {
+        Ok(())
+    } else {
+        Err(io::Error::other("redirect rules incomplete after install"))
+    }
 }
 
 #[cfg(test)]
