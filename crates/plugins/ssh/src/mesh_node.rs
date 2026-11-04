@@ -153,9 +153,9 @@ enum AddedWith {
 /// Fixed paths. Each directory on the way must be owned by root and closed
 /// to group and other writes ([`trusted_directory`]); otherwise nothing is
 /// written or served (J181 M4).
-const SOCKET: &str = "/run/infraternal-mesh-ssh/agent.sock";
+const SOCKET: &str = infraternal_plugin_api::mesh_ssh_files::SOCKET_PATH;
 /// The known-hosts file holding the mesh CA line.
-const KNOWN_HOSTS: &str = "/etc/ssh/infraternal-mesh-known_hosts";
+const KNOWN_HOSTS: &str = infraternal_plugin_api::mesh_ssh_files::KNOWN_HOSTS_PATH;
 /// The uid that must own every trusted directory.
 const ROOT: u32 = 0;
 
@@ -539,7 +539,7 @@ fn remove_client_files(known_hosts: &std::path::Path) {
 /// whether it may ask ([`crate::mesh_keys::may_ask`]); the identity is read
 /// per message, so renewal and removal apply at once.
 async fn serve_socket(shared: Arc<Shared>) {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     let path = Path::new(SOCKET);
     let Some(parent) = path.parent() else {
         return;

@@ -27,8 +27,9 @@
 use std::{fmt::Write as _, net::Ipv4Addr, path::Path};
 
 /// Where the file goes. OpenSSH's default configuration includes this
-/// directory on current Debian, Ubuntu, Fedora and macOS releases.
-pub const CONFIG_PATH: &str = "/etc/ssh/ssh_config.d/50-infraternal-mesh.conf";
+/// directory on current Debian, Ubuntu, Fedora and macOS releases. Shared
+/// with uninstall, which removes exactly this file.
+pub use infraternal_plugin_api::mesh_ssh_files::CONFIG_PATH;
 
 /// The patterns that match mesh hosts: the name suffix and, when the range
 /// falls on octet boundaries, an address glob (OpenSSH patterns have no CIDR).
@@ -115,7 +116,8 @@ pub fn client_config_with_hosts(
     let mut file = String::new();
     writeln!(
         file,
-        "# Managed by infraternal: mesh SSH for mesh names and addresses only."
+        "{} for mesh names and addresses only.",
+        infraternal_plugin_api::mesh_ssh_files::HEADER
     )
     .ok()?;
     writeln!(
