@@ -12,22 +12,30 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// Fixed absolute path of the firewall tool; never looked up through `PATH`.
 const NFT: &str = "/usr/sbin/nft";
+/// Table comment that marks a table as ours. Tables without it are never touched.
 const MARKER: &str = "infraternal.ssh.v1";
 
 /// Observable selection for owner review; no host SSH configuration is changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortMode {
+    /// No listener is held.
     Stopped,
+    /// Listening on TCP/22 of the mesh address itself.
     Direct,
+    /// TCP/22 was taken, so we listen on a random port and redirect mesh TCP/22 to it.
     Redirect,
 }
 
 /// A listener and its optional owned redirect. Explicit stop is retryable and
 /// reports cleanup failure; Drop is only a best-effort fallback, not evidence.
 pub struct MeshPort {
+    /// The bound socket; `None` once stopped.
     listener: Option<TcpListener>,
+    /// The mesh address; also names the firewall table.
     address: IpAddr,
+    /// True while our redirect rules are installed.
     redirected: bool,
 }
 
@@ -61,6 +69,7 @@ impl MeshPort {
         })
     }
 
+    /// Whether the port is stopped, direct or redirected.
     #[must_use]
     pub fn mode(&self) -> PortMode {
         if self.listener.is_none() {
@@ -106,12 +115,17 @@ impl MeshPort {
     }
 }
 
+/// Best-effort `stop`; errors are ignored here, so call `stop` explicitly to learn of them.
 impl Drop for MeshPort {
     fn drop(&mut self) {
         let _ = self.stop();
     }
 }
 
+/// Reject addresses that make no sense for a mesh listener (unspecified,
+/// loopback, multicast) and interface names that are empty, over 15 bytes or
+/// contain anything but letters, digits, `_`, `.` and `-`. The strict character
+/// set is what keeps the interface name safe to place in the firewall script.
 fn validate(address: IpAddr, interface: &str) -> io::Result<()> {
     if address.is_unspecified()
         || address.is_loopback()
@@ -127,6 +141,7 @@ fn validate(address: IpAddr, interface: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Firewall table name derived from the address (hex), so each mesh address has its own table.
 fn table(address: IpAddr) -> String {
     match address {
         IpAddr::V4(address) => format!("infraternal_ssh4_{:08x}", u32::from(address)),
@@ -136,6 +151,8 @@ fn table(address: IpAddr) -> String {
 
 // Table names and script coordinates contain only typed addresses, integer ports
 // and a validated interface. No shell, key material or caller script is accepted.
+/// Apply an nft script atomically (`nft -f -`, script on stdin, output discarded).
+/// Any tool failure is reported as `PermissionDenied`.
 fn transaction(script: &str) -> io::Result<()> {
     let mut child = Command::new(NFT)
         .args(["-f", "-"])
@@ -156,6 +173,10 @@ fn transaction(script: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether our table for `address` exists. `Ok(true)` only for a table whose
+/// comment is exactly the marker. A table with the same name but another (or no)
+/// comment is foreign and gives `AlreadyExists`, so we never delete or adopt it.
+/// A failing or unparsable `nft` listing is an error, not "absent".
 fn presence(address: IpAddr) -> io::Result<bool> {
     let output = Command::new(NFT)
         .args(["-j", "list", "tables"])
@@ -188,6 +209,12 @@ fn presence(address: IpAddr) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Build the nft script that redirects mesh TCP/22 to the internal `port`.
+///
+/// One table with three chains: `incoming` redirects traffic arriving on the
+/// mesh `interface`; `local` does the same for this node's own traffic; `guard`
+/// drops direct connections to the internal port unless the flow was originally
+/// addressed to TCP/22.
 fn render(address: IpAddr, interface: &str, port: u16) -> String {
     let family = if address.is_ipv4() { "ip" } else { "ip6" };
     let destination = match address {

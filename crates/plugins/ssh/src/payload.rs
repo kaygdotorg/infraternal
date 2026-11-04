@@ -1,4 +1,11 @@
 //! Caches public payload hashes for the two configured architectures without trusting path names (#190, D17).
+//!
+//! Provisioning a host needs the SHA-256 of the infraternal binary to upload.
+//! Hashing a large file for every host would be wasteful, so digests are cached
+//! by file identity (device, inode, size, modification and change times), not by
+//! path. A replaced or edited file therefore gets a new identity and is hashed
+//! again. The digest is only an offer: the target host still verifies the bytes
+//! it receives or reuses before running them.
 
 use crate::model::Failure;
 use sha2::{Digest, Sha256};
@@ -11,15 +18,22 @@ static CACHE: PayloadCache = PayloadCache {
     entries: Mutex::const_new(Vec::new()),
 };
 
+/// What makes a file "the same file": two files with equal identity are treated as identical content.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Identity {
+    /// Device number of the filesystem.
     device: u64,
+    /// Inode number.
     inode: u64,
+    /// Size in bytes.
     size: u64,
+    /// Modification time as seconds and nanoseconds.
     modified: (i64, i64),
+    /// Status-change time as seconds and nanoseconds.
     changed: (i64, i64),
 }
 impl Identity {
+    /// Take the identity from file metadata (no file content is read).
     pub(super) fn of(metadata: &std::fs::Metadata) -> Self {
         Self {
             device: metadata.dev(),
@@ -31,20 +45,30 @@ impl Identity {
         }
     }
 }
+/// A cached digest for one file identity.
 struct Entry {
+    /// Identity of the file that was hashed.
     identity: Identity,
+    /// Lower-case hex SHA-256, shared between callers.
     digest: Arc<str>,
 }
+/// Small cache (at most four entries, oldest evicted first).
 #[derive(Default)]
 struct PayloadCache {
+    /// Entries behind an async lock that is also held during a miss's hashing.
     entries: Mutex<Vec<Entry>>,
 }
 
+/// Lower-case hex SHA-256 of the file at `path`, from the process-wide cache.
+///
+/// Fails with an install error if the file is missing, unreadable or changes
+/// while being read.
 pub(crate) async fn digest(path: &Path) -> Result<Arc<str>, Failure> {
     CACHE.digest(path).await
 }
 
 impl PayloadCache {
+    /// Look up `path` by identity; on a miss hash it on a blocking thread and store the result.
     async fn digest(&self, path: &Path) -> Result<Arc<str>, Failure> {
         // Local metadata is a short syscall; only the full read leaves the
         // executor. One blocking task per miss replaces a blocking hop per
@@ -98,12 +122,14 @@ fn hash(path: &Path, identity: Identity) -> Result<Arc<str>, Failure> {
     Ok(format!("{:x}", hash.finalize()).into())
 }
 
+/// Error for a file replaced or edited while it was being hashed.
 fn changed() -> Failure {
     Failure::install(
         "The static infraternal binary changed while being read. Retry host provisioning.",
     )
 }
 
+/// Generic read failure with no path or system detail.
 fn unreadable() -> Failure {
     Failure::install("The static infraternal binary could not be read.")
 }
