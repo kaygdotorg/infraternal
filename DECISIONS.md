@@ -3901,3 +3901,24 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Creating** such a key needs a passkey tap bound to its exact
        settings. **Revoking** it stops new joins; machines that joined stay,
        with a separate action to remove them ("agreed").
+343. **App-window controls, keys on the command line, key lists (owner,
+     2026-11-04, #146; extends D342):**
+     - **Clipboard is automatic both ways:** "pasteing my clipboard to the
+       mac should be automatic and if i am in the screen copying something,
+       copying that to my browser/app should be atuomatic too".
+     - **Top-right controls:** Send keys ("this is fine") and Bring to front
+       on the machine ("also fine"). For the others: "the others need
+       inspiration from screens 5 and/or jump desktop".
+     - **1:1 or fit, reconnect and frame rate are settings, not controls:**
+       "these feel like a different toolbar/pill somewhere that aren't about
+       controls as much as htey are about settings".
+     - **Several windows of one app:** one row per window in the picker
+       ("agreed").
+     - **A key on the command line:** `--setup-key=env:NAME`,
+       `--setup-key=file:PATH` and `--setup-key=-` (stdin), never the literal
+       key: "this format is way better than i what i suggested yeah".
+     - **Any API key may have no expiry**, not only join keys ("this is
+       correct", on "any key may have no expiry").
+     - **Keys live in one list under Settings › Access**, every key with
+       scope chips, uses, the last machine that joined, its expiry and
+       revoke ("agreed").
