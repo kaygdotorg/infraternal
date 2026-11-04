@@ -58,7 +58,11 @@ export function createRows(cx: Ctx, stopsFor: (c: ViewRec) => Stops, goStop: (c:
   };
   const windowInView = (c: ViewRec): string | undefined => {
     const st = stopsFor(c), band = bandInView(c);
-    const owner = st.owners[nearestStop(st, camera.cam.cx)] ?? -1;
+    // At the end of the row the window in view is the row's last one: the stop's own column can be the one before it, with the last
+    // window beside it, and the breadcrumb would name a window that is not the one the camera went to.
+    const end = limit(c, st, band);
+    const atEnd = end !== undefined && camera.cam.cx - st.view / 2 >= end - 2;
+    const owner = atEnd ? c.view.cols.length : st.owners[nearestStop(st, camera.cam.cx)] ?? -1;
     // The window of the row in view that sits in the stop's column; a short row has none there, and its last window is the one in view.
     let before: string | undefined, after: string | undefined;
     c.view.cols.forEach((col, k) => {
