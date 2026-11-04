@@ -227,6 +227,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       for (const it of visible) { it.card.style.setProperty("--ey", `${-lift}px`); lift += it.height + GAP_PX; }
       const front = visible[0]?.height ?? 0;
       wrap.style.setProperty("--front-h", `${front}px`);
+      // Collapsed, the cards behind are as wide as the front one, so only their top edge peeks out.
+      if (visible[0]) wrap.style.setProperty("--front-w", `${visible[0].card.offsetWidth}px`);
     });
   };
   const leave = (it: Item): void => {

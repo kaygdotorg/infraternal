@@ -184,7 +184,7 @@
 .ui-toast-stack[data-placement="parent"] .ui-toast { margin-inline: 0; }
 .ui-toast-stack[data-expanded="true"] .ui-toast { --y: var(--ey, 0px); --s: 1; }
 /* Collapsed: every toast behind the front one is as tall as the front one and shows only its top edge. */
-.ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] { height: var(--front-h); min-height: 0; overflow: hidden; }
+.ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] { height: var(--front-h); width: var(--front-w); min-height: 0; overflow: hidden; }
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] > * { opacity: 0; }
 .ui-toast[data-hidden="true"] { opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 170ms ease-out, transform 190ms cubic-bezier(0.23, 1, 0.32, 1), visibility 0s 170ms; }
 .ui-toast[data-swiping="true"] { transition: none; }
