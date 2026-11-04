@@ -8,14 +8,16 @@ import { defaultValue, type SettingValue } from "../../../../../packages/ui/src/
 import type { SettingsSource } from "../views/settings-body.on-demand";
 import type { ViewId } from "../model/types";
 import type { GroupData } from "../settings-rows/catalog";
-import { SETTING_DEFS, type SettingDef } from "../settings-rows/definitions.on-demand";
+import type { SettingDef } from "../settings-rows/definitions.on-demand";
+import { onDemand } from "../../on-demand";
 import { createRowsSource } from "../settings-rows/source";
 import type { MockWorld } from "./world";
 
 /** Every setting's value, kept for the session so a window that is rebuilt (a role change) keeps what was typed. */
 const values = new Map<string, SettingValue>();
 const valueOf = (s: SettingDef): SettingValue => values.get(s.id) ?? defaultValue(s.spec);
-const defs = new Map(Object.entries(SETTING_DEFS));
+/** The wording and rules of each setting load on demand, as they do in the product (D188). */
+const defOf = async (id: string): Promise<SettingDef | undefined> => (await onDemand(() => import("../settings-rows/definitions.on-demand"))).SETTING_DEFS[id];
 
 const EXAMPLE: Readonly<Record<string, GroupData>> = {
   "you.apps": { keys: [
@@ -34,7 +36,10 @@ const EXAMPLE: Readonly<Record<string, GroupData>> = {
 export function createMockSettings(world: MockWorld): SettingsSource {
   const rows = createRowsSource({
       admin: () => world.role === "operator",
-      backing: (id) => { const def = defs.get(id); return def && { read: async () => valueOf(def), write: async (v) => { if (v === defaultValue(def.spec)) values.delete(id); else values.set(id, v); } }; },
+      backing: (id) => ({
+        read: async () => { const def = await defOf(id); return def ? valueOf(def) : undefined; },
+        write: async (v) => { const def = await defOf(id); if (def && v === defaultValue(def.spec)) values.delete(id); else values.set(id, v); },
+      }),
       data: (comp, group) => EXAMPLE[`${comp}.${group}`],
       value: valueOf,
   });

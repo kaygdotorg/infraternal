@@ -20,7 +20,7 @@ export interface SettingDef {
 const days = (d: number, min: number, max: number): ValueSpec => ({ kind: "duration", unit: "d", default: d, min, max });
 const minutes = (m: number, min: number, max: number): ValueSpec => ({ kind: "duration", unit: "min", default: m, min, max });
 
-export const SETTING_DEFS: Readonly<Record<string, SettingDef>> = Object.fromEntries([
+export const SETTING_DEFS: Readonly<Record<string, SettingDef>> = Object.fromEntries(([
 { id: "scrollback-lines", title: "Lines Kept", explain: "How many lines each terminal keeps for you to scroll back through.", spec: { kind: "number", unit: "lines", default: 10000, min: 1000, max: 100000 }, keywords: "scrollback history buffer" },
 { id: "multiplexer-offer", title: "Offer To Switch", explain: "Ask, in a new shell, whether to switch to the Infraternal Multiplexer.", spec: { kind: "switch", default: true }, keywords: "multiplexer tmux switch" },
 { id: "app-key", title: "Keys Last", explain: "Each use starts the time again; a key unused this long stops working.", spec: days(30, 1, 365), keywords: "cli mcp api key token sliding" },
@@ -36,7 +36,7 @@ export const SETTING_DEFS: Readonly<Record<string, SettingDef>> = Object.fromEnt
 { id: "name-suffix", title: "Machine Names End In", explain: "Machines answer to name.internal inside the mesh; change it only to avoid a clash.", keywords: "dns suffix domain internal",
         spec: { kind: "text", default: ".internal", pattern: /^\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/, rule: "Start with a dot, then lowercase letters, digits and hyphens." } },
 { id: "renew-early", title: "Renew Early", explain: "Certificates for published services are renewed this long before they run out.", spec: days(30, 1, 60), keywords: "proxy certificate renew acme tls" }
-].map((d) => [d.id, d]));
+] satisfies SettingDef[]).map((d) => [d.id, d]));
 
 /** The value a setting has until something stores another. */
 export const defaultOf = (s: SettingDef): SettingValue => defaultValue(s.spec);

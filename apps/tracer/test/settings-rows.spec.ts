@@ -126,8 +126,8 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch, dpr } of SIZES) 
       }
       // The whole list decides together, and by the list's width: phones stack the long Window Sizes descriptions under
       // their names; Theme's one-word descriptions stay beside at every width we ship.
-      if (section.name === "Window Sizes" && w < 600) for (const r of list.filter((x) => x.list === "Phones")) expect(r.mode, `${r.name}: narrow lists show subtitles`).toBe("stacked");
-      if (section.name === "Appearance") for (const r of list.filter((x) => x.list === "Theme")) expect(r.mode, `${r.name}: short descriptions stay beside`).toBe("beside");
+      if (section.name === "Appearance › Layout" && w < 600) for (const r of list.filter((x) => x.list === "Phones")) expect(r.mode, `${r.name}: narrow lists show subtitles`).toBe("stacked");
+      if (section.name === "Appearance › Theme") for (const r of list.filter((x) => x.list === "Theme")) expect(r.mode, `${r.name}: short descriptions stay beside`).toBe("beside");
       // The heading sits the shared gap above the first row: the gap is the heading's own bottom padding.
       const gap = await page.evaluate((listName) => {
         const l = document.querySelector(`.ui-sp-list[aria-label="${listName}"]`)!;
