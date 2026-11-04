@@ -1,4 +1,23 @@
 //! Pins one explicitly confirmed SSH key; changed application pins need a fresh observation and atomic confirmation.
+//!
+//! Host-key trust works in two steps so a key is never trusted by accident:
+//!
+//! 1. A connection to an unknown host fails with a host-key error. The server
+//!    then scans the host's public keys, keeps one, and stores it as a
+//!    pending observation (valid 120 seconds, at most 128 at a time) under a
+//!    random challenge id. The person is shown the fingerprint.
+//! 2. When the person confirms that challenge and fingerprint, the server
+//!    re-reads the effective SSH policy, checks nothing changed (same policy,
+//!    same previous pin, still no external trust), re-checks the person's live
+//!    authority, and only then publishes the key as an application pin: a
+//!    public-key file in a private 0700 directory, written to a temporary name,
+//!    synced and renamed into place. A challenge can replace only the exact pin
+//!    it saw, and works once.
+//!
+//! Trust configured outside the application (known-hosts files or a lookup
+//! command) always wins and is never modified. Pin files contain only public
+//! keys. No private key, password or session capability is stored here.
+//! Anything malformed, wrongly owned or ambiguous fails closed.
 
 use crate::{
     config::TrustPolicy,
@@ -19,9 +38,16 @@ use std::{
 };
 use tokio::process::Command;
 
+/// Serializes every pin write and delete in this process, so a compare-and-replace is atomic.
 static PUBLICATION: Mutex<()> = Mutex::new(());
 
 /// Delete only an owned application pin; external SSH trust is never changed.
+///
+/// `root` is the pin directory and `lookup` the host lookup name whose pin goes.
+/// A missing directory or pin is success. The directory must be a real 0700
+/// directory and the pin a regular 0600 file, both owned by this user (symlinks
+/// are not followed), and its content must be exactly the canonical record for
+/// `lookup`; otherwise nothing is deleted.
 /// # Errors
 /// Refuses unsafe ownership, malformed records and filesystem failures.
 pub fn forget_pin(root: &std::path::Path, lookup: &str) -> Result<(), Failure> {
@@ -68,22 +94,33 @@ pub fn forget_pin(root: &std::path::Path, lookup: &str) -> Result<(), Failure> {
         .map_err(|_| unavailable())
 }
 
+/// A first-contact key waiting for a person's confirmation.
 struct Observation {
+    /// The endpoint it was observed for; a confirmation must name the same one.
     destination: Destination,
+    /// The trust policy at observation time; confirmation requires it unchanged.
     policy: TrustPolicy,
+    /// Candidate keys as `(SHA256 fingerprint, known-hosts record)`; at most one after selection.
     keys: Vec<(String, String)>,
+    /// The application pin that existed then, if any (a changed-key case).
     previous: Option<String>,
+    /// When it was observed; expires after 120 seconds.
     received: Instant,
 }
 
 /// Shares public pin/challenge custody across every automatic method and batch.
 /// No private key, password, session capability or invitation enters this store.
 pub struct TrustedOpenSsh {
+    /// The system OpenSSH adapter used for connections, key scans and fingerprints.
     ssh: OpenSsh,
+    /// Private directory holding the pin files.
     root: PathBuf,
+    /// Observations awaiting confirmation, by challenge id.
     pending: Mutex<HashMap<uuid::Uuid, Observation>>,
 }
 impl TrustedOpenSsh {
+    /// Wrap `ssh` with application pin custody under `root`. The directory is
+    /// created (0700) on first use, not here.
     #[must_use]
     pub fn new(ssh: OpenSsh, root: PathBuf) -> Self {
         Self {
@@ -93,6 +130,7 @@ impl TrustedOpenSsh {
         }
     }
 
+    /// Path of the pin file for `policy`'s lookup name (named by the SHA-256 of the lookup, so the host name never forms a path).
     fn pin(&self, policy: &TrustPolicy) -> PathBuf {
         self.root.join(format!(
             "{:x}.pub",
@@ -100,6 +138,7 @@ impl TrustedOpenSsh {
         ))
     }
 
+    /// Create the pin directory if needed and require it to be a real 0700 directory owned by this user.
     fn private_root(&self) -> Result<(), Failure> {
         match fs::DirBuilder::new().mode(0o700).create(&self.root) {
             Ok(()) => {}
@@ -116,6 +155,11 @@ impl TrustedOpenSsh {
         Ok(())
     }
 
+    /// The existing application pin for `policy`, as its one-line record, or `None` if there is none.
+    ///
+    /// Fails closed when the file is not a 0600 regular file owned by this user
+    /// (symlinks are not followed), is over 8 KiB, or is not exactly the canonical
+    /// record for the lookup name.
     fn recorded(&self, policy: &TrustPolicy) -> Result<Option<String>, Failure> {
         self.private_root()?;
         let path = self.pin(policy);
@@ -154,6 +198,11 @@ impl TrustedOpenSsh {
         Ok(Some(text.to_owned()))
     }
 
+    /// True if trust for the lookup name already exists outside the application.
+    ///
+    /// A lookup command counts as trust without being run, because absence
+    /// cannot be proven. Otherwise each known-hosts file is searched with
+    /// `ssh-keygen -F`; a missing file is skipped, and any other odd result is an error.
     async fn configured_trust(&self, policy: &TrustPolicy) -> Result<bool, Failure> {
         // Let the native engine enforce active command policy; never replace it
         // with a first-contact pin on the strength of a file-only absence check.
@@ -180,6 +229,13 @@ impl TrustedOpenSsh {
         Ok(false)
     }
 
+    /// Scan the host's public keys and register a pending observation.
+    ///
+    /// Returns the challenge id, or `None` when external trust already exists,
+    /// no usable key was found, or 128 observations are already pending. Keys are
+    /// checked (record shape, allowed algorithm, valid fingerprint), preferring
+    /// ed25519, then ecdsa, then rsa, and one is kept. Expired observations are
+    /// dropped first. Nothing is pinned here.
     async fn observe(
         &self,
         destination: Destination,
@@ -256,6 +312,15 @@ impl TrustedOpenSsh {
         Ok(Some(challenge))
     }
 
+    /// Turn a pending observation into an application pin.
+    ///
+    /// The challenge is consumed even if a later check fails, so it cannot be
+    /// retried. Requires: the same destination, under 120 seconds old, the same
+    /// effective trust policy, the same previous pin, no external trust, a
+    /// fingerprint equal to the observed key's, and a successful live
+    /// `authority` check just before publishing. All refusals use one generic
+    /// host-key error. The write is atomic (temporary file, sync, rename, sync
+    /// directory) and guarded by `PUBLICATION`.
     async fn confirm(
         &self,
         destination: Destination,
@@ -327,6 +392,11 @@ impl TrustedOpenSsh {
 }
 
 impl SshTransport for TrustedOpenSsh {
+    /// Connect with strict host keys. If an application pin exists it is used
+    /// (restricted to that key's algorithms), unless external trust now also
+    /// exists, which is refused as ambiguous. On a host-key failure the error
+    /// carries a challenge plus the observed fingerprint and key type, and says
+    /// whether it replaces an earlier pin.
     fn open(
         &self,
         destination: Destination,
@@ -378,6 +448,7 @@ impl SshTransport for TrustedOpenSsh {
             }
         })
     }
+    /// Pin the key observed for `challenge` if `fingerprint` matches it; see `confirm` for the checks.
     fn confirm_host_key<'a>(
         &'a self,
         destination: Destination,
@@ -392,6 +463,10 @@ impl SshTransport for TrustedOpenSsh {
 /// Parse bounded keyscan syntax for the already validated lookup.
 /// Cryptographic key validation belongs to the selected SSH engine.
 /// Robustness tests call this exact production decoder.
+///
+/// Accepts exactly three fields (name, key type, base64 key of at most 4096
+/// characters) with a supported key type. Returns the canonical line
+/// `<lookup> <type> <key>\n`, which replaces whatever name the scan printed.
 #[doc(hidden)]
 #[must_use]
 pub fn public_record(line: &[u8], lookup: &str) -> Option<String> {
@@ -416,6 +491,7 @@ pub fn public_record(line: &[u8], lookup: &str) -> Option<String> {
     }
     Some(format!("{lookup} {} {}\n", fields[1], fields[2]))
 }
+/// True for a SHA-256 fingerprint as printed by OpenSSH: `SHA256:` plus 43 base64 characters.
 fn valid_fingerprint(value: &str) -> bool {
     value.len() == 50
         && value.starts_with("SHA256:")
@@ -423,15 +499,18 @@ fn valid_fingerprint(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
 }
+/// The one error for every failed confirmation, so a peer learns nothing about which check failed.
 fn denied() -> Failure {
     Failure::new(
         FailureKind::HostKey,
         "The SSH host-key confirmation needs review. Retry the host check.",
     )
 }
+/// Generic error for unsafe, malformed or unreadable trust state.
 fn unavailable() -> Failure {
     Failure::unsupported("The public SSH trust policy is unavailable or ambiguous.")
 }
+/// Lock a mutex, ignoring poisoning (the guarded data stays valid after a panic elsewhere).
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value
         .lock()

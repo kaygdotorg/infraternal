@@ -1,12 +1,22 @@
 //! Splits flat JSON column/band geometry without introducing a second document representation [212,243].
 use crate::model;
 use serde_json::{Value, json};
+//
+// Vocabulary used below: a canvas is a left-to-right list of columns. Each
+// column holds windows. A window sits at a `row` inside its column, is `rows`
+// bands tall, and spans `span` columns to the right (itself included). Rows are
+// counted in whole bands, at most 64 of them, so one `u128` bit mask can mark
+// which bands of a column are taken.
+
+/// The mutable `windows` array of a column; `Err` if the column has none.
 fn wins_mut(column: &mut Value) -> Result<&mut Vec<Value>, ()> {
     column
         .get_mut("windows")
         .and_then(Value::as_array_mut)
         .ok_or(())
 }
+/// Reads a small integer field (`span`, `row` or `rows`) from a window, or
+/// `default` when the field is absent.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn band(window: &Value, key: &str, default: u8) -> u8 {
     // The document/intent validator already requires integral values in 0..=64.
@@ -15,6 +25,10 @@ fn band(window: &Value, key: &str, default: u8) -> u8 {
         .and_then(Value::as_f64)
         .map_or(default, |v| v as u8)
 }
+/// Finds the inclusive column range `(start, end)` that contains column `at`
+/// and is tied together by multi-column windows. Windows in different groups
+/// never overlap horizontally, so a vertical split only has to shift rows
+/// inside one group. A column outside every group is its own group `(at, at)`.
 fn range(columns: &[Value], at: usize) -> (usize, usize) {
     let mut start = 0;
     while start < columns.len() {
@@ -34,17 +48,29 @@ fn range(columns: &[Value], at: usize) -> (usize, usize) {
     }
     (at, at)
 }
+/// Bit mask of the `rows` bands starting at `row` (bit N is band N).
 fn mask(row: u8, rows: u8) -> u128 {
     ((1_u128 << rows) - 1) << row
 }
+/// True when none of the bands in `bits` is taken in any of the `span`
+/// columns starting at `column`. `taken` holds one band mask per column.
 fn free(taken: &[u128], column: usize, span: usize, bits: u128) -> bool {
     taken[column..column + span].iter().all(|v| v & bits == 0)
 }
+/// Marks the bands in `bits` as taken in the `span` columns starting at `column`.
 fn mark(taken: &mut [u128], column: usize, span: usize, bits: u128) {
     for v in &mut taken[column..column + span] {
         *v |= bits;
     }
 }
+/// Normalizes the layout so every window has an explicit `span`, `rows` and
+/// non-overlapping `row`.
+///
+/// Pass one clamps each span to the columns that exist and keeps the explicit
+/// rows that do not collide with an earlier window (colliding ones lose their
+/// `row`). Pass two gives each row-less window the first free position at or
+/// below the previous window of its column. `Err` if a column has no `windows`
+/// array or the rows would run past band 64.
 fn settle(columns: &mut [Value]) -> Result<(), ()> {
     let mut taken = vec![0_u128; columns.len()];
     let count = columns.len();
@@ -85,6 +111,20 @@ fn settle(columns: &mut [Value]) -> Result<(), ()> {
     }
     Ok(())
 }
+/// Splits the window `anchor` in two and puts `new` in the freed space.
+///
+/// `axis == "right"` places `new` beside the anchor. A multi-column anchor
+/// gives its right half of the span to `new`. A one-column anchor makes room by
+/// inserting a new column `column_id` after it, with half of the anchor
+/// column's `weight`, and widening every other window that crossed it. Any
+/// other `axis` places `new` below the anchor: rows at or under the anchor shift
+/// down by one within the connected column group, and a `height` is halved
+/// between the two windows.
+///
+/// The layout is normalized first and each column ends sorted by `row`.
+/// `Err` (a refusal, with `columns` possibly half-edited) when the anchor is
+/// missing, `column_id` already exists, or a number would overflow; callers
+/// must therefore work on a copy and keep it only on success.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn split(
     columns: &mut Vec<Value>,

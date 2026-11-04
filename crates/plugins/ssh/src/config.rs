@@ -1,4 +1,17 @@
 //! Retains bounded public OpenSSH policy while excluding ambient identity paths from D183 authentication.
+//!
+//! The server user's own SSH configuration may name identity files, certificates
+//! or hardware providers. Those must never leak into an authentication attempt,
+//! because the attempt is supposed to use only the credentials we hand over.
+//! This module reads the effective configuration (the output of `ssh -G`) and
+//! keeps a small allow-list of public policy: host-key trust files, key
+//! algorithms, ciphers, address binding and similar. Every other option is
+//! dropped and the final SSH child runs with `-F /dev/null` plus only the kept
+//! options. A policy that cannot be reconstructed unambiguously is refused
+//! (fails closed) rather than guessed, because a wrong guess could ignore an
+//! existing trusted host key and so allow first-contact admission.
+//!
+//! [`TrustPolicy`] is the part that survives first-contact confirmation.
 
 use crate::{model::Destination, openssh::scan_destination};
 use std::collections::HashSet;
@@ -6,14 +19,21 @@ use tokio::process::Command;
 
 /// Effective addressing and public trust/transport policy, never key or credential paths.
 pub struct PublicSshConfiguration {
+    /// Where to connect after OpenSSH applied host aliases and proxy rules.
     pub destination: Destination,
+    /// Kept options as lower-case `(name, value)` pairs, already quoted for `-o name=value`.
     options: Vec<(String, String)>,
+    /// One list per `UserKnownHostsFile` / `GlobalKnownHostsFile` line, unquoted, for existence checks.
     trust_paths: Vec<Vec<String>>,
+    /// The `HostKeyAlias`, if configured; it replaces the host name in trust lookups.
     alias: Option<String>,
 }
 impl PublicSshConfiguration {
+    /// True when the configuration asks for nothing beyond default routing.
+    ///
     /// The descriptor helper implements default routing only. Let native SSH
     /// apply source/interface and family restrictions before contacting a host.
+    /// So a bind address, bind interface or restricted address family makes this false.
     #[must_use]
     pub(crate) fn permits_connector(&self) -> bool {
         self.options
@@ -26,6 +46,12 @@ impl PublicSshConfiguration {
     }
 
     /// Parse only the bounded output of trusted system OpenSSH's configuration query.
+    ///
+    /// `original` is the destination the user asked for; `bytes` is the `ssh -G` output.
+    /// Returns `None` (nothing is kept) on invalid endpoints, proxy hops,
+    /// duplicated policy lines, over-long values (above 4096 bytes), control bytes,
+    /// more than 16 trust files, or a multi-file trust list containing `%` or `~`
+    /// tokens. `%n` in kept values is replaced with the original host name.
     /// # Errors
     /// Invalid endpoints, proxy hops, duplicated policy and control bytes refuse parsing.
     #[must_use]
@@ -126,6 +152,16 @@ impl PublicSshConfiguration {
         })
     }
 
+    /// Builds the [`TrustPolicy`] used for first-contact confirmation.
+    ///
+    /// Returns `None` when the paths are ambiguous (see
+    /// [`Self::validate_trust_paths`]), the lookup host name is empty, longer than
+    /// 253 bytes, starts with `-` or has unexpected characters, or a trust file is
+    /// relative or contains `%`. The lookup name is the `HostKeyAlias` if set,
+    /// otherwise the host (written `[host]:port` for non-default ports). The
+    /// policy also carries a SHA-256 digest of all kept options so a later change
+    /// of policy can be noticed.
+    ///
     /// Confirmation requires exact reconstructable public paths and lookup identity.
     #[must_use]
     pub fn trust_policy(&self) -> Option<TrustPolicy> {
@@ -185,8 +221,12 @@ impl PublicSshConfiguration {
         })
     }
 
-    /// Refuse existing public trust filenames hidden by -G's lost whitespace
-    /// quoting. This checks only configured public-path metadata, never contents.
+    /// Returns false if any trust file name could be hidden by `-G`'s lost whitespace quoting.
+    ///
+    /// `-G` prints a quoted list such as `"a b"` as two words. For every run of two or more
+    /// consecutive words this joins them with spaces and checks whether such a file
+    /// exists; if it does, or if its metadata cannot be read, the answer is false
+    /// (fail closed). This checks only configured public-path metadata, never contents.
     /// # Errors
     /// Ambiguous existing paths or inaccessible metadata cannot preserve strict trust.
     #[must_use]
@@ -208,6 +248,11 @@ impl PublicSshConfiguration {
         true
     }
 
+    /// Switches the options to trust exactly one confirmed key file.
+    ///
+    /// Replaces the known-hosts files with `path` (user file) and `/dev/null`
+    /// (global file) and limits host-key algorithms to `algorithms`. Other
+    /// policy, such as revoked keys and cipher choices, is kept.
     pub(crate) fn configure_pin(&mut self, path: &std::path::Path, algorithms: &str) {
         // Admission already checked this exact lookup and configured trust.
         // Retain KRL and crypto policy while selecting the confirmed key family.
@@ -225,8 +270,11 @@ impl PublicSshConfiguration {
             .push(("globalknownhostsfile".into(), "/dev/null".into()));
     }
 
+    /// Adds `-F /dev/null` and the kept public options to an OpenSSH command line.
+    ///
     /// Empty config prevents configured keys/certificates from being appended.
     /// Only public policy is re-applied; credential policy follows separately.
+    /// Nothing secret is placed in argv here.
     pub fn configure(&self, command: &mut Command) {
         command.args(["-F", "/dev/null"]);
         for (name, value) in &self.options {
@@ -269,17 +317,26 @@ mod tests;
 /// Only public addressing/trust policy is retained across first-contact confirmation.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TrustPolicy {
+    /// The endpoint the policy applies to.
     pub destination: Destination,
+    /// Name under which the host key is looked up: the host, `[host]:port`, or the `HostKeyAlias`.
     pub lookup: String,
+    /// Absolute known-hosts files to consult (`none` and `/dev/null` removed).
     pub paths: Vec<std::path::PathBuf>,
     /// Dynamic trust cannot be proven absent by querying static public files.
     pub dynamic_trust: bool,
+    /// Allowed host-key algorithms if the configuration restricts them; `None` means unrestricted.
     algorithms: Option<Vec<String>>,
+    /// SHA-256 over all kept option names and values; makes equal policies comparable.
     digest: [u8; 32],
 }
 
 impl TrustPolicy {
     /// Constrain negotiation to the confirmed key without weakening configured crypto policy.
+    ///
+    /// Returns the comma-separated algorithm names to offer for `key_type`
+    /// (RSA keys map to the SHA-2 signature names), intersected with any configured
+    /// restriction. `None` if the key type is unknown or nothing is allowed.
     pub(crate) fn key_algorithms(&self, key_type: &str) -> Option<String> {
         let candidates: &[&str] = match key_type {
             "ssh-ed25519" => &["ssh-ed25519"],

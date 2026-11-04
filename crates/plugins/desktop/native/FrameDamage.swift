@@ -1,15 +1,31 @@
 /// Role: classify native frame damage and report geometry-only diagnostics in opt-in measurements [D254,D266,#146].
+/// ScreenCaptureKit attaches a list of changed rectangles (the damage) to every captured frame.
+/// These functions decide from that list whether the picture really changed, and avoid sending
+/// duplicate frames to the encoder.
 import Foundation
 import CoreGraphics
 
+/// Objective-C type encoding of a boxed `CGRect`, used to recognize rectangles inside `NSValue`.
 private let damageRectangleEncoding = String(cString: NSValue(rect: .zero).objCType)
 
+/// How much a captured frame changed.
 enum CaptureFrameDamage: String, Equatable {
+    /// The damage list is present but holds only empty rectangles: nothing to encode.
     case unchanged
+    /// Only a small text-cursor-sized area changed.
     case caret
+    /// Anything else, including damage in a form we do not understand.
     case content
 }
 
+/// Classifies a frame's damage metadata.
+///
+/// When unsure the answer is `.content`, so a changed picture is never suppressed. The first
+/// usable frame (`initial`) is always `.content`. A single rectangle at most 3 wide and 8 to 32
+/// high counts as a caret.
+/// - Parameters:
+///   - metadata: The damage rectangles as delivered by the framework, or `nil` if absent.
+///   - initial: True for the first frame of a capture.
 func captureFrameDamage(_ metadata: Any?, initial: Bool) -> CaptureFrameDamage {
     // The first usable buffer establishes the picture even without damage.
     // Unknown metadata must never suppress a potentially changed picture.
@@ -48,6 +64,7 @@ func captureFrameDamage(_ metadata: Any?, initial: Bool) -> CaptureFrameDamage {
     return .content
 }
 
+/// True unless the frame is `.unchanged`; a shortcut for callers that don't care about carets.
 func captureFrameHasDamage(_ metadata: Any?, initial: Bool) -> Bool {
     captureFrameDamage(metadata, initial: initial) != .unchanged
 }

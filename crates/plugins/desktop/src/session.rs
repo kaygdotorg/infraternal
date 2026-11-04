@@ -1,4 +1,21 @@
 //! Server-held sessions fan out immutable access units without letting a viewer stall capture [D104,D200,D208].
+//!
+//! A [`Session`] is the server's record of one capture. The producer side calls
+//! [`Session::publish`] with each encoded frame; the session keeps only the
+//! newest frame and the latest keyframe, and shares them (without copying) with
+//! up to five [`Viewer`]s. A slow viewer skips to the newest frame instead of
+//! building a backlog, and if it misses a delta it waits for a keyframe, which
+//! the session requests from the host once.
+//!
+//! The session also decides who may steer the capture. One viewer at a time is
+//! the controller; its input and resize commands go to the host through a small
+//! bounded queue as [`HostCommand`]s. Each command carries the viewer id and a
+//! lease number, and is rechecked just before it is written, so queued input can
+//! never be applied under a later controller's authority. Input is never
+//! replayed after a reconnect.
+//!
+//! Access decisions come from an [`AccessRules`] implementation and, per viewer,
+//! the viewer's own login (an `Authority`).
 use infraternal_plugin_api::streams::Authority;
 use infraternal_protocol::desktop::Input;
 use std::{
@@ -15,7 +32,9 @@ pub use crate::media::{ASSEMBLY_TIMEOUT, Error, SessionId, Video};
 /// Checks are nonblocking and must not reenter Session; adapters use the existing
 /// event-driven authority projection rather than per-frame database queries.
 pub trait AccessRules: Send + Sync {
+    /// Whether `user` may watch a session on `host` owned by `owner`.
     fn may_view(&self, user: &str, host: &str, owner: &str) -> bool;
+    /// Whether `user` may send input to such a session.
     fn may_control(&self, user: &str, host: &str, owner: &str) -> bool;
     /// Guard the actual viewer write through the host's live admission lease.
     /// Implementations with revocation events cancel the operation without polling.
@@ -39,13 +58,17 @@ pub trait AccessRules: Send + Sync {
         })
     }
 }
+/// A message for the host, queued by the session and written by the relay.
+///
+/// `viewer` and `lease` identify who issued it and under which controller
+/// grant; the command is dropped if either is no longer current.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostCommand {
-    Control {
-        viewer: u64,
-        lease: u64,
-    },
+    /// This viewer has become the controller.
+    Control { viewer: u64, lease: u64 },
+    /// Ask for a new keyframe.
     Keyframe,
+    /// Resize the captured output. `density_milli` is pixels per point times 1000.
     Size {
         viewer: u64,
         lease: u64,
@@ -53,6 +76,7 @@ pub enum HostCommand {
         height: u16,
         density_milli: u16,
     },
+    /// Forward one input event.
     Input {
         viewer: u64,
         lease: u64,
@@ -61,18 +85,28 @@ pub enum HostCommand {
     /// A handover/disconnect releases held remote input before a new controller types.
     ReleaseInput,
 }
+/// An attached viewer's identity.
 struct Principal {
     user: String,
+    /// The viewer's own login, when attached through a socket.
     authority: Option<Arc<dyn Authority>>,
 }
+/// Mutable session state, behind one mutex that is never held across an `await`.
 struct State {
+    /// The latest keyframe, given to viewers that attach later.
     keyframe: Option<Arc<Video>>,
+    /// Sequence number of the newest published frame.
     last_sequence: u64,
+    /// Last size the host has accepted, used to restore it after a reconnect.
     last_forwarded_size: Option<crate::protocol::Size>,
     viewers: HashMap<u64, Principal>,
+    /// Viewer id of the current controller.
     controller: Option<u64>,
+    /// Increases with every change of controller; commands carry the value they
+    /// were issued under.
     controller_lease: u64,
     next_viewer: u64,
+    /// A keyframe request is already queued, so another is not needed.
     repair_pending: bool,
     closed: bool,
 }
@@ -80,17 +114,26 @@ struct State {
 /// object in the server registry even when every viewer detaches.
 pub struct Session {
     id: SessionId,
+    /// The host the capture runs on; fixed for the session's life.
     host: String,
+    /// The user who owns the host; fixed for the session's life.
     owner: String,
     access: Arc<dyn AccessRules>,
     state: Mutex<State>,
+    /// Holds only the newest frame; viewers wake when it changes.
     frames: watch::Sender<Option<Arc<Video>>>,
+    /// Bounded queue (8) of commands for the host.
     commands: mpsc::Sender<HostCommand>,
+    /// Becomes true when the session is closed.
     stopping: watch::Sender<bool>,
+    /// Pinged on every controller change, to cancel writes of the previous one.
     controller_changed: watch::Sender<()>,
     viewers_changed: watch::Sender<()>,
 }
 impl Session {
+    /// Creates a session for capture `id` on `host`, owned by `owner`, with
+    /// `access` deciding who may view and control. Returns the session and the
+    /// receiving end of its host command queue, which the relay drains.
     #[must_use]
     pub fn new(
         id: SessionId,
@@ -125,10 +168,13 @@ impl Session {
             receiver,
         )
     }
+    /// The session's id.
     #[must_use]
     pub const fn id(&self) -> SessionId {
         self.id
     }
+    /// Queues one keyframe request unless one is already pending. Fails with
+    /// `Busy` if the command queue is full.
     fn repair(&self, state: &mut State) -> Result<(), Error> {
         if !state.repair_pending {
             self.commands
@@ -154,6 +200,9 @@ impl Session {
     ) -> Result<Viewer, Error> {
         self.attach_inner(user, Some(authority))
     }
+    /// Shared body of the two attach methods: checks the viewer's login (if any)
+    /// and the access rule, enforces the limit of five viewers, requests a
+    /// keyframe, and registers the viewer.
     fn attach_inner(
         self: &Arc<Self>,
         user: String,
@@ -200,6 +249,9 @@ impl Session {
             waiting_keyframe: true,
         })
     }
+    /// The command that re-announces the current controller to a reconnected
+    /// host, or `None` if nobody is in control. Input itself is not replayed.
+    ///
     /// Restore visibility after a source reconnect without replaying input.
     /// # Errors
     /// Refuses a poisoned lifecycle lock.
@@ -216,6 +268,9 @@ impl Session {
             _ => Ok(None),
         }
     }
+    /// Makes a new encoded frame available to all viewers, replacing the previous
+    /// newest frame. A keyframe is also kept for viewers who attach later.
+    ///
     /// Producer ordering is session-global. Immutable payloads are shared with all viewers.
     /// # Errors
     /// Rejects invalid or nonmonotonic access units and retired sessions.
@@ -237,6 +292,11 @@ impl Session {
         self.frames.send_replace(Some(frame));
         Ok(())
     }
+    /// Whether `command` may still be forwarded to the host right now.
+    /// `ReleaseInput` always may; `Keyframe` may while open; the rest need their
+    /// issuing viewer to be the current controller, on the same lease, with view
+    /// and control access still granted.
+    ///
     /// Recheck queued input at the forwarding boundary. A command cannot inherit
     /// a later controller's authority or survive its originating viewer's drop.
     /// The transport also guards the write against host/socket cancellation.
@@ -274,6 +334,10 @@ impl Session {
                 .may_control(&principal.user, &self.host, &self.owner))
     }
 
+    /// Completes when `command` should no longer be written: its viewer or login
+    /// ended, control changed hands, or the session closed. Never completes for
+    /// `Keyframe` or `ReleaseInput`, and completes at once if already disallowed.
+    ///
     /// Cancel an actual pending input/resize write when its originating login,
     /// controller lease or session ends. Subscribe before the final access rule check
     /// so a handover cannot be missed, including a quick handover back. Callers
@@ -314,6 +378,9 @@ impl Session {
         }
     }
 
+    /// Runs `operation` (the write of `command`) under the issuing viewer's login,
+    /// and abandons it with a forbidden error if the command is cancelled first.
+    ///
     /// Guard the actual native forwarding operation with the originating
     /// viewer's login, then cancel it on handover or session retirement.
     /// The socket adapter retains a weak host lease, preventing a runtime cycle.
@@ -385,12 +452,17 @@ impl Session {
             .map(|state| state.last_sequence)
             .map_err(|_| Error::Unavailable)
     }
+    /// The last size the host accepted, if any (see `checkpoint_size`).
     pub(crate) fn last_forwarded_size(&self) -> Option<crate::protocol::Size> {
         self.state
             .lock()
             .ok()
             .and_then(|state| state.last_forwarded_size)
     }
+    /// Ends the session: drops cached video, detaches every viewer, clears the
+    /// controller, queues a final `ReleaseInput` for the host, and signals
+    /// [`Session::stopped`]. Safe to call more than once.
+    ///
     /// Runtime disable clears retained video and closes pending receivers, without timers.
     pub fn close(&self) {
         if let Ok(mut state) = self.state.lock() {
@@ -430,12 +502,16 @@ impl Session {
 /// Dropping a viewer relinquishes only its attachment. The server session remains.
 pub struct Viewer {
     session: Arc<Session>,
+    /// Id within the session; used in commands and the controller lease.
     id: u64,
     user: String,
     authority: Option<Arc<dyn Authority>>,
     frames: watch::Receiver<Option<Arc<Video>>>,
+    /// The keyframe that was cached at attach time, delivered first.
     cached: Option<Arc<Video>>,
+    /// Sequence number of the last frame this viewer was given.
     last_sequence: u64,
+    /// A frame was missed, so deltas are skipped until a keyframe arrives.
     waiting_keyframe: bool,
 }
 impl Viewer {
@@ -449,6 +525,8 @@ impl Viewer {
             login: self.authority.clone(),
         })
     }
+    /// Checks the viewer's login and the access rule for viewing, or for
+    /// controlling when `control` is true.
     fn allowed(&self, control: bool) -> Result<(), Error> {
         if self
             .authority
@@ -524,6 +602,9 @@ impl Viewer {
             return Ok(frame);
         }
     }
+    /// Makes this viewer the controller, taking over from any other. Does nothing
+    /// if it already is.
+    ///
     /// Handover is explicit and releases held input before replacing the controller.
     /// # Errors
     /// Refuses withdrawn access or an overloaded host control lane.
@@ -567,6 +648,8 @@ impl Viewer {
     pub async fn input_wait(&self, input: Input) -> Result<(), Error> {
         self.queue_command(self.input_command(input)?).await
     }
+    /// Waits up to 1 second for room in the host queue and queues `command`,
+    /// abandoning it if its controller lease ends meanwhile.
     async fn queue_command(&self, command: HostCommand) -> Result<(), Error> {
         // Authority cancellation and the forwarding fence keep queued input from
         // inheriting a later controller, including a quick handover back.
@@ -580,6 +663,9 @@ impl Viewer {
         .await
         .map_err(|_| Error::Busy)?
     }
+    /// Builds the host command for `input`, stamped with the current controller
+    /// lease. Fails unless this viewer is the controller. Control events are
+    /// refused: only taking control may change the visible control state.
     fn input_command(&self, input: Input) -> Result<HostCommand, Error> {
         // Only the server lease transition owns the Mac's visible control state.
         if matches!(input, Input::Control { .. }) {
@@ -621,6 +707,8 @@ impl Viewer {
         self.queue_command(self.resize_command(width, height, density_milli)?)
             .await
     }
+    /// Builds the host command for a size change, stamped with the current
+    /// controller lease. Fails for invalid dimensions or a non-controller.
     fn resize_command(
         &self,
         width: u16,
@@ -648,6 +736,8 @@ impl Viewer {
             density_milli,
         })
     }
+    /// Asks the host for a new keyframe and holds back delta frames until it arrives.
+    ///
     /// A writer that discarded a stale frame seals deltas until the next IDR.
     /// # Errors
     /// Refuses withdrawn access or an overloaded control lane.
@@ -688,6 +778,10 @@ impl Drop for Viewer {
     }
 }
 
+/// Authority for the packets already queued to one viewer. It stays valid only
+/// while the viewer is attached, its login lives, and the access rule still
+/// allows viewing. It holds the viewer's identity, not the `Viewer`, so queued
+/// packets do not keep the attachment alive.
 // Queue leases carry the original viewer identity; its removal seals already
 // encoded packets before a later sink can expose bytes under a different access rule.
 struct ViewerDelivery {
