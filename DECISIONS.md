@@ -3838,3 +3838,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        soon as there is a real name: "agreed".
      - Person-to-machine visibility rules belong to the EE edition: "yes
        person to machine rules is ee area."
+340. **More answers (owner, 2026-11-04):**
+     - The Mac enforces access rules in infraternal's own userspace packet
+       path, inside GotaTun's packet flow, not with pf. It is scheduled right
+       after the Mac mesh node merges: "yes".
+     - The sign-in pool leftovers from #263 get one follow-up after
+       `infraternal up` merges: "agree".
+     - MCP progress for add-host and MCP over HTTP come after #303 and the
+       adapter merge, progress first: "agree".
+     - The website and docs, and the enterprise repository
+       (https://git.kayg.org/kayg/infraternal-enterprise), are grilled
+       later.
+     - The GotaTun fork is pushed to both GitHub and
+       https://git.kayg.org/kayg/gotatun-fork instead of relying on a pull
+       mirror: "why not push to both remotes?"
+     - The kernel mesh path gets the same ownership check GotaTun got:
+       "sure".
