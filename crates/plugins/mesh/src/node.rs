@@ -186,10 +186,31 @@ fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<
 
 pub use crate::dataplane::Identity;
 
+/// Where a node's engine choice came from (D346, #260 J213 P3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineSource {
+    /// Nothing chose: the Linux default.
+    Default,
+    /// The machine's `INFRATERNAL_MESH_ENGINE`.
+    Environment,
+    /// Code chose it (`with_engine`, `restore_with_engine`); the environment cannot change it.
+    Code,
+}
+
+impl EngineSource {
+    /// What `mesh status` reports: the default, or a choice by the machine or its code.
+    fn reason(self) -> EngineReason {
+        match self {
+            Self::Default => EngineReason::Default,
+            Self::Environment | Self::Code => EngineReason::Chosen,
+        }
+    }
+}
+
 /// The component has no polling loop. Its idle netlink socket closes on explicit down.
 pub struct Node {
     engine_kind: EngineKind,
-    engine_reason: EngineReason,
+    engine_source: EngineSource,
     identity: Option<Identity>,
     enabled: bool,
     store: Option<crate::node_state::Store>,
@@ -216,7 +237,7 @@ impl Default for Node {
     fn default() -> Self {
         Self {
             engine_kind: EngineKind::default(),
-            engine_reason: EngineReason::Default,
+            engine_source: EngineSource::Default,
             identity: None,
             enabled: true,
             store: None,
@@ -257,10 +278,11 @@ impl Node {
     /// Use an explicitly selected data-plane engine instead of the default.
     ///
     /// Engine-specific tests and fixtures name their engine, so they keep testing it when the
-    /// default changes. The `INFRATERNAL_MESH_ENGINE` override still applies at `up`.
+    /// default changes. This choice wins over `INFRATERNAL_MESH_ENGINE` (#260 J213 P3).
     #[must_use]
     pub fn with_engine(mut self, engine: EngineKind) -> Self {
         self.engine_kind = engine;
+        self.engine_source = EngineSource::Code;
         self
     }
 
@@ -268,14 +290,20 @@ impl Node {
     /// # Errors
     /// Refuses unsafe state, unrelated interface ownership or failed policy recovery.
     pub fn restore(path: &std::path::Path) -> io::Result<Self> {
-        Self::restore_requesting(path, EngineKind::from_environment()?)
+        let requested = EngineKind::from_environment()?;
+        let source = if requested.is_some() {
+            EngineSource::Environment
+        } else {
+            EngineSource::Default
+        };
+        Self::restore_requesting(path, requested, source)
     }
 
-    /// Restore with an explicitly requested engine in place of the environment override.
+    /// Restore with an engine chosen in code. It replaces the environment override, also at `up`.
     /// # Errors
     /// The same as [`Node::restore`].
     pub fn restore_with_engine(path: &std::path::Path, engine: EngineKind) -> io::Result<Self> {
-        Self::restore_requesting(path, Some(engine))
+        Self::restore_requesting(path, Some(engine), EngineSource::Code)
     }
 
     // Only the machine's explicit choice selects the engine (D346). The recorded engine says
@@ -284,14 +312,10 @@ impl Node {
     fn restore_requesting(
         path: &std::path::Path,
         requested_engine: Option<EngineKind>,
+        engine_source: EngineSource,
     ) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
         let engine_kind = requested_engine.unwrap_or_default();
-        let engine_reason = if requested_engine.is_some() {
-            EngineReason::Chosen
-        } else {
-            EngineReason::Default
-        };
         let snapshot_key = state.config.as_ref().and_then(|c| c.local_key);
         let mut active_link = Device::active_link()?;
         if let Some(link) = active_link.filter(|link| link.engine != engine_kind) {
@@ -314,7 +338,7 @@ impl Node {
         let adopted_kernel = active_link.filter(|link| proven_kernel_link(link, kernel_proof));
         let mut node = Self {
             engine_kind,
-            engine_reason,
+            engine_source,
             routes,
             enabled: state.enabled,
             store: Some(store),
@@ -609,7 +633,7 @@ impl Node {
     pub fn engine_selection(&self) -> EngineSelection {
         EngineSelection {
             engine: self.engine_kind,
-            reason: self.engine_reason,
+            reason: self.engine_source.reason(),
         }
     }
     /// Health of the running `GotaTun` engine; `None` under kernel `WireGuard` or when stopped.
@@ -740,9 +764,11 @@ impl Node {
         if let Some(identity) = &self.identity {
             return Ok(identity.clone());
         }
-        if let Some(engine) = EngineKind::from_environment()? {
+        if self.engine_source != EngineSource::Code
+            && let Some(engine) = EngineKind::from_environment()?
+        {
             self.engine_kind = engine;
-            self.engine_reason = EngineReason::Chosen;
+            self.engine_source = EngineSource::Environment;
         }
         self.firewall.adopt()?;
         let (key, public_key) = self.local_key()?;
