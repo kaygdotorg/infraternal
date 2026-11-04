@@ -6,6 +6,7 @@
 import { contrastRatio, hexToOklab, oklabToHex } from "./color";
 import type { Theme } from "./themes";
 
+/** Full-screen quad vertex shader: passes a 0-to-1 `uv` to the fragment shader. */
 const VERTEX_SHADER = `#version 300 es
 in vec2 p; out vec2 uv;
 void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
@@ -36,6 +37,7 @@ void main() {
   o = vec4(col, 1.0);
 }`;
 
+/** A six-digit hex colour as 0-to-1 red, green and blue, the form the shader takes. */
 const rgb = (hex: string): number[] => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255);
 
 /** Stable per-theme blob positions prevent the background from jumping between visits. */
@@ -82,12 +84,18 @@ export function meshColors(theme: Theme): string[] {
   });
 }
 
+/** Counter of render requests; a result from an older request than the newest is discarded. */
 let newestRender = 0;
+/** The object URL of the image now in use, revoked when a newer one replaces it. */
 let currentUrl = "";
+/** The id for the next request sent to the render worker. */
 let nextWorkerRequest = 0;
+/** The worker, created on first use; `undefined` where workers are unavailable. */
 let renderWorker: Worker | undefined;
+/** Requests the worker has not answered yet, by id. */
 const workerRequests = new Map<number, { resolve: (blob: Blob | null) => void; reject: (error: Error) => void }>();
 
+/** What the worker posts back: the request `id` and the encoded image, or `null` when it failed. */
 interface WorkerResponse { id: number; blob: Blob | null }
 
 /** Creates the optional WebGL worker lazily so auth and idle views load no renderer. */
@@ -242,6 +250,7 @@ export async function renderBackdropBlob(theme: Theme, width: number, height: nu
   return snapshot;
 }
 
+/** The data URL of the grain tile, built once on first use. */
 let grain = "";
 
 /** Builds the one crisp 128 px noise tile used to dither the still mesh. */

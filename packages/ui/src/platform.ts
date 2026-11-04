@@ -3,6 +3,7 @@
  * shown and matched with (⌘ on macOS and iPadOS keyboards, Ctrl elsewhere). Read once per
  * call, never cached, so a test can emulate either platform before the page loads.
  */
+/** True on macOS, iPhone and iPad, judged from the browser's platform hint (falling back to the user agent). */
 export function isMacPlatform(): boolean {
   const hint = navigator.platform || (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform || navigator.userAgent;
   return /mac|iphone|ipad/i.test(hint);
