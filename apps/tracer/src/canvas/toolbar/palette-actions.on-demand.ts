@@ -3,7 +3,7 @@ import type { Ctx, WinRec } from "../context";
 import { beginRename } from "../mesh/rename.on-demand";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
-import { openWindowDocs } from "../windows/docs-action";
+import { openWindowDocs } from "../windows/docs-action.on-demand";
 
 /** Flies to a Settings window (canvas-locked, snapped to its column). */
 export function openSettings(cx: Ctx, section: string, source?: string): void {

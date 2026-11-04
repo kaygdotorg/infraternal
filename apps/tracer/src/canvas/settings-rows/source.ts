@@ -19,7 +19,7 @@ export interface RowsOptions {
   backing?: SettingsSource["backing"];
   data?: SettingsSource["data"];
   /** The value ⌘K shows beside a setting; its default when absent. */
-  value?(setting: SettingDef): SettingValue;
+  value?(setting: SettingDef, standard: SettingValue): SettingValue;
 }
 
 export function createRowsSource(options: RowsOptions): Pick<SettingsSource, "outline" | "render"> & Pick<SettingsSource, "backing" | "data"> {
@@ -32,7 +32,7 @@ export function createRowsSource(options: RowsOptions): Pick<SettingsSource, "ou
     ...(options.backing ? { backing: options.backing } : {}),
     ...(options.data ? { data: options.data } : {}),
     outline: { rows: () => rowsOf(map()), entries: (): OutlineEntry[] => {
-      if (entries) return entries.entriesOf(map(), options.value ?? entries.defaultOf, backed);
+      if (entries) return entries.entriesOf(map(), options.value ?? ((_s, standard) => standard), backed);
       if (!loading) {
         loading = true;
         void onDemand(() => import("./entries.on-demand")).then((e) => { entries = e; for (const run of waiting) run(); }, () => { loading = false; });

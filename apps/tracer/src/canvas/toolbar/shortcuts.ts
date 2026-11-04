@@ -13,7 +13,7 @@ import { isKeyboardLocked } from "../../../../../packages/ui/src/keyboard-lock";
 import { bindTerminalFont } from "../../terminal-font-shortcuts";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
-import { openWindowDocs } from "../windows/docs-action";
+import { onDemand } from "../../on-demand";
 import { WINDOW_DOCS_KEYS } from "./window-docs-keys";
 
 /** The digit-row chord that flies to view `n` (1 to 9): ⌘n on a Mac, Ctrl+Shift+n elsewhere. A position, so the digit row is matched by physical key. */
@@ -74,7 +74,7 @@ export function installShortcuts(cx: Ctx): () => void {
     bindShortcut("new-window-right", (e) => windowKey(e, (w) => cx.win.newWindow(w, "right", true))),
     bindShortcut("new-window-below", (e) => windowKey(e, (w) => cx.win.newWindow(w, "below", true))),
     bindShortcut("close-window", closeActive),
-    ...(cx.adapters.docs ? [bindShortcut("window-docs", (e) => { const w = state.activeWin; if (!e.repeat && w && !cx.inputLock.state) openWindowDocs(cx, w); })] : []),
+    ...(cx.adapters.docs ? [bindShortcut("window-docs", (e) => { const w = state.activeWin; if (!e.repeat && w && !cx.inputLock.state) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, w); }); })] : []),
     // Keyboard Lock (fullscreen only, D222): ⌘W on a Mac and Ctrl+Shift+W elsewhere close the window too, but only while the
     // browser has handed those keys over. Otherwise the browser keeps them (it closes the tab), so the chord is not bound.
     bindCombo(platformCombo({ code: "KeyW", key: "w", mod: true, shift: false }, { code: "KeyW", key: "w", mod: true, shift: true }), closeActive, () => isKeyboardLocked()),

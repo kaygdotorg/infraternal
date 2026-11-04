@@ -16,13 +16,13 @@ import { ICON_OF, spots } from "./model";
  * ⌘K rows. A group is found by its names; a setting by its title, what it does, its technical names and its group. Only a setting
  * that is backed is offered: ⌘K must not fly to a window that has no control for it.
  */
-export function entriesOf(map: readonly ComponentDef[], valueOf: (s: SettingDef) => SettingValue, backed: (settingId: string) => boolean): OutlineEntry[] {
+export function entriesOf(map: readonly ComponentDef[], valueOf: (s: SettingDef, standard: SettingValue) => SettingValue, backed: (settingId: string) => boolean): OutlineEntry[] {
   const out: OutlineEntry[] = [];
   for (const { comp, group } of spots(map)) {
     const icon = ICON_OF[comp.icon];
     out.push({ label: `${comp.title} › ${group.title}`, hint: "settings", icon, action: `canvas:settings:${comp.id}.${group.id}` });
     for (const s of (group.settings ?? []).filter(backed).map((id) => SETTING_DEFS[id]!)) {
-      out.push({ label: s.title, hint: `${comp.title} › ${group.title} · ${formatValue(s.spec, valueOf(s))} · ${s.explain} ${s.keywords ?? ""}`, icon, action: `canvas:settings:${comp.id}.${group.id}.${s.id}` });
+      out.push({ label: s.title, hint: `${comp.title} › ${group.title} · ${formatValue(s.spec, valueOf(s, defaultOf(s)))} · ${s.explain} ${s.keywords ?? ""}`, icon, action: `canvas:settings:${comp.id}.${group.id}.${s.id}` });
     }
   }
   return out;
