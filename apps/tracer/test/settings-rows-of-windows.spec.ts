@@ -18,7 +18,7 @@ const SIZES = {
 const HALF = 0.5;
 const near = (a: number, b: number, what: string): void => { expect(Math.abs(a - b), `${what}: ${a.toFixed(2)} vs ${b.toFixed(2)}`).toBeLessThanOrEqual(HALF); };
 /** The Settings windows the docs have no page for yet: they show no "?" (a button that opens nothing is not offered). */
-const WITHOUT_DOCS = ["s-appearance-theme", "s-appearance-font", "s-appearance-size", "s-appearance-layout", "s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-you-profile", "s-machines-updates", "s-mesh-names", "s-mesh-access", "s-mesh-connections", "s-sharing-published-services", "s-sharing-certificates", "s-about-version", "s-about-licences"];
+const WITHOUT_DOCS = ["s-appearance-themes", "s-appearance-layout", "s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-you-profile", "s-machines-updates", "s-mesh-names", "s-mesh-access", "s-mesh-connections", "s-sharing-published-services", "s-sharing-certificates", "s-about-version", "s-about-licences"];
 const ROWS = ["appearance", "terminal", "you", "machines", "mesh", "sharing", "about"];
 
 async function open(page: Page, extra = ""): Promise<void> {
@@ -170,14 +170,14 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
     const r = n.getBoundingClientRect();
     return { id: n.dataset.windowId!, left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: n.offsetWidth, h: n.offsetHeight, span: n.dataset.span ?? "" };
   }));
-  expect(wins.length).toBe(23);
+  expect(wins.length).toBe(21);
   const layout = await page.evaluate(() => ({ clh: parseFloat((document.querySelector(".cl-world") as HTMLElement).style.getPropertyValue("--clh")), terminalW: document.querySelector<HTMLElement>('.cl[data-view="console"] .ui-window')?.offsetWidth ?? 0 }));
   expect(layout.terminalW, "a terminal window gives the default width").toBeGreaterThan(300);
   expect(layout.clh, "the layout's height is known").toBeGreaterThan(500);
   const byRow = new Map<string, typeof wins>();
   for (const w of wins) { const key = w.id.split("-")[1]!; byRow.set(key, [...(byRow.get(key) ?? []), w]); }
   expect([...byRow.keys()]).toEqual(ROWS);
-  expect([...byRow.values()].map((r) => r.length)).toEqual([4, 4, 5, 2, 4, 2, 2]);
+  expect([...byRow.values()].map((r) => r.length)).toEqual([2, 4, 5, 2, 4, 2, 2]);
   for (const w of wins) {
     near(w.w, layout.terminalW, `${w.id} has the layout's width`);
     near(w.h, layout.clh, `${w.id} has the layout's height: it does not grow to its content`);
@@ -201,7 +201,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
 
   // A window the docs have a page for has "?" as the first button of its action group, and the group obeys the alignment rules. A window without a page has no "?".
   const groups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
-  expect(groups.length).toBe(23);
+  expect(groups.length).toBe(21);
   expect(groups.filter((g) => g.ids.length === 0).map((g) => g.id).sort(), "windows without a docs page offer no button").toEqual([...WITHOUT_DOCS].sort());
   const settingsInset = checkGroups(groups.filter((g) => g.ids.length > 0), "docs");
   // No window's name is ever cut short, even with five windows to a row.
@@ -362,12 +362,12 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   expect(await crumbs(page)).toEqual(["Settings", "You", "Devices"]);
   expect(await checkRows(page, "s-you-devices")).toBe(1);
   await shot(page, "10-you-devices");
-  // The Appearance panel is split into its blocks: each window holds only its own.
-  for (const [at, titles] of [["appearance.theme", ["Theme", "Background", "Card transparency", "Window transparency"]], ["appearance.font", ["Font"]], ["appearance.size", ["UI size"]], ["appearance.layout", ["Phones", "Desktop"]]] as const) {
+  // The Appearance row has the Themes window (a theme holds Colour, backgrounds, windows, font and size, so one window edits all of them) and Layout.
+  for (const [at, titles] of [["appearance.themes", ["UI size", "Colour", "Backgrounds", "Windows", "Fonts"]], ["appearance.layout", ["Phones", "Desktop"]]] as const) {
     await page.evaluate((target) => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${target}`, source: "keyboard" } })), at);
     await page.waitForTimeout(700);
     await expect.poll(() => page.locator(`[data-window-id="s-${at.replace(".", "-")}"] .ui-sp > section .ui-ts-title`).allTextContents()).toEqual(titles);
-    if (at === "appearance.theme") await shot(page, "12-appearance-theme");
+    if (at === "appearance.themes") await shot(page, "12-appearance-themes");
   }
   // Apps lists the keys with Revoke (asking first); Devices lists the browsers with Sign out.
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:you.apps", source: "keyboard" } })));
@@ -420,7 +420,7 @@ test("phone: a row for each component, the breadcrumb fits, rows align, \"?\" op
   expect(field!.height).toBeGreaterThanOrEqual(43.5);
   // The "?" is the first button of the action group, the group obeys the alignment rules on a phone too, and the title still shows.
   const phoneGroups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
-  expect(phoneGroups.length).toBe(23);
+  expect(phoneGroups.length).toBe(21);
   checkGroups(phoneGroups.filter((g) => g.ids.length > 0), "docs");
   const hit = await page.locator('[data-window-id="s-mesh-keys"] .ui-window-action[data-action="docs"]').boundingBox();
   expect(hit!.width).toBeGreaterThanOrEqual(28);
@@ -672,8 +672,8 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     const page = await context.newPage();
     const centre = size.viewport.width / 2;
-    await open(page, "&at=appearance.size");
-    expect(await crumbs(page)).toEqual(["Settings", "Appearance", "Size"]);
+    await open(page, "&at=appearance.themes");
+    expect(await crumbs(page)).toEqual(["Settings", "Appearance", "Themes"]);
     // The breadcrumb as measured, and the main pill (the capsule in Console) as measured, by the same function.
     const measure = (sel: string) => page.evaluate((selector) => {
       const n = document.querySelector<HTMLElement>(selector)!, s = getComputedStyle(n), r = n.getBoundingClientRect();
@@ -700,7 +700,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     near(icon, mainIcon, "breadcrumb icon is the main pill's icon");
     for (const colour of ancestors) expect(colour, "every name in the breadcrumb is full colour, like the main pill").toBe(mainName.color);
     await shot(page, `${tag === "desktop" ? "" : "p"}16-main-pill`);
-    await goTo(page, "canvas:settings:appearance.size");
+    await goTo(page, "canvas:settings:appearance.themes");
     await page.waitForTimeout(500);
     await shot(page, `${tag === "desktop" ? "" : "p"}17-breadcrumb`);
 
@@ -724,7 +724,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     await page.locator('.cl-viewrow[data-view="settings"]').click({ timeout: 15_000 });
     await page.waitForTimeout(1200);
     // Choosing Settings flies to the view's first stop, so the row in view is Theme, not the window that was focused last (D323).
-    expect(await crumbs(page)).toEqual(["Settings", "Appearance", "Theme"]);
+    expect(await crumbs(page)).toEqual(["Settings", "Appearance", "Themes"]);
     const after = await page.evaluate(() => { const r = document.querySelector(".cl-crumbs")!.getBoundingClientRect(); return { cx: (r.left + r.right) / 2, top: r.top, opacity: getComputedStyle(document.querySelector(".cl-crumbs")!).opacity }; });
     near(after.cx, centre, "the breadcrumb is still on the centre line after choosing Settings");
     expect(after.opacity).toBe("1");
@@ -746,7 +746,7 @@ test("close-ups of the breadcrumb beside the main pill at DPR 2 and 3 (desktop a
   for (const [tag, size, dsf] of [["d2", SIZES.desktop, 2], ["d3", SIZES.desktop, 3], ["p2", SIZES.phone, 2], ["p3", SIZES.phone, 3]] as const) {
     const context = await browser.newContext({ ...size, deviceScaleFactor: dsf, baseURL: baseURL() });
     const page = await context.newPage();
-    await open(page, "&at=appearance.size");
+    await open(page, "&at=appearance.themes");
     mkdirSync(SHOTS, { recursive: true });
     const strip = async (name: string, selector: string): Promise<void> => {
       const b = (await page.locator(selector).first().boundingBox())!;
@@ -772,7 +772,9 @@ function measureEdges([id, focus]: readonly [string, boolean]) {
   const head = w.querySelector<HTMLElement>(".ui-window-head")!;
   const box = (r: DOMRect) => ({ left: r.left, right: r.right, top: r.top, bottom: r.bottom });
   const controls = [...w.querySelectorAll<HTMLElement>("button, input, select, textarea, [role=tab], [role=switch], .ui-window-pill")]
-    .filter((c) => { const r = c.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(c).visibility !== "hidden"; });
+    .filter((c) => { const r = c.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(c).visibility !== "hidden"; })
+    // The strip of theme cards scrolls sideways by design: a card past its edge is reached by scrolling or by Tab, which brings it into view, so it is not "cut".
+    .filter((c) => !c.closest(".ui-theme-strip"));
   return {
     window: box(w.getBoundingClientRect()),
     controls: controls.map((c) => {
@@ -813,7 +815,7 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     const vw = size.viewport.width, vh = size.viewport.height;
     const problems: string[] = [];
     const ids = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((n) => n.dataset.windowId!));
-    expect(ids.length).toBe(23);
+    expect(ids.length).toBe(21);
     let rings = 0;
     for (const id of ids) {
       await flyTo(page, id);
@@ -939,7 +941,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     test.setTimeout(120_000);
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     const page = await context.newPage();
-    await open(page, "&at=appearance.font");
+    await open(page, "&at=appearance.themes");
     const vw = size.viewport.width;
     for (const [level, menu, inset] of [["view", ".cl-viewlist", 12], ["row", ".cl-crumb-menu", 8], ["group", ".cl-crumb-menu", 8]] as const) {
       await page.locator(`.cl-crumb[data-level="${level}"]`).click();
@@ -1058,7 +1060,7 @@ test("desktop: ⌘K to a setting low in a window shows that setting", async ({ b
   test.setTimeout(120_000);
   const context = await browser.newContext({ ...SIZES.desktop, baseURL: baseURL() });
   const page = await context.newPage();
-  await open(page, "&at=appearance.theme");
+  await open(page, "&at=appearance.themes");
   const settingIds = await page.evaluate(() => [...document.querySelectorAll('[data-window-id="s-machines-new-machines"] .ui-setting')].map((n) => (n as HTMLElement).dataset.setting!));
   expect(settingIds.length).toBeGreaterThan(3);
   await goTo(page, `canvas:settings:machines.new-machines.${settingIds.at(-1)}`);
@@ -1125,7 +1127,7 @@ for (const [label, size, store, expected] of [
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     await context.addInitScript(([k, v]) => { try { localStorage.setItem(k, v); } catch { /* none */ } }, store);
     const page = await context.newPage();
-    await open(page, "&at=appearance.theme");
+    await open(page, "&at=appearance.themes");
     const widths = await page.evaluate(() => ({ settings: [...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((w) => w.offsetWidth), terminal: [...document.querySelectorAll<HTMLElement>('.cl[data-view="console"] .ui-window')].map((w) => w.offsetWidth) }));
     for (const w of widths.settings) near(w, widths.terminal[0]!, "a Settings window is as wide as a terminal window");
     // The setting is what makes it wide: the default is a third of the screen, Wide is half of it, Full width nearly all of it (times the UI size).
@@ -1221,10 +1223,10 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     test.setTimeout(300_000);
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     const page = await context.newPage();
-    await open(page, "&at=appearance.theme");
+    await open(page, "&at=appearance.themes");
     // Each window is dragged on a fresh canvas, so the sizes the last one left do not hide what the next one does.
     const settings = { hits: [] as string[], skipped: [] as string[], widths: {} as Record<string, number[]>, changed: [] as string[] };
-    for (const [k, id] of ["s-appearance-theme", "s-mesh-keys", "s-sharing-certificates"].entries()) {
+    for (const [k, id] of ["s-appearance-themes", "s-mesh-keys", "s-sharing-certificates"].entries()) {
       if (k > 0) await open(page, `&at=${id.slice(2).replace("-", ".")}`);
       const one = await dragEdges(page, [id], ["settings", "docs", "console"], size.isMobile ? 40 : 110, size.isMobile);
       settings.hits.push(...one.hits); settings.skipped.push(...one.skipped); settings.changed.push(...one.changed); Object.assign(settings.widths, one.widths);
@@ -1233,13 +1235,13 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     expect(settings.hits.join(" | "), "Settings windows never intersect").toBe("");
     // The owner's answer (D323): a drag changes only its own window, never the rest of its column or its row.
     expect(settings.changed.join(" | "), "no other window changed its size").toBe("");
-    expect(new Set(settings.widths["s-appearance-theme"]).size, "the drags did change the window").toBeGreaterThan(1);
+    expect(new Set(settings.widths["s-appearance-themes"]).size, "the drags did change the window").toBeGreaterThan(1);
     if (SHOTS && !size.isMobile) {
       // After a narrowing drag, the way the owner met it: Theme's right edge pulled in.
       mkdirSync(SHOTS, { recursive: true });
-      await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance.theme", source: "keyboard" } })));
+      await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance.themes", source: "keyboard" } })));
       await page.waitForTimeout(1100);
-      const box = (await page.locator('[data-window-id="s-appearance-theme"] .ui-window-resize[data-edge="e"]').boundingBox())!;
+      const box = (await page.locator('[data-window-id="s-appearance-themes"] .ui-window-resize[data-edge="e"]').boundingBox())!;
       const x = Math.min(size.viewport.width - 2, box.x + box.width / 2), y = box.y + box.height / 2 + 100;
       await page.mouse.move(x, y); await page.mouse.down();
       for (let k = 1; k <= 10; k++) { await page.mouse.move(x - (k * 15), y); await page.waitForTimeout(25); }
@@ -1263,10 +1265,10 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     test.setTimeout(240_000);
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     const page = await context.newPage();
-    await open(page, "&at=appearance.theme");
-    expect((await crumbs(page)).slice(1), "starts on Theme").toEqual(["Appearance", "Theme"]);
+    await open(page, "&at=appearance.themes");
+    expect((await crumbs(page)).slice(1), "starts on Themes").toEqual(["Appearance", "Themes"]);
     const focused = await active(page);
-    const pill = (await page.locator('[data-window-id="s-appearance-theme"] .ui-window-pill').boundingBox())!;
+    const pill = (await page.locator('[data-window-id="s-appearance-themes"] .ui-window-pill').boundingBox())!;
     if (size.isMobile) {
       // Two fingers up: the canvas steps one row, as in the rows test above.
       const cdp = await page.context().newCDPSession(page);
@@ -1280,17 +1282,20 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     }
     await page.waitForTimeout(1500);
     // Nothing was clicked, and the window that was focused has left the screen: the focus went to the window now in view (D323).
-    expect(focused).toBe("s-appearance-theme");
+    expect(focused).toBe("s-appearance-themes");
     expect(await active(page), "the focused window is the one in view").toBe("s-terminal-typing");
     expect((await crumbs(page)).slice(1), "the breadcrumb names the next row, Terminal").toEqual(["Terminal", "Typing"]);
     if (!size.isMobile) {
       await page.mouse.wheel(0, -200);
       await page.waitForTimeout(1500);
-      expect((await crumbs(page)).slice(1), "and back").toEqual(["Appearance", "Theme"]);
+      expect((await crumbs(page)).slice(1), "and back").toEqual(["Appearance", "Themes"]);
       // Sideways, to the next window of the row: the group changes with the window in view.
+      // The Appearance row (Themes, Layout) fits a desktop screen, so it has no sideways step; the Terminal row has four windows and does.
+      await goTo(page, "canvas:settings:terminal.typing");
+      await page.waitForTimeout(1200);
       await page.mouse.wheel(300, 0);
       await page.waitForTimeout(1200);
-      expect((await crumbs(page)).slice(1), "the next window of the row").toEqual(["Appearance", "Font"]);
+      expect((await crumbs(page)).slice(1), "the next window of the row").toEqual(["Terminal", "Hosts"]);
     }
     await context.close();
   });
@@ -1301,21 +1306,21 @@ test("desktop: narrowing one window leaves the rest of its column and its row as
   test.setTimeout(240_000);
   const context = await browser.newContext({ ...SIZES.desktop, baseURL: baseURL() });
   const page = await context.newPage();
-  await open(page, "&at=appearance.theme");
+  await open(page, "&at=appearance.themes");
   const sizes = (): Promise<Record<string, string>> => page.evaluate(() => Object.fromEntries([...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((n) => [n.dataset.windowId!, `${n.offsetWidth}x${n.offsetHeight}`])));
   const before = await sizes();
-  const east = (await page.locator('[data-window-id="s-appearance-theme"] .ui-window-resize[data-edge="e"]').boundingBox())!;
+  const east = (await page.locator('[data-window-id="s-appearance-themes"] .ui-window-resize[data-edge="e"]').boundingBox())!;
   const x = east.x + east.width / 2, y = east.y + east.height / 2 + 100;
   await page.mouse.move(x, y); await page.mouse.down();
   for (let k = 1; k <= 10; k++) { await page.mouse.move(x - k * 15, y); await page.waitForTimeout(25); }
   await page.mouse.up();
   await page.waitForTimeout(700);
   const after = await sizes();
-  expect(Number(after["s-appearance-theme"]!.split("x")[0]), "Theme is narrower").toBeLessThan(Number(before["s-appearance-theme"]!.split("x")[0]) - 100);
-  expect(after["s-appearance-theme"]!.split("x")[1], "and as tall as it was").toBe(before["s-appearance-theme"]!.split("x")[1]);
-  for (const [id, size] of Object.entries(before)) if (id !== "s-appearance-theme") expect(after[id], `${id} kept its size`).toBe(size);
-  // Font, in the same row, did not follow Theme's edge: the column's other windows still fill the track.
-  const fontLeft = await page.evaluate(() => document.querySelector('[data-window-id="s-appearance-font"]')!.getBoundingClientRect().left);
+  expect(Number(after["s-appearance-themes"]!.split("x")[0]), "Themes is narrower").toBeLessThan(Number(before["s-appearance-themes"]!.split("x")[0]) - 100);
+  expect(after["s-appearance-themes"]!.split("x")[1], "and as tall as it was").toBe(before["s-appearance-themes"]!.split("x")[1]);
+  for (const [id, size] of Object.entries(before)) if (id !== "s-appearance-themes") expect(after[id], `${id} kept its size`).toBe(size);
+  // Layout, in the same row, did not follow Themes' edge: the column's other windows still fill the track.
+  const fontLeft = await page.evaluate(() => document.querySelector('[data-window-id="s-appearance-layout"]')!.getBoundingClientRect().left);
   const typingRight = await page.evaluate(() => document.querySelector('[data-window-id="s-terminal-typing"]')!.getBoundingClientRect().right);
   expect(fontLeft - typingRight, "the track is as wide as its widest window").toBeGreaterThan(0);
   await context.close();
@@ -1350,10 +1355,10 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     test.setTimeout(180_000);
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     const page = await context.newPage();
-    await open(page, "&at=appearance.theme");
-    // Appearance has four windows and the longest row (You) has five tracks: more steps than there are windows must not reach the fifth track.
+    await open(page, "&at=terminal.typing");
+    // Terminal has four windows and the longest row (You) has five tracks: more steps than there are windows must not reach the fifth track.
     for (let k = 0; k < 7; k++) await stepSideways(page, 1, size.isMobile);
-    const right = await page.evaluate(() => document.querySelector('[data-window-id="s-appearance-layout"]')!.getBoundingClientRect().right);
+    const right = await page.evaluate(() => document.querySelector('[data-window-id="s-terminal-multiplexer"]')!.getBoundingClientRect().right);
     expect(right, "the last window of the row is whole on screen (sideways)").toBeLessThanOrEqual(size.viewport.width + 0.5);
     const gap = size.viewport.width - right;
     expect(gap).toBeGreaterThanOrEqual(-0.5);
@@ -1362,7 +1367,7 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     for (let k = 0; k < 7; k++) await stepSideways(page, 1, size.isMobile);
     const natural = size.viewport.width - (await page.evaluate(() => document.querySelector('[data-window-id="s-you-devices"]')!.getBoundingClientRect().right));
     near(gap, natural, "the short row ends where the longest row ends");
-    await goTo(page, "canvas:settings:appearance.layout");
+    await goTo(page, "canvas:settings:terminal.multiplexer");
     if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await page.screenshot({ path: `${SHOTS}/row-end-${size.isMobile ? "p3" : "d2"}.png` }); }
     await context.close();
   });
@@ -1374,22 +1379,22 @@ for (const [label, size, key, value] of [["1440x900", SIZES.desktop, "tracer.win
     test.setTimeout(180_000);
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     const page = await context.newPage();
-    await open(page, "&at=appearance.layout");
-    expect(await active(page)).toBe("s-appearance-layout");
+    await open(page, "&at=terminal.multiplexer");
+    expect(await active(page)).toBe("s-terminal-multiplexer");
     await page.evaluate(([k, v]) => { localStorage.setItem(k, v); window.dispatchEvent(new CustomEvent("tracer:window-size")); }, [key, value] as const);
     await page.waitForTimeout(1800);
-    expect(await shareOnScreen(page, "s-appearance-layout"), "the active window is still in view after the layout change").toBeGreaterThan(0.5);
-    expect(await active(page)).toBe("s-appearance-layout");
+    expect(await shareOnScreen(page, "s-terminal-multiplexer"), "the active window is still in view after the layout change").toBeGreaterThan(0.5);
+    expect(await active(page)).toBe("s-terminal-multiplexer");
     if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await page.screenshot({ path: `${SHOTS}/layout-kept-${size.isMobile ? "p3" : "d2"}.png` }); }
     // Scroll back along the row until the Layout window has left: the window in front is active, and the breadcrumb names the same one.
-    for (let k = 0; k < 5 && (await shareOnScreen(page, "s-appearance-layout")) >= 0.5; k++) await stepSideways(page, -1, size.isMobile);
+    for (let k = 0; k < 5 && (await shareOnScreen(page, "s-terminal-multiplexer")) >= 0.5; k++) await stepSideways(page, -1, size.isMobile);
     await page.waitForTimeout(500);
-    expect(await shareOnScreen(page, "s-appearance-layout"), "Layout has scrolled away").toBeLessThan(0.5);
+    expect(await shareOnScreen(page, "s-terminal-multiplexer"), "the last window of Terminal has scrolled away").toBeLessThan(0.5);
     const now = await active(page);
-    expect(now, "another window is active").not.toBe("s-appearance-layout");
+    expect(now, "another window is active").not.toBe("s-terminal-multiplexer");
     expect(await shareOnScreen(page, now!), "and it is the one in front of the person").toBeGreaterThan(0.5);
     const names = await crumbs(page);
-    expect(names.slice(1), "the breadcrumb says the same").toEqual(["Appearance", now!.replace("s-appearance-", "").replace(/^./, (c) => c.toUpperCase())]);
+    expect(names.slice(1), "the breadcrumb says the same").toEqual(["Terminal", now!.replace("s-terminal-", "").replace(/^./, (c) => c.toUpperCase())]);
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/active-follows-${size.isMobile ? "p3" : "d2"}.png` });
     await context.close();
   });

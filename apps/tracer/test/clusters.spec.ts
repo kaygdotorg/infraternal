@@ -189,7 +189,7 @@ test("the dots sit on the gradient: the gradient shows everywhere, the dot layer
     const stage = document.querySelector<HTMLElement>("#terminal-screen")!.getBoundingClientRect();
     const root = document.querySelector<HTMLElement>(".ui-canvas-backdrop")!.getBoundingClientRect();
     return {
-      fillOpacity: Number(getComputedStyle(fill).opacity), fillImage: getComputedStyle(fill).backgroundImage.startsWith("linear-gradient"),
+      fillOpacity: Number(getComputedStyle(fill).opacity), fillImage: /-gradient\(/.test(getComputedStyle(fill).backgroundImage),
       layerImage: cs.backgroundImage.startsWith("radial-gradient"), layerMask: cs.maskImage, layerBg: cs.backgroundColor,
       coversScreen: Math.abs(root.width - stage.width) < 1 && Math.abs(root.height - stage.height) < 1,
     };
@@ -836,7 +836,7 @@ test("closing the last window of a column removes the column, its neighbours clo
 
 /** The windows of Settings in rows (#304), in order: one row per component, one window per group; the administrator rows come from the owner's map. */
 const SETTINGS_WINDOWS = {
-  appearance: ["s-appearance-theme", "s-appearance-font", "s-appearance-size", "s-appearance-layout"],
+  appearance: ["s-appearance-themes", "s-appearance-layout"],
   terminal: ["s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-terminal-multiplexer"],
   you: ["s-you-profile", "s-you-passkeys", "s-you-recovery", "s-you-apps", "s-you-devices"],
   machines: ["s-machines-new-machines", "s-machines-updates"],
@@ -867,7 +867,7 @@ test("settings is a view: a gear after a divider, a row of windows for each comp
   await page.locator("#sidebar-toggle").click();
   // Appearance applies live: choosing a theme repaints at once.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("appearance"));
-  await page.locator('.ui-window[data-window-id="s-appearance-theme"] .ui-sp-row[data-id="ink"]').click();
+  await page.locator('.ui-window[data-window-id="s-appearance-themes"] .cl-colour-dot[data-id="ink"]').click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "ink");
   // Viewers get no administrator rows.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { setRole(r: string): void } }).__tracerClusters.setRole("viewer"));

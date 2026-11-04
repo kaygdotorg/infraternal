@@ -122,20 +122,20 @@ for (const theme of ["ink", "paper"]) for (const level of [2, 3, 4]) {
   });
 }
 
-test("the palette's blur is at least 1.5x a terminal line at every card level that has glass", async ({ page }) => {
+test("the palette keeps at least the shared 16 px blur in every theme, so no ghost text shows behind it (D329)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  for (const [level, name] of [[2, "tinted"], [3, "clear"], [4, "frosted"]] as const) {
-    await page.goto(`${URL("ink")}&card=${level}`);
-    await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  await page.goto(URL("ink"));
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  const blurs: Record<string, number> = {};
+  for (const id of ["solid", "tinted", "frosted"]) {
+    await page.evaluate((theme) => window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: theme } })), id);
+    await page.waitForTimeout(400);
     await page.keyboard.press(PALETTE_KEY);
     await expect(page.locator(".palette")).toBeVisible();
-    const blur = await page.locator(".palette").evaluate((el) => Number(/blur\((\d+(?:\.\d+)?)px\)/.exec(getComputedStyle(el).backdropFilter)?.[1] ?? 0));
-    expect(blur, `${name} blur`).toBeGreaterThanOrEqual(27);
+    blurs[id] = await page.locator(".palette").evaluate((el) => Number(/blur\((\d+(?:\.\d+)?)px\)/.exec(getComputedStyle(el).backdropFilter)?.[1] ?? 0));
+    await page.keyboard.press("Escape");
+    expect(blurs[id], `${id} blur`).toBeGreaterThanOrEqual(16);
   }
-  await page.goto(`${URL("ink")}&card=1`);
-  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-  await page.keyboard.press(PALETTE_KEY);
-  await expect(page.locator(".palette")).toBeVisible();
-  // Solid paints no glass, so it pays no blur.
-  expect(await page.locator(".palette").evaluate((el) => getComputedStyle(el).backdropFilter)).toMatch(/^(none|blur\(0px\))/);
+  // Frosted's own 50% blur (12 px) is under the floor, so the palette pays the floor there too; none is below it.
+  console.log(`PALETTE_BLUR ${JSON.stringify(blurs)}`);
 });
