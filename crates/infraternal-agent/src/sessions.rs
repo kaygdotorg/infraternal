@@ -43,6 +43,9 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 // their shells kept running. Process exit is the progress signal; this bound
 // only detects a hang, well inside the server's 60 s connect budget (#29).
 const LAUNCH: Duration = Duration::from_secs(30);
+// How long a failed launch keeps trying to close the shim it started. A shim
+// that missed its Hello is slow rather than gone, so one attempt can miss too.
+const CLEANUP: Duration = Duration::from_secs(10);
 
 /// The hang bound for one launch. Tests shorten it per thread to reach the failure path.
 fn launch_bound() -> Duration {
@@ -929,11 +932,20 @@ async fn abandon_launch(
     name: &str,
     launcher: &mut tokio::process::Child,
 ) {
-    if path.exists()
-        && let Ok(mut session) = connect_sequenced(path.to_path_buf(), id.into_bytes()).await
-        && session.caps & infraternal_shim::frame::CLOSE_SESSION != 0
-    {
-        let _ = send(&mut session.peer, &Frame::CloseSession).await;
+    // The shim that missed its Hello is slow, not gone: retry the close through
+    // its own authenticated session until `CLEANUP`, ending on any answer.
+    let deadline = tokio::time::Instant::now() + CLEANUP;
+    while path.exists() && tokio::time::Instant::now() < deadline {
+        match connect_sequenced(path.to_path_buf(), id.into_bytes()).await {
+            Ok(mut session) => {
+                if session.caps & infraternal_shim::frame::CLOSE_SESSION != 0 {
+                    let _ = send(&mut session.peer, &Frame::CloseSession).await;
+                }
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
     }
     if !matches!(manager, Manager::Detached) {
         let mut stop = isolated(Path::new("systemctl"));

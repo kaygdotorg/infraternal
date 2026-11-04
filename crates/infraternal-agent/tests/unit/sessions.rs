@@ -595,3 +595,98 @@ async fn failed_launch_stops_the_process_it_started_and_no_other() {
     assert!(alive(bystander_pid), "an unrelated process was stopped");
     bystander.kill().await.unwrap();
 }
+
+/// #324/#334: a detached shim that binds but misses the 2 s Hello fails the launch ("operation failed") while its
+/// terminal lives on, unnamed. The cleanup must reach it even when the shim is still too slow for the first retry,
+/// and must close it through its own authenticated session (the id in Hello), not by name.
+#[tokio::test(flavor = "current_thread")]
+async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
+    use infraternal_shim::frame::{CLOSE_SESSION, Frame};
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    // The detaching launcher: record the session name it was given, then exit successfully, as the real one does.
+    let name_file = root.join("session.name");
+    let exe = root.join("detaching-shim");
+    fs::write(
+        &exe,
+        format!(
+            "#!/bin/sh\necho \"$3\" > '{}'\nexit 0\n",
+            name_file.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    let sessions = state.join("sessions");
+    let shim = tokio::spawn(async move {
+        let name = loop {
+            if let Ok(name) = fs::read_to_string(&name_file)
+                && name.ends_with('\n')
+            {
+                break name.trim().to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let id = uuid::Uuid::parse_str(&name).unwrap();
+        let path = sessions.join(format!("{name}.sock"));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        // The first two connections (the launch and the first cleanup try) get no Hello in time: a loaded host.
+        let mut silent = Vec::new();
+        for _ in 0..2 {
+            silent.push(listener.accept().await.unwrap().0);
+        }
+        let (mut peer, _) = listener.accept().await.unwrap();
+        super::send(
+            &mut peer,
+            &Frame::Hello {
+                version: 1,
+                caps: CLOSE_SESSION | infraternal_shim::frame::SEQUENCED_INPUT,
+                session: id.into_bytes(),
+                pid: 1,
+                cols: 80,
+                rows: 24,
+                created: 0,
+                head: 0,
+                start: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = super::Reader::default();
+        while let Ok(frame) = reader.read(&mut peer).await {
+            if frame == Frame::CloseSession {
+                let _ = closed_tx.send(());
+                return;
+            }
+        }
+    });
+
+    let result = super::launch_configured(
+        &exe,
+        &state,
+        super::Manager::Detached,
+        nix::unistd::Uid::effective().as_raw(),
+        80,
+        24,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        false,
+        &[],
+    )
+    .await;
+    let error = result.err().expect("a missed Hello fails the launch");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    tokio::time::timeout(std::time::Duration::from_secs(20), closed_rx)
+        .await
+        .expect("the failed launch left its detached session running")
+        .unwrap();
+    shim.await.unwrap();
+}
