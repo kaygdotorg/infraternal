@@ -160,6 +160,8 @@ export class AppStream {
   private leased = false;
   /** A quiet lease request is on its way: a drag-resize asks once, and the answer pushes the latest size. */
   private leasing = false;
+  /** Counts releases: a size-only lease that was asked for before a release and lands after it is withdrawn at once. */
+  private releaseEpoch = 0;
   /** The size the machine was last told (Start's, or the last Size message): what a hand resize is compared against. */
   private pushedSize: StreamSize | undefined;
   /** When a size-only lease was last refused; throttles only size-only attempts, never the person's own control. */
@@ -463,10 +465,15 @@ export class AppStream {
     if (this.leasing || this.leased || this.streamId === undefined || !this.attached || !this.o.connection.isWelcomed) return;
     if (this.control.kind === "requesting" || performance.now() - this.leaseRefusedAt < CONTROL_RETRY_MS) return;
     const id = this.streamId;
+    const epoch = this.releaseEpoch;
     this.leasing = true;
     try {
       await this.o.connection.call("desktop.session.control", { stream_id: id });
       if (this.streamId !== id || this.disposed) return;
+      // The window was let go of while the call was in flight: the server now holds a lease nobody wants. Withdraw it the
+      // only way the server offers (retire this viewer, see `releaseControl`) instead of keeping it on a window that is no
+      // longer the active one.
+      if (epoch !== this.releaseEpoch) { this.retireViewer(); return; }
       this.leased = true;
       this.pushSize();
     } catch {
@@ -520,17 +527,24 @@ export class AppStream {
   releaseControl(): void {
     const held = this.leased || this.control.kind === "controlled" || this.control.kind === "paused" || this.control.kind === "requesting";
     this.keepControl = false;
+    this.releaseEpoch++;
     this.setControl({ kind: "none" });
     window.clearTimeout(this.statusTimer);
     window.clearTimeout(this.pausedTimer);
     this.statusTimer = 0;
-    if (held) {
-      // Input::Release clears held keys but intentionally retains the native lease.
-      // Retire this viewer to withdraw the lease, then view the existing session
-      // under a new stream id so a late acquisition cannot regain control.
-      this.detach();
-      if (this.visible && this.session && !this.disposed) this.attach();
-    }
+    if (held) this.retireViewer();
+  }
+
+  /**
+   * Withdraws the controller lease. Input::Release clears held keys but intentionally retains the native lease, and the
+   * server has no message that gives only the lease back, so this viewer is retired and the existing session is viewed
+   * again under a new stream id (so a late acquisition cannot regain control). It costs one new keyframe, which is why it
+   * runs only when a lease, for input or for a size alone, was really held: a size-only lease needs it too, because
+   * leaving it would keep the machine's own control indicator up on a window the person has left.
+   */
+  private retireViewer(): void {
+    this.detach();
+    if (this.visible && this.session && !this.disposed) this.attach();
   }
 
   /** Whether the person may try to control again (the view-only state shows until the retry window passes). */

@@ -207,6 +207,21 @@ test("a drag's looking sizes do not hide its final size: the settle is compared 
   } finally { f.stream.dispose(); }
 });
 
+test("a size-only lease that lands after the window was let go of is withdrawn, not kept", async () => {
+  const f = await fixture(true);
+  try {
+    f.stream.resize({ width: 1000, height: 600, density: 1 });
+    // The window is left while the lease call is still in flight (nothing is held yet, so release has nothing to withdraw) ...
+    f.stream.releaseControl();
+    f.answerControl(true);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // ... so when the lease lands, no size is pushed under it and the viewer is retired, which withdraws the lease.
+    expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size")).toBe(false);
+    expect(f.closed).toContain(1);
+    expect(f.controller()).toBeUndefined();
+  } finally { f.stream.dispose(); }
+});
+
 test("a size the box took while the start waited for the connection counts as told to the machine", async () => {
   const frames: string[] = [];
   const connection: StreamOptions["connection"] = {
