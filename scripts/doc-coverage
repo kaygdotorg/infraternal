@@ -503,7 +503,7 @@ def collect():
             continue
         ext = f.rsplit(".", 1)[-1]
         if ext == "rs":
-            key, scan = "rust:" + (owner(f, cargo) or "(none)"), scan_rust
+            key, scan = "rust:" + (owner(f, cargo) or "(no crate)"), scan_rust
         elif ext in ("ts", "mjs", "js", "cjs"):
             o = owner(f, pkg)
             key, scan = "ts:" + (o or os.path.dirname(f) or "."), scan_ts
