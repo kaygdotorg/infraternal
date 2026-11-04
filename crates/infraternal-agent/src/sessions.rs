@@ -1166,6 +1166,7 @@ async fn abandon_launch(mut job: Abandoned) {
 /// - A detaching launcher that has provably never forked (stopped, with no children) cannot have started
 ///   a shim: killed and reaped.
 /// - Otherwise only the shim's own authenticated exit counts (`close_detached`).
+///
 /// Without proof the rendezvous and the person record are left alone: a live terminal keeps its discovery
 /// and its revocation attribution. A detached shim's socket is never unlinked here.
 #[cfg(target_os = "linux")]
