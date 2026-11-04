@@ -14,6 +14,8 @@ already assigns a lower priority is preserved.
 The output contains:
 
 - `bin/infraternal`, a convenience symlink to the static server executable.
+- `bin/infra` and `share/infraternal/infra`, relative aliases to the canonical
+  executable in each directory [349].
 - `share/infraternal/infraternal`, the server for the selected architecture.
 - `share/infraternal/infraternal-{x86_64,aarch64}-musl`, full host payloads.
 - `share/infraternal/infraternal-{x86_64,aarch64}-session-musl`, session payloads.

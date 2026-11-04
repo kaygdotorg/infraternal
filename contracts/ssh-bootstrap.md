@@ -585,3 +585,12 @@ Exact screen copy for the later UI pass: title “This host has leftovers from a
 earlier setup”; body “infraternal didn't finish setting up here before. Start
 fresh to remove what it left behind and continue.”; primary “Start fresh”;
 secondary “Back”. Paths belong only in Details.
+
+## Short CLI name [349]
+
+Root and rootless installations also publish `infra -> infraternal` beside the
+canonical PATH launcher. Creation never replaces an occupied path, including a
+dangling symlink; a skipped alias produces a fixed setup warning. Rollback removes
+only a link created by that attempt, and uninstall removes only an owned link whose
+literal target still names the canonical launcher. Both names use canonical
+`infraternal` help, usage and error text. Shell configuration is never edited.

@@ -571,6 +571,7 @@ pub async fn cleanup(
         .map(left_line)
         .collect();
     std::fs::remove_file(&paths.unit)?;
+    infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
