@@ -5,13 +5,13 @@
 //! 1. as the client side: certifies the key of the person who added the
 //!    machine (owner L1 rule; the server's own host belongs to the owner),
 //!    bound to the node's one mesh address, records the certificate's digest
-//!    and installs it with the client files (`mesh.ssh.person_key`,
-//!    `mesh.ssh.client`);
+//!    and installs it with the client files (`mesh-ssh-node.person_key`,
+//!    `mesh-ssh-node.client`);
 //! 2. as the target side: pushes a sequence-numbered [`Snapshot`] (the CA
 //!    key, every currently valid person certificate, and every person's
 //!    login grant for this host from [`crate::login_access`]) together with
 //!    a host certificate for the node's in-memory host key
-//!    (`mesh.ssh.host_key`, `mesh.ssh.configure`).
+//!    (`mesh-ssh-node.host_key`, `mesh-ssh-node.configure`).
 //!
 //! Mesh SSH is off for every node until the owner turns it on (owner
 //! question Q4 on #221). A node that is off still receives snapshots, so
@@ -356,7 +356,7 @@ impl MeshSshPlugin {
                 if issue || remaining < RENEW_BEFORE {
                     let reply = channel
                         .call(
-                            "mesh.ssh.person_key",
+                            "mesh-ssh-node.person_key",
                             serde_json::to_vec(&json!({ "person": person })).map_err(|_| ())?,
                         )
                         .await
@@ -392,7 +392,7 @@ impl MeshSshPlugin {
                     });
                     channel
                         .call(
-                            "mesh.ssh.client",
+                            "mesh-ssh-node.client",
                             serde_json::to_vec(&input).map_err(|_| ())?,
                         )
                         .await
@@ -405,7 +405,7 @@ impl MeshSshPlugin {
             }
             _ => {
                 let _ = channel
-                    .call("mesh.ssh.client", br#"{"person":null}"#.to_vec())
+                    .call("mesh-ssh-node.client", br#"{"person":null}"#.to_vec())
                     .await;
             }
         }
@@ -414,7 +414,7 @@ impl MeshSshPlugin {
         let snapshot = self.snapshot(node.0, ca_key, host).await?;
         let host_certificate = if enabled {
             let reply = channel
-                .call("mesh.ssh.host_key", b"{}".to_vec())
+                .call("mesh-ssh-node.host_key", b"{}".to_vec())
                 .await
                 .map_err(|_| ())?;
             let reply: Value = serde_json::from_slice(&reply).map_err(|_| ())?;
@@ -447,7 +447,7 @@ impl MeshSshPlugin {
         });
         channel
             .call(
-                "mesh.ssh.configure",
+                "mesh-ssh-node.configure",
                 serde_json::to_vec(&input).map_err(|_| ())?,
             )
             .await

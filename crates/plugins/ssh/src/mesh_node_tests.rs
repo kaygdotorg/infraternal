@@ -80,11 +80,11 @@ fn a_stale_snapshot_is_reported_not_accepted() {
                 "snapshot": {"sequence": sequence, "node": 9, "ca": vec![7_u8; 32], "certificates": [], "grants": {}},
             })
         };
-        let first = node.call("mesh.ssh.configure", &serde_json::to_vec(&snapshot(5)).unwrap());
+        let first = node.call("mesh-ssh-node.configure", &serde_json::to_vec(&snapshot(5)).unwrap());
         assert!(first.is_ok());
-        let stale = node.call("mesh.ssh.configure", &serde_json::to_vec(&snapshot(5)).unwrap());
+        let stale = node.call("mesh-ssh-node.configure", &serde_json::to_vec(&snapshot(5)).unwrap());
         assert!(stale.is_err());
-        let newer = node.call("mesh.ssh.configure", &serde_json::to_vec(&snapshot(6)).unwrap());
+        let newer = node.call("mesh-ssh-node.configure", &serde_json::to_vec(&snapshot(6)).unwrap());
         assert!(newer.is_ok());
     });
 }
@@ -111,4 +111,13 @@ fn unauthenticated_connections_are_bounded_per_source_and_in_total() {
         }
     }
     assert!(pending.admit("10.254.2.1".parse().unwrap()).is_none());
+}
+
+/// The component registers in a real infraternal agent registry: every
+/// action carries the plugin's ID as its prefix.
+#[test]
+fn the_component_registers_in_an_agent_registry() {
+    let node = MeshSshNode::new(std::env::temp_dir(), |_| None).unwrap();
+    let mut registry = infraternal_plugin_api::PluginRegistry::default();
+    assert!(registry.register(Box::new(node)).is_ok());
 }

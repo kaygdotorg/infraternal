@@ -1,17 +1,17 @@
 //! The mesh SSH component inside the infraternal agent: host key, pushed authority and the TCP/22 listener [D235, D289], #221.
 //!
 //! The server drives it with control actions. As a target:
-//! - `mesh.ssh.host_key` returns this node's host public key. The key is
+//! - `mesh-ssh-node.host_key` returns this node's host public key. The key is
 //!   created in memory when the infraternal agent starts and is never written
 //!   to disk; a restart makes a new one and the server certifies it again.
-//! - `mesh.ssh.configure` installs the authority snapshot and the host
+//! - `mesh-ssh-node.configure` installs the authority snapshot and the host
 //!   certificate, and turns the listener on or off (off by default, owner
 //!   question Q4 on #221).
 //!
 //! As a client (the machine a person types `ssh` on):
-//! - `mesh.ssh.person_key` makes the person's key in memory and returns its
+//! - `mesh-ssh-node.person_key` makes the person's key in memory and returns its
 //!   public half; the server certifies it with this node's mesh address.
-//! - `mesh.ssh.client` installs that certificate, writes the `ssh_config.d`
+//! - `mesh-ssh-node.client` installs that certificate, writes the `ssh_config.d`
 //!   block and the CA known-hosts line from structured values (never server
 //!   text), and serves the key socket ([`crate::mesh_keys`]). A `person` of
 //!   null removes all three. The socket admits only ordinary local accounts
@@ -66,14 +66,17 @@ const fn control(id: &'static str, summary: &'static str) -> ActionDef {
 }
 /// The actions only the authenticated server link may call.
 const CONTROL_ACTIONS: &[ActionDef] = &[
-    control("mesh.ssh.host_key", "Read this node's mesh SSH host key"),
     control(
-        "mesh.ssh.configure",
+        "mesh-ssh-node.host_key",
+        "Read this node's mesh SSH host key",
+    ),
+    control(
+        "mesh-ssh-node.configure",
         "Apply mesh SSH access and the host certificate",
     ),
-    control("mesh.ssh.person_key", "Make a person's mesh SSH key"),
+    control("mesh-ssh-node.person_key", "Make a person's mesh SSH key"),
     control(
-        "mesh.ssh.client",
+        "mesh-ssh-node.client",
         "Install a person's certificate and the client files",
     ),
 ];
@@ -95,7 +98,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     unavailable_event: br#"{"type":"error","error":"Mesh SSH is unavailable."}"#,
 };
 
-/// Input of `mesh.ssh.configure`.
+/// Input of `mesh-ssh-node.configure`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Configure {
@@ -107,14 +110,14 @@ struct Configure {
     host_certificate: Option<String>,
 }
 
-/// Input of `mesh.ssh.person_key`.
+/// Input of `mesh-ssh-node.person_key`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersonKeyRequest {
     person: String,
 }
 
-/// Input of `mesh.ssh.client`; a `person` of null removes the client side.
+/// Input of `mesh-ssh-node.client`; a `person` of null removes the client side.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Client {
@@ -164,7 +167,7 @@ struct Desired {
 struct Shared {
     authority: Authority<ShimRuntime>,
     host_key: PrivateKey,
-    /// The person key made by `mesh.ssh.person_key`, waiting for its certificate.
+    /// The person key made by `mesh-ssh-node.person_key`, waiting for its certificate.
     pending: std::sync::Mutex<Option<(String, PrivateKey)>>,
     /// The identity the key socket serves; replaced whole on renewal.
     identity: std::sync::RwLock<Option<Arc<PersonKey>>>,
@@ -516,7 +519,7 @@ impl AgentPlugin for MeshSshNode {
     }
     fn call(&mut self, action_id: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
         match action_id {
-            "mesh.ssh.host_key" => {
+            "mesh-ssh-node.host_key" => {
                 let key = self
                     .shared
                     .host_key
@@ -526,9 +529,9 @@ impl AgentPlugin for MeshSshNode {
                 serde_json::to_vec(&serde_json::json!({ "host_key": key }))
                     .map_err(|_| PluginError::Rejected)
             }
-            "mesh.ssh.configure" => self.configure(input),
-            "mesh.ssh.person_key" => self.person_key(input),
-            "mesh.ssh.client" => self.client(input),
+            "mesh-ssh-node.configure" => self.configure(input),
+            "mesh-ssh-node.person_key" => self.person_key(input),
+            "mesh-ssh-node.client" => self.client(input),
             _ => Err(PluginError::UnknownAction),
         }
     }
