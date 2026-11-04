@@ -305,6 +305,7 @@ rust_verify_fast() {
     rust_run_gate "doc comments on diff" verify_diff_docs
     rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
+        rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
         rust_run_gate "static builds" rust_static_build_check
     fi
     rust_print_summary

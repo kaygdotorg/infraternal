@@ -571,3 +571,25 @@ When a Codex implementation job finishes, an independent Codex reviewer starts a
 - Job and release branches are pushed as soon as they have commits. Unfinished
   job work that can't be committed yet is snapshotted to `wip/<job>` so it
   isn't lost.
+
+## 18. Nightly parser fuzzing (D351, #344)
+
+On dev-02, provision an owner-readable mode-0600 Forgejo token file outside the
+checkout, then run `scripts/install-nightly-fuzz --token-file <private-path>`.
+The user timer runs at 02:00 IST, with up to fifteen minutes of jitter, through
+build-slot. Keep the checkout at the reviewed source revision; updating it is
+an explicit maintenance action. Install a nightly Rust toolchain and cargo-fuzz
+before enabling the service. The timer uses `nix develop` for native build
+prerequisites and the nightly compiler explicitly for fuzz instrumentation.
+
+The 3,600-second mutation budget is divided across all 36 existing targets
+(100 seconds each), serially and at three build jobs. Initial compilation adds
+build time to the first run. Corpora, target logs, upload-deduplication records
+and `last-run.json` live under `~/.local/state/infraternal-fuzz/`; the build
+target lives in `~/.cache/infraternal-fuzz/target`, outside the idle-target sweep. Failures are
+filed as Forgejo issues with exact inputs attached; a failed upload resumes on
+the next run. Tokens are read from a file, never passed in argv or printed.
+Use `systemctl --user start infraternal-fuzz.service` for a foreground-observed
+manual run and `journalctl --user -u infraternal-fuzz.service` for its results.
+A shorter `--budget-seconds 36` run exercises all targets for one second each;
+it is a smoke check and is not an hour of fuzzing.

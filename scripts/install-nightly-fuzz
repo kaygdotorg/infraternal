@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Install D351's user timer on dev-02 after provisioning a private token file.
+
+Run from a persistent checkout on dev-02. The service reserves a build slot,
+uses the existing cargo-fuzz targets and reports crashes through the token file.
+It runs at 02:00 IST with at most fifteen minutes of scheduling jitter.
+"""
+import argparse
+import os
+from pathlib import Path
+import socket
+import stat
+import subprocess
+
+
+def main():
+    """Write and validate the units, then enable the timer without starting a run."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--token-file', type=Path, required=True)
+    args = parser.parse_args()
+    if socket.gethostname() != 'infraternal-dev-02-std':
+        raise SystemExit('install the nightly timer on dev-02')
+    token = args.token_file.resolve(strict=True)
+    metadata = token.stat()
+    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise SystemExit('token file must be owned by this user with mode 0600')
+    root = Path(__file__).resolve().parents[1]
+    if any(character in str(root) + str(token) for character in '%\n"\\'):
+        raise SystemExit('unit paths contain unsupported quoting characters')
+    units = Path.home() / '.config/systemd/user'
+    units.mkdir(parents=True, exist_ok=True)
+    service = units / 'infraternal-fuzz.service'
+    timer = units / 'infraternal-fuzz.timer'
+    service.write_text(f'''# Nightly parser fuzzing and failing-input reports, D351 (#344).
+[Unit]
+Description=infraternal nightly parser fuzzing
+[Service]
+Type=oneshot
+WorkingDirectory={root}
+Environment=PATH={Path.home()}/.local/share/infraternal-fuzz/cargo/bin:/usr/local/bin:{Path.home()}/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin
+Environment=RUSTUP_HOME={Path.home()}/.local/share/infraternal-fuzz/rustup
+Environment=CARGO_HOME={Path.home()}/.local/share/infraternal-fuzz/cargo
+# Outside worktrees/ and codex-scratch/, so the 6 h idle-target sweep keeps it
+# between nightly runs instead of forcing a full rebuild every night.
+Environment=CARGO_TARGET_DIR={Path.home()}/.cache/infraternal-fuzz/target
+ExecStart={Path.home()}/infraternal-ops/build-slot nice -n10 nix develop -c python3 scripts/nightly-fuzz.py --token-file "{token}" --budget-seconds 3600
+# Covers the build-slot queue at night, the build, and the 1 h fuzzing budget.
+TimeoutStartSec=6h
+UMask=0077
+KillMode=control-group
+''')
+    timer.write_text('''# Run at night in the owner's timezone, independent of VM timezone.
+[Unit]
+Description=infraternal nightly parser fuzz timer
+[Timer]
+OnCalendar=*-*-* 02:00:00 Asia/Kolkata
+RandomizedDelaySec=15m
+Persistent=true
+Unit=infraternal-fuzz.service
+[Install]
+WantedBy=timers.target
+''')
+    subprocess.run(['systemd-analyze', '--user', 'verify', str(service), str(timer)], check=True)
+    subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
+    subprocess.run(['systemctl', '--user', 'enable', '--now', timer.name], check=True)
+    subprocess.run(['systemctl', '--user', 'list-timers', timer.name, '--no-pager'], check=True)
+
+
+if __name__ == '__main__':
+    main()
