@@ -2,8 +2,14 @@
 use super::{Auth, Error, Result, hash, random};
 use axum::http::{HeaderMap, HeaderValue};
 
+/// Name prefix of the ceremony-binding cookie. The `__Host-` prefix makes browsers
+/// accept it only over HTTPS, with `Path=/` and no `Domain`, so a sibling
+/// subdomain cannot plant or overwrite it.
 const COOKIE: &str = "__Host-infraternal-ceremony=";
 
+/// Returns the binding token the browser sent, or `None` when the cookie is
+/// missing, duplicated, or not a well-formed 43-character token. A duplicate is
+/// treated as missing so a hidden second cookie cannot choose the value.
 fn cookie(headers: &HeaderMap) -> Option<&str> {
     super::cookies::capability(headers, COOKIE)
 }

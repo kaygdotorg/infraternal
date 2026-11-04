@@ -6,6 +6,9 @@
 
 use std::{ffi::OsString, fmt::Write as _, path::Path, process::Command};
 
+/// Placeholder value set on the multiplexer variables for the duration of shell
+/// startup. The cleanup script recognises it to tell "still our placeholder"
+/// from a value a startup file set itself.
 const MARKER: &str = "infraternal-startup";
 
 /// Configure a shell with a guaranteed startup cleanup boundary, if supported.
@@ -47,6 +50,9 @@ pub(crate) fn configure(
     true
 }
 
+/// The value `name` will have in the child: an explicit override on `command`
+/// (including a removal, which gives `None`) wins, then the caller's own
+/// environment when `inherited` is true, otherwise `None`.
 fn environment(command: &Command, name: &str, inherited: bool) -> Option<OsString> {
     if let Some((_, value)) = command.get_envs().find(|(key, _)| *key == name) {
         value.map(OsString::from)

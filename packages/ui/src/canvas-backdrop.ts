@@ -28,15 +28,22 @@
  * `--ui-dot-gap` (spacing at 100 % zoom, default 22px), `--ui-dot-color` (the tint), `--ui-dot-opacity`,
  * `--ui-gradient-opacity` (how strongly the gradient shows) and `--ui-dot-fill` (the gradient itself).
  */
+/** Number of dot layers (levels of detail); layer k has spacing `gap * 2^k`. */
 const LEVELS = 4;
-/** How far a layer may be scaled from the zoom it was painted at before it is painted again. */
+/** The smallest scale a painted layer may be shown at before it is painted again; the layer box is sized to still cover the screen at this scale. */
 const MIN_SCALE = 0.6;
+/** The largest scale a painted layer may be shown at before it is painted again. */
 const MAX_SCALE = 1.7;
 /** At rest a layer within this of its painted zoom is left alone (a repaint for 1 % would only move dots by sub-pixels). */
 const REST_TOLERANCE = 0.01;
 
+/** What a layer was last painted for: the zoom (`z0`) and the viewport size. */
 interface Snap { z0: number; vw: number; vh: number }
 
+/**
+ * The handle returned by {@link createCanvasBackdrop}. `root` is the element it added to the parent; `dispose()`
+ * removes it. Call `update` from the camera, not from a timer.
+ */
 export interface CanvasBackdrop {
   readonly root: HTMLElement;
   /** Places the dots for a camera: `tx`, `ty` are the world origin on screen, `z` the zoom. */
@@ -46,6 +53,12 @@ export interface CanvasBackdrop {
   dispose(): void;
 }
 
+/**
+ * Adds the backdrop as the first child of `parent` and returns its handle.
+ * The element is decorative (`aria-hidden`). The dot spacing is read once, from `--ui-dot-gap`, on the first `update`.
+ * @example
+ * const dots = createCanvasBackdrop(stage); dots.update(tx, ty, zoom, stage.clientWidth, stage.clientHeight);
+ */
 export function createCanvasBackdrop(parent: HTMLElement): CanvasBackdrop {
   const root = document.createElement("div");
   root.className = "ui-canvas-backdrop";

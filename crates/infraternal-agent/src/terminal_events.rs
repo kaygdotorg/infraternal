@@ -8,11 +8,14 @@ use uuid::Uuid;
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub(super) enum Notice<'a> {
+    /// The full list of live session ids, as UUID strings.
     #[serde(rename = "terminal.sessions.snapshot")]
     SessionsSnapshot {
         #[serde(serialize_with = "serialize_session_ids")]
         session_ids: &'a [[u8; 16]],
     },
+    /// Sent when a session's replay has caught up. `out_seq` is the output cursor,
+    /// written as a decimal string; `cols` and `rows` are the terminal size.
     #[serde(rename = "terminal.replay_complete")]
     ReplayComplete {
         session_id: Uuid,
@@ -21,8 +24,12 @@ pub(super) enum Notice<'a> {
         cols: u16,
         rows: u16,
     },
+    /// Tells the client that terminal query replies are not available for this
+    /// session. Carries only the session id.
     #[serde(rename = "terminal.query_replies_unavailable")]
     QueryRepliesUnavailable { session_id: Uuid },
+    /// The session's process ended. `status` is the exit status and `final_seq` the
+    /// last output sequence number. `retired` is left out unless it is `Some`.
     #[serde(rename = "terminal.exited")]
     Exited {
         session_id: Uuid,
@@ -31,16 +38,21 @@ pub(super) enum Notice<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         retired: Option<bool>,
     },
+    /// A screen snapshot exists for `session_id` at output sequence `seq`;
+    /// `approximate` says whether it is only an approximation.
     #[serde(rename = "terminal.snapshot")]
     Snapshot {
         session_id: Uuid,
         seq: u64,
         approximate: bool,
     },
+    /// No snapshot could be provided for `session_id` at sequence `seq`.
     #[serde(rename = "terminal.snapshot_unavailable")]
     SnapshotUnavailable { session_id: Uuid, seq: u64 },
 }
 impl Notice<'_> {
+    /// Serializes the notice straight to JSON bytes (the `type` field names the
+    /// event). Fails only if serialization itself fails.
     pub(super) fn json(&self) -> io::Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(io::Error::from)
     }

@@ -11,6 +11,9 @@ pub(crate) struct Lease {
 }
 
 impl Lease {
+    /// Starts a lease for `user`'s session `token`. It subscribes to revocation first
+    /// and reads the session expiry second, so a revocation committing in between is
+    /// still seen. Fails if the session has no valid authority now.
     pub(crate) async fn new(state: &WebSocketState, user: &str, token: &str) -> Result<Self, ()> {
         // Subscribe before SQL so a commit racing the read remains observable.
         let revoked = state.auth.revocation_events(user);
@@ -23,6 +26,7 @@ impl Lease {
         self.expiry
     }
 
+    /// Re-reads the session expiry from the database and clears the pending revocation flag. Fails if authority is gone.
     async fn refresh(
         &mut self,
         state: &WebSocketState,
@@ -34,6 +38,11 @@ impl Lease {
         Ok(())
     }
 
+    /// Drives `operation` while watching for revocation and expiry. If revocation was
+    /// signalled or the expiry passed, authority is re-read first; the same re-read
+    /// happens mid-flight and again before the result is returned. The result is
+    /// returned only if authority still holds. A closed revocation source counts as
+    /// `Unavailable`, so a write never goes ahead without its watcher.
     pub(crate) async fn run<T>(
         &mut self,
         state: &WebSocketState,

@@ -11,8 +11,11 @@ import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { ProvisioningRun, type ProvisioningHandlers, type ProvisioningOptions, type OneUseAuth } from "../../provisioning-client";
 import { ServiceError, type DiscoveredHost, type InstallCommand, type OneTimeSecret, type ProvisioningService, type SavedKey, type ServerKey } from "./service";
 
+/** True for a plain object (not null, not an array); narrows an unknown server value. */
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+/** Operating-system names the wizard has an icon for; any other value from the server is ignored. */
 const PLATFORMS: readonly string[] = ["ubuntu", "debian", "proxmox", "redhat", "nixos", "apple", "unknown"];
+/** Discovery sources the wizard knows how to label; unknown sources are dropped from a row. */
 const SOURCES: readonly string[] = ["netbird", "tailscale", "known-hosts", "ssh-config", "already-added"];
 
 /** Reads a discovery row defensively: the server's data is untrusted until shaped. */
@@ -34,16 +37,22 @@ export function parseDiscovered(value: unknown): DiscoveredHost | undefined {
   return host;
 }
 
+/** Reads the server's SSH public key answer. Returns `undefined` unless the key and its fingerprint are both strings; `locked` is true only when the server says so. */
 export function parseServerKey(value: unknown): ServerKey | undefined {
   if (!isRecord(value) || typeof value.public_key !== "string" || typeof value.fingerprint !== "string") return undefined;
   return { publicKey: value.public_key, fingerprint: value.fingerprint, locked: value.locked === true };
 }
 
+/** Reads the install-command answer. Returns `undefined` unless it has the command text and a numeric expiry in seconds. */
 export function parseInstallCommand(value: unknown): InstallCommand | undefined {
   if (!isRecord(value) || typeof value.command !== "string" || typeof value.expires_in_seconds !== "number") return undefined;
   return { command: value.command, expiresInSeconds: value.expires_in_seconds };
 }
 
+/**
+ * One same-origin request that is never cached. With `init` it sends the body as JSON. It does not look at the status: callers
+ * decide what each status means. If the network fails it throws a `ServiceError` of kind "network".
+ */
 async function call(path: string, init?: { method: string; body: unknown }): Promise<Response> {
   try {
     return await fetch(path, {
@@ -74,6 +83,13 @@ function refusal(response: Response, what: string): ServiceError {
   return new ServiceError(`Couldn't ${what}. Try again.`, response.status === 503 ? "unavailable" : "refused");
 }
 
+/**
+ * The real `ProvisioningService`, talking to the server's bootstrap endpoints.
+ * Secrets (a password or private key the person typed) are never sent by this object directly: `mintCredential` checks their size and
+ * content, then keeps them in memory under a random reference for 60 seconds, bound to one target and address, at most 16 at a time. A
+ * run takes the secret once (`takeAuth` deletes it before use). Host-key challenges seen during a run are remembered so that
+ * `trustHostKey` can only trust a fingerprint the server really showed. `dispose` forgets every secret and challenge.
+ */
 export function createRealProvisioning(): ProvisioningService {
   const secrets = new Map<string, { target: string; address: string; auth: OneUseAuth; expires: number }>();
   const observations = new Map<string, { run: ProvisioningRun; target: string; challenge: string; fingerprints: string[] }>();

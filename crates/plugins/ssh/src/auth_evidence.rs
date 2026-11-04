@@ -1,32 +1,66 @@
 //! Reduces local SSH authentication receipts to method metadata without retaining diagnostics or inferring a provider (#190).
+//!
+//! The local OpenSSH client prints a line such as
+//! `Authenticated to <host> using "<method>".` in its debug output. This module
+//! recognizes that one line byte by byte, in constant memory, and keeps a single
+//! bit: whether the method was `none` (the network admitted us without a key or
+//! password). Everything else on the line (host name, banner text, process id)
+//! is matched and then forgotten. Any deviation from the exact line shape marks
+//! the line invalid, so partial or spoofed text never counts as evidence.
+//!
+//! The result is only a hint. Whether the SSH socket was really admitted is
+//! decided elsewhere; this bit never grants access.
 
+/// Literal start of the receipt line.
 const PREFIX: &[u8] = b"Authenticated to ";
+/// Debug location tag of the one trusted source line (final result of the user-auth exchange).
+/// A line from any other source location, such as the banner handler, is ignored.
 const TAG: &[u8] = b"sshconnect2.c:ssh_userauth2():";
+/// Literal between the host name and the method name, ending at the opening quote.
 const USING: &[u8] = b" using \"";
 
+/// Position of the recognizer inside one line. The `bool` carried by the late
+/// states is "the method spelled exactly `none`".
 #[derive(Clone, Copy)]
 enum Phase {
+    /// Matching `PREFIX`; the number is how many bytes matched so far.
     Prefix(usize),
+    /// Matching the debug location tag.
     Tag(usize),
+    /// Reading the decimal source line number (at most 10 digits).
     Location(usize),
+    /// Expecting `(` of the `(pid=...)` context.
     Open,
+    /// Reading the printable context text up to `)` (at most 128 bytes).
     Context(usize),
+    /// Expecting `:` after the context.
     Colon,
+    /// Expecting the single space before the receipt text.
     Space,
+    /// Saw `\r` after a complete receipt, waiting for `\n`.
     CrEnd(bool),
+    /// Scanning the host name for `USING`; the number is how many bytes of it matched.
     Using(usize),
+    /// Reading the method name (lowercase letters and `-`, at most 64 bytes).
     Method { length: usize, none: bool },
+    /// Expecting the closing `.` after the method's closing quote.
     Dot(bool),
+    /// Complete receipt; only a line end may follow.
     End(bool),
+    /// The line broke the expected shape; ignored until the next `\n`.
     Invalid,
 }
 
 /// A constant-size streaming recognizer. It stores only literal-match positions
 /// and a public method bit, never a hostname, banner, credential or raw line.
 pub struct MethodReceipt {
+    /// Where the current line stands.
     phase: Phase,
+    /// `Some(true)` when the last complete receipt used method `none`,
+    /// `Some(false)` for any other method, `None` if no complete receipt was seen.
     network: Option<bool>,
 }
+/// Starts at the beginning of a line with no receipt seen.
 impl Default for MethodReceipt {
     fn default() -> Self {
         Self {
@@ -108,6 +142,10 @@ impl MethodReceipt {
         }
     }
 
+    /// What the last complete receipt said: `Some(true)` if the method was
+    /// `none` (network-level admission), `Some(false)` for any other method,
+    /// `None` when no valid receipt has been seen yet.
+    ///
     /// Only a method hint; SSH socket admission remains the authentication proof.
     #[must_use]
     pub fn network(&self) -> Option<bool> {

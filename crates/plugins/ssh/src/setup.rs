@@ -1,4 +1,12 @@
 //! Retains host-bound D255 setup progress independently of wizard sockets, with bounded replay and no idle task.
+//!
+//! While a host is being set up, the worker reports progress through
+//! [`Status`]. A browser can disconnect and later reconnect, so each host keeps
+//! its last 16 events and the latest event of each stage. A client that asks for
+//! events after a cursor that has already been dropped is told to resync and
+//! receives the current state of every stage instead. Every call is bound to an
+//! owner id: a different person can neither read nor change another's host.
+//! Events carry only fixed, safe messages, never output from the remote host.
 
 use crate::model::{Failure, InstallStep};
 use serde::Serialize;
@@ -13,9 +21,13 @@ use uuid::Uuid;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
+    /// Copying and installing the infraternal binary on the host.
     Install,
+    /// Joining the host to the mesh.
     Join,
+    /// Starting the service.
     Start,
+    /// The host is ready for use.
     Ready,
 }
 
@@ -23,35 +35,54 @@ pub enum Stage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
+    /// The stage is in progress.
     Running,
+    /// The stage finished and was confirmed.
     Done,
+    /// The stage failed.
     Failed,
 }
 
 /// Public host/session coordinates and fixed safe diagnostics, never remote output.
 #[derive(Clone, Debug, Serialize)]
 pub struct Event {
+    /// The host being set up.
     pub host_id: Uuid,
+    /// The terminal session the setup runs in.
     pub session_id: Uuid,
+    /// Attempt number, starting at 1 (at most 8).
     pub attempt: u32,
+    /// Per-host event counter; never repeats or goes backwards, also across attempts.
     pub sequence: u64,
+    /// Stage this event is about.
     pub stage: Stage,
+    /// Outcome for that stage.
     pub state: State,
     /// Attempt eligibility; current authority and worker admission still apply.
     pub retry_available: bool,
+    /// Install step that failed, when the event is a failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<InstallStep>,
+    /// Fixed user-facing failure text; never contains remote output.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<&'static str>,
 }
 
+/// Everything remembered about one host's setup.
 struct Host {
+    /// Owner id; every call must present the same one.
     owner: String,
+    /// The session this host's setup is bound to; fixed after the first attempt.
     session: Uuid,
+    /// Current attempt number.
     attempt: u32,
+    /// Sequence of the latest event.
     sequence: u64,
+    /// Replay window: the latest 16 events.
     events: VecDeque<Event>,
+    /// Latest event per stage in `Stage` order, cleared when a new attempt begins.
     current: [Option<Event>; 4],
+    /// Carries the latest sequence number to subscribers.
     changed: watch::Sender<u64>,
 }
 
@@ -62,6 +93,10 @@ pub struct Status(Mutex<HashMap<Uuid, Host>>);
 impl Status {
     /// Register only after terminal ownership is published. Existing coordinates
     /// cannot be replaced by another person or a different session.
+    ///
+    /// The first call for a host creates it (attempt 1); each later call starts
+    /// the next attempt, up to 8, and clears the per-stage state but keeps the
+    /// sequence counter running.
     /// # Errors
     /// Refuses changed identity or the bounded host cap.
     pub fn begin(&self, owner: &str, host: Uuid, session: Uuid) -> Result<(), Failure> {
@@ -96,6 +131,10 @@ impl Status {
     }
 
     /// Publish confirmed stage progress from the trusted setup worker.
+    ///
+    /// Assigns the next sequence number, keeps it in the replay window, wakes
+    /// subscribers, and offers a retry only for a failure before the 8th attempt.
+    /// Only the failure's fixed message and step are stored.
     /// # Errors
     /// Refuses absent or foreign host ownership.
     pub fn emit(
@@ -153,6 +192,9 @@ impl Status {
 
     /// Return replay after a cursor; an old cursor receives authoritative current
     /// stage states plus an explicit resync flag instead of inventing missing events.
+    ///
+    /// Returns `(resync, events)` where events are in sequence order and all have
+    /// a sequence above `after` unless `resync` is true.
     /// # Errors
     /// Refuses absent or foreign host ownership.
     pub fn events(
@@ -183,6 +225,7 @@ impl Status {
         Ok((resync, events))
     }
 }
+/// One answer for unknown host, foreign owner and cap reached, so a caller cannot tell them apart.
 fn unavailable() -> Failure {
     Failure::unsupported("The host setup status is unavailable.")
 }

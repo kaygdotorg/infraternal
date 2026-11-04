@@ -30,15 +30,20 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
+/** The two sizes captured for each figure: a wide screen and a phone. */
 export const FIGURE_SIZES = ["desktop", "phone"] as const;
+/** The two colour schemes captured: dark ("ink") and light ("paper"). */
 export const FIGURE_SCHEMES = ["ink", "paper"] as const;
+/** One of {@link FIGURE_SIZES}. */
 export type FigureSize = (typeof FIGURE_SIZES)[number];
+/** One of {@link FIGURE_SCHEMES}. */
 export type FigureScheme = (typeof FIGURE_SCHEMES)[number];
 
 /** The size of one captured picture in CSS pixels (its file is this wide times the capture's scale). */
 export interface FigureBox { width: number; height: number }
 /** What the capture recorded for one figure. */
 export interface FigureEntry { desktop: FigureBox; phone: FigureBox; clip?: boolean }
+/** What `manifest.json` holds: the entry of every captured figure, by figure name. */
 export type FigureManifest = Record<string, FigureEntry>;
 
 /** Page width (rem) below which the phone picture is used. */
@@ -46,8 +51,10 @@ export const PHONE_BREAKPOINT = "36rem";
 /** Where the figures are served, under the docs tree. */
 export const FIGURES_URL = "/docs/figures";
 
+/** The file name of one picture, for example `startup-question.phone.ink.webp`. */
 export const figureFile = (name: string, size: FigureSize, scheme: FigureScheme, extension: "webp" | "webm"): string => `${name}.${size}.${scheme}.${extension}`;
 
+/** What {@link figures} needs: the `manifest`, the optional `directory` of the pictures, and the `page` name used in error messages. */
 export interface FigureOptions {
   manifest: FigureManifest;
   /** The folder the pictures are in, checked for each file a figure uses; a figure with a file missing is pending. */

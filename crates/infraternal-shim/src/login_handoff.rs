@@ -60,6 +60,16 @@ impl Prepared {
     }
 }
 
+/// Takes over a PTY and login lease that a worker passed down by exec and
+/// returns them as an owned terminal.
+///
+/// `master` and `lease` are inherited descriptor numbers and must differ. The
+/// master is duplicated and validated as a PTY master. The lease peer must
+/// authenticate as `uid` and process `pid` (pinned through `pin`, with
+/// optional `parent`). The worker's one-byte acknowledgment is then consumed,
+/// waiting up to 2 seconds if it has not arrived; anything coalesced behind it,
+/// such as an exit status, stays readable on the same lease. Fails with the
+/// authentication or I/O error, and the descriptors are released.
 pub(crate) fn adopt(
     master: i32,
     lease: i32,

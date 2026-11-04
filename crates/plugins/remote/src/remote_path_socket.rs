@@ -37,6 +37,7 @@ use std::{
 
 use crate::{remote_path_copies::CopyClock, remote_peer_routes::Recent};
 
+/// Per-endpoint state about the mesh route and recent traffic.
 struct Paths {
     mesh: Option<SocketAddr>,
     resend: Recent,

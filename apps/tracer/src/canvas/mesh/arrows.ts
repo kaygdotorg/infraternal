@@ -13,15 +13,19 @@
  * from in at most 180 ms, ease-out, no overshoot. Only path data and the head transform change; no layout is touched.
  */
 import type { Pt, Rect } from "../layout/geometry";
+/** The geometry types, re-exported for the mesh modules. */
 export type { Pt, Rect };
 
+/** The SVG namespace, needed to create SVG elements. */
 const SVG_NS = "http://www.w3.org/2000/svg";
+/** Creates an SVG element of tag `tag`, with the optional CSS class `cls`. */
 const svgEl = <K extends keyof SVGElementTagNameMap>(tag: K, cls?: string): SVGElementTagNameMap[K] => {
   const node = document.createElementNS(SVG_NS, tag);
   if (cls) node.setAttribute("class", cls);
   return node;
 };
 
+/** Where an arrow leaves and arrives: the points `p0`, `p1` and the unit directions `t0`, `t1` it travels in there. */
 interface Anchors { p0: Pt; t0: Pt; p1: Pt; t1: Pt }
 
 /** Picks the facing sides of two rectangles; `lane` shifts the anchors so parallel arrows do not overlap. */
@@ -44,8 +48,13 @@ export const anchorOn = (rect: Rect, from: Rect | Pt, lane = 0): Pt => {
   return anchors(r, rect, lane).p1;
 };
 
+/** How an arrow looks: dashed (via a relay), its tone, and whether it can be edited. */
 export interface ArrowStyle { dashed?: boolean; tone?: "accent" | "quiet"; /** Adds a wide invisible hit line and a grab handle on each end (the Mesh edits grants with them). */ editable?: boolean }
 
+/**
+ * One arrow: a curve and a head in an SVG group (`g`) in world coordinates. Draw it with `draw` (exact points) or `between`
+ * (two rectangles), read a point on it with `pointAt`, and remove it with `remove`. Editable arrows get a wide hit line and grab handles.
+ */
 export class Arrow {
   readonly g = svgEl("g", "cl-arrow");
   private readonly line = svgEl("path", "cl-arrow-line");
@@ -128,6 +137,7 @@ export class Arrow {
     this.tip = p1;
   }
 
+  /** Draws from rectangle `a` to rectangle `b`, on their facing sides. `lane` shifts the ends so parallel arrows do not overlap. */
   between(a: Rect, b: Rect, size: number, lane = 0): void {
     const n = anchors(a, b, lane);
     this.draw(n.p0, n.t0, n.p1, n.t1, size);
@@ -148,6 +158,7 @@ export class Arrow {
   /** Stops a press in flight (an arrow taken from the pool starts at rest). */
   rest(): void { this.pressing?.cancel(); this.pressing = undefined; }
 
+  /** Hides or shows the arrow without removing it. */
   set hidden(value: boolean) { this.g.toggleAttribute("hidden", value); }
   remove(): void { this.g.remove(); }
 }
@@ -175,8 +186,10 @@ export class DragArrow {
     this.arrow.g.dataset.live = "";
   }
 
+  /** True while the free end sits on a target. */
   get snapped(): boolean { return this.target !== undefined; }
 
+  /** Moves the free end to `pointer` (world coordinates). `size` is the head length in world pixels. */
   move(pointer: Pt, size: number): void {
     this.pointer = pointer;
     this.lastSize = size;

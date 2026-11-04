@@ -304,7 +304,10 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
 #[must_use]
 pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
     use infraternal_plugin_api::ActionTarget;
-    #[cfg(all(feature = "agent", target_os = "linux"))]
+    #[cfg(any(
+        all(feature = "agent", target_os = "linux"),
+        all(feature = "agent", target_os = "macos")
+    ))]
     use infraternal_plugin_api::JsonSchema;
     let mut plugin = if infraternal_plugin_api::PLACEHOLDERS {
         DESCRIPTOR.cli_plugin(ActionTarget::Global)
@@ -350,7 +353,72 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
         }
         plugin.actions.push(action);
     }
-    #[cfg(not(all(feature = "agent", target_os = "linux")))]
+    #[cfg(all(feature = "agent", target_os = "macos"))]
+    for mut action in crate::policy::cli::actions() {
+        action.availability = infraternal_plugin_api::ActionAvailability::Available;
+        action.cli_handler = infraternal_plugin_api::CliHandler::MeshService;
+        action.examples.clear();
+        action.instructions = match action.command.last().map(String::as_str) {
+            Some("up") => vec![
+                "Run this command on the Mac that should join the configured Mesh.".to_owned(),
+                "Approve the one-time administrator prompt to start the system service.".to_owned(),
+            ],
+            Some("down") => {
+                vec!["Stop the system service and disconnect this Mac from the Mesh.".to_owned()]
+            }
+            _ => vec!["Read whether the system Mesh service is running.".to_owned()],
+        };
+        action.input_schema = if matches!(
+            action.command.last().map(String::as_str),
+            Some("up" | "down")
+        ) {
+            action.cli_hidden_inputs = vec!["system_service".to_owned()];
+            JsonSchema::object(
+                [(
+                    "system_service".to_owned(),
+                    JsonSchema::boolean("Internal service-control request."),
+                )],
+                std::iter::empty(),
+            )
+        } else {
+            JsonSchema::empty_object()
+        };
+        plugin.actions.push(action);
+    }
+    #[cfg(not(any(
+        all(feature = "agent", target_os = "linux"),
+        all(feature = "agent", target_os = "macos")
+    )))]
     plugin.actions.extend(crate::policy::cli::plugin().actions);
     plugin
+}
+
+#[cfg(all(test, feature = "agent", target_os = "macos"))]
+mod macos_cli_tests {
+    use super::cli_plugin;
+    use infraternal_plugin_api::{ActionAvailability, CliHandler};
+
+    #[test]
+    fn macos_mesh_lifecycle_actions_use_the_system_service() {
+        let plugin = cli_plugin();
+        for command in [
+            &["mesh", "up"][..],
+            &["mesh", "down"][..],
+            &["mesh", "status"][..],
+        ] {
+            let action = plugin
+                .actions
+                .iter()
+                .find(|action| {
+                    action
+                        .command
+                        .iter()
+                        .map(String::as_str)
+                        .eq(command.iter().copied())
+                })
+                .unwrap_or_else(|| panic!("missing mesh action {command:?}"));
+            assert_eq!(action.availability, ActionAvailability::Available);
+            assert_eq!(action.cli_handler, CliHandler::MeshService);
+        }
+    }
 }

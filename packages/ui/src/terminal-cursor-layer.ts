@@ -20,8 +20,10 @@
 export const CURSOR_BLINK_PERIOD_MS = 1060;
 /** About 30 seconds of blinking without input, then the cursor stays steady. */
 export const CURSOR_BLINK_LIMIT_MS = 30_000;
+/** How many blink periods fit in the blink limit. */
 const CURSOR_BLINK_ITERATIONS = Math.round(CURSOR_BLINK_LIMIT_MS / CURSOR_BLINK_PERIOD_MS);
 
+/** Where and how to draw the cursor: the cell (`column`, `row`), the cell size in pixels, the shape and a CSS colour. */
 export interface TerminalCursorPlacement {
   /** The renderer's canvas; the layer sits at its offset inside the host. */
   canvas: HTMLCanvasElement;
@@ -45,13 +47,25 @@ export interface TerminalCursorSnapshot {
   color: string;
 }
 
+/**
+ * A cursor box above the terminal canvas that blinks without the main thread. Create it with
+ * {@link mountTerminalCursorLayer}; call `place` when the cursor moves, `restart` on input, `hide` and `stopBlink`
+ * when it should not show or blink, and `dispose` to remove it.
+ */
 export class TerminalCursorLayer {
+  /** The layer's box. */
   private readonly element: HTMLElement;
+  /** The running blink, or `undefined` when steady. */
   private animation: Animation | undefined;
+  /** The placement last applied, as a string, so an unchanged cursor writes no style. */
   private key = "";
+  /** Whether the layer is visible. */
   private shown = false;
+  /** The last placed rectangle, for {@link TerminalCursorLayer.snapshot}. */
   private box = { x: 0, y: 0, width: 0, height: 0 };
+  /** The last placed colour. */
   private color = "";
+  /** Under reduced motion the cursor never blinks. */
   private readonly reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
   constructor(host: HTMLElement) {
@@ -90,6 +104,7 @@ export class TerminalCursorLayer {
     }
   }
 
+  /** Stops blinking and hides the cursor. */
   hide(): void {
     this.stopBlink();
     if (!this.shown) return;
@@ -117,17 +132,20 @@ export class TerminalCursorLayer {
     this.animation = undefined;
   }
 
+  /** What the layer shows now. */
   snapshot(): TerminalCursorSnapshot {
     const playing = this.animation?.playState === "running";
     return { visible: this.shown, blinking: playing, ...this.box, color: this.color };
   }
 
+  /** Stops the blink and removes the layer from the page. */
   dispose(): void {
     this.stopBlink();
     this.element.remove();
   }
 }
 
+/** Adds a cursor layer to `host` and returns it. The layer starts hidden until the first `place`. */
 export function mountTerminalCursorLayer(host: HTMLElement): TerminalCursorLayer {
   return new TerminalCursorLayer(host);
 }

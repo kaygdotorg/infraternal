@@ -10,6 +10,7 @@
 import type { CoreScreen } from "../core-screen";
 import { createInbox, type InboxController } from "../../../../packages/ui/src/inbox";
 
+/** The inbox made for each screen, so a screen has exactly one. */
 const made = new WeakMap<CoreScreen, InboxController>();
 
 /** The screen's inbox, made on first use. */

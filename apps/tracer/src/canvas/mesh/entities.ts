@@ -13,6 +13,7 @@ export function meshEntity(source: MeshSource, id: string): EntityRef {
   return { kind: "host", name: id, via: node?.tags ?? [], ...(node?.os ? { platform: node.os } : {}) };
 }
 
+/** A sentence in two forms: `plain` text for labels and tests, and `node` with entity chips for display. */
 export interface Say { plain: string; node: DocumentFragment }
 
 /** `say("Let {a} reach {b}?", { a: "tag:ci", b: "nix-cache" })`. */

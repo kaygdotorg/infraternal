@@ -1,5 +1,6 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
 import { AuthError, checkStatus, checkSession, recoveryAuth, isDeviceUserCode, type AuthStatus } from "./auth";
+import { readApprovalLink, type ApprovalKind, type ApprovalLink } from "./approval-link";
 import { registerSignOut } from "./sign-out";
 import { warmOfflineShell } from "./offline-cache";
 import type { DrawingIdentity } from "./offline-drawing";
@@ -99,8 +100,7 @@ declare global {
 }
 
 const app = document.querySelector<HTMLElement>("#app") ?? missingMount();
-type DeviceApprovalLink = { code: string } | { error: string } | undefined;
-let deviceApprovalLink = consumeDeviceApprovalLink();
+let deviceApprovalLink: ApprovalLink = consumeDeviceApprovalLink();
 let deviceApprovalComplete = false;
 type UiFont = "sans" | "mono";
 
@@ -161,7 +161,7 @@ async function start(): Promise<void> {
   if (deviceApprovalLink && "error" in deviceApprovalLink) {
     await fontsReady;
     installTooltips();
-    await showDeviceApproval(undefined, deviceApprovalLink.error);
+    await showDeviceApproval(deviceApprovalLink.kind, undefined, deviceApprovalLink.error);
     return;
   }
   try {
@@ -192,15 +192,15 @@ async function showAuthState(status: AuthStatus): Promise<void> {
     return;
   }
   if (deviceApprovalLink && "code" in deviceApprovalLink) {
-    const code = deviceApprovalLink.code;
+    const { code, kind } = deviceApprovalLink;
     if (!isDeviceUserCode(code)) {
-      await showDeviceApproval(code);
+      await showDeviceApproval(kind, code);
       return;
     }
     const session = status.setupRequired ? undefined : await checkSession();
     if (session) {
       activeUserId = session.user_id;
-      await showDeviceApproval(code);
+      await showDeviceApproval(kind, code);
     } else {
       renderAuth(status.setupRequired, "", status.setupTokenCommand);
     }
@@ -292,7 +292,7 @@ function renderAuth(
     peerSessions.forget(userId);
     activeUserId = userId;
     if (deviceApprovalLink && "code" in deviceApprovalLink) {
-      void showDeviceApproval(deviceApprovalLink.code);
+      void showDeviceApproval(deviceApprovalLink.kind, deviceApprovalLink.code);
       return;
     }
     if (firstSetup) showWelcome(welcomeName ?? "", instant);
@@ -302,12 +302,19 @@ function renderAuth(
 }
 
 /** Shows the request and requires a separate, user-initiated fresh passkey tap to approve it. */
-async function showDeviceApproval(code?: string, error?: string): Promise<void> {
+async function showDeviceApproval(kind: ApprovalKind, code?: string, error?: string): Promise<void> {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   try {
     const { mountDeviceApproval } = await onDemand(() => import("./device-approval.on-demand"));
-    await mountDeviceApproval(app, code ?? null, error, () => { deviceApprovalComplete = true; });
+    await mountDeviceApproval(app, kind, code ?? null, error, {
+      onApproved: () => { deviceApprovalComplete = true; },
+      // Leaving a pending request is not a decision: it stays unapproved until it expires, and the person lands in the app.
+      onCancel: () => {
+        deviceApprovalLink = undefined;
+        void showTerminal(undefined, true);
+      },
+    });
   } catch {
     renderUnavailable("Could not load device sign-in. Check your connection and reopen the link.");
     return;
@@ -328,21 +335,19 @@ async function showDeviceApprovalSuccess(): Promise<void> {
   scheduleBackdrop();
 }
 
-/** Synchronously removes every device code before `start` can issue any auth request. */
-function consumeDeviceApprovalLink(): DeviceApprovalLink {
-  const url = new URL(location.href);
-  const codes = url.searchParams.getAll("device_code");
-  if (codes.length === 0) return undefined;
-  url.searchParams.delete("device_code");
+/**
+ * Synchronously removes every approval code (query or fragment) from the address bar before `start` can issue any
+ * request. A link that cannot be cleared is refused: a code left in the bar would sit in history and screenshots.
+ */
+function consumeDeviceApprovalLink(): ApprovalLink {
+  const { link, cleaned } = readApprovalLink(location);
+  if (cleaned === undefined) return link;
   try {
-    history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    history.replaceState(history.state, "", cleaned);
   } catch {
-    return { error: "This sign-in link could not be cleared from the address bar. Close this page and open the link again." };
+    return { error: "This link could not be cleared from the address bar. Close this page and open the link again.", kind: link?.kind ?? "sign_in" };
   }
-  if (codes.length !== 1) {
-    return { error: "This sign-in link has more than one code. Ask the person who started it to run infraternal sign-in again." };
-  }
-  return { code: codes[0] ?? "" };
+  return link;
 }
 
 function showWelcome(displayName: string, instant = false): void {

@@ -13,14 +13,20 @@ use tokio::{
 
 // Count the executing request as well as queued requests. Wire bytes include
 // mux/header overhead; a single maximum legal Input must fit without a copy.
+/// Most requests in flight per terminal: the one being sent plus those queued behind it.
 const REQUESTS: usize = 8;
+/// Wire bytes one terminal may hold in its queue. Room for one maximum-size legal Input frame plus multiplexing overhead.
 const WIRE_BYTES: usize = infraternal_protocol::MAX_FRAME_LEN + 128;
 // Reply claims are already bounded per session. Separate reservations keep
 // those small best-effort frames from spending keyboard capacity.
+/// Reply slots per terminal, separate from keyboard slots so small terminal-query replies never use up input capacity.
 const REPLY_REQUESTS: usize = crate::terminal_queries::POSITIONS;
 
+/// An item waiting to be sent to the host.
 enum QueuedFrame {
+    /// An ordinary encoded frame (Input or Resize).
     Wire(Bytes),
+    /// An answer to a terminal query. It is dropped, not delayed, once `expires` passes.
     Reply {
         query_seq: u64,
         bytes: Bytes,
@@ -28,6 +34,7 @@ enum QueuedFrame {
     },
 }
 
+/// One queued frame plus the permits it holds. The permits are released when it is dropped, after forwarding finishes.
 struct Request {
     frame: QueuedFrame,
     _bytes: Option<OwnedSemaphorePermit>,
@@ -44,6 +51,8 @@ pub(super) struct InputQueue {
 }
 
 impl InputQueue {
+    /// Starts the worker task that sends queued frames to `handle` in order for terminal `stream`.
+    /// If sending fails, it reports a server-initiated close (code 1013) on `output` and stops.
     pub(super) fn new(
         handle: AttachmentHandle,
         stream: u32,
@@ -152,6 +161,7 @@ impl InputQueue {
 }
 
 impl Drop for InputQueue {
+    /// Stops the worker. Anything still queued is discarded.
     fn drop(&mut self) {
         self.worker.abort();
     }

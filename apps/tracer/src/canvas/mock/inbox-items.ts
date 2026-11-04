@@ -6,6 +6,7 @@
 import { ICONS } from "../../../../../packages/ui/src/icons";
 import type { InboxItem } from "../../../../../packages/ui/src/inbox";
 
+/** Two example waiting items for the inbox card (`?inbox=3`). Their buttons do nothing. */
 export function mockInboxItems(): InboxItem[] {
   const noop = (): void => undefined;
   return [

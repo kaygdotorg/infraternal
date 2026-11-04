@@ -5,9 +5,12 @@
  */
 import { onDemand } from "../../on-demand";
 
+/** The type of the droplet module, so callers get its exports without importing it at load time. */
 type Droplet = typeof import("./droplet.on-demand");
+/** The module once loaded; `undefined` until then. */
 let loaded: Droplet | undefined;
 
+/** Loads the droplet module (once). Later calls return the same module at once. */
 export const loadDroplet = (): Promise<Droplet> => loaded ? Promise.resolve(loaded) : onDemand(() => import("./droplet.on-demand")).then((m) => (loaded = m));
 /** Ends the split that is playing, if any (a no-op while the module has never loaded). */
 export const endSplit = (): void => loaded?.endSplit();

@@ -3,9 +3,18 @@ use super::Command;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
+/// How many ordinary commands (input, resize, and so on) may wait in the queue
+/// at once. Replies have their own budget, `REPLY_SLOTS`.
 const COMMAND_SLOTS: usize = 8;
+/// How many replies (answers to terminal queries) may wait in the queue at once,
+/// kept apart from `COMMAND_SLOTS` so replies can never use up typing's room.
 const REPLY_SLOTS: usize = 64;
 
+/// A queued command stamped with the total credit published before it.
+/// `credit_before` is the fence: the receiver releases no more credit than this
+/// before delivering the command, which keeps credit and commands in the order
+/// the producer sent them. `_slot` holds the command's queue reservation until
+/// the command is delivered.
 pub(super) struct Ordered {
     command: Command,
     credit_before: u64,
@@ -17,15 +26,27 @@ pub(super) struct Ordered {
 // publication and ordered-command fences under that single producer's order.
 // Mutable admission also prevents concurrent callers from interleaving a fence
 // snapshot with publication of a later credit total.
+/// The single producer side of a session's command queue.
+///
+/// Input, resize and replies go through one FIFO. Credit (permission to send more
+/// output bytes) is not queued: it is added to a running total that the receiver
+/// turns into grants, so credit can never fill the queue. There is deliberately
+/// no `Clone`, and sending needs `&mut self`: one owner publishes credit and takes
+/// each command's fence snapshot, so the two cannot interleave out of order.
 pub(super) struct Sender {
     raw: mpsc::Sender<Ordered>,
     credits: watch::Sender<u64>,
     slots: Arc<Semaphore>,
     reply_slots: Arc<Semaphore>,
 }
+/// The consuming side of a session's command queue.
 pub(super) enum Receiver {
+    /// Plain FIFO used by native connections, which carry their own credit.
     #[cfg(feature = "remote")]
     Native(mpsc::Receiver<Command>),
+    /// Queue plus credit total shared with a `Sender`. `seen` is how much credit
+    /// has already been handed out; `pending` is a command taken from the queue
+    /// that is waiting for its credit fence to be satisfied.
     Shared {
         raw: mpsc::Receiver<Ordered>,
         credits: watch::Receiver<u64>,
@@ -33,6 +54,8 @@ pub(super) enum Receiver {
         pending: Option<Ordered>,
     },
 }
+/// Creates a connected `Sender` and `Receiver` with room for `COMMAND_SLOTS`
+/// ordinary commands plus `REPLY_SLOTS` replies.
 pub(super) fn channel() -> (Sender, Receiver) {
     let (tx, rx) = mpsc::channel(COMMAND_SLOTS + REPLY_SLOTS);
     let (credits, reader) = watch::channel(0);
@@ -52,9 +75,20 @@ pub(super) fn channel() -> (Sender, Receiver) {
     )
 }
 impl Sender {
+    /// True once the receiver has been dropped, so sending is pointless.
     pub(super) fn is_closed(&self) -> bool {
         self.raw.is_closed()
     }
+    /// Queues a command without waiting.
+    ///
+    /// * `Credit(n)` adds `n` to the credit total. It never blocks and never takes a
+    ///   queue slot; zero is ignored. It fails with `Full` only if the total would
+    ///   overflow `u64`.
+    /// * Everything else needs a free slot, replies from their own pool. When none is
+    ///   free, `Ping` and `Reply` are dropped silently and `Ok` is returned, because
+    ///   they are best-effort and must not displace accepted typing. Any other
+    ///   command fails with `Full`.
+    /// * Fails with `Closed` (returning the command) after the receiver is gone.
     pub(super) fn try_send(
         &mut self,
         command: Command,
@@ -123,6 +157,9 @@ impl Sender {
     }
 }
 impl Receiver {
+    /// Waits for the next command to run, in send order. Returns `None` when the
+    /// sender is gone and nothing remains. May be cancelled and called again without
+    /// losing a command or credit.
     pub(super) async fn next(&mut self) -> Option<Command> {
         match self {
             #[cfg(feature = "remote")]
@@ -136,6 +173,13 @@ impl Receiver {
         }
     }
 }
+/// Implements `next` for the shared queue.
+///
+/// Turns the credit total into `Credit` grants (at most `u32::MAX` each) up to the
+/// next queued command's fence, then yields that command. The total is read
+/// before looking ahead in the queue so credit sent after a command can never be
+/// granted ahead of it. State is committed only when a value is returned, so
+/// cancelling this future (as the terminal's outer `select!` does) loses nothing.
 async fn next_shared(
     raw: &mut mpsc::Receiver<Ordered>,
     credits: &mut watch::Receiver<u64>,

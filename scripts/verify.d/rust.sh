@@ -21,6 +21,13 @@ rust_run_gate() {
     printf '(%s: %ss)\n' "$name" "$((SECONDS - started))"
 }
 
+# Doc-comment coverage may never go down (D345): scripts/doc-coverage compares every unit with
+# scripts/doc-coverage-baseline.json. The fixture test comes first so a broken scanner cannot
+# pass the ratchet by miscounting. Pure python, a few seconds, shared by `quick` and `fast`.
+verify_doc_coverage() {
+    python3 scripts/test-doc-coverage.py && python3 scripts/doc-coverage --check
+}
+
 rust_print_summary() {
     local row
     local name
@@ -282,6 +289,7 @@ rust_verify_fast() {
     rust_run_gate "shim process-per-user" cargo test --locked --package infraternal-shim --features process-per-user --lib
     rust_run_gate "cargo-deny" cargo deny check
     rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
+    rust_run_gate "doc coverage ratchet" verify_doc_coverage
     if [[ "$mode" == final ]]; then
         rust_run_gate "static builds" rust_static_build_check
     fi

@@ -29,6 +29,12 @@ export interface AddHostDeps {
   applyIdentities(hosts: readonly { id: string; name: string; user?: string; os?: HostPlatform }[]): void;
 }
 
+/**
+ * Mounts the add-host flow for the product canvas. When a host finishes enrolling it registers the host with the session list,
+ * then opens its shell window, or, if the host already has a first shell, attaches the rest of its setup (install, join, start)
+ * to that window's machine pill. A host without a connection identity gets an error toast and is skipped. The returned `open`
+ * also pre-warms the setup feed.
+ */
 export function mountAddHost(core: CoreScreen, deps: AddHostDeps): AddHost {
   const addHost = createAddHost(core, {
     service: deps.service, sink: { setupInPill: true, prepareTerminal() {

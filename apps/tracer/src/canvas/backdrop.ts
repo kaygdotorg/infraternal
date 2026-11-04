@@ -10,6 +10,7 @@
  */
 import { createCanvasBackdrop, type CanvasBackdrop } from "../../../../packages/ui/src/canvas-backdrop";
 
+/** The canvas's dotted background. */
 export interface Backdrop {
   /** Re-measures the canvas area inside the stage. Call on mount and on resize. */
   measure(): void;
@@ -17,9 +18,11 @@ export interface Backdrop {
   update(t: { tx: number; ty: number; z: number; vw: number; vh: number; rest: boolean }): void;
   /** Frees every dot layer's surface (a hidden page); the next `update` brings them back. */
   release(): void;
+  /** Removes the layers. */
   dispose(): void;
 }
 
+/** Makes the backdrop in `stage`. `viewport` is the canvas area; its offset inside the stage is re-measured by `measure`, never per frame. */
 export function createBackdrop(stage: HTMLElement, viewport: HTMLElement): Backdrop {
   const layer: CanvasBackdrop = createCanvasBackdrop(stage);
   const box = { x: 0, y: 0, w: 0, h: 0 };

@@ -12,12 +12,16 @@
 import { onDemand } from "../../on-demand";
 import type { groups } from "./groups.on-demand";
 
+/** The functions of the grouped-layout module. */
 export type Groups = typeof groups;
+/** The module once it has evaluated; `undefined` until then. */
 let loaded: Groups | undefined;
 
 /** Called by the module when it evaluates. */
 export const registerGroups = (g: Groups): void => { loaded = g; };
+/** The grouped-layout module if it has loaded, else `undefined`. Never waits. */
 export const groupsLoaded = (): Groups | undefined => loaded;
+/** Loads the grouped-layout module (once) and resolves with it. */
 export const loadGroups = (): Promise<Groups> => loaded ? Promise.resolve(loaded) : onDemand(() => import("./groups.on-demand")).then(() => loaded!);
 
 /** A column is plain when no group wraps it: its windows stack, and the flat path (what the product always did) is exact. */

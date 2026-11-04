@@ -9,7 +9,9 @@
 //! and on a file database its RESERVED lock stalls every other writer until
 //! the busy timeout: both surface as `Storage` errors.
 
-/// Begin `BEGIN IMMEDIATE` on a pooled connection, independent of the caller.
+/// Starts a writer transaction (`BEGIN IMMEDIATE`) on a pooled connection, safe against the
+/// caller being cancelled. Use it instead of `begin_with("BEGIN IMMEDIATE")` anywhere the
+/// caller can be dropped mid-way.
 ///
 /// The begin runs to completion in its own task. If the caller goes away, the
 /// finished `Transaction` is dropped inside that task, which queues sqlx's

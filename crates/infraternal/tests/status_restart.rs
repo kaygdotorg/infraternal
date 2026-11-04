@@ -18,6 +18,19 @@ fn service_states_are_truthful_in_text_and_json() {
     let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
         .unwrap()
         .num_microseconds();
+    // Fixture managers run with a PATH holding only themselves; they stamp fresh
+    // starts with the interpreter the other real-binary fixtures already use.
+    let python = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v python3"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert!(!python.is_empty(), "the status fixtures need python3");
     let cases = [
         (
             "activating",
@@ -110,24 +123,31 @@ fn service_states_are_truthful_in_text_and_json() {
             .unwrap();
             let manager = home.join("bin/systemctl");
             for (active, sub, restarts, started, code, status, label, state, exit) in cases {
-                // Keep each recent-start fixture recent even when the complete
-                // matrix takes more than the restart window on a loaded host.
+                // A recent start is stamped when the manager is asked, one
+                // second before that moment: a single cold status run on a
+                // loaded host can take longer than the 10 s restart window, so
+                // a value frozen when this fixture is written can age out (#334).
                 let started = if started == now {
-                    nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
-                        .unwrap()
-                        .num_microseconds()
+                    format!(
+                        "$({python} -c 'import time; print(int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1e6) - 1000000)')"
+                    )
                 } else {
-                    started
+                    started.to_string()
                 };
                 let scope_check = if scope == "user" {
                     "test \"$1\" = --user || exit 1\nshift\n"
                 } else {
                     "test \"$1\" = show || exit 1\n"
                 };
-                // Responsive managers can exceed 40 ms on a busy host (#312).
-                // Keep the original delay too. A response above half the total
-                // budget must not be cut off by a per-observation split; the
-                // fresh active service needs two responses on one deadline.
+                // Delayed responses still exercise the child-exit wakeup and
+                // the two observations of a fresh active service. The matrix
+                // runs under a hang-sized budget: it checks how states read,
+                // and a cold debug binary can spend seconds of a 500 ms window
+                // on its own page faults (#334); with its pages evicted under
+                // two agent suites one run exceeded 30 s. No case here waits
+                // for the budget to expire, so its size costs passing runs
+                // nothing. The budget's structure (one deadline for both
+                // observations) is a unit test in infraternal-status.
                 let delay = match active {
                     "delayed" => "/bin/sleep 0.025\n",
                     "busy" => "/bin/sleep 0.3\n",
@@ -164,6 +184,7 @@ fn service_states_are_truthful_in_text_and_json() {
                         .env("XDG_CONFIG_HOME", &config)
                         .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &system)
                         .env("PATH", home.join("bin"))
+                        .env("INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS", "120000")
                         .output()
                         .unwrap();
                     let text = String::from_utf8(output.stdout).unwrap();

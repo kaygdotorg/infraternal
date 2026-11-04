@@ -12,11 +12,14 @@
  */
 import { expect, type Locator, type Page } from "playwright/test";
 
+/** The colour scheme of a picture: dark ("ink") or light ("paper"). */
 export type Scheme = "ink" | "paper";
+/** The screen size of a picture: a wide window or a phone. */
 export type SizeName = "desktop" | "phone";
 
 /** A capture size: the browser window, and how sharp the pictures are (desktop 2x, phone 3x). */
 export interface CaptureSize { width: number; height: number; scale: number; touch: boolean }
+/** The capture settings for each size name. */
 export const SIZES: Record<SizeName, CaptureSize> = {
   desktop: { width: 1440, height: 900, scale: 2, touch: false },
   phone: { width: 393, height: 852, scale: 3, touch: true },
@@ -28,6 +31,7 @@ export type Crop = { whole: true } | { around: (page: Page) => Locator; air: num
 /** The steps of a clip: what a person does from the prepared state, each followed by a pause long enough to read the result. */
 export type Flow = (page: Page, pause: (ms: number) => Promise<void>) => Promise<void>;
 
+/** One figure: its `name` (used in `figure:<name>` in a page), how to open and prepare the product, what part of the screen to keep, and optionally a clip. */
 export interface Figure {
   name: string;
   /** The page to open (the same address the product's own mockups use, plus the scheme). */
@@ -41,10 +45,14 @@ export interface Figure {
   clip?: Flow;
 }
 
+/** The text of the startup question the multiplexer figure waits for. */
 const QUESTION = "tmux started automatically. Would you like to switch to the Infraternal Multiplexer instead?";
+/** The answer button named `name` in the startup question toast. */
 const choice = (page: Page, name: string): Locator => page.locator(".ui-toast-icons").getByRole("button", { name, exact: true });
+/** The button named `name` inside the add-host wizard's floating card. */
 const inWizard = (page: Page, name: string): Locator => page.locator(".ah-float").getByRole("button", { name, exact: true });
 
+/** Every figure of the user docs. Add an entry here to add a figure; `capture.ts` runs all of them. */
 export const FIGURES: Figure[] = [
   {
     // The startup question of the multiplexer page, and the clip of answering it. The window is the picture (a clip cannot be cropped).

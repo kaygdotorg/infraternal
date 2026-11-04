@@ -19,6 +19,8 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+/// Resident memory of this process in KiB, read from `/proc/self/status`.
+/// Panics if the file cannot be read (diagnostic code only).
 fn rss() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap()
@@ -31,6 +33,8 @@ fn rss() -> u64 {
         .parse()
         .unwrap()
 }
+/// CPU time this process has used so far (user plus system) in clock ticks,
+/// read from `/proc/self/stat`.
 fn cpu_ticks() -> u64 {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     let fields: Vec<_> = stat
@@ -41,6 +45,11 @@ fn cpu_ticks() -> u64 {
         .collect();
     fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
 }
+/// Prints one `transport_diagnostic` line. Timing percentiles (p50, p99) come
+/// from `timings`, which is sorted in place. `baseline` and `retained` are RSS in
+/// KiB before and after holding 1000 connection pairs; `cpu` is the CPU ticks
+/// spent connecting them. The machine name and load average are included so
+/// readings can be judged later.
 fn report(kind: &str, timings: &mut [u128], baseline: u64, retained: u64, cpu: u64) {
     timings.sort_unstable();
     println!(
@@ -56,6 +65,11 @@ fn report(kind: &str, timings: &mut [u128], baseline: u64, retained: u64, cpu: u
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+/// Copies `reader` to `writer`, delaying every chunk by 150 ms to imitate half
+/// of a 300 ms round trip. Each chunk's delay starts when it arrives, and at
+/// most 64 chunks wait at once, which bounds memory and pushes back on the
+/// sender. At end of input it flushes everything pending, then shuts `writer`
+/// down. Returns the first I/O error.
 pub(crate) async fn delayed_copy(
     mut reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin,
@@ -91,9 +105,14 @@ pub(crate) async fn delayed_copy(
     }
 }
 
+/// A TCP relay to `upstream` on an ephemeral loopback port; see `tcp_proxy_at`.
 async fn tcp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
     tcp_proxy_at(upstream, "127.0.0.1:0".parse().unwrap()).await
 }
+/// Starts a TCP relay listening on `address` that forwards to `upstream` with
+/// 300 ms of added round-trip time: an extra 300 ms before each connect, plus
+/// `delayed_copy` in both directions. Returns the bound address and the task;
+/// abort the task to stop the relay.
 pub(crate) async fn tcp_proxy_at(
     upstream: SocketAddr,
     address: SocketAddr,
@@ -121,6 +140,8 @@ pub(crate) async fn tcp_proxy_at(
     });
     (address, task)
 }
+/// Sends one datagram to `target` after 150 ms. Holding `permit` until the send
+/// finishes bounds how many datagrams can be in flight.
 async fn delayed_datagram(
     socket: Arc<UdpSocket>,
     target: SocketAddr,
@@ -131,6 +152,9 @@ async fn delayed_datagram(
     tokio::time::sleep(Duration::from_millis(150)).await;
     let _ = socket.send_to(&bytes, target).await;
 }
+/// Forwards replies from upstream (read on `peer`) back to one `client` through
+/// `front`, each after 150 ms. When all in-flight slots in `pending` are taken
+/// the reply is dropped, which QUIC treats as ordinary packet loss.
 async fn udp_replies(
     peer: Arc<UdpSocket>,
     front: Arc<UdpSocket>,
@@ -155,6 +179,8 @@ async fn udp_replies(
         }
     }
 }
+/// Starts a UDP relay on an ephemeral loopback port that forwards to `upstream`
+/// with 300 ms added round-trip time. Returns the bound address and the task.
 pub(crate) async fn udp_proxy(upstream: SocketAddr) -> (SocketAddr, JoinHandle<()>) {
     let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     udp_proxy_on(socket, upstream)
@@ -198,6 +224,9 @@ pub(crate) fn udp_proxy_on(
     (address, task)
 }
 
+/// Diagnostic: times 25 TCP+TLS handshakes through the 300 ms relay, then holds
+/// 1000 direct connection pairs and reports their memory and CPU cost. Ignored by
+/// default; run alone on a quiet machine.
 #[tokio::test]
 #[ignore = "diagnostic only; run alone without build or browser overlap"]
 async fn tcp_300ms_and_1000_connection_pairs() {
@@ -236,6 +265,8 @@ async fn tcp_300ms_and_1000_connection_pairs() {
     drop(retained);
 }
 
+/// Diagnostic: the same measurement as the TCP one, over QUIC. Ignored by
+/// default; run alone on a quiet machine.
 #[tokio::test]
 #[ignore = "diagnostic only; run alone without build or browser overlap"]
 async fn quic_300ms_and_1000_connection_pairs() {
@@ -313,6 +344,10 @@ async fn quic_bulk_50m_kernel_latency() {
     measure_quic_bulk(Some(300)).await;
 }
 
+/// Runs the 50 MiB QUIC transfer and reports throughput. `kernel_rtt` is the
+/// round trip imposed by a kernel network namespace in milliseconds, or `None`
+/// to use the userspace delaying relay. Panics unless the host name is the
+/// authorized perf VM, since throughput numbers from other machines mean nothing.
 #[allow(clippy::too_many_lines)]
 async fn measure_quic_bulk(kernel_rtt: Option<u32>) {
     assert_eq!(
@@ -422,6 +457,9 @@ async fn measure_quic_bulk(kernel_rtt: Option<u32>) {
     client.close(0u32.into(), b"");
 }
 
+/// Sends `bytes` bytes (repeats of `payload`) from `a` over one stream. `b`
+/// checks every byte against the pattern and replies with the count it received;
+/// panics on any mismatch.
 async fn exact_bulk(a: &quinn::Connection, b: &quinn::Connection, payload: &[u8], bytes: usize) {
     tokio::join!(
         async {

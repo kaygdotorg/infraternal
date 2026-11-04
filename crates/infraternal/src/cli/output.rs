@@ -630,6 +630,7 @@ fn print_with_phase<T: Serialize>(
 }
 
 /// Shares formatting-error and destination handling for every rendered result.
+#[cfg(feature = "plugin-server")]
 pub fn write_output(output: Result<String, serde_json::Error>, to_stderr: bool) {
     write_rendered(output, to_stderr, true);
 }
@@ -894,7 +895,18 @@ mod tests {
                 "role": "node",
                 "components": [{"name": "server", "state": "Stopped"}]
             }),
-            "up" => json!({"started": []}),
+            "up" => json!({
+                "server": "https://infra.example.org",
+                "hostname": "workstation",
+                "mode": "system",
+                "key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "machine_key": "AAAA AAAA AAAA AAAA",
+                "user_code": "AbCdEfGhIjKlMnOp",
+                "approval_url": "https://infra.example.org/#join=AbCdEfGhIjKlMnOp",
+                "service": "infraternal-agent.service",
+                "status": "active",
+                "path": "/usr/local/bin/infraternal"
+            }),
             "skill" => json!({
                 "commands": [{"command": "status", "description": "Show status."}],
                 "skill": "# Status skill",

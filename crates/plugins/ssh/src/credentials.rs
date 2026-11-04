@@ -1,4 +1,22 @@
 //! Hands decrypted SSH material to ephemeral helpers without secret files, argv or environment values [23][141].
+//!
+//! A [`CredentialSession`] owns one private directory (mode 0700, under a
+//! trusted scratch root) for the lifetime of a single OpenSSH connection attempt:
+//!
+//! - A private key is loaded into a throw-away `ssh-agent` bound to a socket in
+//!   that directory, by piping the key to `ssh-add -` on stdin. The key is never
+//!   written to a file.
+//! - A password or passphrase is served over a private Unix socket to a tiny
+//!   askpass helper script (also in that directory). The helper only answers the
+//!   two expected prompt shapes (passphrase and password) and refuses everything
+//!   else, so it can never approve a host-trust or permission prompt.
+//! - The environment holds only paths (`SSH_AUTH_SOCK`, `SSH_ASKPASS`, the
+//!   socket path), never secret values. Secrets are never in argv.
+//!
+//! [`CredentialSession::configure`] then pins the OpenSSH child to exactly that
+//! one method and switches off every ambient identity, certificate, hardware
+//! provider and GSSAPI delegation. After login, `CredentialSession::authenticated`
+//! erases the helpers; dropping the session kills them and removes the directory.
 
 use crate::{
     model::{Failure, FailureKind},
@@ -22,25 +40,44 @@ use tokio::{
 
 /// Trusted helper paths and private socket root; requests cannot set these paths.
 pub struct CredentialConfig {
+    /// Path of the `ssh-agent` program started per session.
     pub ssh_agent: PathBuf,
+    /// Path of the `ssh-add` program used to load a key.
     pub ssh_add: PathBuf,
+    /// Our own executable, copied into the session directory to answer askpass prompts.
     pub askpass_binary: PathBuf,
+    /// Root under which per-session 0700 directories are created. If it is too long
+    /// for a Unix socket address, [`runtime_root`] is used instead.
     pub scratch: PathBuf,
 }
 
 /// Scope owns every helper and its 0700 directory, including during failed preparation.
 pub struct CredentialSession {
+    /// The per-session private directory; `None` until created. Removed on drop.
     directory: Option<PathBuf>,
+    /// The throw-away `ssh-agent`, present only when a private key was supplied.
     agent: Option<KeyHelper>,
+    /// Task serving the password/passphrase over the askpass socket.
     askpass: Option<JoinHandle<()>>,
+    /// The credential is a password (not a key), so only password authentication is enabled.
     password: bool,
+    /// Network-identity mode: no local secret, all password/key methods are disabled.
     network: bool,
+    /// An askpass script exists in the directory (it refuses when there is no secret).
     prompt_helper: bool,
+    /// Lets the prompt machinery tell the caller about prompts it saw.
     pub(crate) prompt_parent: PromptParent,
 }
 
 impl CredentialSession {
     /// Materialize only private helper programs/sockets; secrets stay in stdin or memory.
+    ///
+    /// Takes ownership of `credentials` and consumes them. For a key, the key is
+    /// loaded into the scoped agent and the passphrase task is stopped again right
+    /// after. For a password, the askpass task stays alive until
+    /// `Self::authenticated` or drop. The `Network` kind creates only the
+    /// directory. `Credentials::Automatic` is refused: it must go through the
+    /// ordered auth adapter first.
     /// # Errors
     /// Refuses invalid material, long socket paths or unavailable/refusing helpers.
     pub async fn prepare(
@@ -134,6 +171,13 @@ impl CredentialSession {
         Ok(session)
     }
 
+    /// Writes the askpass script and, when there is a secret, starts the task that serves it.
+    ///
+    /// With a secret: binds `askpass.sock` (mode 0600), copies the helper image and
+    /// serves the secret to it. Without one the script just exits with failure, so
+    /// a missing passphrase fails instead of prompting a terminal. The script only
+    /// replies to `Enter passphrase for ...: ` and `...'s password: ` prompts.
+    /// The secret is rejected when empty, over 16 KiB or containing NUL or newline.
     fn prepare_prompt(
         &mut self,
         adapter: &CredentialConfig,
@@ -201,6 +245,11 @@ impl CredentialSession {
         }
         Ok(())
     }
+    /// Starts the scoped `ssh-agent` (own process group, socket `agent.sock`) and loads `key` into it.
+    ///
+    /// The key bytes go to `ssh-add -` on stdin only. Waits up to 3 seconds for
+    /// the agent socket and 10 seconds for `ssh-add`; a refusal (wrong passphrase
+    /// or bad key) is an authentication failure with no key material in the message.
     async fn prepare_key(
         &mut self,
         adapter: &CredentialConfig,
@@ -260,7 +309,10 @@ impl CredentialSession {
         Ok(())
     }
 
+    /// Path of the OpenSSH connection-sharing control socket for this session.
+    ///
     /// This path belongs to the owned private directory, never request input.
+    /// Fails if the directory was not created.
     pub(crate) fn control_socket(&self) -> Result<PathBuf, Failure> {
         self.directory
             .as_ref()
@@ -269,6 +321,10 @@ impl CredentialSession {
     }
 
     /// Erase prompt/signing helpers before any post-authentication command.
+    ///
+    /// Stops the askpass task, retires the agent (error if it does not stop
+    /// within 3 seconds) and deletes the helper sockets and scripts. The directory
+    /// itself stays, since the control socket lives in it, until drop.
     pub(crate) async fn authenticated(&mut self) -> Result<(), Failure> {
         if let Some(task) = self.askpass.take() {
             task.abort();
@@ -285,6 +341,10 @@ impl CredentialSession {
         Ok(())
     }
 
+    /// Points a child at this session's agent and askpass script via environment paths.
+    ///
+    /// Only paths are set. Without a prompt helper, askpass is disabled
+    /// (`SSH_ASKPASS_REQUIRE=never`) so nothing can ask on a terminal.
     fn configure_helpers(&self, command: &mut Command) {
         if let Some(directory) = &self.directory {
             // These are paths, never credential values. Supplied keys use only
@@ -310,6 +370,11 @@ impl CredentialSession {
     }
 
     /// Apply credential paths and authentication policy to one OpenSSH child.
+    ///
+    /// Always drops the inherited agent and turns off identity files,
+    /// certificates, PKCS#11 providers, host-based and GSSAPI delegation. Then
+    /// exactly one method stays enabled: none (network identity), password only,
+    /// or public key only (via the scoped agent). Keyboard-interactive is always off.
     pub fn configure(&self, command: &mut Command) {
         // Replace the inherited agent only with this scope's helper, if any.
         command.env_remove("SSH_AUTH_SOCK");
@@ -394,10 +459,13 @@ impl CredentialSession {
 
 /// Retain the signer leader until its owned group has been retired.
 struct KeyHelper {
+    /// Process group of the agent; retired (killed) as a unit.
     group: Group,
+    /// The agent's leader process.
     child: Child,
 }
 impl KeyHelper {
+    /// Kills the agent's group and waits up to 3 seconds for the leader to exit.
     async fn retire(mut self) -> Result<(), Failure> {
         self.group.retire();
         tokio::time::timeout(Duration::from_secs(3), self.child.wait())
@@ -407,12 +475,14 @@ impl KeyHelper {
         Ok(())
     }
 }
+/// Dropping without `retire` still kills the group, so a failed attempt never leaks an agent.
 impl Drop for KeyHelper {
     fn drop(&mut self) {
         self.group.retire();
     }
 }
 
+/// Cleanup on every exit path: stop the prompt task, kill the agent group, delete the directory.
 impl Drop for CredentialSession {
     fn drop(&mut self) {
         if let Some(task) = self.askpass.take() {
@@ -427,6 +497,10 @@ impl Drop for CredentialSession {
 }
 
 /// Hidden CLI mode invoked only by SSH's askpass protocol; stdout is its private reply pipe.
+///
+/// Connects to the socket named by `INFRATERNAL_SSH_ASKPASS_SOCKET` (3 second
+/// read timeout), reads at most 16 KiB and writes the secret to stdout for
+/// OpenSSH. Prints nothing else, and nothing on failure.
 /// # Errors
 /// Refuses missing/oversized socket paths, unavailable helpers or oversized replies.
 pub fn askpass_reply() -> std::io::Result<()> {
@@ -448,6 +522,10 @@ pub fn askpass_reply() -> std::io::Result<()> {
 
 /// Use a short runtime root for sockets; persistent data paths never enter `sun_path`.
 /// The lazy helper preparation checks ownership, permissions and symlinks before use.
+///
+/// Uses `$XDG_RUNTIME_DIR` when it is absolute and short (40 bytes or less),
+/// otherwise `/run` for root or `/run/user/<uid>`, plus an `if-ssh-<uid>` leaf.
+/// Only computes the path; it does not create it.
 #[must_use]
 pub fn runtime_root() -> PathBuf {
     let uid = nix::unistd::geteuid().as_raw();

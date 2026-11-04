@@ -8,7 +8,14 @@ use infraternal_plugin_api::{
 /// Stable plugin owner used to materialize only the requested CLI definitions.
 pub const ID: &str = "backup";
 
-/// Register the backup component actions exposed by this plugin.
+/// Build the backup plugin definition: its `backup up`, `backup down` and
+/// `backup status` commands.
+///
+/// Every action is marked "not available yet" because no backup runtime exists.
+/// The action declarations are placeholders: they are only present when the
+/// plugin API is built with its placeholders feature, otherwise the returned
+/// definition has no actions. Pure and cheap; call it whenever the CLI help or
+/// generated skills need the definition.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     PluginDefinition::new(

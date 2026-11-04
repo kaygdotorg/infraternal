@@ -41,6 +41,10 @@ function darkScheme(): boolean {
   return scheme === "dark" ? true : scheme === "light" ? false : window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
+/**
+ * Starts the reading marker, the figure choice and the click-to-copy on a docs page. `root` is the page; `scroller` is the element that scrolls it,
+ * or `null` when the whole window scrolls. Returns the function that stops all of it.
+ */
 export function enhanceDoc(root: HTMLElement, scroller: HTMLElement | null): () => void {
   const headings = [...root.querySelectorAll<HTMLElement>(".doc-body h2[id], .doc-body h3[id]")];
   const links = new Map<string, HTMLAnchorElement[]>();

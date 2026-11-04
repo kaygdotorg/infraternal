@@ -38,6 +38,7 @@ const RELEASE_AFTER_MS = 30_000;
 const CONTROL_RETRY_MS = 15_000;
 /** The status poll while control is in use, and how long after the last input it keeps asking (an idle window asks nothing). */
 const STATUS_EVERY_MS = 500;
+/** How long after the last input the status poll keeps asking (see `STATUS_EVERY_MS`). */
 const STATUS_WHILE_MS = 4000;
 /**
  * How often a live, visible window asks the machine for its window's shape when nobody is typing (the status poll above
@@ -47,6 +48,7 @@ const SHAPE_EVERY_MS = 1000;
 /** A shape change smaller than this (relative) is rounding, not a new shape. */
 const SHAPE_EPSILON = 0.005;
 
+/** The callbacks a stream uses to tell its window what happened. They run on the main thread, in the order things occurred. */
 export interface StreamEvents {
   state(state: StreamState): void;
   control(control: ControlState): void;
@@ -58,6 +60,7 @@ export interface StreamEvents {
   shape(aspect: number): void;
 }
 
+/** What a stream needs: the connection, which machine and target to stream, and the callbacks. `makeWorker` is a test seam. */
 export interface StreamOptions {
   connection: Pick<MuxConnection, "call" | "openStream" | "closeStream" | "send" | "isWelcomed" | "onWelcome">;
   hostId: string;
@@ -107,6 +110,7 @@ export function parseStatus(value: unknown): MachineStatus {
   return out;
 }
 
+/** A UUID string as its 16 bytes, or `undefined` when it is not a valid UUID. */
 const uuidBytes = (id: string): Uint8Array | undefined => {
   const hex = id.replaceAll("-", "");
   return /^[0-9a-f]{32}$/i.test(hex) ? new Uint8Array(hex.match(/../g)!.map((b) => parseInt(b, 16))) : undefined;
@@ -119,6 +123,11 @@ export function streamingSupport(): "ok" | "decoder" | "canvas" {
   return "ok";
 }
 
+/**
+ * One app-window or screen stream, from the page's side. Call `open` to start, `setVisible` as the window comes and goes from view, `resize`
+ * when its body changes size, `takeControl` and `sendInput` for input, and `dispose` when the window closes (which also stops the stream on
+ * the machine). Read `current`, `controlState` and `hasSession` for the present state; changes also arrive through `StreamOptions.events`.
+ */
 export class AppStream {
   private state: StreamState = { kind: "idle" };
   private control: ControlState = { kind: "none" };
@@ -155,8 +164,11 @@ export class AppStream {
 
   constructor(private readonly o: StreamOptions) {}
 
+  /** The stream's present state. */
   get current(): StreamState { return this.state; }
+  /** The present control state. */
   get controlState(): ControlState { return this.control; }
+  /** True once the machine has started a session for this stream and it has not been stopped. */
   get hasSession(): boolean { return this.session !== undefined; }
 
   private setState(next: StreamState): void {

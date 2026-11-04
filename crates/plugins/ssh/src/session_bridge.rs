@@ -1,4 +1,12 @@
 //! Launches the D255 shim-owned shell and bridges SSH pipes through the existing terminal dispatcher.
+//!
+//! This is the program that runs on the target host as the SSH command. It
+//! starts (or reattaches to) a terminal session owned by the shim, never a
+//! shell of its own, then copies bytes between the SSH pipes and the terminal
+//! dispatcher over a private socket pair, without parsing them. Before the
+//! first dispatcher bytes it writes one `SESSION <uuid>` line, in the same
+//! write, which tells the other side the session exists. It accepts no command
+//! or identity from its arguments: [`Options::decode`] allows exactly two shapes.
 
 use infraternal_agent::{
     daemon,
@@ -11,12 +19,17 @@ use std::{io, os::fd::AsRawFd, path::PathBuf};
 
 /// Only the authenticated internal startup shapes may enter the session bridge.
 pub struct Options {
+    /// Private state directory of the infraternal agent on this host.
     state: PathBuf,
+    /// Existing session to reattach to; `None` launches a new one.
     session: Option<uuid::Uuid>,
 }
 
 impl Options {
     /// Decode the exact launcher shape before any filesystem or process work.
+    ///
+    /// Accepts `--state <dir>` or `--state <dir> --session <uuid>` and nothing
+    /// else. Returns `None` for any other arguments or an invalid session id.
     #[must_use]
     pub fn decode(arguments: &[std::ffi::OsString]) -> Option<Self> {
         let (state, session) = match arguments {
@@ -49,6 +62,10 @@ impl Options {
 
 /// Internal authenticated SSH command; all protocol output goes to its pipe.
 /// No public shell, arbitrary command or login identity is accepted from argv.
+///
+/// With `session` set it reattaches and serves terminal actions only; without it
+/// a new session is launched and plugin control is kept (#230). Blocks until the
+/// bridge ends.
 /// # Errors
 /// Returns runtime, private-state, shim admission or authenticated bridge failures.
 pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> io::Result<()> {
@@ -72,6 +89,8 @@ pub fn run(state: PathBuf, session: Option<uuid::Uuid>) -> io::Result<()> {
     )
 }
 
+/// Run [`bridge`] to completion on a small single-thread runtime, serving the
+/// session with `serve` (the dispatcher entry point to use).
 fn run_mode<F>(state: PathBuf, session: Option<uuid::Uuid>, serve: F) -> io::Result<()>
 where
     F: for<'a> AsyncFnOnce(&'a Socket, Option<PathBuf>, u32, sessions::Session) -> io::Result<()>
@@ -82,6 +101,9 @@ where
         .build()?;
     infraternal_agent::block_on_io(&runtime, Box::pin(bridge(state, session, serve)))
 }
+/// Obtain the session (reattach to `existing`, or launch one under the system
+/// or user manager according to the effective uid), then run the dispatcher and
+/// the pipe relay together. Ends when either one ends.
 async fn bridge<F>(state: PathBuf, existing: Option<uuid::Uuid>, serve: F) -> io::Result<()>
 where
     F: for<'a> AsyncFnOnce(&'a Socket, Option<PathBuf>, u32, sessions::Session) -> io::Result<()>,
@@ -156,6 +178,9 @@ async fn relay_pipes(
     }
 }
 
+/// Copy dispatcher output to the SSH pipe. The first write is prefixed with the
+/// `SESSION <uuid>` line, so a session is announced only once the dispatcher
+/// actually produced output; if it produces none, nothing is published.
 async fn relay_output(
     pipes: &impl Channel,
     from: &mut (impl tokio::io::AsyncRead + Unpin),

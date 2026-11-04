@@ -2,14 +2,17 @@
 use super::{Auth, Error, Wrap};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Extension, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(test)]
 #[path = "account_summary_tests.rs"]
@@ -20,11 +23,38 @@ mod hostname_tests;
 
 /// Mount the POST-only `/auth/{action}` API. TLS terminates at the configured public origin.
 pub fn router(auth: Auth) -> Router {
+    router_with_state(HttpState {
+        auth,
+        #[cfg(feature = "remote")]
+        invitation_issuer: None,
+    })
+}
+
+#[cfg(feature = "remote")]
+/// Mount auth with the runtime's existing issuer for approved machine enrollment.
+pub(crate) fn router_with_invitation_issuer(
+    auth: Auth,
+    invitation_issuer: Option<crate::remote_http::InvitationIssuer>,
+) -> Router {
+    router_with_state(HttpState {
+        auth,
+        invitation_issuer,
+    })
+}
+
+#[derive(Clone)]
+struct HttpState {
+    auth: Auth,
+    #[cfg(feature = "remote")]
+    invitation_issuer: Option<crate::remote_http::InvitationIssuer>,
+}
+
+fn router_with_state(state: HttpState) -> Router {
     Router::new()
         .route("/auth/{action}", post(dispatch))
         .layer(DefaultBodyLimit::max(32 * 1024))
         .layer(axum::middleware::map_response(no_store))
-        .with_state(auth)
+        .with_state(state)
 }
 
 // One typed body per action; unknown fields (including PRF/DEK plaintext) fail closed.
@@ -90,14 +120,27 @@ struct Token {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Device {
+struct DeviceStart {
     device: String,
-    scopes: Vec<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+    #[serde(default)]
+    request: Option<super::devices::JoinMachineRequest>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Code {
     code: String,
+}
+/// A passkey proof for the join-approval ceremony started for `code`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveJoin {
+    code: String,
+    ceremony: String,
+    proof: Value,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,12 +194,28 @@ async fn no_store(mut response: Response) -> Response {
 }
 
 async fn dispatch(
-    State(auth): State<Auth>,
+    State(state): State<HttpState>,
     Path(action): Path<String>,
     headers: HeaderMap,
+    source: Option<Extension<crate::runtime::ClientAddress>>,
     Json(value): Json<Value>,
 ) -> Response {
-    let result = execute(&auth, &action, &headers, value).await;
+    // The runtime's source admission always attaches the trusted address in
+    // production (it refuses /auth/ requests without one). A router mounted
+    // without it accounts every caller to one shared source.
+    let source = source.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |Extension(address)| {
+        address.0
+    });
+    let result = execute(
+        &state.auth,
+        #[cfg(feature = "remote")]
+        state.invitation_issuer.as_ref(),
+        &action,
+        &headers,
+        source,
+        value,
+    )
+    .await;
     let response = match result {
         Ok(response) => response,
         Err(Error::Throttled) => (
@@ -181,6 +240,11 @@ async fn dispatch(
         Err(Error::Conflict) => (
             StatusCode::CONFLICT,
             Json(json!({"error":"username already exists"})),
+        )
+            .into_response(),
+        Err(Error::RemoteUnavailable) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"enrollment unavailable"})),
         )
             .into_response(),
         Err(_) => (
@@ -216,12 +280,14 @@ pub(super) fn current_time(auth: &Auth) -> super::Result<i64> {
 #[allow(clippy::too_many_lines)]
 async fn execute(
     auth: &Auth,
+    #[cfg(feature = "remote")] invitation_issuer: Option<&crate::remote_http::InvitationIssuer>,
     action: &str,
     headers: &HeaderMap,
+    source: IpAddr,
     value: Value,
 ) -> super::Result<Response> {
     let now = current_time(auth)?;
-    ingress(auth, action, headers, now).await?;
+    ingress(auth, action, headers, source, now).await?;
     if action == "setup-check" {
         let b: Token = body(value)?;
         auth.setup_check(&b.token, now).await?;
@@ -246,7 +312,7 @@ async fn execute(
                     .await?,
             );
         }
-        "login-start" => login_start(auth, headers, value, now).await?,
+        "login-start" => login_start(auth, headers, source, value, now).await?,
         "login-finish" => {
             let b: Login = body(value)?;
             auth.require_ceremony_binding(&b.ceremony, headers).await?;
@@ -341,20 +407,50 @@ async fn execute(
             json!({"ok":true})
         }
         "device-start" => {
-            let b: Device = body(value)?;
-            auth.device_start(&b.device, b.scopes, now).await?
+            let b: DeviceStart = body(value)?;
+            match (b.kind.as_deref(), b.scopes, b.request) {
+                (None | Some("sign_in"), Some(scopes), None) => {
+                    auth.device_start(&b.device, scopes, source, now).await?
+                }
+                (Some("join_machine"), None, Some(request)) => {
+                    auth.device_join_start(&b.device, request, source, now)
+                        .await?
+                }
+                _ => return Err(Error::Invalid),
+            }
         }
         "device-inspect" => {
             let b: Code = body(value)?;
             auth.device_inspect(cookie(headers)?, &b.code, now).await?
         }
-        "device-approve" => {
+        // Every approval (CLI sign-in, machine join) is a passkey ceremony bound to its code.
+        "device-approve-start" => {
             let b: Code = body(value)?;
-            auth.device_approve(cookie(headers)?, &b.code, now).await?;
+            auth.device_approve_start(cookie(headers)?, &b.code, now)
+                .await?
+        }
+        "device-approve-finish" => {
+            let b: ApproveJoin = body(value)?;
+            auth.device_approve_finish(cookie(headers)?, &b.code, &b.ceremony, b.proof, now)
+                .await?;
             json!({"ok":true})
         }
         "device-redeem" => {
             let b: Token = body(value)?;
+            #[cfg(feature = "remote")]
+            if auth.device_join_approved(&b.token, now).await? {
+                let approval = auth.approved_device_join(&b.token, now).await?;
+                let issuer = invitation_issuer.ok_or(Error::RemoteUnavailable)?;
+                let invitation = issuer
+                    .issue_approved_machine_join(&b.token, approval, now)
+                    .await
+                    .map_err(|status| match status {
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Denied,
+                        StatusCode::BAD_REQUEST => Error::Invalid,
+                        _ => Error::RemoteUnavailable,
+                    })?;
+                return Ok(Json(invitation).into_response());
+            }
             json!({"api_key":auth.device_redeem(&b.token, now).await?})
         }
         "security-settings" => {
@@ -416,6 +512,7 @@ async fn ceremony_response(
 async fn login_start(
     auth: &Auth,
     headers: &HeaderMap,
+    source: IpAddr,
     value: Value,
     now: i64,
 ) -> super::Result<Value> {
@@ -427,7 +524,7 @@ async fn login_start(
             }
             auth.login_start(&user, now).await
         }
-        None => auth.discoverable_login_start(now).await,
+        None => auth.discoverable_login_start_from(now, Some(source)).await,
     }
 }
 
@@ -444,7 +541,13 @@ async fn setup_start(auth: &Auth, value: Value, now: i64) -> super::Result<Value
     }
 }
 
-async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> super::Result<()> {
+async fn ingress(
+    auth: &Auth,
+    action: &str,
+    headers: &HeaderMap,
+    source: IpAddr,
+    now: i64,
+) -> super::Result<()> {
     // CLI approval polling uses its own bearer capability, never a browser cookie.
     if !matches!(action, "device-start" | "device-redeem")
         && headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(auth.origin())
@@ -455,33 +558,59 @@ async fn ingress(auth: &Auth, action: &str, headers: &HeaderMap, now: i64) -> su
     if action == "logout" {
         return Ok(());
     }
-    // Two fixed partitions keep the aggregate ceiling at 180/minute. No device
-    // caller can spend the 120 browser slots; IP/proxy headers are never trusted.
-    let mut budget = auth.ingress.lock().await;
-    if now - budget.window >= 60 {
-        *budget = Ingress {
-            window: now,
-            ..Ingress::default()
-        };
+    // Public device-code requests share no process-wide bucket: any caller could
+    // spend it and refuse every other `up` and sign-in (#263, J122 P2). They are
+    // limited per source network by the runtime's source admission, and the
+    // state they create is bounded by the pending-approval caps instead.
+    if matches!(action, "device-start" | "device-redeem") {
+        return Ok(());
     }
-    let (used, limit) = if matches!(action, "device-start" | "device-redeem") {
-        (&mut budget.devices, 60)
-    } else {
-        (&mut budget.browser, 120)
-    };
-    if *used >= limit {
+    // Browser actions are budgeted per enclosing network (IPv6 /48, IPv4
+    // /24), so callers from a few networks can spend only their own share and
+    // never refuse a sign-in from anywhere else (#263, J145 P2-1). There is
+    // no process-wide counter: any such ceiling is the same lockout at N
+    // networks, and distributed floods are the reverse proxy's job (#76913).
+    // IP/proxy headers are never trusted here; `source` is the runtime's.
+    if crate::runtime::admit_temporal_request(
+        &mut auth.ingress.lock().await.networks,
+        crate::runtime::browser_network(source),
+        now,
+        BROWSER_PER_MINUTE,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    // Once a network has spent its budget, a live signed-in session there
+    // still gets its own per-person budget, so a flood cannot stop the owner
+    // from reviewing and approving an `up` (#263, J134 P2-1). The session is
+    // looked up only on this exhausted path; an invalid cookie stays throttled.
+    let Ok(token) = cookie(headers) else {
         return Err(Error::Throttled);
-    }
-    *used += 1;
-    Ok(())
+    };
+    let user = auth
+        .session(token, now)
+        .await
+        .map_err(|_| Error::Throttled)?
+        .user_id;
+    let mut budget = auth.ingress.lock().await;
+    crate::runtime::admit_temporal_request(&mut budget.people, user, now, BROWSER_PER_MINUTE)
+        .map_err(|_| Error::Throttled)
 }
 
-/// Fixed-size admission partitions; all HTTP actions count, including authenticated reads.
+/// Browser requests per minute for each enclosing network, and each person's
+/// budget after that. 120 is the old server-wide figure, so no single network
+/// gets less than every caller used to share.
+const BROWSER_PER_MINUTE: u8 = 120;
+
+/// Browser admission budgets; every browser action counts, including
+/// authenticated reads. `networks` is keyed by enclosing network, `people` by
+/// the user ID of a live session that falls back once its network is spent.
+/// Both maps evict their oldest window when full.
 #[derive(Default)]
 pub(super) struct Ingress {
-    window: i64,
-    browser: u32,
-    devices: u32,
+    networks: std::collections::HashMap<IpAddr, crate::runtime::SourceBucket>,
+    people: std::collections::HashMap<String, crate::runtime::SourceBucket>,
 }
 
 /// Keep the unauthenticated response limited to first-run state and its local command.
@@ -511,6 +640,7 @@ mod tests {
             .await
             .unwrap();
         let now = 1_800_000_000;
+        let source = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ORIGIN,
@@ -518,7 +648,7 @@ mod tests {
         );
         headers.insert("x-forwarded-for", HeaderValue::from_static("127.0.0.1"));
         assert!(matches!(
-            ingress(&auth, "login-start", &headers, now).await,
+            ingress(&auth, "login-start", &headers, source, now).await,
             Err(Error::Denied)
         ));
         headers.insert(
@@ -526,25 +656,25 @@ mod tests {
             HeaderValue::from_static("https://auth.example.test"),
         );
         for _ in 0..120 {
-            ingress(&auth, "session", &headers, now).await.unwrap();
-        }
-        assert!(matches!(
-            ingress(&auth, "login-start", &headers, now).await,
-            Err(Error::Throttled)
-        ));
-        for _ in 0..60 {
-            ingress(&auth, "device-redeem", &HeaderMap::new(), now)
+            ingress(&auth, "session", &headers, source, now)
                 .await
                 .unwrap();
         }
         assert!(matches!(
-            ingress(&auth, "device-start", &HeaderMap::new(), now).await,
+            ingress(&auth, "login-start", &headers, source, now).await,
             Err(Error::Throttled)
         ));
-        ingress(&auth, "login-start", &headers, now + 60)
+        // Device-code requests skip the shared browser partition, and have no
+        // process-wide partition of their own (per-source limits live in runtime).
+        for _ in 0..1000 {
+            ingress(&auth, "device-redeem", &HeaderMap::new(), source, now)
+                .await
+                .unwrap();
+        }
+        ingress(&auth, "device-start", &HeaderMap::new(), source, now)
             .await
             .unwrap();
-        ingress(&auth, "device-redeem", &HeaderMap::new(), now + 60)
+        ingress(&auth, "login-start", &headers, source, now + 60)
             .await
             .unwrap();
     }

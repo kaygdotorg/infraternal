@@ -8,5 +8,6 @@ import { installFocusRing } from "../../packages/ui/src/focus-ring";
 import { enhanceDoc } from "./src/canvas/docs/doc-enhance";
 
 installFocusRing();
+/** The page's main content, or `null` on a page without one. */
 const page = document.querySelector<HTMLElement>("main");
 if (page) enhanceDoc(page, null);
