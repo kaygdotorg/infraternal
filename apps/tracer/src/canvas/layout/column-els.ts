@@ -1,3 +1,8 @@
+/**
+ * Helpers for reading and sizing a view's column elements. A column has two widths: the saved one (`data-w`, which is what the
+ * layout stores) and the drawn one (`--w`, which a device may raise to a floor or lower to a ceiling). Keep them apart: only
+ * the saved width is ever written back to the model.
+ */
 import { drawnWidth, type Metrics } from "./geometry";
 
 /** The column elements of a view, in order: plain columns and group wrappers' columns (D212). No DOM setup at load time. */
