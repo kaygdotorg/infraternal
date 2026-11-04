@@ -58,6 +58,7 @@ impl Auth {
         if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
+        let order = pending.start();
         pending.registrations.insert(
             id.clone(),
             Registration {
@@ -70,6 +71,7 @@ impl Auth {
                 rotate_recovery: rotate,
                 expires: now + CEREMONY,
                 binding: None,
+                order,
             },
         );
         Ok(
@@ -308,6 +310,7 @@ impl Auth {
         if identified_ceremonies(&pending) >= PENDING_CEREMONIES {
             return Err(Error::Denied);
         }
+        let order = pending.start();
         pending.logins.insert(
             id.clone(),
             Login {
@@ -315,6 +318,7 @@ impl Auth {
                 expires: now + CEREMONY,
                 binding: None,
                 network: None,
+                order,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -368,6 +372,7 @@ impl Auth {
         if total >= PENDING_CEREMONIES {
             evict_from_heaviest_network(&mut pending, mine)?;
         }
+        let order = pending.start();
         pending.logins.insert(
             id.clone(),
             Login {
@@ -375,6 +380,7 @@ impl Auth {
                 expires: now + CEREMONY,
                 binding: None,
                 network,
+                order,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -631,7 +637,7 @@ fn evict_from_heaviest_network(p: &mut Pending, mine: usize) -> Result<()> {
         .filter(|(_, login)| {
             matches!(login.state, LoginState::Discoverable(_)) && login.network == heaviest
         })
-        .min_by_key(|(_, login)| login.expires)
+        .min_by_key(|(_, login)| login.order)
         .map(|(id, _)| id.clone())
         .ok_or(Error::Throttled)?;
     p.logins.remove(&oldest);
@@ -656,12 +662,12 @@ fn make_room_for_person(p: &mut Pending, user: &str) {
         .registrations
         .iter()
         .filter(|(_, r)| r.user == user)
-        .map(|(id, r)| (r.expires, id, true));
+        .map(|(id, r)| (r.order, id, true));
     let logins = p
         .logins
         .iter()
         .filter(|(_, l)| matches!(&l.state, LoginState::Identified(_, who) if who == user))
-        .map(|(id, l)| (l.expires, id, false));
+        .map(|(id, l)| (l.order, id, false));
     let mut held: Vec<_> = registrations.chain(logins).collect();
     if held.len() < PER_PERSON_CEREMONIES {
         return;
