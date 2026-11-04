@@ -109,6 +109,9 @@ test("reconnecting is the turning dot and a dimmed picture, with no text strip",
   await page.request.post("/__mock/drop-sockets");
   await expect(stage(page)).toHaveAttribute("data-picture", "dim", { timeout: 15_000 });
   await expect(appWindow(page).locator(".ui-window-conn")).toHaveAttribute("data-state", "reconnecting");
+  // A text strip, if the state still drew one, lands a moment after the state changes: give it that moment so an absent
+  // strip is a fact and not a race.
+  await page.waitForTimeout(700);
   await expect(appWindow(page).locator(".cl-sx-strip")).toHaveCount(0);
   // The state card is only for when there is nothing to show; here there is a picture.
   await expect(appWindow(page).locator(".aw-card")).toHaveAttribute("data-shown", "false");

@@ -176,6 +176,21 @@ test("a refused size-only lease is silent: the person never asked to control", a
   } finally { f.stream.dispose(); }
 });
 
+test("a refused size-only lease never delays the person's own control", async () => {
+  const f = await fixture(true);
+  try {
+    // The size-only lease is refused (the machine may not have registered the viewer yet) ...
+    f.stream.resize({ width: 1000, height: 600, density: 1 });
+    f.answerControl(false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // ... and a real click right after still takes control at once, instead of waiting out a retry window.
+    const taking = f.stream.takeControl();
+    f.answerControl(true);
+    expect(await taking).toBe(true);
+    expect(f.stream.controlState.kind).toBe("controlled");
+  } finally { f.stream.dispose(); }
+});
+
 test("following the machine's own shape sends no size at all (looking never moves it)", async () => {
   const f = await fixture();
   try {

@@ -151,6 +151,8 @@ export class AppStream {
   private leased = false;
   /** A quiet lease request is on its way: a drag-resize asks once, and the answer pushes the latest size. */
   private leasing = false;
+  /** When a size-only lease was last refused; throttles only size-only attempts, never the person's own control. */
+  private leaseRefusedAt = -Infinity;
   private shapeTimer = 0;
   private shapeBusy = false;
   private lastShape: number | undefined;
@@ -439,7 +441,7 @@ export class AppStream {
    */
   private async leaseForSize(): Promise<void> {
     if (this.leasing || this.leased || this.streamId === undefined || !this.attached || !this.o.connection.isWelcomed) return;
-    if (this.control.kind === "requesting" || performance.now() - this.controlRefusedAt < CONTROL_RETRY_MS) return;
+    if (this.control.kind === "requesting" || performance.now() - this.leaseRefusedAt < CONTROL_RETRY_MS) return;
     const id = this.streamId;
     this.leasing = true;
     try {
@@ -448,7 +450,8 @@ export class AppStream {
       this.leased = true;
       this.pushSize();
     } catch {
-      if (this.streamId === id) this.controlRefusedAt = performance.now();
+      // Its own clock: a refusal here (the viewer may not be registered yet) must never delay the person's real control.
+      if (this.streamId === id) this.leaseRefusedAt = performance.now();
     } finally { this.leasing = false; }
   }
 
