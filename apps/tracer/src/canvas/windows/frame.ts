@@ -16,7 +16,6 @@ import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResi
 import type { Ctx, ViewRec, WinRec } from "../context";
 import type { WindowModel } from "../model/types";
 import { ICON, SESSION_ICON, iconFor } from "../views/icons";
-import { onDemand } from "../../on-demand";
 import { isInteractive, isTerminal, makeBody } from "../views/body";
 import { onDemand, whenIdle } from "../../on-demand";
 import { coarse } from "../dom";
