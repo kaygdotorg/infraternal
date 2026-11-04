@@ -1478,6 +1478,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const recoveryNotice = stage.querySelector<HTMLElement>("#recovery-notice")!;
   const cancelRecovery = stage.querySelector<HTMLButtonElement>("#recovery-cancel")!;
   let recoveryReady: number | undefined;
+  let recoveryToastId: string | undefined;
   const cancelClick = (): void => {
     cancelRecovery.disabled = true;
     const error = stage.querySelector<HTMLElement>("#recovery-cancel-error")!;
@@ -1590,10 +1591,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (readyAt !== undefined) {
         stage.querySelector<HTMLElement>("#recovery-notice-time")!.textContent = `Account recovery requested · Available ${new Date(readyAt * 1000).toLocaleString()}`;
         if (recoveryReady !== readyAt) {
-          toast.show({ message: "Recovery requested. You can cancel it from this device.", duration: 5000 });
+          recoveryToastId = toast.show({ message: "Recovery requested. You can cancel it from this device.", duration: 5000 });
         }
       } else {
-        toast.dismiss();
+        // Only our own notice: other toasts in the stack are not ours to dismiss.
+        toast.dismiss(recoveryToastId);
       }
       recoveryReady = readyAt;
     },
