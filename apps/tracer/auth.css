@@ -117,7 +117,7 @@
   margin: 0;
   padding: 0 0.875rem;
   border: 1px solid var(--line);
-  border-radius: 0.75rem;
+  border-radius: var(--r-md);
   outline: none;
   background: var(--field);
   color: var(--fg);
@@ -238,7 +238,7 @@
 .auth-signin { --auth-pad: 2.25rem; --auth-tail: 0.9375rem; padding: var(--auth-pad) 2rem var(--auth-pad); }
 .auth-signin:has(.auth-text-button) { padding-bottom: calc(var(--auth-pad) - var(--auth-tail)); }
 .auth-signin .auth-lede { margin-bottom: 1.75rem; }
-.auth-login { width: 100%; height: 3rem; border-radius: 0.75rem; font-size: 0.9375rem; }
+.auth-login { width: 100%; height: 3rem; border-radius: var(--r-md); font-size: 0.9375rem; }
 .device-approval-facts { display: grid; gap: 0.75rem; margin: 0 0 1.25rem; }
 .device-approval-facts > div { display: grid; grid-template-columns: 6rem minmax(0, 1fr); align-items: baseline; gap: 0.75rem; }
 .device-approval-facts dt { color: var(--fg-2); font-size: 0.8125rem; }

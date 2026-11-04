@@ -230,7 +230,7 @@
 .ui-toast-marker .tick svg { width: 0.875rem; height: 0.875rem; stroke: var(--bg); }
 .ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; }
 .ui-toast-actions[hidden] { display: none !important; }
-.ui-toast-action { min-height: 2rem; flex: none; padding: 0 0.5rem; border-radius: 0.5rem; color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
+.ui-toast-action { min-height: 2rem; flex: none; padding: 0 0.5rem; border-radius: var(--r-sm); color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-action[hidden] { display: none !important; }
 /* Icon choices after the message: the same 28 px desktop / 44 px touch size as the confirmation popover's icon buttons, flat and quiet. */
 /* A question with choices gets room for its sentence beside them; on a phone it wraps inside the screen width. */
@@ -244,7 +244,7 @@
 }
 .ui-toast-icons { display: flex; flex: none; align-items: center; gap: 2px; }
 .ui-toast-icons[hidden] { display: none !important; }
-.ui-toast-icon { display: grid; width: 1.75rem; min-height: 1.75rem; flex: none; place-items: center; padding: 0; border-radius: 0.5rem; color: var(--fg-2); }
+.ui-toast-icon { display: grid; width: 1.75rem; min-height: 1.75rem; flex: none; place-items: center; padding: 0; border-radius: var(--r-sm); color: var(--fg-2); }
 .ui-toast-icon svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .ui-toast-icon:first-child { color: var(--accent); }
 @media (hover: hover) and (pointer: fine) { .ui-toast-icon:hover { background: var(--hover); color: var(--fg); } }
@@ -256,7 +256,7 @@
 .ui-toast-glyph svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .ui-toast[data-icon="true"] .ui-toast-marker { display: none; }
 /* The optional dismiss control: a quiet icon, the same height as the action. */
-.ui-toast-close { display: grid; width: 2rem; min-height: 2rem; flex: none; place-items: center; padding: 0; border-radius: 0.5rem; color: var(--fg-3); }
+.ui-toast-close { display: grid; width: 2rem; min-height: 2rem; flex: none; place-items: center; padding: 0; border-radius: var(--r-sm); color: var(--fg-3); }
 .ui-toast-close[hidden] { display: none; }
 .ui-toast-close svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .ui-toast-close:hover { background: var(--hover); color: var(--fg); } }
@@ -581,7 +581,7 @@
 @media (pointer: coarse) { .ui-window-menu-item { height: 2.75rem; } }
 @media (hover: hover) and (pointer: fine) { .ui-window-menu-item:hover { background: var(--hover); color: var(--fg); } .ui-window-menu-item.is-danger:hover { color: var(--danger); } }
 /* Row swipes (row-menu.ts): the row's leaf and the revealed buttons move together with one transform each; the row clips them. */
-.ui-swipe-row { position: relative; overflow: hidden; border-radius: 0.5rem; touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.ui-swipe-row { position: relative; overflow: hidden; border-radius: var(--r-sm); touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .ui-row-swipe-act { text-shadow: none; position: absolute; top: 0; bottom: 0; display: flex; align-items: center; width: 100%; overflow: hidden; pointer-events: auto; cursor: pointer; background: color-mix(in oklab, var(--fg) 14%, transparent); color: var(--fg); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); }
 .ui-row-swipe-act[data-side="left"] { left: 100%; justify-content: flex-start; }
 .ui-row-swipe-act[data-side="right"] { right: 100%; justify-content: flex-end; }
@@ -732,7 +732,7 @@
 .ui-chip-field {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 0.75rem;
+  border-radius: var(--r-md);
   background: rgb(from var(--fg) r g b / 0.05);
   cursor: text;
   transition: border-color 120ms ease, background-color 120ms ease;
@@ -918,7 +918,7 @@
 @media (hover: hover) and (pointer: fine) { .ui-settings-nav-row:hover { background: var(--hover); } }
 .ui-settings-main { display: flex; min-height: 0; flex: 1; border-top: 1px solid var(--line); }
 .ui-settings-nav { display: flex; flex: none; flex-direction: column; gap: 2px; width: 9.375rem; padding: 0.5rem; border-right: 1px solid var(--line); }
-.ui-settings-nav-row { display: flex; align-items: center; gap: 0.5rem; height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: 0.5rem; background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-settings-nav-row { display: flex; align-items: center; gap: 0.5rem; height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-settings-nav-row[aria-current="true"] { background: var(--hover); color: var(--fg); }
 .ui-settings-nav-row svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-settings-pane { min-width: 0; flex: 1; overflow: auto; padding: 0.375rem 1.125rem 0.875rem; overscroll-behavior: contain; }
@@ -1004,7 +1004,7 @@
 .ui-ts-item { position: relative; display: flex; align-items: center; gap: 0.625rem; min-height: var(--ui-row-h, 2rem); border-bottom: 1px solid var(--line); background: transparent; }
 .ui-ts-item:last-child { border-bottom: 0; }
 .ui-ts-item[data-dragging] { z-index: 2; background: var(--overlay-solid); border-radius: 0.625rem; box-shadow: var(--shadow); }
-.ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 1.875rem); height: var(--ui-control-h, 1.875rem); padding: 0; border: 0; border-radius: 0.5rem; background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
+.ui-ts-grip { display: grid; flex: none; place-items: center; width: var(--ui-control-h, 1.875rem); height: var(--ui-control-h, 1.875rem); padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg-3); cursor: grab; touch-action: none; }
 .ui-ts-grip svg { width: var(--ui-icon, 1rem); height: var(--ui-icon, 1rem); fill: none; stroke: currentColor; stroke-linecap: round; }
 .ui-ts-item[data-dragging] .ui-ts-grip { cursor: grabbing; }
 .ui-ts-icon { display: grid; flex: none; color: var(--fg-2); }
@@ -1064,7 +1064,7 @@
 /* One column that is the pane's width, never wider: a window keeps its width when the UI size grows (#283), and a row that cannot wrap (a theme and its "dark") must not widen the whole column and push every section's right edge out of the window. */
 .ui-sp { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
 .ui-sp-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
-.ui-sp-row { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: 0.5rem; background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
+.ui-sp-row { display: flex; align-items: center; gap: 0.625rem; width: 100%; min-height: var(--ui-row-h, 2rem); padding: 0 0.5rem; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; transition: background-color 140ms ease, transform 140ms var(--ease-out, ease-out); }
 .ui-sp-row:active { transform: scale(var(--ui-press-scale, 0.97)); }
 @media (hover: hover) and (pointer: fine) { .ui-sp-row:hover { background: var(--hover); } }
 .ui-sp-swatch, .ui-sp-slot { flex: none; width: 1.125rem; height: 1.125rem; }
@@ -1091,7 +1091,7 @@
 .ui-sp[data-ticks] { --ui-sp-end: calc(var(--ui-sp-tick, 1.125rem) + 0.625rem); }
 .ui-sp .ui-sp-row { position: relative; isolation: isolate; padding: 0; }
 .ui-sp .ui-sp-row:is(.ui-sp-switch, .ui-sp-status) { padding-right: var(--ui-sp-end); }
-.ui-sp .ui-sp-row::before { content: ""; position: absolute; inset: 0 -0.5rem; z-index: -1; border-radius: 0.5rem; pointer-events: none; transition: background-color 140ms ease; }
+.ui-sp .ui-sp-row::before { content: ""; position: absolute; inset: 0 -0.5rem; z-index: -1; border-radius: var(--r-sm); pointer-events: none; transition: background-color 140ms ease; }
 @media (hover: hover) and (pointer: fine) {
   .ui-sp .ui-sp-row:hover { background: none; }
   .ui-sp .ui-sp-row:hover::before { background: var(--hover); }
@@ -1240,7 +1240,7 @@
 .ui-inbox-count { font-variant-numeric: tabular-nums; }
 .ui-inbox-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
 .ui-inbox-row {
-  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: var(--row); padding: 0 0.375rem; border: 0; border-radius: 0.5rem;
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: var(--row); padding: 0 0.375rem; border: 0; border-radius: var(--r-sm);
   background: none; color: var(--fg); font: inherit; font-size: var(--text-body); font-weight: var(--fw-label); text-align: left; cursor: pointer;
   -webkit-tap-highlight-color: transparent;
   transition: background-color 120ms ease, transform 140ms var(--ease-out, ease-out);
@@ -1259,7 +1259,7 @@
 .ui-inbox-item[data-expanded="true"] .ui-inbox-panel-inner { opacity: 1; padding-bottom: 0.375rem; }
 .ui-inbox-body { margin: 0; padding-top: 2px; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
 .ui-inbox-actions { display: flex; justify-content: flex-end; gap: 0.375rem; }
-.ui-inbox-action { --ui-button-height: 1.75rem; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); min-height: 1.75rem; padding: 0 0.75rem; border-radius: 0.5rem; }
+.ui-inbox-action { --ui-button-height: 1.75rem; --ui-button-font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); min-height: 1.75rem; padding: 0 0.75rem; border-radius: var(--r-sm); }
 @media (pointer: coarse) { .ui-sidebar-card { padding: 0.375rem; } .ui-inbox-action { --ui-button-height: 2.75rem; min-height: 2.75rem; } }
 @media (prefers-reduced-motion: reduce) { .ui-sidebar-card, .ui-sidebar-card[data-open="false"] { transform: none; transition: opacity 150ms ease; } .ui-inbox-panel, .ui-inbox-panel-inner, .ui-inbox-chevron, .ui-inbox-row { transition-duration: 1ms; } .ui-inbox-panel-inner { transition: opacity 150ms ease; } }
 

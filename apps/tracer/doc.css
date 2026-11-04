@@ -26,7 +26,7 @@
    standalone page does not load the app's stylesheet; in the app the same `.ui-copied` classes apply, scoped to `.doc-code`. */
 .doc code { padding: 1px 0.3125rem; border-radius: 0.375rem; background: rgb(from var(--fg) r g b / 0.05); font: inherit; font-size: 0.93em; overflow-wrap: anywhere; }
 .doc .doc-code { position: relative; margin: 0 0 1rem; }
-.doc pre { margin: 0; overflow-x: auto; padding: 0.75rem 1rem; border-radius: 0.75rem; background: rgb(from var(--fg) r g b / 0.05); line-height: 1.6; cursor: pointer; -webkit-overflow-scrolling: touch; transition: background-color 120ms ease; outline: none; }
+.doc pre { margin: 0; overflow-x: auto; padding: 0.75rem 1rem; border-radius: var(--r-md); background: rgb(from var(--fg) r g b / 0.05); line-height: 1.6; cursor: pointer; -webkit-overflow-scrolling: touch; transition: background-color 120ms ease; outline: none; }
 @media (hover: hover) { .doc pre:hover { background: rgb(from var(--fg) r g b / 0.08); } }
 .doc pre code { padding: 0; background: none; overflow-wrap: normal; transition: opacity 110ms ease-out; }
 .doc .doc-code[data-copied] pre code { opacity: 0; }
@@ -42,7 +42,7 @@
    same, an icon and a title on one centre line, then the text. The fill and hairline are the tone at low strength, so they read on
    ink and on paper alike; the title and text stay in the page's own colours (contrast), and only the icon carries the tone.
    Tones: note is neutral, tip is the "ok" colour, important is the accent, warning is amber, caution is red. */
-.doc .callout { --tone: var(--fg-2); margin: 0 0 1rem; padding: 0.75rem 1rem; border: 1px solid color-mix(in oklab, var(--tone) 30%, transparent); border-radius: 0.75rem; background: color-mix(in oklab, var(--tone) 9%, transparent); }
+.doc .callout { --tone: var(--fg-2); margin: 0 0 1rem; padding: 0.75rem 1rem; border: 1px solid color-mix(in oklab, var(--tone) 30%, transparent); border-radius: var(--r-md); background: color-mix(in oklab, var(--tone) 9%, transparent); }
 .doc .callout-tip { --tone: var(--ok); }
 .doc .callout-important { --tone: var(--accent); }
 .doc .callout-warning { --tone: var(--warn); }
@@ -59,7 +59,7 @@
    A folded section. The page says what is true; the reasoning is one tap away. The row is a 44 px target on touch, its chevron is
    drawn like the contents' (a font glyph would not centre), and the body opens by growing in height where the browser can animate
    it (Chromium); elsewhere it opens at once. */
-.doc .why { margin: 0 0 1rem; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: 0.75rem; interpolate-size: allow-keywords; }
+.doc .why { margin: 0 0 1rem; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: var(--r-md); interpolate-size: allow-keywords; }
 .doc .why summary { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; min-height: var(--row); box-sizing: border-box; padding: 0.375rem 1rem; font-weight: var(--fw-label); cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
 .doc .why summary::-webkit-details-marker { display: none; }
 .doc .why summary::after { content: ""; flex: none; width: 0.4em; height: 0.4em; margin-right: 0.2em; border: solid var(--fg-2); border-width: 0 1.5px 1.5px 0; transform: translateY(-0.12em) rotate(45deg); transition: transform 160ms var(--ease-out); }
@@ -86,7 +86,7 @@
 .doc .cite a::after { content: ""; position: absolute; inset: -0.5rem -0.375rem; }
 @media (pointer: coarse) { .doc .cite a::after { inset: -0.875rem -0.75rem; } }
 .doc .references { margin: 0 0 1rem; padding-left: 1.6em; color: var(--fg-2); font-size: var(--text-secondary); font-weight: var(--fw-secondary); }
-.doc .references li { margin: 0.5rem 0; padding: 0.125rem 0.5rem 0.125rem 0.25rem; border-radius: 0.5rem; }
+.doc .references li { margin: 0.5rem 0; padding: 0.125rem 0.5rem 0.125rem 0.25rem; border-radius: var(--r-sm); }
 .doc .references li:target, .doc .cite a:target { background: rgb(from var(--fg) r g b / 0.08); }
 .doc .references .back { display: inline-grid; place-items: center; width: 1.5rem; height: 1.25rem; margin-left: 0.25rem; vertical-align: -0.25rem; color: var(--fg-2); }
 .doc .references .back svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
@@ -97,7 +97,7 @@
    attribute, in CSS pixels, so it is as sharp as the capture's 2x or 3x allows) and never wider than the text; its box starts on the
    text's left edge. A clip is laid exactly over the still (same crop, same size) and fades in once it plays. */
 .doc .figure { margin: 1.5rem 0; }
-.doc .figure-media { position: relative; display: block; width: fit-content; max-width: 100%; overflow: hidden; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: 0.75rem; line-height: 0; }
+.doc .figure-media { position: relative; display: block; width: fit-content; max-width: 100%; overflow: hidden; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: var(--r-md); line-height: 0; }
 .doc .figure img { display: block; max-width: 100%; height: auto; }
 .doc .figure-clip { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 200ms ease; pointer-events: none; }
 .doc .figure-clip[data-playing] { opacity: 1; }
@@ -109,7 +109,7 @@
 /* ---- Tables ------------------------------------------------------------------------------------------------------------------
    A table is a box with a header band and hairlines between rows; its first column names the row. The box scrolls by itself when
    a table is wider than the text (cells wrap, so only a table with long unbreakable words does). In a narrow canvas window each row stacks into a card instead (docs-reader.css). */
-.doc .table { overflow-x: auto; margin: 0 0 1rem; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: 0.75rem; }
+.doc .table { overflow-x: auto; margin: 0 0 1rem; border: 1px solid rgb(from var(--fg) r g b / 0.1); border-radius: var(--r-md); }
 .doc table { width: 100%; margin: 0; border-collapse: collapse; }
 .doc th, .doc td { padding: 0.5rem 0.75rem; border-bottom: 1px solid rgb(from var(--fg) r g b / 0.1); text-align: left; vertical-align: top; }
 .doc th { background: rgb(from var(--fg) r g b / 0.04); color: var(--fg-2); font-weight: var(--fw-label); white-space: nowrap; }

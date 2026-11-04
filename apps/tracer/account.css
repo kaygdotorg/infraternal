@@ -55,7 +55,7 @@
 @media (prefers-reduced-motion: reduce) { .ac .ui-kv-chevron, .ac-avatar, .ac-pencil { transition: none; } }
 
 .ac-signout {
-  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: var(--ui-row-h); margin: 0; padding: 0 0.375rem; border: 0; border-radius: 0.5rem; background: none;
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-height: var(--ui-row-h); margin: 0; padding: 0 0.375rem; border: 0; border-radius: var(--r-sm); background: none;
   color: var(--fg-2); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
   transition: background-color 120ms ease, color 120ms ease, transform 140ms var(--ease-out, ease-out);
 }
@@ -72,7 +72,7 @@
 .ac-pane-clip { min-height: 0; overflow: hidden; }
 /* An opaque ground (the overlay's own solid colour) under the pane: the tag cards below are mixed into it, so every text on the
    pane has one known background and its contrast can be measured. */
-.ac-pane-body { --ac-quiet: color-mix(in oklab, var(--fg) 88%, var(--overlay-solid, var(--bg))); display: grid; gap: 0.875rem; margin: 0.375rem 0 0.25rem; padding: 0.75rem; border-radius: 0.75rem; background: color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg))); }
+.ac-pane-body { --ac-quiet: color-mix(in oklab, var(--fg) 88%, var(--overlay-solid, var(--bg))); display: grid; gap: 0.875rem; margin: 0.375rem 0 0.25rem; padding: 0.75rem; border-radius: var(--r-md); background: color-mix(in oklab, var(--fg) 5%, var(--overlay-solid, var(--bg))); }
 @media (prefers-reduced-motion: reduce) { .ac-pane { transition: none; } }
 
 /* One block for each account: its name and how many machines, then a card for each tag. Accounts are told apart by a hairline and

@@ -13,7 +13,7 @@
 .cl-sx-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .cl-sx-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-sx-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); }
-@media (pointer: coarse) { .cl-sx-pop { border-radius: 1.125rem; } .cl-sx-head { padding: 1rem 1rem 0.75rem; } .cl-sx-logo { width: 1.75rem; height: 1.75rem; } }
+@media (pointer: coarse) { .cl-sx-pop { border-radius: var(--r-lg); } .cl-sx-head { padding: 1rem 1rem 0.75rem; } .cl-sx-logo { width: 1.75rem; height: 1.75rem; } }
 
 /* ---- the manager ---------------------------------------------------------------- */
 .cl-sx-scroll { padding: 0.5rem; }
@@ -21,10 +21,10 @@
 .cl-sx-group + .cl-sx-group { margin-top: 2px; }
 .cl-sx-eyebrow { margin: 0.5rem 0.5rem 2px; color: var(--fg-3); font: var(--ui-type-eyebrow); letter-spacing: var(--ui-tracking); }
 .cl-sx-list { margin: 0; padding: 0; list-style: none; }
-.cl-sx-row { position: relative; border-radius: 0.5rem; }
+.cl-sx-row { position: relative; border-radius: var(--r-sm); }
 .cl-sx-main {
   display: grid; grid-template-columns: 1.125rem minmax(0, 1fr) auto; align-items: center; column-gap: 0.5rem; width: 100%; min-height: 3rem; margin: 0; padding: 0.3125rem 0.5rem;
-  border: 0; border-radius: 0.5rem; background: none; color: var(--fg); text-align: left; cursor: default;
+  border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); text-align: left; cursor: default;
   /* The press uses the individual `scale` property, so the swipe's own transform is never eased behind the finger. */
   transition: scale 140ms var(--ease-out, ease-out), background-color 140ms ease;
 }
