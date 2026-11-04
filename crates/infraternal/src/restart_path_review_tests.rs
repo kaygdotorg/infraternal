@@ -8,7 +8,7 @@ use std::{
 
 #[cfg(target_os = "linux")]
 #[test]
-/// Exercise pathname recovery with private state and panic-safe child ownership.
+/// Exercise pathname recovery with a compact image, private state, and panic-safe child ownership.
 fn late_recovery_from_path_invocation_keeps_install_target() {
     const NAME: &str =
         "restart::tests::path_review::late_recovery_from_path_invocation_keeps_install_target";
@@ -45,17 +45,19 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
     }
     let fixture = crate::restart_binary::fixture::Directory::new();
     let state = fixture.0.clone();
-    let child = Command::new(std::env::current_exe().unwrap())
-        .arg0("infraternal")
-        .args(["--exact", NAME, "--nocapture"])
-        .current_dir(&state)
-        .env("REVIEW_RECOVERY_PATH_STATE", &state)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let child = Command::new(super::stripped_test_image(
+        &std::env::current_exe().unwrap(),
+    ))
+    .arg0("infraternal")
+    .args(["--exact", NAME, "--nocapture"])
+    .current_dir(&state)
+    .env("REVIEW_RECOVERY_PATH_STATE", &state)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .process_group(0)
+    .spawn()
+    .unwrap();
     let output = super::bounded_output(child, super::HANG_BOUND, NAME);
     std::fs::remove_dir_all(state).unwrap();
     assert!(

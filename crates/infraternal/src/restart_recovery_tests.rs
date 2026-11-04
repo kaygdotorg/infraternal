@@ -17,6 +17,65 @@ use openssl::{
 };
 use std::sync::Arc;
 
+/// Restart fixtures must work from an oversized debug image without raising production's limit.
+#[cfg(target_os = "linux")]
+#[test]
+fn oversized_debug_image_does_not_limit_restart_fixtures() {
+    use crate::restart_binary::fixture::{Directory, Signed};
+    use std::os::unix::process::CommandExt;
+    const NAME: &str =
+        "restart::recovery_tests::oversized_debug_image_does_not_limit_restart_fixtures";
+    if std::env::var_os("INFRATERNAL_OVERSIZED_RESTART_BOUND").is_some() {
+        assert!(crate::restart_binary::Opened::running().is_err());
+        println!("production oversized running-image refusal: preserved");
+        return;
+    }
+    let directory = Directory::new();
+    let image = Signed::image(directory.0.join("oversized-debug-image"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&image.path)
+        .unwrap()
+        .set_len(512 * 1024 * 1024 + 1)
+        .unwrap();
+    // ELF ignores trailing padding; strip removes it along with debug sections.
+    // A sparse extension crosses the real bound without manufacturing debug symbols.
+    for check_bound in [true, false] {
+        let mut command = std::process::Command::new(&image.path);
+        if check_bound {
+            command
+                .args(["--exact", NAME, "--nocapture"])
+                .env("INFRATERNAL_OVERSIZED_RESTART_BOUND", "1");
+        } else {
+            command.args([
+                "restart::",
+                "--skip",
+                NAME,
+                "--test-threads=2",
+                "--nocapture",
+            ]);
+        }
+        // A failing nested suite can exceed a pipe buffer; collect its logs in private files.
+        let stdout = directory.0.join(format!("{check_bound}.stdout"));
+        let stderr = directory.0.join(format!("{check_bound}.stderr"));
+        let child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::fs::File::create(&stdout).unwrap())
+            .stderr(std::fs::File::create(&stderr).unwrap())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let output = super::tests::bounded_output(child, Duration::from_secs(300), NAME);
+        let stdout = std::fs::read_to_string(stdout).unwrap();
+        let stderr = std::fs::read_to_string(stderr).unwrap();
+        assert!(
+            output.status.success(),
+            "check_bound={check_bound}\n{stdout}\n{stderr}"
+        );
+        println!("{stdout}");
+    }
+}
+
 fn material() -> (CaMaterial, X509) {
     let key = PKey::generate_ed25519().unwrap();
     let mut name = X509NameBuilder::new().unwrap();
@@ -65,7 +124,7 @@ fn material() -> (CaMaterial, X509) {
 #[cfg(target_os = "linux")]
 #[test]
 #[allow(clippy::too_many_lines)]
-/// Verify real execution and late recovery using private executable state and owned children.
+/// Verify real execution and late recovery using compact images, private state, and owned children.
 fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
     use std::os::unix::{ffi::OsStrExt, process::CommandExt};
     const NAME: &str =
@@ -164,17 +223,19 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         let address = reservation.local_addr().unwrap();
         drop(reservation);
         let mut child = crate::restart_binary::fixture::ChildGuard::new(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", NAME, "--nocapture"])
-                .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
-                .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
-                .env("INFRATERNAL_RECOVERY_CASE", case)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .process_group(0)
-                .spawn()
-                .unwrap(),
+            std::process::Command::new(super::tests::stripped_test_image(
+                &std::env::current_exe().unwrap(),
+            ))
+            .args(["--exact", NAME, "--nocapture"])
+            .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
+            .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
+            .env("INFRATERNAL_RECOVERY_CASE", case)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap(),
         );
         let preparation_deadline = std::time::Instant::now() + Duration::from_secs(300);
         let mut recovery_deadline = None;
