@@ -1174,7 +1174,7 @@ async function dragEdges(page: Page, ids: string[], views: string[], amount = 11
         // The blank part of the header, between the title pill and the action group: a press and hold there starts the resize mode.
         const mode = await page.evaluate((i) => document.querySelector(`[data-window-id="${i}"]`)!.getAttribute("data-resize"), id);
         if (mode !== "touch") {
-          const gap = await page.evaluate((i) => { const w = document.querySelector(`[data-window-id="${i}"]`)!; const pill = w.querySelector(".ui-window-pill")!.getBoundingClientRect(), acts = w.querySelector(".ui-window-actions")!.getBoundingClientRect(); return { x: (pill.right + acts.left) / 2, y: (pill.top + pill.bottom) / 2, room: acts.left - pill.right }; }, id);
+          const gap = await page.evaluate((i) => { const w = document.querySelector(`[data-window-id="${i}"]`)!; const pill = w.querySelector(".ui-window-pill")!.getBoundingClientRect(), acts = w.querySelector(".ui-window-actions")!.getBoundingClientRect(), edge = acts.width > 0 ? acts.left : w.getBoundingClientRect().right - 8; return { x: (pill.right + edge) / 2, y: (pill.top + pill.bottom) / 2, room: edge - pill.right }; }, id);
           await finger("touchStart", gap.x, gap.y);
           await page.waitForTimeout(700);
           await finger("touchEnd", gap.x, gap.y);

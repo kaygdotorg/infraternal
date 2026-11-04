@@ -142,7 +142,8 @@ export function createCrumbs(cx: Ctx): Crumbs {
     stage.append(node);
     const screen = stage.getBoundingClientRect(), box = anchor.getBoundingClientRect();
     node.style.minWidth = `${Math.round(box.width)}px`;
-    const width = Math.min(Math.max(node.offsetWidth, box.width), screen.width - 16);
+    // The drawn width, not the rounded one: a half pixel of difference moves the centre by a quarter pixel (the menu is centred to 0.5 px).
+    const width = Math.min(Math.max(node.getBoundingClientRect().width, box.width), screen.width - 16);
     // Centred on the pill it came from, shifted only as far as the screen's inset needs (TASTE: a menu opened from a pill is centred on that pill).
     const centre = box.left + box.width / 2 - screen.left;
     node.style.left = `${Math.round(Math.max(8, Math.min(centre - width / 2, screen.width - 8 - width)))}px`;
