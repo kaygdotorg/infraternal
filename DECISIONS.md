@@ -3768,3 +3768,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        as a new host with a new key and retires the old infraternal agent
        (#305). The owner treats the failing re-add of `code` as a bug ("bug
        is not fixed?"), so this path is built.
+336. **Morning answers (owner, 2026-11-04):**
+     - Traefik containment (#281, docs/design/proxy-containment.md): a
+       cgroup per Traefik child now, measured first: "let's do it".
+     - GotaTun keeps ring (D289): "keep ring and optimise".
+     - Each passkey tap is bound to the one action shown on screen, not to
+       "any tap in the last 5 minutes" (#303): "agreed".
+     - Toasts stack the way svelte-sonner stacks, rather than replacing one
+       another: "the calternal thread took that base of svelte-sonner and
+       rewrote it to be smaller and to its needs. it behaves the same way
+       though so stack them." Errors are never hidden by later info toasts.
+     - The rootless refusal message gets shorter, and people need UI to
+       choose which account they log in as on each host: "i agree but we
+       also adjacently need some UI around what user one prefers on hosts
+       as I wouldnt want to login as root all the time".
