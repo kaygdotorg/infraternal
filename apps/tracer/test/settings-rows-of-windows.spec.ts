@@ -1277,7 +1277,9 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
       await page.mouse.wheel(0, 200);
     }
     await page.waitForTimeout(1500);
-    expect(await active(page), "nothing was clicked: the focused window is the same").toBe(focused);
+    // Nothing was clicked, and the window that was focused has left the screen: the focus went to the window now in view (D323).
+    expect(focused).toBe("s-appearance-theme");
+    expect(await active(page), "the focused window is the one in view").toBe("s-terminal-typing");
     expect((await crumbs(page)).slice(1), "the breadcrumb names the next row, Terminal").toEqual(["Terminal", "Typing"]);
     if (!size.isMobile) {
       await page.mouse.wheel(0, -200);
@@ -1349,7 +1351,7 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     // Appearance has four windows and the longest row (You) has five tracks: more steps than there are windows must not reach the fifth track.
     for (let k = 0; k < 7; k++) await stepSideways(page, 1, size.isMobile, "s-appearance-theme");
     const right = await page.evaluate(() => document.querySelector('[data-window-id="s-appearance-layout"]')!.getBoundingClientRect().right);
-    expect(await shareOnScreen(page, "s-appearance-layout"), "the last window of the row is whole on screen").toBeGreaterThan(0.99);
+    expect(right, "the last window of the row is whole on screen (sideways)").toBeLessThanOrEqual(size.viewport.width + 0.5);
     expect(size.viewport.width - right, "and nothing but the group's inset is to its right").toBeLessThanOrEqual(18);
     expect(size.viewport.width - right).toBeGreaterThanOrEqual(-0.5);
     if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await page.screenshot({ path: `${SHOTS}/row-end-${size.isMobile ? "p3" : "d2"}.png` }); }
