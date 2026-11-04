@@ -68,7 +68,7 @@
   --ui-overlay-shadow: var(--elevation);
   color: var(--fg);
   font: var(--fw-body) 0.875rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ui-tracking);
   --ui-tick-border-color: color-mix(in oklab, var(--fg) 34%, transparent);
   --ui-tick-border-width: 1.5px;
   /* The sign-in card's secondary text sits closer to its primary (#a1a1aa on #f4f4f5)
@@ -259,7 +259,7 @@
   --ui-button-padding: 0 1.25rem;
   --ui-button-radius: 999px;
   --ui-button-font: var(--fw-title) 0.84375rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-button-letter-spacing: -0.01em;
+  --ui-button-letter-spacing: var(--ui-tracking);
   --ui-button-transition: transform 140ms var(--ease-out), background-color 160ms ease;
   margin-left: auto;
 }

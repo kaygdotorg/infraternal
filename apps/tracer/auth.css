@@ -61,7 +61,7 @@
   color: var(--fg);
   background: transparent;
   font: var(--fw-body) 0.875rem/1.55 var(--font-face);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ui-tracking);
 }
 
 #faulty-field {
@@ -212,7 +212,7 @@
   background: var(--fg);
   color: var(--on-fg);
   font: var(--fw-title) 0.84375rem/1 var(--font-face);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ui-tracking);
   cursor: pointer;
   transition: transform 140ms var(--ease-out), opacity 160ms ease;
 }

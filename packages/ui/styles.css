@@ -766,7 +766,7 @@
   background: rgb(from var(--fg) r g b / 0.08);
   color: var(--fg);
   font: var(--fw-label) 0.8125rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ui-tracking);
   transform-origin: left center;
   transition: background-color 120ms ease;
 }

@@ -313,7 +313,7 @@ button { color: inherit; }
   line-height: 1.45;
   /* Same tracking as the sign-in card: monospace at 11-16 px wants near-zero tracking;
      -0.025em put glyphs on fractional advances and made mono text look uneven. */
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ui-tracking);
 }
 :root[data-ui-font="mono"] .capsule { font-weight: var(--fw-body); letter-spacing: inherit; }
 :root[data-ui-font="mono"] .tab { font-size: var(--text-secondary); font-weight: var(--fw-body); }
@@ -440,7 +440,7 @@ button { color: inherit; }
 /* With a footer pinned at the bottom, only the host tree scrolls. */
 .sidebar[data-foot] #tree { flex: 0 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .sidebar-head { flex: none; display: flex; align-items: center; gap: 0.5rem; height: var(--pill-h); margin-bottom: 0.25rem; padding: 0 calc(var(--pill-h) + 0.5rem) 0 0.5rem; }
-.sidebar-title { font-weight: var(--fw-title); letter-spacing: -0.01em; }
+.sidebar-title { font-weight: var(--fw-title); letter-spacing: var(--ui-tracking); }
 .bm { --bm-line: color-mix(in oklab, var(--fg) 16%, transparent); position: relative; margin-left: 0.25rem; padding-left: 0.875rem; }
 /* The view-level line is drawn per section, in the section's own box, so it is as long as the content and never as long
    as the scrollport: each section carries its own stretch, the stretches meet, and the last one ends at its head's centre
