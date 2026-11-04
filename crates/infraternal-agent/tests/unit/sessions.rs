@@ -599,7 +599,7 @@ async fn failed_launch_stops_the_process_it_started_and_no_other() {
 }
 
 /// What a stand-in detached shim does on the rendezvous: bind after `bind_delay`, stay silent on the first
-/// `silent` connections (a loaded host missing the 2 s Hello), then answer and report a received CloseSession.
+/// `silent` connections (a loaded host missing the 2 s Hello), then answer and report a received `CloseSession`.
 fn detached_fixture(
     state: &std::path::Path,
     root: &std::path::Path,

@@ -908,7 +908,7 @@ async fn launch_configured(
     for (name, value) in infraternal_shim::session_locale_environment() {
         command.env(name, value);
     }
-    let mut child = command
+    let child = command
         .stdin(if program.is_empty() {
             Stdio::null()
         } else {
@@ -923,7 +923,7 @@ async fn launch_configured(
     // its own task and bound, so a cancelled caller cannot cancel it.
     let record = reservation
         .as_mut()
-        .and_then(|reservation| reservation.spawned());
+        .and_then(crate::rootless_sessions::Reservation::spawned);
     let mut launch = Launch {
         child: Some(child),
         watch: Some(watch),
