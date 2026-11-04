@@ -1060,9 +1060,7 @@ impl TraefikSupervisor {
         // before it can keep our listeners.
         let orphan = OrphanIdentity {
             uid: child_identity()?.0,
-            executable: fs::metadata(&settings.executable)
-                .ok()
-                .map(|metadata| (metadata.dev(), metadata.ino())),
+            executables: installed_executables(&settings.executable),
         };
         let child_lock = Arc::new(acquire_child_lock(&settings.lock_directory, &orphan)?);
         let worker_child_lock = Arc::clone(&child_lock);
@@ -1616,12 +1614,55 @@ fn trusted_health_owners(child: u32) -> Vec<u32> {
 const CHILD_LOCK_NAME: &str = ".traefik-child.lock";
 const ORPHAN_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// What an orphaned Traefik child looks like: the child identity's UID, running the installed
-/// executable (device and inode; `None` when it is not installed, so nothing matches).
+/// What an orphaned Traefik child looks like: the child identity's UID, running one of our
+/// installed Traefik executables (device and inode; empty when none is installed, so nothing
+/// matches).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct OrphanIdentity {
     uid: u32,
-    executable: Option<(u64, u64)>,
+    executables: Vec<(u64, u64)>,
+}
+
+/// The identities of every Traefik release this node has installed, the current one first.
+///
+/// Each release installs to its own `<store>/<digest>/bin/traefik`, so an orphan left by an
+/// agent from before an upgrade runs an older path than the current one. Only a path of exactly
+/// that shape is widened to its siblings, and only sibling directories named like a digest
+/// count, so a custom executable path matches itself alone.
+fn installed_executables(current: &Path) -> Vec<(u64, u64)> {
+    let identity = |path: &Path| {
+        fs::metadata(path)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()))
+    };
+    let mut found: Vec<_> = identity(current).into_iter().collect();
+    let store = current
+        .parent()
+        .filter(|bin| bin.file_name().is_some_and(|name| name == "bin"))
+        .and_then(Path::parent)
+        .filter(|release| {
+            release
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(crate::installer::valid_component_digest)
+        })
+        .and_then(Path::parent);
+    if let Some(Ok(releases)) = store.map(fs::read_dir) {
+        for release in releases.flatten() {
+            let is_release = release
+                .file_name()
+                .to_str()
+                .is_some_and(crate::installer::valid_component_digest);
+            if let Some(id) = is_release
+                .then(|| identity(&release.path().join("bin").join("traefik")))
+                .flatten()
+                && !found.contains(&id)
+            {
+                found.push(id);
+            }
+        }
+    }
+    found
 }
 
 /// Take the lock every Traefik child inherits, stopping orphans that still hold it.
@@ -1671,7 +1712,10 @@ fn acquire_child_lock(directory: &Path, orphan: &OrphanIdentity) -> io::Result<F
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        "an orphaned proxy process still holds its listeners",
+                        format!(
+                            "a process that is not an installed Traefik of ours holds the proxy lock: {}",
+                            describe_lock_holders(&file)
+                        ),
                     ));
                 }
                 thread::sleep(Duration::from_millis(20));
@@ -1693,9 +1737,6 @@ fn stop_lock_holders(lock: &File, orphan: &OrphanIdentity) -> io::Result<()> {
     use std::os::fd::AsFd as _;
     let metadata = lock.metadata()?;
     let lock = (metadata.dev(), metadata.ino());
-    let Some(executable) = orphan.executable else {
-        return Ok(());
-    };
     let own = std::process::id();
     for entry in fs::read_dir("/proc")? {
         let Some(pid) = entry?
@@ -1714,7 +1755,7 @@ fn stop_lock_holders(lock: &File, orphan: &OrphanIdentity) -> io::Result<()> {
         if holds_inode(pid, lock)
             && runs_only_as(pid, orphan.uid)
             && fs::metadata(format!("/proc/{pid}/exe"))
-                .is_ok_and(|exe| (exe.dev(), exe.ino()) == executable)
+                .is_ok_and(|exe| orphan.executables.contains(&(exe.dev(), exe.ino())))
         {
             let _ = infraternal_shim::signal_process_descriptor(
                 process.as_fd(),
@@ -1723,6 +1764,43 @@ fn stop_lock_holders(lock: &File, orphan: &OrphanIdentity) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Name the processes holding `lock`, with their executables, for the error an operator reads.
+#[cfg(target_os = "linux")]
+fn describe_lock_holders(lock: &File) -> String {
+    let Ok(metadata) = lock.metadata() else {
+        return "unknown holder".to_owned();
+    };
+    let inode = (metadata.dev(), metadata.ino());
+    let own = std::process::id();
+    let mut holders = Vec::new();
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid != own && holds_inode(pid, inode) {
+            let exe = fs::read_link(format!("/proc/{pid}/exe")).map_or_else(
+                |_| "unreadable executable".to_owned(),
+                |p| p.display().to_string(),
+            );
+            holders.push(format!("PID {pid} ({exe})"));
+        }
+    }
+    if holders.is_empty() {
+        "unknown holder".to_owned()
+    } else {
+        holders.join(", ")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn describe_lock_holders(_lock: &File) -> String {
+    "unknown holder".to_owned()
 }
 
 #[cfg(target_os = "linux")]

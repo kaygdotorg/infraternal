@@ -333,7 +333,7 @@ fn read_signed_metadata(path: &Path, limit: usize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn valid_component_digest(value: &str) -> bool {
+pub(crate) fn valid_component_digest(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
