@@ -213,6 +213,45 @@ impl CertificateAuthority {
         Ok(SignedCertificate { der, record })
     }
 
+    /// The issuer's raw Ed25519 public key, which mesh SSH trusts as its CA
+    /// (owner question Q1 on #221: reuse the D168 key).
+    /// # Errors
+    /// Refuses a key that is not Ed25519.
+    pub fn ssh_public_key(&self) -> Result<[u8; 32], CaError> {
+        if self.0.key.id() != Id::ED25519 {
+            return Err(CaError);
+        }
+        self.0
+            .key
+            .raw_public_key()
+            .map_err(|_| CaError)?
+            .try_into()
+            .map_err(|_| CaError)
+    }
+
+    /// Sign one SSH certificate body for mesh SSH [D235], #221.
+    ///
+    /// Domain separation: the body must start with the Ed25519 SSH
+    /// certificate type string, so this path can never sign an X.509
+    /// structure (which starts with a DER `0x30`) or any other message with
+    /// the shared key. The certificate's shape is built and checked by
+    /// `infraternal_plugin_ssh::mesh_issue`; this only signs.
+    /// # Errors
+    /// Refuses any other body and signing failures.
+    pub fn sign_ssh(&self, body: &[u8]) -> Result<[u8; 64], CaError> {
+        const BODY_PREFIX: &[u8] = b"\0\0\0\x20ssh-ed25519-cert-v01@openssh.com";
+        if !body.starts_with(BODY_PREFIX) || self.0.key.id() != Id::ED25519 {
+            return Err(CaError);
+        }
+        let mut signer =
+            openssl::sign::Signer::new_without_digest(&self.0.key).map_err(|_| CaError)?;
+        signer
+            .sign_oneshot_to_vec(body)
+            .map_err(|_| CaError)?
+            .try_into()
+            .map_err(|_| CaError)
+    }
+
     fn build_host(
         &self,
         host: Uuid,
@@ -413,6 +452,27 @@ pub(crate) mod tests {
 
     pub(crate) fn test_material() -> CaMaterial {
         source(true).load().unwrap()
+    }
+
+    #[test]
+    fn ssh_signing_is_limited_to_ssh_certificate_bodies() {
+        let source = source(true);
+        let ca = CertificateAuthority::from_source(&source).unwrap();
+        let public = ca.ssh_public_key().unwrap();
+        assert_eq!(public.as_slice(), source.key.raw_public_key().unwrap());
+        let body = b"\0\0\0\x20ssh-ed25519-cert-v01@openssh.com\0\0\0\x20nonce";
+        let signature = ca.sign_ssh(body).unwrap();
+        let mut verifier = openssl::sign::Verifier::new_without_digest(&source.key).unwrap();
+        assert!(verifier.verify_oneshot(&signature, body).unwrap());
+        // An X.509 body, a bare message or a different SSH key type is refused.
+        for refused in [
+            &b"\x30\x82\x01\x00"[..],
+            b"",
+            b"\0\0\0\x20ssh-ed25519-cert-v01@openssh.co",
+            b"\0\0\0\x1cecdsa-sha2-nistp256-cert-v01",
+        ] {
+            assert!(ca.sign_ssh(refused).is_err());
+        }
     }
 
     #[test]
