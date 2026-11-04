@@ -1466,6 +1466,52 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         assert_eq!(active, 1, "cancel must retire enrollment authority");
         return;
     }
+    if let Some(delay) = std::env::var("BREAKIT2_CANCEL_AFTER_CONFIRM_MS")
+        .ok()
+        .and_then(|delay| delay.parse::<u64>().ok())
+    {
+        // #305 P2-1: confirm the stuck-install offer, then close the sheet while
+        // the host is still setting the install aside. The host's own journal
+        // dates the stop; this line dates the drop.
+        let mut changed = batch.subscribe();
+        let challenge = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                if let Some(challenge) = batch
+                    .events(0)
+                    .1
+                    .iter()
+                    .find_map(|event| event.leftovers.as_deref().map(|leftovers| leftovers.challenge))
+                {
+                    return challenge;
+                }
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        runner.start_fresh(&batch, "owner", "live", challenge).unwrap();
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        println!("CANCEL breakit2 boundary=confirmed+{delay}ms action=drop_batch epoch_us={at}");
+        drop(batch);
+        tokio::time::timeout(Duration::from_secs(90), async {
+            while !f.backend.attempts.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The attempt record goes before its restore has run; keep the runtime
+        // up past the restore's 45 s cap so the restore is never cut short.
+        tokio::time::sleep(Duration::from_secs(50)).await;
+        println!("CANCEL breakit2 attempt_ended=true");
+        server.abort();
+        drop(listeners);
+        return;
+    }
     let mut changed = batch.subscribe();
     let mut retry_private = retry_private;
     let mut selected_attempt = 1;
