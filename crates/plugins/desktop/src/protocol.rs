@@ -265,9 +265,7 @@ impl Start {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Input {
     /// Typed text: one Unicode scalar value (not a control character).
-    Text {
-        scalar: u32,
-    },
+    Text { scalar: u32 },
     /// Mouse button or movement. `button` and `state` are each 0 to 2.
     Mouse {
         x: f64,

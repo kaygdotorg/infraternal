@@ -65,10 +65,7 @@ pub trait AccessRules: Send + Sync {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostCommand {
     /// This viewer has become the controller.
-    Control {
-        viewer: u64,
-        lease: u64,
-    },
+    Control { viewer: u64, lease: u64 },
     /// Ask for a new keyframe.
     Keyframe,
     /// Resize the captured output. `density_milli` is pixels per point times 1000.
