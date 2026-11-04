@@ -1627,7 +1627,8 @@ fn linux_command(
         command.env(name, value);
     }
     // Preserve zsh's supported profile location for isolated canaries.
-    if let Some(directory) = std::env::var_os("ZDOTDIR") {
+    // Only from a directory the person or root controls (#328 P3-1).
+    if let Some(directory) = crate::shell_startup::zsh_directory(user) {
         command.env("ZDOTDIR", directory);
     }
     // SAFETY: the callback runs after fork, uses only libc-backed syscalls
@@ -1683,9 +1684,8 @@ fn darwin_command(
     for (name, value) in crate::session_locale_environment() {
         command.env(name, value);
     }
-    if let Some(directory) = std::env::var_os("ZDOTDIR") {
-        command.env("ZDOTDIR", directory);
-    }
+    // macOS never forwards ZDOTDIR: zsh would run startup code from a
+    // directory the root agent's environment named (#328 P3-1).
     prepare_child(&mut command);
     only_standard_descriptors(&mut command);
     lead_terminal(&mut command);
@@ -1729,9 +1729,8 @@ fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Co
     for (name, value) in crate::session_locale_environment() {
         command.env(name, value);
     }
-    if let Some(directory) = std::env::var_os("ZDOTDIR") {
-        command.env("ZDOTDIR", directory);
-    }
+    // macOS never forwards ZDOTDIR: zsh would run startup code from a
+    // directory the root agent's environment named (#328 P3-1).
     prepare_child(&mut command);
     only_standard_descriptors(&mut command);
     lead_terminal(&mut command);
@@ -1792,7 +1791,8 @@ fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Co
         }
     }
     // Preserve zsh's supported profile location for isolated canaries.
-    if let Some(directory) = std::env::var_os("ZDOTDIR") {
+    // Only from a directory the person or root controls (#328 P3-1).
+    if let Some(directory) = crate::shell_startup::zsh_directory(user) {
         command.env("ZDOTDIR", directory);
     }
     // SAFETY: the callback runs after fork, uses only libc-backed syscalls

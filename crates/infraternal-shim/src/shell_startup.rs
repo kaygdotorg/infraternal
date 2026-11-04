@@ -63,6 +63,55 @@ fn environment(command: &Command, name: &str, inherited: bool) -> Option<OsStrin
     }
 }
 
+/// The zsh startup directory (`ZDOTDIR`) a person's shell may inherit from
+/// the root infraternal agent's environment, or `None` (Linux, #328 P3-1).
+///
+/// zsh runs startup code from this directory, so it must not belong to anyone
+/// but the person or root: the canonical directory and every ancestor must be
+/// owned by root or `uid`. None may be writable by others (a sticky ancestor
+/// such as /tmp is fine: others cannot rename entries in it). Group write is
+/// accepted only for the person's own user-private group (same name and gid
+/// as the account). The result is the canonical path, so a later symlink swap
+/// cannot redirect it. macOS never forwards `ZDOTDIR` (`session_shell`).
+#[cfg(target_os = "linux")]
+pub(crate) fn zsh_directory(user: &nix::unistd::User) -> Option<std::path::PathBuf> {
+    let value = std::env::var_os("ZDOTDIR")?;
+    trusted_directory(Path::new(&value), user)
+}
+
+/// Whether `path` resolves to a directory only `user` or root controls.
+#[cfg(target_os = "linux")]
+fn trusted_directory(path: &Path, user: &nix::unistd::User) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    if !path.is_absolute() {
+        return None;
+    }
+    let real = path.canonicalize().ok()?;
+    // The person's user-private group: its name is the account name.
+    let private_group = nix::unistd::Group::from_gid(user.gid)
+        .ok()
+        .flatten()
+        .is_some_and(|group| group.name == user.name);
+    let mut current = Some(real.as_path());
+    let mut leaf = true;
+    while let Some(directory) = current {
+        let metadata = std::fs::symlink_metadata(directory).ok()?;
+        let owner = metadata.uid();
+        let mode = metadata.mode();
+        let sticky = mode & 0o1000 != 0;
+        if !metadata.is_dir()
+            || (owner != 0 && owner != user.uid.as_raw())
+            || (mode & 0o002 != 0 && (leaf || !sticky))
+            || (mode & 0o020 != 0 && !(private_group && metadata.gid() == user.gid.as_raw()))
+        {
+            return None;
+        }
+        leaf = false;
+        current = directory.parent();
+    }
+    Some(real)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +289,44 @@ mod tests {
         )
         .unwrap();
         fixture
+    }
+
+    /// `ZDOTDIR` is forwarded only from directories the person or root
+    /// controls (#328 P3-1).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_directory_must_belong_to_the_person_or_root() {
+        let me = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+            .unwrap()
+            .unwrap();
+        let own = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            trusted_directory(own, &me).is_some(),
+            "the person's own directory"
+        );
+        assert!(trusted_directory(Path::new("relative/dir"), &me).is_none());
+        assert!(trusted_directory(Path::new("/nonexistent-j146"), &me).is_none());
+        // World-writable: anyone could plant startup code.
+        let open = std::env::temp_dir().join(format!("zdotdir-open-{}", std::process::id()));
+        fs::create_dir_all(&open).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            trusted_directory(&open, &me).is_none(),
+            "a world-writable directory"
+        );
+        fs::remove_dir(&open).unwrap();
+        // Another person's directory: what the root agent leaked before.
+        if !nix::unistd::Uid::effective().is_root() {
+            let other = nix::unistd::User {
+                uid: nix::unistd::Uid::from_raw(me.uid.as_raw() + 1),
+                gid: nix::unistd::Gid::from_raw(me.gid.as_raw() + 1),
+                name: format!("{}-other", me.name),
+                ..me.clone()
+            };
+            assert!(
+                trusted_directory(own, &other).is_none(),
+                "another account's directory"
+            );
+        }
     }
 }

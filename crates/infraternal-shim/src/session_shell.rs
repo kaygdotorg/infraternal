@@ -54,8 +54,15 @@ const LAUNCHCTL: &str = "/bin/launchctl";
 const READINESS: &str = "read -r line; printf 'infraternal-ready\\n'";
 // macOS shells rebuild PATH from /etc/paths through path_helper at login.
 const PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
-// Variables the root shim passes on to the entry. Everything else is dropped.
-const PASSED: [&str; 4] = ["TERM", "COLORTERM", "INFRATERNAL_SESSION", "ZDOTDIR"];
+// The only variables the entry takes from its caller, the root shim, which
+// sets each of them itself: TERM and COLORTERM are fixed terminal values,
+// INFRATERNAL_SESSION is this terminal's marker. Locale variables (LANG, LC_*)
+// come from the host's installed locales (locale.rs). Everything else is
+// dropped, including ZDOTDIR: zsh would run startup code from a directory a
+// root environment named (#328 P3-1). HOME, USER, LOGNAME, SHELL, PATH and
+// TMPDIR are set from the account, and SSH_AUTH_SOCK only from a verified
+// GUI login.
+const PASSED: [&str; 3] = ["TERM", "COLORTERM", "INFRATERNAL_SESSION"];
 // <bsm/audit.h>: AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS.
 const GRAPHIC_ACCESS: u64 = 0x10;
 // <unistd.h>: _CS_DARWIN_USER_TEMP_DIR.
@@ -268,7 +275,7 @@ fn prepare(request: &Request) -> io::Result<Command> {
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     command.env_clear();
     for (key, value) in &inherited {
-        if PASSED.iter().any(|name| key == *name) || locale(key) {
+        if forwarded(key) {
             command.env(key, value);
         }
     }
@@ -292,6 +299,12 @@ fn prepare(request: &Request) -> io::Result<Command> {
     Ok(command)
 }
 
+/// Whether the entry passes this variable from its caller on to the shell.
+fn forwarded(key: &OsStr) -> bool {
+    PASSED.iter().any(|name| key == *name) || locale(key)
+}
+
+/// Locale variables: `LANG` and the `LC_*` family.
 fn locale(key: &OsStr) -> bool {
     key == "LANG" || key.as_bytes().starts_with(b"LC_")
 }
@@ -456,6 +469,35 @@ mod tests {
         }
         let long = "x".repeat(MAX_PROGRAM);
         assert!(parse(&args(&["--uid", "1", "--program", "--", &long])).is_none());
+    }
+
+    /// The environment allowlist: terminal values, the marker and locale only;
+    /// no loader, shell-startup or path variable from the root caller.
+    #[test]
+    fn only_terminal_and_locale_variables_are_forwarded() {
+        for kept in [
+            "TERM",
+            "COLORTERM",
+            "INFRATERNAL_SESSION",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+        ] {
+            assert!(forwarded(OsStr::new(kept)), "{kept}");
+        }
+        for dropped in [
+            "ZDOTDIR",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "BASH_ENV",
+            "ENV",
+            "PATH",
+            "HOME",
+            "SSH_AUTH_SOCK",
+            "TMPDIR",
+        ] {
+            assert!(!forwarded(OsStr::new(dropped)), "{dropped}");
+        }
     }
 
     /// Every process has an audit record; the call must succeed with our
