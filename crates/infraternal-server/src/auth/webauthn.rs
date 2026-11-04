@@ -326,7 +326,9 @@ impl Auth {
     /// Anonymous ceremonies have their own pool, so they can never refuse an
     /// identified ceremony (a signed-in owner's fresh tap or approval), and an
     /// HTTP caller's network holds at most [`ANONYMOUS_CEREMONIES_PER_NETWORK`]
-    /// of it (#263, J145 P2-1).
+    /// of it (#263, J145 P2-1). A full pool makes room from the network
+    /// holding the most (see [`evict_from_heaviest_network`]), so filling it
+    /// cannot refuse a sign-in from a network with fewer (#263, J161 P3-1).
     pub(crate) async fn discoverable_login_start_from(
         &self,
         now: i64,
@@ -358,11 +360,11 @@ impl Auth {
                 mine + usize::from(network.is_some() && login.network == network),
             )
         });
-        if total >= PENDING_CEREMONIES {
-            return Err(Error::Denied);
-        }
         if mine >= ANONYMOUS_CEREMONIES_PER_NETWORK {
             return Err(Error::Throttled);
+        }
+        if total >= PENDING_CEREMONIES {
+            evict_from_heaviest_network(&mut pending, mine)?;
         }
         pending.logins.insert(
             id.clone(),
@@ -589,9 +591,50 @@ impl Auth {
 /// Most ceremonies of each pool (identified and registration; anonymous).
 const PENDING_CEREMONIES: usize = 1024;
 /// Most pending anonymous ceremonies one enclosing network (IPv6 /48, IPv4
-/// /24) may hold. Filling the anonymous pool then takes 32 such networks, the
-/// same residual the owner accepted for pending approvals (#76913).
+/// /24) may hold. 32 such networks fill the anonymous pool, but a full pool
+/// then gives newcomers the slots of the heaviest networks instead of
+/// refusing them.
 const ANONYMOUS_CEREMONIES_PER_NETWORK: usize = 32;
+
+/// Make room in the full anonymous pool for a caller whose network holds
+/// `mine` of it: drop the oldest waiting ceremony of the network holding the
+/// most. A ceremony leaves the pool when its finish begins, so every entry
+/// here is still waiting for a passkey.
+///
+/// A person signing in holds one ceremony for a few seconds, so their network
+/// loses it only once every flooding network is down to one, which takes
+/// about 1024 networks instead of 32. If the caller's network already holds
+/// as many as any other, taking from a peer would only trade places, so the
+/// caller is throttled (429 and Retry-After), not told its passkey failed.
+/// Rejected: refusing at the cap (32 networks lock out every sign-in), and
+/// evicting the globally oldest entry (a fast flood would displace a real
+/// person's prompt before they tap). The count runs only on this full path.
+fn evict_from_heaviest_network(p: &mut Pending, mine: usize) -> Result<()> {
+    let mut counts: std::collections::HashMap<Option<std::net::IpAddr>, usize> =
+        std::collections::HashMap::new();
+    for login in p.logins.values() {
+        if matches!(login.state, LoginState::Discoverable(_)) {
+            *counts.entry(login.network).or_default() += 1;
+        }
+    }
+    let Some((heaviest, most)) = counts.into_iter().max_by_key(|&(_, count)| count) else {
+        return Err(Error::Throttled);
+    };
+    if most <= mine {
+        return Err(Error::Throttled);
+    }
+    let oldest = p
+        .logins
+        .iter()
+        .filter(|(_, login)| {
+            matches!(login.state, LoginState::Discoverable(_)) && login.network == heaviest
+        })
+        .min_by_key(|(_, login)| login.expires)
+        .map(|(id, _)| id.clone())
+        .ok_or(Error::Throttled)?;
+    p.logins.remove(&oldest);
+    Ok(())
+}
 
 /// Registrations plus identified logins: the pool only signed-in people and
 /// setup can start ceremonies in.
