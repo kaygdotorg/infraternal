@@ -9,6 +9,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod agent;
+pub mod cgroup;
 pub mod cli;
 pub mod config;
 pub mod controller;

@@ -2,6 +2,8 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 pub mod action;
+#[cfg(unix)]
+pub mod cli_alias;
 
 pub use action::{
     ActionAvailability, ActionContract, ActionDefinition, ActionEffect, ActionExample,

@@ -903,6 +903,12 @@ fn install_system_service(
 
     let path_directory = ensure_directory(root, "usr/local/bin", expected_uid)?;
     install_path_link(&path_directory.join("infraternal"), expected_uid)?;
+    if !infraternal_plugin_api::cli_alias::install(
+        &path_directory.join("infraternal"),
+        expected_uid,
+    )? {
+        eprintln!("infraternal: skipped infra; an existing path belongs to another command.");
+    }
 
     let unit_directory = ensure_directory(root, "etc/systemd/system", expected_uid)?;
     let unit_path = unit_directory.join("infraternal-agent.service");
@@ -1430,6 +1436,7 @@ mod tests {
         );
     }
 
+    /// Both public names must reach the installed system image.
     #[test]
     fn system_install_copies_the_running_binary_links_path_and_enables_one_unit() {
         let temporary = TemporaryDirectory::new();
@@ -1466,6 +1473,10 @@ mod tests {
             fs::read_link(&link).unwrap(),
             Path::new("/var/lib/infraternal/bin/infraternal")
         );
+        assert_eq!(
+            fs::read_link(link.with_file_name("infra")).unwrap(),
+            Path::new("infraternal")
+        );
         let unit_text = fs::read_to_string(unit).unwrap();
         assert!(unit_text.contains("ExecStart=/var/lib/infraternal/bin/infraternal agent run"));
         assert!(unit_text.contains("--data /var/lib/infraternal/agent"));
@@ -1473,6 +1484,18 @@ mod tests {
             fs::read_to_string(calls).unwrap(),
             "daemon-reload\nenable --now infraternal-agent.service\nis-active infraternal-agent.service\n"
         );
+        // A later foreign command wins even when this installation is repeated.
+        let alias = link.with_file_name("infra");
+        fs::remove_file(&alias).unwrap();
+        fs::write(&alias, b"foreign infra").unwrap();
+        install_system_service(
+            &temporary.0,
+            &source,
+            &systemctl,
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(alias).unwrap(), b"foreign infra");
     }
 
     #[test]

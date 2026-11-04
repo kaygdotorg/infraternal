@@ -3992,3 +3992,75 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      work on those CPUs during the run, and run-to-run spread no worse than
      the unpinned harness's. Earlier unpinned numbers stay valid for
      history, but aren't compared directly with pinned ones.
+349. **`infra` alias, Themes approved, app-window icons, takeover proof
+     (owner, 2026-11-04):**
+     - **`infra` is a second name for the CLI:** "can we also alias the
+       infraternal CLI to infra? sounds neater. of course both should work -
+       infraternal is the actual command, infra is the symlink. don't know
+       if the symlink is the best way to do the alias (but we shoudn't
+       change the shell config)". The installers add `infra` next to
+       `infraternal` (a symlink or an equivalent link), never by editing
+       shell configuration. Help and messages read the same through either
+       name.
+     - **Themes round 4 (#323) is approved:** "approved, though you're
+       misisng the requested additional colour schemes and fonts." The
+       product build must include D329's additional colour schemes and
+       fonts.
+     - **App windows are never split** (amends D200 V7): "correct! but our
+       agent needs to get the correct icon from the app". The infraternal
+       agent reports each app's real icon with its window list, and the
+       canvas shows it.
+     - **Takeover with live terminals (D337):** "please built (b) our
+       current state is just waiting for b to be built so it can be
+       tested". The "prove the old server is mine" confirmation is built
+       next, so a machine whose old agent still runs terminals can be taken
+       over by its owner.
+     - **The app-window controls need mockups** with the buttons we will
+       actually use, and a test of the Mac side: "screenshots look pretty
+       good but i want mockups with the buttons we are going to use, has the
+       mac agent been tested?"
+350. **App-window controls, round 1 (owner, 2026-11-04, #146; extends D342,
+     D343, D349):**
+     - **Top right:** Send keys stays. Bring to front is questioned ("send
+       keys is a good action but what is bring to front? we need to refine
+       this"). The owner pointed to the Screens 5 App Store screenshots as a
+       reference. The final set is asked as a follow-up.
+     - **Send keys:** a short list on desktop. "on phone it should replace
+       the terminal row in the toolbar."
+     - **Settings** (1:1 or fit, frame rate, reconnect) sit behind a gear in
+       the window's pill, "but global defaults need to be in Settings →
+       Remote Desktop → MacOS".
+     - **Frame rate:** "Automatic" or "Save data" ("agreed").
+     - **Phone layout:** "i think for both terminal and mac, we should bring
+       the machine pill down. headers are the wrong place for mobile. what
+       you're suggesting belongs to the phone toolbar row." On a phone, the
+       machine pill moves down to the bottom toolbar area, for terminals
+       and app windows alike, and Full screen and Close live in the phone
+       toolbar row, not a header.
+     - **Picker rows:** "<Icon> <App> <Window Title> <Optional Number>". The
+       number appears only when two windows of one app share a title.
+351. **App-window top right, and engineering practices adopted (owner,
+     2026-11-04, #146, #344):**
+     - **App-window top right:** Send keys plus ⋯. The ⋯ menu holds
+       Screenshot, View only, Close window on the machine (with a
+       confirmation) and Settings. Bring to front is dropped, because input
+       already brings the app forward (D208 A3): "correct, that's all for
+       now. we can change it later as needs arise."
+     - **Engineering practices (#344) are adopted:** "yes this is way better
+       than arbitrary rules because these are grounded in experience". They
+       live in `docs/ENGINEERING.md`, enforced through review plus cheap
+       checks ("agreed"). Specifically:
+       - an event-loop lag probe in tests and the benchmark harness only,
+         never in shipped builds ("agreed");
+       - a root gate step for changes that touch root-install, proxy, mesh
+         or shim code ("agreed but isn't that what test.ssh.kayg.org
+         for?"). The test server stays the real-environment check for
+         browser and passkey flows; the root gate covers root-only code
+         paths on every change;
+       - clippy's `too_many_lines` and `too_many_arguments` are turned off
+         ("sure");
+       - D345 doc comments are checked on the diff ("correct");
+       - a new fixed sleep in a test needs a written reason, flagged on the
+         diff ("agreed");
+       - the fuzz targets run nightly on dev-02, about 1 h, with crashes
+         filed as issues ("agreed").

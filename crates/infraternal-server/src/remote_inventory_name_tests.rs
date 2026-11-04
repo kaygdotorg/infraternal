@@ -113,9 +113,11 @@ async fn an_ip_added_host_uses_its_cached_hostname_and_old_facts_do_not_clear_it
         mesh: None,
     };
 
+    // D339: no usable name yet, so `<os>-<first 6 characters of the id>`; no OS reported yet gives `host`.
+    let fallback = format!("host-{}", &host.simple().to_string()[..6]);
     assert_eq!(
         source.list("owner", None).await.unwrap()["hosts"][0]["name"],
-        "unnamed"
+        fallback.as_str()
     );
     let changes = source
         .save_facts(host, &json!({"hostname":"MiniPC01.lan", "os":"Linux"}))

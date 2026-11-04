@@ -109,6 +109,9 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         };
         rows.push(("Data plane", format!("{engine}, {reason}")));
     }
+    if let Some(detail) = value["proxy_containment"]["detail"].as_str() {
+        rows.push(("Proxy", detail.to_owned()));
+    }
     let (tone, message) = engine_health(&value, &mut rows)?.unwrap_or((tone, message));
     Ok(Presented {
         tone,
@@ -461,6 +464,14 @@ mod tests {
     fn legacy_status_remains_readable_and_invalid_link_is_refused() {
         assert!(status(serde_json::json!({"state":"On","peer_count":0}), 80).is_ok());
         assert!(status(serde_json::json!({"state":"On","peer_count":0,"server_link":{"kind":"Mesh","reason":"MeshProven","endpoint":"invalid input"}}), 80).is_err());
+    }
+
+    #[test]
+    fn status_says_when_proxy_containment_is_limited() {
+        let value = serde_json::json!({"state":"On","peer_count":0,"proxy_containment":{"kind":"fallback","detail":"limited: the infraternal agent's unit lacks Delegate=yes"}});
+        let text = status(value, 120).expect("human status").body;
+        assert!(text.contains("Proxy"), "{text}");
+        assert!(text.contains("lacks Delegate=yes"), "{text}");
     }
 
     fn peer(node: u64, address: &str, handshake: u64) -> serde_json::Value {
