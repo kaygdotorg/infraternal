@@ -3967,3 +3967,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        and loss-aware p99 parity with kernel WireGuard is still the target,
        still measured, and still drives the latency work. Bugs found by
        running on GotaTun are fixed as they appear.
+347. **Open questions, 2026-11-04 evening (owner):**
+     - **No more build compute:** "no more compute sadly". Work stays
+       within the current build slots (compute01 4, dev-02 2); use them
+       better instead.
+     - **Mesh SSH login identity (amends D344):** "agreed with your rec".
+       Only the account the machine was added with acts as the person. Other
+       ordinary accounts on that machine get only what grants give them.
+     - **Migration file names:** "yes pls anything to simplify and get
+       moving faster". New migrations are named by timestamp, so parallel
+       branches can't collide (#344 Q2). Existing numbered migrations stay.
+     - **GotaTun latency:** "p99 first". Loaded p99 is the latency target.
+       Median interactive latency isn't a separate goal for now.
+     - **API keys with no expiry (D343):** "nah let's not make it
+       complicated". "Never" means never: no inactivity end either.
