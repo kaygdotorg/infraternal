@@ -5,40 +5,40 @@
    "total": 7
   },
   "rust:crates/infraternal": {
-   "documented": 292,
-   "total": 921
+   "documented": 313,
+   "total": 936
   },
   "rust:crates/infraternal-agent": {
-   "documented": 370,
-   "total": 1035
+   "documented": 433,
+   "total": 1045
   },
   "rust:crates/infraternal-mesh": {
-   "documented": 95,
-   "total": 197
+   "documented": 143,
+   "total": 198
   },
   "rust:crates/infraternal-mesh/fuzz": {
-   "documented": 1,
+   "documented": 2,
    "total": 2
   },
   "rust:crates/infraternal-plugin-api": {
-   "documented": 220,
+   "documented": 248,
    "total": 361
   },
   "rust:crates/infraternal-protocol": {
-   "documented": 39,
+   "documented": 48,
    "total": 110
   },
   "rust:crates/infraternal-server": {
-   "documented": 1232,
+   "documented": 1347,
    "total": 3443
   },
   "rust:crates/infraternal-session": {
-   "documented": 3,
+   "documented": 9,
    "total": 11
   },
   "rust:crates/infraternal-shim": {
-   "documented": 353,
-   "total": 1048
+   "documented": 563,
+   "total": 1060
   },
   "rust:crates/infraternal-status": {
    "documented": 50,
@@ -49,23 +49,23 @@
    "total": 6
   },
   "rust:crates/plugins/canvas": {
-   "documented": 18,
+   "documented": 27,
    "total": 87
   },
   "rust:crates/plugins/desktop": {
-   "documented": 167,
+   "documented": 388,
    "total": 612
   },
   "rust:crates/plugins/host-facts": {
-   "documented": 30,
+   "documented": 37,
    "total": 78
   },
   "rust:crates/plugins/mesh": {
-   "documented": 429,
-   "total": 1030
+   "documented": 548,
+   "total": 1268
   },
   "rust:crates/plugins/mesh/fuzz": {
-   "documented": 2,
+   "documented": 4,
    "total": 4
   },
   "rust:crates/plugins/proxy": {
@@ -73,19 +73,19 @@
    "total": 601
   },
   "rust:crates/plugins/relay": {
-   "documented": 91,
+   "documented": 114,
    "total": 211
   },
   "rust:crates/plugins/release": {
-   "documented": 24,
+   "documented": 25,
    "total": 71
   },
   "rust:crates/plugins/remote": {
-   "documented": 243,
+   "documented": 277,
    "total": 493
   },
   "rust:crates/plugins/ssh": {
-   "documented": 438,
+   "documented": 534,
    "total": 1046
   },
   "rust:fuzz": {
@@ -109,7 +109,7 @@
    "total": 8
   },
   "swift:crates/plugins/desktop/native": {
-   "documented": 27,
+   "documented": 307,
    "total": 308
   },
   "swift:crates/plugins/desktop/tests/fixtures": {
@@ -117,11 +117,11 @@
    "total": 86
   },
   "ts:apps/release-signer/src": {
-   "documented": 7,
+   "documented": 22,
    "total": 23
   },
   "ts:apps/tracer": {
-   "documented": 1887,
+   "documented": 2480,
    "total": 4939
   },
   "ts:docs/verification/addhost-breakit2": {
@@ -133,11 +133,11 @@
    "total": 21
   },
   "ts:packages/protocol": {
-   "documented": 83,
+   "documented": 97,
    "total": 190
   },
   "ts:packages/ui": {
-   "documented": 330,
+   "documented": 503,
    "total": 742
   },
   "ts:research/vnc/benchmark": {
