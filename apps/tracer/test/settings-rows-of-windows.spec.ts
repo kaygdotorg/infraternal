@@ -1,5 +1,5 @@
 /**
- * Settings as rows of windows (issue #304, mockup `?mock=1&proto=clusters&settings=sections`): the table drives the rows and
+ * Settings as rows of windows (issue #304, `?mock=1&proto=clusters`): the table drives the rows and
  * windows, the top breadcrumb, the sidebar nesting, the "?" docs buttons and ⌘K; a setting shows its default and range, refuses
  * a value out of range inline, and resets. Alignment is measured, not looked at: text and icons on one centre line, one left
  * edge per column, every window at the layout's size, everything within 0.5 px (the owner's rule, 2026-11-01). `SETTINGS_SHOTS=<dir>`
@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
 const SHOTS = process.env.SETTINGS_SHOTS;
-const URL = "/?mock=1&proto=clusters&scene=3&settings=sections&theme=mocha&bg=none";
+const URL = "/?mock=1&proto=clusters&scene=3&at=appearance&theme=mocha&bg=none";
 const SIZES = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
   phone: { viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
