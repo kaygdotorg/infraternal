@@ -9,7 +9,7 @@ import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
 const SHOTS = process.env.SETTINGS_SHOTS;
-const URL = "/?mock=1&proto=clusters&scene=3&at=appearance&theme=mocha&bg=none";
+const URL = "/?mock=1&proto=clusters&scene=3&theme=mocha&bg=none";
 const SIZES = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
   phone: { viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
@@ -19,7 +19,7 @@ const near = (a: number, b: number, what: string): void => { expect(Math.abs(a -
 const ROWS = ["appearance", "terminal", "you", "machines", "mesh", "sharing", "about"];
 
 async function open(page: Page, extra = ""): Promise<void> {
-  await page.goto(`${URL}${extra}`);
+  await page.goto(`${URL}${extra.includes("&at=") ? extra : `&at=appearance${extra}`}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await expect(page.locator(".cl-crumbs:not([hidden])")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(1800);
