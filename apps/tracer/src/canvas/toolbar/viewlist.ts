@@ -7,7 +7,8 @@ import type { Ctx } from "../context";
 import { onDemand, whenIdle } from "../../on-demand";
 
 export interface ViewList {
-  toggle(): void;
+  /** Opens or closes the list; it grows from `from` (the top pill when omitted) and is centred on it. */
+  toggle(from?: HTMLElement): void;
   close(instant?: boolean): void;
   isOpen(): boolean;
 }
@@ -21,7 +22,7 @@ export function createViewList(cx: Ctx): ViewList {
   let loading: Promise<ViewList> | undefined;
   whenIdle(() => { if (!cx.signal.aborted) void load(); });
   return {
-    toggle: () => { if (list) list.toggle(); else void load().then((l) => { if (!cx.signal.aborted) l.toggle(); }); },
+    toggle: (from) => { if (list) list.toggle(from); else void load().then((l) => { if (!cx.signal.aborted) l.toggle(from); }); },
     close: (instant) => list?.close(instant),
     isOpen: () => list?.isOpen() ?? false,
   };

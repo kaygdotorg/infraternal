@@ -42,9 +42,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await page.screenshot({ path: tracerEvidencePath(`account-summary-${viewport.width}-${theme}.png`) });
     await row("Passkeys").locator(".ui-kv-value").click();
     await expect(page.locator("#sidebar-toggle")).toHaveAttribute("aria-expanded", "false");
-    const settings = page.locator('[data-window-id="s-account"]');
+    // Settings in rows of windows (#304): the Passkeys row of the card opens the Passkeys window, the Recovery row opens Recovery.
+    const settings = page.locator('[data-window-id="s-you-passkeys"]');
     await expect(settings.getByRole("button", { name: "Add a second", exact: true })).toBeVisible();
-    await expect(settings.locator('[data-kind="recovery"]')).toContainText("verification history unavailable");
+    await expect(page.locator('[data-window-id="s-you-recovery"] [data-kind="recovery"]')).toContainText("verification history unavailable");
     await page.waitForTimeout(500);
     await page.screenshot({ path: tracerEvidencePath(`account-settings-${viewport.width}-${theme}.png`) });
     const alignment = await settings.locator('[data-kind="passkeys"] .ui-sp-row').evaluate((root) => {

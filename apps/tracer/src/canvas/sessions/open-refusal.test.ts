@@ -51,7 +51,7 @@ test("a rootless server says why it cannot open a shell and what to do (#327)", 
     sessionList: false,
   });
   expect(noLogin).toEqual({
-    message: "This server runs without root and has no user account matching your name, so it cannot open a shell for you. Add a host to work elsewhere.",
+    message: "This server runs without root, so it can only open shells as its own user. Add a host to work elsewhere.",
     sessionList: false,
   });
   // A genuinely malformed request keeps its own wording.

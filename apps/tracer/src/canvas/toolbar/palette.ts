@@ -39,5 +39,6 @@ export function installPalette(cx: Ctx): () => void {
   };
   window.addEventListener("tracer:canvas-action", onAction, { signal });
   const offHosts = cx.adapters.sessions.onChange(() => core.refreshPalette());
-  return () => { offHosts(); removeProvider(); };
+  const offEntries = cx.adapters.settings.outline?.onEntries?.(() => core.refreshPalette());
+  return () => { offHosts(); offEntries?.(); removeProvider(); };
 }

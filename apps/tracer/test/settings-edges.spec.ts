@@ -8,6 +8,7 @@
  * switch), not the hit box that holds it: icon buttons keep their 44 px targets and still show their glyph on the edge.
  * Review screenshots land in the external job evidence directory.
  */
+import { paletteOpen } from "./settings-palette";
 import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
@@ -15,22 +16,22 @@ import { resolve } from "node:path";
 
 const captures = tracerEvidencePath("settings-edges");
 const SIZES = [{ w: 1440, h: 900, touch: false, dpr: 2 }, { w: 393, h: 852, touch: true, dpr: 3 }] as const;
-/** Section id (the window is `s-<id>`), the palette words that open it. */
+/** Window id without `s-` (Settings in rows of windows, #304), the palette words that open it. The old Appearance, Toolbar and Shortcuts sections are now blocks inside Theme, Typing and Layout. */
 const SECTIONS = [
-  { id: "appearance", words: "settings: appearance" },
-  { id: "windows", words: "settings: window sizes" },
-  { id: "hosts", words: "settings: hosts" },
-  { id: "toolbar", words: "settings: toolbar" },
-  { id: "shortcuts", words: "settings: shortcuts" },
-  { id: "devices", words: "settings: devices" },
-  { id: "account", words: "settings: account" },
-  { id: "about", words: "settings: about" },
+  { id: "appearance-theme", words: "Appearance › Theme" },
+  { id: "appearance-layout", words: "Appearance › Layout" },
+  { id: "terminal-hosts", words: "Terminal › Hosts" },
+  { id: "terminal-typing", words: "Terminal › Typing" },
+  { id: "you-devices", words: "You › Devices" },
+  { id: "you-profile", words: "You › Profile" },
+  { id: "you-passkeys", words: "You › Passkeys" },
+  { id: "about-version", words: "About › Version" },
 ] as const;
 
-/** The row types each section must show, so a section that renders nothing cannot pass. */
+/** The row types each window must show, so a window that renders nothing cannot pass. */
 const EXPECTED: Record<string, string[]> = {
-  appearance: ["slider", "tabs"], windows: [], hosts: ["switch", "status"], toolbar: ["toolbar"], shortcuts: ["shortcut"],
-  devices: ["device"], account: ["fact", "status"], about: ["fact"],
+  "appearance-theme": ["tabs"], "appearance-layout": [], "terminal-hosts": ["switch", "status"], "terminal-typing": ["toolbar", "shortcut"],
+  "you-devices": ["device"], "you-profile": ["status"], "you-passkeys": ["fact"], "about-version": ["fact"],
 };
 
 interface Mark { left: number; right: number }
@@ -109,14 +110,12 @@ async function open(page: Page, theme: string): Promise<void> {
 /** Opens a section through the palette and waits until its window is the one on screen and has rows. */
 async function show(page: Page, section: (typeof SECTIONS)[number]): Promise<void> {
   for (let attempt = 0; attempt < 4; attempt++) {
-    await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type(section.words);
-    await page.keyboard.press("Enter");
+    await paletteOpen(page, section.words, section.id.replace("-", "."));
     const ok = await expect.poll(() => page.evaluate((id) => {
       const win = document.querySelector(`.ui-window[data-window-id="s-${id}"]`);
       if (!win || !win.querySelector(".ui-settings-pane")) return false;
       // The camera may still be flying to the window: every measurement is relative to the pane, so only its rows must exist.
-      return win.querySelectorAll("li, .ui-sp-row, .ui-kv-row, .ui-tabs").length > 0;
+      return win.querySelectorAll("li, .ui-sp, .ui-sp-row, .ui-kv-row, .ui-tabs").length > 0;
     }, section.id), { timeout: 5000 }).toBe(true).then(() => true, () => false);
     if (ok) return;
   }
