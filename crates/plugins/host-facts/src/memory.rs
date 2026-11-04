@@ -3,17 +3,27 @@
 use infraternal_plugin_api::admission::OpenRefusal;
 use serde::{Deserialize, Serialize};
 
+/// Bytes in one mebibyte.
 const MIB: u64 = 1024 * 1024;
 
-/// Settings are validated before replacing the active policy.
+/// The headroom a host must keep free before it accepts a new terminal session.
+///
+/// The floor is the larger of a fixed amount (MiB) and a share of total memory
+/// (percent). Settings are validated before replacing the active policy, so a
+/// bad update never leaves a half-applied policy. The fields are private; build
+/// one with [`MemoryPolicy::default`] (256 MiB or 5 percent) or
+/// [`MemoryPolicy::decode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct MemoryPolicy {
+    /// Fixed part of the floor, in MiB. Serialized as `terminalMemoryFloorMiB`.
     #[serde(rename = "terminalMemoryFloorMiB")]
     floor_mib: u64,
+    /// Share of total memory kept free, 0 to 100. Serialized as `terminalMemoryFloorPercent`.
     #[serde(rename = "terminalMemoryFloorPercent")]
     percent: u8,
 }
 
+/// The built-in floor: 256 MiB or 5 percent of total memory, whichever is larger.
 impl Default for MemoryPolicy {
     fn default() -> Self {
         Self {
@@ -25,6 +35,10 @@ impl Default for MemoryPolicy {
 
 impl MemoryPolicy {
     /// Decode a complete bounded settings update without changing a valid policy on failure.
+    ///
+    /// `input` is a JSON object with exactly the two fields
+    /// `terminalMemoryFloorMiB` and `terminalMemoryFloorPercent`; both are
+    /// required, so a partial update is refused rather than merged.
     /// # Errors
     /// Rejects unknown fields, overflow, invalid percentages and oversized requests.
     pub fn decode(input: &[u8]) -> Result<Self, super::FactsError> {
@@ -50,7 +64,10 @@ impl MemoryPolicy {
         })
     }
 
-    /// A percentage floor rounds up to a byte, avoiding an overflow-prone total × percent.
+    /// The minimum free memory, in bytes, for a host with `total` bytes of memory.
+    ///
+    /// This is the larger of the fixed MiB floor and the percentage floor. A
+    /// percentage floor rounds up to a byte, avoiding an overflow-prone total × percent.
     #[must_use]
     pub fn floor_bytes(self, total: u64) -> u64 {
         let percent = u64::from(self.percent);
@@ -59,6 +76,10 @@ impl MemoryPolicy {
 
     /// Check the current OS sample rather than estimating from empty-shell memory.
     /// Existing output rings, VT history and all other host work reduce available memory.
+    ///
+    /// `memory` is the latest total and used byte counts, or `None` when the
+    /// host could not be sampled. `session_count` is only reported back in the
+    /// refusal; it does not affect the decision.
     /// # Errors
     /// Returns the public reason and current counters when admission cannot proceed.
     pub fn admit(

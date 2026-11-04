@@ -11,8 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How many times each timed operation runs.
 const SAMPLES: usize = 1_000;
 
+/// Runs `sample` [`SAMPLES`] times and prints the median and 95th-percentile
+/// time in microseconds as `{label}_p50_us=... {label}_p95_us=...`. The
+/// closure returns a number only so the optimizer cannot discard its work.
 fn report_samples(label: &str, mut sample: impl FnMut() -> u64) {
     let mut elapsed = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
@@ -26,10 +30,14 @@ fn report_samples(label: &str, mut sample: impl FnMut() -> u64) {
     println!("{label}_p50_us={median:.2} {label}_p95_us={p95:.2}");
 }
 
+/// Converts a duration to fractional microseconds.
 fn micros(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1_000_000.0
 }
 
+/// Encodes a `host.facts.read` call carrying `input` and its successful reply
+/// carrying `result` as muxed frames. Returns `(request_bytes, response_bytes)`
+/// as they would appear on the wire.
 fn wire_bytes(call_id: u32, input: &[u8], result: &[u8]) -> Result<(usize, usize), Box<dyn Error>> {
     let mut request = Vec::with_capacity(256);
     encode_muxed_frame_into(
@@ -54,6 +62,8 @@ fn wire_bytes(call_id: u32, input: &[u8], result: &[u8]) -> Result<(usize, usize
     Ok((request.len(), response.len()))
 }
 
+/// Calls the plugin's `host.facts.read` action with `input` (JSON bytes) and
+/// returns the JSON reply, turning a plugin failure into an I/O error.
 fn action(plugin: &mut HostFactsPlugin, input: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
     plugin
         .call("host.facts.read", input)
@@ -61,6 +71,10 @@ fn action(plugin: &mut HostFactsPlugin, input: &[u8]) -> Result<Vec<u8>, Box<dyn
         .map_err(Into::into)
 }
 
+/// Prints latency percentiles for static and live fact collection, then the
+/// JSON and wire sizes of the static read and the live ("popover") read. The
+/// "two leg" totals double the one-leg size for a request that crosses two
+/// muxed hops. Run it in release mode for meaningful numbers.
 fn main() -> Result<(), Box<dyn Error>> {
     report_samples("static_collection", || {
         u64::from(collect_static_facts(AgentMode::Embedded).cpus)
