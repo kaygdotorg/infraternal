@@ -1029,7 +1029,12 @@ async fn remove_host(
             .review_with_key(&identity.person_id, request.host_id)
             .await
             .map(|value| (Json(value), true))
-            .map_err(|_| StatusCode::FORBIDDEN);
+            // The key was authorized above; a refusal here means the owner has no such live
+            // host. 403 would read as a dead key to every client.
+            .map_err(|error| match error {
+                crate::auth::Error::Denied => StatusCode::NOT_FOUND,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            });
     }
     api.removal
         .remove_with_key(
