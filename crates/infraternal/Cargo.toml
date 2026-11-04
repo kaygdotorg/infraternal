@@ -38,12 +38,14 @@ url = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 uuid.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
-qrcodegen = { version = "1.8.0", optional = true }
-
 infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1.0", optional = true }
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true }
 infraternal-plugin-proxy = { path = "../plugins/proxy", version = "0.1.0", optional = true }
+
+# Only the terminal QR code of `infraternal up` (#263) is Linux-only; the plugin
+# dependencies above stay on every platform.
+[target.'cfg(target_os = "linux")'.dependencies]
+qrcodegen = { version = "1.8.0", optional = true }
 
 [features]
 # App windows are compiled only for an explicit desktop build (#146).
