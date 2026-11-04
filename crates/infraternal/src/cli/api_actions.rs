@@ -707,11 +707,7 @@ fn status_failure(status: StatusCode) -> ActionFailure {
 async fn tls_stream(server: &Url) -> Result<tokio_openssl::SslStream<TcpStream>, ()> {
     let name = server.host_str().ok_or(())?;
     let port = server.port_or_known_default().ok_or(())?;
-    let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())
-        .map_err(|_| ())?;
-    builder.set_default_verify_paths().map_err(|_| ())?;
-    let ssl = builder
-        .build()
+    let ssl = hosted_tls_connector()?
         .configure()
         .map_err(|_| ())?
         .into_ssl(name)
@@ -720,6 +716,14 @@ async fn tls_stream(server: &Url) -> Result<tokio_openssl::SslStream<TcpStream>,
     let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| ())?;
     Pin::new(&mut stream).connect().await.map_err(|_| ())?;
     Ok(stream)
+}
+
+/// The TLS client for hosted actions: peer and hostname verification against public trust.
+fn hosted_tls_connector() -> Result<openssl::ssl::SslConnector, ()> {
+    let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())
+        .map_err(|_| ())?;
+    builder.set_default_verify_paths().map_err(|_| ())?;
+    Ok(builder.build())
 }
 
 fn bearer_header(api_key: &str) -> Result<HeaderValue, ()> {
@@ -930,6 +934,58 @@ mod tests {
             failure.message,
             status_failure(StatusCode::BAD_REQUEST).message
         );
+    }
+
+    /// Found on the test server (#303, J94e): `sign-in` reached it but every hosted action
+    /// said "could not be reached securely". Shipping builds link a vendored OpenSSL whose
+    /// default paths name its build prefix, so they hold no roots on the host. Hosted actions
+    /// must load the host's public CA bundle, the same trust `sign-in` uses. The child run
+    /// points OpenSSL's defaults at nothing, so only explicitly loaded roots count.
+    #[test]
+    fn hosted_actions_trust_the_host_ca_bundle() {
+        let bundles = [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+        ];
+        if !bundles
+            .iter()
+            .any(|bundle| std::path::Path::new(bundle).is_file())
+        {
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "cli::api_actions::tests::hosted_trust_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(
+                "SSL_CERT_FILE",
+                "/nonexistent/infraternal-no-default-roots.pem",
+            )
+            .env("SSL_CERT_DIR", "/nonexistent/infraternal-no-default-roots")
+            .output()
+            .expect("run the trust probe");
+        let output = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && output.contains("1 passed"),
+            "hosted actions have no trust roots without OpenSSL's defaults:\n{output}"
+        );
+    }
+
+    /// Run only by `hosted_actions_trust_the_host_ca_bundle`, with OpenSSL's defaults unset.
+    #[test]
+    #[ignore = "child of hosted_actions_trust_the_host_ca_bundle"]
+    fn hosted_trust_probe() {
+        let ssl = super::hosted_tls_connector()
+            .expect("hosted TLS connector")
+            .configure()
+            .expect("TLS configuration")
+            .into_ssl("ssh.kayg.org")
+            .expect("TLS session");
+        assert!(!ssl.ssl_context().cert_store().all_certificates().is_empty());
     }
 
     #[test]
