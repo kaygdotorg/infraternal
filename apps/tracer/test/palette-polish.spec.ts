@@ -39,7 +39,7 @@ test("no palette row renders without a title, whole list and scoped to Settings"
     await expect.poll(() => page.locator('#palette-results .result[data-action^="canvas:settings:"]').count(), { timeout: 10_000 }).toBeGreaterThan(0);
     settings.push(...await page.locator('#palette-results .result[data-action^="canvas:settings:"] .result-label').allTextContents());
   }
-  expect(settings.filter((t) => t.includes(" › ")).length).toBeGreaterThanOrEqual(8);
+  expect(settings.filter((t) => t.includes("›")).length).toBeGreaterThanOrEqual(8);
   await page.keyboard.press("Escape");
   // The list scoped to the Settings view: its windows are named by their groups.
   await page.evaluate(() => {
