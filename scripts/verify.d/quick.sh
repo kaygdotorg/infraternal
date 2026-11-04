@@ -7,7 +7,8 @@
 #      merge base with origin/dev
 #   3. the unit tests (lib and bin targets) of the changed packages, never of a cargo-fuzz package
 #      (its bins loop forever, #329) and under a hard timeout that fails loudly instead of hanging
-#   4. the tracer typecheck, only when TypeScript changed
+#   4. the tracer typecheck, only when TypeScript changed; before it, "ui literals" (ui-literals.py):
+#      the change must not add pixel font sizes, pixel corner radii or pasted easing curves (#345)
 # It is NOT the gate. It does not check dependents of a changed crate, integration tests, the
 # static release builds, cargo-deny, the architecture checks or the size report. A green quick
 # run is never quoted as the gate; `scripts/verify fast` stays the gate (docs/PROCESS.md).
@@ -73,6 +74,9 @@ verify_quick() {
     fi
 
     if ((tracer)); then
+        # Under a second: counts only the files this change touches (see ui-literals.py), so it runs before the slow typecheck.
+        rust_run_gate "ui literals" python3 "${script_dir}/verify.d/ui-literals.py" "$base"
+        if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
         rust_run_gate "tracer typecheck" bash -c \
             'cd "$1/apps/tracer" && bun install --frozen-lockfile && bun run check' _ "$(cd -- "${script_dir}/.." && pwd)"
     fi
