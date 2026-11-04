@@ -12,10 +12,15 @@
    machine is catching up with a resize, or when an app refuses a size. */
 .aw-stage { position: absolute; inset: 0; display: grid; outline: none; cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .aw-stage:focus, .aw-stage:focus-visible { outline: none; }
-.aw-surface { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: contain; transition: opacity 200ms var(--ease-out, ease-out); }
-/* Nothing true to show: the picture goes. Only a memory of one (paused, reconnecting): it stays, dimmed. */
+.aw-surface { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: contain; transition: opacity 200ms var(--ease-out, ease-out), filter 200ms var(--ease-out, ease-out); }
+/* Nothing true to show: the picture goes. Only a memory of one (paused, reconnecting): it stays, dimmed. The dim is
+   told by the pill's dot and mark; the picture only has to read as "not live" and stay a picture.
+   Fading alone is not enough: a fade pulls the picture toward the card, which is the window's own colour. On the dark
+   card that reads as a quiet picture; on the light card a dark app turns into a flat grey slab that looks dead, not
+   paused. So the picture is also drained of colour, and keeps more of its own contrast in light mode. */
 .aw-stage[data-picture="none"] .aw-surface { opacity: 0; }
-.aw-stage[data-picture="dim"] .aw-surface { opacity: 0.45; }
+.aw-stage[data-picture="dim"] .aw-surface { opacity: var(--aw-dim-opacity, 0.5); filter: saturate(var(--aw-dim-saturate, 0.45)); }
+@media (prefers-color-scheme: light) { .aw-stage { --aw-dim-opacity: 0.72; --aw-dim-saturate: 0.35; } }
 
 /* The state card is the "No access" card's twin: same position, same type, same rhythm (message, 24 px, action). */
 .aw-card { z-index: 1; transition: opacity 200ms var(--ease-out, ease-out); }
