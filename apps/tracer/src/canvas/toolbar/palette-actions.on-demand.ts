@@ -6,12 +6,12 @@ import { isTerminal } from "../views/body";
 import { onDemand } from "../../on-demand";
 
 /** Flies to a Settings window (canvas-locked, snapped to its column). */
-export function openSettings(cx: Ctx, section: string, source?: string): void {
+export async function openSettings(cx: Ctx, section: string, source?: string): Promise<void> {
   const c = cx.views.get("settings");
   // Settings as rows of windows (#304): a target is `component`, `component.group` or `component.group.setting`, and the
   // sections of the old Settings are mapped to where they went. A target it does not know opens the first window.
   const outline = cx.adapters.settings.outline;
-  const target = outline && (outline.locate(section) ?? outline.locate(outline.rows()[0]?.id ?? ""));
+  const target = outline && ((await outline.locate(section)) ?? (await outline.locate(outline.rows()[0]?.id ?? "")));
   const rec = (target ? c?.wins.get(target.windowId) : undefined) ?? c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0];
   if (!rec) return;
   cx.win.setActive(rec);
@@ -29,7 +29,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   const active = selected?.owner.wins.get(selected.model.id) === selected ? selected : undefined;
   if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
   else if (kind === "overview") cx.nav.showOverview();
-  else if (kind === "settings") openSettings(cx, value ?? "appearance", detail?.source);
+  else if (kind === "settings") void openSettings(cx, value ?? "appearance", detail?.source);
   else if (kind === "windowdocs") { if (active) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, active); }); }
   else if (kind === "share") void cx.sharing?.open();
   else if (kind === "unlink") cx.sharing?.unlinkCurrent();

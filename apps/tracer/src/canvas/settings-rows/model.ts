@@ -36,25 +36,10 @@ export const spotByWindow = (map: readonly ComponentDef[], id: string): Spot | u
 /** A settings window's section is its id without the `s-`: `mesh-keys`. */
 export const spotBySection = (map: readonly ComponentDef[], section: string): Spot | undefined => spots(map).find((s) => `${s.comp.id}-${s.group.id}` === section);
 
-/** Where each of the old Settings sections went (⌘K, the person's card and the core screen still ask for them by name). */
-export const LEGACY: Readonly<Record<string, string>> = {
-  appearance: "appearance.theme", windows: "appearance.layout", hosts: "terminal.hosts", toolbar: "terminal.typing", shortcuts: "terminal.typing",
-  about: "about.version", account: "you.profile", devices: "you.devices", grants: "mesh.access", users: "you.profile", discovery: "machines.new-machines",
-};
-
 const section = (id: string): string => SECTION_ICON[id] ?? ICON.host;
 export const ICON_OF: Record<ComponentDef["icon"], string> = {
   appearance: section("appearance"), terminal: ICON.terminal, you: section("account"), machines: ICON.host, mesh: ICON.node, sharing: ICON.port, about: section("about"),
 };
-
-/** Resolves an action target (`mesh.keys`, `mesh.keys.connection-keys`, or an old section id) to a window and a setting. */
-export function locate(map: readonly ComponentDef[], target: string): { windowId: string; settingId?: string } | undefined {
-  const [comp, group, setting] = (LEGACY[target] ?? target).split(".");
-  const spot = spots(map).find((s) => s.comp.id === comp && (group === undefined || s.group.id === group));
-  if (!spot) return undefined;
-  const settingId = setting && spot.group.settings?.includes(setting) ? setting : undefined;
-  return { windowId: winId(spot.comp.id, spot.group.id), ...(settingId ? { settingId } : {}) };
-}
 
 export function rowsOf(map: readonly ComponentDef[]): OutlineRow[] {
   return map.map((c) => ({ id: c.id, title: c.title, icon: ICON_OF[c.icon], groups: c.groups.map((g) => ({ id: g.id, title: g.title, windowId: winId(c.id, g.id) })) }));

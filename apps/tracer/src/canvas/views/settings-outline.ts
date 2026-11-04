@@ -30,7 +30,7 @@ export interface SettingsOutline {
   /** Tells the palette when `entries` has more to show than it returned (the wording of the settings loads on demand). */
   onEntries?(run: () => void): () => void;
   /** Where an action target points: the window to bring into view and, for one setting, the row to show in it. */
-  locate(target: string): { windowId: string; settingId?: string } | undefined;
+  locate(target: string): Promise<{ windowId: string; settingId?: string } | undefined>;
   /** Shows a setting's row inside its window (scrolled into view, with a faint fill that fades). */
   reveal(windowId: string, settingId: string): void;
 }

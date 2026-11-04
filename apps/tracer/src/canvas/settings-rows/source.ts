@@ -11,7 +11,7 @@ import { onDemand } from "../../on-demand";
 import type { SettingValue } from "../../../../../packages/ui/src/setting-value";
 import type { SettingDef } from "./definitions.on-demand";
 import type { OutlineEntry } from "../views/settings-outline";
-import { locate, rowsOf, spotBySection, visibleMap } from "./model";
+import { rowsOf, spotBySection, visibleMap } from "./model";
 
 export interface RowsOptions {
   /** Whether the viewer sees the administrator rows (Machines, Mesh, Sharing). */
@@ -39,7 +39,7 @@ export function createRowsSource(options: RowsOptions): Pick<SettingsSource, "ou
       }
       return [];
     },
-    onEntries: (run: () => void): (() => void) => { waiting.add(run); return () => { waiting.delete(run); }; }, locate: (target) => locate(map(), target), reveal: (windowId, settingId) => { void onDemand(() => import("./body.on-demand")).then((mod) => { mod.revealSetting(windowId, settingId); }); } },
+    onEntries: (run: () => void): (() => void) => { waiting.add(run); return () => { waiting.delete(run); }; }, locate: async (target) => (await onDemand(() => import("./locate.on-demand"))).locate(map(), target), reveal: (windowId, settingId) => { void onDemand(() => import("./body.on-demand")).then((mod) => { mod.revealSetting(windowId, settingId); }); } },
     render(section, pane, cx) {
       const spot = spotBySection(map(), section);
       if (!spot) return undefined;

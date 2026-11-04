@@ -9,7 +9,8 @@ import { defaultWidth, metricsFor } from "../layout/geometry";
 import { runsOf } from "../layout/grid";
 import { SETTING_DEFS } from "./definitions.on-demand";
 import { entriesOf } from "./entries.on-demand";
-import { LEGACY, SETTINGS_ROWS, buildSettingsMapView, locate, spots, visibleMap, winId } from "./model";
+import { LEGACY, locate } from "./locate.on-demand";
+import { SETTINGS_ROWS, buildSettingsMapView, spots, visibleMap, winId } from "./model";
 import { ADD_HOST, NO_ACCESS, TERMINAL } from "./docs-adapter";
 
 test("Settings is one row of windows for each component: one grid, the layout's size, no window spans", () => {
