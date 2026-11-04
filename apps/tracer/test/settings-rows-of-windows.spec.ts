@@ -16,6 +16,8 @@ const SIZES = {
 } as const;
 const HALF = 0.5;
 const near = (a: number, b: number, what: string): void => { expect(Math.abs(a - b), `${what}: ${a.toFixed(2)} vs ${b.toFixed(2)}`).toBeLessThanOrEqual(HALF); };
+/** The Settings windows the docs have no page for yet: they show no "?" (a button that opens nothing is not offered). */
+const WITHOUT_DOCS = ["s-appearance-theme", "s-appearance-font", "s-appearance-size", "s-appearance-layout", "s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-you-profile", "s-machines-updates", "s-mesh-names", "s-mesh-access", "s-mesh-connections", "s-sharing-published-services", "s-sharing-certificates", "s-about-version", "s-about-licences"];
 const ROWS = ["appearance", "terminal", "you", "machines", "mesh", "sharing", "about"];
 
 async function open(page: Page, extra = ""): Promise<void> {
@@ -174,7 +176,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   const byRow = new Map<string, typeof wins>();
   for (const w of wins) { const key = w.id.split("-")[1]!; byRow.set(key, [...(byRow.get(key) ?? []), w]); }
   expect([...byRow.keys()]).toEqual(ROWS);
-  expect([...byRow.values()].map((r) => r.length)).toEqual([4, 3, 5, 2, 4, 2, 2]);
+  expect([...byRow.values()].map((r) => r.length)).toEqual([4, 4, 5, 2, 4, 2, 2]);
   for (const w of wins) {
     near(w.w, layout.terminalW, `${w.id} has the layout's width`);
     near(w.h, layout.clh, `${w.id} has the layout's height: it does not grow to its content`);
@@ -196,10 +198,11 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
     expect(a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1, `${a.id} overlaps ${b.id}`).toBe(false);
   }
 
-  // Every window has "?" as the first button of its action group, and the group obeys the alignment rules.
+  // A window the docs have a page for has "?" as the first button of its action group, and the group obeys the alignment rules. A window without a page has no "?".
   const groups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
   expect(groups.length).toBe(23);
-  const settingsInset = checkGroups(groups, "docs");
+  expect(groups.filter((g) => g.ids.length === 0).map((g) => g.id), "windows without a docs page offer no button").toEqual(WITHOUT_DOCS);
+  const settingsInset = checkGroups(groups.filter((g) => g.ids.length > 0), "docs");
   // No window's name is ever cut short, even with five windows to a row.
   const cut = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((w) => { const h = w.querySelector<HTMLElement>(".ui-window-host")!; return h.scrollWidth > h.clientWidth + 0.5 ? `${w.dataset.windowId}: ${h.textContent}` : ""; }).filter(Boolean));
   expect(cut).toEqual([]);
@@ -332,13 +335,12 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   await expect(page.locator('.cl[data-view="docs"] .ui-window[data-window-id="d-reference/keys"]'), "the page of the heading is the active window").toHaveAttribute("data-active", "");
   await shot(page, "07b-docs-cluster");
   await goTo(page, "canvas:settings:mesh.names");
-  // A window with no page yet says so in the preview itself, with no expand icon to a page that is not there.
-  await page.locator('[data-window-id="s-mesh-names"] .ui-window-action[data-action="docs"]').click();
-  await expect(page.locator(".ui-dp-pop .ui-dp-empty")).toHaveText("There is no page about this yet.");
-  await expect(page.locator(".ui-dp-pop .ui-dp-expand")).toHaveCount(0);
-  await page.waitForTimeout(450);
+  // A window the docs have no page for has no "?" at all, and its shortcut opens nothing: a button that leads nowhere is not offered.
+  await expect(page.locator('[data-window-id="s-mesh-names"] .ui-window-action[data-action="docs"]')).toHaveCount(0);
+  await page.keyboard.press("Control+Shift+Alt+Slash");
+  await page.waitForTimeout(500);
+  await expect(page.locator(".ui-dp-pop")).toHaveCount(0);
   await shot(page, "08-no-page-yet");
-  await page.keyboard.press("Escape");
 
   // ⌘K goes straight to one setting: its window comes into view, the breadcrumb follows, the row is shown.
   await palette(page, "wireguard");
@@ -418,7 +420,7 @@ test("phone: a row for each component, the breadcrumb fits, rows align, \"?\" op
   // The "?" is the first button of the action group, the group obeys the alignment rules on a phone too, and the title still shows.
   const phoneGroups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
   expect(phoneGroups.length).toBe(23);
-  checkGroups(phoneGroups, "docs");
+  checkGroups(phoneGroups.filter((g) => g.ids.length > 0), "docs");
   const hit = await page.locator('[data-window-id="s-mesh-keys"] .ui-window-action[data-action="docs"]').boundingBox();
   expect(hit!.width).toBeGreaterThanOrEqual(28);
   const title = await page.evaluate(() => document.querySelector('[data-window-id="s-mesh-keys"] .ui-window-host')!.getBoundingClientRect().width);
@@ -718,7 +720,8 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     await page.waitForTimeout(700);
     await page.locator('.cl-viewrow[data-view="settings"]').click({ timeout: 15_000 });
     await page.waitForTimeout(1200);
-    expect(await crumbs(page)).toEqual(["Settings", "Appearance", "Size"]);
+    // Choosing Settings flies to the view's first stop, so the row in view is Theme, not the window that was focused last (D323).
+    expect(await crumbs(page)).toEqual(["Settings", "Appearance", "Theme"]);
     const after = await page.evaluate(() => { const r = document.querySelector(".cl-crumbs")!.getBoundingClientRect(); return { cx: (r.left + r.right) / 2, top: r.top, opacity: getComputedStyle(document.querySelector(".cl-crumbs")!).opacity }; });
     near(after.cx, centre, "the breadcrumb is still on the centre line after choosing Settings");
     expect(after.opacity).toBe("1");

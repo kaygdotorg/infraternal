@@ -192,5 +192,9 @@ export function createCrumbs(cx: Ctx): Crumbs {
     setName(groupPill, at.group.title);
     fit();
   };
-  return { paint, dispose() { closeMenu(true); sizeWatch.disconnect(); mirrorWatch.disconnect(); fadeWatch.disconnect(); capsule.style.removeProperty("--crumbs-w"); root.remove(); top.removeAttribute("data-crumbs"); } };
+  // The rows of the view scroll inside it (one band at a time) and the camera does not move for that: a scroll anywhere in the stage
+  // (scroll events do not bubble, so the capture phase) repaints the names once a frame.
+  let scrollFrame = 0;
+  stage.addEventListener("scroll", () => { if (!scrollFrame) scrollFrame = requestAnimationFrame(() => { scrollFrame = 0; paint(); }); }, { capture: true, passive: true, signal });
+  return { paint, dispose() { cancelAnimationFrame(scrollFrame); closeMenu(true); sizeWatch.disconnect(); mirrorWatch.disconnect(); fadeWatch.disconnect(); capsule.style.removeProperty("--crumbs-w"); root.remove(); top.removeAttribute("data-crumbs"); } };
 }
