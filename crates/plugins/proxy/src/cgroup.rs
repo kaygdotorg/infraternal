@@ -34,6 +34,9 @@ const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const LEAF_PREFIX: &str = "proxy-";
 /// Bounds a stop: after `cgroup.kill` the kernel only has to deliver SIGKILL.
 const EMPTY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounds the cgroups a (rootless, compromised) child may have made inside its leaf that a stop
+/// removes; past it the stop fails closed instead of walking an unbounded tree.
+const MAX_NESTED_CGROUPS: usize = 4096;
 /// The agent's cgroup when the last leaf was made, for a restart whose cgroup moved (an init
 /// system without systemd can start the next agent elsewhere).
 const RECORD_NAME: &str = ".traefik-cgroup";
@@ -150,8 +153,8 @@ impl ProxyCgroups {
     /// Returns the reason when `base` can't hold proxy leaves.
     pub fn at(base: PathBuf, lock_directory: &Path) -> Result<Self, &'static str> {
         check_base(&base)?;
-        let lock = fs::metadata(lock_directory)
-            .map_err(|_| "the proxy state directory is unreadable")?;
+        let lock =
+            fs::metadata(lock_directory).map_err(|_| "the proxy state directory is unreadable")?;
         Ok(Self {
             base,
             tag: format!("{LEAF_PREFIX}{:x}-{:x}-", lock.dev(), lock.ino()),
@@ -268,10 +271,45 @@ fn kill_and_remove(leaf: &Path) -> io::Result<()> {
         thread::sleep(pause);
         pause = (pause * 2).min(Duration::from_millis(5));
     }
-    match fs::remove_dir(leaf) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+    // A rootless child owns its leaf and can make cgroups inside it. `cgroup.kill` and
+    // `populated` cover the whole subtree, so they are empty now, but rmdir of a cgroup with
+    // children fails with EBUSY, which would block every later start (#281, J172 P3-1). Remove
+    // them deepest first: a breadth-first listing reversed puts every child before its parent.
+    let mut nested = Vec::new();
+    let mut next = 0;
+    let mut current = leaf.to_owned();
+    loop {
+        for entry in fs::read_dir(&current)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if nested.len() == MAX_NESTED_CGROUPS {
+                    return Err(io::Error::other(format!(
+                        "proxy cgroup {} holds too many nested cgroups to remove",
+                        leaf.display()
+                    )));
+                }
+                nested.push(entry.path());
+            }
+        }
+        let Some(child) = nested.get(next) else {
+            break;
+        };
+        current.clone_from(child);
+        next += 1;
     }
+    for directory in nested
+        .iter()
+        .rev()
+        .map(PathBuf::as_path)
+        .chain(std::iter::once(leaf))
+    {
+        if let Err(error) = fs::remove_dir(directory)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn is_empty(leaf: &Path) -> io::Result<bool> {

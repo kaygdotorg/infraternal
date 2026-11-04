@@ -392,6 +392,63 @@ fn a_child_that_leaves_its_cgroup_is_still_stopped() {
     assert!(!still_alive, "the direct child must be stopped");
 }
 
+// P3-1: a child-made cgroup inside the leaf must not make the leaf impossible to remove, neither
+// on stop nor when the next agent adopts a leftover leaf.
+#[test]
+fn a_cgroup_made_inside_the_leaf_never_blocks_removal() {
+    let Some((root, lock_directory, cgroups)) = contained_fixture("nested") else {
+        return;
+    };
+    let marker = marker();
+    let _cleanup = Cleanup {
+        marker: marker.clone(),
+        agent: None,
+    };
+    let mut child = spawn_in_leaf(
+        &root,
+        &cgroups,
+        &format!("/bin/mkdir -p \"/sys/fs/cgroup$c/a/b\" 2>/dev/null\nexec /bin/sleep {marker}"),
+    );
+    assert!(
+        wait_for(
+            || !grandchildren(&marker).is_empty(),
+            Duration::from_secs(5)
+        ),
+        "the fake Traefik started"
+    );
+    let leaf = child.cgroup().expect("contained child").to_owned();
+    let nested = leaf.join("a").exists();
+    let stopped = child.stop();
+    eprintln!(
+        "nested: made={nested} stop={stopped:?} leaf left={}",
+        leaf.exists()
+    );
+    // A leftover leaf with a nested cgroup, as a crash would leave it, adopted at next start.
+    let leftover = cgroups.create_leaf().expect("second leaf");
+    let leftover_path = leftover.path().to_owned();
+    let made = std::fs::create_dir_all(leftover_path.join("x").join("y")).is_ok();
+    drop(leftover);
+    let adopted = ProxyCgroups::detect(&lock_directory)
+        .expect("same containment")
+        .adopt_orphans();
+    eprintln!(
+        "nested: leftover made={made} adopt={adopted:?} left={}",
+        leftover_path.exists()
+    );
+    sweep(&marker);
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        stopped.is_ok(),
+        "stop must remove a leaf with nested cgroups: {stopped:?}"
+    );
+    assert!(!leaf.exists(), "the leaf must be gone");
+    assert!(
+        adopted.is_ok(),
+        "adoption must remove nested cgroups: {adopted:?}"
+    );
+    assert!(!leftover_path.exists(), "the leftover leaf must be gone");
+}
+
 // P3-5: the leaf name carries the lock directory's device and inode, so two agents in one cgroup
 // whose lock directories share an inode on different filesystems never adopt each other's leaves.
 #[test]
