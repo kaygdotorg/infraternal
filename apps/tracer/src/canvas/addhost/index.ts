@@ -17,6 +17,7 @@ import type { AddHostSink, ProvisioningService } from "./service";
 import { onDemand } from "../../on-demand";
 import type { Wizard } from "./wizard";
 
+/** What `createAddHost` needs; `host` is optional and defaults to an overlay over the stage. */
 export interface AddHostOptions {
   /** The provisioning service, or a loader for it: the real one loads with the wizard, not with the canvas (D188). */
   service: ProvisioningService | (() => Promise<ProvisioningService>);
@@ -24,12 +25,19 @@ export interface AddHostOptions {
   host?: FlowHost;
 }
 
+/** The mounted add-host flow. */
 export interface AddHost {
   /** Opens the wizard (or focuses the open one). Pass this as `Adapters.addHost`. */
   open(): void;
+  /** Removes the palette row and the action listener, and closes the wizard if one is open. */
   dispose(): void;
 }
 
+/**
+ * Mounts the add-host flow: the palette row "Add hosts" and the `canvas:addhost` action both call `open`. The wizard's code
+ * loads the first time it is needed; if that fails the person gets a toast and the next tap tries again. While a load is
+ * running further taps are ignored. Call `dispose` when the canvas goes away.
+ */
 export function createAddHost(core: CoreScreen, options: AddHostOptions): AddHost {
   const host = options.host ?? createOverlayFlowHost(core.stage);
   let wizard: Wizard | undefined;

@@ -227,6 +227,34 @@ impl Auth {
     }
 }
 
+/// Check, inside the caller's writer transaction, that this session is still live and unlocked
+/// by both the caller's clock and SQLite's.
+///
+/// This grants no per-action authority and checks no tap age. A change that needs a tap verifies
+/// its own ceremony, bound to that one action, before calling this (D336). For example, a key
+/// approval verifies the passkey ceremony `device_approve_start` bound to its code. This check
+/// only makes a logout or expiry that committed first refuse the change.
+pub(crate) async fn require_live_session_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    token_hash: &str,
+    user: &str,
+    now: i64,
+) -> Result<()> {
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 \
+         AND expires>MAX(?,unixepoch()))",
+    )
+    .bind(token_hash)
+    .bind(user)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !live {
+        return Err(Error::Denied);
+    }
+    Ok(())
+}
+
 pub(super) async fn insert_session(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token: &str,

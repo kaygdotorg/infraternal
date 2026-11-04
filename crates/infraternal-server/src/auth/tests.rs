@@ -10,6 +10,7 @@ use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
+use base64::engine::general_purpose::STANDARD_NO_PAD as FINGERPRINT_B64;
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, Stream, StreamExt};
 use hkdf::Hkdf;
@@ -57,6 +58,9 @@ mod socket_backend;
 use socket_backend::read_terminal_open;
 const NOW: i64 = 1_800_000_000;
 const ORIGIN: &str = "https://auth.example.test";
+/// Trusted caller address for direct device-approval starts.
+const TEST_SOURCE: std::net::IpAddr =
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 1));
 
 struct Software {
     key: PKey<Private>,
@@ -156,6 +160,16 @@ impl Software {
         signer.update(&Sha256::digest(&input)).unwrap();
         signer.sign_to_vec().unwrap()
     }
+}
+/// Approve a pending request the only way the server allows: a passkey
+/// ceremony bound to its code and this session (#263, J145 P3-3).
+async fn approve_with_passkey(f: &mut Fixture, code: &str, now: i64) -> Result<()> {
+    let start = f.auth.device_approve_start(&f.session, code, now).await?;
+    let proof = f.software.login(&start, ORIGIN, true);
+    let ceremony = str_field(&start, "ceremony").to_owned();
+    f.auth
+        .device_approve_finish(&f.session, code, &ceremony, proof, now)
+        .await
 }
 fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap()
@@ -307,10 +321,6 @@ async fn tapped_session(auth: &Auth, user: &str, action: Value, now: i64) -> Str
     tx.commit().await.unwrap();
     bind_tap(auth, &token, action, now).await;
     token
-}
-
-fn approve(code: &Value) -> Value {
-    json!({"kind":"device.approve","code":str_field(code, "user_code")})
 }
 
 async fn finish_replacement(f: &Fixture, start: &Value, software: &Software, now: i64) -> String {
@@ -820,10 +830,10 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
             .is_err()
     );
     // New fixture avoids resurrecting an expired record for the device API assertions.
-    let f = fixture().await;
+    let mut f = fixture().await;
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
     assert!(
@@ -845,9 +855,7 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
             .unwrap()["scopes"],
         json!(["hosts:read"])
     );
-    bind_tap(&f.auth, &f.session, approve(&approval), NOW).await;
-    f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+    approve_with_passkey(&mut f, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     let key = f
@@ -885,19 +893,17 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     assert!(f.auth.api_authorize(&key, "hosts:read").await.is_err());
     assert!(
         f.auth
-            .device_start("cli", vec!["admin".into()], NOW)
+            .device_start("cli", vec!["admin".into()], TEST_SOURCE, NOW)
             .await
             .is_err()
     );
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
-    bind_tap(&f.auth, &f.session, approve(&approval), NOW + 600).await;
     assert!(
-        f.auth
-            .device_approve(&f.session, str_field(&approval, "user_code"), NOW + 600)
+        approve_with_passkey(&mut f, str_field(&approval, "user_code"), NOW + 600)
             .await
             .is_err()
     );
@@ -929,6 +935,7 @@ async fn device_keys_accept_declared_action_scopes_without_broadening_to_unknown
         .device_start(
             "cli",
             scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            TEST_SOURCE,
             NOW,
         )
         .await
@@ -946,11 +953,240 @@ async fn device_keys_accept_declared_action_scopes_without_broadening_to_unknown
     for scope in ["admin", "hosts:*", "*", "session:write"] {
         assert!(
             f.auth
-                .device_start("cli", vec![scope.to_owned()], NOW)
+                .device_start("cli", vec![scope.to_owned()], TEST_SOURCE, NOW)
                 .await
                 .is_err(),
             "unknown scope {scope:?} must not be issued"
         );
+    }
+}
+
+#[tokio::test]
+async fn sign_in_device_inspection_keeps_its_existing_unbounded_retry_behavior() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let approval = f
+        .auth
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
+        .await
+        .unwrap();
+    for attempt in 1..=6 {
+        assert_eq!(
+            f.auth
+                .device_inspect(&f.session, str_field(&approval, "user_code"), NOW)
+                .await
+                .unwrap()["scopes"],
+            json!(["hosts:read"]),
+            "sign-in inspection attempt {attempt}"
+        );
+    }
+    approve_with_passkey(&mut f, str_field(&approval, "user_code"), NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.auth
+            .device_redeem(str_field(&approval, "poll_token"), NOW)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn device_join_request_inspects_as_a_key_and_mode_bound_machine_join() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    let host_id = Uuid::new_v4();
+    let key_digest = (0_u8..=u8::MAX)
+        .map(|byte| [byte; 32])
+        .find(|candidate| FINGERPRINT_B64.encode(candidate) != B64.encode(candidate))
+        .expect("fixture key digest whose fingerprint needs standard base64");
+    let key_fingerprint = format!("SHA256:{}", FINGERPRINT_B64.encode(key_digest));
+    let start = json!({
+        "kind": "join_machine",
+        "device": "laptop",
+        "request": {
+            "host_id": host_id,
+            "hostname": "laptop",
+            "mode": "system",
+            "execution_uid": 0,
+            "key_fingerprint": key_fingerprint,
+        },
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&start).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-inspect")
+                .header("content-type", "application/json")
+                .header("origin", ORIGIN)
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let review: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(review["kind"], "join_machine");
+    assert_eq!(review["hostname"], "laptop");
+    assert_eq!(review["mode"], "system");
+    assert_eq!(review["key_fingerprint"], key_fingerprint);
+    assert!(review.get("host_id").is_none());
+    assert!(review.get("request").is_none());
+    assert!(review.get("key_fingerprint").is_some());
+}
+
+#[tokio::test]
+async fn device_join_approval_requires_the_owner_session() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let app = super::http::router(f.auth.clone());
+    let start = json!({
+        "kind": "join_machine",
+        "device": "laptop",
+        "request": {
+            "host_id": Uuid::new_v4(),
+            "hostname": "laptop",
+            "mode": "system",
+            "execution_uid": 0,
+            "key_fingerprint": format!(
+                "SHA256:{}",
+                FINGERPRINT_B64.encode(Sha256::digest(rand::random::<[u8; 32]>()))
+            ),
+        },
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&start).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-inspect")
+                .header("content-type", "application/json")
+                .header("origin", ORIGIN)
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-approve-start")
+                .header("content-type", "application/json")
+                .header("origin", ORIGIN)
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn device_join_code_allows_only_five_inspection_attempts() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    let start = json!({
+        "kind": "join_machine",
+        "device": "laptop",
+        "request": {
+            "host_id": Uuid::new_v4(),
+            "hostname": "laptop",
+            "mode": "system",
+            "execution_uid": 0,
+            "key_fingerprint": format!(
+                "SHA256:{}",
+                FINGERPRINT_B64.encode(Sha256::digest(rand::random::<[u8; 32]>()))
+            ),
+        },
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/auth/device-start")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(serde_json::to_vec(&start).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    for attempt in 1..=6 {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/auth/device-inspect")
+                    .header("content-type", "application/json")
+                    .header("origin", ORIGIN)
+                    .header("cookie", format!("__Host-infraternal={}", f.session))
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&json!({"code": approval["user_code"]})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let expected = if attempt <= 5 {
+            axum::http::StatusCode::OK
+        } else {
+            axum::http::StatusCode::UNAUTHORIZED
+        };
+        assert_eq!(response.status(), expected, "inspection attempt {attempt}");
     }
 }
 
@@ -1153,12 +1389,12 @@ async fn recovery_expiry_revocation_and_cross_user_isolation() {
     let mut f = fixture().await;
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], NOW)
+        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
         .await
         .unwrap();
-    bind_tap(&f.auth, &f.session, approve(&approval), NOW).await;
+    // Recovery, not the approval ceremony, is under test here.
     f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .approve_without_passkey_for_tests(&f.session, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     let api_key = f
@@ -1331,12 +1567,13 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
             .body(axum::body::Body::from(r#"{"token":"invalid"}"#))
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
-        if index < 60 {
-            assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
-        } else {
-            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
-            assert_eq!(response.headers()["retry-after"], "60");
-        }
+        // No process-wide device bucket exists to exhaust (#263); per-source
+        // limits are the runtime middleware's, which this router omits.
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "poll {index}"
+        );
     }
     let request = axum::http::Request::builder()
         .method("POST")
@@ -2690,10 +2927,13 @@ async fn discoverable_latency_at_pending_capacity() {
                 );
             }
             if prefill == 824 {
-                assert!(
-                    f.auth.discoverable_login_start(now).await.is_err(),
-                    "pending capacity must fail closed"
-                );
+                // Identified and anonymous ceremonies have separate pools (#263, J145 P2-1).
+                let full = if identified {
+                    f.auth.login_start(&f.user, now).await.is_err()
+                } else {
+                    f.auth.discoverable_login_start(now).await.is_err()
+                };
+                assert!(full, "pending capacity must fail closed");
             }
         }
     }
@@ -3563,3 +3803,6 @@ mod admin_window_tests;
 mod api_expiry;
 #[path = "key_lifetime_tests.rs"]
 mod key_lifetime_tests;
+
+#[path = "device_pending_tests.rs"]
+mod device_pending;

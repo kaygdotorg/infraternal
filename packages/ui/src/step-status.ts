@@ -2,8 +2,10 @@
 import { createSpinner } from "./spinner";
 import { tick } from "./tick";
 
+/** The four states of a step: not started, in progress (spinner), finished (tick), or failed (cross). */
 export type StepStatus = "pending" | "running" | "done" | "failed";
 
+/** The handle returned by {@link mountStepStatus}. */
 export interface StepStatusController {
   /** Updates the glyph while keeping it out of the interaction and focus order. */
   set(status: StepStatus): void;

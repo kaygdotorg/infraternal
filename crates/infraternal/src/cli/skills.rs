@@ -265,8 +265,11 @@ mod tests {
         {
             // Placeholders are not written (D299 C5); a working agent command is.
             assert!(!files.contains(&"infraternal-agent-up.md".to_owned()));
-            assert!(!files.contains(&"infraternal-up.md".to_owned()));
         }
+        #[cfg(all(feature = "remote", target_os = "linux"))]
+        assert!(files.contains(&"infraternal-up.md".to_owned()));
+        #[cfg(not(all(feature = "remote", target_os = "linux")))]
+        assert!(!files.contains(&"infraternal-up.md".to_owned()));
         #[cfg(feature = "remote")]
         assert!(files.contains(&"infraternal-agent-join.md".to_owned()));
         for file in files {

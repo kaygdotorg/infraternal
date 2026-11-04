@@ -40,21 +40,43 @@ async fn key_revocation_is_an_admin_action_inside_the_window() {
         .expect("ten minutes after the tap, revoking a key needs no new tap");
 }
 
+/// D333 and D336: the admin window never covers a per-action change. Ten minutes into the
+/// window, a key approval still needs its own passkey ceremony, bound to its code; an ordinary
+/// sign-in ceremony made just now does not approve it.
 #[tokio::test]
-async fn per_action_changes_still_need_a_recent_tap_inside_the_window() {
+async fn per_action_changes_still_need_their_own_tap_inside_the_window() {
     let _guard = SERIAL.lock().await;
-    let f = fixture().await;
+    let mut f = fixture().await;
     let approval = f
         .auth
-        .device_start("cli", vec!["status:read".to_owned()], NOW + 600)
+        .device_start(
+            "cli",
+            vec!["status:read".to_owned()],
+            TEST_SOURCE,
+            NOW + 600,
+        )
         .await
         .unwrap();
-    // Even a tap bound to this very approval is too old ten minutes in (D336).
-    bind_tap(&f.auth, &f.session, approve(&approval), NOW).await;
+    let code = str_field(&approval, "user_code").to_owned();
+    f.auth
+        .fresh_session(&f.session, NOW + 600)
+        .await
+        .expect("still inside the admin window");
+    let login = f.auth.login_start(&f.user, NOW + 600).await.unwrap();
+    let proof = f.software.login(&login, ORIGIN, true);
     assert!(matches!(
         f.auth
-            .device_approve(&f.session, str_field(&approval, "user_code"), NOW + 600)
+            .device_approve_finish(
+                &f.session,
+                &code,
+                str_field(&login, "ceremony"),
+                proof,
+                NOW + 600
+            )
             .await,
         Err(Error::Denied)
     ));
+    approve_with_passkey(&mut f, &code, NOW + 600)
+        .await
+        .expect("the approval's own bound ceremony approves it");
 }

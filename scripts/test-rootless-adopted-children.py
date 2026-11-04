@@ -40,8 +40,12 @@ def main():
             os.mkfifo(release, 0o600)
             client.input(f"sh -c {shlex.quote('sh -c ' + shlex.quote(command) + ' </dev/null >/dev/null 2>&1 &')}\n".encode())
             terminal_marker(client, f'review-job{index}-started')
+            # The shell's redirection creates the file before printf writes it,
+            # so existence alone can expose an empty file (#324). The record is
+            # complete only once its terminating newline is there.
             deadline = time.monotonic() + 5
-            while not path.exists() and time.monotonic() < deadline:
+            while not (path.exists() and path.read_text().endswith('\n')):
+                assert time.monotonic() < deadline, f'fixture job {index} did not record its pid'
                 time.sleep(.01)
             pid = int(path.read_text().strip())
             pins.append((pid, os.pidfd_open(pid)))

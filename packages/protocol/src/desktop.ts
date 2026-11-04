@@ -1,6 +1,36 @@
-/** Borrowed binary desktop messages; validation mirrors the Rust codec [D12,D200,D232]. */
+/**
+ * Desktop (remote screen) messages of the wire protocol: the body layouts for frame tags
+ * 0x40 to 0x45. The outer frame codec (`codec.ts`) reads the tag and length and hands the
+ * body to {@link decodeDesktop}, or asks {@link measureDesktop} and {@link writeDesktop}
+ * to size and fill an outgoing body. All integers are little-endian.
+ *
+ * Decoded `Uint8Array` fields are views into the received buffer, not copies: copy them if
+ * they must outlive it. Every limit here mirrors the Rust codec [D12,D200,D232]; change both
+ * together, because a message one side accepts and the other rejects breaks the connection.
+ */
+
+/**
+ * The number 8, exported by the codec for callers that need a desktop-video identifier.
+ * This module does not use it itself. (The tracer's capability negotiation in
+ * `apps/tracer/src/connection.ts` uses its own `DESKTOP_VIDEO_CAP`.)
+ */
 export const DESKTOP_VIDEO = 8n;
+/**
+ * Largest encoded video payload in bytes, and the largest `total` of a fragmented one:
+ * 4 MiB minus 42 bytes. The Rust codec enforces the same bound.
+ */
 export const MAX_VIDEO_BYTES = 4 * 1024 * 1024 - 42;
+/**
+ * One input event from the viewer to the host screen (carried by an `input` message).
+ * - `release`: let go of every key and button the host believes is held.
+ * - `control`: take (`active: true`) or give up control of the host's input.
+ * - `text`: one typed Unicode scalar value (not a UTF-16 unit).
+ * - `mouse`: pointer position in millionths of the surface (0 to 1_000_000 on each axis),
+ *   `button` 0 left, 1 right, 2 middle, `state` 0 move, 1 down, 2 up.
+ * - `scroll`: same position; `dx`/`dy` are signed 32-bit native pixel deltas.
+ * - `key`: a host keycode (0 to 127, see `MAC_KEYCODES`) going down or up.
+ * `modifiers` is the bit set from `modifierBits` (shift 1, control 2, alt 4, meta 8).
+ */
 export type VideoInput =
   | { kind: "release" }
   | { kind: "control"; active: boolean }
@@ -8,6 +38,20 @@ export type VideoInput =
   | { kind: "mouse"; x: number; y: number; button: number; state: number; modifiers: number }
   | { kind: "scroll"; x: number; y: number; dx: number; dy: number; modifiers: number }
   | { kind: "key"; keycode: number; down: boolean; modifiers: number };
+/**
+ * A decoded desktop message. The frame tag for each kind:
+ * - `attach` (0x40): bind this connection to a desktop `sessionId` (16 bytes). `delivery`
+ *   0 sends video reliably, 1 as datagrams.
+ * - `video` (0x41): one encoded frame. `sequence` starts at 1; `captureNs` is the capture
+ *   time in nanoseconds; `keyframe` marks a frame that decodes without earlier ones.
+ * - `size` (0x42): the viewer's surface in pixels (even, at most 4096 each, at most
+ *   4 Mpixel in total) and its pixel density in thousandths (1000 means 1x).
+ * - `input` (0x43): a {@link VideoInput}.
+ * - `repair` (0x44): carries `lastSequence`, the last video sequence the viewer applied;
+ *   the sender uses it to resume after loss.
+ * - `fragment` (0x45): one 1024-byte slice of a video frame too big for a datagram,
+ *   at byte `offset` of `total`; the last slice may be shorter.
+ */
 export type DesktopMessage =
   | { kind: "attach"; sessionId: Uint8Array; delivery: 0 | 1 }
   | { kind: "video"; sequence: bigint; captureNs: bigint; keyframe: boolean; bytes: Uint8Array }
@@ -15,10 +59,20 @@ export type DesktopMessage =
   | { kind: "input"; input: VideoInput }
   | { kind: "repair"; lastSequence: bigint }
   | { kind: "fragment"; sessionId: Uint8Array; sequence: bigint; captureNs: bigint; keyframe: boolean; total: number; offset: number; bytes: Uint8Array };
+/** Rejects a message; every validation failure in this module throws the same error on purpose. */
 const fail = (): never => { throw new RangeError("invalid desktop fields"); };
+/** True for a safe integer from 0 to `max` inclusive (so NaN, fractions and negatives fail). */
 const integer = (n: number, max: number): boolean => Number.isSafeInteger(n) && n >= 0 && n <= max;
+/** True for a bigint that fits an unsigned 64-bit field. */
 const u64 = (n: bigint): boolean => typeof n === "bigint" && n >= 0n && n <= 0xffff_ffff_ffff_ffffn;
-/** Validates before allocating, including nested fields and fragment arithmetic. */
+/**
+ * Checks a message against the protocol limits and returns its frame `tag` and body
+ * `length` in bytes, so the caller can size its output buffer before writing.
+ * Validates before allocating, including nested fields and fragment arithmetic.
+ * @throws RangeError("invalid desktop fields") when any field is out of range, for example
+ * a zero `sequence`, an odd or oversized surface, a control character as `text`, or a
+ * fragment whose `offset` is not a multiple of 1024.
+ */
 export function measureDesktop(message: DesktopMessage): { tag: number; length: number } {
   switch (message.kind) {
     case "attach":
@@ -60,7 +114,12 @@ export function measureDesktop(message: DesktopMessage): { tag: number; length: 
       return { tag: 0x45, length: 41 + message.bytes.length };
   }
 }
-/** Writes to the outer codec's already-sized reusable output buffer. */
+/**
+ * Writes the body of `m` into `output` starting at byte `cursor`. The buffer must already be
+ * large enough, and `m` must already have passed {@link measureDesktop}: this function does
+ * no checking and no allocation. For `input` messages the first body byte is the input
+ * kind (0 mouse, 1 scroll, 2 key, 3 release, 4 text, 5 control).
+ */
 export function writeDesktop(m: DesktopMessage, output: Uint8Array, cursor: number): void {
   const v = new DataView(output.buffer, output.byteOffset, output.byteLength);
   switch (m.kind) {
@@ -85,7 +144,13 @@ export function writeDesktop(m: DesktopMessage, output: Uint8Array, cursor: numb
     case "fragment": output.set(m.sessionId, cursor); v.setBigUint64(cursor+16, m.sequence, true); v.setBigUint64(cursor+24, m.captureNs, true); output[cursor+32] = Number(m.keyframe); v.setUint32(cursor+33, m.total, true); v.setUint32(cursor+37, m.offset, true); output.set(m.bytes, cursor+41); break;
   }
 }
-/** Reads only bounded fixed fields and borrowed views, then validates all semantic limits. */
+/**
+ * Decodes the body of a frame with desktop tag `tag` (0x40 to 0x45).
+ * Reads only bounded fixed fields and borrowed views, then validates all semantic limits.
+ * `bytes` and `sessionId` in the result point into `body`.
+ * @throws RangeError("invalid desktop fields") for an unknown input kind, a wrong body
+ * length, a flag byte other than 0 or 1, or any value {@link measureDesktop} rejects.
+ */
 export function decodeDesktop(tag: number, body: Uint8Array): DesktopMessage {
   const v = new DataView(body.buffer, body.byteOffset, body.byteLength);
   const exact = (length: number): void => { if (body.length !== length) fail(); };

@@ -25,6 +25,7 @@ import type { Grant } from "../model/types";
 import type { GraphViewModule } from "./graph-view";
 import type { MeshSource } from "./source";
 
+/** The Mesh as the canvas holds it: building the graph view, redrawing arrows with the camera, and the counts and rows for the view's summary. */
 export interface MeshModule {
   /** Fills a graph view with its node cards and arrows. */
   buildGraph(c: ViewRec): void;
@@ -45,6 +46,11 @@ export interface MeshModule {
   dispose(): void;
 }
 
+/**
+ * Makes the Mesh module for the canvas `cx` over `source`. Its heavy code loads the first time the Mesh view is on screen (a quiet
+ * loading card shows while it does, and a failed load is tried again on the next frame the view is on screen). Source failures
+ * are shown as toasts. `dispose` stops listening and removes the loading cards.
+ */
 export function createMesh(cx: Ctx, source: MeshSource): MeshModule {
   const { camera } = cx;
   const cam = camera.cam;

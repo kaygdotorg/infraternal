@@ -349,7 +349,7 @@ async fn review3_pending_routes_and_idle_expiry_recovery() {
         ("login-start", json!({"user_id":f.user})),
         ("recovery-cancel", json!({})),
         ("device-inspect", json!({"code":"unknown"})),
-        ("device-approve", json!({"code":"unknown"})),
+        ("device-approve-start", json!({"code":"unknown"})),
         ("api-list", json!({})),
         ("api-revoke", json!({"id":"unknown"})),
     ] {

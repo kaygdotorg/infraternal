@@ -299,6 +299,7 @@ mod durable_state {
                         ipv6: "fd01::1".parse().unwrap(),
                     },
                     default_policy: DefaultPolicy::Allow,
+                    exposure: None,
                     peers: std::collections::BTreeMap::new(),
                 }),
                 backend: None,

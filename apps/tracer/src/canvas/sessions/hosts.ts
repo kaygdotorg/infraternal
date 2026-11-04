@@ -4,13 +4,19 @@ import { ActionRefused } from "../../connection";
 import { isCanonicalUuid } from "../../identifiers";
 import type { HostEntry } from "./adapter";
 
+/** The part of the connection the host list uses: calls, subscriptions and the welcome event. */
 interface Transport {
   readonly isWelcomed?: boolean;
   call(action: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   onWelcome(listener: () => void): () => void;
   subscribe(filter: { topic: string }, listener: (event: Record<string, unknown>) => void, onOpen?: () => void): () => void;
 }
+/** A host admitted to the account, with whether the infraternal agent on it is connected. */
 type AdmittedHost = HostEntry & { address?: string; online: boolean };
+/**
+ * Checks one page of the host list from the server. Returns `undefined` for anything malformed (a bad shape, more than 128 hosts, a bad
+ * id or name, a field over 1,024 characters, or a bad cursor), so one bad page never half-fills the list.
+ */
 function page(value: Record<string, unknown>): { hosts: AdmittedHost[]; next: string | null } | undefined {
   if (!Array.isArray(value.hosts) || value.hosts.length > 128 || !(value.next === null || isCanonicalUuid(value.next))) return;
   const hosts: AdmittedHost[] = [];

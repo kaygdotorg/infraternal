@@ -381,6 +381,10 @@ pub enum CliHandler {
     SignIn,
     /// Adapt one shared hosted action to the API-key HTTP or bootstrap WebSocket transport.
     HostedAction,
+    /// Enroll this Linux machine and install its system service.
+    Up,
+    /// Run the elevated half of `up` without placing credentials in process arguments.
+    UpSystem,
     /// Run the configured server in the foreground.
     ServerRun,
     /// Create and start a server service.

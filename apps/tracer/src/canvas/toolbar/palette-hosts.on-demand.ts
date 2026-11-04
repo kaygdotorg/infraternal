@@ -10,6 +10,7 @@ import type { Ctx } from "../context";
 import { isFreeView } from "../layout/stops";
 import { SESSION_ICON } from "../views/icons";
 
+/** Builds the palette rows that act on hosts. Rows are made fresh each time the palette opens, and only for what this instance offers. */
 export function hostEntries(cx: Ctx): PaletteEntry[] {
   const out: PaletteEntry[] = [];
   const removal = cx.adapters.hostRemoval;

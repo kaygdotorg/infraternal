@@ -2,6 +2,7 @@
 import type { MuxConnection } from "../../connection";
 import type { MeshTransport } from "./protocol";
 
+/** Adapts the page's one connection to the `MeshTransport` the Mesh uses. Calls fail at once while the socket is down, and the Mesh starts asking only after a terminal is attached. */
 export function connectionTransport(connection: MuxConnection): MeshTransport {
   return {
     // A frame sent while the socket is down is dropped and its call would wait for the next drop; failing at once

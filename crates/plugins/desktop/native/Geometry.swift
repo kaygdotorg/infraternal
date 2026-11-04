@@ -1,13 +1,20 @@
 /// Role: AX window identity and aspect-preserving geometry that yields permanently to managed desktops [D208 A2,D290].
+/// Coordinates: window frames are in screen points with the origin at the top left of the main
+/// display (the Core Graphics and Accessibility convention). `output` sizes are encoded pixels.
 import AppKit
 import ApplicationServices
 import Darwin
 
 /// Read executable names, never arguments or settings. Cache across viewers;
 /// manager presence latches separately in each window, including on restoration.
+/// Process names are compared against `tilingManagerExecutables`. Scans at most once per second.
 private enum WindowManagerPresence {
+    /// Monotonic seconds of the last process scan.
     static var checkedAt = -Double.infinity
+    /// Result of the last scan.
     static var present = false
+    /// True if a tiling manager is running. Scans the process list at most once per second;
+    /// `now` is monotonic seconds.
     static func current(at now: Double) -> Bool {
         if now - checkedAt < 1 { return present }
         checkedAt = now
@@ -25,12 +32,14 @@ private enum WindowManagerPresence {
     }
 }
 
+/// Reads one Accessibility attribute, or `nil` if the element does not have it or the call fails.
 func axValue(_ element: AXUIElement, _ name: CFString) -> CFTypeRef? {
     var value: CFTypeRef?
     guard AXUIElementCopyAttributeValue(element, name, &value) == .success else { return nil }
     return value
 }
 
+/// The on-screen frame of an Accessibility window element in points, or `nil` if unreadable.
 func axFrame(_ element: AXUIElement) -> CGRect? {
     guard let p = axValue(element, kAXPositionAttribute as CFString), CFGetTypeID(p) == AXValueGetTypeID(),
           let s = axValue(element, kAXSizeAttribute as CFString), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
@@ -39,24 +48,53 @@ func axFrame(_ element: AXUIElement) -> CGRect? {
     return CGRect(origin: point, size: size)
 }
 
+/// Follows one application window and keeps the capture area, output size and resizing in step.
+///
+/// The infraternal agent may resize the real window so its shape matches the viewer, but it gives
+/// up for good when a tiling manager owns the desktop, and pauses while the local user is active.
+/// All methods must run on the main thread: the Accessibility observer is attached to its run
+/// loop.
 final class WindowGeometry {
+    /// Process ID of the app that owns the window.
     let pid: Int32
+    /// Window server ID of the window.
     let id: UInt32
+    /// The matching Accessibility element, or `nil` when no single window matched; then the window can
+    /// be followed but never resized.
     let window: AXUIElement?
+    /// The window's frame when we first saw it; `restore` puts it back.
     let original: CGRect
+    /// The window's current frame in points.
     var actual: CGRect
+    /// The window size, in points, that would fill the viewer's output at the display's density.
     var desired: CGSize
+    /// Size of the encoded picture in pixels, as requested by the viewer.
     var output: CGSize
+    /// Where the captured area sits inside `output`, in output pixels, after fitting.
     var content: CGRect = .zero
+    /// Area captured, in screen points: the window plus overlapping popups of the same app.
     var captureRect: CGRect = .zero
+    /// Accessibility observer that calls `follow` on moves, resizes and menu changes.
     private var observer: AXObserver?
+    /// Why the window is or is not being resized: `following`, `refused`, `managed`, `local_input` or
+    /// `closed`.
     var reason = "following"
+    /// True once we changed the window's size, so `restore` knows it has work to do.
     var didResize = false
+    /// Tracks whether the desktop owns this window's size.
     private var ownership = WindowResizeOwnership()
+    /// Number of resize requests sent, for diagnostics.
     private var resizeRequests = 0
+    /// False once the window has gone.
     var exists = true
+    /// Frames where clicks may go: the window and its overlapping popups. Gaps between them are excluded.
     private var interactive: [CGRect] = []
 
+    /// Starts following a window.
+    ///
+    /// Throws `HelperFailure.permission` when Accessibility access is missing or the window ID and
+    /// process do not match a real window, and `HelperFailure.invalid` for a bad `size`. `size` has
+    /// the keys described at `resize`.
     init(id: UInt32, pid: Int32, size: [String: Any]) throws {
         guard AXIsProcessTrusted(), let entry = windowSnapshot(applicationMetadata: false).first(where: {
             ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid
@@ -97,10 +135,16 @@ final class WindowGeometry {
         }
     }
 
+    /// Detaches the observer from the main run loop.
     deinit {
         if let observer { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes) }
     }
 
+    /// Applies a new output size from the viewer and refreshes the geometry.
+    ///
+    /// `size` holds `canvas_width`, `canvas_height`, `backing_scale`, `width` and `height`, all
+    /// finite and greater than 0; `width` and `height` are output pixels. Throws
+    /// `HelperFailure.invalid` otherwise.
     func resize(_ size: [String: Any]) throws {
         guard let cw = size["canvas_width"] as? Double, let ch = size["canvas_height"] as? Double,
               let scale = size["backing_scale"] as? Double,
@@ -125,6 +169,12 @@ final class WindowGeometry {
         if !exists { interactive = []; reason = "closed" }
     }
 
+    /// Re-reads the window's state, decides whether to resize it and recomputes `captureRect`,
+    /// `content` and the click areas. Sets `exists` to false and `reason` to `closed` when the window
+    /// has gone.
+    ///
+    /// A resize is requested at most once per new size, never while a tiling manager is present and
+    /// not within 60 seconds of local keyboard or mouse use.
     func follow() {
         let snapshot = windowSnapshot(applicationMetadata: false)
         guard let selected = snapshot.first(where: { ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid }),
@@ -166,6 +216,11 @@ final class WindowGeometry {
         content = CGRect(x: (output.width - size.width)/2, y: (output.height - size.height)/2, width: size.width, height: size.height)
     }
 
+    /// Puts the window back to its original size and position.
+    ///
+    /// Returns `true` when there was nothing to undo or the window is back within 1 point of the
+    /// original; `false` if it could not be restored. Does nothing for a managed window, because
+    /// restoring would start a fight with the manager.
     func restore() -> Bool {
         ownership.detectManager(WindowManagerPresence.current(at: ProcessInfo.processInfo.systemUptime))
         // Restoring an old size after ownership changed would restart the fight.
@@ -181,16 +236,22 @@ final class WindowGeometry {
             && abs(f.width-original.width) < 1 && abs(f.height-original.height) < 1
     }
 
+    /// The window's state as a JSON-ready dictionary (rectangles, reason, output size, IDs, scale).
     func json() -> [String: Any] {
         ["original": rectJSON(original), "actual": rectJSON(actual), "capture_rect": rectJSON(captureRect), "content_rect": rectJSON(content),
          "reason": reason, "width": output.width, "height": output.height, "window_id": id, "owner_pid": pid, "source_backing_scale": backingScale(actual), "managed": ownership.managed, "resize_requests": resizeRequests]
     }
 
+    /// Sends one size change through Accessibility and counts it.
     private func requestSize(_ window: AXUIElement, _ value: AXValue) -> AXError {
         resizeRequests += 1
         return AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
     }
 
+    /// Converts a point in the encoded picture (output pixels) to screen points.
+    ///
+    /// Returns `nil` when the window is gone, the point is in the letterbox bars, or it is in a gap
+    /// between the window and its popups, where a click could reach another app.
     func point(x: Double, y: Double) -> CGPoint? {
         guard exists, let point = mappedPoint(x:x,y:y,source:captureRect,output:output) else { return nil }
         // The bounding rectangle includes gaps between menus and the main window.

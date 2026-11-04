@@ -31,24 +31,38 @@ import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { activityIn, readPerfProbe, wsBetween } from "./perf-activity";
 import { DROP, FREEZE, FrameDetector, RING, THROTTLE_MS, type FrameVerdict } from "./perf-detector";
 
+/** The browser-local key under which the readout's open or closed state is saved. */
 const OPEN_KEY = "tracer.fps-hud-open";
+/** How often the readout repaints: every 250 ms. */
 const REPAINT_MS = 250;
+/** Late frames closer together than this belong to one incident. */
 const COALESCE_MS = 400;
+/** How long after the last late frame an open incident is closed. */
 const CLOSE_AFTER_MS = 800;
 /** How long a long interval waits before it is reported, to learn whether it started a throttled run (more than two throttled frames fit in it). */
 const THROTTLE_WAIT_MS = 2500;
+/** How long collected incidents wait before they are sent. */
 const FLUSH_AFTER_MS = 10_000;
+/** The most incidents one tab sends in an hour. */
 const MAX_INCIDENTS_PER_HOUR = 600;
+/** The size (JSON characters) at which a batch of incidents is closed; the rest wait for the next send. */
 const MAX_BODY = 40_000;
+/** The time span the sparkline shows. */
 const SPARK_MS = 2000;
+/** The sparkline's drawing size in pixels. */
 const SPARK_W = 64;
 const SPARK_H = 12;
 
+/** One script that ran during a long animation frame, as the browser reports it. */
 interface Script { inv: string; type: string; src: string; fn: string; pos: number; ms: number; forced: number; pause: number }
+/** A long animation frame: its timing split and the scripts that ran in it. */
 interface Loaf { start: number; ms: number; block: number; render: number; styleLayout: number; forced: number; scripts: Script[] }
+/** A long task. */
 interface Task { start: number; ms: number; kind: string }
+/** A slow input event. */
 interface Slow { start: number; ms: number; delay: number; name: string; target: string }
 
+/** One recorded stall: a run of late frames that is sent to the preview server as one line. */
 export interface Incident {
   kind: "drop" | "freeze";
   /** Wall-clock time of the first late frame (ms since the epoch). */
@@ -94,12 +108,20 @@ interface Diag {
   support: { loaf: boolean; longtask: boolean; event: boolean };
 }
 
+/** An incident still being collected, with the ring positions and times that bound it. */
 interface Open extends Incident { firstIdx: number; firstT: number; lastT: number; endT: number }
 
+/** The first `n` characters of any value as text. */
 const clip = (s: unknown, n = 120): string => String(s ?? "").slice(0, n);
+/** Rounds to one decimal. */
 const r1 = (v: number): number => Math.round(v * 10) / 10;
+/** A URL as a path when it is on this page's origin, otherwise in full. */
 const pathOf = (url: string): string => { try { const u = new URL(url, location.href); return u.origin === location.origin ? u.pathname : u.href; } catch { return clip(url); } };
 
+/**
+ * Shows the frame meter and starts recording incidents. Pass `{ bench: true }` for the `?fps=bench` mode that times the
+ * per-frame work alone. Returns a handle whose `dispose()` removes the meter and its observers.
+ */
 export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): void } {
   const det = new FrameDetector();
   const sid = randomUuid();

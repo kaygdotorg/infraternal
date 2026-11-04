@@ -37,6 +37,7 @@ fn orphan_route_retirement_preserves_foreign_routes() {
             ipv6: "fd01::1".parse().unwrap(),
         },
         default_policy: DefaultPolicy::Deny,
+        exposure: None,
         upserted: BTreeMap::new(),
         merged: BTreeMap::new(),
         removed: Vec::new(),

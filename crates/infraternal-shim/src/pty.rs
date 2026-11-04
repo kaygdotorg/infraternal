@@ -922,6 +922,192 @@ pub(super) fn prepare_child(command: &mut Command) {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_parent_bound_child(command: &mut Command) {
+    let owner = unistd::getpid();
+    // SAFETY: the child hook runs between fork and exec and only calls prctl/getppid wrappers.
+    // Installing the signal before checking the parent closes the fork-to-hook race.
+    unsafe {
+        command.pre_exec(move || {
+            nix::sys::prctl::set_pdeathsig(Signal::SIGTERM).map_err(io::Error::from)?;
+            if unistd::getppid() != owner {
+                return Err(io::Error::other("proxy owner exited before child startup"));
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Keep the proxy's rootful credential drop inside the audited child boundary [#281].
+#[cfg(unix)]
+pub(crate) fn prepare_proxy_child(
+    command: &mut Command,
+    working_directory: &File,
+    descriptors: &[(i32, i32)],
+    identity: Option<(u32, u32)>,
+) -> io::Result<()> {
+    let working_directory = working_directory.as_raw_fd();
+    let descriptors = descriptors.to_vec();
+    if descriptors
+        .iter()
+        .any(|(source, target)| *source < 3 || *target < 64 || source == target)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proxy child descriptor mapping is outside policy",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    let owner = unistd::getpid();
+    // SAFETY: the established shim hooks set signal defaults, close the trusted
+    // control descriptor, and bind the process to its owner before this hook.
+    // This hook only remaps pre-opened descriptors, enters the pinned working
+    // directory, drops credentials and re-arms the parent-death signal before exec.
+    unsafe {
+        command.pre_exec(move || {
+            for (source, target) in &descriptors {
+                if nix::libc::dup2(*source, *target) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            if nix::libc::fchdir(working_directory) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            if let Some((uid, gid)) = identity {
+                drop_proxy_root(uid, gid)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            if let Some((uid, gid)) = identity {
+                unistd::setgroups(&[]).map_err(errno)?;
+                unistd::setgid(unistd::Gid::from_raw(gid)).map_err(errno)?;
+                unistd::setuid(unistd::Uid::from_raw(uid)).map_err(errno)?;
+            }
+            #[cfg(target_os = "linux")]
+            set_no_new_privileges()?;
+            // Changing the effective UID clears the parent-death signal, so the earlier owner
+            // binding no longer holds after the drop. Re-arm it last, then recheck the parent:
+            // an owner that died before this point must not leave a listener behind. SIGKILL,
+            // because a graceful stop would keep the listeners open while it drains [#281].
+            #[cfg(target_os = "linux")]
+            {
+                nix::sys::prctl::set_pdeathsig(Signal::SIGKILL).map_err(io::Error::from)?;
+                if unistd::getppid() != owner {
+                    return Err(io::Error::other("proxy owner exited before child startup"));
+                }
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct CapabilityHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+#[cfg(target_os = "linux")]
+fn drop_proxy_root(uid: u32, gid: u32) -> io::Result<()> {
+    const CAP_NET_BIND_SERVICE: u32 = 10;
+    const CAPABILITY_BIT: u32 = 1 << CAP_NET_BIND_SERVICE;
+    const PR_SET_KEEPCAPS: i32 = 8;
+    const PR_CAPBSET_DROP: i32 = 24;
+    const PR_CAP_AMBIENT: i32 = 47;
+    const PR_CAP_AMBIENT_RAISE: u32 = 2;
+    const PR_CAP_AMBIENT_CLEAR_ALL: u32 = 4;
+
+    linux_prctl(PR_SET_KEEPCAPS, 1, 0)?;
+    for capability in 0..64_u32 {
+        if capability == CAP_NET_BIND_SERVICE {
+            continue;
+        }
+        let result = unsafe {
+            nix::libc::prctl(
+                PR_CAPBSET_DROP,
+                nix::libc::c_ulong::from(capability),
+                0,
+                0,
+                0,
+            )
+        };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(nix::libc::EINVAL) {
+                return Err(error);
+            }
+        }
+    }
+    unistd::setgroups(&[]).map_err(errno)?;
+    unistd::setgid(unistd::Gid::from_raw(gid)).map_err(errno)?;
+    unistd::setuid(unistd::Uid::from_raw(uid)).map_err(errno)?;
+
+    let header = CapabilityHeader {
+        version: 0x2008_0522,
+        pid: 0,
+    };
+    let data = [
+        CapabilityData {
+            effective: CAPABILITY_BIT,
+            permitted: CAPABILITY_BIT,
+            inheritable: CAPABILITY_BIT,
+        },
+        CapabilityData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+    ];
+    // SAFETY: the kernel reads fixed-layout, initialized capability structures for this process.
+    let result =
+        unsafe { nix::libc::syscall(nix::libc::SYS_capset, &raw const header, data.as_ptr()) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    linux_prctl(
+        PR_CAP_AMBIENT,
+        nix::libc::c_ulong::from(PR_CAP_AMBIENT_CLEAR_ALL),
+        0,
+    )?;
+    linux_prctl(
+        PR_CAP_AMBIENT,
+        nix::libc::c_ulong::from(PR_CAP_AMBIENT_RAISE),
+        nix::libc::c_ulong::from(CAP_NET_BIND_SERVICE),
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn set_no_new_privileges() -> io::Result<()> {
+    const PR_SET_NO_NEW_PRIVS: i32 = 38;
+    linux_prctl(PR_SET_NO_NEW_PRIVS, 1, 0)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_prctl(
+    option: i32,
+    argument: nix::libc::c_ulong,
+    extra: nix::libc::c_ulong,
+) -> io::Result<()> {
+    // SAFETY: prctl consumes only the scalar arguments supplied by this module.
+    if unsafe { nix::libc::prctl(option, argument, extra, 0, 0) } == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Keep the public direct-exec policy on the same audited descriptor boundary.
 pub(super) fn prepare_child_without_control(command: &mut Command) {
     prepare_isolated_child(command);
@@ -1399,6 +1585,32 @@ pub(super) fn process_exit_descriptor(pid: u32) -> io::Result<std::os::fd::Owned
     // SAFETY: a successful pidfd_open returns exactly one owned descriptor;
     // OwnedFd closes it on every path, including cancelled daemon discovery.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// Send `signal` to the process a pidfd names. Unlike `kill(pid)`, this can't reach a later
+/// process that reused the PID: once the named process is gone the call fails with `ESRCH`.
+#[cfg(target_os = "linux")]
+pub(super) fn signal_process_descriptor(
+    process: std::os::fd::BorrowedFd<'_>,
+    signal: nix::sys::signal::Signal,
+) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: pidfd_send_signal takes a borrowed descriptor that outlives the call, a signal
+    // number, a null siginfo pointer (the kernel then fills in a kill-like siginfo) and zero
+    // flags. It reads no memory from us and returns 0 or -1 with errno.
+    let result = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_pidfd_send_signal,
+            process.as_raw_fd(),
+            signal as nix::libc::c_int,
+            std::ptr::null::<nix::libc::siginfo_t>(),
+            0_u32,
+        )
+    };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

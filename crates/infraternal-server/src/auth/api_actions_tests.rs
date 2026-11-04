@@ -507,7 +507,7 @@ async fn sign_in_refuses_a_scope_that_no_action_uses() {
     let f = fixture().await;
     assert!(matches!(
         f.auth
-            .device_start("cli", vec!["sessions:write".to_owned()], NOW)
+            .device_start("cli", vec!["sessions:write".to_owned()], TEST_SOURCE, NOW)
             .await,
         Err(Error::Invalid)
     ));

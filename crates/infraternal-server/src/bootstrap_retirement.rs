@@ -28,6 +28,9 @@ impl EnrollmentStore {
         }
     }
 
+    /// One attempt at [`retire_bootstrap`](EnrollmentStore::retire_bootstrap) in a single
+    /// transaction. Refuses a negative time or a host that exists but is not this
+    /// owner's, was created later than `now`, or has no pending retirement intent.
     async fn retire_bootstrap_once(
         &self,
         owner: &str,

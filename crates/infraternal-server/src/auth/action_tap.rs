@@ -1,9 +1,8 @@
 //! Per-action passkey taps bound to the one action shown on screen (D333, D336).
 //!
-//! D333 asks a tap for each of these changes, even inside the browser's admin window: key
-//! approval, passkey add, recovery-key rotation and the security settings. D336 binds each such
-//! tap to the one action on screen ("agreed"), not to whichever change comes first after a
-//! sign-in.
+//! D333 asks a tap for each of these changes, even inside the browser's admin window: passkey
+//! add, recovery-key rotation and the security settings. D336 binds each such tap to the one
+//! action on screen ("agreed"), not to whichever change comes first after a sign-in.
 //!
 //! The browser names the action when it starts the passkey ceremony (`login-start` with
 //! `action`). The server keeps only a digest of it on the pending ceremony, and a successful
@@ -17,9 +16,12 @@
 //! of these changes, though it still starts the 15-minute admin window for everyday admin
 //! actions.
 //!
-//! CA setup and CA role changes are per-action taps too. They already run their own ceremonies,
-//! bound to one operation in `ca_administration` (for a role change, the exact recipient and
-//! role), and they do not use this module.
+//! Three other per-action taps run their own ceremonies and do not use this module:
+//! - Key approval (sign-in and machine join, #263): `devices::device_approve_start` starts a
+//!   passkey ceremony bound to the session and the exact code. `device_approve_finish` spends it
+//!   once.
+//! - CA setup and CA role changes: `ca_administration` binds each ceremony to one operation
+//!   (for a role change, the exact recipient and role).
 use super::{Error, Result, hash};
 use serde::Deserialize;
 
@@ -32,9 +34,6 @@ pub(crate) const ACTION_TAP_SECONDS: i64 = 120;
 #[derive(Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub(crate) enum TapAction {
-    /// Approve the one key request whose user code is on the approval page.
-    #[serde(rename = "device.approve")]
-    ApproveKey { code: String },
     /// Start enrolling one more passkey on this account.
     #[serde(rename = "passkey.add")]
     AddPasskey,
@@ -51,8 +50,6 @@ impl TapAction {
     /// Refuse parameters no change could accept, before a ceremony is spent on them.
     pub(super) fn validate(&self) -> Result<()> {
         match self {
-            // Server codes are 16 base64url characters; never store an unbounded string.
-            Self::ApproveKey { code } if code.is_empty() || code.len() > 64 => Err(Error::Invalid),
             Self::SecuritySettings {
                 api_key_lifetime_days,
             } if !(1..=365).contains(api_key_lifetime_days) => Err(Error::Invalid),
@@ -65,7 +62,6 @@ impl TapAction {
 /// The session row already binds the user, so the digest does not repeat it.
 pub(crate) fn digest(action: &TapAction) -> String {
     hash(&match action {
-        TapAction::ApproveKey { code } => format!("infraternal/tap/v1|device.approve|{code}"),
         TapAction::AddPasskey => "infraternal/tap/v1|passkey.add".to_owned(),
         TapAction::RotateRecovery => "infraternal/tap/v1|recovery.rotate".to_owned(),
         TapAction::SecuritySettings {

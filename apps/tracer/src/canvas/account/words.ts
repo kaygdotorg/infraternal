@@ -10,9 +10,11 @@
  */
 import type { Login, LoginHost, Person, Recovery } from "./model";
 
+/** Formats numbers with the English thousands separator. */
 const count = new Intl.NumberFormat("en");
 /** A number with its separators: "1,284". */
 export const num = (n: number): string => count.format(n);
+/** "1 host" or "2 hosts": the count with its separators, then the matching word. */
 const plural = (n: number, one: string, many: string): string => `${num(n)} ${n === 1 ? one : many}`;
 
 /** What the card and the pill call the person: the name, or the username when the data has no name. */
@@ -44,6 +46,7 @@ export const TAG_CARDS_SHOWN = 6;
 /** Hosts drawn in one tag card; the rest is one quiet "+N more". */
 export const HOSTS_PER_TAG = 24;
 
+/** One tag's machines in an account's breakdown. */
 export interface TagGroup {
   /** `null` = the machines that carry no tag. */
   tag: string | null;
@@ -70,6 +73,7 @@ export function tagGroups(login: Login): TagGroup[] {
 
 /** A recovery key that was last verified longer ago than this is a concern. A product call; the owner can change it. */
 export const RECOVERY_STALE_DAYS = 90;
+/** One day in milliseconds. */
 const DAY = 86_400_000;
 
 /** "3 Mar", or "3 Mar 2025" when it was not this year. */
@@ -78,6 +82,7 @@ export function shortDate(at: number, now: number): string {
   return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", ...(sameYear ? {} : { year: "numeric" }) }).format(at);
 }
 
+/** How one sign-in fact is said: the value, whether it is calm or a concern, and the tooltip. */
 export interface Reading {
   /** What the value field says. */
   value: string;
@@ -103,6 +108,7 @@ export function passkeyReading(passkeys: number): Reading {
   return { value: num(passkeys), mark: "ok", tip: "Passkeys, in Settings" };
 }
 
+/** One sign-in row of the card: a `Reading` plus which fact it is and its key (the row label). */
 export interface HealthRow extends Reading {
   id: "passkeys" | "recovery" | "devices";
   key: string;
@@ -120,6 +126,7 @@ export function healthRows(person: Person, now: number = Date.now()): HealthRow[
   return rows;
 }
 
+/** Why the pill carries its amber mark, and the one-line tooltip that says so. */
 export interface Attention { why: "recovery" | "passkey"; /** The pill's tooltip, in one line. */ tip: string }
 
 /** The one reason the pill carries its amber mark (Q6); the recovery key comes first when both apply. */

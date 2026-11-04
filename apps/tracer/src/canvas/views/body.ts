@@ -19,6 +19,10 @@ export function shouldCloseWindowAfterExit(status: number, setupPending: boolean
   return status === 0 && !setupPending;
 }
 
+/**
+ * Fills the window's card body for its kind: a terminal binds to its session, an app window or screen loads its on-demand body, and so on.
+ * A window with no access shows a plain notice instead. Any earlier content of the body is replaced.
+ */
 export function makeBody(cx: Ctx, rec: WinRec): void {
   const m = rec.model;
   const body = rec.card.body;

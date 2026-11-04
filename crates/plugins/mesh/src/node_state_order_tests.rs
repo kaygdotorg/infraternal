@@ -27,6 +27,7 @@ fn revision(version: u64) -> State {
             } else {
                 DefaultPolicy::Deny
             },
+            exposure: None,
             peers: std::collections::BTreeMap::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: std::collections::BTreeMap::new(),

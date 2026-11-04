@@ -19,15 +19,31 @@ use std::{
 
 // Short output is latency-sensitive too, but an entire ready cohort must not
 // postpone the next input poll. Bulk retains its independent rotating turn.
+/// Most short-output PTY reads one scheduling round grants, so a large ready
+/// group cannot postpone the next input poll. Bulk reads keep their own
+/// rotating turn.
 const INTERACTIVE_READS_PER_ROUND: usize = 64;
+/// Time budget for short-output reads in one round (500 microseconds), counted
+/// from the end of input dispatch.
 const INTERACTIVE_OUTPUT_TIME: Duration = Duration::from_micros(500);
+/// Epoll key reserved for the signal descriptor. It is never a descriptor
+/// registration key.
 const SIGNAL: u64 = u64::MAX;
+/// What the reactor remembers about one registered descriptor: the epoll
+/// interest `flags`, its `key` (a generation in the high 32 bits and the
+/// descriptor number in the low 32), and the `session` slot that owns it.
 #[derive(Clone, Copy)]
 struct Registration {
     flags: EpollFlags,
     key: u64,
     session: u16,
 }
+/// The epoll set for every hosted session, with the bookkeeping that maps
+/// ready events back to the session slot that owns the descriptor.
+///
+/// `next_key` only counts up and is refused before it wraps, so after a
+/// descriptor is closed and its number reused, an old event for the previous
+/// owner can never be mistaken for the new one.
 pub(super) struct Registry {
     epoll: Epoll,
     by_fd: HashMap<RawFd, Registration>,
@@ -35,6 +51,7 @@ pub(super) struct Registry {
     next_key: u32,
 }
 
+/// Test helper: a registry with every session's descriptors registered.
 #[cfg(test)]
 pub(super) fn ownership_fixture(sessions: &[Session], signals: &SignalFd) -> io::Result<Registry> {
     let mut registry = Registry::new(sessions.len(), signals)?;
@@ -44,6 +61,7 @@ pub(super) fn ownership_fixture(sessions: &[Session], signals: &SignalFd) -> io:
     Ok(registry)
 }
 impl Registry {
+    /// Creates an epoll set for `count` session slots with `signals` registered.
     fn new(count: usize, signals: &SignalFd) -> io::Result<Self> {
         let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC)?;
         epoll.add(signals, EpollEvent::new(EpollFlags::EPOLLIN, SIGNAL))?;
@@ -54,6 +72,8 @@ impl Registry {
             next_key: 0,
         })
     }
+    /// Forgets all descriptors of slot `index`. They are already closed, so the
+    /// kernel has removed them from epoll.
     fn retire(&mut self, index: usize) {
         for fd in self.owned[index].drain(..) {
             self.by_fd.remove(&fd);
@@ -77,10 +97,19 @@ impl Registry {
             live
         });
     }
+    /// Looks up the registration for an event key. `None` if the descriptor has
+    /// since been closed or reused (the generation no longer matches).
     fn registration(&self, key: u64) -> Option<&Registration> {
         let fd = RawFd::try_from(key & u64::from(u32::MAX)).ok()?;
         self.by_fd.get(&fd).filter(|entry| entry.key == key)
     }
+    /// Brings epoll up to date with the session at slot `index`: the listener
+    /// (readable), the PTY master (readable while output can be read, writable while
+    /// input is queued) and each viewer (readable unless it is waiting, writable when
+    /// there is something to send). `hold_ack` keeps a pure logical acknowledgment
+    /// from counting as writable. Descriptors that went away are dropped, and
+    /// interest is only changed when it differs from what is registered. Fails if
+    /// the identity counter or slot number is exhausted, or on an epoll error.
     fn sync(&mut self, index: usize, session: &Session, hold_ack: bool) -> io::Result<()> {
         // Peer admission already caps this array. Steady interest changes
         // borrow a small stack list rather than allocate on every settle.
@@ -182,6 +211,7 @@ impl Default for Ready {
     }
 }
 impl Ready {
+    /// Records `flags` for `key`, merging with earlier flags for the same key.
     fn insert(&mut self, key: u64, flags: EpollFlags) {
         // Registration generations start at one, so zero is never an fd key.
         debug_assert_ne!(key, 0);
@@ -198,6 +228,7 @@ impl Ready {
             self.more.push((key, flags));
         }
     }
+    /// The flags recorded for `key` this turn, if any.
     fn get(&self, key: u64) -> Option<EpollFlags> {
         self.keys
             .iter()
@@ -210,6 +241,8 @@ impl Ready {
                     .map(|(_, flags)| *flags)
             })
     }
+    /// The flags for descriptor `fd` this turn, translated to poll flags for the
+    /// session's step functions. Empty if the descriptor is no longer registered.
     fn flags(&self, fd: RawFd, registry: &Registry) -> PollFlags {
         let flags = registry
             .by_fd
@@ -241,6 +274,7 @@ struct ReadyWork {
     round: u32,
 }
 impl ReadyWork {
+    /// Creates rows for `count` session slots.
     fn new(count: usize) -> Self {
         Self {
             rows: (0..count).map(|_| Ready::default()).collect(),
@@ -248,6 +282,9 @@ impl ReadyWork {
             round: 0,
         }
     }
+    /// Starts a new turn, discarding the previous turn's rows lazily. When the
+    /// round counter would wrap, every row is cleared first so old rows can never
+    /// look current.
     fn next_round(&mut self) {
         self.active.clear();
         if let Some(round) = self.round.checked_add(1) {
@@ -260,6 +297,7 @@ impl ReadyWork {
             self.round = 1;
         }
     }
+    /// The row for slot `index` in this turn, creating it empty on first touch.
     fn entry(&mut self, index: usize) -> &mut Ready {
         let ready = &mut self.rows[index];
         if ready.generation != self.round {
@@ -271,6 +309,7 @@ impl ReadyWork {
         }
         ready
     }
+    /// The row for slot `index` if it was touched this turn.
     fn get(&self, index: usize) -> Option<&Ready> {
         let ready = self.rows.get(index)?;
         (ready.generation == self.round && self.round != 0).then_some(ready)
@@ -287,10 +326,15 @@ struct ReadyMarks {
     output_deadline: Option<Instant>,
 }
 impl ReadyMarks {
+    /// Bits of a slot's mark for its bulk-read queue entry: 0 none, 1 queued,
+    /// 2 cancelled (revived in place instead of queued twice).
     const BULK_MASK: u8 = 3;
+    /// Mark bit: the slot has a deadline entry in the timer heap.
     const TIMER: u8 = 4;
+    /// Mark bit: the slot has a pending acknowledgment fallback.
     const ACK: u8 = 8;
 
+    /// Creates empty marks for `count` session slots.
     fn new(count: usize) -> Self {
         Self {
             queued: vec![0; count],
@@ -300,6 +344,9 @@ impl ReadyMarks {
             output_deadline: None,
         }
     }
+    /// Starts a new turn: resets the short-read count and the output deadline. When
+    /// the round counter would wrap, the read marks are cleared first so an old mark
+    /// can never skip a newly ready session.
     fn next_round(&mut self) {
         self.interactive_reads = 0;
         self.output_deadline = None;
@@ -312,6 +359,8 @@ impl ReadyMarks {
             self.round = 1;
         }
     }
+    /// Marks slot `index` for a bulk read. Returns true if the caller must push a
+    /// queue entry, false if one already exists (a cancelled one is revived).
     fn queue(&mut self, index: usize) -> bool {
         // Low bits: 0 has no deque entry, 1 is bulk, 2 is cancelled.
         // The timer bit survives every bulk transition. A cancelled entry
@@ -321,39 +370,48 @@ impl ReadyMarks {
         *state = (*state & !Self::BULK_MASK) | 1;
         prior == 0
     }
+    /// Cancels the slot's bulk queue entry, because a short read was granted
+    /// instead. The entry stays in the queue and is skipped when reached.
     fn promote(&mut self, index: usize) {
         let state = &mut self.queued[index];
         if *state & Self::BULK_MASK != 0 {
             *state = (*state & !Self::BULK_MASK) | 2;
         }
     }
+    /// Consumes the slot's bulk entry. True only if it was live, not cancelled.
     fn take_bulk(&mut self, index: usize) -> bool {
         let state = &mut self.queued[index];
         let prior = *state & Self::BULK_MASK;
         *state &= !Self::BULK_MASK;
         prior == 1
     }
+    /// Marks the slot as having a timer entry. True if the caller must push one.
     fn queue_timer(&mut self, index: usize) -> bool {
         let state = &mut self.queued[index];
         let prior = *state & Self::TIMER;
         *state |= Self::TIMER;
         prior == 0
     }
+    /// Clears the slot's timer mark after its heap entry was removed.
     fn retire_timer(&mut self, index: usize) {
         self.queued[index] &= !Self::TIMER;
     }
+    /// Marks a pending acknowledgment fallback. True if the caller must queue it.
     fn queue_ack(&mut self, index: usize) -> bool {
         let state = &mut self.queued[index];
         let prior = *state & Self::ACK;
         *state |= Self::ACK;
         prior == 0
     }
+    /// Consumes the pending acknowledgment mark. True if there was one.
     fn take_ack(&mut self, index: usize) -> bool {
         let state = &mut self.queued[index];
         let prior = *state & Self::ACK;
         *state &= !Self::ACK;
         prior != 0
     }
+    /// Starts the round's output time budget at `now`. Called after input dispatch
+    /// and never before a blocking wait, so waiting does not use up the budget.
     fn start_output_round(&mut self, now: Instant) {
         // Start after input dispatch, never before a blocking poll. Cheap
         // replies share a turn; costly output yields without an idle timer.
@@ -369,9 +427,15 @@ impl ReadyMarks {
             INTERACTIVE_READS_PER_ROUND
         );
     }
+    /// Grants a short read for slot `index` if the round still has budget; see
+    /// `read_interactive_at`.
     fn read_interactive(&mut self, index: usize) -> bool {
         self.read_interactive_at(index, Instant::now())
     }
+    /// Grants the slot one short PTY read at time `now`, or refuses. Refused when
+    /// the round has used all its reads, the deadline has passed, or this slot
+    /// already read this round. A grant cancels the slot's bulk entry; a refusal
+    /// leaves it, so bulk progress continues to rotate.
     fn read_interactive_at(&mut self, index: usize, now: Instant) -> bool {
         if self.interactive_reads == INTERACTIVE_READS_PER_ROUND
             || self.output_deadline.is_some_and(|deadline| now >= deadline)
@@ -402,6 +466,7 @@ impl ReadyMarks {
         self.promote(index);
         true
     }
+    /// Marks the slot as having read this round. False if it already had.
     fn read_once(&mut self, index: usize) -> bool {
         if self.read[index] == self.round {
             return false;
@@ -441,6 +506,9 @@ enum AckMode {
     QueuedRead,
 }
 impl AckMode {
+    /// Chooses how to handle an acknowledgment: `QueuedRead` when a PTY read is
+    /// pending, `Fresh` for a new incoming acknowledgment with nothing writable,
+    /// otherwise `Immediate`.
     fn for_control(incoming: bool, writable: bool, read_pending: bool) -> Self {
         if read_pending {
             Self::QueuedRead
@@ -486,6 +554,10 @@ fn settle(
 ) -> io::Result<bool> {
     settle_with_ack_mode(index, slots, registry, timers, marks, AckMode::Immediate)
 }
+/// Brings a ready session to rest after a step: runs its housekeeping (with
+/// acknowledgments held back unless `ack_mode` is `Immediate`), removes it if it
+/// finished, schedules its retention deadline once and re-syncs its epoll
+/// interest. Returns false if the slot is empty or was just finished.
 fn settle_with_ack_mode(
     index: usize,
     slots: &mut [Option<Session>],
@@ -517,11 +589,23 @@ fn settle_with_ack_mode(
     registry.sync(index, session, !matches!(ack_mode, AckMode::Immediate))?;
     Ok(true)
 }
+/// Drops the session in slot `index` and its registrations. Used when a step
+/// fails or panics, so one hosted session cannot take the others down.
 fn retire_failed(index: usize, slots: &mut [Option<Session>], registry: &mut Registry) {
     slots[index] = None;
     registry.retire(index);
 }
 
+/// The shared host's event loop. Serves all `sessions` on the current thread
+/// until every one has ended, then returns.
+///
+/// Each turn waits in epoll (without a timeout when idle work exists, otherwise
+/// until the next retention deadline), gathers readiness, reads signals
+/// (child exit, and the diagnostic dump signals when built for diagnostics),
+/// dispatches input, then spends a bounded output budget so input is never
+/// starved by output. A session that fails or panics is retired alone; the
+/// function then returns an error once the others finish. `accounting` is an
+/// optional diagnostics file that is closed on its first write error.
 #[allow(clippy::too_many_lines)]
 pub(super) fn run(
     sessions: Vec<Session>,

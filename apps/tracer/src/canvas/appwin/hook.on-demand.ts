@@ -10,6 +10,7 @@ import type { SessionBinding } from "../sessions/adapter";
 import type { AppWindowsAdapter } from "./adapter";
 import { createAppWindowsPart, type AppWindowsPart } from "./appwin.on-demand";
 
+/** What the canvas calls on the app-window feature. Every method is safe to call while the feature is off: it then does nothing or returns an empty list. */
 export interface AppWindowsHook {
   togglePicker(anchor: HTMLElement, source: PopoverSource, query?: string): void;
   paletteEntries(): PaletteEntry[];

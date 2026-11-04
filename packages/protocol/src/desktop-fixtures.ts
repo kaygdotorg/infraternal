@@ -1,5 +1,10 @@
 /** Shared binary desktop fixtures for semantic and incremental differential tests [D12,D232]. */
 import type { DesktopMessage } from "./codec";
+/**
+ * One valid message of every desktop kind, mostly at its maximum field values (all-ones
+ * sequence numbers, extreme scroll deltas, all modifiers). Tests encode each, decode it again
+ * and compare the result with the Rust codec's output for the same message.
+ */
 export const desktopCases:DesktopMessage[]=[
   {kind:"input",input:{kind:"release"}},
   {kind:"attach",sessionId:new Uint8Array(16).fill(146),delivery:0},

@@ -17,6 +17,7 @@ pub fn initialize_private_key_memory() -> Result<(), crate::ServerError> {
     )
 }
 
+/// Applies the memory-protection result for private keys. As root it refuses to continue without locked memory and core-dump exclusion; as an unprivileged development account it only warns.
 fn enforce_private_key_memory(protection: i32, root: bool) -> Result<(), crate::ServerError> {
     if protection == 1 {
         return Ok(());
@@ -172,6 +173,7 @@ impl MemoryCaSource {
         Ok(source)
     }
 
+    /// Unlocks the source with `material`. The material must be a valid CA whose issuer certificate is byte-identical to the one this source already trusts; anything else is refused. The key is stored before the unlocked event is sent, so no signer can see "unlocked" without a key.
     pub(crate) fn install(&self, material: CaMaterial) -> Result<(), CaError> {
         CertificateAuthority::from_material(material.clone())?;
         if material.issuer().to_der().map_err(|_| CaError)?

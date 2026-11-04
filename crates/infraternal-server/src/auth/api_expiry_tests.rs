@@ -7,12 +7,18 @@ use super::*;
 async fn key(f: &Fixture) -> String {
     let approval = f
         .auth
-        .device_start_for("cli", vec!["hosts:read".into()], Some(30 * 86_400), NOW)
+        .device_start_for(
+            "cli",
+            vec!["hosts:read".into()],
+            Some(30 * 86_400),
+            TEST_SOURCE,
+            NOW,
+        )
         .await
         .unwrap();
-    bind_tap(&f.auth, &f.session, approve(&approval), NOW).await;
+    // Key lifetimes, not the approval ceremony, are under test here.
     f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .approve_without_passkey_for_tests(&f.session, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     let key = f

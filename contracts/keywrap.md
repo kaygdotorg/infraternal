@@ -102,7 +102,8 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | recovery-cancel | `{}` + any live session | `{ok:true}` |
 | device-start | `{device,scopes}` | `{poll_token,user_code,expires_in:600}` |
 | device-inspect | `{code}` + session | requested device/scopes for approval UI |
-| device-approve | `{code}` + session tapped for `device.approve` with this `code` | `{ok:true}` |
+| device-approve-start | `{code}` + session (owner for a machine join; join codes must be inspected first) | passkey `{ceremony,options}` bound to this code and session |
+| device-approve-finish | `{code,ceremony,proof}` + the same session | `{ok:true}`; one tap approves exactly this request, once (#263) |
 | device-redeem | `{token:poll_token}` | `{api_key}` once |
 | api-list | `{}` + session | device/scopes and nonsecret revocation `id` |
 | security-settings | `{}` + live owner session | `{api_key_lifetime_days}` |
@@ -126,8 +127,7 @@ tap opens the 15-minute admin window (D333). Server action adapters call `Auth::
 to enforce it without duplicating policy.
 
 Per-action taps (D333, D336) are bound to the one action shown on screen. The browser signs in
-again with `login-start {user_id?, action}`, where `action` is one of
-`{"kind":"device.approve","code":...}`, `{"kind":"passkey.add"}`,
+again with `login-start {user_id?, action}`, where `action` is one of `{"kind":"passkey.add"}`,
 `{"kind":"recovery.rotate"}` or `{"kind":"security.settings","api_key_lifetime_days":n}`. An
 unknown kind, an extra field or an out-of-range value is `400`. The server keeps a
 domain-separated digest of the action and its parameters on the ceremony, and `login-finish`
@@ -135,8 +135,10 @@ writes it on the new session. The matching change spends it once in its own writ
 transaction, within 120 s of the tap. Any other action or parameters, a second use, a later
 use or a plain sign-in is `401`. A refused change rolls back and leaves the tap unspent.
 `add-start` spends the `passkey.add` tap, and `registration-finish` then only checks that
-this live session spent it. A new authenticator may take longer than 120 s. CA setup and CA role
-changes use their own operation-bound ceremonies (`contracts/remote.md`). CLI keys
+this live session spent it. A new authenticator may take longer than 120 s. Key approval
+(sign-in and machine join) is its own ceremony: `device-approve-start` binds a passkey ceremony
+to this session and this code, and `device-approve-finish` spends it once (#263). CA setup and CA
+role changes use their own operation-bound ceremonies (`contracts/remote.md`). CLI keys
 never establish a fresh browser session. Initial scopes are `hosts:read`,
 `terminal:connect`, `actions:dry-run`; destructive MCP execution is not granted
 by this lane. Action adapters must require the separate dry-run contract [28].

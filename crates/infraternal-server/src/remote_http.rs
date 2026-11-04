@@ -1,7 +1,7 @@
 //! Serves bounded remote enrollment and owner revocation over HTTPS; signer unlock remains a separate trusted D168 adapter, #78.
 
 use crate::{
-    auth::Auth,
+    auth::{ApprovedMachineJoin, Auth},
     ca::CaKeySource,
     enrollment::{EnrollmentStore, IssueConstraints, Mode},
     remote_enrollment::RemoteEnrollment,
@@ -148,6 +148,15 @@ impl InvitationIssuer {
             None,
         )
         .await
+    }
+    /// Issue the existing one-machine invitation for an owner-approved device-code request.
+    pub(crate) async fn issue_approved_machine_join(
+        &self,
+        poll_token: &str,
+        approval: ApprovedMachineJoin,
+        now: i64,
+    ) -> Result<JoinInvitation, StatusCode> {
+        issue_approved_machine_join(self.0.clone(), poll_token, approval, now).await
     }
     pub(crate) fn ready(&self) -> bool {
         self.0.source.load().is_ok()
@@ -486,6 +495,109 @@ async fn issue_invitation(
             .transpose()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
         endpoint: Some(api.endpoint.endpoint),
+        server_name: api.endpoint.server_name,
+    };
+    transaction
+        .commit()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(invitation)
+}
+
+async fn issue_approved_machine_join(
+    api: Api,
+    poll_token: &str,
+    approval: ApprovedMachineJoin,
+    now: i64,
+) -> Result<JoinInvitation, StatusCode> {
+    let request = approval.request;
+    let (mode, execution_uid) = match request.mode.as_str() {
+        "system" if request.execution_uid == 0 => (Mode::Rootful, 0),
+        "user" if request.execution_uid != 0 => (Mode::Rootless, request.execution_uid),
+        _ => return Err(StatusCode::FORBIDDEN),
+    };
+    let expected_key_digest = request.key_digest().map_err(|_| StatusCode::FORBIDDEN)?;
+    let invitation_secret = request
+        .receipt_token(poll_token)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let mut transaction = api
+        .pool
+        .begin()
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // A device approval can create only its requested owner-bound host row.
+    sqlx::query(
+        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) \
+         SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+             WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1) \
+         ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(request.host_id.as_bytes().as_slice())
+    .bind(&approval.user_id)
+    .bind(mode.as_str())
+    .bind(i64::from(execution_uid))
+    .bind(approval.issued_at)
+    .bind(&approval.session_hash)
+    .bind(&approval.user_id)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let stored_uid: Option<i64> = sqlx::query_scalar(
+        "SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? AND revoked_at IS NULL",
+    )
+    .bind(request.host_id.as_bytes().as_slice())
+    .bind(&approval.user_id)
+    .bind(mode.as_str())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if stored_uid != Some(i64::from(execution_uid)) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let token = api
+        .store
+        .issue_approved_receipt_in(
+            crate::enrollment::ApprovedJoinReceipt {
+                owner: &approval.user_id,
+                host: request.host_id,
+                mode,
+                issued_at: approval.issued_at,
+                expires_at: approval.expires_at,
+                now,
+                session_hash: &approval.session_hash,
+                invitation_secret: &invitation_secret,
+                expected_key_digest: &expected_key_digest,
+            },
+            &mut transaction,
+        )
+        .await
+        .map_err(|error| match error {
+            crate::enrollment::EnrollmentError::Denied => StatusCode::FORBIDDEN,
+            crate::enrollment::EnrollmentError::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
+        })?;
+    let invitation = JoinInvitation {
+        host_id: request.host_id,
+        mode,
+        execution_uid,
+        public_origin: api.auth.origin().to_owned(),
+        token: token.secret().to_owned(),
+        ca_der: B64.encode(
+            api.source
+                .public_issuer()
+                .map(|issuer| issuer.to_der())
+                .transpose()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+                .unwrap_or(api.endpoint.ca_der),
+        ),
+        https_system_roots: api.source.uses_system_https(),
+        https_der: api
+            .source
+            .https_certificate()
+            .map(|leaf| leaf.to_der().map(|der| B64.encode(der)))
+            .transpose()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        endpoint: None,
         server_name: api.endpoint.server_name,
     };
     transaction

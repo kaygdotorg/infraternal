@@ -1,0 +1,35 @@
+# Managed mesh-only reverse proxy acquisition, configuration and supervision.
+[package]
+name = "infraternal-plugin-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
+infraternal-mesh = { path = "../../infraternal-mesh", version = "0.1.0" }
+infraternal-shim.workspace = true
+base64.workspace = true
+nix.workspace = true
+openssl.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+url.workspace = true
+flate2 = "1"
+tar = "0.4"
+uuid.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+
+[dev-dependencies]
+flate2 = "1"
+tar = "0.4"
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }

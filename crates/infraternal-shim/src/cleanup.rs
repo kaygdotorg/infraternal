@@ -32,6 +32,13 @@ pub(crate) struct Cleanup {
 }
 
 impl Cleanup {
+    /// Creates the private cleanup socket next to the session socket (same name with
+    /// the `stop` extension), mode `0600`, non-blocking. `proof` is the byte string
+    /// written back to whoever asked for cleanup once it is confirmed; `controller`
+    /// is the one non-root uid allowed to connect.
+    ///
+    /// Fails if something already exists at that path: another live endpoint is
+    /// never unlinked. The socket file is removed again when the `Cleanup` drops.
     #[cold]
     pub(crate) fn bind(endpoint: &Path, controller: u32, proof: Vec<u8>) -> io::Result<Self> {
         let path = endpoint.with_extension("stop");
@@ -54,25 +61,46 @@ impl Cleanup {
         Ok(cleanup)
     }
 
+    /// The listening socket, for the shim's poll loop to wait on.
     pub(crate) fn listener(&self) -> &impl AsFd {
         &self.listener
     }
+    /// The currently connected recipient, if any, for the poll loop to wait on.
     pub(crate) fn peer(&self) -> Option<&UnixStream> {
         self.peer.as_ref()
     }
+    /// True once a valid stop request has been read. It stays true: a later
+    /// reconnect or a lost recipient never cancels a requested cleanup.
     pub(crate) fn requested(&self) -> bool {
         self.requested
     }
+    /// Marks cleanup as confirmed, which lets `flush` start sending the proof.
+    /// Called once the session's child processes have been finished.
     pub(crate) fn confirm(&mut self) {
         self.confirmed = true;
     }
+    /// True when the proof can be sent: cleanup is confirmed, a request was read
+    /// and a recipient is connected. The poll loop waits for writability only then.
     pub(crate) fn writable(&self) -> bool {
         self.confirmed && self.accepted && self.peer.is_some()
     }
+    /// True while a recipient is connected but its request has not been read yet,
+    /// so the poll loop should wait for it to become readable.
     pub(crate) fn reading(&self) -> bool {
         !self.accepted && self.peer.is_some()
     }
 
+    /// Deletes the on-disk records that tie this finished terminal to the people
+    /// who had access to it (files named `<32 hex digits>-<session>.terminal` in the
+    /// `infraternal-login-locks` directory under the state directory).
+    ///
+    /// Requires that the session's exit record already exists; without it this
+    /// fails, so a live terminal's records are never removed. A missing directory
+    /// means there is nothing to do. The directory must be private (`0700`, owned by
+    /// this user) and every record an empty `0600` file of ours; anything else is
+    /// refused with `PermissionDenied` rather than deleted. The directory is synced
+    /// afterwards. Session ids are never reused, so only this terminal's records can
+    /// match.
     #[cold]
     pub(crate) fn retire_attribution(&self) -> io::Result<()> {
         let socket = self.path.with_extension("sock");
@@ -135,6 +163,9 @@ impl Cleanup {
         fs::File::open(directory)?.sync_all()
     }
 
+    /// Forgets the current recipient, for example after a hang-up. A complete
+    /// request that is already queued is read first, so losing the connection never
+    /// cancels a cleanup that was asked for.
     pub(crate) fn disconnect(&mut self) {
         // HUP can arrive with a complete queued request. Consume it before
         // retiring the recipient: losing the proof link never cancels cleanup.
@@ -142,6 +173,10 @@ impl Cleanup {
         self.peer = None;
     }
 
+    /// Accepts at most one connection (so other events keep their turn) and makes it
+    /// the recipient. Connections from users other than root or the controller are
+    /// dropped silently. A new recipient replaces the old one, whose queued request
+    /// is read first; the proof restarts from its first byte.
     #[cold]
     pub(crate) fn accept(&mut self) -> io::Result<()> {
         // One accept per lifecycle turn preserves SIGCHLD and PTY fairness.
@@ -169,6 +204,9 @@ impl Cleanup {
         Ok(())
     }
 
+    /// Reads one byte from the recipient. The fixed stop byte marks the cleanup as
+    /// requested and accepted. No data yet is fine; end of input, any other byte
+    /// or an error drops the recipient. Does nothing after a request was accepted.
     #[cold]
     pub(crate) fn read_request(&mut self) {
         let Some(peer) = &mut self.peer else { return };
@@ -195,6 +233,9 @@ impl Cleanup {
         }
     }
 
+    /// Writes as much of the proof as the socket takes. Does nothing unless
+    /// `writable`. When all of it is written, or the recipient fails, the recipient
+    /// is dropped; a partial write is resumed on the next call.
     #[cold]
     pub(crate) fn flush(&mut self) {
         if !self.writable() {

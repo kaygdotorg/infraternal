@@ -16,6 +16,8 @@ pub mod coordinator;
 
 pub mod backend;
 
+pub mod proxy_ports;
+
 #[cfg(feature = "relay")]
 pub mod discovery;
 

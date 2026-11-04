@@ -10,7 +10,9 @@
  *
  * Reduced motion, and a first mount with no card to leave, render with no swap.
  */
+/** The strong ease-out curve used for every part of the swap. */
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+/** How far (px) a card travels sideways as it enters or leaves. */
 const SLIDE = 28;
 
 /** Runs `render` (which must replace the host's content) and animates from the card it replaced. */

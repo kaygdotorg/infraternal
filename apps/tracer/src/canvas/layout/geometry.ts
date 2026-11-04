@@ -11,13 +11,20 @@ import { COLUMN_GAP, DEFAULT_SIZES, columnWidth, maxColumnWidth, peekWidth, type
 
 export { COLUMN_GAP };
 
+/** A point in canvas (world) pixels. */
 export interface Pt { x: number; y: number }
+/** A rectangle in canvas pixels: top-left corner `x`, `y` and size `w`, `h`. */
 export interface Rect { x: number; y: number; w: number; h: number }
 
+/** The grid cell in pixels. Every view box has its edges on this grid. */
 export const CELL = 120;
 /** Space inside a box around the content: left, top (room for the view label), right, bottom. */
 export const MARGIN = { l: 48, t: 96, r: 48, b: 48 };
 
+/**
+ * The sizes the canvas lays out with at the current viewport, made by `metricsFor`: column widths, the column height (`clh`), the node
+ * size of the graph, and the UI scale. `colW` and `peekW` are the default widths; `minW` and `maxW` bound what is drawn.
+ */
 export interface Metrics {
   colW: number;
   /** A column's width in a strip of several on a phone (neighbours peek in); equal to `colW` elsewhere. */
@@ -82,8 +89,10 @@ export function contentSize(view: ViewModel, m: Metrics): { w: number; h: number
   return { w, h: view.cols.length ? m.clh : Math.round(m.clh * 0.7) };
 }
 
+/** A view's rectangle on the grid, as used by `resolve`. */
 export interface Box { id: string; x: number; y: number; w: number; h: number }
 
+/** The grid box of `view`: its content plus `MARGIN`, rounded up to whole cells, at the view's own position. */
 export function boxOf(view: ViewModel, m: Metrics): Box {
   const c = contentSize(view, m);
   const w = Math.ceil((c.w + MARGIN.l + MARGIN.r) / CELL) * CELL;
@@ -91,8 +100,10 @@ export function boxOf(view: ViewModel, m: Metrics): Box {
   return { id: view.id, x: view.x, y: view.y, w, h };
 }
 
+/** Rounds a canvas coordinate to the nearest grid line. */
 export const snapToGrid = (v: number): number => Math.round(v / CELL) * CELL;
 
+/** True when the two boxes share any area. Boxes that only touch do not overlap. */
 const overlaps = (a: Box, b: Box): boolean => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 
 /** Picks the least-travel separation, avoiding a protected box when display settlement holds one anchor. */

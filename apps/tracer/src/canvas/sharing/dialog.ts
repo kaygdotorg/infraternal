@@ -11,7 +11,9 @@
 import { mountChipInput, type Chip, type ChipInputController } from "../../../../../packages/ui/src/chip-input";
 import { enhanceSwitch } from "../../../../../packages/ui/src/switch";
 
+/** What the person chose to send: which views, to whom, and whether to publish to the team. */
 export interface ShareChoice { views: string[]; to: string[]; publish: boolean }
+/** What the dialog needs: the views to offer and the ones preselected, the sender, who can receive, whether publishing is allowed, and the send callback. */
 export interface ShareDialogOptions {
   /** Views that can be shared (not Settings). */
   views: Array<{ id: string; name: string }>;
@@ -23,12 +25,17 @@ export interface ShareDialogOptions {
   canPublish: boolean;
   onSend(choice: ShareChoice): void;
 }
+/** The built dialog: its `panel` (shown by the caller), `focus`, and the `recipients` input. */
 export interface ShareDialog { panel: HTMLElement; content: HTMLElement[]; focus(): void; recipients(): ChipInputController; dispose(): void }
 
+/** Icon markup for a person recipient. */
 const USER = '<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1-4 4-5.5 7-5.5s6 1.5 7 5.5"/></svg>';
+/** Icon markup for a group recipient. */
 const GROUP = '<svg viewBox="0 0 24 24" class="is-line" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3 19c.8-3.4 3.2-5 6-5s5.2 1.6 6 5M16 5.5a3 3 0 0 1 0 5.5M18 14.5c1.7.6 2.7 2 3 4.5"/></svg>';
+/** Icon markup for the send button. */
 const SEND = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12 20 4l-4 16-4.5-6.5z"/><path d="m11.5 13.5 8.5-9.5"/></svg>';
 
+/** Builds the dialog panel. It does not show it: the caller morphs it out of the top pill. `onSend` receives the choice when the person sends. */
 export function buildShareDialog(options: ShareDialogOptions): ShareDialog {
   const panel = document.createElement("section");
   panel.className = "cl-share ui-overlay-surface";

@@ -2,7 +2,10 @@
 use std::{future::Future, io, time::Duration};
 use tokio::sync::watch;
 
+/// How long the server link may stay continuously down before `run` abandons
+/// the current attempt and starts a fresh one (five minutes).
 const OFFLINE_LIMIT: Duration = Duration::from_mins(5);
+/// Upper bound on the pause between reconnect attempts (30 seconds).
 pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Rate limit for repeated server-link close lines: the first line of a window
@@ -12,12 +15,16 @@ pub(super) const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// one timer task per window.
 pub(super) struct LinkNotes(std::sync::Arc<std::sync::Mutex<NoteWindow>>);
 
+/// State behind `LinkNotes`: when the current window started, how many close
+/// lines were held back in it, and whether a timer is already scheduled to report
+/// that count.
 struct NoteWindow {
     start: Option<tokio::time::Instant>,
     suppressed: u64,
     armed: bool,
 }
 
+/// Length of one rate-limit window for repeated link-close lines (60 seconds).
 pub(super) const LINK_NOTE_WINDOW: Duration = Duration::from_secs(60);
 
 impl NoteWindow {
@@ -37,6 +44,7 @@ impl NoteWindow {
 }
 
 impl LinkNotes {
+    /// Creates an empty rate limiter; the first event prints immediately.
     pub(super) fn new() -> Self {
         Self(std::sync::Arc::new(std::sync::Mutex::new(NoteWindow {
             start: None,

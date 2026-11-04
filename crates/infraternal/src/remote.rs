@@ -107,7 +107,29 @@ pub(crate) fn default_data() -> io::Result<PathBuf> {
 }
 
 pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()> {
+    join_with_key_inner(url, data, input, None).await
+}
+
+/// Enroll the exact key whose public fingerprint was approved before system elevation.
+pub(crate) async fn join_with_key(
+    url: &str,
+    data: &Path,
+    invitation: &[u8],
+    key_pkcs8: &[u8],
+) -> io::Result<()> {
+    join_with_key_inner(url, data, invitation, Some(key_pkcs8)).await
+}
+
+async fn join_with_key_inner(
+    url: &str,
+    data: &Path,
+    input: &[u8],
+    key_pkcs8: Option<&[u8]>,
+) -> io::Result<()> {
     if input.len() > 8192 {
+        return Err(refused());
+    }
+    if key_pkcs8.is_some_and(|bytes| bytes.is_empty() || bytes.len() > 4096) {
         return Err(refused());
     }
     let invitation: JoinInvitation = serde_json::from_slice(input).map_err(|_| refused())?;
@@ -130,21 +152,23 @@ pub(crate) async fn join(url: &str, data: &Path, input: &[u8]) -> io::Result<()>
     // for this key and chain to the invited root, and the stored identity is
     // replaced only after that.
     let previous = enrolled_key(data, &invitation, uid, &server_name)?;
-    let (key, snapshot) = match previous {
-        Some((key, snapshot)) => (key, Some(snapshot)),
-        None => (prepared_key(data)?, None),
+    let supplied_key = key_pkcs8
+        .map(|bytes| PKey::private_key_from_pkcs8(bytes).map_err(|_| refused()))
+        .transpose()?;
+    let (key, snapshot) = match (previous, supplied_key) {
+        (Some((key, snapshot)), Some(supplied)) if key.public_eq(&supplied) => {
+            (key, Some(snapshot))
+        }
+        (Some(_), Some(_)) => return Err(refused()),
+        (Some((key, snapshot)), None) => (key, Some(snapshot)),
+        (None, Some(key)) => (key, None),
+        (None, None) => (prepared_key(data)?, None),
     };
-    let mut csr = X509Req::builder().map_err(|_| refused())?;
-    csr.set_subject_name(&X509NameBuilder::new().map_err(|_| refused())?.build())
-        .map_err(|_| refused())?;
-    csr.set_pubkey(&key).map_err(|_| refused())?;
-    csr.sign(&key, MessageDigest::null())
-        .map_err(|_| refused())?;
     let request = JoinRequest {
         host_id: invitation.host_id,
         mode: invitation.mode,
         token: invitation.token,
-        csr_der: B64.encode(csr.build().to_der().map_err(|_| refused())?),
+        csr_der: join_csr_der(&key)?,
     };
     let root = X509::from_der(&B64.decode(&invitation.ca_der).map_err(|_| refused())?)
         .map_err(|_| refused())?;
@@ -213,8 +237,52 @@ pub(crate) async fn prepare_join_key(origin: &str, data: &Path) -> io::Result<[u
     prepared_key_digest(data)
 }
 
+/// Prepare a new machine key without reusing this user's existing agent identity.
+pub(crate) async fn prepare_machine_join_key(origin: &str, data: &Path) -> io::Result<[u8; 32]> {
+    preflight(origin, None, true).await?;
+    prepare(data).map_err(|error| local_state(error.kind()))?;
+    prepared_key_digest(data).map_err(|error| local_state(error.kind()))
+}
+
+fn join_csr_der(key: &PKey<openssl::pkey::Private>) -> io::Result<String> {
+    let mut csr = X509Req::builder().map_err(|_| refused())?;
+    csr.set_subject_name(&X509NameBuilder::new().map_err(|_| refused())?.build())
+        .map_err(|_| refused())?;
+    csr.set_pubkey(key).map_err(|_| refused())?;
+    csr.sign(key, MessageDigest::null())
+        .map_err(|_| refused())?;
+    Ok(B64.encode(csr.build().to_der().map_err(|_| refused())?))
+}
+
+fn local_state(kind: io::ErrorKind) -> io::Error {
+    io::Error::new(kind, "local machine state could not be accessed")
+}
+
 fn prepared_key_digest(data: &Path) -> io::Result<[u8; 32]> {
     let key = prepared_key(data)?;
+    let public = key.raw_public_key().map_err(|_| refused())?;
+    Ok(openssl::sha::sha256(&public))
+}
+
+/// Read the prepared private key only for a private, bounded handoff to the root helper.
+pub(crate) fn prepared_join_key_pkcs8(data: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
+    let key = prepared_key(data)?;
+    key.private_key_to_pkcs8()
+        .map(Zeroizing::new)
+        .map_err(|_| refused())
+}
+
+/// Remove the user's pending key after the root-owned identity has been published.
+pub(crate) fn retire_prepared_join_key(data: &Path) -> io::Result<()> {
+    retire_pending_key(data)
+}
+
+/// Derive the approved key's public digest from its private PKCS#8 handoff bytes.
+pub(crate) fn key_digest_from_pkcs8(bytes: &[u8]) -> io::Result<[u8; 32]> {
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return Err(refused());
+    }
+    let key = PKey::private_key_from_pkcs8(bytes).map_err(|_| refused())?;
     let public = key.raw_public_key().map_err(|_| refused())?;
     Ok(openssl::sha::sha256(&public))
 }

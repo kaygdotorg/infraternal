@@ -2,21 +2,23 @@
 //!
 //! A sign-in or re-authentication ceremony may name one action (`login_start_for`). The tap then
 //! authorizes exactly that action with exactly those parameters, once, within
-//! `ACTION_TAP_SECONDS`. A plain sign-in authorizes none of them. CA role changes and CA setup
-//! use their own purpose-bound ceremonies; `ca_administration_tests` checks those the same way.
+//! `ACTION_TAP_SECONDS`. A plain sign-in authorizes none of them.
+//!
+//! Key approval (#263) runs its own ceremony, bound to the session and the code. The last test
+//! here checks it the same way. CA role changes and CA setup also use their own purpose-bound
+//! ceremonies, which `ca_administration_tests` checks.
 use super::super::action_tap::{ACTION_TAP_SECONDS, TapAction};
 use super::*;
 
-/// Every per-action category D333 names that is served by the auth routes.
+/// Every per-action category D333 names whose tap is a session bound to one action (key
+/// approval has its own ceremony; see the last test).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Change {
-    ApproveKey,
     AddPasskey,
     RotateRecovery,
     SecuritySettings,
 }
-const CHANGES: [Change; 4] = [
-    Change::ApproveKey,
+const CHANGES: [Change; 3] = [
     Change::AddPasskey,
     Change::RotateRecovery,
     Change::SecuritySettings,
@@ -25,27 +27,17 @@ const CHANGES: [Change; 4] = [
 /// One concrete action as the screen shows it: the category and its parameters.
 struct Shown {
     change: Change,
-    code: String,
     days: i64,
 }
 
-async fn shown(f: &Fixture, change: Change, days: i64) -> Shown {
-    let request = f
-        .auth
-        .device_start("cli", vec!["status:read".to_owned()], NOW)
-        .await
-        .unwrap();
-    Shown {
-        change,
-        code: str_field(&request, "user_code").to_owned(),
-        days,
-    }
+/// The action `change` with `days` as its lifetime parameter (used by security settings).
+fn shown(change: Change, days: i64) -> Shown {
+    Shown { change, days }
 }
 
 impl Shown {
     fn action(&self) -> TapAction {
         serde_json::from_value(match self.change {
-            Change::ApproveKey => json!({"kind":"device.approve","code":self.code}),
             Change::AddPasskey => json!({"kind":"passkey.add"}),
             Change::RotateRecovery => json!({"kind":"recovery.rotate"}),
             Change::SecuritySettings => {
@@ -58,7 +50,6 @@ impl Shown {
     /// Run this change with the session `token` at `now`.
     async fn run(&self, f: &Fixture, token: &str, now: i64) -> Result<()> {
         match self.change {
-            Change::ApproveKey => f.auth.device_approve(token, &self.code, now).await,
             Change::AddPasskey => f.auth.add_start(token, now).await.map(drop),
             Change::RotateRecovery => {
                 let words = bip39::Mnemonic::generate(24).unwrap().to_string();
@@ -110,8 +101,8 @@ async fn a_tap_for_one_action_cannot_authorize_another() {
     for a in CHANGES {
         for b in CHANGES.into_iter().filter(|b| *b != a) {
             let mut f = fixture().await;
-            let tapped = shown(&f, a, 7).await;
-            let other = shown(&f, b, 7).await;
+            let tapped = shown(a, 7);
+            let other = shown(b, 7);
             let token = tap(&mut f, Some(&tapped), NOW).await;
             denied(
                 &other.run(&f, &token, NOW).await,
@@ -129,20 +120,9 @@ async fn a_tap_for_one_action_cannot_authorize_another() {
 async fn a_tap_is_bound_to_the_parameters_shown() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
-    let (shown_key, other_key) = (
-        shown(&f, Change::ApproveKey, 7).await,
-        shown(&f, Change::ApproveKey, 7).await,
-    );
-    let token = tap(&mut f, Some(&shown_key), NOW).await;
-    denied(
-        &other_key.run(&f, &token, NOW).await,
-        "a tap for one key request approved another",
-    );
-    shown_key.run(&f, &token, NOW).await.unwrap();
-
     let (seven, thirty) = (
-        shown(&f, Change::SecuritySettings, 7).await,
-        shown(&f, Change::SecuritySettings, 30).await,
+        shown(Change::SecuritySettings, 7),
+        shown(Change::SecuritySettings, 30),
     );
     let token = tap(&mut f, Some(&seven), NOW).await;
     denied(
@@ -157,7 +137,7 @@ async fn a_plain_sign_in_authorizes_no_per_action_change() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
     for change in CHANGES {
-        let action = shown(&f, change, 7).await;
+        let action = shown(change, 7);
         let enrollment = f.session.clone();
         denied(
             &action.run(&f, &enrollment, NOW).await,
@@ -176,25 +156,12 @@ async fn a_replayed_tap_is_refused() {
     let _guard = SERIAL.lock().await;
     for change in CHANGES {
         let mut f = fixture().await;
-        let action = shown(&f, change, 7).await;
+        let action = shown(change, 7);
         let token = tap(&mut f, Some(&action), NOW).await;
         action.run(&f, &token, NOW).await.unwrap();
-        // The same action again: a key request with a fresh code needs its own tap, and the
-        // other categories repeat the exact action the tap named.
-        let again = if change == Change::ApproveKey {
-            let next = shown(&f, change, 7).await;
-            sqlx::query("UPDATE sessions SET tap_action=? WHERE token_hash=?")
-                .bind(super::super::action_tap::digest(&next.action()))
-                .bind(hash(&token))
-                .execute(&f.auth.pool)
-                .await
-                .unwrap();
-            next
-        } else {
-            action
-        };
+        // The exact action the tap named, again.
         denied(
-            &again.run(&f, &token, NOW + 1).await,
+            &action.run(&f, &token, NOW + 1).await,
             &format!("a spent {change:?} tap ran twice"),
         );
     }
@@ -205,14 +172,14 @@ async fn an_expired_tap_is_refused() {
     let _guard = SERIAL.lock().await;
     for change in CHANGES {
         let mut f = fixture().await;
-        let late = shown(&f, change, 7).await;
+        let late = shown(change, 7);
         let token = tap(&mut f, Some(&late), NOW).await;
         denied(
             &late.run(&f, &token, NOW + ACTION_TAP_SECONDS).await,
             &format!("a {change:?} tap ran {ACTION_TAP_SECONDS} s after it was made"),
         );
         let mut f = fixture().await;
-        let on_time = shown(&f, change, 7).await;
+        let on_time = shown(change, 7);
         let token = tap(&mut f, Some(&on_time), NOW).await;
         on_time
             .run(&f, &token, NOW + ACTION_TAP_SECONDS - 1)
@@ -225,11 +192,99 @@ async fn an_expired_tap_is_refused() {
 async fn a_bound_tap_still_starts_the_admin_window() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
-    let action = shown(&f, Change::SecuritySettings, 7).await;
+    let action = shown(Change::SecuritySettings, 7);
     let token = tap(&mut f, Some(&action), NOW).await;
     action.run(&f, &token, NOW).await.unwrap();
     f.auth
         .fresh_session(&token, NOW + 60)
         .await
         .expect("the D333 browser admin window is unchanged");
+}
+
+/// A pending key request's user code, as the approval page shows it.
+async fn key_request(f: &Fixture, now: i64) -> String {
+    let request = f
+        .auth
+        .device_start("cli", vec!["status:read".to_owned()], TEST_SOURCE, now)
+        .await
+        .unwrap();
+    str_field(&request, "user_code").to_owned()
+}
+
+/// Start the key-approval ceremony for `code` from `session` and make its passkey proof.
+async fn approval_tap(f: &mut Fixture, session: &str, code: &str, now: i64) -> (String, Value) {
+    let start = f
+        .auth
+        .device_approve_start(session, code, now)
+        .await
+        .unwrap();
+    let proof = f.software.login(&start, ORIGIN, true);
+    (str_field(&start, "ceremony").to_owned(), proof)
+}
+
+/// Key approval's tap is its own ceremony (#263), and D336 holds for it as for the taps above. It
+/// is bound to the one code on the page and to the session that started it, it runs once, it
+/// expires, and no other tap (a plain sign-in, or one bound to another action) stands in for it.
+#[tokio::test]
+async fn a_key_approval_tap_is_bound_to_its_code_and_session_once_and_expires() {
+    let _guard = SERIAL.lock().await;
+    let mut f = fixture().await;
+    let session = f.session.clone();
+    let (x, y) = (key_request(&f, NOW).await, key_request(&f, NOW).await);
+
+    // Bound to its code: the ceremony for X does not approve Y, and the attempt leaves it for X.
+    let (ceremony, proof) = approval_tap(&mut f, &session, &x, NOW).await;
+    denied(
+        &f.auth
+            .device_approve_finish(&session, &y, &ceremony, proof.clone(), NOW)
+            .await,
+        "a tap for key request X approved Y",
+    );
+    // Bound to its session: another signed-in session of the same person cannot finish it.
+    let other = tapped_session(&f.auth, &f.user, json!({"kind":"passkey.add"}), NOW).await;
+    denied(
+        &f.auth
+            .device_approve_finish(&other, &x, &ceremony, proof.clone(), NOW)
+            .await,
+        "another session finished this session's approval tap",
+    );
+    f.auth
+        .device_approve_finish(&session, &x, &ceremony, proof.clone(), NOW)
+        .await
+        .expect("the tap approves the one key request it was made for");
+    // Single use.
+    denied(
+        &f.auth
+            .device_approve_finish(&session, &x, &ceremony, proof, NOW)
+            .await,
+        "an approval tap was replayed",
+    );
+
+    // Expiry: the ceremony is refused once its lifetime is over.
+    let z = key_request(&f, NOW).await;
+    let (ceremony, proof) = approval_tap(&mut f, &session, &z, NOW).await;
+    denied(
+        &f.auth
+            .device_approve_finish(&session, &z, &ceremony, proof, NOW + super::super::CEREMONY)
+            .await,
+        "an expired approval tap approved a key",
+    );
+
+    // No other tap stands in: a session tapped for security settings, finishing with an
+    // ordinary sign-in ceremony, approves nothing.
+    let settings = tapped_session(
+        &f.auth,
+        &f.user,
+        json!({"kind":"security.settings","api_key_lifetime_days":30}),
+        NOW,
+    )
+    .await;
+    let login = f.auth.login_start(&f.user, NOW).await.unwrap();
+    let proof = f.software.login(&login, ORIGIN, true);
+    denied(
+        &f.auth
+            .device_approve_finish(&settings, &y, str_field(&login, "ceremony"), proof, NOW)
+            .await,
+        "a tap for another action approved a key",
+    );
 }

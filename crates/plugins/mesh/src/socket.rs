@@ -1,4 +1,23 @@
-//! Owns Mesh socket calls, scoped live watches and deadline expiry outside terminal dispatch [11,28,198].
+//! The Mesh plugin's connection to browsers and tools: calls, live watches and
+//! their expiry [11,28,198].
+//!
+//! Each connected user gets one worker task that runs apart from the terminal
+//! dispatch loop, so slow database work can never stall a terminal. On the
+//! multiplexed socket it handles two kinds of traffic:
+//!
+//! - **Calls** on the control stream (stream 0) whose action id starts with
+//!   `mesh.`. Destructive actions need a fresh passkey confirmation, not just
+//!   an unlocked socket.
+//! - **Watches** (subscriptions) on their own streams. A watch starts with a
+//!   `snapshot` event, then gets `changed` notices, `resync` snapshots after
+//!   missed changes, presence changes or a liveness deadline, or an `error`.
+//!   A watch only ever sees what its user may view.
+//!
+//! On a watch's stream the id is `generation << 1`. The low bit is set on the
+//! last event of a watch, which tells the host the watch has ended.
+//!
+//! The plugin also starts the per-node coordination for each connected
+//! infraternal agent (see [`MeshPlugin::node_connected`]).
 use crate::{
     api::{MAX_MESH_FRAME_LEN, MeshApiError, MeshChange, MeshFilter, MeshService},
     descriptor::DESCRIPTOR,
@@ -18,23 +37,37 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Semaphore, mpsc};
+/// The stream that carries calls and their results.
 const CONTROL_STREAM: u32 = 0;
+/// How many watches one socket may hold. Sized so the list is a small array that
+/// is scanned, not hashed.
 const MAX_MESH_SUBSCRIPTIONS: usize = MAX_SUBSCRIPTIONS;
-/// Coordinator implementation; construction is pure and never creates a server [201].
+/// The Mesh plugin: serves Mesh calls and watches for users and runs the mesh
+/// coordination for connected nodes [201].
+///
+/// Creating it is pure. It never starts a server; it only holds the database
+/// pool (inside [`MeshService`]) and a limit on concurrent mesh work. Cloning
+/// is cheap and shares both.
 #[derive(Clone)]
 pub struct MeshPlugin {
     mesh: MeshService,
     mesh_work: Arc<Semaphore>,
 }
 impl MeshPlugin {
-    /// Bind to an existing server pool, leaving six authority slots in production.
+    /// Creates the plugin on the server's database pool.
+    ///
+    /// Mesh work may use at most two of the pool's connections (fewer on a
+    /// tiny pool, never fewer than one), leaving the rest, six in production,
+    /// for authority checks and other features.
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
         let capacity = Self::mesh_work_capacity(&pool);
         Self::with_mesh_service(capacity, MeshService::new(pool))
     }
 
-    /// Bind the coordinator's derived DNS default to the server's configured public origin.
+    /// Like [`new`](MeshPlugin::new), but also gives the mesh the server's
+    /// public origin (`public_origin`), from which the default DNS suffix is
+    /// derived.
     #[must_use]
     pub fn with_public_origin(pool: SqlitePool, public_origin: &str) -> Self {
         let capacity = Self::mesh_work_capacity(&pool);
@@ -44,6 +77,8 @@ impl MeshPlugin {
         )
     }
 
+    /// How many mesh jobs may use the database at once: the pool size minus two
+    /// connections kept free, limited to 1 or 2.
     fn mesh_work_capacity(pool: &SqlitePool) -> usize {
         pool.options()
             .get_max_connections()
@@ -51,6 +86,7 @@ impl MeshPlugin {
             .clamp(1, 2) as usize
     }
 
+    /// Assembles the plugin from a service and a work limit.
     fn with_mesh_service(capacity: usize, mesh: MeshService) -> Self {
         Self {
             mesh,
@@ -58,19 +94,26 @@ impl MeshPlugin {
         }
     }
 
-    /// Share the same revision broadcaster with other server inventory features.
+    /// The mesh service this plugin uses. Other server features can take it to
+    /// share the same change broadcaster, so they hear about mesh revisions too.
     #[must_use]
     pub fn service(&self) -> MeshService {
         self.mesh.clone()
     }
 }
 impl Plugin for MeshPlugin {
+    /// Drops the cached data-plane view when permissions change, so the next
+    /// read uses the new authority.
     fn authority_changed(&self) -> Option<Operation<'_, ()>> {
         Some(Box::pin(self.mesh.invalidate_dataplane()))
     }
+    /// The static description of the plugin's actions and topics.
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
+    /// Runs for as long as an infraternal agent's channel is connected: serves
+    /// that node's mesh configuration. On the server's own channel it also
+    /// tracks who is online, and the two tasks end together.
     fn node_connected(
         &self,
         channel: Arc<dyn infraternal_plugin_api::node_channel::NodeChannel>,
@@ -93,6 +136,11 @@ impl Plugin for MeshPlugin {
             }
         }))
     }
+    /// Runs one user's worker until the socket closes.
+    ///
+    /// The loop waits for the first of: a watch's liveness deadline, a request
+    /// frame, a presence change, or a mesh change notice. Every step runs under
+    /// the host's authorization check, and any failure ends the worker.
     fn run(
         &self,
         host: Arc<dyn SocketHost>,
@@ -188,30 +236,46 @@ impl Plugin for MeshPlugin {
     }
 }
 
-/// The retained filter and its queue-only generation share one installed watch.
+/// One live watch on this socket.
+///
+/// The filter and the generation belong together: replacing the watch replaces
+/// both.
 #[derive(Clone)]
 struct MeshSubscription {
+    /// The watch id chosen by the client.
     sub_id: u32,
+    /// What the watch wants to see.
     filter: MeshFilter,
+    /// Counts how many times this stream was subscribed; stale replies are
+    /// dropped by comparing it.
     generation: u32,
+    /// Unix time in seconds at which a node shown by this watch is due to be
+    /// reported offline, so a resync is owed. `None` if no such time exists.
     liveness_deadline: Option<i64>,
 }
 
-/// The 32-watch bound makes replacement a bounded scan without hashing/allocation.
+/// Removes the watch `sub_id` if present. The small fixed limit on watches makes
+/// this a short scan that needs no hashing or allocation.
 fn mesh_remove(subscriptions: &mut Vec<MeshSubscription>, sub_id: u32) {
     if let Some(index) = subscriptions.iter().position(|sub| sub.sub_id == sub_id) {
         subscriptions.swap_remove(index);
     }
 }
 
+/// The JSON a client sends to start a watch: `{"topic": "mesh", "tag": ...}`.
+/// Unknown fields are refused.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MeshSubscribeFilter {
+    /// Must be `mesh`.
     topic: String,
+    /// Only show nodes with this tag, if given.
     #[serde(default)]
     tag: Option<String>,
 }
 
+/// The `error` event for a failed watch, with a short message that is safe to
+/// show the user.
 fn mesh_error_event(error: MeshApiError) -> Value {
     let message = match error {
         MeshApiError::InvalidInput => "invalid input",
@@ -225,6 +289,8 @@ fn mesh_error_event(error: MeshApiError) -> Value {
     json!({"type":"error","error":message})
 }
 
+/// Sends one event on a watch's stream. `stream_id` carries the generation and
+/// the end-of-watch bit (see the module docs).
 async fn send_mesh_event<K>(
     sink: &mut K,
     sub_id: u32,
@@ -248,6 +314,11 @@ where
     .await
 }
 
+/// Tells every watch that may see `change` that something changed, and updates
+/// its liveness deadline.
+///
+/// A watch that is not allowed to see the change hears nothing. A watch whose
+/// permission check fails is sent an `error` and removed.
 #[allow(clippy::too_many_arguments)]
 async fn send_mesh_change<K>(
     state: &MeshPlugin,
@@ -320,8 +391,10 @@ enum Resync<'a> {
 
 /// Sends fresh snapshots to the watches `which` selects.
 ///
-/// The snapshots are read under one shared `mesh_work` permit and sent after it is released: a viewer slow to
-/// drain its socket must not hold the permit that host configuration delivery also needs (#236).
+/// The snapshots are read under one shared `mesh_work` permit and sent after
+/// it is released: a viewer slow to drain its socket must not hold the permit
+/// that host configuration delivery also needs (#236). A watch whose snapshot
+/// fails gets an `error` and is removed.
 #[allow(clippy::too_many_arguments)]
 async fn send_mesh_resync<K>(
     state: &MeshPlugin,
@@ -389,7 +462,11 @@ where
     Ok(())
 }
 
-/// Initial and resync snapshots share permission/error delivery for one generation.
+/// Builds and sends the first snapshot (or a replacement) of one watch.
+///
+/// Returns whether the watch stays open and its next liveness deadline. If
+/// the user may no longer view the data, an `error` is sent and the watch ends.
+/// `kind` is the event type, such as `snapshot`.
 async fn send_mesh_snapshot<K>(
     state: &MeshPlugin,
     user_id: &str,
@@ -422,7 +499,8 @@ where
     Ok((retained, deadline))
 }
 
-/// Parse the complete Mesh view filter separately from generic topic discovery.
+/// Parses the JSON filter of a Mesh watch, separately from generic topic
+/// discovery.
 ///
 /// # Errors
 /// Refuses oversized JSON, unknown fields, duplicate fields and other topics.
@@ -440,9 +518,19 @@ pub fn parse_subscription(input: &[u8]) -> Result<MeshFilter, MeshApiError> {
         cursor: None,
     })
 }
+/// Handles one request frame: starts a watch (`Subscribe`) or runs a `mesh.*`
+/// action (`Call`). Any other frame, or a wrong stream, is an error that ends
+/// the worker.
+///
+/// Mesh work runs in its own ordered, bounded socket worker [D11]. Slow
+/// database writes and subscriber reads must never park the terminal and
+/// control dispatch loop.
+///
+/// A watch is registered before its first snapshot is built, and a bad filter
+/// answers with an `error` event that ends the watch. For a call, the result
+/// frame is only sent if the socket is still live afterwards, and destructive
+/// actions first require a fresh passkey confirmation.
 #[allow(clippy::too_many_lines)]
-// Mesh work runs in its own ordered, bounded socket worker [D11]. Slow database
-// writes and subscriber reads must never park the terminal/control dispatch loop.
 async fn handle_mesh_frame<K>(
     wire: Bytes,
     state: &MeshPlugin,
@@ -569,7 +657,8 @@ where
     }
 }
 
-/// Queue only bounded encoded bytes; the host owns the actual socket write deadline.
+/// Encodes `frame` and queues it for the socket. The queueing itself may wait at
+/// most one second; the host owns the deadline for the actual socket write.
 async fn send_frame<K>(
     sink: &mut K,
     stream_id: u32,
@@ -587,6 +676,8 @@ where
     .await
     .map_err(|_| ())?
 }
+/// The current Unix time in seconds, or `Err` if the clock is before 1970 or out
+/// of range.
 fn unix_seconds() -> Result<i64, ()> {
     i64::try_from(
         SystemTime::now()

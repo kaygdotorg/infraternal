@@ -81,6 +81,7 @@ fn configure(node: &mut Node) {
             last: index + 1 == chunk_count,
             addresses: addresses(1),
             default_policy: DefaultPolicy::Deny,
+            exposure: None,
             upserted: peers.iter().cloned().collect::<BTreeMap<_, _>>(),
             merged: BTreeMap::new(),
             removed: Vec::new(),

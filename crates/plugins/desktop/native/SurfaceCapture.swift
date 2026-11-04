@@ -1,48 +1,98 @@
 /// Role: same-process ScreenCaptureKit IOSurface → hardware encoder capture; latest damage replaces queued surfaces [D204,D266].
+/// Frames flow capture callback -> `receiveFrame` (a one-slot mailbox) -> `drain` on the encoding
+/// queue -> `Encoder` -> `output` as video packets (kind 70). The mailbox keeps only the newest
+/// frame, so a slow encoder skips old pictures instead of building latency. No pixels are copied
+/// between processes: the framework's own buffer goes straight to the hardware encoder.
 import AppKit
 import CoreMedia
 import ScreenCaptureKit
 import VideoToolbox
 
+/// Captures one window or display with ScreenCaptureKit and streams it as encoded video.
+///
+/// Create it, call `start()` once, then feed it `congestion()` and `repair()` signals as the viewer
+/// reports them, and `stop()` when done. After `stop()` it cannot be started again. `stop()`,
+/// `congestion()` and `repair()` may be called from any thread; capture callbacks arrive on one
+/// serial queue and encoding runs on another.
 final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
+    /// Guards all the mutable state below that is shared between the capture and encoding queues.
     private let mailbox = NSLock()
+    /// Opt-in timing output, enabled by the `INFRATERNAL_DESKTOP_MEASURE` environment variable.
     private let measure = ProcessInfo.processInfo.environment["INFRATERNAL_DESKTOP_MEASURE"] != nil
+    /// Serial queue on which `drain` and the refresh timer run.
     private let encodingQueue = DispatchQueue(label: "infraternal.desktop.surface.encode", qos: .userInteractive)
+    /// Serial queue on which the framework delivers frames.
     private let callbacks = DispatchQueue(label: "infraternal.desktop.surface.capture", qos: .userInteractive)
+    /// The hardware encoder; used only from the encoding queue.
     private let encoder = Encoder()
+    /// The running capture stream, or `nil` before start and after stop.
     private var stream: SCStream?
     // Only the serial callback queue touches this bounded diagnostic counter.
+    /// How many callbacks have been logged in measurement mode (only the first eight).
     private var diagnosticCallbacks = 0
     // Preserve the callback stamp with its exact buffer through newest-frame
     // replacement; retained refreshes must never acquire a newer callback stamp.
+    /// The newest not-yet-encoded frame: pixels, capture time, callback time, damage kind. Replaced by
+    /// every newer frame.
     private var latest: (CVPixelBuffer, UInt64, UInt64, CaptureFrameDamage)?
+    /// The last frame seen, kept so a settled sharp refresh can re-encode it with no new capture.
     private var retained: (CVPixelBuffer, UInt64, UInt64, CaptureFrameDamage)?
+    /// True while a `drain` is scheduled or running, so only one runs at a time.
     private var active = false
+    /// True once `stop()` has run. Never goes back to false.
     private var stopped = false
+    /// A keyframe has been requested by the viewer.
     private var repairing = false
+    /// The viewer reported congestion since the last `drain` pass.
     private var congested = false
+    /// Decides, from changes and results, what kind of picture to encode next.
     private var damageState = DamageEncodingState()
+    /// Exact-pixel history used to tell a blinking cursor from real changes.
     private let pixels = FramePixels()
+    /// Adaptive bit rate, in bits per second, for the encoder.
     private var bitrate: AdaptiveBitrate
+    /// One-shot timer for the settled sharp refresh and for retrying a dropped keyframe.
     private var refresh: DispatchSourceTimer?
+    /// Encoded picture size in pixels.
     private let size: CGSize
+    /// Source area in screen points; the picture is fitted inside `size` with its aspect ratio kept.
     private let rect: CGRect
+    /// What to capture: `type` is `screen` (with `display_id`) or `window` (with `window_id` and `owner_pid`).
     private let target: [String: Any]
+    /// Encode HEVC instead of H.264.
     private let hevc: Bool
+    /// Source frame rate in frames per second, for the encoder's timing.
     private let fps: Int
+    /// Sends one packet (kind, body) to the infraternal agent; this is `sendPacket`.
     private let output: (UInt8, Data) throws -> Void
 
+    /// Prepares a capture; nothing starts until `start()`.
+    /// - Parameters:
+    ///   - target: See `target`.
+    ///   - rect: Source area in screen points. For a screen target it must equal that display's frame.
+    ///   - size: Encoded picture size in pixels.
+    ///   - hevc: Use HEVC instead of H.264.
+    ///   - fps: Source frame rate.
+    ///   - output: Receives each packet to send.
     init(target: [String: Any], rect: CGRect, size: CGSize, hevc: Bool, fps: Int, output: @escaping (UInt8, Data) throws -> Void) {
         self.target = target; self.rect = rect; self.size = size; self.hevc = hevc; self.fps = fps; self.output = output
         bitrate = AdaptiveBitrate(maximum: max(500_000, Int(size.width * size.height) * 3))
     }
 
+    /// In measurement mode, logs a lifecycle stage with a timestamp.
     private func trace(_ stage: String) {
         if measure {
             FileHandle.standardError.write(Data("METRIC capture_lifecycle pid=\(getpid()) stage=\(stage) at_ns=\(nanos(mach_absolute_time()))\n".utf8))
         }
     }
 
+    /// Finds the window or display and starts the capture stream.
+    ///
+    /// Throws `HelperFailure.unavailable` if the target is gone or no longer matches, and
+    /// `HelperFailure.invalid` for an unknown target type; framework errors are rethrown. If `stop()`
+    /// runs while this is in progress, the late stream is shut down instead of being used. The
+    /// framework captures the whole window; a screen target is cropped to `rect`. The picture is
+    /// converted to sRGB BGRA, scaled to fit `size`, with the pointer shown.
     func start() async throws {
         trace("enumerate_begin")
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -102,6 +152,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if retired { try await candidate.stopCapture() }
     }
 
+    /// Called by the framework when the capture ends on its own (for example the window closed).
+    /// Reports one error packet (kind 69) to the infraternal agent unless `stop()` already ran.
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         if measure {
             FileHandle.standardError.write(Data("METRIC capture_stopped pid=\(getpid()) code=\((error as NSError).code)\n".utf8))
@@ -111,6 +163,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Receives each captured frame from the framework. Ignores anything that is not a complete
+    /// screen frame, then hands the buffer, its capture time and its damage rectangles to
+    /// `receiveFrame`.
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         let callback = measure ? nanos(mach_absolute_time()) : 0
         if measure && diagnosticCallbacks < 8 {
@@ -130,6 +185,15 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// The framework validates readiness/status above. Real-buffer fixtures use
     /// this same handoff to exercise mailbox and hardware delivery without a GUI.
+    /// Puts a captured picture in the mailbox, replacing any older one, and wakes the encoder.
+    ///
+    /// Frames whose damage list holds only empty rectangles are dropped. When a blink-only update is
+    /// replaced by a newer frame, the result counts as content if either was content.
+    /// - Parameters:
+    ///   - pixel: The captured buffer; retained until encoded.
+    ///   - ticks: Capture time in `mach_absolute_time` ticks.
+    ///   - damage: The framework's list of changed rectangles, if any.
+    ///   - callback: Time the callback began (measurement only).
     func receiveFrame(_ pixel: CVPixelBuffer, ticks: UInt64, damage: Any?, callback: UInt64 = 0) {
         mailbox.lock()
         guard !stopped else { mailbox.unlock(); return }
@@ -151,6 +215,13 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
 
+    /// Encodes pictures until nothing is due, on the encoding queue.
+    ///
+    /// Each pass takes the newest frame, asks `damageState` what to encode (motion, caret delta, or a
+    /// sharp refresh), encodes it and sends the packet. A dropped keyframe is retried one frame
+    /// interval later; a settled picture schedules its sharp refresh with a timer rather than
+    /// polling. A terminal encoder or output error stops the capture and sends one error packet. When
+    /// it ends it reschedules itself if a newer frame arrived in the meantime.
     private func drain() {
         var retryDroppedFrame = false
         do {
@@ -235,14 +306,18 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if queued && !retired { encodingQueue.async { [weak self] in self?.drain() } }
     }
 
+    /// Records that the viewer connection is congested; the next encoding pass lowers the bit rate.
     func congestion() { mailbox.lock(); congested = true; mailbox.unlock() }
 
+    /// Requests a keyframe, for when the viewer lost or cannot decode earlier video.
     func repair() {
         mailbox.lock(); repairing = true; let schedule = !active && !stopped
         if schedule { active = true }; mailbox.unlock()
         if schedule { encodingQueue.async { [weak self] in self?.drain() } }
     }
 
+    /// Stops the capture and encoder. Returns `true` only for the call that actually retired it, so
+    /// exactly one caller reports a terminal error. Safe to call repeatedly and from any thread.
     @discardableResult func stop() -> Bool {
         mailbox.lock()
         // Capture, encoder and Start completion can fail concurrently. Only the

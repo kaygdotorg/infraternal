@@ -23,9 +23,11 @@ import type { SetupSource } from "../addhost/setup-pill.on-demand";
 
 /** How long each background stage takes in the mock (ms). The first prompt arrives at `PROMPT_MS`. */
 export const PROMPT_MS = 1500;
+/** How long each background stage takes in the demo, in milliseconds. */
 const STAGE_MS: Record<SetupStageId, number> = { install: 1500, join: 1300, start: 1100, ready: 900 };
 /** The step a failing stage reports, as the server would name it. */
 const STEP_OF: Record<SetupStageId, NonNullable<SetupEvent["failedStep"]>> = { install: "install", join: "join", start: "start", ready: "readiness" };
+/** The server-style text a failing stage reports in the demo. */
 const MESSAGE_OF: Record<SetupStageId, string> = {
   install: "Package install exited with status 100.",
   join: "Timed out waiting for the host to join the mesh (60 s).",
@@ -33,6 +35,7 @@ const MESSAGE_OF: Record<SetupStageId, string> = {
   ready: "The terminal session did not reattach within 30 s.",
 };
 
+/** The scripted setup run: the event `source` the pill subscribes to, a `wrap` that makes a provisioning service follow the script, and which stage fails first. */
 export interface SetupDemo {
   source: SetupSource;
   wrap(service: ProvisioningService): ProvisioningService;

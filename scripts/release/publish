@@ -9,8 +9,9 @@ publication_version "$1"
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID in the environment}"
 [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[a-zA-Z0-9]+$ ]] || { printf 'invalid account identifier\n' >&2; exit 2; }
 bundle="$release_target/releases/$1"
-files=(VERSION infraternal infraternal-x86_64-musl infraternal-aarch64-musl infraternal-x86_64-session-musl infraternal-aarch64-session-musl)
-for name in "${files[@]}"; do [[ -f "$bundle/$name" ]] || { printf 'build the release bundle first\n' >&2; exit 1; }; done
+files=(VERSION infraternal infraternal-x86_64-musl infraternal-aarch64-musl infraternal-x86_64-session-musl infraternal-aarch64-session-musl proxy-traefik-darwin-amd64.json proxy-traefik-darwin-arm64.json proxy-traefik-linux-amd64.json proxy-traefik-linux-arm64.json)
+component_archives=(components/$1/proxy/darwin/amd64/traefik_v3.7.17_darwin_amd64.tar.gz components/$1/proxy/darwin/arm64/traefik_v3.7.17_darwin_arm64.tar.gz components/$1/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz components/$1/proxy/linux/arm64/traefik_v3.7.17_linux_arm64.tar.gz)
+for name in "${files[@]}" "${component_archives[@]}"; do [[ -f "$bundle/$name" ]] || { printf 'build the release bundle first\n' >&2; exit 1; }; done
 printf '%s\n' "$1" | cmp - "$bundle/VERSION" || { printf 'the built bundle belongs to another version\n' >&2; exit 1; }
 api="$release_api/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/infraternal-builds/objects/releases/$1"
 # All build directories for this user share one inode. Never unlink the lock:
@@ -32,6 +33,11 @@ staging="$(mktemp -d "$release_scratch/publish.XXXXXX")"
 request "$CLOUDFLARE_API_TOKEN" --get --data-urlencode "prefix=releases/$1/" --data-urlencode 'per_page=1' \
     "${api%/releases/$1}" | python3 "$release_root/scripts/release/response.py" empty-prefix
 for name in "${files[@]}"; do
+    request "$CLOUDFLARE_API_TOKEN" --request PUT --header 'If-None-Match: *' \
+        --header 'Content-Type: application/octet-stream' --data-binary "@$bundle/$name" "$api/$name" | \
+        python3 "$release_root/scripts/release/response.py" uploaded
+done
+for name in "${component_archives[@]}"; do
     request "$CLOUDFLARE_API_TOKEN" --request PUT --header 'If-None-Match: *' \
         --header 'Content-Type: application/octet-stream' --data-binary "@$bundle/$name" "$api/$name" | \
         python3 "$release_root/scripts/release/response.py" uploaded

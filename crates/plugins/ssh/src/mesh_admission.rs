@@ -17,18 +17,26 @@ pub const MAX_CERTIFICATE_SECONDS: u64 = 24 * 60 * 60;
 pub struct CertificateClaims<'a> {
     /// Digest of the entire signed certificate, not its client-controlled serial.
     pub fingerprint: [u8; 32],
+    /// The person the certificate was issued to.
     pub person: &'a str,
+    /// Mesh node the certificate is bound to.
     pub source_node: u64,
+    /// The one exact client address the certificate is valid from.
     pub source_address: IpAddr,
+    /// First valid second (Unix time, inclusive).
     pub valid_after: u64,
+    /// End of validity (Unix time, exclusive).
     pub valid_before: u64,
 }
 
 /// Socket observation and resolved target account, never client environment data.
 #[derive(Clone, Copy)]
 pub struct LoginRequest<'a> {
+    /// Peer address seen on the accepted TCP connection.
     pub source_address: IpAddr,
+    /// Mesh node of the host being logged into.
     pub target_node: u64,
+    /// Local OS account the target host resolved for this login.
     pub target_account: &'a str,
 }
 
@@ -60,11 +68,17 @@ pub trait CurrentAccess {
 /// to unauthenticated peers; audit may record the reason without key material.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
+    /// Empty person or account, or a certificate that failed protocol-level checks.
     InvalidClaims,
+    /// Lifetime is zero, reversed or over [`MAX_CERTIFICATE_SECONDS`], or `now` is outside it.
     CertificateTime,
+    /// Peer address differs from the certificate's, or maps to a different mesh node.
     Source,
+    /// The certificate is not currently registered or one of its links is disabled.
     Revoked,
+    /// Mesh network rules do not allow source node to reach the target on TCP/22.
     NetworkAccess,
+    /// No explicit login rule lets this person use the target account.
     LoginAccess,
 }
 

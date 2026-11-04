@@ -41,6 +41,9 @@ pub mod relay_path;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod connection_state;
 
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod proxy_access;
+
 #[cfg(feature = "server")]
 pub mod store;
 

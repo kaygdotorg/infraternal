@@ -2,15 +2,22 @@
 //! it, and the redeemed key ends at that time however often it is renewed.
 use super::*;
 
+/// Approve and redeem one key with this lifetime (`None`: the default).
 async fn approve(f: &Fixture, lifetime: Option<i64>) -> String {
     let approval = f
         .auth
-        .device_start_for("cli", vec!["status:read".to_owned()], lifetime, NOW)
+        .device_start_for(
+            "cli",
+            vec!["status:read".to_owned()],
+            lifetime,
+            TEST_SOURCE,
+            NOW,
+        )
         .await
         .unwrap();
-    bind_tap(&f.auth, &f.session, super::approve(&approval), NOW).await;
+    // Key lifetimes, not the approval ceremony, are under test here.
     f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .approve_without_passkey_for_tests(&f.session, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     f.auth
@@ -25,7 +32,7 @@ async fn a_key_request_defaults_to_24_hours_and_the_review_shows_it() {
     let f = fixture().await;
     let approval = f
         .auth
-        .device_start("cli", vec!["status:read".to_owned()], NOW)
+        .device_start("cli", vec!["status:read".to_owned()], TEST_SOURCE, NOW)
         .await
         .unwrap();
     let review = f
@@ -39,9 +46,9 @@ async fn a_key_request_defaults_to_24_hours_and_the_review_shows_it() {
         "the start response keeps the shape released CLIs accept"
     );
 
-    bind_tap(&f.auth, &f.session, super::approve(&approval), NOW).await;
+    // Key lifetimes, not the approval ceremony, are under test here.
     f.auth
-        .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
+        .approve_without_passkey_for_tests(&f.session, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
     let key = f
@@ -68,7 +75,13 @@ async fn a_requested_lifetime_stays_between_one_hour_and_the_owner_policy() {
         assert!(
             matches!(
                 f.auth
-                    .device_start_for("cli", vec!["status:read".to_owned()], Some(lifetime), NOW)
+                    .device_start_for(
+                        "cli",
+                        vec!["status:read".to_owned()],
+                        Some(lifetime),
+                        TEST_SOURCE,
+                        NOW
+                    )
                     .await,
                 Err(Error::Invalid)
             ),
@@ -78,7 +91,13 @@ async fn a_requested_lifetime_stays_between_one_hour_and_the_owner_policy() {
     for lifetime in [3_600, 7 * 86_400, 30 * 86_400] {
         assert!(
             f.auth
-                .device_start_for("cli", vec!["status:read".to_owned()], Some(lifetime), NOW)
+                .device_start_for(
+                    "cli",
+                    vec!["status:read".to_owned()],
+                    Some(lifetime),
+                    TEST_SOURCE,
+                    NOW
+                )
                 .await
                 .is_ok(),
             "{lifetime}"

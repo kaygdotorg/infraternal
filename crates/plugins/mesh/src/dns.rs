@@ -18,19 +18,30 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-/// The host split-DNS integration sends the configured mesh suffix to this service's high port.
+/// The UDP port the resolver listens on. It is a high port so no privilege is
+/// needed; the host's split-DNS setup sends queries for the mesh suffix here.
 pub const DNS_PORT: u16 = 1053;
+/// Cache lifetime, in seconds, of answers that exist.
 const POSITIVE_TTL: u32 = 30;
+/// Cache lifetime, in seconds, of "no such name" and "no such record type"
+/// answers. Short, so a new node becomes reachable quickly.
 const NEGATIVE_TTL: u32 = 5;
+/// Largest query accepted, in bytes. Longer datagrams are dropped.
 const MAX_PACKET: usize = 4096;
 
+/// The addresses one name resolves to.
 #[derive(Clone, Copy)]
 struct Addresses {
     ipv4: Ipv4Addr,
     ipv6: std::net::Ipv6Addr,
 }
 
-/// A canonical, immutable-by-convention view of names from one accepted revision.
+/// All names the resolver can answer, taken from one accepted policy revision.
+///
+/// Names are stored as lowercase host labels, without the suffix. A name
+/// resolves under the configured suffix and also under the default `internal`
+/// suffix, so the old name keeps working after a user picks their own. Treat a
+/// value as immutable: updates build a new `Records` and swap it in.
 #[derive(Clone)]
 pub(crate) struct Records {
     local_address: Ipv4Addr,
@@ -39,6 +50,8 @@ pub(crate) struct Records {
 }
 
 impl Records {
+    /// No names yet, only the default suffix. Every query in the zone gets
+    /// "no such name" until real records are published.
     fn empty(local_address: Ipv4Addr) -> Self {
         Self {
             local_address,
@@ -47,6 +60,13 @@ impl Records {
         }
     }
 
+    /// Builds the name set from a node's configuration: the node's own name
+    /// and the names of its peers.
+    ///
+    /// # Errors
+    /// Returns `InvalidData` if the suffix is not valid, a name is not a valid
+    /// label or would exceed 253 bytes with a suffix, two nodes share a name,
+    /// or a name refers to a peer that is not in the configuration.
     pub(crate) fn from_config(config: &Config) -> io::Result<Self> {
         validate_dns(&config.dns_suffix, false).map_err(|_| invalid_config())?;
         let mut suffixes = vec![config.dns_suffix.clone()];
@@ -81,6 +101,8 @@ impl Records {
         Ok(records)
     }
 
+    /// Adds one name. Fails with `InvalidData` for an invalid, too long or
+    /// duplicate name.
     fn insert(&mut self, label: &str, addresses: Addresses) -> io::Result<()> {
         if self
             .suffixes
@@ -97,6 +119,7 @@ impl Records {
     }
 }
 
+/// The error for a configuration with an unusable or duplicate name.
 fn invalid_config() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -104,6 +127,8 @@ fn invalid_config() -> io::Error {
     )
 }
 
+/// Lowercases a host label and checks it: ASCII letters, digits and hyphens,
+/// 1 to 63 bytes, not starting or ending with a hyphen. `None` if it fails.
 fn canonical_label(label: &str) -> Option<String> {
     if label.is_empty() || !label.is_ascii() || label.len() > 63 {
         return None;
@@ -121,21 +146,41 @@ fn canonical_label(label: &str) -> Option<String> {
     }
 }
 
-/// Build one authoritative response, or return `None` for names outside the configured suffix.
+/// Answers one DNS query packet from `config`'s names, as if it came from this
+/// node itself. Mainly for tests and tools; the running service uses
+/// [`Resolver`].
 ///
-/// Names outside this zone are left to the operating system's other DNS routes. The
-/// split-DNS installer must therefore direct only this suffix's queries here.
+/// Returns the encoded reply, or `None` if the name is outside the mesh
+/// suffix. Such names are left to the operating system's other DNS routes, so
+/// the split-DNS setup must send only the mesh suffix here.
+///
 /// # Errors
-/// Rejects malformed packets, non-query opcodes, multiple questions and invalid snapshots.
+/// Rejects malformed packets, packets that are not plain single-question
+/// queries, and configurations with invalid names.
 pub fn response(packet: &[u8], config: &Config) -> io::Result<Option<Vec<u8>>> {
     let records = Records::from_config(config)?;
     response_for_records(packet, &records)
 }
 
+/// Like [`response`], but with names that are already built.
 fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<Vec<u8>>> {
     response_for_source(packet, records, IpAddr::V4(records.local_address))
 }
 
+/// Builds the reply to `packet` received from `source`.
+///
+/// The outcomes, in order:
+/// - `Err` for an oversized or malformed packet, or one that is not a single
+///   plain query.
+/// - `REFUSED` with no records if `source` is not this node's own mesh
+///   address. A node only holds its own filtered view of the names, so it must
+///   not answer anyone else from it.
+/// - `Ok(None)` if the name is outside every configured suffix.
+/// - `REFUSED` for a class other than `IN`.
+/// - `NXDOMAIN` plus a short-lived SOA if the host does not exist (a name with
+///   more than one label before the suffix never exists).
+/// - An `A` or `AAAA` answer for existing hosts; any other record type gets an
+///   empty answer plus the SOA (NODATA).
 fn response_for_source(
     packet: &[u8],
     records: &Records,
@@ -211,6 +256,13 @@ fn response_for_source(
     encode(&reply).map(Some)
 }
 
+/// Finds which configured suffix `qname` (lowercase, no trailing dot) falls
+/// under and the host part before it.
+///
+/// Returns the suffix and the host part, which is empty if `qname` is the
+/// suffix itself (the zone apex). Returns `None` if no suffix matches. A name
+/// with a real host part always wins over a zone apex: with suffixes
+/// `a.internal` and `internal`, `a.internal` is host `a` in `internal`.
 fn matching_zone<'zone, 'query>(
     qname: &'query str,
     suffixes: &'zone [String],
@@ -238,14 +290,18 @@ fn matching_zone<'zone, 'query>(
     empty_label.or(zone_apex)
 }
 
+/// The error for an unusable query packet.
 fn invalid_packet() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid DNS query packet")
 }
 
+/// Serializes a reply, mapping failures to the packet error.
 fn encode(message: &Message) -> io::Result<Vec<u8>> {
     message.to_vec().map_err(|_| invalid_packet())
 }
 
+/// The SOA record for `suffix`, attached to negative answers so resolvers
+/// cache them for [`NEGATIVE_TTL`] seconds.
 fn negative_soa(suffix: &str) -> io::Result<Record> {
     // Records validates the configured suffix before constructing Hickory's owned DNS name.
     let zone = Name::from_ascii(suffix).map_err(|_| invalid_config())?;
@@ -256,7 +312,13 @@ fn negative_soa(suffix: &str) -> io::Result<Record> {
     ))
 }
 
-/// A UDP listener bound only to a mesh IPv4 address, with an atomically replaced snapshot.
+/// The mesh DNS server of one node.
+///
+/// It listens on UDP port [`DNS_PORT`] of the node's mesh IPv4 address only,
+/// with a background thread named `mesh-dns`. Queries from any other source
+/// address are refused (see [`response`]). Names can be replaced while it runs
+/// ([`replace`](Resolver::replace)); each query sees a whole snapshot, never a
+/// half-updated one. Dropping the resolver stops the thread and waits for it.
 pub struct Resolver {
     address: Ipv4Addr,
     records: Arc<RwLock<Records>>,
@@ -265,22 +327,33 @@ pub struct Resolver {
 }
 
 impl Resolver {
-    /// Bind the DNS UDP high port on the mesh address and publish the accepted snapshot.
+    /// Starts serving the names in `config` on the node's mesh address.
+    ///
     /// # Errors
-    /// Reports an invalid name snapshot, an occupied DNS port or an unavailable mesh address.
+    /// Fails if the names are invalid, if the port is already in use, or if the
+    /// mesh address is not available on this host yet.
     pub fn bind(config: &Config) -> io::Result<Self> {
         let records = Records::from_config(config)?;
         Self::bind_records(config.addresses.ipv4, records)
     }
 
+    /// Starts serving on `address` with no names, so the port is held before
+    /// the first snapshot arrives.
     pub(crate) fn bind_empty(address: Ipv4Addr) -> io::Result<Self> {
         Self::bind_records(address, Records::empty(address))
     }
 
+    /// The mesh address the resolver is bound to.
     pub(crate) const fn address(&self) -> Ipv4Addr {
         self.address
     }
 
+    /// Binds the socket and starts the worker thread.
+    ///
+    /// The thread waits on the socket and on a shutdown pipe at once, so it
+    /// needs no timer to notice shutdown. Packets over the size limit,
+    /// unparseable queries and queries outside the zone get no reply; send
+    /// errors are ignored because UDP gives no delivery guarantee anyway.
     fn bind_records(address: Ipv4Addr, initial: Records) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::from((address, DNS_PORT)))?;
         let worker_socket = socket.try_clone()?;
@@ -338,9 +411,13 @@ impl Resolver {
         })
     }
 
-    /// Replace records after a complete coordinator snapshot has been accepted.
+    /// Swaps in the names of a newly accepted snapshot. Takes effect for the
+    /// next query.
+    ///
     /// # Errors
-    /// Rejects malformed names, references to absent peers, and duplicate labels.
+    /// Rejects malformed names, references to absent peers and duplicate
+    /// names, and returns `Unsupported` if the node's mesh address changed:
+    /// that needs a new resolver. The old names stay active on error.
     pub fn replace(&self, config: &Config) -> io::Result<()> {
         if config.addresses.ipv4 != self.address {
             return Err(io::Error::new(
@@ -356,6 +433,7 @@ impl Resolver {
         Ok(())
     }
 
+    /// Swaps in records that are already validated.
     pub(crate) fn publish(&self, records: Records) {
         *self
             .records

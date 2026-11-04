@@ -30,6 +30,7 @@ pub struct Node {
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
     firewall: Firewall,
+    proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
     // A committed revision remains restrictive until exact retirement succeeds.
     connection_cleanup_pending: bool,
@@ -50,6 +51,7 @@ impl Default for Node {
             pending: None,
             routes: BTreeSet::new(),
             firewall: Firewall::default(),
+            proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
             connection_cleanup_pending: false,
             client: None,
@@ -258,6 +260,29 @@ impl Node {
     pub fn active(&self) -> bool {
         self.identity.is_some()
     }
+    /// Apply the proxy's Mesh routes and public gate to the owned firewall.
+    ///
+    /// `confirmed` is true only when Traefik has confirmed a route snapshot rendered from the
+    /// current Mesh configuration; gate-only and other local updates pass false.
+    ///
+    /// # Errors
+    /// Returns a firewall or conntrack cleanup failure without accepting a new policy.
+    pub fn set_proxy_ingress(
+        &mut self,
+        proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
+        confirmed: bool,
+    ) -> io::Result<()> {
+        // An unchanged snapshot still reaches the firewall: Traefik has just confirmed it, and
+        // any source that lost a route since the last confirmation must lose its open flows.
+        if self.active()
+            && let Some(config) = self.config.as_ref()
+        {
+            self.firewall
+                .apply_proxy_ingress(config, &proxy_ingress, confirmed)?;
+        }
+        self.proxy_ingress = proxy_ingress;
+        Ok(())
+    }
     /// Disabled intent is not Off until retained kernel/socket ownership is gone.
     #[must_use]
     pub fn stopping(&self) -> bool {
@@ -385,6 +410,7 @@ impl Node {
         self.firewall.remove()?;
         self.retire_routes()?;
         self.firewall = Firewall::default();
+        self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
         self.identity = None;
         self.config = None;
@@ -477,6 +503,7 @@ impl Node {
                     version: chunk.version,
                     addresses: chunk.addresses,
                     default_policy: chunk.default_policy,
+                    exposure: chunk.exposure.clone(),
                     peers: BTreeMap::new(),
                     #[cfg(feature = "mesh-dns-spike")]
                     peer_names: BTreeMap::new(),
@@ -517,6 +544,7 @@ impl Node {
             || pending.version != chunk.version
             || pending.from_version != chunk.from_version
             || pending.default_policy != chunk.default_policy
+            || pending.config.exposure != chunk.exposure
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -1028,6 +1056,7 @@ mod tests {
                 ipv6: "fd01::2".parse().expect("IPv6"),
             },
             default_policy: crate::dataplane::DefaultPolicy::default(),
+            exposure: None,
             peers: BTreeMap::new(),
             #[cfg(feature = "mesh-dns-spike")]
             peer_names: std::collections::BTreeMap::new(),
@@ -1093,6 +1122,7 @@ mod tests {
             version: 1,
             addresses: addresses(1),
             default_policy: DefaultPolicy::Allow,
+            exposure: None,
             peers: (2..=1001)
                 .map(|id| {
                     let (_, key) = Key::generate().expect("public peer fixture");

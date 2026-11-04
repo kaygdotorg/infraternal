@@ -1,4 +1,10 @@
 //! Bridges an SSH command's exclusive stdin/stdout pipes without idle polling (D255).
+//!
+//! When infraternal runs as an SSH command, its stdin and stdout are the pipes
+//! carrying the protocol. [`Stdio`] duplicates them, marks the copies
+//! close-on-exec so no child process (manager, shim) inherits them, makes them
+//! non-blocking and waits for readiness through the event loop, so no timer or
+//! thread polls them.
 
 use infraternal_shim::readiness::Registration;
 use nix::{
@@ -9,7 +15,9 @@ use std::{io, os::fd::OwnedFd};
 
 /// Each direction has one owner; no shell or shim inherits these pipe copies.
 pub struct Stdio {
+    /// The command's standard input, watched for readability.
     input: Registration<OwnedFd>,
+    /// The command's standard output, watched for writability.
     output: Registration<OwnedFd>,
 }
 impl Stdio {
@@ -23,6 +31,7 @@ impl Stdio {
         })
     }
 }
+/// Make `fd` close-on-exec and non-blocking, then register it for readiness events.
 fn watched(fd: OwnedFd) -> io::Result<Registration<OwnedFd>> {
     // dup does not preserve CLOEXEC. Subsequent manager/shim children must
     // never retain the bridge's trusted protocol descriptors.
@@ -37,6 +46,8 @@ fn watched(fd: OwnedFd) -> io::Result<Registration<OwnedFd>> {
     .map_err(io::Error::from)?;
     Registration::new(fd)
 }
+/// Byte channel over the pipes. `read` returns 0 at end of input; `write` sends
+/// the whole buffer or fails (a zero-length write is `WriteZero`).
 impl infraternal_plugin_api::channel::Channel for Stdio {
     async fn read(&self, bytes: &mut [u8]) -> io::Result<usize> {
         loop {

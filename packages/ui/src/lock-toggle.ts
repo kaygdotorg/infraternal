@@ -23,12 +23,15 @@
  */
 import { Spring } from "./spring";
 
+/** What caused a toggle: a pointer click or a keyboard activation (a click with `detail` 0). */
 export type LockSource = "pointer" | "keyboard";
 
+/** Options for {@link createLockToggle}. `onToggle` is told the state being asked for; it must call `setLocked` itself to accept it. */
 export interface LockToggleOptions {
   onToggle(next: boolean, source: LockSource): void;
 }
 
+/** The padlock control. `root` is the button to place in a window card; `locked` is the current state. `dispose()` removes the button and its listener. */
 export interface LockToggle {
   readonly root: HTMLButtonElement;
   readonly locked: boolean;
@@ -39,10 +42,13 @@ export interface LockToggle {
   dispose(): void;
 }
 
+/** The padlock's body, as SVG markup. */
 const BODY = '<rect class="ui-lock-body" x="5" y="11" width="14" height="9.5" rx="2.5"/>';
+/** The padlock's shackle (the U-shaped bar), as SVG markup. */
 const SHACKLE = '<path class="ui-lock-shackle" d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>';
 // The shackle pivots about its left foot, like a real padlock opening.
 const PIVOT_X = 8.5, PIVOT_Y = 11;
+/** How far (px) the open shackle is raised, and how far (degrees) it is tilted. */
 const LIFT = 3, TILT = 22;
 
 /** Short and literal; the chord that leaves the lock is in the shortcuts view and the palette. */
@@ -50,6 +56,11 @@ export const lockLabel = (locked: boolean): string => locked
   ? "Unlock input"
   : "Lock input";
 
+/**
+ * Builds the padlock button. It starts open and does not change by itself when clicked: `options.onToggle(next, source)` is
+ * called and the owner calls `setLocked(next)` if the change is allowed. The button sets `aria-pressed`, `data-state`
+ * and the tooltip text (see {@link lockLabel}).
+ */
 export function createLockToggle(options: LockToggleOptions): LockToggle {
   const root = document.createElement("button");
   root.type = "button";
@@ -94,6 +105,7 @@ export function createLockToggle(options: LockToggleOptions): LockToggle {
 
   return {
     root,
+    /** The current state. */
     get locked() { return locked; },
     setLocked,
     nudge() {
@@ -107,12 +119,18 @@ export function createLockToggle(options: LockToggleOptions): LockToggle {
 // ---- reveal: pointer proximity on desktop, header taps on touch ------------------------------
 // One document listener serves every window. A frame at most reads each tracked window's
 // top edge, and only a change of state touches the DOM.
+/** How far (px) below a window's top edge the mouse still counts as "near". The check also allows 16 px above the edge. */
 const NEAR = 64;
+/** Windows whose lock is revealed by pointer proximity. */
 const tracked = new Set<{ root: HTMLElement; lock: LockToggle }>();
+/** Whether the shared document listeners are installed. They are never removed. */
 let listening = false;
+/** The pending animation frame for {@link sweep}, or 0. */
 let frame = 0;
+/** The last mouse position, or `undefined` after the pointer left the document. */
 let pointer: { x: number; y: number } | undefined;
 
+/** Marks each tracked window `data-lock-near` while the mouse is near its top edge; one write per change of state. */
 const sweep = (): void => {
   frame = 0;
   for (const entry of tracked) {

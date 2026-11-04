@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 test("device approval link reviews the exact laptop and scopes before approval", async ({ page }) => {
   let codeInAddressAtStatus: string | null = null;
-  let loginStarts = 0;
+  let approvalStarts = 0;
   let approvals = 0;
   await page.addInitScript(() => {
     Object.defineProperty(navigator.credentials, "get", {
@@ -31,8 +31,9 @@ test("device approval link reviews the exact laptop and scopes before approval",
     device: "kayg-laptop",
     scopes: ["hosts:read", "sessions:read", "status:read"], lifetime_seconds: 86400,
   } }));
-  await page.route("**/auth/login-start", async route => {
-    loginStarts += 1;
+  // CLI sign-in approval is a passkey ceremony bound to its code (#263, J145 P3-3).
+  await page.route("**/auth/device-approve-start", async route => {
+    approvalStarts += 1;
     await route.fulfill({ json: { ceremony: "fixture", options: { publicKey: {
       challenge: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       rpId: "localhost",
@@ -42,7 +43,7 @@ test("device approval link reviews the exact laptop and scopes before approval",
       extensions: { prf: { eval: { first: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" } } },
     } } } });
   });
-  await page.route("**/auth/device-approve", async route => {
+  await page.route("**/auth/device-approve-finish", async route => {
     approvals += 1;
     await route.fulfill({ json: { ok: true } });
   });
@@ -125,7 +126,7 @@ test("device approval link reviews the exact laptop and scopes before approval",
   await page.getByText("I checked that this code matches the code in my terminal").click();
   await page.getByRole("button", { name: "Approve with passkey" }).click();
   await expect(page.getByRole("alert")).toContainText("passkey prompt was cancelled");
-  expect(loginStarts).toBe(1);
+  expect(approvalStarts).toBe(1);
   expect(approvals).toBe(0);
   expect(await page.evaluate(() => Reflect.get(window, "__deviceApprovalPasskeyPrompted"))).toBe(true);
 });
@@ -213,8 +214,16 @@ test("a fresh virtual passkey tap approves the reviewed device request", async (
     scopes: ["hosts:read", "sessions:read", "status:read"], lifetime_seconds: 86400,
   } }));
   let approvals = 0;
-  await page.route("**/auth/device-approve", async (route) => {
-    approvals += 1;
+  // The double has no approval ceremony: borrow its real login options so the virtual authenticator answers.
+  const starts: string[] = [];
+  await page.route("**/auth/device-approve-start", async (route) => {
+    const login = await route.fetch({ url: new URL("/auth/login-start", route.request().url()).href, postData: "{}" });
+    starts.push(String(route.request().postDataJSON().code));
+    await route.fulfill({ json: { ...(await login.json() as object), ceremony: "approval-1" } });
+  });
+  await page.route("**/auth/device-approve-finish", async (route) => {
+    const body = route.request().postDataJSON() as { code: unknown; ceremony: unknown; proof: unknown };
+    if (body.code === "AbCdEfGhIjKlMnOp" && body.ceremony === "approval-1" && typeof body.proof === "object") approvals += 1;
     await route.fulfill({ json: { ok: true } });
   });
 
@@ -225,8 +234,9 @@ test("a fresh virtual passkey tap approves the reviewed device request", async (
   await expect(page.getByRole("heading", { name: "Device approved" })).toBeVisible();
   expect(approvals).toBe(1);
   expect(await page.evaluate(() => document.documentElement.dataset.deviceApprovalPasskeyGets)).toBe("1");
-  expect(requests.indexOf("/auth/login-finish")).toBeGreaterThanOrEqual(0);
-  expect(requests.indexOf("/auth/login-finish")).toBeLessThan(requests.indexOf("/auth/device-approve"));
+  // One tap, bound to this code: no separate sign-in stands in for it.
+  expect(starts).toEqual(["AbCdEfGhIjKlMnOp"]);
+  expect(requests.filter(path => path === "/auth/login-finish" || path === "/auth/device-approve")).toEqual([]);
 });
 
 test("a signed-out browser must sign in before it can inspect a device request", async ({ page }) => {
@@ -256,7 +266,7 @@ test("a signed-out browser must sign in before it can inspect a device request",
       extensions: { prf: { eval: { first: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" } } },
     } } } });
   });
-  await page.route("**/auth/device-approve", async route => {
+  await page.route("**/auth/device-approve-finish", async route => {
     approvals += 1;
     await route.fulfill({ json: { ok: true } });
   });

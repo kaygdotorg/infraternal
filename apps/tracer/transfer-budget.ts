@@ -14,8 +14,11 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 
+/** The build output folder to measure; `TRACER_DIST`, default `dist`. */
 const dist = process.env.TRACER_DIST ?? "dist";
+/** Bytes in a kibibyte. */
 const KIB = 1024;
+/** The compressed size limits per class: critical and deferred for the whole class, on-demand for each chunk. */
 const limits = {
   critical: { gzip: 320 * KIB, brotli: 267 * KIB },
   // Release-6 shared layout and offline drawing measured 56,712 B gzip / 50,322 B brotli. D188 sets each cap to
@@ -28,8 +31,11 @@ const limits = {
   // reported, not limited.
   onDemand: { gzip: 20 * KIB, brotli: 18 * KIB },
 };
+/** The chunk lists the build wrote to `chunks.json`. */
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[]; onDemand: string[] };
+/** The compressed size of each on-demand chunk, checked one by one. */
 const onDemandChunks = new Map<string, { gzip: number; brotli: number }>();
+/** Running totals per class: size as written, gzip and Brotli. */
 const totals = { critical: { identity: 0, gzip: 0, brotli: 0 }, deferred: { identity: 0, gzip: 0, brotli: 0 }, onDemand: { identity: 0, gzip: 0, brotli: 0 } };
 for (const name of await readdir(dist, { recursive: true })) {
   // The docs pages' own script (docs/doc.js, docs-build.ts) is a file of its own, loaded only by a standalone docs page: it is not
@@ -59,6 +65,7 @@ for (const klass of ["critical", "deferred", "onDemand"] as const) {
 if (totals.critical.gzip > limits.critical.gzip || totals.critical.brotli > limits.critical.brotli) {
   throw new Error("production critical-path JavaScript exceeds the compressed transfer budget");
 }
+/** The largest on-demand chunk by gzip size, reported in the log. */
 const biggest = { name: "", gzip: 0, brotli: 0 };
 for (const [name, size] of onDemandChunks) if (size.gzip > biggest.gzip) Object.assign(biggest, { name, ...size });
 console.log(`JavaScript transfer, onDemand largest chunk ${biggest.name}: gzip=${biggest.gzip}/${limits.onDemand.gzip} brotli=${biggest.brotli}/${limits.onDemand.brotli} bytes (class total gzip=${totals.onDemand.gzip} brotli=${totals.onDemand.brotli}, not limited)`);
@@ -82,7 +89,9 @@ if (totals.deferred.gzip > limits.deferred.gzip || totals.deferred.brotli > limi
  *    previewed or picked, so their size is paid on first use, never on first paint.
  * Nerd Font symbols are budgeted apart: they are fetched only when output holds a prompt icon.
  */
+/** Bytes in a kibibyte, for the font budgets. */
 const KB = 1024;
+/** Font budgets by family folder: `critical` for the preloaded upright face, `total` for all faces. */
 const familyBudgets: Record<string, { critical?: number; total: number }> = {
   "maple-mono-nf": { critical: 50 * KB, total: 104 * KB },
   // Sizes measured at subset time (identity bytes): roman + italic, rounded up to the next KB
@@ -96,7 +105,9 @@ const familyBudgets: Record<string, { critical?: number; total: number }> = {
   "fira-code": { total: 40 * KB },
   "source-code-pro": { total: 48 * KB },
 };
+/** The size limit for the Nerd Font symbols file. */
 const symbolsLimit = 230 * KB;
+/** The folder holding the font families in the build output. */
 const fontRoot = `${dist}/fonts`;
 const fontEntries = await readdir(fontRoot, { withFileTypes: true });
 let fontFailure = "";

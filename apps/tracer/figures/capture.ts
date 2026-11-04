@@ -28,21 +28,30 @@ import { findLeaks } from "../docs-dataset";
 import { FIGURE_SCHEMES, FIGURE_SIZES, figureFile, type FigureManifest } from "../docs-figure";
 import { FIGURES, SIZES, type Crop, type Figure, type Scheme, type SizeName } from "./figures";
 
+/** The folder the pictures and `manifest.json` are written to; `FIGURES_OUT` overrides it. */
 const OUT = resolve(process.env.FIGURES_OUT ?? resolve(import.meta.dirname, "../../../docs/user/figures"));
+/** When set, a PNG copy of each picture is also written here for looking at. */
 const PREVIEW = process.env.FIGURES_PREVIEW ? resolve(process.env.FIGURES_PREVIEW) : undefined;
+/** The figure names to capture (`FIGURES_ONLY`), or `undefined` for all. */
 const ONLY = process.env.FIGURES_ONLY?.split(",").map((name) => name.trim()).filter(Boolean);
+/** The sizes to capture (`FIGURES_SIZES`), or `undefined` for all. */
 const ONLY_SIZES = process.env.FIGURES_SIZES?.split(",").map((name) => name.trim()) as SizeName[] | undefined;
+/** The fixed clock of every capture, so times on screen never change between runs. */
 const FIXED_TIME = "2026-03-14T09:41:00Z";
 /** WebP quality of a still, 0..1. Flat interface colours stay clean at this level and the files stay small. */
 const STILL_QUALITY = 0.9;
+/** The largest allowed still in bytes; a bigger one fails the run. */
 const MAX_STILL = 160_000;
+/** The largest allowed clip in bytes. */
 const MAX_CLIP = 1_000_000;
 
 test.describe.configure({ mode: "serial" });
 test.setTimeout(5 * 60_000);
 
+/** The entries captured in this run, written to `manifest.json` at the end. */
 const manifest: FigureManifest = {};
 mkdirSync(OUT, { recursive: true });
+/** Where `manifest.json` is. */
 const manifestPath = resolve(OUT, "manifest.json");
 // A partial run keeps what earlier runs captured.
 const existing: FigureManifest = existsSync(manifestPath) && !process.env.FIGURES_OUT ? JSON.parse(readFileSync(manifestPath, "utf8")) : {};
@@ -55,6 +64,7 @@ const STEADY_CURSOR = `(() => {
   };
 })();`;
 
+/** A browser context set up for one size and scheme: viewport, sharpness, touch, colour scheme, language and time zone. Stills use reduced motion; clips do not. */
 async function openContext(browser: Browser, size: SizeName, scheme: Scheme, viewport: { width: number; height: number }, still: boolean): Promise<BrowserContext> {
   const spec = SIZES[size];
   return browser.newContext({
@@ -64,6 +74,7 @@ async function openContext(browser: Browser, size: SizeName, scheme: Scheme, vie
   });
 }
 
+/** Opens `address` in a new page of `context` with the steady cursor and the fixed clock. */
 async function openPage(context: BrowserContext, address: string): Promise<Page> {
   const page = await context.newPage();
   await page.addInitScript(STEADY_CURSOR);
@@ -92,6 +103,7 @@ async function visibleWords(page: Page): Promise<string> {
   });
 }
 
+/** Fails the test when the page's visible text holds an internal name, private address or key shape; `label` names the figure in the message. */
 async function assertClean(page: Page, label: string): Promise<void> {
   const leaks = findLeaks(await visibleWords(page));
   expect(leaks, `${label}: internal names on the page (add them to docs-dataset.ts)`).toEqual([]);
@@ -122,7 +134,9 @@ async function toWebp(page: Page, png: Buffer): Promise<Buffer> {
   return Buffer.from(base64, "base64");
 }
 
+/** The window size for a figure: the size's own, with the figure's override on top. */
 const viewportOf = (figure: Figure, size: SizeName): { width: number; height: number } => ({ ...SIZES[size], ...(figure.viewport?.[size] ?? {}) });
+/** The crop for a figure at a size: its own for that size, else the one it names for all sizes. */
 const cropOf = (figure: Figure, size: SizeName): Crop => ("whole" in figure.crop || "around" in figure.crop ? figure.crop as Crop : (figure.crop as Partial<Record<SizeName, Crop>>)[size] ?? { whole: true });
 
 for (const figure of FIGURES) {
