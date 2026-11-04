@@ -95,6 +95,10 @@ pub enum Input {
 /// One decoded (or to-be-encoded) desktop message. It borrows its byte slices, so it
 /// allocates nothing. Which side may send which variant, and on which stream, is enforced by
 /// the desktop plugin, not here. The tag of each variant is given by [`Message::tag`].
+///
+/// `Repair` (viewer to host, tag `0x44`, 8 bytes) asks the host for a new keyframe, for example
+/// after video was lost. Its `last_sequence` is the last video sequence the viewer received; the
+/// current host produces a keyframe whatever its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Message<'a> {
     /// Viewer to host, tag `0x40`, 17 bytes: the 16-byte `session_id` of the desktop session to
@@ -124,9 +128,6 @@ pub enum Message<'a> {
     /// Viewer to host, tag `0x43`: an [`Input`] event. The body starts with a kind byte
     /// (mouse 0, scroll 1, key 2, release 3, text 4, control 5).
     Input(Input),
-    /// Viewer to host, tag `0x44`, 8 bytes: asks the host for a new keyframe, for example after
-    /// video was lost. `last_sequence` is the last video sequence the viewer received; the
-    /// current host produces a keyframe whatever its value.
     Repair {
         last_sequence: u64,
     },
