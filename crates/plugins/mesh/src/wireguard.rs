@@ -97,9 +97,10 @@ pub(crate) struct ActiveLink {
     /// The public key the link's marker names; `None` for the legacy unbound kernel and
     /// `GotaTun` markers.
     pub(crate) owner: Option<PublicKey>,
-    /// The TUN's owner and group, which alone may attach it (#260 J213 P1); `None` when unset,
-    /// and always `None` for kernel links.
+    /// The TUN's owner uid, which alone may attach it (#260 J213 P1); `None` when unset, and
+    /// always `None` for kernel links.
     pub(crate) tun_owner: Option<u32>,
+    /// The TUN's group, read the same way as [`ActiveLink::tun_owner`].
     pub(crate) tun_group: Option<u32>,
 }
 

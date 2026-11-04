@@ -41,6 +41,8 @@ fn links() -> Vec<(u32, String, Option<String>)> {
         .collect()
 }
 
+/// Another installation takes the shared name while our new link is not yet claimed: its link
+/// keeps its marker, our creation fails, and nothing of ours is left behind.
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
 fn a_racing_creator_keeps_its_link_and_its_marker() {
