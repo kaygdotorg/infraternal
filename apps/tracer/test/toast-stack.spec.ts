@@ -122,6 +122,9 @@ for (const { name, viewport, touch } of VIEWPORTS) {
       // A terminal screen on a touch device lifts the stack above its key tray (styles.css); the card must not add the lift again.
       await page.evaluate(() => { document.body.classList.add("terminal-screen"); document.body.style.setProperty("--keybar-height", "50px"); });
       await show(page, { message: "One", duration: 0 });
+      // Settled: the entrance offset (0.5rem) is gone once the card is open.
+      await expect(cards(page).first()).toHaveAttribute("data-open", "true");
+      await page.waitForTimeout(400);
       const gap = await page.evaluate(() => {
         const stack = document.querySelector(".ui-toast-stack")!.getBoundingClientRect();
         const card = document.querySelector(".ui-toast")!.getBoundingClientRect();
