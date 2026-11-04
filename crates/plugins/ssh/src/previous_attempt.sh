@@ -199,7 +199,7 @@ validate_upgrade_stage() {
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   case "${entry##*/}" in
    transaction|kind|lease) :;;
-   activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested)
+   activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested|creating-alias)
     private_file "$entry"
     [ "$(stat -c '%s' "$entry")" = 0 ] || refuse marker;;
    found-service)
@@ -566,7 +566,7 @@ inspect_previous() {
     case "${entry##*/}" in
      transaction|kind) private_file "$entry";;
      lease) private_file "$entry";;
-     activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested)
+     activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested|creating-alias)
       private_file "$entry"
       [ "$(stat -c '%s' "$entry")" = 0 ] || refuse marker;;
      state|cache) private_tree "$entry";;

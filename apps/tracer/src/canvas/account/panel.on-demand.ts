@@ -52,7 +52,7 @@ export interface AccountPanelEnv {
   model: AccountModel;
   toast: Pick<ToastController, "show">;
   /** Opens a section of Settings (the rows of sign-in health, and the access rules). */
-  openSettings(section: "account" | "grants"): void;
+  openSettings(section: "account" | "grants" | "you.passkeys" | "you.recovery"): void;
 }
 
 export interface AccountPanel {
@@ -210,7 +210,7 @@ export function createAccountPanel(env: AccountPanelEnv): AccountPanel {
     return out;
   };
   const signInRows = (person: Person): KeyValueRow[] => healthRows(person).map((row) => ({
-    group: "Sign-in", key: row.key, value: row.value, mark: row.mark, copy: row.value, press: { tip: row.tip, run: () => env.openSettings("account") },
+    group: "Sign-in", key: row.key, value: row.value, mark: row.mark, copy: row.value, press: { tip: row.tip, run: () => env.openSettings(row.key === "Recovery key" ? "you.recovery" : "you.passkeys") },
   }));
 
   const decorate = (b: Built): void => {

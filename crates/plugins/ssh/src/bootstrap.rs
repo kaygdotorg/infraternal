@@ -1129,6 +1129,8 @@ impl Bootstrap {
         })
     }
 
+    /// Enroll one host, publish its CLI, report setup warnings, and prove readiness.
+    /// All changes stay bound to this attempt's transaction for cancellation recovery.
     #[allow(
         clippy::too_many_lines,
         reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
@@ -1656,6 +1658,17 @@ impl Bootstrap {
                 )?;
             }
             drop(join); // Capability plaintext is erased immediately after its stdin handoff.
+            if transaction.alias_skipped() {
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Install,
+                    "Skipped infra because an existing path belongs to another command. Use infraternal instead.",
+                    started,
+                    None,
+                );
+            }
             if !linger && !early {
                 emit(
                     batch,

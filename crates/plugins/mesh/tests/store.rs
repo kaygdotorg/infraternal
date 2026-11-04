@@ -130,12 +130,12 @@ async fn publication_identity_tracks_server_public_host_across_restart() {
 
 #[tokio::test]
 #[cfg(feature = "mesh-dns-spike")]
-async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
+async fn a_fallback_named_node_is_not_published_in_mesh_dns_until_it_has_a_real_name() {
     let pool = pool().await;
     let store = Store::new(pool.clone());
     let (server, _) = store.attach("server", key(1), None, true).await.unwrap();
     let (unnamed, _) = store
-        .attach("unreported-host", key(2), None, false)
+        .attach("00000000-0000-4000-8000-0000000000aa", key(2), None, false)
         .await
         .unwrap();
     let (name, source): (String, String) =
@@ -144,7 +144,7 @@ async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(name, "unnamed");
+    assert_eq!(name, "host-000000");
     assert_eq!(source, "placeholder");
 
     let config = store.config(server).await.unwrap();
@@ -155,7 +155,9 @@ async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
     assert!(!config.peer_names.contains_key(&unnamed));
 
     let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
-    query.extend_from_slice(&[7, b'u', b'n', b'n', b'a', b'm', b'e', b'd', 8]);
+    query.push(11);
+    query.extend_from_slice(b"host-000000");
+    query.push(8);
     query.extend_from_slice(b"internal");
     query.extend_from_slice(&[0, 0, 1, 0, 1]);
     let response = infraternal_plugin_mesh::dns::response(&query, &config)
@@ -167,6 +169,23 @@ async fn reachable_placeholder_node_is_not_published_in_mesh_dns() {
             .metadata
             .response_code,
         hickory_proto::op::ResponseCode::NXDomain
+    );
+
+    // D339: the DNS name comes as soon as the machine reports a real one.
+    store
+        .attach_named(
+            "00000000-0000-4000-8000-0000000000aa",
+            key(2),
+            None,
+            false,
+            Some("minipc01"),
+        )
+        .await
+        .unwrap();
+    let config = store.config(server).await.unwrap();
+    assert_eq!(
+        config.peer_names.get(&unnamed).map(String::as_str),
+        Some("minipc01")
     );
 }
 

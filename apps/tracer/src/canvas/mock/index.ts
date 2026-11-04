@@ -51,6 +51,8 @@ import { createDataMode, mountDataToggle } from "./data-mode";
 import { DATA_IDS, type DataId } from "./data-ids";
 import type { AccountMock } from "./account/mount.on-demand";
 import { createStartupDemo } from "./startup-demo";
+import { buildSettingsMapView, visibleMap } from "../settings-rows/model";
+import { createRowsDocs } from "../settings-rows/docs-adapter";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
 
@@ -119,6 +121,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       teach: (hint) => teachOnce("mock", hint),
       ...(startupDemo ? { startupHints: startupDemo.hints } : {}),
       sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
+      docs: createRowsDocs(() => docs),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       // `?privilege=<scenario>`: the machine details offer the privileged-access consent (the product has no service for it yet).
       // `?removal=1`: the host row's "Remove host…" (D309). The product's removal asks for a passkey; the test double only asks and says so.
@@ -130,7 +133,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   });
   const cx = canvas.cx;
   // The docs: a Docs view with a window per page, and searchable in the palette (#302). The production canvas always has them
-  // (when the server has docs); the test double adds them only with `?docs=1`, so the scenes keep the views they are about.
+  // (when the server has docs); the test double adds them only with `?docs=1`, so the scenes keep the views they are about. The "?"
+  // buttons are there either way (#304): without the docs they say the page is not available.
   const docs = new URLSearchParams(location.search).get("docs") === "1" ? installDocsSource(core, cx) : undefined;
   const { camera, state } = cx;
   const stopOffer = offerMeshView(cx, mesh);
@@ -141,7 +145,18 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     mesh.reset(); // the scene starts from its own mesh (and its grants)
     inventory.reset();
     const named = (host: string): { id: string; name: string } | undefined => { const id = DEFAULT_SESSION[host]; const rec = id ? inventory.get(host, id) : undefined; return rec ? { id: rec.id, name: rec.name } : undefined; };
-    canvas.setViews((m: Metrics) => buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator", named));
+    // Settings is built from the table, one row per component and one window per group (#304).
+    canvas.setViews((m: Metrics) => {
+      const views = buildViews(world.role, m, mesh, world.screens, world.omit, sceneIndex === 6 && world.role === "operator", named);
+      // `noaccess=1` (an example for the "?" on an error card): the studio-mac window is one the person has no access to.
+      const noAccess = query.get("noaccess") === "1" ? "studio-mac" : undefined;
+      const built = views.map((v) => {
+        if (v.id === "console" && noAccess) return { ...v, cols: v.cols.map((col) => ({ ...col, wins: col.wins.map((w) => (w.kind === "terminal" && w.host === noAccess ? { ...w, noAccess: true, lines: [] } : w)) })) };
+        if (v.id !== "settings") return v;
+        return buildSettingsMapView(visibleMap(world.role === "operator"), m, v);
+      });
+      return built;
+    });
     cx.sharing?.reset();
   };
 
@@ -293,6 +308,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   // The pill demo starts where a terminal window is on screen (scene 3: Console), so the new window opens beside it.
   const startScene = Math.min(scenes.length - 1, Math.max(0, ((options.scene ?? (setupDemo || startupDemo ? 3 : 1)) | 0) - 1));
   goScene(startScene);
+  // The settings mockup opens on its first window (Settings › Appearance › Theme), or on `at=<component>.<group>[.<setting>]`.
+  if (query.get("at")) window.setTimeout(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${query.get("at") ?? "appearance"}`, source: "keyboard" } })), 900);
   if (setupDemo && query.get("autopilot") !== "0") window.setTimeout(() => { void runAutopilot(openAddHost); }, 500);
   startupDemo?.start();
   const sessionsScene = Number(new URLSearchParams(location.search).get("sessions")) || 0;
@@ -330,7 +347,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     act: (action: string) => cx.core.act(action),
     overview: () => cx.nav.showOverview(),
     openSession: (host: string, container?: string) => cx.win.open(host, container),
-    openSettings: (section: string) => { const c = cx.views.get("settings"); const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0]; if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); } },
+    openSettings: (section: string) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); },
     showContinueChip,
     float: () => cx.float.info(),
     setRole: (r: Role) => { world.role = r; world.forcedRole = true; goScene(4); },

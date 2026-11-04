@@ -16,6 +16,8 @@ export interface Stops {
   lefts: number[];
   /** Width of the viewport in world units at this zoom. */
   view: number;
+  /** The column each stop is for (a tiled view; empty for a graph). Where columns share a stop, the first owns it, and the last owns the one at the right edge. */
+  owners: number[];
 }
 
 /** A graph with more nodes than this is too big to snap card by card: it opens fitted whole, with the canvas free. */
@@ -32,17 +34,21 @@ export function stopsFor(view: ViewModel, r: Rect, vw: number, vh: number, centr
   const z = free ? Math.max(MIN_FREE_ZOOM, Math.min(1, (0.86 * vh) / r.h, (0.9 * vw) / r.w)) : Math.min(1, vh / r.h);
   const width = vw / z;
   let lefts: number[];
+  let owners: number[] = [];
   if (free && r.w > width) lefts = [Math.round(r.x - 0.04 * width)];
-  else if (r.w <= width) lefts = [Math.round(r.x + r.w / 2 - width / 2)];
+  else if (r.w <= width) { lefts = [Math.round(r.x + r.w / 2 - width / 2)]; owners = [0]; }
   else {
     const max = Math.round(r.x + r.w - width);
     let x = r.x;
     const raw = view.layout === "graph" ? view.nodes.map((n) => r.x + n.x - 30) : view.cols.map((col) => { const w = drawnWidth(col.w, { minW, maxW }); const at = x - Math.max(0, (width - w) / 2); x += w + COLUMN_GAP; return at; });
     // `centred` (a phone's tiled view): every column rests in the middle of the screen, the first and last included, so the
     // slices of the neighbours at the two edges are equal and the strip's ends show empty canvas rather than a wider window.
-    lefts = centred && view.layout !== "graph" ? [...new Set(raw.map(Math.round))].sort((p, q) => p - q) : [...new Set(raw.map((v) => Math.round(clamp(v, r.x, max))).concat(max))].sort((p, q) => p - q);
+    const tiled = view.layout !== "graph";
+    const placed = centred && tiled ? raw.map(Math.round) : raw.map((v) => Math.round(clamp(v, r.x, max)));
+    lefts = [...new Set(centred && tiled ? placed : placed.concat(max))].sort((p, q) => p - q);
+    if (tiled) owners = lefts.map((l) => (l === max && !centred ? (placed.lastIndexOf(l) < 0 ? placed.length - 1 : placed.lastIndexOf(l)) : placed.indexOf(l)));
   }
-  return { z, cy: r.h * z <= vh ? r.y + r.h / 2 : r.y + (free ? vh / (2 * z) - 0.04 * vh / z : vh / (2 * z)), lefts, view: width };
+  return { z, cy: r.h * z <= vh ? r.y + r.h / 2 : r.y + (free ? vh / (2 * z) - 0.04 * vh / z : vh / (2 * z)), lefts, view: width, owners };
 }
 
 /** The index of the stop whose centre is nearest to world x `cx`. */

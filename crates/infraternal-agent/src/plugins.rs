@@ -215,14 +215,17 @@ fn connect_proxy_and_mesh(
     proxy_controller
         .set_mesh_ingress_observer(mesh_plugin.proxy_ingress_observer())
         .map_err(|_| PluginError::Rejected)?;
-    Ok(
-        mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config| {
+    Ok(mesh_plugin
+        .with_configuration_observer(std::sync::Arc::new(move |config| {
             let context = config
                 .as_ref()
                 .and_then(|config| proxy_mesh_context(config).ok());
             proxy_controller.set_mesh_context(context)
-        })),
-    )
+        }))
+        .with_proxy_containment(std::sync::Arc::new(|| {
+            let containment = infraternal_plugin_proxy::cgroup::containment();
+            (containment.kind(), containment.describe())
+        })))
 }
 
 #[cfg(all(test, feature = "proxy"))]

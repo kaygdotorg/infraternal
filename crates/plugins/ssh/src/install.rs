@@ -98,8 +98,27 @@ pub struct Installation {
     // Cloned retries share at most the original session image and the full
     // exact-version image. Neither digest comes from the target or its journal.
     images: Arc<[std::sync::OnceLock<Arc<str>>; 2]>,
+    /// Fixed, validated setup receipt used to report an occupied short CLI name.
+    alias_skipped: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Installation {
+    /// Whether setup preserved a foreign `infra` path; callers should show a warning.
+    #[must_use]
+    pub fn alias_skipped(&self) -> bool {
+        self.alias_skipped
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Retain only the fixed warning from an already validated setup response.
+    fn record_alias_warning(&self, bytes: &[u8]) {
+        self.alias_skipped.store(
+            bytes
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == b"ALIAS skipped"),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// Rebind a failed retry to a freshly authenticated SSH route without changing shell ownership or image pins.
     pub(crate) fn with_session(&self, session: Arc<dyn SshSession>) -> Self {
         Self {
@@ -108,6 +127,7 @@ impl Installation {
             transaction: self.transaction,
             mode: self.mode,
             images: self.images.clone(),
+            alias_skipped: self.alias_skipped.clone(),
         }
     }
 }
@@ -345,6 +365,7 @@ impl Installation {
             transaction: cleanup.transaction,
             mode: cleanup.mode,
             images: Arc::default(),
+            alias_skipped: Arc::default(),
         })
     }
     /// Validate consent and URL again at the mutation boundary.
@@ -375,6 +396,7 @@ impl Installation {
             transaction: uuid::Uuid::new_v4(),
             mode: target.mode,
             images: Arc::default(),
+            alias_skipped: Arc::default(),
         })
     }
 
@@ -393,6 +415,7 @@ impl Installation {
             transaction: uuid::Uuid::new_v4(),
             mode: target.mode,
             images: Arc::default(),
+            alias_skipped: Arc::default(),
         })
     }
 
@@ -525,7 +548,10 @@ start_setup_lease
                 }
                 error.in_mode(self.mode)
             })?;
-        parse_transfer_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+        let linger =
+            parse_transfer_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))?;
+        self.record_alias_warning(&output.stdout);
+        Ok(linger)
     }
 
     async fn negotiated_payload(binary: &Path) -> Result<Transfer, Failure> {
@@ -959,10 +985,15 @@ fi
         // Never replace unrelated launcher/unit files. A previous installation is
         // recognizable only through the same host marker and exact launcher target.
         let start_body = setup_scripts::ACTIVATE;
-        self.session
+        let output = self
+            .session
             .run(&self.script(start_body), Input::Empty)
             .await
             .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+        if !matches!(output.stdout.as_slice(), b"" | b"ALIAS skipped\n") {
+            return Err(invalid_setup().in_mode(self.mode));
+        }
+        self.record_alias_warning(&output.stdout);
         self.session
             .run(&self.script(setup_scripts::START), Input::Empty)
             .await
@@ -994,7 +1025,9 @@ fi
                 }
                 error.in_mode(self.mode)
             })?;
-        parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+        let linger = parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))?;
+        self.record_alias_warning(&output.stdout);
+        Ok(linger)
     }
 
     /// Each step still runs a fresh errexit child with the full ownership
@@ -1559,6 +1592,10 @@ if [ -f "$stage/failed" ]; then
     if [ "${preserve_session:-no}" != yes ] || [ "$kind" != fresh ]; then
         if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
     fi
+    # Only this attempt's newly created short link belongs to rollback.
+    # Inspect the link itself: its live binary has already been retired above.
+    alias="${launcher%/*}/infra"
+    if [ -f "$stage/creating-alias" ] && [ -L "$alias" ] && [ "$(stat -c '%u' "$alias")" = "$(id -u)" ] && [ "$(readlink "$alias")" = infraternal ] && [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$base/bin/current" ]; then rm -f "$alias"; fi
     if [ -f "$stage/replacing-launcher" ] && [ ! -f "$stage/had-launcher" ]; then rm -f "$launcher"; fi
     [ ! -f "$stage/replacing-unit" ] || rm -f "$unit"
     rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit" "$stage/replacing-launcher"
@@ -1742,6 +1779,7 @@ fn hex_nibble(byte: u8) -> Result<u8, Failure> {
     }
 }
 
+/// Validate ordered setup steps, admitting only the fixed optional alias warning.
 fn parse_steps(bytes: &[u8], upload: bool) -> Result<bool, Failure> {
     if bytes.len() > 256 {
         return Err(invalid_setup());
@@ -1772,6 +1810,9 @@ fn parse_steps(bytes: &[u8], upload: bool) -> Result<bool, Failure> {
             if crate::transport::TransferChoice::parse(choice.as_bytes()).is_none() {
                 return Err(invalid_setup());
             }
+        }
+        if name == "install" && lines.clone().next() == Some("ALIAS skipped") {
+            lines.next();
         }
         let next = lines.clone().next().ok_or_else(invalid_setup)?;
         if let Some(failed) = next.strip_prefix("FAIL ") {
@@ -1813,6 +1854,7 @@ pub fn interrupted_transfer_step(bytes: &[u8]) -> Option<InstallStep> {
     interrupted_steps(bytes, true)
 }
 
+/// Recover the last complete setup step, allowing its fixed alias warning receipt.
 fn interrupted_steps(bytes: &[u8], upload: bool) -> Option<InstallStep> {
     if bytes.len() > 256 {
         return None;
@@ -1834,6 +1876,9 @@ fn interrupted_steps(bytes: &[u8], upload: bool) -> Option<InstallStep> {
         };
         if line != format!("STEP {name}") {
             return None;
+        }
+        if name == "install" && lines.peek() == Some(&"ALIAS skipped") {
+            lines.next();
         }
         last = Some(if upload && index == 0 {
             InstallStep::Upload

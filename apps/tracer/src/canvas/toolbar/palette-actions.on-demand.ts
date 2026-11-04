@@ -3,14 +3,21 @@ import type { Ctx, WinRec } from "../context";
 import { beginRename } from "../mesh/rename.on-demand";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
+import { onDemand } from "../../on-demand";
 
 /** Flies to a Settings window (canvas-locked, snapped to its column). */
-export function openSettings(cx: Ctx, section: string): void {
+export async function openSettings(cx: Ctx, section: string, source?: string): Promise<void> {
   const c = cx.views.get("settings");
-  const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0];
+  // Settings as rows of windows (#304): a target is `component`, `component.group` or `component.group.setting`, and the
+  // sections of the old Settings are mapped to where they went. A target it does not know opens the first window.
+  const outline = cx.adapters.settings.outline;
+  const target = outline && ((await outline.locate(section)) ?? (await outline.locate(outline.rows()[0]?.id ?? "")));
+  const rec = (target ? c?.wins.get(target.windowId) : undefined) ?? c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0];
   if (!rec) return;
   cx.win.setActive(rec);
   cx.nav.focusWindow(rec);
+  // The row is shown once the camera has mostly arrived (a keyboard jump is instant, so it need not wait).
+  if (outline && target?.settingId) window.setTimeout(() => outline.reveal(target.windowId, target.settingId!), source === "keyboard" ? 80 : 420);
 }
 
 export interface CanvasAction { action?: string; source?: string }
@@ -22,7 +29,8 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   const active = selected?.owner.wins.get(selected.model.id) === selected ? selected : undefined;
   if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
   else if (kind === "overview") cx.nav.showOverview();
-  else if (kind === "settings") openSettings(cx, value ?? "appearance");
+  else if (kind === "settings") void openSettings(cx, value ?? "appearance", detail?.source);
+  else if (kind === "windowdocs") { if (active) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, active); }); }
   else if (kind === "share") void cx.sharing?.open();
   else if (kind === "unlink") cx.sharing?.unlinkCurrent();
   else if (kind === "split") { if (active && isTerminal(active)) void cx.win.split(active, value === "right" ? "right" : "down"); }

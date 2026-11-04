@@ -53,7 +53,7 @@ validate_retired_stage() {
    payload)
     [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || exit 71
     case "$(stat -c '%a' "$entry")" in 600|700) continue;; *) exit 71;; esac;;
-   transaction|kind|lease|unit|activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested) :;;
+   transaction|kind|lease|unit|activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested|creating-alias) :;;
    *) refuse entry;;
   esac
   [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 600:1 ] || exit 71
