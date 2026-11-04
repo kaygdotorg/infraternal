@@ -19,6 +19,7 @@ export const docsWindowId = (slug: string): string => `d-${slug}`;
 /** What the view needs to know about a page. */
 export interface DocsPageRef { slug: string; title: string }
 
+/** Builds the Docs view's model: one window of kind `docs` in its own column for each page, in the given order, at the default column width. */
 export function buildDocsView(pages: readonly DocsPageRef[], m: Metrics): ViewModel {
   return {
     id: DOCS_VIEW, name: "Docs", layout: "tiled", nodes: [], x: 0, y: 0,
