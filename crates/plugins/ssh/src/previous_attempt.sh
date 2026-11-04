@@ -1,4 +1,18 @@
 # Classify earlier host provisioning using private ownership receipts; never adopt foreign data.
+# The installation base is 0700, except root's /var/lib/infraternal, which
+# `infraternal up` lays out as 0711 so every user can reach its 0755 bin/
+# while only root can list it (#263). The installer preamble accepts the same
+# and nothing else (J145 P3-4); recovering a stuck root install must too.
+# Every directory under the base stays exactly 0700. up_root_base is set by
+# the installation prelude (install.rs), never by the login environment; only
+# the shell oracle points it at a fixture.
+private_base_mode() {
+ case "$(stat -c '%a' "$base")" in
+  700) return 0;;
+  711) [ "$(id -u)" = 0 ] && [ "$base" = "$up_root_base" ];;
+  *) return 1;;
+ esac
+}
 private_file() {
  [ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ "$(stat -c '%a:%h' "$1")" = 600:1 ] || exit 71
  [ "$(stat -c '%s' "$1")" -le 128 ] || exit 71
@@ -238,7 +252,7 @@ validate_upgrade_stage() {
  [ -f "$stage/activating" ] || [ -f "$stage/failed" ] || refuse marker
 }
 validate_upgrade_root() {
- [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
+ [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && private_base_mode || exit 71
  private_file "$base/.bootstrap-owner"
  [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
  previous_host=$(cat "$base/.bootstrap-owner")
@@ -498,7 +512,7 @@ inspect_previous() {
    printf 'INFRATERNAL_SETUP_STALE %s %s %s 0\n' "$previous_host" "$previous_transaction" "$identity"
    return
   fi
-  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
+  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && private_base_mode || exit 71
   [ "$(stat -c '%d:%i' "$base")" = "$identity" ] || refuse identity
   if [ ! -e "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ]; then
    for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
@@ -510,7 +524,7 @@ inspect_previous() {
    [ "$(cat "$base/.bootstrap-owner")" = "$previous_host" ] || refuse owner
   fi
  else
-  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && [ "$(stat -c '%a' "$base")" = 700 ] || exit 71
+  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] && private_base_mode || exit 71
   private_file "$base/.bootstrap-owner"
   [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
   previous_host=$(cat "$base/.bootstrap-owner")

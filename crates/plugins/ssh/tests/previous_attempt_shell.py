@@ -82,6 +82,7 @@ home="{self.home}"
 unit="{self.unit}"
 launcher="{self.launcher}"
 manager=mock_manager
+up_root_base="{getattr(self, 'up_root_base', '/var/lib/infraternal')}"
 manager_log="{self.manager_log}"
 manager_active="{self.manager_active}"
 mock_manager() {{
@@ -1216,6 +1217,25 @@ supersede_stuck_install "{expected}"
         self.assertFalse(stage.exists(), 'the lost commit is finished (#305 P2-2)')
         self.assertTrue((self.base / 'bin/live').exists())
         self.assertEqual(self.mutating_calls(), [], 'the running service is never touched')
+
+    def test_only_roots_up_base_may_be_0711(self):
+        # #263: `infraternal up` makes root's /var/lib/infraternal 0711; a stuck
+        # root install there must still be recognised. The oracle runs as a
+        # normal user, so `id` stands in for root and up_root_base for the path.
+        self.make_upgrade_fixture()
+        body = '\n{}private_base_mode; echo "rc=$?"\n'
+        as_root = 'id() { echo 0; }\n'
+        self.base.chmod(0o711)
+        self.up_root_base = str(self.base)
+        self.assertEqual(self.run_shell(body.format(as_root)).stdout, b'rc=0\n', 'root up base at 0711')
+        self.assertEqual(self.run_shell(body.format('')).stdout, b'rc=1\n', 'a rootless base stays 0700')
+        self.up_root_base = '/var/lib/infraternal'
+        self.assertEqual(self.run_shell(body.format(as_root)).stdout, b'rc=1\n', 'only that path')
+        self.base.chmod(0o755)
+        self.up_root_base = str(self.base)
+        self.assertEqual(self.run_shell(body.format(as_root)).stdout, b'rc=1\n', 'and only 0711')
+        self.base.chmod(0o700)
+        self.assertEqual(self.run_shell(body.format('')).stdout, b'rc=0\n')
 
     def test_a_finish_whose_agent_stopped_since_the_check_keeps_the_rollback_state(self):
         # J202 P2: the server saw the agent online and chose Finish; the agent

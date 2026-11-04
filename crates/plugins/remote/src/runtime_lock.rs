@@ -27,8 +27,9 @@ pub const LOCK: &str = ".lifetime-lock";
 /// The cleanup script compares it with the level it needs, so a cached helper that predates
 /// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
 /// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`;
-/// level 4: `sessions-count`; level 5: `enrolled`; level 6: `stage-processes`.
-pub const LEVEL: &[u8] = b"6\n";
+/// level 4: `sessions-count`; level 5: `enrolled`; level 6: `stage-processes`;
+/// level 7: root's `infraternal up` base may be 0711 ([`traversable_base`]).
+pub const LEVEL: &[u8] = b"7\n";
 
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -36,13 +37,42 @@ fn refused() -> io::Error {
 #[cold]
 #[inline(never)]
 fn directory(path: &Path) -> io::Result<File> {
+    private_directory(path, false)
+}
+
+/// Root's `/var/lib/infraternal`, which `infraternal up` lays out as 0711.
+const UP_ROOT_BASE: &str = "/var/lib/infraternal";
+
+/// Whether an installation base with `mode` may be 0711 rather than 0700.
+/// Only root's `/var/lib/infraternal`: `infraternal up` makes it 0711 so every
+/// user can reach its 0755 `bin/` through `/usr/local/bin/infraternal`, while
+/// only root can list it (#263). The SSH installer's preamble accepts the
+/// same and nothing else (J145 P3-4), so recovery of a stuck root install
+/// must too. Every directory under it stays exactly 0700.
+#[must_use]
+pub fn traversable_base(path: &Path, euid: u32, mode: u32) -> bool {
+    match mode & 0o777 {
+        0o700 => true,
+        0o711 => euid == 0 && path == Path::new(UP_ROOT_BASE),
+        _ => false,
+    }
+}
+
+/// Open an owned private directory: 0700, or for an installation base, any
+/// mode [`traversable_base`] accepts.
+fn private_directory(path: &Path, base: bool) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
         .open(path)?;
     let metadata = file.metadata()?;
-    if metadata.uid() != nix::unistd::Uid::effective().as_raw() || metadata.mode() & 0o777 != 0o700
-    {
+    let euid = nix::unistd::Uid::effective().as_raw();
+    let private = if base {
+        traversable_base(path, euid, metadata.mode())
+    } else {
+        metadata.mode() & 0o777 == 0o700
+    };
+    if metadata.uid() != euid || !private {
         return Err(refused());
     }
     Ok(file)
@@ -964,7 +994,7 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
             return Err(71);
         }
         let base = Path::new(&base);
-        let root = directory(base).map_err(|_| 71)?;
+        let root = private_directory(base, true).map_err(|_| 71)?;
         let metadata = root.metadata().map_err(|_| 71)?;
         if identity != format!("{}:{}", metadata.dev(), metadata.ino()).as_str() {
             return Err(71);

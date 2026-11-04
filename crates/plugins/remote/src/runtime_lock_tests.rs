@@ -748,3 +748,19 @@ fn foreign_inode_twin_inner() {
     eprintln!("target inode={target} sessions={result:?}");
     assert_eq!(result, Ok(()), "dead endpoint reported live (73)");
 }
+
+/// #263: only root's `infraternal up` base may be 0711; every other base,
+/// and every directory under one, stays exactly 0700 (J145 P3-4).
+#[test]
+fn only_roots_up_base_may_be_traversable() {
+    let up = Path::new("/var/lib/infraternal");
+    assert!(traversable_base(up, 0, 0o40711));
+    assert!(traversable_base(up, 0, 0o700));
+    assert!(!traversable_base(up, 1000, 0o711), "not for another user");
+    assert!(
+        !traversable_base(Path::new("/home/a/.local/share/infraternal"), 0, 0o711),
+        "not for another path, even as root"
+    );
+    assert!(!traversable_base(up, 0, 0o755), "never readable by others");
+    assert!(!traversable_base(up, 0, 0o701));
+}
