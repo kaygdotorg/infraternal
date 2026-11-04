@@ -34,6 +34,11 @@ verify_diff_docs() {
         python3 scripts/verify.d/diff-practices.py docs "${VERIFY_QUICK_BASE:-origin/dev}"
 }
 
+# Root-only paths complement browser/passkey coverage on the test server (D351).
+verify_privileged() {
+    python3 scripts/test-verify-privileged.py && scripts/verify-privileged
+}
+
 rust_print_summary() {
     local row
     local name
@@ -305,6 +310,7 @@ rust_verify_fast() {
     rust_run_gate "doc comments on diff" verify_diff_docs
     rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
+        rust_run_gate "privileged integration" verify_privileged
         rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
         rust_run_gate "static builds" rust_static_build_check
     fi

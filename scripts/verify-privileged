@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Run the namespace-requiring tests of the areas a change touches (D351, #344).
+
+What it is for: install, proxy, mesh and shim code has paths that only run with
+privileges inside a network: WireGuard and TUN links, nftables rules, routes,
+DNS on a mesh address, cgroup containment. Ordinary test runs never reach them,
+so those tests are `#[ignore]`d with a reason such as "Run in a disposable
+user/network namespace". When a change touches one of those four areas (path
+globs below, against the merge base), this script runs that area's tests.
+
+How it stays contained: nothing runs as host root, and there is no sudo.
+- Everything is built as the calling user: the same `cargo test --workspace
+  --no-run` build the `test` row uses, plus mesh with the features its
+  namespace tests need.
+- Each prebuilt test binary then runs in a sandbox made only of unprivileged
+  kernel features: a new user namespace (uid 0 inside is the caller's uid
+  outside, so "root" there has no power over host files), plus new network,
+  mount and PID namespaces. Inside, the whole host filesystem is mounted
+  read-only, recursively; `pivot_root` makes that the root and the old root is
+  detached, so there is no path back to writable host mounts. The only
+  writable places are fresh tmpfs mounts (/tmp, which also holds the build-
+  output view, /run, /var/tmp, /dev/shm), and they vanish with the namespace. The network namespace has only loopback, so
+  the host network is unreachable.
+- Before any test runs, `self_check` plants escapes inside the same sandbox
+  (writing under $HOME, the checkout, the target and /etc; remounting / read-
+  write; reaching an outside address; leaving a file behind) and the row fails
+  unless every one of them fails.
+
+Which tests run: every `#[ignore]`d test in the area's packages whose reason
+asks for root or a disposable namespace (`PRIVILEGED_REASON`), each alone in
+its own sandbox. Reasons that need something else (the perf VM, Docker, a
+release binary, an sshd or Pebble fixture) are left out by `OTHER_NEEDS`, so
+the selection follows the code instead of a list that goes stale.
+
+Not covered: code paths that only behave differently as *real* host root
+(rootful proxy supervision, installing for other accounts, host-login as
+root). A user namespace cannot exercise them without giving the branch real
+root, which this row refuses to do; they are listed in `NOT_COVERED` and in
+docs/PROCESS.md §11. Browser and passkey flows run against the test server.
+
+How to use it: `scripts/verify fast` runs it as the `privileged integration`
+row; by hand, `scripts/verify-privileged`. It needs Linux with unprivileged
+user namespaces and runs inside the flake dev shell (for `nft`, `ip`, cargo).
+"""
+import argparse
+import fnmatch
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import uuid
+
+# Path globs that put a change in an area. fnmatch's `*` already crosses
+# directories; `**` only reads clearer.
+GLOBS = {
+    'install': ('crates/infraternal/src/install*', 'crates/infraternal/src/up*', 'crates/infraternal/src/main.rs',
+                'crates/plugins/ssh/**', 'crates/plugins/remote/src/*install*',
+                'crates/plugins/remote/src/setup*', 'crates/plugins/remote/src/bootstrap*'),
+    'proxy': ('crates/plugins/proxy/**',),
+    'mesh': ('crates/plugins/mesh/**', 'crates/infraternal-mesh/**', 'crates/infraternal-server/src/*mesh*'),
+    'shim': ('crates/infraternal-shim/**', 'crates/infraternal-agent/src/rootless*',
+             'crates/infraternal-agent/src/login*', 'crates/infraternal/src/shim*'),
+}
+
+# The packages each area scans for namespace tests: (package, directory,
+# features). Empty features mean "as the workspace build compiles it";
+# otherwise the package is built on its own with exactly these.
+PACKAGES = {
+    'install': (('infraternal', 'crates/infraternal', ''),
+                ('infraternal-plugin-ssh', 'crates/plugins/ssh', ''),
+                ('infraternal-plugin-remote', 'crates/plugins/remote', '')),
+    'proxy': (('infraternal-plugin-proxy', 'crates/plugins/proxy', ''),),
+    'mesh': (('infraternal-plugin-mesh', 'crates/plugins/mesh', 'agent,server,relay,test-support'),),
+    'shim': (('infraternal-shim', 'crates/infraternal-shim', ''),
+             ('infraternal', 'crates/infraternal', '')),
+}
+
+# Targets that need a feature their package's shared set leaves off. The DNS
+# resolver is default-off (`mesh-dns-spike`), and turning it on for every mesh
+# test changes `Config`'s fields under fixtures that are not written for it.
+TARGET_FEATURES = {
+    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns-spike',
+}
+
+# Root-only behaviour this row deliberately does not exercise, and why. Kept
+# here so the gap is visible in the code that decides what runs.
+NOT_COVERED = {
+    'proxy': 'rootful Traefik supervision and installation (rootful() is false for uid 0 in a user namespace)',
+    'install': 'installing for other accounts and system paths (needs real uids and host directories)',
+    'shim': 'host-login and PTY ownership as real root (needs real setuid/setgid over host accounts)',
+}
+
+# An ignore reason that asks for privileges or a disposable namespace...
+PRIVILEGED_REASON = re.compile(r'namespace|as root|CAP_NET_ADMIN|unshare', re.I)
+# ...unless it also needs something this row does not provide.
+OTHER_NEEDS = re.compile(r'perf VM|CPUWeight|MESH_REVIEW_PROBE|release binary|static release|Docker|Pebble|sshd|research/', re.I)
+IGNORED_TEST = re.compile(r'#\[ignore\s*=\s*"([^"]*)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)')
+
+# The sandbox, run by bash as PID 1 of the new PID namespace (so orphans of a
+# test are reaped by a shell). Arguments: scratch dir, target dir, then the
+# test command. Every step must succeed; a failure aborts before the test.
+SANDBOX_SETUP = r'''set -eu
+PATH=$PATH:/usr/sbin:/sbin
+scratch=$1 target=$2; shift 2
+new=$scratch/root
+mount --make-rprivate /
+mount --rbind / "$new"
+# Recursively read-only: every host mount under the new root, not just the top.
+mount -o remount,bind,ro=recursive "$new"
+mount -t proc proc "$new/proc"
+mount -t tmpfs -o mode=1777 tmpfs "$new/tmp"
+mount -t tmpfs -o mode=1777 tmpfs "$new/dev/shm"
+# Fresh /run and /var/tmp: tests may add named netns under /run/netns.
+mount -t tmpfs -o mode=755 tmpfs "$new/run"
+mount -t tmpfs -o mode=1777 tmpfs "$new/var/tmp"
+# Build outputs read through `ut`, a tmpfs dir whose `debug` links to the
+# read-only target: tests can make scratch dirs there and still find examples.
+mkdir -p "$new/tmp/ut"
+ln -s "$target/debug" "$new/tmp/ut/debug"
+cd "$new"
+pivot_root . .
+# Detach the old root entirely: nothing writable from the host stays reachable.
+umount -l .
+cd "$PRIVILEGED_CWD"
+ip link set lo up
+"$@" </dev/null
+'''
+
+
+def areas(paths):
+    """Return the areas whose globs match any changed path.
+
+    Shared build inputs (workspace manifest, lockfile, toolchain, cargo config)
+    and this script itself select every area, because they can change any
+    area's behaviour.
+    """
+    shared = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify-privileged')
+    if any(path in shared or path.startswith('.cargo/') for path in paths):
+        return set(GLOBS)
+    return {area for area, patterns in GLOBS.items()
+            if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)}
+
+
+def target_of(relative, src_target):
+    """Map a source file inside a package to the cargo test target holding it.
+
+    `src_target` is where `src/` unit tests live: 'lib', or 'bin:<name>' for a
+    binary-only package.
+    """
+    parts = Path(relative).parts
+    if parts[0] == 'tests' and len(parts) >= 2:
+        return 'test:' + Path(parts[1]).stem
+    if parts[0] == 'src':
+        return src_target
+    return None
+
+
+def privileged_ignored(root, package, directory):
+    """Find `#[ignore]`d test functions in one package that ask for a namespace.
+
+    Returns {target: {function name: ignore reason}}. The scan is textual on
+    purpose: it only needs the attribute and the function name that follows.
+    """
+    found = {}
+    src_target = 'lib' if (root / directory / 'src/lib.rs').exists() else 'bin:' + package
+    for path in sorted((root / directory).rglob('*.rs')):
+        target = target_of(path.relative_to(root / directory), src_target)
+        if not target:
+            continue
+        for match in IGNORED_TEST.finditer(path.read_text()):
+            reason, name = match.groups()
+            if PRIVILEGED_REASON.search(reason) and not OTHER_NEEDS.search(reason):
+                found.setdefault(target, {})[name] = reason
+    return found
+
+
+def cargo_selector(target):
+    """Turn a target key ('lib', 'bin:x', 'test:y') into cargo's target flags."""
+    if target == 'lib':
+        return ['--lib']
+    kind, name = target.split(':', 1)
+    return ['--' + kind, name]
+
+
+def builds(selected):
+    """The `cargo test --no-run` invocations for the selected areas, in order.
+
+    Each entry is (cargo arguments, what it provides): None for the workspace
+    build, a package name, or a (package, target) pair. Later entries replace
+    earlier executables for what they provide.
+    """
+    result = [(['--workspace'], None)]
+    for area in sorted(selected):
+        for package, _, features in PACKAGES[area]:
+            entry = (['-p', package, '--features', features, '--tests', '--examples'], package)
+            # --examples builds fixtures such as mesh's kernel_node that its
+            # namespace tests execute.
+            if features and entry not in result:
+                result.append(entry)
+    packages = {package for area in selected for package, _, _ in PACKAGES[area]}
+    for (package, target), features in sorted(TARGET_FEATURES.items()):
+        if package in packages:
+            result.append((['-p', package, '--features', features, *cargo_selector(target)], (package, target)))
+    return result
+
+
+def target_key(artifact):
+    """Name a compiled test target the way this script does: 'lib', 'bin:x' or 'test:y'."""
+    kinds = artifact['target']['kind']
+    if 'bin' in kinds:
+        return 'bin:' + artifact['target']['name']
+    if 'test' in kinds:
+        return 'test:' + artifact['target']['name']
+    return 'lib'
+
+
+def executables(root, selected):
+    """Build the test binaries as the caller and map (package directory, target) to each."""
+    found = {}
+    directories = {package: directory for area in selected for package, directory, _ in PACKAGES[area]}
+    for cargo_args, provides in builds(selected):
+        output = subprocess.run(['cargo', 'test', '--locked', *cargo_args, '--no-run', '--message-format=json'],
+                                cwd=root, stdout=subprocess.PIPE, text=True, check=True).stdout
+        if '--examples' in cargo_args:
+            # `cargo test --no-run` leaves examples only under hashed names;
+            # tests run them as target/debug/examples/<name> (mesh kernel_node).
+            plain = [arg for arg in cargo_args if arg != '--tests']
+            subprocess.run(['cargo', 'build', '--locked', *plain], cwd=root, check=True)
+        for line in output.splitlines():
+            artifact = json.loads(line) if line.startswith('{') else {}
+            if artifact.get('reason') != 'compiler-artifact' or not artifact.get('executable') \
+                    or not artifact.get('profile', {}).get('test'):
+                continue
+            manifest = Path(artifact['manifest_path']).parent
+            if not manifest.is_relative_to(root):
+                continue
+            directory = str(manifest.relative_to(root))
+            key = (directory, target_key(artifact))
+            if isinstance(provides, str) and directory != directories[provides]:
+                continue
+            if isinstance(provides, tuple) and key != (directories[provides[0]], provides[1]):
+                continue
+            found[key] = artifact['executable']
+    return found
+
+
+def sandboxed(command, environment, cwd, scratch, target):
+    """Wrap one command in the unprivileged sandbox described in the module docs.
+
+    `environment` is passed explicitly (`env -i`), so nothing else from the
+    caller's environment leaks in. CARGO_TARGET_DIR points at the tmpfs view.
+    """
+    environment = dict(environment, CARGO_TARGET_DIR='/tmp/ut', PRIVILEGED_CWD=str(cwd), TMPDIR='/tmp')
+    pairs = [f'{key}={value}' for key, value in sorted(environment.items())
+             if '\n' not in value and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)]
+    return ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--fork', '--mount-proc',
+            'env', '-i', *pairs, 'bash', '-c', SANDBOX_SETUP, 'privileged-sandbox', str(scratch), str(target),
+            *command]
+
+
+# Each probe must FAIL inside the sandbox; the label says what it would prove.
+ESCAPES = {
+    'write in the home directory': 'touch "$HOME_DIR/.privileged-escape"',
+    'write in the checkout': 'touch "$CHECKOUT/.privileged-escape"',
+    'write in the build target': 'touch "$TARGET_DIR/.privileged-escape"',
+    'write /etc': 'touch /etc/.privileged-escape',
+    'remount / read-write': 'mount -o remount,rw /',
+    'reach the host network': 'timeout 3 bash -c "exec 3<>/dev/tcp/$OUTSIDE_ADDRESS/22"',
+    'have a route off loopback': 'ip route show table main | grep -q . || ip -6 route show table main | grep -v "^fe80" | grep -q .',
+    'reach the internet': 'timeout 3 bash -c "exec 3<>/dev/tcp/1.1.1.1/53"',
+    'map uid 0 to host root': 'test "$(awk \'{print $2}\' /proc/self/uid_map)" = 0',
+}
+
+
+def self_check(scratch, target, checkout):
+    """Plant escapes inside the sandbox; return the ones that wrongly succeeded.
+
+    Also proves persistence is impossible: a file written to /tmp inside must
+    not exist anywhere outside afterwards. An empty list means contained.
+    """
+    marker = f'privileged-persist-{uuid.uuid4().hex}'
+    outside = subprocess.run(['ip', '-4', 'route', 'get', '1.1.1.1'], capture_output=True, text=True).stdout
+    address = re.search(r'\bsrc (\S+)', outside)
+    probes = ['set +e']
+    for label, probe in ESCAPES.items():
+        probes.append(f'if ( {probe} ) >/dev/null 2>&1; then echo "ESCAPED: {label}"; else echo "contained: {label}"; fi')
+    probes.append(f'touch /tmp/{marker} && echo "contained: wrote only to the sandbox tmpfs"')
+    environment = {'HOME_DIR': str(Path.home()), 'CHECKOUT': str(checkout), 'TARGET_DIR': str(target),
+                   'OUTSIDE_ADDRESS': address[1] if address else '1.1.1.1', 'PATH': os.environ['PATH']}
+    result = subprocess.run(sandboxed(['bash', '-c', '\n'.join(probes)], environment, '/', scratch, target),
+                            capture_output=True, text=True)
+    print(result.stdout, end='', flush=True)
+    escaped = [line for line in result.stdout.splitlines() if line.startswith('ESCAPED')]
+    expected = len(ESCAPES) + 1
+    if result.returncode or sum(1 for line in result.stdout.splitlines() if line.startswith('contained')) != expected:
+        escaped.append(f'sandbox did not start cleanly (exit {result.returncode}): {result.stderr.strip()[-400:]}')
+    for path in (Path('/tmp') / marker, Path(tempfile.gettempdir()) / marker, scratch / 'root' / 'tmp' / marker):
+        if path.exists():
+            escaped.append(f'ESCAPED: {path} persisted outside the sandbox')
+    return escaped
+
+
+def plan(root, selected, binaries):
+    """List the runs: (label, package directory, executable, test args), plus missing targets."""
+    directories = {package: directory for area in selected for package, directory, _ in PACKAGES[area]}
+    runs, missing = [], []
+    for package, directory in sorted(directories.items()):
+        for target, names in sorted(privileged_ignored(root, package, directory).items()):
+            path = binaries.get((directory, target))
+            if not path:
+                missing.append(f'{package} {target}')
+                continue
+            listing = subprocess.run([path, '--list', '--ignored'], cwd=root / directory,
+                                     capture_output=True, text=True, check=True).stdout
+            full = [line[:-len(': test')] for line in listing.splitlines() if line.endswith(': test')]
+            for test in sorted(t for t in full if t.rsplit('::', 1)[-1] in names):
+                # Each test runs alone in a fresh sandbox: several say so, and
+                # it keeps one test's leftovers from reaching another.
+                runs.append((f'{package} {target} {test}', directory, path, ['--ignored', '--exact', test]))
+    return runs, missing
+
+
+def run(root, selected, target):
+    """Build as the caller, prove containment, then run each selected test. Returns failures."""
+    binaries = executables(root, selected)
+    scratch = Path(tempfile.mkdtemp(prefix='privileged-', dir=Path.home() / '.cache'))
+    try:
+        (scratch / 'root').mkdir()
+        escaped = self_check(scratch, target, root)
+        if escaped:
+            return ['sandbox containment: ' + line for line in escaped]
+        print('privileged integration: sandbox contained every planted escape', flush=True)
+        runs, missing = plan(root, selected, binaries)
+        failed = [f'{name}: no test binary was built' for name in missing]
+        print(f'privileged integration: {len(runs)} runs for areas={",".join(sorted(selected))}', flush=True)
+        # PYTHONPATH: some namespace tests load scripts/ helpers that import
+        # their siblings. The parent netns lets the DNS test prove it left it.
+        base = {'PATH': os.environ['PATH'], 'HOME': '/tmp', 'LANG': 'C.UTF-8', 'PYTHONPATH': str(root / 'scripts'),
+                'INFRATERNAL_TEST_STATE_ROOT': '/tmp/st',
+                'INFRATERNAL_DNS_TEST_PARENT_NETNS': os.readlink('/proc/self/ns/net')}
+        for index, (label, directory, path, test_args) in enumerate(runs, 1):
+            print(f'=== [{index}/{len(runs)}] {label}', flush=True)
+            environment = dict(base, CARGO_MANIFEST_DIR=str(root / directory))
+            command = ['bash', '-c', 'mkdir -p /tmp/st && exec "$@"', 'test', path, *test_args,
+                       '--test-threads=1', '--nocapture']
+            result = subprocess.run(sandboxed(command, environment, root / directory, scratch, target))
+            print(f'=== [{index}/{len(runs)}] {label}: {"PASS" if result.returncode == 0 else "FAIL"}', flush=True)
+            if result.returncode:
+                failed.append(label)
+        return failed
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def main():
+    """Pick areas from the diff against the merge base, then build and run their namespace tests."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--base', default=os.environ.get('VERIFY_QUICK_BASE', 'origin/dev'))
+    parser.add_argument('--self-check', action='store_true', help='only prove the sandbox contains planted escapes')
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    target = Path(os.environ.get('CARGO_TARGET_DIR', str(root / 'target'))).resolve()
+    if args.self_check:
+        target.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix='privileged-', dir=Path.home() / '.cache'))
+        try:
+            (scratch / 'root').mkdir()
+            escaped = self_check(scratch, target, root)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        raise SystemExit('\n'.join(escaped) if escaped else 0)
+    base = subprocess.check_output(['git', 'merge-base', 'HEAD', args.base], cwd=root, text=True).strip()
+    paths = subprocess.check_output(['git', 'diff', '--name-only', '-z', base], cwd=root).decode().split('\0')
+    paths += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z'], cwd=root).decode().split('\0')
+    selected = areas([path for path in paths if path])
+    if not selected:
+        print('privileged integration: SKIP (no install, proxy, mesh or shim changes)')
+        return
+    print(f'privileged integration: areas={",".join(sorted(selected))}', flush=True)
+    for area in sorted(selected & set(NOT_COVERED)):
+        print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
+    failed = run(root, selected, target)
+    if failed:
+        raise SystemExit('privileged integration: FAIL\n  ' + '\n  '.join(failed))
+    print('privileged integration: PASS', flush=True)
+
+
+if __name__ == '__main__':
+    main()

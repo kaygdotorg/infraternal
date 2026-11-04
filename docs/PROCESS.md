@@ -572,6 +572,69 @@ When a Codex implementation job finishes, an independent Codex reviewer starts a
   job work that can't be committed yet is snapshotted to `wip/<job>` so it
   isn't lost.
 
+## 17. Privileged integration and runtime probes (D351, #344)
+
+**What it covers:** tests that need privileges inside a network: WireGuard and
+TUN links, nftables rules, routes, DNS on a mesh address. They are
+`#[ignore]`d with a reason such as "Run in a disposable user/network
+namespace". When a change touches install/bootstrap/removal, proxy, mesh or
+shim/host-login code (the path globs in `scripts/verify-privileged`, against
+the merge base `VERIFY_QUICK_BASE`, default `origin/dev`), the `privileged
+integration` row of `scripts/verify fast` runs those tests. Shared build inputs
+(workspace manifest, lockfile, toolchain) select all four areas; other changes
+skip the row.
+
+**Which tests:** every ignored test in the area's packages whose reason asks
+for root or a disposable namespace, each alone in a fresh sandbox. The reason
+text selects them, so a new namespace test joins without editing a list.
+Reasons that need the perf VM, Docker, a release binary or an sshd or Pebble
+fixture stay out. Binaries come from the `test` row's own `cargo test
+--workspace --no-run` build; mesh, and its default-off DNS test, are built
+again with the features their namespace tests need.
+
+**What is contained, exactly:** nothing in this row runs as host root, and it
+uses no sudo. Building and the scripts run as the calling user. Each test
+binary runs under `unshare --user --map-root-user --net --mount --pid`:
+- uid 0 inside is the caller's uid outside (`/proc/self/uid_map` is
+  `0 <uid> 1`), so in-namespace "root" has no rights over host files beyond
+  the caller's own;
+- the whole host filesystem is bind-mounted read-only *recursively*
+  (`ro=recursive`), `pivot_root` makes it the root and the old root is
+  detached, so no writable host mount stays reachable, including the caller's
+  home, the checkout and the build target;
+- the only writable places are new tmpfs mounts (`/tmp`, which also holds the
+  build-output view `CARGO_TARGET_DIR=/tmp/ut`, `/run`, `/var/tmp`,
+  `/dev/shm`), and they disappear with the namespace;
+- the network namespace has only loopback: no route, no host interfaces, no
+  internet;
+- the environment is passed explicitly (`env -i`), and bash stays PID 1 so
+  orphaned test processes are reaped.
+
+Before any test, the row plants escapes in the same sandbox: writes under the
+home directory, the checkout, the target and `/etc`; `mount -o remount,rw /`;
+a route off loopback; connections to the host's address and to the internet;
+a uid map onto host root; a file left in `/tmp`. The row fails unless every
+one fails and the file does not exist anywhere outside afterwards.
+`scripts/test-verify-privileged.py` runs the same check and a control showing
+the writes succeed outside the sandbox.
+
+**Not covered:** behaviour that only differs as *real* host root (rootful
+proxy supervision and installation, installing for other accounts and system
+paths, host-login and PTY ownership as root). A user namespace cannot reach
+those paths without giving the branch real root, which this row refuses to do.
+`NOT_COVERED` in the script names them and the row prints them. A job that
+changes them still proves them as root by hand on a build VM, and its review
+checks that proof.
+
+**Where it runs:** any Linux build VM that allows unprivileged user
+namespaces, inside the flake dev shell (for `ip`, `nft`, cargo). compute01
+and dev-02 both qualify.
+
+**How it differs from the test server:** https://test.ssh.kayg.org is the
+real-environment check for browser and passkey flows on a deployed build. It
+does not run each branch's namespace tests. This row does, on every such
+change, without deploying anything. Neither replaces the other.
+
 ## 18. Nightly parser fuzzing (D351, #344)
 
 On dev-02, provision an owner-readable mode-0600 Forgejo token file outside the
