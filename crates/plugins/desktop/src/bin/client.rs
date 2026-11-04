@@ -1,4 +1,13 @@
 //! Local test client saves helper Annex-B access units without a server or browser [D203,D208].
+//!
+//! Usage: `infraternal-desktop-client <socket> list|status|capture [start.json
+//! output.h264 seconds] [--json]`.
+//!
+//! It connects to a running desktop helper's Unix socket, sends one command and
+//! prints the reply as a short text report (or raw JSON with `--json`).
+//! `capture` also reads a start request from a JSON file, then writes the
+//! received video access units to the output file for the given number of
+//! seconds (default 5, at most 120). It exists for testing the helper by hand.
 use infraternal_plugin_desktop::protocol::{self, Kind};
 use std::{
     fs,
@@ -7,6 +16,9 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
+/// Parses the command line, sends one command to the helper, prints the reply,
+/// and for `capture` saves the stream. Returns an error (non-zero exit) on bad
+/// usage, I/O failure, or when the helper answers with an error.
 fn main() -> io::Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -72,6 +84,9 @@ fn main() -> io::Result<()> {
     save_stream(socket, &args, json)
 }
 
+/// Makes helper-supplied text safe to print: drops control characters (which
+/// could drive the terminal) and bidirectional overrides (which could reorder
+/// the displayed text), and keeps at most 256 characters.
 fn clean(value: &str) -> String {
     value
         .chars()
@@ -79,6 +94,9 @@ fn clean(value: &str) -> String {
         .take(256)
         .collect()
 }
+/// Prints the helper's reply: the raw JSON when `json` is set, otherwise a
+/// window and display table for `List`, or a short state summary for other
+/// commands.
 fn render(value: &serde_json::Value, kind: Kind, json: bool) {
     if json {
         println!("{value}");
@@ -132,6 +150,13 @@ fn render(value: &serde_json::Value, kind: Kind, json: bool) {
     }
 }
 
+/// Writes the helper's video to the file named by `args[3]` for `args[4]`
+/// seconds (default 5, capped at 120), then asks it to stop and waits for the
+/// final state message.
+///
+/// The output file is created new with mode 0600 and never overwritten. A
+/// background thread appends each video payload (minus its 9-byte header) as it
+/// arrives; the result is the number of frames saved.
 fn save_stream(mut socket: UnixStream, args: &[std::ffi::OsString], json: bool) -> io::Result<()> {
     let output = args
         .get(3)

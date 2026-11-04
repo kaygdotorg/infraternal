@@ -1,17 +1,32 @@
 //! Selects one viewer's original or restricted SPS from helper-owned standard SEI; picture NALs are never changed [D204,D266], #146.
+//!
+//! The helper puts two versions of the H.264 sequence parameter set (SPS) in each
+//! keyframe: the one it sends by default, followed by a standard SEI message
+//! (user data tagged `infraternal-sps1`) that carries the encoder's original SPS.
+//! [`select`] picks one for a given viewer: the low-delay SPS as sent, or the
+//! original one swapped in. Only these parameter NAL units are touched; the
+//! picture data is passed through byte for byte, and a frame without the SEI
+//! message is returned unchanged. A malformed SEI message makes the whole frame
+//! refused rather than guessed at.
 use bytes::Bytes;
 
+/// The user-data identifier that marks the helper's SEI message.
 const ID: &[u8; 16] = b"infraternal-sps1";
 
-/// This preference is per viewer and changes only on a repairing keyframe.
+/// Which sequence parameter set a viewer wants. This preference is per viewer
+/// and changes only on a repairing keyframe.
 #[derive(Clone, Copy, Default, Debug, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Parameters {
+    /// The SPS exactly as the encoder produced it.
     Encoder,
+    /// The helper's restricted SPS tuned for low decoding delay (the default).
     #[default]
     LowDelay,
 }
 
+/// Finds the next Annex-B start code at or after `from`. Returns where the start
+/// code begins and where the NAL unit's data begins (3- or 4-byte start code).
 fn prefix(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
     (from..bytes.len().saturating_sub(2)).find_map(|i| {
         if bytes[i..].starts_with(&[0, 0, 0, 1]) {
@@ -24,6 +39,10 @@ fn prefix(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
     })
 }
 
+/// Looks at one NAL unit (without start code). If it is the helper's SEI
+/// message, returns the original SPS inside it. `Ok(None)` means it is some
+/// other NAL unit; `Err` means it carries the helper's tag but is malformed or
+/// oversized.
 // Only the helper's single user-data message is interpreted. Other SEI is opaque.
 fn original(nal: &[u8]) -> Result<Option<Vec<u8>>, ()> {
     if nal.first().is_none_or(|byte| byte & 31 != 6) {
@@ -92,6 +111,10 @@ fn original(nal: &[u8]) -> Result<Option<Vec<u8>>, ()> {
     Ok(Some(sps.to_vec()))
 }
 
+/// Removes the helper's metadata from the access unit `bytes` and, for
+/// [`Parameters::Encoder`], replaces the SPS just before it with the original.
+/// For [`Parameters::LowDelay`] the SPS is kept and only the metadata is removed.
+///
 /// Strip only recognized helper metadata and restore its preceding SPS when requested.
 /// Legacy access units and all non-keyframes keep the shared allocation.
 /// # Errors

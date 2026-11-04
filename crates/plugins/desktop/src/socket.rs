@@ -1,4 +1,11 @@
 //! Private runtime endpoint and same-effective-user admission before parsing [D203,D40].
+//!
+//! The helper listens on a Unix socket named `desktop.sock` inside a private
+//! runtime directory. Two checks protect it: the directory must be a real
+//! directory owned by this user with no group/other access ([`validate_runtime`]),
+//! and every connecting peer must have the same effective user id according to
+//! the kernel ([`admit`]). File permissions alone are not treated as
+//! authentication.
 use std::{
     fs, io,
     os::unix::{
@@ -10,11 +17,16 @@ use std::{
 
 /// Owns only the endpoint created by this instance; never removes another helper's socket.
 pub struct Endpoint {
+    /// The bound listening socket.
     pub listener: UnixListener,
     path: PathBuf,
+    /// Device and inode of the socket file we created. Drop removes the path only
+    /// if it still has this identity.
     identity: (u64, u64),
 }
 impl Endpoint {
+    /// Creates `desktop.sock` (mode 0600) inside `runtime` and listens on it.
+    ///
     /// # Errors
     /// Refuses symlinks, foreign/permissive runtime directories and occupied paths.
     pub fn bind(runtime: &Path) -> io::Result<Self> {
@@ -30,12 +42,16 @@ impl Endpoint {
         fs::set_permissions(&endpoint.path, fs::Permissions::from_mode(0o600))?;
         Ok(endpoint)
     }
+    /// Path of the socket file.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 }
 
+/// Checks that `runtime` is a directory (not a symlink) owned by the current
+/// user with no group or other permissions.
+///
 /// # Errors
 /// Rejects symlinks and a runtime directory visible to another Unix user.
 pub fn validate_runtime(runtime: &Path) -> io::Result<()> {
@@ -63,12 +79,18 @@ impl Drop for Endpoint {
     }
 }
 
+/// Accepts a connected peer only if the kernel says it runs as the same user as
+/// this process.
+///
 /// # Errors
 /// Uses kernel credentials; filesystem access alone is not authentication.
 pub fn admit(stream: &UnixStream) -> io::Result<()> {
     admit_uid(stream, nix::unistd::geteuid().as_raw())
 }
 
+/// [`admit`] with the expected user id given explicitly (so it can be tested).
+/// Fails with `PermissionDenied` on a different user, or `Unsupported` on
+/// systems where peer credentials cannot be read.
 fn admit_uid(stream: &UnixStream, expected: u32) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let uid = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
