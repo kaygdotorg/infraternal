@@ -7,7 +7,9 @@ import { parseValue, defaultValue, formatValue } from "../../../../../packages/u
 import { SETTINGS_MAP } from "./catalog";
 import { defaultWidth, metricsFor } from "../layout/geometry";
 import { runsOf } from "../layout/grid";
-import { LEGACY, SETTINGS_ROWS, buildSettingsMapView, entriesOf, locate, spots, visibleMap, winId } from "./model";
+import { SETTING_DEFS } from "./definitions.on-demand";
+import { entriesOf } from "./entries.on-demand";
+import { LEGACY, SETTINGS_ROWS, buildSettingsMapView, locate, spots, visibleMap, winId } from "./model";
 import { ADD_HOST, NO_ACCESS, TERMINAL } from "./docs-adapter";
 
 test("Settings is one row of windows for each component: one grid, the layout's size, no window spans", () => {
@@ -36,19 +38,19 @@ test("ids are unique: a window, a component and a setting each have one place", 
   const windows = spots(SETTINGS_MAP).map((s) => winId(s.comp.id, s.group.id));
   expect(new Set(windows).size).toBe(windows.length);
   expect(new Set(SETTINGS_MAP.map((c) => c.id)).size).toBe(SETTINGS_MAP.length);
-  const settings = spots(SETTINGS_MAP).flatMap((s) => s.group.settings ?? []).map((s) => s.id);
+  const settings = spots(SETTINGS_MAP).flatMap((s) => s.group.settings ?? []);
   expect(new Set(settings).size).toBe(settings.length);
 });
 
 test("every default is inside its own allowed range and survives being typed back", () => {
-  for (const { group } of spots(SETTINGS_MAP)) for (const s of group.settings ?? []) {
+  for (const s of Object.values(SETTING_DEFS)) {
     const shown = formatValue(s.spec, defaultValue(s.spec));
     expect(parseValue(s.spec, shown, defaultValue(s.spec))).toEqual({ ok: true, value: defaultValue(s.spec) });
   }
 });
 
 test("the numbers the owner gave are in the table", () => {
-  const get = (id: string) => spots(SETTINGS_MAP).flatMap((s) => s.group.settings ?? []).find((s) => s.id === id)!.spec;
+  const get = (id: string) => SETTING_DEFS[id]!.spec;
   const text = (id: string) => formatValue(get(id), defaultValue(get(id)));
   expect(text("connection-keys")).toBe("7 d");
   expect(text("machine-identity")).toBe("7 d");
@@ -148,4 +150,10 @@ test("⌘K offers a setting only when something stores it", () => {
   const entries = entriesOf(visibleMap(true), (s) => defaultValue(s.spec), (id) => id === "app-key");
   expect(entries.filter((e) => e.action.split(".").length === 3).map((e) => e.label)).toEqual(["Keys Last"]);
   expect(entries.length).toBe(spots(SETTINGS_MAP).length + 1);
+});
+
+test("the table and the definitions agree: every id in a window is defined, and every definition is in a window", () => {
+  const placed = spots(SETTINGS_MAP).flatMap((s) => s.group.settings ?? []);
+  for (const id of placed) expect(SETTING_DEFS[id], id).toBeDefined();
+  expect(Object.keys(SETTING_DEFS).sort()).toEqual([...placed].sort());
 });

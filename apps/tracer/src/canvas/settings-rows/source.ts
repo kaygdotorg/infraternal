@@ -8,9 +8,10 @@
  */
 import type { SettingsSource } from "../views/settings-body.on-demand";
 import { onDemand } from "../../on-demand";
-import { defaultValue, type SettingValue } from "../../../../../packages/ui/src/setting-value";
-import type { SettingDef } from "./catalog";
-import { entriesOf, locate, rowsOf, spotBySection, visibleMap } from "./model";
+import type { SettingValue } from "../../../../../packages/ui/src/setting-value";
+import type { SettingDef } from "./definitions.on-demand";
+import type { OutlineEntry } from "../views/settings-outline";
+import { locate, rowsOf, spotBySection, visibleMap } from "./model";
 
 export interface RowsOptions {
   /** Whether the viewer sees the administrator rows (Machines, Mesh, Sharing). */
@@ -24,10 +25,21 @@ export interface RowsOptions {
 export function createRowsSource(options: RowsOptions): Pick<SettingsSource, "outline" | "render"> & Pick<SettingsSource, "backing" | "data"> {
   const map = () => visibleMap(options.admin());
   const backed = (id: string): boolean => options.backing?.(id) !== undefined;
+  // The wording of every setting loads when ⌘K first asks for the rows (D188); the palette is told when it has arrived.
+  let entries: typeof import("./entries.on-demand") | undefined, defaults: typeof import("./definitions.on-demand") | undefined, loading = false;
+  const waiting = new Set<() => void>();
   return {
     ...(options.backing ? { backing: options.backing } : {}),
     ...(options.data ? { data: options.data } : {}),
-    outline: { rows: () => rowsOf(map()), entries: () => entriesOf(map(), options.value ?? ((s) => defaultValue(s.spec)), backed), locate: (target) => locate(map(), target), reveal: (windowId, settingId) => { void onDemand(() => import("./body.on-demand")).then((mod) => { mod.revealSetting(windowId, settingId); }); } },
+    outline: { rows: () => rowsOf(map()), entries: (): OutlineEntry[] => {
+      if (entries && defaults) return entries.entriesOf(map(), options.value ?? ((s) => defaults!.defaultOf(s)), backed);
+      if (!loading) {
+        loading = true;
+        void Promise.all([onDemand(() => import("./entries.on-demand")), onDemand(() => import("./definitions.on-demand"))]).then(([e, d]) => { entries = e; defaults = d; for (const run of waiting) run(); }, () => { loading = false; });
+      }
+      return [];
+    },
+    onEntries: (run: () => void): (() => void) => { waiting.add(run); return () => { waiting.delete(run); }; }, locate: (target) => locate(map(), target), reveal: (windowId, settingId) => { void onDemand(() => import("./body.on-demand")).then((mod) => { mod.revealSetting(windowId, settingId); }); } },
     render(section, pane, cx) {
       const spot = spotBySection(map(), section);
       if (!spot) return undefined;

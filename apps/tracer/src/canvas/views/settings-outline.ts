@@ -27,6 +27,8 @@ export interface SettingsOutline {
   rows(): OutlineRow[];
   /** ⌘K rows: one per group and one per setting. */
   entries(): OutlineEntry[];
+  /** Tells the palette when `entries` has more to show than it returned (the wording of the settings loads on demand). */
+  onEntries?(run: () => void): () => void;
   /** Where an action target points: the window to bring into view and, for one setting, the row to show in it. */
   locate(target: string): { windowId: string; settingId?: string } | undefined;
   /** Shows a setting's row inside its window (scrolled into view, with a faint fill that fades). */

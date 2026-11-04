@@ -17,6 +17,7 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import type { GroupDef, KeyDef, PanelId } from "./catalog";
+import { SETTING_DEFS } from "./definitions.on-demand";
 import type { Spot } from "./model";
 
 /** Live rows by window and setting, so ⌘K can show one. A window registers on render and leaves on cleanup. */
@@ -79,7 +80,7 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
   const note = (text: string): HTMLElement => { const n = el("p", "cl-settings-later"); n.textContent = text; pane.append(n); return n; };
 
   // Settings with a store get a row; the rest get nothing (no control that saves nowhere).
-  const backed = (group.settings ?? []).filter((def) => source.backing?.(def.id));
+  const backed = (group.settings ?? []).filter((id) => source.backing?.(id)).map((id) => SETTING_DEFS[id]!);
   if (backed.length) {
     const list = el("div", "ui-setting-list");
     for (const def of backed) {

@@ -17,9 +17,8 @@ import type { ColumnModel, ViewModel, WindowModel } from "../model/types";
 import type { Metrics } from "../layout/geometry";
 import { defaultWidth } from "../layout/geometry";
 import { ICON, SECTION_ICON } from "../views/icons";
-import type { OutlineEntry, OutlineRow } from "../views/settings-outline";
-import { formatValue, type SettingValue } from "../../../../../packages/ui/src/setting-value";
-import { SETTINGS_MAP, type ComponentDef, type GroupDef, type SettingDef } from "./catalog";
+import type { OutlineRow } from "../views/settings-outline";
+import { SETTINGS_MAP, type ComponentDef, type GroupDef } from "./catalog";
 
 export const winId = (comp: string, group: string): string => `s-${comp}-${group}`;
 export interface Spot { comp: ComponentDef; group: GroupDef }
@@ -53,28 +52,12 @@ export function locate(map: readonly ComponentDef[], target: string): { windowId
   const [comp, group, setting] = (LEGACY[target] ?? target).split(".");
   const spot = spots(map).find((s) => s.comp.id === comp && (group === undefined || s.group.id === group));
   if (!spot) return undefined;
-  const settingId = setting && spot.group.settings?.some((s) => s.id === setting) ? setting : undefined;
+  const settingId = setting && spot.group.settings?.includes(setting) ? setting : undefined;
   return { windowId: winId(spot.comp.id, spot.group.id), ...(settingId ? { settingId } : {}) };
 }
 
 export function rowsOf(map: readonly ComponentDef[]): OutlineRow[] {
   return map.map((c) => ({ id: c.id, title: c.title, icon: ICON_OF[c.icon], groups: c.groups.map((g) => ({ id: g.id, title: g.title, windowId: winId(c.id, g.id) })) }));
-}
-
-/**
- * ⌘K rows. A group is found by its names; a setting by its title, what it does, its technical names and its group. Only a setting
- * that is backed is offered: ⌘K must not fly to a window that has no control for it.
- */
-export function entriesOf(map: readonly ComponentDef[], valueOf: (s: SettingDef) => SettingValue, backed: (settingId: string) => boolean): OutlineEntry[] {
-  const out: OutlineEntry[] = [];
-  for (const { comp, group } of spots(map)) {
-    const icon = ICON_OF[comp.icon];
-    out.push({ label: `${comp.title} › ${group.title}`, hint: "settings", icon, action: `canvas:settings:${comp.id}.${group.id}` });
-    for (const s of (group.settings ?? []).filter((x) => backed(x.id))) {
-      out.push({ label: s.title, hint: `${comp.title} › ${group.title} · ${formatValue(s.spec, valueOf(s))} · ${s.explain} ${s.keywords ?? ""}`, icon, action: `canvas:settings:${comp.id}.${group.id}.${s.id}` });
-    }
-  }
-  return out;
 }
 
 const settingsWindow = (comp: ComponentDef, group: GroupDef, extra: Partial<WindowModel> = {}): WindowModel =>

@@ -7,15 +7,15 @@ import { renderDevices } from "../../../../../packages/ui/src/settings-panels";
 import { defaultValue, type SettingValue } from "../../../../../packages/ui/src/setting-value";
 import type { SettingsSource } from "../views/settings-body.on-demand";
 import type { ViewId } from "../model/types";
-import type { GroupData, SettingDef } from "../settings-rows/catalog";
-import { SETTINGS_MAP } from "../settings-rows/catalog";
+import type { GroupData } from "../settings-rows/catalog";
+import { SETTING_DEFS, type SettingDef } from "../settings-rows/definitions.on-demand";
 import { createRowsSource } from "../settings-rows/source";
 import type { MockWorld } from "./world";
 
 /** Every setting's value, kept for the session so a window that is rebuilt (a role change) keeps what was typed. */
 const values = new Map<string, SettingValue>();
 const valueOf = (s: SettingDef): SettingValue => values.get(s.id) ?? defaultValue(s.spec);
-const defs = new Map(SETTINGS_MAP.flatMap((c) => c.groups.flatMap((g) => g.settings ?? [])).map((s) => [s.id, s]));
+const defs = new Map(Object.entries(SETTING_DEFS));
 
 const EXAMPLE: Readonly<Record<string, GroupData>> = {
   "you.apps": { keys: [
