@@ -1,10 +1,18 @@
 //! Removes visible host inventory and owned SSH pins while retaining certificate denial tombstones [16][168][198], #87.
+//!
+//! A removal is a dry run, then the removal. In the browser both run inside the 15-minute
+//! admin window that a sign-in tap opens (D333, D339): the dry run returns a single-use review
+//! bound to the session, the host and the uninstall choice for `REVIEW_SECONDS`. With an API
+//! key, the action route issues its own review token (D28, D333).
 use crate::{auth::Auth, enrollment::EnrollmentStore, remote_runtime::RemoteHosts};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
+
+/// How long a browser dry run's review stays usable, as for a key's review token.
+const REVIEW_SECONDS: i64 = 120;
 
 struct Pending {
     hash: String,
@@ -16,8 +24,8 @@ struct Pending {
 
 /// What authorizes one removal. Both are rechecked inside the publish transaction.
 enum RemovalAuthority {
-    /// A browser removal's own fresh passkey assertion.
-    Passkey(crate::auth::VerifiedPasskey),
+    /// D339: a browser session inside its admin window, with this session's live review.
+    AdminWindow,
     /// D333: a `hosts:write` API key inside its scope, with no further tap. Its audit row is
     /// completed in the same transaction as the removal.
     ApiKey { key_hash: String, audit_id: i64 },
@@ -60,7 +68,8 @@ impl Removal {
         uninstall: bool,
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
-        let session = self.auth.session(token, now).await?;
+        // D339: the dry run runs inside the admin window; the removal rechecks it.
+        let session = self.auth.fresh_session(token, now).await?;
         let address: Option<String> = sqlx::query_scalar("SELECT COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h JOIN users u ON u.id=h.owner_id LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND u.owner=1")
             .bind(host.as_bytes().as_slice()).bind(&session.user_id).fetch_optional(&self.pool).await?;
         let address = address.ok_or(crate::auth::Error::Denied)?;
@@ -69,30 +78,34 @@ impl Removal {
         if pending.len() >= 1024 {
             return Err(crate::auth::Error::Denied);
         }
-        let mut start = self.auth.login_start(&session.user_id, now).await?;
-        let id = start["ceremony"]
-            .as_str()
-            .ok_or(crate::auth::Error::Denied)?
-            .to_owned();
-        start["action"] = json!({"id":infraternal_plugin_remote::REMOVE.id,"label":infraternal_plugin_remote::REMOVE.summary,"host_id":host,"host":address,"uninstall":uninstall});
+        // The review is a random capability, held only in memory: a restart means a new dry run.
+        let review = crate::auth::random_capability();
+        let start = json!({
+            "review": review,
+            "review_expires_in": REVIEW_SECONDS,
+            "action": {"id":infraternal_plugin_remote::REMOVE.id,"label":infraternal_plugin_remote::REMOVE.summary,"host_id":host,"host":address,"uninstall":uninstall},
+        });
         pending.insert(
-            id,
+            review,
             Pending {
                 hash: crate::auth::hash(token),
                 user: session.user_id,
                 host,
                 uninstall,
-                expires: now.checked_add(300).ok_or(crate::auth::Error::Denied)?,
+                expires: now
+                    .checked_add(REVIEW_SECONDS)
+                    .ok_or(crate::auth::Error::Denied)?,
             },
         );
         Ok(start)
     }
+    /// Remove the host a review from this session's dry run named. A review for another host
+    /// is refused without spending it.
     pub(crate) async fn finish_host(
         &self,
         token: &str,
         host: Uuid,
         id: &str,
-        proof: Value,
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
         if self
@@ -104,15 +117,9 @@ impl Removal {
         {
             return Err(crate::auth::Error::Denied);
         }
-        self.finish(token, id, proof, now).await
+        self.finish(token, id, now).await
     }
-    pub(crate) async fn finish(
-        &self,
-        token: &str,
-        id: &str,
-        proof: Value,
-        now: i64,
-    ) -> Result<Value, crate::auth::Error> {
+    async fn finish(&self, token: &str, id: &str, now: i64) -> Result<Value, crate::auth::Error> {
         let hash = crate::auth::hash(token);
         let entry = {
             let mut pending = self.pending.lock().await;
@@ -124,7 +131,6 @@ impl Removal {
         if entry.expires <= now {
             return Err(crate::auth::Error::Denied);
         }
-        let verified = self.auth.verify_passkey(id, proof, now).await?;
         let permit = self
             .admission
             .clone()
@@ -136,7 +142,7 @@ impl Removal {
         tokio::spawn(async move {
             let _permit = permit;
             service
-                .publish(entry, RemovalAuthority::Passkey(verified), now)
+                .publish(entry, RemovalAuthority::AdminWindow, now)
                 .await
         })
         .await
@@ -216,15 +222,22 @@ impl Removal {
             .await?;
         let live = now.max(crate::runtime::unix_seconds().map_err(|_| crate::auth::Error::Denied)?);
         let audit_id = match &authority {
-            RemovalAuthority::Passkey(verified) => {
-                let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id JOIN passkeys p ON p.user_id=u.id JOIN remote_hosts h ON h.owner_id=u.id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1 AND p.id=? AND h.id=? AND h.revoked_at IS NULL)")
-                    .bind(&entry.hash).bind(&entry.user).bind(live).bind(verified.credential()).bind(entry.host.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+            RemovalAuthority::AdminWindow => {
+                // Owner, host and session are rechecked under the writer lock, and the admin
+                // window by both clocks (`fresh_session_tx`), so a logout, role loss or the
+                // window closing after the dry run refuses the removal.
+                let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id JOIN remote_hosts h ON h.owner_id=u.id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1 AND h.id=? AND h.revoked_at IS NULL)")
+                    .bind(&entry.hash).bind(&entry.user).bind(live).bind(entry.host.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
                 if !allowed
-                    || verified.user() != entry.user
-                    || verified.verified_at() > live
-                    || verified.verified_at() <= live - 300
-                    || verified.expires() <= live
                     || entry.expires <= live
+                    || !infraternal_plugin_api::fresh_session_tx(
+                        &mut tx,
+                        &entry.hash,
+                        &entry.user,
+                        now,
+                        infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
+                    )
+                    .await?
                 {
                     return Err(crate::auth::Error::Denied);
                 }

@@ -24,6 +24,8 @@ mod webauthn;
 mod wraps;
 
 pub(crate) use action_tap::{TapAction, require_tap_tx};
+/// 32 random bytes, base64url: an unguessable single-use capability id.
+pub(crate) use crypto::random as random_capability;
 use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
 pub(crate) use crypto::{hash, session_incarnation};
 #[cfg(feature = "remote")]

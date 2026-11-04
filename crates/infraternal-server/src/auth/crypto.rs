@@ -3,7 +3,7 @@ use super::{B64, Engine, Error, Result};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use sha2::{Digest, Sha256};
 
-pub(super) fn random() -> String {
+pub(crate) fn random() -> String {
     B64.encode(rand::random::<[u8; 32]>())
 }
 pub(crate) fn hash(value: &str) -> String {

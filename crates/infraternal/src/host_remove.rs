@@ -1,4 +1,6 @@
-//! Adapts the remote plugin's removal action to private-stdin HTTPS requests and organized CLI results [16][168][202], #87.
+//! Adapts the remote plugin's removal action to private-stdin HTTPS requests and organized CLI
+//! results [16][168][202], #87. The start is the dry run; the finish sends its review, inside the
+//! session's admin window (D339).
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -13,11 +15,9 @@ use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 struct Input {
     session: String,
     #[serde(default)]
-    ceremony: Option<String>,
-    #[serde(default)]
-    proof: Option<Value>,
+    review: Option<String>,
 }
-/// Session cookies and passkey assertions enter only through bounded private stdin.
+/// Session cookies and reviews enter only through bounded private stdin.
 pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine: bool) -> ExitCode {
     let operation = || -> io::Result<Value> {
         let mut bytes = Vec::new();
@@ -27,7 +27,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         }
         let input: Input = serde_json::from_slice(&bytes).map_err(|_| denied())?;
         let body = if finish {
-            json!({"host_id":host,"ceremony":input.ceremony.ok_or_else(denied)?,"proof":input.proof.ok_or_else(denied)?})
+            json!({"host_id":host,"review":input.review.ok_or_else(denied)?})
         } else {
             json!({"host_id":host,"uninstall":!retain})
         };
@@ -44,7 +44,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         })
     };
     match operation() {
-        // The challenge or the result of the hosted action travels in `data`; the
+        // The review or the result of the hosted action travels in `data`; the
         // sentence says which step the person is on.
         Ok(value) => {
             let (state, message, next) = if finish {
@@ -59,11 +59,11 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             } else {
                 (
                     CommandState::Pending,
-                    "Removing this host needs your owner passkey.".to_owned(),
-                    "Confirm with your owner passkey, then pass the session, ceremony and proof on standard input with --finish.",
+                    "Review what removing this host does.".to_owned(),
+                    "To remove it, pass the session and the review on standard input with --finish within two minutes.",
                 )
             };
-            // The challenge is for scripts; a person at a terminal needs the sentence, not the material.
+            // The review is for scripts; a person at a terminal needs the sentence, not the capability.
             let data = if machine { value } else { json!({}) };
             let mut result = CommandResult::new("remove-host", state, message, data);
             if !next.is_empty() {
@@ -75,7 +75,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             machine,
             infraternal_plugin_remote::REMOVE.id,
             "Host removal was refused.",
-            "Use a live owner session and a fresh removal passkey proof on standard input.",
+            "Use an owner session signed in within 15 minutes, and a review from its dry run on standard input.",
             Exit::NotAllowed,
         ),
     }
