@@ -572,7 +572,7 @@ When a Codex implementation job finishes, an independent Codex reviewer starts a
   job work that can't be committed yet is snapshotted to `wip/<job>` so it
   isn't lost.
 
-## 17. Privileged integration and runtime probes (D351, #344)
+## 11. Privileged integration (D351, #344)
 
 **What it covers:** tests that need privileges inside a network: WireGuard and
 TUN links, nftables rules, routes, DNS on a mesh address. They are
@@ -635,7 +635,7 @@ real-environment check for browser and passkey flows on a deployed build. It
 does not run each branch's namespace tests. This row does, on every such
 change, without deploying anything. Neither replaces the other.
 
-## 18. Nightly parser fuzzing (D351, #344)
+## 12. Nightly parser fuzzing (D351, #344)
 
 On dev-02, provision an owner-readable mode-0600 Forgejo token file outside the
 checkout, then run `scripts/install-nightly-fuzz --token-file <private-path>`.
@@ -656,3 +656,14 @@ Use `systemctl --user start infraternal-fuzz.service` for a foreground-observed
 manual run and `journalctl --user -u infraternal-fuzz.service` for its results.
 A shorter `--budget-seconds 36` run exercises all targets for one second each;
 it is a smoke check and is not an hour of fuzzing.
+
+## 13. Runtime responsiveness probes (D351, #344)
+
+`bench-probes` in `infraternal-agent` enables the D351 responsiveness driver:
+`cargo build --release -p infraternal-agent --features bench-probes --example
+runtime-responsiveness`. Copy that driver to the performance VM and execute it
+through `perf-run`. It reports correlated real-dispatcher Pong times while a
+file writer is held; functional tests assert ordering and completion only.
+The `probe release exclusion` row compiles release consumers with and without
+the explicit feature, proving the module is absent from the ordinary library.
+The product CLI has no feature that enables these probes.

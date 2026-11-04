@@ -311,6 +311,7 @@ rust_verify_fast() {
     rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
         rust_run_gate "privileged integration" verify_privileged
+        rust_run_gate "probe release exclusion" python3 scripts/test-runtime-probe-gating.py
         rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
         rust_run_gate "static builds" rust_static_build_check
     fi
