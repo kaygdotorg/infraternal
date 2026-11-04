@@ -6,7 +6,8 @@
  * the breadcrumb names the component, so the body repeats neither (TASTE: never repeat the heading in the rows below it). The
  * "?" that opens the group's docs is the first button of the window's action group (`docs/docs-adapter.ts`), not part of the body.
  *
- * Nothing is saved anywhere but in memory for the session (`saveValue`): this is a mockup of the layout and the rules.
+ * A setting is drawn only when its source has a store for it (`SettingsSource.backing`); a window with nothing to show says
+ * "Not available yet." in one plain line and keeps its place, so nothing here is a control that saves nowhere.
  */
 import { ICONS } from "../../../../../packages/ui/src/icons";
 import { createSettingRow, type SettingRow } from "../../../../../packages/ui/src/setting-row";
@@ -15,13 +16,12 @@ import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
 import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 import { el } from "../dom";
-import type { GroupDef } from "./catalog";
+import type { GroupDef, KeyDef, PanelId } from "./catalog";
 import type { Spot } from "./model";
-import { saveValue, valueOf } from "./model";
 
 /** Live rows by window and setting, so ⌘K can show one. A window registers on render and leaves on cleanup. */
 const live = new Map<string, Map<string, SettingRow>>();
-/** Keys the person revoked in this session (the list is test data). */
+/** Keys the person revoked in this session (the list is a source's data). */
 const revoked = new Set<string>();
 
 export function revealSetting(windowId: string, settingId: string): void {
@@ -37,7 +37,7 @@ const KIND_NAME = { cli: "Command line", mcp: "AI tool" } as const;
 const KEY_ICON = '<circle cx="8.5" cy="12" r="3.5"/><path d="M12 12h9M18 12v3M15 12v2"/>';
 
 /** The command-line and AI-tool keys: name, kind, last used, when it runs out, and Revoke (with the compact confirmation). */
-function renderKeys(pane: HTMLElement, keys: NonNullable<GroupDef["keys"]>): () => void {
+function renderKeys(pane: HTMLElement, keys: readonly KeyDef[]): () => void {
   const list = el("ul", "ui-sp-devices cl-keys");
   const paint = (): void => {
     list.replaceChildren();
@@ -67,35 +67,53 @@ function renderKeys(pane: HTMLElement, keys: NonNullable<GroupDef["keys"]>): () 
   return () => list.remove();
 }
 
-export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { group }: Spot): () => void {
+/** The panels a window shows, from the table's `panel` (one or several). */
+const panelsOf = (group: GroupDef): readonly PanelId[] => group.panel === undefined ? [] : typeof group.panel === "string" ? [group.panel] : group.panel;
+
+export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp, group }: Spot): () => void {
   const disposers: Array<() => void> = [];
   const mine = new Map<string, SettingRow>();
   live.set(windowId, mine);
-  if (group.settings?.length) {
+  const source = cx.adapters.settings;
+  let shown = 0;
+  const note = (text: string): HTMLElement => { const n = el("p", "cl-settings-later"); n.textContent = text; pane.append(n); return n; };
+
+  // Settings with a store get a row; the rest get nothing (no control that saves nowhere).
+  const backed = (group.settings ?? []).filter((def) => source.backing?.(def.id));
+  if (backed.length) {
     const list = el("div", "ui-setting-list");
-    for (const def of group.settings) {
-      const row = createSettingRow({ id: def.id, title: def.title, explain: def.explain, spec: def.spec, value: valueOf(def), onSave: (v) => saveValue(def, v) });
+    for (const def of backed) {
+      const backing = source.backing!(def.id)!;
+      const row = createSettingRow({ id: def.id, title: def.title, explain: def.explain, spec: def.spec, onSave: (v) => backing.write(v) });
       mine.set(def.id, row);
       list.append(row.root);
       disposers.push(() => row.dispose());
+      // The row is drawn at once with the default; the stored value arrives when the store has answered.
+      let gone = false;
+      disposers.push(() => { gone = true; });
+      void backing.read().then((v) => {
+        if (gone) return;
+        if (v === undefined) { row.dispose(); mine.delete(def.id); if (!list.children.length) list.remove(); note("Only the owner can change this."); }
+        else row.set(v);
+      }, () => { if (!gone) { row.dispose(); mine.delete(def.id); note("This could not be read just now. Try again later."); } });
     }
     pane.append(list);
+    shown++;
   }
-  if (group.facts?.length) disposers.push(renderFacts(pane, group.title, group.facts.map((g) => ({ title: g.title, rows: g.rows }))));
-  if (group.keys) disposers.push(renderKeys(pane, group.keys));
-  if (group.later) {
-    const note = el("p", "cl-settings-later");
-    note.textContent = group.later;
-    pane.append(note);
-  }
-  if (group.panel) {
-    // An existing panel, unchanged. It makes a pane of its own, which would pad and scroll twice inside this one.
+  const data = source.data?.(comp.id, group.id);
+  if (data?.facts?.length) { disposers.push(renderFacts(pane, group.title, data.facts.map((g) => ({ title: g.title, rows: g.rows })))); shown++; }
+  if (data?.keys) { disposers.push(renderKeys(pane, data.keys)); shown++; }
+
+  // Existing panels, unchanged. A panel the source does not offer (devices, in the product today) is not shown.
+  const panels = panelsOf(group).filter((id) => id !== "devices" || source.sections.includes("devices"));
+  for (const id of panels) {
     const holder = el("div", "cl-settings-nest");
     pane.append(holder);
+    shown++;
     let gone = false, stop: (() => void) | undefined;
     void onDemand(() => import("../views/settings-body.on-demand")).then((mod) => {
       if (gone) return;
-      stop = mod.renderSettingsBody(cx, group.panel!, holder);
+      stop = mod.renderSettingsBody(cx, id, holder);
       // One panel fills several windows (Appearance is Theme, Font and Size): the blocks that belong to another window go.
       if (group.only) for (const block of holder.querySelectorAll<HTMLElement>(".ui-sp > section")) {
         if (!group.only.includes(block.querySelector(".ui-ts-title")?.textContent ?? "")) block.remove();
@@ -103,5 +121,6 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { grou
     });
     disposers.push(() => { gone = true; stop?.(); holder.remove(); });
   }
+  if (!shown) note("Not available yet.");
   return () => { if (live.get(windowId) === mine) live.delete(windowId); for (const d of disposers) d(); };
 }

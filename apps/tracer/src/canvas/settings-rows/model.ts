@@ -18,7 +18,7 @@ import type { Metrics } from "../layout/geometry";
 import { defaultWidth } from "../layout/geometry";
 import { ICON, SECTION_ICON } from "../views/icons";
 import type { OutlineEntry, OutlineRow } from "../views/settings-outline";
-import { formatValue, defaultValue, type SettingValue } from "../../../../../packages/ui/src/setting-value";
+import { formatValue, type SettingValue } from "../../../../../packages/ui/src/setting-value";
 import { SETTINGS_MAP, type ComponentDef, type GroupDef, type SettingDef } from "./catalog";
 
 export const winId = (comp: string, group: string): string => `s-${comp}-${group}`;
@@ -39,7 +39,7 @@ export const spotBySection = (map: readonly ComponentDef[], section: string): Sp
 
 /** Where each of the old Settings sections went (⌘K, the person's card and the core screen still ask for them by name). */
 export const LEGACY: Readonly<Record<string, string>> = {
-  appearance: "appearance.theme", windows: "appearance.layout", hosts: "machines.new-machines", toolbar: "terminal.typing", shortcuts: "terminal.typing",
+  appearance: "appearance.theme", windows: "appearance.layout", hosts: "terminal.hosts", toolbar: "terminal.typing", shortcuts: "terminal.typing",
   about: "about.version", account: "you.profile", devices: "you.devices", grants: "mesh.access", users: "you.profile", discovery: "machines.new-machines",
 };
 
@@ -61,23 +61,21 @@ export function rowsOf(map: readonly ComponentDef[]): OutlineRow[] {
   return map.map((c) => ({ id: c.id, title: c.title, icon: ICON_OF[c.icon], groups: c.groups.map((g) => ({ id: g.id, title: g.title, windowId: winId(c.id, g.id) })) }));
 }
 
-/** ⌘K rows. A group is found by its names; a setting by its title, what it does, its technical names and its group. */
-export function entriesOf(map: readonly ComponentDef[], valueOf: (s: SettingDef) => SettingValue): OutlineEntry[] {
+/**
+ * ⌘K rows. A group is found by its names; a setting by its title, what it does, its technical names and its group. Only a setting
+ * that is backed is offered: ⌘K must not fly to a window that has no control for it.
+ */
+export function entriesOf(map: readonly ComponentDef[], valueOf: (s: SettingDef) => SettingValue, backed: (settingId: string) => boolean): OutlineEntry[] {
   const out: OutlineEntry[] = [];
   for (const { comp, group } of spots(map)) {
     const icon = ICON_OF[comp.icon];
     out.push({ label: `${comp.title} › ${group.title}`, hint: "settings", icon, action: `canvas:settings:${comp.id}.${group.id}` });
-    for (const s of group.settings ?? []) {
+    for (const s of (group.settings ?? []).filter((x) => backed(x.id))) {
       out.push({ label: s.title, hint: `${comp.title} › ${group.title} · ${formatValue(s.spec, valueOf(s))} · ${s.explain} ${s.keywords ?? ""}`, icon, action: `canvas:settings:${comp.id}.${group.id}.${s.id}` });
     }
   }
   return out;
 }
-
-/** Every setting's saved value, kept for the session so a window that is rebuilt (a role change) keeps what was typed. */
-const values = new Map<string, SettingValue>();
-export const valueOf = (s: SettingDef): SettingValue => values.get(s.id) ?? defaultValue(s.spec);
-export const saveValue = (s: SettingDef, v: SettingValue): void => { if (v === defaultValue(s.spec)) values.delete(s.id); else values.set(s.id, v); };
 
 const settingsWindow = (comp: ComponentDef, group: GroupDef, extra: Partial<WindowModel> = {}): WindowModel =>
   ({ id: winId(comp.id, group.id), kind: "settings", host: group.title, session: comp.title, ...extra });

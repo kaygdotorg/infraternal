@@ -37,13 +37,19 @@ export interface SettingRowOptions {
   spec: ValueSpec;
   /** The saved value to start from; the default when absent. */
   value?: SettingValue;
-  /** Called with a valid new value after it is saved. */
-  onSave?(value: SettingValue): void;
+  /**
+   * Called with a valid new value after it is saved. A store that can say no (a server) returns a promise: when it resolves to a
+   * sentence, or fails, the row puts the previous value back and shows the sentence as a refusal, so the screen never keeps a
+   * value that was not stored.
+   */
+  onSave?(value: SettingValue): void | Promise<string | void>;
 }
 
 export interface SettingRow {
   readonly root: HTMLElement;
   value(): SettingValue;
+  /** Puts a value that came from the store on screen (not a save): a row is drawn before a server has answered. */
+  set(value: SettingValue): void;
   /** Quiet highlight that fades: how ⌘K shows which row it jumped to. */
   found(): void;
   dispose(): void;
@@ -101,7 +107,15 @@ export function createSettingRow(options: SettingRowOptions): SettingRow {
     if (message !== undefined) refusalText.textContent = message;
   };
   const show = (): void => { paintControl(saved); refuse(undefined); paintReset(); };
-  const save = (value: SettingValue): void => { saved = value; show(); options.onSave?.(saved); };
+  const save = (value: SettingValue): void => {
+    const before = saved;
+    saved = value;
+    show();
+    const outcome = options.onSave?.(saved);
+    if (!(outcome instanceof Promise)) return;
+    const undo = (message: string): void => { if (saved !== value) return; saved = before; paintControl(saved); paintReset(); refuse(message); };
+    outcome.then((message) => { if (typeof message === "string") undo(message); }, () => undo("It could not be saved. The old value is still in use."));
+  };
 
   if (isTyped(spec)) {
     input = document.createElement("input");
@@ -165,6 +179,7 @@ export function createSettingRow(options: SettingRowOptions): SettingRow {
   return {
     root,
     value: () => saved,
+    set(value) { saved = value; show(); },
     found() {
       root.removeAttribute("data-found");
       void root.offsetWidth; // restart the fade when ⌘K jumps to the same row twice

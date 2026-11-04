@@ -29,11 +29,12 @@ export interface SettingsSource {
   accountStatuses?(): StatusActionPref[];
   accountRefresh?(): void;
   accountFacts?(): Array<{ title: string; rows: Array<{ key: string; value: string }> }>;
-  /**
-   * Settings as rows of windows (issue #304): when present, the sidebar, the top breadcrumb and ⌘K show Settings › Component ›
-   * Group from it. Absent (the product today): nothing of this is offered anywhere.
-   */
+  /** Settings as rows of windows (issue #304): the sidebar, the top breadcrumb and ⌘K show Settings › Component › Group from it. */
   outline?: import("./settings-outline").SettingsOutline;
+  /** Where the value of one setting of the table lives (by its id); absent: nobody stores it, so it shows no control. */
+  backing?(settingId: string): import("./settings-outline").SettingBacking | undefined;
+  /** Lists of facts and keys for a group of the table (component id, group id); absent: the group has none. */
+  data?(component: string, group: string): import("../settings-rows/catalog").GroupData | undefined;
 }
 
 /** The host-connection lock as a Settings group: plain words for the state, and the button only for an administrator while it is locked. */

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** The table that maps settings to rows and windows holds together, whoever edits it next. */
 import { expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parseValue, defaultValue, formatValue } from "../../../../../packages/ui/src/setting-value";
 import { SETTINGS_MAP } from "./catalog";
 import { defaultWidth, metricsFor } from "../layout/geometry";
 import { runsOf } from "../layout/grid";
-import { LEGACY, SETTINGS_ROWS, buildSettingsMapView, entriesOf, locate, spots, valueOf, visibleMap, winId } from "./model";
+import { LEGACY, SETTINGS_ROWS, buildSettingsMapView, entriesOf, locate, spots, visibleMap, winId } from "./model";
+import { ADD_HOST, NO_ACCESS, TERMINAL } from "./docs-adapter";
 
 test("Settings is one row of windows for each component: one grid, the layout's size, no window spans", () => {
   for (const admin of [true, false]) for (const [w, h, coarse] of [[1440, 900, false], [1024, 768, false], [2560, 1300, false], [393, 852, true]] as const) {
@@ -75,10 +78,46 @@ test("a window's docs link points at a page, and only the windows the owner name
   for (const { group } of spots(SETTINGS_MAP)) if (group.docs) expect(["reference/keys", "terminal/multiplexer"]).toContain(group.docs.page);
 });
 
+/** Every page of `docs/user/` as its address (`reference/keys`) and the ids of its headings, cut the way the docs build cuts them. */
+function docsPages(): Map<string, Set<string>> {
+  const root = join(import.meta.dir, "../../../../../docs/user");
+  const pages = new Map<string, Set<string>>();
+  const strip = (name: string): string => name.replace(/^\d+-/, "").replace(/\.md$/, "");
+  for (const dir of readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory())) {
+    for (const file of readdirSync(join(root, dir.name)).filter((f) => f.endsWith(".md") && f !== "index.md")) {
+      const ids = new Set<string>();
+      for (const line of readFileSync(join(root, dir.name, file), "utf8").split("\n")) {
+        const m = /^#{2,6}\s+(.*)$/.exec(line);
+        if (m) ids.add(m[1]!.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, ""));
+      }
+      pages.set(`${strip(dir.name)}/${strip(file)}`, ids);
+    }
+  }
+  return pages;
+}
+
+test("every \"?\" link opens a page and a heading that exist in docs/user", () => {
+  const pages = docsPages();
+  const links = [...spots(SETTINGS_MAP).flatMap((s) => (s.group.docs ? [s.group.docs] : [])), TERMINAL, NO_ACCESS, ADD_HOST];
+  expect(links.length).toBeGreaterThan(5);
+  for (const link of links) {
+    expect(pages.has(link.page), `page ${link.page}`).toBe(true);
+    if (link.heading) expect(pages.get(link.page)!.has(link.heading), `${link.page}#${link.heading}`).toBe(true);
+  }
+});
+
+test("the table holds no invented data: no lists of facts or keys, and every panel it names is one the product renders", () => {
+  const PANELS = ["appearance", "windows", "hosts", "toolbar", "shortcuts", "account", "about", "devices"];
+  for (const { group } of spots(SETTINGS_MAP)) {
+    expect(Object.keys(group).filter((k) => ["facts", "keys", "later"].includes(k))).toEqual([]);
+    for (const id of typeof group.panel === "string" ? [group.panel] : group.panel ?? []) expect(PANELS).toContain(id);
+  }
+});
+
 test("the owner's map: rows, windows and their order", () => {
   expect(SETTINGS_MAP.map((c) => `${c.title}: ${c.groups.map((g) => g.title).join(", ")}`)).toEqual([
     "Appearance: Theme, Font, Size, Layout",
-    "Terminal: Typing, Scrollback, Multiplexer",
+    "Terminal: Typing, Hosts, Scrollback, Multiplexer",
     "You: Profile, Passkeys, Recovery, Apps, Devices",
     "Machines: New Machines, Updates",
     "Mesh: Keys, Names, Access, Connections",
@@ -98,9 +137,15 @@ test("every section of the old Settings still opens somewhere, and a setting is 
 });
 
 test("⌘K has one row per group and one per setting, and a setting is findable by its technical name", () => {
-  const entries = entriesOf(visibleMap(true), valueOf);
+  const entries = entriesOf(visibleMap(true), (s) => defaultValue(s.spec), () => true);
   const groups = spots(SETTINGS_MAP).length, settings = spots(SETTINGS_MAP).reduce((n, s) => n + (s.group.settings?.length ?? 0), 0);
   expect(entries.length).toBe(groups + settings);
   expect(entries.find((e) => e.hint.includes("wireguard"))?.label).toBe("Connection Keys");
   expect(entries.find((e) => e.action === "canvas:settings:mesh.keys")?.label).toBe("Mesh › Keys");
+});
+
+test("⌘K offers a setting only when something stores it", () => {
+  const entries = entriesOf(visibleMap(true), (s) => defaultValue(s.spec), (id) => id === "app-key");
+  expect(entries.filter((e) => e.action.split(".").length === 3).map((e) => e.label)).toEqual(["Keys Last"]);
+  expect(entries.length).toBe(spots(SETTINGS_MAP).length + 1);
 });

@@ -47,7 +47,9 @@ import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
 import { buildVersion } from "../build-version";
 import type { DetailsSourceLoader } from "./windows/details-source";
-import { BUILTIN_SECTIONS, buildSettingsView } from "./views/settings";
+import { buildSettingsMapView, visibleMap } from "./settings-rows/model";
+import { createRowsDocs } from "./settings-rows/docs-adapter";
+import { createProductRows } from "./settings-rows/product-source";
 
 import type { CanvasStore } from "./model/store";
 
@@ -261,8 +263,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       refresh: () => undefined, onChange,
     }];
   }
+  const productRows = createProductRows(() => true);
   const canvas = createCanvas(core, {
-    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], render: () => undefined, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void accountModel?.refresh?.(); } } : {}) }, mesh, hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection), startupHints },
+    adapters: { teach: (hint) => teachOnce(options.accountId, hint), sessions, activeTerminal: () => sessions.activeClient(), inventory, details, store, settings: { sections: [], ...productRows, ...(accountStatuses ? { accountStatuses, accountRefresh: () => { void accountModel?.refresh?.(); } } : {}) }, mesh, docs: createRowsDocs(() => docs), hostRemoval: removal, addHost: () => { warmSetup(); addHost.open(); }, authority, appWindows: createAppWindowsAdapter(connection), startupHints },
     float: false,
     persisted: (id) => id !== "settings",
   });
@@ -290,7 +293,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     // First run, or nothing left to restore: one new shell.
     if (!doc && !saved) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
     const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: (doc?.cell.x ?? 0) * CELL, y: (doc?.cell.y ?? 0) * CELL };
-    const settings = buildSettingsView(false, m, BUILTIN_SECTIONS);
+    const settings = buildSettingsMapView(visibleMap(true), m, { id: "settings", name: "Settings", layout: "tiled", cols: [], nodes: [], x: 0, y: 0 });
     settings.x = boxOf(console_, m).w + CELL;
     const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh").map((v) => viewFromDocument(v, v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : []));
     return [console_, ...recovered, settings];
