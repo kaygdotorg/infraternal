@@ -185,9 +185,75 @@ pub struct MeshSshNode {
     desired: watch::Sender<Desired>,
     supervisor: Option<JoinHandle<()>>,
     socket: Option<JoinHandle<()>>,
+    runtime: Option<Runtime>,
+}
+
+/// The component's own single-threaded runtime on a dedicated thread.
+///
+/// The infraternal agent calls node plugins on its `node-plugins` OS thread,
+/// which has no Tokio runtime, so the component cannot borrow one. It starts
+/// this runtime on first use (nothing runs until mesh SSH is configured) and
+/// spawns every listener, connection, key-socket and pump task on it.
+/// Dropping it stops the thread and every task on it.
+struct Runtime {
+    handle: tokio::runtime::Handle,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Runtime {
+    /// Start the runtime thread and wait for its handle.
+    fn start() -> Result<Self, PluginError> {
+        let (ready, handle) = std::sync::mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("mesh-ssh".into())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                if ready.send(runtime.handle().clone()).is_ok() {
+                    runtime.block_on(async {
+                        let _ = stopped.await;
+                    });
+                }
+            })
+            .map_err(|_| PluginError::Rejected)?;
+        let handle = handle.recv().map_err(|_| PluginError::Rejected)?;
+        Ok(Self {
+            handle,
+            stop: Some(stop),
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl MeshSshNode {
+    /// The component's runtime, started on first use.
+    fn handle(&mut self) -> Result<tokio::runtime::Handle, PluginError> {
+        if self.runtime.is_none() {
+            self.runtime = Some(Runtime::start()?);
+        }
+        self.runtime
+            .as_ref()
+            .map(|runtime| runtime.handle.clone())
+            .ok_or(PluginError::Rejected)
+    }
+
     /// # Errors
     /// Fails only if the system random source cannot make a host key.
     pub fn new(state: PathBuf, accounts: AccountLookup) -> Result<Self, PluginError> {
@@ -210,6 +276,7 @@ impl MeshSshNode {
             }),
             supervisor: None,
             socket: None,
+            runtime: None,
         })
     }
 
@@ -258,7 +325,8 @@ impl MeshSshNode {
             });
         }
         if self.supervisor.is_none() {
-            self.supervisor = Some(tokio::spawn(supervise(
+            let runtime = self.handle()?;
+            self.supervisor = Some(runtime.spawn(supervise(
                 Arc::clone(&self.shared),
                 self.mesh.subscribe(),
                 self.desired.subscribe(),
@@ -372,7 +440,8 @@ impl MeshSshNode {
             .write()
             .map_err(|_| PluginError::Rejected)? = Some(Arc::new(PersonKey { certificate, key }));
         if self.socket.is_none() {
-            self.socket = Some(tokio::spawn(serve_socket(Arc::clone(&self.shared))));
+            let runtime = self.handle()?;
+            self.socket = Some(runtime.spawn(serve_socket(Arc::clone(&self.shared))));
         }
         Ok(br#"{"accepted":true}"#.to_vec())
     }

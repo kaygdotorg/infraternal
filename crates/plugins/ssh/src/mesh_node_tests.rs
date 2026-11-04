@@ -121,3 +121,23 @@ fn the_component_registers_in_an_agent_registry() {
     let mut registry = infraternal_plugin_api::PluginRegistry::default();
     assert!(registry.register(Box::new(node)).is_ok());
 }
+
+/// The infraternal agent calls node plugins on its own OS thread with no
+/// Tokio runtime; configuring the component there must not panic.
+#[test]
+fn configure_works_from_a_thread_without_a_runtime() {
+    let configured = std::thread::spawn(|| {
+        let mut node = MeshSshNode::new(std::env::temp_dir(), |_| None).unwrap();
+        let input = json!({
+            "enabled": false,
+            "snapshot": {"sequence": 1, "node": 9, "ca": vec![7_u8; 32], "certificates": [], "grants": {}},
+        });
+        node.call(
+            "mesh-ssh-node.configure",
+            &serde_json::to_vec(&input).unwrap(),
+        )
+        .is_ok()
+    })
+    .join();
+    assert!(matches!(configured, Ok(true)), "{configured:?}");
+}
