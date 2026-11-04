@@ -50,6 +50,7 @@ verify_quick() {
 
     # Whole-repo and cheap, so it always runs, whatever changed.
     rust_run_gate "doc coverage ratchet" verify_doc_coverage
+    rust_run_gate "doc comments on diff" verify_diff_docs
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 
     if ((whole)); then
