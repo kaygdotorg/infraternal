@@ -212,3 +212,38 @@ for (const size of SIZES) {
     });
   }
 }
+
+// D337: another server's install running with open terminals is refused by name, with no action.
+for (const size of SIZES) {
+  test(`captures reenroll-in-use at ${size.name} and keeps its text aligned`, async ({ browser }) => {
+    test.setTimeout(180_000);
+    const context = await browser.newContext({
+      baseURL: `http://localhost:${PORT}`,
+      viewport: { width: size.width, height: size.height },
+      deviceScaleFactor: 2,
+      hasTouch: size.name === "phone",
+      isMobile: size.name === "phone",
+    });
+    const page = await context.newPage();
+    try {
+      await reach(page, "inuse.lab", size);
+      const failure = page.locator(".ah-page[data-page='failure']");
+      await expect(page.getByRole("heading", { name: "inuse.lab is in use by another server" })).toBeVisible({ timeout: 30_000 });
+      await expect(failure.locator(".ah-lede")).toHaveText("Its infraternal agent is running with 2 open terminals and may still be connected to monitor01.example.");
+      await expect(failure.locator(".ah-text")).toHaveText("Prove you own monitor01.example to take it over. That isn't available yet.");
+      const edges = await failure.evaluate((page) => [".ah-title", ".ah-lede", ".ah-text"].flatMap((selector) => {
+        const node = page.querySelector(selector);
+        return node ? [node.getBoundingClientRect().left] : [];
+      }));
+      expect(edges.length).toBe(3);
+      for (const edge of edges) expect(Math.abs(edge - edges[0]!)).toBeLessThanOrEqual(0.5);
+      for (const name of ["Replace the stuck install", "Join as a new host", "Disconnect and join here"]) {
+        await expect(page.locator(".ah-float footer").getByRole("button", { name, exact: true })).toHaveCount(0);
+      }
+      await page.waitForTimeout(600);
+      await page.screenshot({ path: resolve(OUT, `reenroll-in-use-${size.name}-2x-ink.png`) });
+    } finally {
+      await context.close();
+    }
+  });
+}
