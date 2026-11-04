@@ -19,7 +19,10 @@ fn ip(args: &[&str]) -> bool {
 
 /// Every link in this namespace as `(index, name, alias)`, read with `ip` rather than our code.
 fn links() -> Vec<(u32, String, Option<String>)> {
-    let output = Command::new("ip").args(["-o", "-d", "link", "show"]).output().unwrap();
+    let output = Command::new("ip")
+        .args(["-o", "-d", "link", "show"])
+        .output()
+        .unwrap();
     String::from_utf8(output.stdout)
         .unwrap()
         .lines()
@@ -27,10 +30,12 @@ fn links() -> Vec<(u32, String, Option<String>)> {
             let mut parts = line.splitn(3, ": ");
             let index = parts.next()?.trim().parse().ok()?;
             let name = parts.next()?.split('@').next()?.to_owned();
-            let alias = line
-                .split(" alias ")
-                .nth(1)
-                .map(|rest| rest.split_whitespace().next().unwrap_or_default().to_owned());
+            let alias = line.split(" alias ").nth(1).map(|rest| {
+                rest.split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            });
             Some((index, name, alias))
         })
         .collect()
@@ -66,5 +71,8 @@ fn a_racing_creator_keeps_its_link_and_its_marker() {
         .iter()
         .filter(|link| !before.contains(&link.0) && link.1 != INTERFACE)
         .collect();
-    assert!(leftovers.is_empty(), "create left a link behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "create left a link behind: {leftovers:?}"
+    );
 }

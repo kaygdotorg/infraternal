@@ -136,7 +136,12 @@ fn explicit_engine_child() {
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
 fn an_engine_chosen_in_code_wins_over_the_environment() {
     let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "explicit_engine_child", "--nocapture"])
+        .args([
+            "--ignored",
+            "--exact",
+            "explicit_engine_child",
+            "--nocapture",
+        ])
         .env(PIN_CHILD, "1")
         .env("INFRATERNAL_MESH_ENGINE", "gotatun")
         .status()

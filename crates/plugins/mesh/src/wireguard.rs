@@ -204,7 +204,11 @@ impl Device {
             }
         };
         #[cfg(feature = "test-support")]
-        if let Some(hook) = AFTER_LINK_CREATED.lock().ok().and_then(|mut hook| hook.take()) {
+        if let Some(hook) = AFTER_LINK_CREATED
+            .lock()
+            .ok()
+            .and_then(|mut hook| hook.take())
+        {
             hook();
         }
         // Creation does not run the generic alias setter, so the marker is set here, with the
