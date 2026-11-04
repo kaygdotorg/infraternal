@@ -89,6 +89,31 @@ Reviews and fixes run at the same time as the next lane's build.
   never merged.
 - A lane starts only when its ground is decided.
 
+### Database migrations [347]
+
+Create new migrations with `scripts/new-migration add_foo`. The helper writes
+`crates/infraternal-server/migrations/YYYYMMDDHHMMSS_add_foo.sql`, using UTC
+to the second. Use lowercase words joined by underscores. If that second is
+already occupied, retry in the next second. `verify quick` and `verify fast`
+reject duplicate numeric versions and new sequential filenames, including
+untracked files. A collision between branches caught on integration needs a
+fresh timestamp before the migration has been applied anywhere.
+
+Existing numbered files remain unchanged. The fixed legacy-name list also
+reserves the already allocated 0041–0048 names; do not extend that list for
+new work. Never rename or edit a migration already applied to a database:
+its version and original source checksum identify its history.
+
+SQLx sorts numeric versions, so timestamps follow 0048. It applies every
+unapplied version, including an earlier timestamp merged after a later one.
+Keep `ignore_missing = false` and checksum validation enabled. A merged build
+must contain every applied migration; running an older branch missing an
+applied file fails deliberately. Timestamp order does not resolve schema
+dependencies: dependent migrations must merge with their prerequisites and
+use a later timestamp. Independent branch changes must work in either arrival
+order. Regression tests exercise real SQLite with the shipping migrator flags,
+numbered history, both timestamp arrival orders and altered checksums.
+
 ## 4. Integrate all the time, and dogfood at once
 
 - Small, frequent merges to `dev`. The gate runs on the merge result every

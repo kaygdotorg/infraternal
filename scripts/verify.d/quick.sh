@@ -1,6 +1,7 @@
 # `scripts/verify quick`: the few-minute pre-check that runs before the full gate (#329).
 #
 # It runs what fails most often, cheapest first, and stops at the first failure:
+#   0. migration names (D347): no new sequential files or duplicate numeric versions
 #   1. cargo fmt --check (whole workspace; it needs no compilation)
 #   1b. the doc-coverage ratchet (D345): coverage per crate or package never goes down
 #   2. cargo clippy (workspace, same flags as the gate) when any Rust package changed against the
@@ -14,6 +15,7 @@
 # run is never quoted as the gate; `scripts/verify fast` stays the gate (docs/PROCESS.md).
 # Sourced by scripts/verify after rust.sh, whose rust_run_gate and summary it reuses.
 
+# Run the inexpensive pre-check rows, stopping before compilation on a policy failure.
 verify_quick() {
     local base="${VERIFY_QUICK_BASE:-origin/dev}"
     local scope token name
@@ -41,6 +43,8 @@ verify_quick() {
         "$base" "$whole" "${packages[*]}" "$tracer"
 
     rust_run_gate "scope guard" python3 "${script_dir}/test-verify-quick-scope.py"
+    rust_run_gate "migration names" python3 "${script_dir}/verify.d/migration-names.py"
+    if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
     rust_run_gate "fmt" cargo fmt --all --check
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 

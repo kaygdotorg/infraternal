@@ -38,6 +38,9 @@ mod migration_compat;
 mod migration_compat_tests;
 #[cfg(test)]
 mod migration_data_tests;
+/// Timestamp ordering and strict upgrade-history regression tests [D347].
+#[cfg(test)]
+mod migration_timestamp_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
