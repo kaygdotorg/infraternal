@@ -15,8 +15,8 @@
  * Plain words (TASTE): titles and explanations say what changes for the person, in one line. The technical term, where an
  * expert needs it, sits in the explanation or in `keywords` (which ⌘K searches, but nobody has to read).
  */
-import type { ValueSpec } from "../../../../../../packages/ui/src/setting-value";
-import type { DocsLink } from "../../docs/docs-adapter";
+import type { ValueSpec } from "../../../../../packages/ui/src/setting-value";
+import type { DocsLink } from "../docs/docs-adapter";
 
 /** One setting with a value that can be changed: it shows its default, its allowed range, a Reset and one line of help. */
 export interface SettingDef {
@@ -61,7 +61,7 @@ export interface GroupDef {
 export interface ComponentDef {
   id: string;
   title: string;
-  /** Key into `ICON_OF` (settings-map/model.ts). */
+  /** Key into `ICON_OF` (settings-rows/model.ts). */
   icon: "appearance" | "terminal" | "you" | "machines" | "mesh" | "sharing" | "about";
   admin?: boolean;
   groups: GroupDef[];

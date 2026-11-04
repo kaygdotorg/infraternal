@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** The table that maps settings to rows and windows holds together, whoever edits it next. */
 import { expect, test } from "bun:test";
-import { parseValue, defaultValue, formatValue } from "../../../../../../packages/ui/src/setting-value";
+import { parseValue, defaultValue, formatValue } from "../../../../../packages/ui/src/setting-value";
 import { SETTINGS_MAP } from "./catalog";
-import { defaultWidth, metricsFor } from "../../layout/geometry";
-import { runsOf } from "../../layout/grid";
+import { defaultWidth, metricsFor } from "../layout/geometry";
+import { runsOf } from "../layout/grid";
 import { LEGACY, SETTINGS_ROWS, buildSettingsMapView, entriesOf, locate, spots, valueOf, visibleMap, winId } from "./model";
 
 test("Settings is one row of windows for each component: one grid, the layout's size, no window spans", () => {

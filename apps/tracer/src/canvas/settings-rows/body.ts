@@ -8,13 +8,13 @@
  *
  * Nothing is saved anywhere but in memory for the session (`saveValue`): this is a mockup of the layout and the rules.
  */
-import { ICONS } from "../../../../../../packages/ui/src/icons";
-import { createSettingRow, type SettingRow } from "../../../../../../packages/ui/src/setting-row";
-import { renderFacts } from "../../../../../../packages/ui/src/settings-panels";
-import { mountConfirmTip } from "../../../../../../packages/ui/src/tooltip";
-import { onDemand } from "../../../on-demand";
-import type { Ctx } from "../../context";
-import { el } from "../../dom";
+import { ICONS } from "../../../../../packages/ui/src/icons";
+import { createSettingRow, type SettingRow } from "../../../../../packages/ui/src/setting-row";
+import { renderFacts } from "../../../../../packages/ui/src/settings-panels";
+import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
+import { onDemand } from "../../on-demand";
+import type { Ctx } from "../context";
+import { el } from "../dom";
 import type { GroupDef } from "./catalog";
 import type { Spot } from "./model";
 import { saveValue, valueOf } from "./model";
@@ -93,7 +93,7 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { grou
     const holder = el("div", "cl-settings-nest");
     pane.append(holder);
     let gone = false, stop: (() => void) | undefined;
-    void onDemand(() => import("../../views/settings-body.on-demand")).then((mod) => {
+    void onDemand(() => import("../views/settings-body.on-demand")).then((mod) => {
       if (gone) return;
       stop = mod.renderSettingsBody(cx, group.panel!, holder);
       // One panel fills several windows (Appearance is Theme, Font and Size): the blocks that belong to another window go.

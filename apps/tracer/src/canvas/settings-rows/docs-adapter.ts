@@ -5,9 +5,9 @@
  * multiplexer page), the add-host dialog (the host join token) and a "No access" card (keys at a glance). Moving a link or
  * giving another window one is a line here or in the table; the canvas does not change.
  */
-import type { DocsSource } from "../../docs/docs-source";
-import type { DocsAdapter, DocsLink } from "../../docs/docs-adapter";
-import { excerptOf } from "../../docs/docs-excerpt";
+import type { DocsSource } from "../docs/docs-source";
+import type { DocsAdapter, DocsLink } from "../docs/docs-adapter";
+import { excerptOf } from "../docs/docs-excerpt";
 import { SETTINGS_MAP } from "./catalog";
 import { STAND_IN } from "./docs-standin";
 import { spotByWindow } from "./model";

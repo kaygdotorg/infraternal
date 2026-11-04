@@ -51,8 +51,8 @@ import { createDataMode, mountDataToggle } from "./data-mode";
 import { DATA_IDS, type DataId } from "./data-ids";
 import type { AccountMock } from "./account";
 import { createStartupDemo } from "./startup-demo";
-import { buildSettingsMapView, visibleMap } from "./settings-map/model";
-import { createMockDocs } from "./settings-map/docs-adapter";
+import { buildSettingsMapView, visibleMap } from "../settings-rows/model";
+import { createMockDocs } from "../settings-rows/docs-adapter";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
 

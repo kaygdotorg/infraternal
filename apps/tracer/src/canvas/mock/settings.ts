@@ -3,8 +3,8 @@ import { renderDevices, renderFacts } from "../../../../../packages/ui/src/setti
 import type { SettingsSource } from "../views/settings-body.on-demand";
 import type { ViewId } from "../model/types";
 import type { MockWorld } from "./world";
-import { renderGroup, revealSetting } from "./settings-map/body";
-import { entriesOf, locate, rowsOf, spotBySection, valueOf, visibleMap } from "./settings-map/model";
+import { renderGroup, revealSetting } from "../settings-rows/body";
+import { entriesOf, locate, rowsOf, spotBySection, valueOf, visibleMap } from "../settings-rows/model";
 
 /**
  * `rows` is `?settings=sections` (issue #304): Settings as rows of windows, one row per component and one window per group,

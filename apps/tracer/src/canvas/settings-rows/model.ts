@@ -13,12 +13,12 @@
  *
  * The breadcrumb and the sidebar read the same table, so they say Settings > Component > Window.
  */
-import type { ColumnModel, ViewModel, WindowModel } from "../../model/types";
-import type { Metrics } from "../../layout/geometry";
-import { defaultWidth } from "../../layout/geometry";
-import { ICON, SECTION_ICON } from "../../views/icons";
-import type { OutlineEntry, OutlineRow } from "../../views/settings-outline";
-import { formatValue, defaultValue, type SettingValue } from "../../../../../../packages/ui/src/setting-value";
+import type { ColumnModel, ViewModel, WindowModel } from "../model/types";
+import type { Metrics } from "../layout/geometry";
+import { defaultWidth } from "../layout/geometry";
+import { ICON, SECTION_ICON } from "../views/icons";
+import type { OutlineEntry, OutlineRow } from "../views/settings-outline";
+import { formatValue, defaultValue, type SettingValue } from "../../../../../packages/ui/src/setting-value";
 import { SETTINGS_MAP, type ComponentDef, type GroupDef, type SettingDef } from "./catalog";
 
 export const winId = (comp: string, group: string): string => `s-${comp}-${group}`;
