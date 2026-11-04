@@ -213,7 +213,15 @@ impl Node {
             // Preserve nodes upgraded from the old kernel-only format until their
             // owner selects GotaTun or runs an explicit down/up transition.
             engine_kind = EngineKind::Kernel;
-            store.record_engine(engine_kind)?;
+            // Only a directory that has held node state is such a node. The link's
+            // name and marker are shared by every node on the host, so for a fresh
+            // directory the live link can be another node's: keep the choice in
+            // memory, as before the engine record existed, and claim nothing
+            // durably. Recording it would also put a file and a directory fsync in
+            // front of every fresh start (#260).
+            if store.holds_node_state()? {
+                store.record_engine(engine_kind)?;
+            }
         }
         if active_engine.is_some() && active_engine != Some(engine_kind) {
             return Err(io::ErrorKind::AlreadyExists.into());

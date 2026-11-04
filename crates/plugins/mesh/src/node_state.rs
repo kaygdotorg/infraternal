@@ -115,6 +115,26 @@ impl Store {
             &serde_json::to_vec(&engine).map_err(io::Error::other)?,
         )
     }
+    /// Whether this directory has held mesh node state: a public snapshot, a route journal, an
+    /// interface record or a private key. The engine record is left out on purpose, because it
+    /// is the record this answer gates (#260).
+    /// # Errors
+    /// Reports filesystem errors other than a missing file.
+    pub(crate) fn holds_node_state(&self) -> io::Result<bool> {
+        for path in [
+            &self.path,
+            &self.route_path,
+            &self.interface_path,
+            &self.key_path,
+        ] {
+            match fs::symlink_metadata(path) {
+                Ok(_) => return Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
     /// Read the selected engine, if this node has recorded one.
     /// # Errors
     /// Refuses unsafe metadata and malformed engine values.
