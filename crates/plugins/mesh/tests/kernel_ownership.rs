@@ -137,3 +137,26 @@ fn our_own_kernel_link_is_still_adopted_and_removed() {
     assert!(same, "the restarted node did not reattach its own link");
     assert_eq!(after_down, None, "down left our own link behind");
 }
+
+/// A stop between creating our link and setting its key leaves a link with no key. Its marker
+/// names our recorded key, so restore still removes that incomplete startup, and only it.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn our_own_unkeyed_kernel_link_is_still_cleaned_up() {
+    let state = private_state("kernel-own-unkeyed");
+    let result = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let ours = node.up()?.public_key;
+        drop(node);
+        remove_link();
+        Device::create(ours)?;
+        let unkeyed = link_index().is_some();
+        drop(Node::restore_with_engine(&state, EngineKind::Kernel)?);
+        Ok::<_, std::io::Error>((unkeyed, link_index()))
+    })();
+    remove_link();
+    fs::remove_dir_all(&state).unwrap();
+    let (unkeyed, after) = result.unwrap();
+    assert!(unkeyed, "the unkeyed link was created");
+    assert_eq!(after, None, "restore left our own incomplete link behind");
+}

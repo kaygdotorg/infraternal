@@ -407,7 +407,7 @@ async fn initialize(
             && link.is_some_and(|link| {
                 link.engine == EngineKind::GotaTun
                     && Some(link.ifindex) == adopt
-                    && link.gotatun_owner == Some(local_public_key)
+                    && link.owner == Some(local_public_key)
             })
     };
     let before = crate::wireguard::Device::active_link()?;

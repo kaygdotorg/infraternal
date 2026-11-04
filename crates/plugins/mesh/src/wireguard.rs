@@ -80,7 +80,11 @@ pub struct Counters {
 }
 /// Interface name is fixed: ownership never includes an operator's other interfaces.
 pub const INTERFACE: &str = "infraternal0";
+/// The unbound kernel marker that links created before D340 carry.
 const KERNEL_ALIAS: &[u8] = b"infraternal.mesh.v1\0";
+/// The kernel marker since D340: it names the creating node's public key, so even a link that has
+/// no key yet says whose it is.
+const KERNEL_OWNER_PREFIX: &[u8] = b"infraternal.mesh.v2:";
 const GOTATUN_ALIAS: &[u8] = b"infraternal.mesh.gotatun.v1\0";
 const GOTATUN_OWNER_PREFIX: &[u8] = b"infraternal.mesh.gotatun.v2:";
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -90,14 +94,15 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 pub(crate) struct ActiveLink {
     pub(crate) engine: crate::gotatun_node::EngineKind,
     pub(crate) ifindex: u32,
-    /// `None` for kernel links and legacy unbound `GotaTun` markers.
-    pub(crate) gotatun_owner: Option<PublicKey>,
+    /// The public key the link's marker names; `None` for the legacy unbound kernel and
+    /// `GotaTun` markers.
+    pub(crate) owner: Option<PublicKey>,
 }
 
-/// Put only the public node identity in the marker because the TUN name is shared across installs.
-fn gotatun_alias(owner: PublicKey) -> Vec<u8> {
-    let mut alias = Vec::with_capacity(GOTATUN_OWNER_PREFIX.len() + owner.0.len() * 2 + 1);
-    alias.extend_from_slice(GOTATUN_OWNER_PREFIX);
+/// Put only the public node identity in the marker because the link name is shared across installs.
+fn owner_alias(prefix: &[u8], owner: PublicKey) -> Vec<u8> {
+    let mut alias = Vec::with_capacity(prefix.len() + owner.0.len() * 2 + 1);
+    alias.extend_from_slice(prefix);
     for byte in owner.0 {
         alias.push(HEX[usize::from(byte >> 4)]);
         alias.push(HEX[usize::from(byte & 0x0f)]);
@@ -106,8 +111,8 @@ fn gotatun_alias(owner: PublicKey) -> Vec<u8> {
     alias
 }
 
-fn parse_gotatun_owner(alias: &[u8]) -> Option<PublicKey> {
-    let encoded = alias.strip_prefix(GOTATUN_OWNER_PREFIX)?;
+fn parse_owner(prefix: &[u8], alias: &[u8]) -> Option<PublicKey> {
+    let encoded = alias.strip_prefix(prefix)?;
     if encoded.len() != 65 || encoded[64] != 0 {
         return None;
     }
@@ -131,10 +136,11 @@ fn hex_digit(value: u8) -> Option<u8> {
 /// No timer or background thread: the socket exists only during one operation.
 pub struct Device;
 impl Device {
-    /// Create our interface only; an existing interface must already be owned by the caller.
+    /// Create our interface only, marked with `owner`, the public key the caller will configure.
+    /// An existing interface is refused, never taken over.
     /// # Errors
     /// Returns kernel errors including insufficient privileges and duplicate interface.
-    pub fn create() -> io::Result<()> {
+    pub fn create(owner: PublicKey) -> io::Result<()> {
         let mut payload = vec![0; 16];
         attribute(&mut payload, 3, b"infraternal0\0")?;
         let mut linkinfo = Vec::new();
@@ -143,10 +149,11 @@ impl Device {
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         socket.request(16, 4 | 0x200 | 0x400, &payload)?;
         // Creation does not run the generic alias setter. Mark the new link
-        // explicitly before a later process may adopt it; never leave an unmarked success.
+        // explicitly before a later process may adopt it; never leave an unmarked success. The
+        // owner key lets a restart prove the link is ours before its key is set (D340).
         let mut marker = vec![0; 16];
         attribute(&mut marker, 3, b"infraternal0\0")?;
-        attribute(&mut marker, 20, KERNEL_ALIAS)?;
+        attribute(&mut marker, 20, &owner_alias(KERNEL_OWNER_PREFIX, owner))?;
         if let Err(error) = socket.request(16, 4, &marker) {
             Self::delete()?;
             return Err(error);
@@ -165,7 +172,7 @@ impl Device {
     pub fn mark_tun(owner: PublicKey) -> io::Result<()> {
         let mut payload = vec![0; 16];
         attribute(&mut payload, 3, b"infraternal0\0")?;
-        attribute(&mut payload, 20, &gotatun_alias(owner))?;
+        attribute(&mut payload, 20, &owner_alias(GOTATUN_OWNER_PREFIX, owner))?;
         Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4, &payload)?;
         Ok(())
     }
@@ -212,24 +219,27 @@ impl Device {
                 _ => {}
             }
         }
-        if alias == Some(KERNEL_ALIAS) && kind.is_some_and(|kind| kind == b"wireguard\0") {
-            return Ok(Some(ActiveLink {
-                engine: crate::gotatun_node::EngineKind::Kernel,
-                ifindex,
-                gotatun_owner: None,
-            }));
-        }
-        if kind.is_some_and(|kind| kind == b"tun\0") {
-            let gotatun_owner = match alias {
-                Some(alias) if alias == GOTATUN_ALIAS => None,
-                Some(alias) => parse_gotatun_owner(alias),
-                None => None,
-            };
-            if alias == Some(GOTATUN_ALIAS) || gotatun_owner.is_some() {
+        // A marker names the engine; only an owner-bound one names the installation.
+        let engine = match kind {
+            Some(b"wireguard\0") => Some((
+                crate::gotatun_node::EngineKind::Kernel,
+                KERNEL_ALIAS,
+                KERNEL_OWNER_PREFIX,
+            )),
+            Some(b"tun\0") => Some((
+                crate::gotatun_node::EngineKind::GotaTun,
+                GOTATUN_ALIAS,
+                GOTATUN_OWNER_PREFIX,
+            )),
+            _ => None,
+        };
+        if let (Some((engine, unbound, prefix)), Some(alias)) = (engine, alias) {
+            let owner = parse_owner(prefix, alias);
+            if alias == unbound || owner.is_some() {
                 return Ok(Some(ActiveLink {
-                    engine: crate::gotatun_node::EngineKind::GotaTun,
+                    engine,
                     ifindex,
-                    gotatun_owner,
+                    owner,
                 }));
             }
         }

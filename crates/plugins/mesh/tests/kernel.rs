@@ -14,8 +14,8 @@ use std::{
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
-    Device::create().unwrap();
-    let (local, _) = Key::generate().unwrap();
+    let (local, public) = Key::generate().unwrap();
+    Device::create(public).unwrap();
     Device::configure(&local, 0).unwrap();
     let identity = Device::identity().unwrap();
     let peers: Vec<_> = (1_u32..=1000)
@@ -60,8 +60,8 @@ fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_kernel_chunked_peers() {
-    Device::create().unwrap();
-    let (local, _) = Key::generate().unwrap();
+    let (local, public) = Key::generate().unwrap();
+    Device::create(public).unwrap();
     Device::configure(&local, 0).unwrap();
     let peers: Vec<_> = (1_u32..=1000)
         .map(|id| {
@@ -109,8 +109,8 @@ fn real_kernel_chunked_peers() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_kernel_ephemeral_identity() {
-    Device::create().unwrap();
     let (local, public) = Key::generate().unwrap();
+    Device::create(public).unwrap();
     Device::configure(&local, 0).unwrap();
     let (actual, port) = Device::identity().unwrap();
     assert_eq!(actual, public);
@@ -137,8 +137,8 @@ fn policy_table_route_conflict_is_refused() {
             .unwrap()
             .success()
     );
-    Device::create().unwrap();
-    let (key, _) = Key::generate().unwrap();
+    let (key, public) = Key::generate().unwrap();
+    Device::create(public).unwrap();
     Device::configure(&key, 0).unwrap();
     assert!(
         Command::new("ip")
@@ -169,8 +169,8 @@ fn policy_table_route_conflict_is_refused() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn retired_host_routes_can_be_replayed() {
-    Device::create().unwrap();
     let (key, public) = Key::generate().unwrap();
+    Device::create(public).unwrap();
     Device::configure(&key, 0).unwrap();
     let peer = Peer {
         key: public,
@@ -189,7 +189,7 @@ fn retired_host_routes_can_be_replayed() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn created_interface_is_marked_for_restart_adoption() {
-    Device::create().unwrap();
+    Device::create(Key::generate().unwrap().1).unwrap();
     assert!(Device::owned().unwrap());
     Device::delete().unwrap();
 }
