@@ -35,7 +35,7 @@ export interface AccountMountEnv {
   core: CoreScreen;
   model: AccountModel;
   /** Opens a section of Settings. */
-  openSettings(section: "account" | "grants"): void;
+  openSettings(section: "account" | "grants" | "you.passkeys" | "you.recovery"): void;
 }
 
 let styles: Promise<void> | undefined;

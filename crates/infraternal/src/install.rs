@@ -173,7 +173,7 @@ fn render_unit(
         ""
     };
     Ok(format!(
-        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\n{scope}ExecStart={command}\n{reload}Restart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy={target}\n"
+        "[Unit]\nDescription=infraternal server ({name})\nAfter=network.target\n\n[Service]\nType=simple\n{scope}ExecStart={command}\n{reload}Restart=on-failure\nRestartSec=2\nKillMode=process\nDelegate=yes\n\n[Install]\nWantedBy={target}\n"
     ))
 }
 
@@ -266,6 +266,8 @@ mod tests {
         let output = install(&args, &options).expect("dry-run output");
         assert!(output.contains("tracer-server.service"));
         assert!(output.contains("KillMode=process"));
+        // The proxy puts each Traefik child in its own cgroup under the unit's [#281, D336].
+        assert!(output.contains("Delegate=yes"));
         assert!(output.contains("systemctl --user enable --now tracer-server.service"));
         assert!(output.contains("--tls-key"));
         assert!(!output.contains("INFRATERNAL_SERVER_SERVICE_SCOPE"));

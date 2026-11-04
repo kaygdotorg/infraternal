@@ -133,6 +133,8 @@ struct Registration {
     rotate_recovery: bool,
     expires: i64,
     binding: Option<String>,
+    /// Start order (see [`Pending::started`]); eviction drops the lowest.
+    order: u64,
 }
 enum Authority {
     Setup(String),
@@ -150,11 +152,24 @@ struct Login {
     /// For an anonymous (discoverable) ceremony started over HTTP, the
     /// caller's enclosing network; it bounds that network's share.
     network: Option<std::net::IpAddr>,
+    /// Start order (see [`Pending::started`]); eviction drops the lowest.
+    order: u64,
 }
 #[derive(Default)]
 struct Pending {
     registrations: HashMap<String, Registration>,
     logins: HashMap<String, Login>,
+    /// Ceremonies started so far. Expiry has one-second resolution, so a
+    /// burst in one second would make "oldest" arbitrary; this counter orders
+    /// starts exactly for the pool evictions (#263).
+    started: u64,
+}
+impl Pending {
+    /// The next start order.
+    fn start(&mut self) -> u64 {
+        self.started += 1;
+        self.started
+    }
 }
 
 /// Shared auth library state. Configure the public HTTPS origin explicitly; proxy headers cannot change it.

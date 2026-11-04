@@ -16,7 +16,7 @@ const open = async (page: Page, width = 1440, height = 900): Promise<void> => {
 const showAppearance = async (page: Page): Promise<void> => {
   await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(350);
-  await page.keyboard.type("Settings: Appearance", { delay: 6 });
+  await page.keyboard.type("Appearance › Size", { delay: 6 });
   await page.waitForTimeout(400);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(1500);
@@ -134,7 +134,7 @@ test.describe("on a phone", () => {
   test("the slider is a 44 px target and works by touch", async ({ page }) => {
     await open(page, 393, 852);
     await showAppearance(page).catch(async () => { await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "K", code: "KeyK", ctrlKey: true, shiftKey: true, bubbles: true }))); });
-    await page.keyboard.type("Settings: Appearance", { delay: 6 }).catch(() => undefined);
+    await page.keyboard.type("Appearance › Size", { delay: 6 }).catch(() => undefined);
     await page.keyboard.press("Enter").catch(() => undefined);
     await page.waitForTimeout(1500);
     const box = await slider(page).boundingBox();

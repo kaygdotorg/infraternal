@@ -8,6 +8,8 @@ import type { WindowModel } from "../model/types";
 
 export const ICON = {
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  /** A question mark in a ring: "read about this window" (the first button of an action group, #304). */
+  help: '<circle cx="12" cy="12" r="8.5"/><path d="M9.7 9.6a2.4 2.4 0 0 1 4.6.8c0 1.6-2.3 1.9-2.3 3.4M12 17h.01"/>',
   splitRight: ICONS.splitRight,
   splitDown: ICONS.splitDown,
   terminal: '<path d="m5 8 4 4-4 4M12 16h7"/>',

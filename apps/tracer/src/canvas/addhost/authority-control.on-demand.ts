@@ -63,6 +63,8 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
   let offered = false;
   let toastOver = false;
   let toastOpen = false;
+  /** Our sign-in toast only: other toasts in the stack (an error beside it) are not ours to dismiss. */
+  let toastId: string | undefined;
   const publish = (): void => {
     const waiting = state === "locked" && toastOver && !busy;
     const inbox = waiting ? inboxFor(core) : existingInbox(core);
@@ -75,7 +77,7 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
     if (offered || state !== "locked" || !(options.canUnlock?.() ?? true)) return;
     offered = true;
     toastOpen = true;
-    core.toast.show({
+    toastId = core.toast.show({
       message: LOCKED_TITLE, duration: TOAST_MS, dismissible: true, icon: ICONS.lock,
       action: { label: "Unlock", onSelect: () => { void unlock(); } },
       onClose: () => { toastOpen = false; toastOver = true; publish(); },
@@ -89,7 +91,7 @@ export function makeAuthorityControl(core: CoreScreen, options: AuthorityOptions
     if (next !== state) {
       state = next;
       // Unlocked elsewhere while the sign-in toast is still up: it has nothing left to offer.
-      if (state === "unlocked" && toastOpen) core.toast.dismiss();
+      if (state === "unlocked" && toastOpen) core.toast.dismiss(toastId);
       offerToast(); publish(); emit();
     }
   }).catch(() => undefined).then(() => { pending = undefined; });

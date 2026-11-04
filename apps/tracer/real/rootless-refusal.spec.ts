@@ -4,15 +4,15 @@
  * the infraternal agent refuses it for want of a login, and the toast must say why and what to do, not "not valid".
  * Runs only as a non-root user: a root host falls back to root for such a person, so there is no refusal to see.
  *
- * The server has no remote component on purpose. With one, a locked authority raises its own "unlock" toast in the same
- * first load, and the toast surface holds one message, so whichever arrives last replaces the other (reported on #327).
- * The unlock row itself is covered by authority-after-setup.spec.ts.
+ * The server has no remote component on purpose, so this spec isolates the refusal. With one, a locked authority raises
+ * its own "unlock" toast in the same first load; toasts now stack (D336), so the refusal stays beside it
+ * (toast-stack.spec.ts covers that rule). The unlock row itself is covered by authority-after-setup.spec.ts.
  */
 import { expect, test } from "playwright/test";
 import { startRealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 
-const MESSAGE = "This server runs without root and has no user account matching your name, so it cannot open a shell for you. Add a host to work elsewhere.";
+const MESSAGE = "This server runs without root, so it can only open shells as its own user. Add a host to work elsewhere.";
 
 for (const [name, viewport, phone] of [["desktop", { width: 1440, height: 900 }, false], ["phone", { width: 393, height: 852 }, true]] as const) {
   test(`a rootless server says why it cannot open a shell (${name})`, async ({ browser }) => {

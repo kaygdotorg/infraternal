@@ -171,7 +171,7 @@ test("a press on the person pill before the account chunks have arrived opens th
   console.log(`person pill pressed before the account chunks arrived: ${Date.now() - t0} ms from the transfer starting to the open card`);
 });
 
-test("Settings, Account opened before the account chunk has arrived shows its rows when it does", async ({ page }) => {
+test("Settings, Passkeys opened before the account chunk has arrived shows its rows when it does", async ({ page }) => {
   test.setTimeout(60_000);
   await stubSummary(page);
   const held = await hold(page, chunkWith(ACCOUNT_MODEL));
@@ -179,17 +179,19 @@ test("Settings, Account opened before the account chunk has arrived shows its ro
   await page.goto(PRODUCT);
   await expect(page.locator("#sidebar-toggle")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(1500);
-  await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:account", source: "pointer" } })));
-  const settings = page.locator('[data-window-id="s-account"]');
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:you.passkeys", source: "pointer" } })));
+  // Settings in rows of windows (#304): the sign-in rows are the Passkeys and Recovery windows, the sign-out row is Profile.
+  const settings = page.locator('[data-window-id="s-you-passkeys"]');
+  const profile = page.locator('[data-window-id="s-you-profile"]');
   await expect(settings).toBeVisible();
   await page.waitForTimeout(500);
   await expect(settings.locator('[data-kind="passkeys"]'), "no row with words it cannot know yet").toBeHidden();
-  await expect(settings.getByRole("button", { name: "This device" }).or(settings.locator('[data-kind="this-device"]')), "the rest of the pane is there").toBeVisible();
+  await expect(profile.getByRole("button", { name: "This device" }).or(profile.locator('[data-kind="this-device"]')), "the rest of the pane is there").toBeVisible();
   const t0 = Date.now();
   held.release();
   await expect(settings.getByRole("button", { name: "Add a second", exact: true })).toBeVisible();
-  await expect(settings.locator('[data-kind="recovery"]')).toContainText("verification history unavailable");
-  console.log(`Settings, Account opened before the account chunk arrived: rows ${Date.now() - t0} ms after the transfer starts`);
+  await expect(page.locator('[data-window-id="s-you-recovery"] [data-kind="recovery"]')).toContainText("verification history unavailable");
+  console.log(`Settings, Passkeys opened before the account chunk arrived: rows ${Date.now() - t0} ms after the transfer starts`);
 });
 
 test("the account chunks are fetched by the page itself when it is idle, so the first press finds them", async ({ page }) => {
