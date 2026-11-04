@@ -346,7 +346,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     act: (action: string) => cx.core.act(action),
     overview: () => cx.nav.showOverview(),
     openSession: (host: string, container?: string) => cx.win.open(host, container),
-    openSettings: (section: string) => { const c = cx.views.get("settings"); const rec = c?.wins.get(`s-${section}`) ?? [...(c?.wins.values() ?? [])][0]; if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); } },
+    openSettings: (section: string) => { window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source: "pointer" } })); },
     showContinueChip,
     float: () => cx.float.info(),
     setRole: (r: Role) => { world.role = r; world.forcedRole = true; goScene(4); },

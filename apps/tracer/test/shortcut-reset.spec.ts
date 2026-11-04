@@ -25,15 +25,15 @@ async function open(page: Page): Promise<void> {
   await page.waitForTimeout(1000);
   for (let attempt = 0; attempt < 4; attempt++) {
     await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("settings: shortcuts");
+    await page.keyboard.type("terminal typing");
     await page.keyboard.press("Enter");
-    const ok = await expect.poll(() => page.evaluate(() => document.querySelectorAll('.ui-window[data-window-id="s-shortcuts"] .ui-ss-row').length), { timeout: 5000 }).toBeGreaterThan(3).then(() => true, () => false);
+    const ok = await expect.poll(() => page.evaluate(() => document.querySelectorAll('.ui-window[data-window-id="s-terminal-typing"] .ui-ss-row').length), { timeout: 5000 }).toBeGreaterThan(3).then(() => true, () => false);
     if (ok) break;
   }
   await page.waitForTimeout(900);
 }
 
-const WIN = '.ui-window[data-window-id="s-shortcuts"]';
+const WIN = '.ui-window[data-window-id="s-terminal-typing"]';
 const resetAllRow = (page: Page): Locator => page.locator(`${WIN} .ui-ss-row[data-reset-all]`);
 
 /** Right edge of every row's last key cap, and the left edge of every label. */
@@ -88,7 +88,7 @@ for (const { w, h, touch, dpr } of SIZES) test(`shortcut reset ${w}x${h}`, async
     expect(spread(changed.map((r) => r.label)), `${where}: labels keep one left edge`).toBeLessThanOrEqual(0.5);
     // The dot sits on the first cap's top-left corner and takes no room.
     const dot = await page.evaluate((id) => {
-      const row = document.querySelector(`.ui-window[data-window-id="s-shortcuts"] .ui-ss-row[data-id="${id}"]`)!;
+      const row = document.querySelector(`.ui-window[data-window-id="s-terminal-typing"] .ui-ss-row[data-id="${id}"]`)!;
       const d = row.querySelector(".ui-ss-dot")!.getBoundingClientRect(), cap = row.querySelector("kbd")!.getBoundingClientRect();
       return { dx: d.left + d.width / 2 - cap.left, dy: d.top + d.height / 2 - cap.top, size: d.width, position: getComputedStyle(row.querySelector(".ui-ss-dot")!).position };
     }, ids[0]!);

@@ -15,22 +15,22 @@ import { resolve } from "node:path";
 
 const captures = tracerEvidencePath("settings-edges");
 const SIZES = [{ w: 1440, h: 900, touch: false, dpr: 2 }, { w: 393, h: 852, touch: true, dpr: 3 }] as const;
-/** Section id (the window is `s-<id>`), the palette words that open it. */
+/** Window id without `s-` (Settings in rows of windows, #304), the palette words that open it. The old Appearance, Toolbar and Shortcuts sections are now blocks inside Theme, Typing and Layout. */
 const SECTIONS = [
-  { id: "appearance", words: "settings: appearance" },
-  { id: "windows", words: "settings: window sizes" },
-  { id: "hosts", words: "settings: hosts" },
-  { id: "toolbar", words: "settings: toolbar" },
-  { id: "shortcuts", words: "settings: shortcuts" },
-  { id: "devices", words: "settings: devices" },
-  { id: "account", words: "settings: account" },
-  { id: "about", words: "settings: about" },
+  { id: "appearance-theme", words: "appearance theme" },
+  { id: "appearance-layout", words: "appearance layout" },
+  { id: "terminal-hosts", words: "terminal hosts" },
+  { id: "terminal-typing", words: "terminal typing" },
+  { id: "you-devices", words: "you devices" },
+  { id: "you-profile", words: "you profile" },
+  { id: "you-passkeys", words: "you passkeys" },
+  { id: "about-version", words: "about version" },
 ] as const;
 
-/** The row types each section must show, so a section that renders nothing cannot pass. */
+/** The row types each window must show, so a window that renders nothing cannot pass. */
 const EXPECTED: Record<string, string[]> = {
-  appearance: ["slider", "tabs"], windows: [], hosts: ["switch", "status"], toolbar: ["toolbar"], shortcuts: ["shortcut"],
-  devices: ["device"], account: ["fact", "status"], about: ["fact"],
+  "appearance-theme": ["slider", "tabs"], "appearance-layout": [], "terminal-hosts": ["switch", "status"], "terminal-typing": ["toolbar", "shortcut"],
+  "you-devices": ["device"], "you-profile": ["status"], "you-passkeys": ["fact"], "about-version": ["fact"],
 };
 
 interface Mark { left: number; right: number }

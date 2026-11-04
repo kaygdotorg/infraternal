@@ -21,10 +21,10 @@ import { uiFactor } from "./ui-factor";
 
 const captures = tracerEvidencePath("settings-rows");
 const SIZES = [{ w: 375, h: 667, touch: true, dpr: 3 }, { w: 393, h: 852, touch: true, dpr: 3 }, { w: 1440, h: 900, touch: false, dpr: 2 }] as const;
-/** Each section, the palette words that open it, and a list that proves the section is the one on screen. */
+/** Each window (Settings in rows of windows, #304), the palette words that open it, and a list that proves the section is the one on screen. */
 const SECTIONS = [
-  { name: "Appearance", words: "settings: appearance", list: "Theme" },
-  { name: "Window Sizes", words: "settings: window sizes", list: "Phones" },
+  { name: "Appearance › Theme", words: "appearance theme", list: "Theme" },
+  { name: "Appearance › Layout", words: "appearance layout", list: "Phones" },
 ] as const;
 
 /** True when the named list exists and lies inside the screen (its column is the one in view). */
