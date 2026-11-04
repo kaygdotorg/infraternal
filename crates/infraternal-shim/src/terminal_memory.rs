@@ -54,6 +54,8 @@ pub(crate) struct HostFloor {
 /// uses the shared remainder, still inside the total user pool.
 pub(crate) const MAX_FLOOR: usize = 2 * 1024 * 1024;
 impl HostBudget {
+    /// Creates a pool of `limit` bytes for one user's terminals. `floor` is the
+    /// smallest protected screen reservation a session gets.
     pub(crate) fn new(limit: usize, floor: usize) -> Arc<Self> {
         Arc::new(Self {
             used: AtomicUsize::new(0),
@@ -79,9 +81,12 @@ impl HostBudget {
             bytes: AtomicUsize::new(floor),
         }))
     }
+    /// The smallest per-session floor this pool grants.
     pub(crate) fn minimum_floor(&self) -> usize {
         self.floor
     }
+    /// The `OutOfMemory` error returned when the pool has no room, worded for the
+    /// user, with the pool size in MiB, KiB or bytes.
     fn full_error(&self) -> std::io::Error {
         let mib = 1024 * 1024;
         let kib = 1024;
@@ -101,9 +106,12 @@ impl HostBudget {
     pub(crate) fn total_used(&self) -> usize {
         self.used.load(Ordering::Relaxed) + self.floors.load(Ordering::Relaxed)
     }
+    /// The pool's hard cap in bytes.
     pub(crate) fn limit_bytes(&self) -> usize {
         self.limit
     }
+    /// Takes `bytes` from the pool's shared remainder (above floors). Returns false,
+    /// changing nothing, if that would pass the cap; zero always succeeds.
     pub(crate) fn try_charge(&self, bytes: usize) -> bool {
         if bytes == 0 {
             return true;
@@ -119,6 +127,7 @@ impl HostBudget {
             })
             .is_ok()
     }
+    /// Gives back `bytes` taken by `try_charge`. Must not exceed what was charged.
     pub(crate) fn release_charge(&self, bytes: usize) {
         self.used.fetch_sub(bytes, Ordering::Relaxed);
     }
@@ -131,10 +140,15 @@ impl HostBudget {
     pub(crate) fn used(&self) -> usize {
         self.used.load(Ordering::Relaxed)
     }
+    /// True if growing a terminal that holds `used` bytes by `bytes` would fit,
+    /// given its `floor`. Charges nothing.
     fn fits(&self, used: usize, bytes: usize, floor: usize) -> bool {
         let extra = Self::excess(used, bytes, floor);
         extra <= self.limit.saturating_sub(self.total_used())
     }
+    /// Charges the pool for growing a terminal from `used` by `bytes`. Growth that
+    /// stays within the terminal's own `floor` costs the pool nothing. False if it
+    /// does not fit.
     fn charge(&self, used: usize, bytes: usize, floor: usize) -> bool {
         self.try_charge(Self::excess(used, bytes, floor))
     }
@@ -171,6 +185,9 @@ impl HostBudget {
     }
 }
 impl HostFloor {
+    /// Changes this session's floor to `to`, moving the terminal's existing `used`
+    /// bytes between its protected floor and the shared remainder. Returns false and
+    /// changes nothing if the larger floor would pass the pool's cap.
     fn resize(&self, used: usize, to: usize) -> bool {
         let from = self.bytes.load(Ordering::Relaxed);
         if !self.host.refloor(used, from, to) {
@@ -179,6 +196,7 @@ impl HostFloor {
         self.bytes.store(to, Ordering::Relaxed);
         true
     }
+    /// The session's current floor in bytes.
     pub(crate) fn bytes(&self) -> usize {
         self.bytes.load(Ordering::Relaxed)
     }
@@ -191,6 +209,9 @@ impl Drop for HostFloor {
     }
 }
 
+/// The allocator function table in the layout the native library expects. Its
+/// four entries are allocate, resize (used only for the fit query), remap
+/// (always refuses) and free.
 #[repr(C)]
 struct Vtable {
     alloc: unsafe extern "C" fn(*mut c_void, usize, u8, usize) -> *mut c_void,
@@ -198,11 +219,18 @@ struct Vtable {
     remap: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize, usize) -> *mut c_void,
     free: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize),
 }
+/// The allocator handle passed to the native library: a context pointer and the
+/// function table. It is boxed with the `Memory` so the pointers stay valid.
 #[repr(C)]
 struct Abi {
     context: *mut c_void,
     vtable: *const Vtable,
 }
+/// Header written in front of every native allocation. Blocks form a doubly
+/// linked list per terminal, which lets the whole terminal's memory be freed
+/// without looking at what the native side built. The flags record the class:
+/// `mapped` for page-aligned history pages, `encoded` for compressed history,
+/// `structure` for page-list nodes.
 struct Block {
     previous: Option<NonNull<Block>>,
     next: Option<NonNull<Block>>,
@@ -213,6 +241,14 @@ struct Block {
     structure: bool,
 }
 
+/// Allocation accounting and ownership for one native terminal.
+///
+/// Gives the native library an allocator that charges every request against the
+/// terminal's limit, per-class caps and the user's shared pool, and links it to
+/// this terminal. Dropping `Memory` frees everything still allocated, without
+/// touching the native state; that is how a terminal whose resize failed is
+/// cleaned up safely. Everything runs on the reactor thread, inside synchronous
+/// native calls.
 pub(super) struct Memory {
     abi: Abi,
     // Native read-side operations may decompress history and allocate even
@@ -220,6 +256,10 @@ pub(super) struct Memory {
     // context has interior mutation; its counters never escape as references.
     state: std::cell::UnsafeCell<State>,
 }
+/// The mutable counters and block list behind `Memory`. `used`, `peak` and the
+/// class counters are in bytes including headers. `refused` is set when a
+/// request (other than optional compressed history) is turned down. `floor` is
+/// this terminal's protected share of the pool.
 struct State {
     first: Option<NonNull<Block>>,
     used: usize,
@@ -239,16 +279,23 @@ struct State {
 impl Memory {
     // Native allocator pointers borrow the ABI and context, so constructing
     // the final stable box here is required rather than moving a stack value.
+    /// Test constructor: a standalone `Memory` with `limit` bytes and no pool.
     #[allow(clippy::unnecessary_box_returns)]
     #[cfg(test)]
     pub(super) fn new(limit: usize) -> Box<Self> {
         Self::with_host(limit, 0, None, None)
     }
+    /// Test constructor: like `new`, also with an `encoded_limit` for compressed
+    /// history.
     #[allow(clippy::unnecessary_box_returns)]
     #[cfg(all(test, feature = "compact-history"))]
     pub(super) fn with_history(limit: usize, encoded_limit: usize) -> Box<Self> {
         Self::with_host(limit, encoded_limit, None, None)
     }
+    /// Creates the accounting for one terminal. `limit` is its total cap and
+    /// `encoded_limit` the cap for compressed history. `host` is the user's pool and
+    /// `floor_reservation` the floor reserved for this session; both are optional.
+    /// Returned boxed because the native side keeps pointers into it.
     #[allow(clippy::unnecessary_box_returns)]
     pub(super) fn with_host(
         limit: usize,
@@ -280,12 +327,15 @@ impl Memory {
         memory.abi.context = memory.state.get().cast();
         memory
     }
+    /// `(bytes in use, peak bytes, refused)`.
     pub(super) fn stats(&self) -> (usize, usize, bool) {
         // SAFETY: synchronous reactor calls never overlap native callbacks;
         // return copied scalars, not a borrow across a subsequent native call.
         let state = unsafe { &*self.state.get() };
         (state.used, state.peak, state.refused)
     }
+    /// `(ordinary bytes, page bytes, block count)`. Page bytes are mapped history
+    /// pages plus page-list structure; ordinary excludes those and compressed data.
     pub(super) fn allocation_classes(&self) -> (usize, usize, usize) {
         // SAFETY: the synchronous test inspects copied ownership metadata only,
         // between native calls; the list is never borrowed across a callback.
@@ -357,10 +407,12 @@ impl Memory {
         }
         count
     }
+    /// Bytes held in compressed history form.
     pub(super) fn encoded_bytes(&self) -> usize {
         // SAFETY: copied accounting between synchronous native calls.
         unsafe { (*self.state.get()).encoded_used }
     }
+    /// Test helper: refuse every further allocation.
     #[cfg(test)]
     pub(super) fn refuse_new_allocations(&mut self) {
         self.refuse_beyond(0);
@@ -387,6 +439,10 @@ impl Memory {
             state.floor = floor;
         }
     }
+    /// The floor for a screen made of `pages` pages of `page_len` bytes: both
+    /// screens plus two pages to recycle, charged as page-aligned mappings, plus
+    /// fixed overhead, clamped between `minimum` and `MAX_FLOOR` (or `minimum` if
+    /// that is larger).
     pub(crate) fn screen_floor(pages: usize, page_len: usize, minimum: usize) -> usize {
         let charge = mapping_charge(page_len, page_size());
         pages
@@ -396,11 +452,14 @@ impl Memory {
             .saturating_add(SCREEN_OVERHEAD)
             .clamp(minimum, MAX_FLOOR.max(minimum))
     }
+    /// Test helper: this terminal's current floor.
     #[cfg(test)]
     pub(super) fn floor(&self) -> usize {
         // SAFETY: copied scalar between synchronous native calls.
         unsafe { (*self.state.get()).floor }
     }
+    /// The pointer to hand to the native library as its allocator. Valid as long as
+    /// this `Memory` lives and is not moved (it is boxed).
     pub(super) fn abi(&self) -> *const c_void {
         (&raw const self.abi).cast()
     }
@@ -419,6 +478,7 @@ impl State {
                 || size <= (256 * 1024_usize).saturating_sub(ordinary))
             && (!encoded || size <= self.encoded_limit.saturating_sub(self.encoded_used))
     }
+    /// Adds an admitted allocation of `size` bytes to the counters and the peak.
     fn count(&mut self, size: usize, mapped: bool, encoded: bool, structure: bool) {
         self.used += size;
         if mapped {
@@ -445,6 +505,8 @@ fn mapping_charge(len: usize, page: usize) -> usize {
         .next_multiple_of(page)
 }
 
+/// The system page size, read once; 4096 if the system reports something
+/// unusable.
 fn page_size() -> usize {
     static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *SIZE.get_or_init(|| {
@@ -459,6 +521,15 @@ fn page_size() -> usize {
 }
 
 // Header alignment follows the rounded allocation offset, proved below.
+/// Native allocator entry. Returns null (a refusal) unless the request fits the
+/// terminal's limit, its class cap and the pool; a refusal other than for
+/// compressed history marks the terminal as refused.
+///
+/// `return_address` carries a class tag from the native adapter: `usize::MAX`
+/// for a page-aligned, zero-filled history mapping, `usize::MAX - 1` for
+/// compressed history, `STRUCTURE` for page-list nodes, anything else ordinary.
+/// `alignment` is log2 of the alignment in bytes. The block header is placed
+/// before the returned payload and added to the terminal's list.
 #[allow(clippy::cast_ptr_alignment)]
 unsafe extern "C" fn allocate(
     ctx: *mut c_void,
@@ -611,6 +682,7 @@ unsafe extern "C" fn resize(
             .as_ref()
             .is_none_or(|host| host.fits(memory.used, size, memory.floor))
 }
+/// Native allocator entry for in-place remapping. Always refuses.
 unsafe extern "C" fn remap(
     _: *mut c_void,
     _: *mut c_void,
@@ -622,6 +694,9 @@ unsafe extern "C" fn remap(
     ptr::null_mut()
 }
 // Payload minus the aligned header width recovers its original live node.
+/// Native allocator entry that frees one payload: unlinks its block, returns the
+/// bytes to the counters and the pool, and unmaps or deallocates it. Also used
+/// by `Memory::drop` to free whatever is left.
 #[allow(clippy::cast_ptr_alignment)]
 unsafe extern "C" fn release(ctx: *mut c_void, payload: *mut c_void, _: usize, _: u8, _: usize) {
     // SAFETY: native ownership supplies exactly one live allocator payload.
@@ -668,6 +743,7 @@ unsafe extern "C" fn release(ctx: *mut c_void, payload: *mut c_void, _: usize, _
         }
     }
 }
+/// The allocator table handed to every native terminal.
 static VTABLE: Vtable = Vtable {
     alloc: allocate,
     resize,
