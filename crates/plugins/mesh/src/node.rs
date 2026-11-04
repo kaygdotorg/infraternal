@@ -461,7 +461,6 @@ impl Node {
         Ok(())
     }
     // Keep version/binding checks and complete staging visible before installation.
-    #[allow(clippy::too_many_lines)]
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
         if !chunk.access_updates.is_empty()
             && (chunk.from_version.is_none()
@@ -671,7 +670,6 @@ impl Node {
         Ok(())
     }
     // Keep the apply/fence/rollback transaction and its failure ordering visible together.
-    #[allow(clippy::too_many_lines)]
     fn apply(&mut self, config: Config) -> io::Result<()> {
         #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
         let dns_records = crate::dns::Records::from_config(&config)?;

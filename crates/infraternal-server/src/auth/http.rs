@@ -277,7 +277,6 @@ pub(super) fn current_time(auth: &Auth) -> super::Result<i64> {
 }
 
 // Keep typed action dispatch together so capability and response rules can be reviewed in one place.
-#[allow(clippy::too_many_lines)]
 async fn execute(
     auth: &Auth,
     #[cfg(feature = "remote")] invitation_issuer: Option<&crate::remote_http::InvitationIssuer>,

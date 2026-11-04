@@ -143,7 +143,6 @@ fn parser_rejects_unknown_fields_user_endpoints_and_invalid_bounds() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the edit sequence beside its final revision and audit assertions.
 async fn inventory_lifecycle_preserves_policy_identity_and_audits_every_edit() {
     let fixture = Fixture::new().await;
     let service = &fixture.service;
@@ -358,7 +357,6 @@ async fn inventory_lifecycle_preserves_policy_identity_and_audits_every_edit() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep setup, scoped authorization, and failed-edit atomicity in one case.
 async fn scoped_grant_role_filters_inventory_and_cannot_cross_tags() {
     let fixture = Fixture::new().await;
     let service = &fixture.service;

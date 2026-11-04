@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)] // Keep the real writer wait and post-expiry state evidence together.
 async fn review_mesh_delete_refused_when_freshness_expires_during_writer_wait() {
     let _guard = SERIAL.lock().await;
     let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(

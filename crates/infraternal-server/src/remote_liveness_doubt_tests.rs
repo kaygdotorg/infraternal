@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The fixture host answers the server's primary probes only while `answer` is set.
 /// Silence is the only fault: the QUIC connection, streams and terminal stay intact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)]
 async fn one_missed_primary_reply_shows_reconnecting_and_only_a_second_retires_the_link() {
     let (server, node, root, _) = identities();
     let (store, _pool, host_id, _) = super::super::revocation::admitted_store(&node, &root).await;

@@ -72,7 +72,6 @@ async fn terminal_send(handle: &AttachmentHandle, frame: Frame<'_>) {
 /// Memory-only credentials and prelaunched shims avoid persistent fixture identity material.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "10-minute real PTY measurement; pinned VM lock and INFRATERNAL_PING_BINARY required"]
-#[allow(clippy::too_many_lines)]
 async fn primary_ping_during_terminal_flood() {
     let binary = PathBuf::from(std::env::var_os("INFRATERNAL_PING_BINARY").unwrap());
     let seconds: u64 = std::env::var("INFRATERNAL_PING_SECONDS")

@@ -5,7 +5,6 @@ use crate::embedded::TerminalOutput;
 /// The controlled shadow proves readiness only: no retained input or shadow
 /// Output can mask whether the ordinary primary delivers its healthy terminal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)]
 async fn saturated_native_control_queue_does_not_hide_primary_terminal_output() {
     verify_saturated_primary(false).await;
 }
@@ -17,7 +16,6 @@ async fn scheduled_probe_preserves_primary_at_full_native_control_capacity() {
     verify_saturated_primary(true).await;
 }
 
-#[allow(clippy::too_many_lines)]
 async fn verify_saturated_primary(wait_for_probe: bool) {
     let (server, node, root, _) = identities();
     let (store, _pool, host_id, _) = super::super::revocation::admitted_store(&node, &root).await;

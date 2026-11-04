@@ -539,7 +539,6 @@ async fn build_router_with_key_setup(
 
 // Keep startup ordering visible: persisted switches load before node workers
 // attach, and admitted transports exist before their dependent server features.
-#[allow(clippy::too_many_lines)]
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,

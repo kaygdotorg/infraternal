@@ -766,10 +766,6 @@ impl Bootstrap {
         Ok(())
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep failure recording, session cleanup, rollback and final state ordered in one attempt."
-    )]
     async fn attempt(
         &self,
         batch: Arc<BatchInner>,
@@ -979,7 +975,6 @@ impl Bootstrap {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     // Transient bytes remain in this future and its lazy provider, never batch state.
     async fn resolve_attempt(
         &self,
@@ -1016,7 +1011,6 @@ impl Bootstrap {
 
     /// Resolve the first trusted image before any installation writes. A full
     /// fallback is retained so an older release does not repeat its acquisition.
-    #[allow(clippy::too_many_arguments)]
     async fn payload(
         &self,
         batch: &BatchInner,
@@ -1131,10 +1125,6 @@ impl Bootstrap {
 
     /// Enroll one host, publish its CLI, report setup warnings, and prove readiness.
     /// All changes stay bound to this attempt's transaction for cancellation recovery.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
-    )]
     fn run<'a>(
         &'a self,
         batch: &'a BatchInner,
@@ -1899,7 +1889,6 @@ impl Bootstrap {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn await_start_fresh(
         &self,
         batch: &BatchInner,
@@ -1924,7 +1913,6 @@ impl Bootstrap {
     /// leaves the stop and the new enrollment only seconds (#305 P2-1).
     /// Nor does it hold an add-host slot: eight unanswered confirmations would
     /// otherwise block every add-host on the server for the whole wait (#305 P3-2).
-    #[allow(clippy::too_many_arguments)]
     async fn confirm_start_fresh(
         &self,
         batch: &BatchInner,
@@ -1999,7 +1987,6 @@ impl Bootstrap {
     }
 
     /// Run the confirmed action on the host.
-    #[allow(clippy::too_many_arguments)]
     async fn act_start_fresh(
         &self,
         batch: &BatchInner,
@@ -2271,7 +2258,6 @@ fn emit(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_with_leftovers(
     batch: &BatchInner,
     target: &Target,

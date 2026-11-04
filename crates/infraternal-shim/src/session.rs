@@ -572,7 +572,6 @@ pub fn run(config: Config) -> io::Result<()> {
 /// Run with a shortened exit ceiling for deterministic real-PTY verification.
 /// # Errors
 /// Returns the same errors as [`run`]; durations above ten minutes are clamped.
-#[allow(clippy::too_many_lines)]
 pub fn run_with_retention(config: Config, retention: Duration) -> io::Result<()> {
     run_configured(config, retention, None, None)
 }
@@ -632,7 +631,6 @@ pub fn run_with_prestarted_login(
     run_configured(config, retention, group, Some(pty))
 }
 
-#[allow(clippy::too_many_lines)]
 fn run_configured(
     mut config: Config,
     retention: Duration,
@@ -1288,7 +1286,6 @@ fn stop_shell(
 }
 
 /// Stop exactly at an unaccepted input frame; trailing wire belongs to this peer.
-#[allow(clippy::too_many_arguments)]
 fn consume_peer(
     bytes: &[u8],
     p: &mut Peer,
@@ -1343,7 +1340,6 @@ fn consume_peer(
     Ok((acknowledged_exit, used))
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,

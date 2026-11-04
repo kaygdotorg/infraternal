@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // The authorization bypass needs one complete role/membership scenario.
 async fn review_scoped_membership_cannot_claim_hidden_node() {
     let fixture = Fixture::new().await;
     let service = &fixture.service;
@@ -88,7 +87,6 @@ async fn review_scoped_membership_cannot_claim_hidden_node() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Exercise allowed and denied edits with the same persisted role.
 async fn scoped_membership_checks_pre_edit_host_scope() {
     let fixture = Fixture::new().await;
     let service = &fixture.service;

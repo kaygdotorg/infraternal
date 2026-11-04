@@ -3,7 +3,6 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)] // Keep the full-capacity authority/read-count fence together.
 async fn account_logout_wakes_only_its_16_sockets_among_256() {
     account_isolation_at_capacity(false).await;
 }
@@ -13,7 +12,6 @@ async fn account_recovery_wakes_only_its_16_sockets_among_256() {
     account_isolation_at_capacity(true).await;
 }
 
-#[allow(clippy::too_many_lines)] // Full-capacity setup, revocation and count assertions share one fence.
 async fn account_isolation_at_capacity(recovery: bool) {
     let _guard = SERIAL.lock().await;
     let clock = FrozenSocketTime::new().await;

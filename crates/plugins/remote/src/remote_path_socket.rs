@@ -981,7 +981,6 @@ mod tests {
 
     /// Exercise the same retained ACK-only transmit with a functional emission
     /// assertion or the additional deadline assertion on the measurement VM.
-    #[allow(clippy::too_many_lines)]
     async fn old_ack_only_before_probe(timed: bool) {
         use crate::remote_tls::tests::{leaf, root};
         let ca = root();

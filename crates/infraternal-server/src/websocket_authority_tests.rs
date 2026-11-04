@@ -167,7 +167,6 @@ enum Interruption {
     Expiry,
 }
 
-#[allow(clippy::too_many_lines)] // Keep the held connection and exact interruption fence together.
 async fn interrupted_authority_operation(interruption: Interruption) {
     let _clock = FrozenSocketTime::new().await;
     for _ in 0..3 {
@@ -443,7 +442,6 @@ mod cap_review_r3 {
     /// caller's attempt ends. The busy timeout must recover every place even
     /// while the lock is still held; unlocking must not be needed for cleanup.
     #[tokio::test(start_paused = true)]
-    #[allow(clippy::too_many_lines)] // Keep lock, query-start observations and cleanup in one test.
 
     async fn sqlite_busy_timeout_recovers_detached_storm_without_unlocking() {
         use sqlx::Connection;

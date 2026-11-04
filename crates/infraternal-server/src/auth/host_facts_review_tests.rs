@@ -3,7 +3,6 @@ use super::*;
 
 /// A slow host read must not serialize every other mux stream behind its Result (wire.md section 6).
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn pending_host_facts_read_keeps_control_ping_responsive() {
     let _guard = SERIAL.lock().await;
     let clock = FrozenSocketTime::new().await;
