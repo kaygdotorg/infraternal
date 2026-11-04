@@ -32,8 +32,13 @@ pub const GRACE: Duration = Duration::from_secs(30);
 /// The private v1 request has no strings or variable-length allocations.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RequestHeader {
+    /// Readiness probe (`?`, no descriptor). The worker answers `R`.
     Ready,
+    /// Stop request (`!`, no descriptor). The worker ends every shell and answers
+    /// `S`.
     Stop,
+    /// Start a shell for the session with this 16-byte id (exactly one descriptor,
+    /// the terminal, travels with it).
     Terminal([u8; 16]),
 }
 /// Shared pure decoder used by descriptor reception and parser fuzzing.
@@ -67,10 +72,14 @@ pub fn decode_status(bytes: &[u8]) -> io::Result<i32> {
     }
 }
 
+/// One shell the worker is tracking: its child process (`None` once its status
+/// has been sent) and the connection that receives that status and signals
+/// disconnection.
 struct Running {
     child: Option<Child>,
     reply: UnixStream,
 }
+/// Removes the worker's socket file when dropped.
 struct Endpoint<'a>(&'a Path);
 impl Drop for Endpoint<'_> {
     fn drop(&mut self) {
@@ -103,6 +112,8 @@ pub fn worker_announced(endpoint: &Path, grace: Duration, controller: u32) -> io
     worker_configured(endpoint, grace, controller, true)
 }
 
+/// Shared body of the worker entry points; `announce` selects whether to report
+/// readiness on the launch pipe.
 #[allow(clippy::too_many_lines)]
 fn worker_configured(
     endpoint: &Path,
@@ -315,6 +326,9 @@ fn worker_configured(
 // Child identifiers come only from the kernel's lists for this process's
 // threads. No owned child is reaped between enumeration and signal delivery,
 // so those pids cannot be recycled into unrelated host processes.
+/// Pids of this process's direct children, taken from the kernel's per-thread
+/// lists. Taking them from the kernel (not scanning the account) means only
+/// descendants this worker owns are ever signalled.
 fn children() -> io::Result<Vec<nix::unistd::Pid>> {
     let mut children = Vec::new();
     for thread in fs::read_dir("/proc/self/task")? {
@@ -337,6 +351,8 @@ fn children() -> io::Result<Vec<nix::unistd::Pid>> {
     Ok(children)
 }
 
+/// Reaps finished children that are not one of the `running` shells, so their
+/// exit statuses are not stolen.
 fn reap_adopted(running: &[Running]) -> io::Result<()> {
     reap_except(|pid| {
         running
@@ -350,6 +366,7 @@ pub(crate) fn reap_terminal_jobs(shell: Option<u32>) -> io::Result<()> {
     reap_except(|pid| Some(pid) == shell)
 }
 
+/// Reaps every finished child whose pid `owned_status` rejects, without waiting.
 fn reap_except(owned_status: impl Fn(u32) -> bool) -> io::Result<()> {
     use nix::sys::wait::{WaitPidFlag, waitpid};
     for pid in children()? {
@@ -364,6 +381,9 @@ fn reap_except(owned_status: impl Fn(u32) -> bool) -> io::Result<()> {
     Ok(())
 }
 
+/// Kills and reaps every child until none remain. Repeats because killing a
+/// parent hands its children to this process, so detached and double-forked
+/// descendants are collected too.
 pub(crate) fn finish_children() -> io::Result<()> {
     use nix::sys::{signal::kill, wait::waitpid};
     loop {
@@ -456,6 +476,8 @@ pub(crate) fn start(
     Ok(peer)
 }
 
+/// Reads the worker's one-byte `A` that confirms the shell started. Any other
+/// byte means the host login refused to start it.
 pub(crate) fn acknowledge(peer: &mut UnixStream) -> io::Result<()> {
     let mut started = [0];
     peer.read_exact(&mut started)?;
@@ -467,6 +489,7 @@ pub(crate) fn acknowledge(peer: &mut UnixStream) -> io::Result<()> {
 
 // Both launch adapters authenticate the connection that receives the terminal;
 // readiness on a previous connection cannot authorize a replacement socket.
+/// Connects to `endpoint` and authenticates that exact connection.
 fn connect(
     endpoint: &Path,
     uid: u32,
@@ -536,6 +559,10 @@ pub fn authenticate(
 // Only a worker that is the kernel-backed logind leader may end its session.
 // Inherited rootless/fallback session identifiers must never terminate a host
 // login that also contains the infraternal agent or unrelated account work.
+/// The logind session id this process leads, or `None`. The id comes from this
+/// process's cgroup and counts only if logind confirms this process is the
+/// session leader, so inherited sessions that hold unrelated work are never
+/// terminated.
 fn owned_session() -> Option<String> {
     let record = fs::read_to_string("/proc/self/cgroup").ok()?;
     let id = record
@@ -570,6 +597,8 @@ fn owned_session() -> Option<String> {
     }
     Some(id.to_owned())
 }
+/// Asks logind to end the session this worker leads, if any. Runs last in
+/// retirement, after every descendant is gone. Errors are ignored.
 fn terminate() {
     // Readiness and terminal opens need no logind round trip. Authenticate the
     // current leader only at retirement, after descendants have been reaped:

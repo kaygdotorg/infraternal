@@ -2,6 +2,8 @@
 #[path = "../infraternal/relocations.rs"]
 mod relocations;
 
+/// Emits the shared loader-relocation settings for the `infraternal-session`
+/// target and re-runs only when this script or the shared table changes.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../infraternal/relocations.rs");
