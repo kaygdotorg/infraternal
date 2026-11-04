@@ -160,6 +160,8 @@ export class AppStream {
   private leased = false;
   /** A quiet lease request is on its way: a drag-resize asks once, and the answer pushes the latest size. */
   private leasing = false;
+  /** The size the machine was last told (Start's, or the last Size message): what a hand resize is compared against. */
+  private pushedSize: StreamSize | undefined;
   /** When a size-only lease was last refused; throttles only size-only attempts, never the person's own control. */
   private leaseRefusedAt = -Infinity;
   private shapeTimer = 0;
@@ -201,6 +203,7 @@ export class AppStream {
     this.started = true;
     this.hadPicture = false;
     this.size = chooseSize(css.width, css.height, css.density);
+    this.pushedSize = this.size;
     const support = streamingSupport();
     if (support !== "ok") { this.setState({ kind: "unsupported", reason: support }); return; }
     this.setState({ kind: "connecting" });
@@ -429,18 +432,20 @@ export class AppStream {
   }
 
   /**
-   * The window body's layout size changed: the machine's window follows it (D208 A2), quietly. Resizing a card or
-   * moving it into a column is layout, not input meant for the machine (A3), so it never shows control: the size goes
-   * under a size-only lease (`leased`) that nothing on the page announces. `byHand` is false for a change that only
-   * took the machine's own shape (looking): that sends its size only if control is already held and otherwise waits.
+   * The window body's layout size changed. The latest size is always remembered; whether the machine's window follows it
+   * (D208 A2) depends on who changed it:
+   * - `byHand` false is the card following what it was shown (the machine's own shape, a layout settling): looking,
+   *   which never takes a lease, never shows control and sends nothing (D208 A3).
+   * - `byHand` true is a person's resize or move settling: the machine's window follows, quietly, under a size-only
+   *   lease (`leased`) that nothing on the page announces. It is compared with the size the machine was last told, not
+   *   with the last size seen, so the sizes a drag passed through while looking do not hide the final one.
    */
   resize(css: { width: number; height: number; density: number }, byHand = true): void {
     const next = chooseSize(css.width, css.height, css.density);
-    if (!sizeChanged(this.size, next)) return;
+    const changed = sizeChanged(this.size, next);
     this.size = next;
-    // Merely attaching uses Start's size; holding any lease sends the latest size.
-    if (this.canPushSize()) this.pushSize();
-    else if (byHand) void this.leaseForSize();
+    if (this.canPushSize()) { if (changed || (byHand && sizeChanged(this.pushedSize, next))) this.pushSize(); }
+    else if (byHand && sizeChanged(this.pushedSize, next)) void this.leaseForSize();
   }
 
   /** Whether a lease is held, for input (announced) or for the size alone (quiet). */
@@ -469,6 +474,7 @@ export class AppStream {
 
   private pushSize(): void {
     if (!this.size || this.streamId === undefined || !this.attached || !this.canPushSize()) return;
+    this.pushedSize = this.size;
     this.o.connection.send(this.streamId, { type: "Desktop", message: { kind: "size", width: this.size.width, height: this.size.height, densityMilli: densityMilli(this.size) } });
   }
 

@@ -47,9 +47,6 @@ export interface AppBodyOptions {
   aspect?: number;
 }
 
-/** A box change this soon after the window took the machine's shape came from that, not from the person's hand. */
-const SHAPE_SETTLE_MS = 600;
-
 /** Icons of the state cards, from the shared set. */
 const CARD_ICON: Record<NonNullable<StateView["card"]>["mark"], string | undefined> = {
   spinner: undefined,
@@ -78,7 +75,10 @@ export class AppBinding implements SessionBinding {
   private picture = { width: 0, height: 0 };
   /** The machine's own window or screen shape (width / height), once it has reported one. */
   private remoteShape: number | undefined;
-  private shapedAt = -Infinity;
+  /** A person's resize, move or split has just settled (`refit`): the next size the box settles on follows on the machine. */
+  private handPending = false;
+  /** The window is taking the machine's shape right now (see `applyShape`). */
+  private shaping = false;
   private listedShapeTried = false;
   private resizeTimer = 0;
   private opened = false;
@@ -106,7 +106,7 @@ export class AppBinding implements SessionBinding {
         state: (s) => this.paintState(s),
         control: (c) => this.paintControl(c),
         picture: (size) => { this.picture = size; },
-        shape: (aspect) => { this.remoteShape = aspect; this.applyShape(aspect, true); },
+        shape: (aspect) => { this.remoteShape = aspect; this.applyShape(aspect); },
         surface: (canvas) => this.setSurface(canvas),
       },
     });
@@ -147,16 +147,17 @@ export class AppBinding implements SessionBinding {
       // once; later shapes come only from the machine's own reports while it streams.
       const tried = this.listedShapeTried;
       this.listedShapeTried = true;
-      if (!tried && this.applyShape(this.o.aspect, true)) return;
+      if (!tried && this.applyShape(this.o.aspect)) return;
       this.opened = true;
       this.stream.setVisible(this.visible);
       void this.stream.open(size);
       return;
     }
     window.clearTimeout(this.resizeTimer);
-    // A resize by hand makes the machine's window follow, quietly (no control shown). Taking the machine's shape is
-    // looking, which never moves anything (D208 A3), so that one sends nothing.
-    this.resizeTimer = window.setTimeout(() => this.stream.resize(this.css(), performance.now() - this.shapedAt > SHAPE_SETTLE_MS), first ? 0 : 120);
+    // Only a person's resize, move or split (`refit`) makes the machine's window follow, and quietly (no control shown). A
+    // box change from anything else, such as taking the machine's own shape, is looking and never moves anything (D208 A3).
+    // The flag is read when the timer fires, so a later observer callback that restarts the timer cannot lose it.
+    this.resizeTimer = window.setTimeout(() => { const byHand = this.handPending; this.handPending = false; this.stream.resize(this.css(), byHand); }, first ? 0 : 120);
   }
 
   private setSurface(canvas: HTMLCanvasElement | undefined): void {
@@ -465,15 +466,16 @@ export class AppBinding implements SessionBinding {
   }
 
   /** The canvas window takes the machine's shape (TASTE "A remote window takes its own shape"); a no-op once it has it. */
-  /** `looking` marks the change as the window following the machine, so the size it causes never takes control. */
-  private applyShape(aspect: number | undefined, looking: boolean): boolean {
-    if (aspect === undefined || this.disposed || !shapeStreamWindow(this.cx, this.rec, this.stage, aspect)) return false;
-    if (looking) this.shapedAt = performance.now();
-    return true;
+  private applyShape(aspect: number | undefined): boolean {
+    if (aspect === undefined || this.disposed) return false;
+    // Shaping ends through the shared resize host, which calls `refit()` again: that nested call is the window following
+    // the machine, not a person's resize, so it must not mark the change as by hand.
+    this.shaping = true;
+    try { return shapeStreamWindow(this.cx, this.rec, this.stage, aspect); } finally { this.shaping = false; }
   }
 
   // A resize by hand ends here too: the window settles back into the machine's shape, keeping the height it was given.
-  refit(): void { this.applyShape(this.remoteShape, false); this.measure(false); }
+  refit(): void { if (!this.shaping) this.handPending = true; this.applyShape(this.remoteShape); this.measure(false); }
 
   dispose(): void {
     if (this.disposed) return;

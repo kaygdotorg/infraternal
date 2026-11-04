@@ -191,6 +191,22 @@ test("a refused size-only lease never delays the person's own control", async ()
   } finally { f.stream.dispose(); }
 });
 
+test("a drag's looking sizes do not hide its final size: the settle is compared with what the machine was told", async () => {
+  const f = await fixture();
+  try {
+    // The box passes through sizes while the person drags (the observer only looks) ...
+    f.stream.resize({ width: 900, height: 600, density: 1 }, false);
+    f.stream.resize({ width: 1000, height: 600, density: 1 }, false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.actions).not.toContain("desktop.session.control");
+    // ... and when the drag settles by hand, the final size (already seen) still reaches the machine, quietly.
+    f.stream.resize({ width: 1000, height: 600, density: 1 }, true);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size" && frame.message.width === 1000)).toBe(true);
+    expect(f.stream.controlState.kind).toBe("none");
+  } finally { f.stream.dispose(); }
+});
+
 test("following the machine's own shape sends no size at all (looking never moves it)", async () => {
   const f = await fixture();
   try {

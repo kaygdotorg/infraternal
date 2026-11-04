@@ -102,6 +102,22 @@ test("resizing a card makes the machine's window follow, and never shows control
   await expect(appWindow(page).locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal");
 });
 
+test("following the machine's shape, wide and then tall, never takes the lease, shows control or sends a size", async ({ page }) => {
+  await openCanvas(page, { windowShape: { width: 1600, height: 900 } });
+  await openApp(page);
+  const aspect = async (): Promise<number> => { const b = (await stage(page).boundingBox())!; return b.width / b.height; };
+  await expect.poll(aspect, { timeout: 8000 }).toBeGreaterThan(1600 / 900 * 0.98);
+  // Let every debounce and animation settle, including the slow ones on a loaded host: the rule is not a timing one.
+  await page.waitForTimeout(1500);
+  await config(page, { windowShape: { width: 900, height: 1100 } });
+  await expect.poll(aspect, { timeout: 8000 }).toBeLessThan(900 / 1100 * 1.02);
+  await page.waitForTimeout(1500);
+  const machine = await machineState(page);
+  expect(machine.sessions.every((session) => !session.controller)).toBe(true);
+  expect(machine.sizes).toHaveLength(0);
+  await expect(page.locator(".aw-pillmark")).toHaveCount(0);
+});
+
 test("reconnecting is the turning dot and a dimmed picture, with no text strip", async ({ page }) => {
   await openCanvas(page);
   await openApp(page);
