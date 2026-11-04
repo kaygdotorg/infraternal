@@ -1,5 +1,10 @@
-/** Minimal Bun declarations used to type-check the dependency-free test package. */
+/**
+ * Minimal Bun declarations used to type-check the dependency-free test package.
+ * They cover only what the protocol tests call; add a declaration here when a test needs
+ * another Bun API, instead of adding a types dependency.
+ */
 declare module "bun:test" {
+  /** The assertion methods the tests use on the value passed to `expect`. */
   interface Matchers {
     toBe(expected: unknown): void;
     toEqual(expected: unknown): void;
