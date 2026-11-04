@@ -1486,6 +1486,37 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 
+    /// Found on the test server (#303, J94e): the dry run of a host the owner does not have
+    /// answered 403, which the CLI reads as a dead key ("Signed out"). The key is fine; the
+    /// host is missing, so the answer is 404.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn a_dry_run_of_an_unknown_host_is_not_found_not_a_dead_key() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-unknown-host-key-never-print";
+        removal_fixture(&pool, &[token]).await;
+        let (status, _) = post_key_action(
+            &app,
+            token,
+            "remote.host.remove",
+            serde_json::json!({"host_id": uuid::Uuid::new_v4(), "dry_run": true}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
     /// D28 through the real router: the dry run's token removes the host once. Another key,
     /// another host, a replay and a token on a dry run are refused, and refusals are audited.
     #[cfg(feature = "remote")]
