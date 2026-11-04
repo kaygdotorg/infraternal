@@ -5,7 +5,7 @@ referenced: D316 (Traefik as a managed sidecar), D330 (rootless `--public`), D33
 
 ## As built (J164)
 
-- Each child gets a leaf `proxy-<lock dir inode>-<n>` under the infraternal agent's own cgroup.
+- Each child gets a leaf `proxy-<lock dir device>-<inode>-<n>` under the infraternal agent's own cgroup.
   It joins the leaf in the shim's pre-exec hook, before it can exec or fork. Stopping it
   writes `cgroup.kill`, reaps the direct child, waits for `populated 0` and removes the leaf.
   No controller is enabled, so the agent stays where its init system put it.

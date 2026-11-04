@@ -2,9 +2,10 @@
 //! [#281, D336, docs/design/proxy-containment.md option 1].
 //!
 //! The leaf is a child of the infraternal agent's own cgroup, named
-//! `proxy-<tag>-<n>`. The tag is the inode of the supervisor's private lock directory, so the
-//! mixed and public supervisors never touch each other's leaves, and the same supervisor finds
-//! its leaves again after a crash. The child joins its leaf in the pre-exec hook, before it can
+//! `proxy-<dev>-<ino>-<n>`, from the device and inode of the supervisor's private lock
+//! directory, so the mixed and public supervisors never touch each other's leaves, two agents in
+//! one cgroup whose lock directories share an inode on different filesystems don't either, and
+//! the same supervisor finds its leaves again after a crash. The child joins its leaf in the pre-exec hook, before it can
 //! exec or fork, and stopping it writes `cgroup.kill`, which kills every member at once.
 //!
 //! Invariants:
@@ -149,12 +150,11 @@ impl ProxyCgroups {
     /// Returns the reason when `base` can't hold proxy leaves.
     pub fn at(base: PathBuf, lock_directory: &Path) -> Result<Self, &'static str> {
         check_base(&base)?;
-        let tag = fs::metadata(lock_directory)
-            .map_err(|_| "the proxy state directory is unreadable")?
-            .ino();
+        let lock = fs::metadata(lock_directory)
+            .map_err(|_| "the proxy state directory is unreadable")?;
         Ok(Self {
             base,
-            tag: format!("{LEAF_PREFIX}{tag:x}-"),
+            tag: format!("{LEAF_PREFIX}{:x}-{:x}-", lock.dev(), lock.ino()),
             record: lock_directory.join(RECORD_NAME),
             next: AtomicU64::new(0),
         })

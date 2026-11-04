@@ -15,10 +15,11 @@ use super::{
     DYNAMIC_CONFIG_FILENAME, TraefikSupervisor, fake_traefik, generation_probe_server,
     generation_probe_settings, public_service, supervisor_fixture,
 };
-use crate::cgroup::Containment;
+use crate::cgroup::ProxyCgroups;
 use std::{
     io::BufRead,
-    path::Path,
+    os::unix::fs::MetadataExt as _,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -31,6 +32,24 @@ const HELPER_READY: &str = "proxy-crash-helper-ready";
 
 fn must_contain() -> bool {
     std::env::var_os("INFRATERNAL_REQUIRE_PROXY_CGROUP").is_some_and(|value| value == "1")
+}
+
+/// Whether this process contains its Traefik children (rootful or rootless).
+fn contained() -> bool {
+    crate::cgroup::containment().kind().starts_with("cgroup")
+}
+
+/// The leaf-name prefix the agent uses for the supervisor owning `lock_directory`.
+fn leaf_prefix(lock_directory: &Path) -> String {
+    let metadata = std::fs::metadata(lock_directory).expect("lock directory");
+    format!("proxy-{:x}-{:x}-", metadata.dev(), metadata.ino())
+}
+
+/// This process's own cgroup directory.
+fn own_cgroup_directory() -> Option<PathBuf> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let relative = own.lines().find_map(|line| line.strip_prefix("0::"))?;
+    Some(PathBuf::from(format!("/sys/fs/cgroup{relative}")))
 }
 
 /// A `sleep` duration no other process on the machine is running.
@@ -86,17 +105,12 @@ fn wait_for(mut done: impl FnMut() -> bool, within: Duration) -> bool {
     done()
 }
 
-fn proxy_leaves(lock_directory: &Path) -> Vec<std::path::PathBuf> {
-    use std::os::unix::fs::MetadataExt as _;
-    let Ok(own) = std::fs::read_to_string("/proc/self/cgroup") else {
+fn proxy_leaves(lock_directory: &Path) -> Vec<PathBuf> {
+    let Some(own) = own_cgroup_directory() else {
         return Vec::new();
     };
-    let Some(relative) = own.lines().find_map(|line| line.strip_prefix("0::")) else {
-        return Vec::new();
-    };
-    let tag = std::fs::metadata(lock_directory).map_or(0, |metadata| metadata.ino());
-    let prefix = format!("proxy-{tag:x}-");
-    std::fs::read_dir(format!("/sys/fs/cgroup{relative}"))
+    let prefix = leaf_prefix(lock_directory);
+    std::fs::read_dir(own)
         .into_iter()
         .flatten()
         .flatten()
@@ -138,12 +152,8 @@ fn verdict(name: &str, survivors: &[u32], leaves: &[std::path::PathBuf]) {
         "{name}: containment={} survivors={survivors:?} leaves={leaves:?}",
         containment.kind()
     );
-    if containment == Containment::Cgroup || must_contain() {
-        assert_eq!(
-            containment,
-            Containment::Cgroup,
-            "this run must contain the proxy"
-        );
+    if contained() || must_contain() {
+        assert!(contained(), "this run must contain the proxy");
         assert!(
             survivors.is_empty(),
             "{name}: processes outlived the proxy: {survivors:?}"
@@ -182,7 +192,7 @@ fn a_stopped_child_leaves_no_forked_process_behind() {
         ),
         "the fake Traefik forked its grandchild"
     );
-    if supervisor.containment() == &Containment::Cgroup {
+    if contained() {
         assert_eq!(proxy_leaves(&lock_directory).len(), 1, "one leaf per child");
     }
     drop(supervisor);
@@ -289,4 +299,46 @@ fn an_agent_crash_leaves_no_forked_process_behind_once_the_next_agent_starts() {
     sweep(&marker);
     let _ = std::fs::remove_dir_all(&root);
     verdict("crash", &survivors, &leaves);
+}
+
+// --- J172 review findings (#281 comment 77452) ---
+
+/// Detect containment for a fresh fixture, or skip (fail when the run must contain).
+fn contained_fixture(name: &str) -> Option<(PathBuf, PathBuf, ProxyCgroups)> {
+    let root = std::env::temp_dir().join(format!("proxy-cg-{name}-{}", uuid::Uuid::new_v4()));
+    let (_, lock_directory) = supervisor_fixture(&root);
+    match ProxyCgroups::detect(&lock_directory) {
+        Ok(cgroups) => Some((root, lock_directory, cgroups)),
+        Err(reason) => {
+            assert!(
+                !must_contain(),
+                "{name}: this run must contain the proxy: {reason}"
+            );
+            eprintln!("{name}: skipped, no containment here: {reason}");
+            let _ = std::fs::remove_dir_all(&root);
+            None
+        }
+    }
+}
+
+// P3-5: the leaf name carries the lock directory's device and inode, so two agents in one cgroup
+// whose lock directories share an inode on different filesystems never adopt each other's leaves.
+#[test]
+fn the_leaf_name_carries_device_and_inode() {
+    let Some((root, lock_directory, cgroups)) = contained_fixture("tag") else {
+        return;
+    };
+    let expected = leaf_prefix(&lock_directory);
+    let leaf = cgroups.create_leaf().expect("leaf");
+    let name = leaf
+        .path()
+        .file_name()
+        .expect("leaf name")
+        .to_string_lossy()
+        .into_owned();
+    let removed = leaf.remove();
+    let _ = std::fs::remove_dir_all(&root);
+    eprintln!("tag: {name}");
+    assert!(removed.is_ok());
+    assert!(name.starts_with(&expected), "{name}");
 }
