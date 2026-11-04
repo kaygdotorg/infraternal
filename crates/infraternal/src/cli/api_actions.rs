@@ -718,12 +718,11 @@ async fn tls_stream(server: &Url) -> Result<tokio_openssl::SslStream<TcpStream>,
     Ok(stream)
 }
 
-/// The TLS client for hosted actions: peer and hostname verification against public trust.
+/// The TLS client for hosted actions: the connector `sign-in` uses, so both trust the host's
+/// public CA bundle even when the linked OpenSSL's default paths hold no roots (a vendored
+/// build names its build prefix). TLS 1.3, peer and hostname verification, HTTP/1.1 ALPN.
 fn hosted_tls_connector() -> Result<openssl::ssl::SslConnector, ()> {
-    let mut builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())
-        .map_err(|_| ())?;
-    builder.set_default_verify_paths().map_err(|_| ())?;
-    Ok(builder.build())
+    crate::remote::outbound_tls_connector(None).map_err(|_| ())
 }
 
 fn bearer_header(api_key: &str) -> Result<HeaderValue, ()> {

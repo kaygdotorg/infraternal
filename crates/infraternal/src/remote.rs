@@ -598,9 +598,10 @@ pub(crate) async fn post_json(
 
 /// Builds the shared TLS connector before a request opens its socket.
 ///
-/// Sign-in uses platform trust; join may supply its existing pinned root. Both retain TLS 1.3,
-/// peer verification, and hostname checks so the shared transport cannot weaken either flow.
-fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector, ClientFailure> {
+/// Sign-in and the hosted CLI actions use platform trust; join may supply its existing pinned
+/// root. All retain TLS 1.3, peer verification, and hostname checks so the shared transport
+/// cannot weaken any flow.
+pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector, ClientFailure> {
     let mut tls = SslConnector::builder(SslMethod::tls_client())
         .map_err(|_| ClientFailure::TlsConfiguration)?;
     tls.set_min_proto_version(Some(SslVersion::TLS1_3))
