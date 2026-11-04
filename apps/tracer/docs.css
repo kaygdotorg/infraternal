@@ -22,6 +22,8 @@
   --text-body: 13px; --text-secondary: 12px; --row: 28px;
   --fw-secondary: 450; --fw-body: 500; --fw-label: 550; --fw-title: 650;
   --ease: cubic-bezier(0.23, 1, 0.32, 1);
+  /* The app names this one curve --ease-out (style.css); doc.css is shared with the in-app reader and reads that name, so the standalone pages define it too. */
+  --ease-out: var(--ease);
   background: var(--bg);
   color: var(--fg);
   font-family: "Maple Mono NF", ui-monospace, monospace;
