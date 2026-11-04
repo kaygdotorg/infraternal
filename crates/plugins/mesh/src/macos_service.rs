@@ -131,6 +131,8 @@ fn trusted_executable(path: &Path) -> io::Result<PathBuf> {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
     }
+    // A root-owned file can still make dyld load a user's library (J162 F2, #265).
+    crate::macos_image::check_file(&path)?;
     Ok(path)
 }
 

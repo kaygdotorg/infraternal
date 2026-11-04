@@ -79,6 +79,10 @@ pub mod macos_key;
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub mod macos_node;
 
+// Pure byte parsing, so its tests also run in the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+pub mod macos_image;
+
 #[cfg(feature = "server")]
 pub mod settings;
 
