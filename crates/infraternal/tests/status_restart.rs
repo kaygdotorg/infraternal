@@ -18,6 +18,19 @@ fn service_states_are_truthful_in_text_and_json() {
     let now = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
         .unwrap()
         .num_microseconds();
+    // Fixture managers run with a PATH holding only themselves; they stamp fresh
+    // starts with the interpreter the other real-binary fixtures already use.
+    let python = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v python3"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert!(!python.is_empty(), "the status fixtures need python3");
     let cases = [
         (
             "activating",
@@ -110,14 +123,16 @@ fn service_states_are_truthful_in_text_and_json() {
             .unwrap();
             let manager = home.join("bin/systemctl");
             for (active, sub, restarts, started, code, status, label, state, exit) in cases {
-                // Keep each recent-start fixture recent even when the complete
-                // matrix takes more than the restart window on a loaded host.
+                // A recent start is stamped when the manager is asked, one
+                // second before that moment: a single cold status run on a
+                // loaded host can take longer than the 10 s restart window, so
+                // a value frozen when this fixture is written can age out (#334).
                 let started = if started == now {
-                    nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
-                        .unwrap()
-                        .num_microseconds()
+                    format!(
+                        "$({python} -c 'import time; print(int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1e6) - 1000000)')"
+                    )
                 } else {
-                    started
+                    started.to_string()
                 };
                 let scope_check = if scope == "user" {
                     "test \"$1\" = --user || exit 1\nshift\n"
@@ -128,8 +143,9 @@ fn service_states_are_truthful_in_text_and_json() {
                 // the two observations of a fresh active service. The matrix
                 // runs under a hang-sized budget: it checks how states read,
                 // and a cold debug binary can spend seconds of a 500 ms window
-                // on its own page faults (#334). shared_deadline() below keeps
-                // the budget's structure.
+                // on its own page faults (#334). The budget's structure (one
+                // deadline for both observations) is a unit test in
+                // infraternal-status.
                 let delay = match active {
                     "delayed" => "/bin/sleep 0.025\n",
                     "busy" => "/bin/sleep 0.3\n",
@@ -203,39 +219,5 @@ fn service_states_are_truthful_in_text_and_json() {
             }
         }
     }
-    shared_deadline(&root.join("system-server"));
     fs::remove_dir_all(root).unwrap();
-}
-
-/// A fresh active service is observed twice on one deadline. With a 4 s
-/// budget, an immediate first answer and a 2.5 s second answer must be read:
-/// a per-observation split (2 s each) would cut the second one. This runs after
-/// the matrix, so the binary is warm and 1.5 s of margin is only scheduling.
-fn shared_deadline(home: &std::path::Path) {
-    let started = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
-        .unwrap()
-        .num_microseconds();
-    let seen = home.join("first-observation");
-    fs::write(
-        home.join("bin/systemctl"),
-        format!(
-            "#!/bin/sh\ntest \"$1\" = show || exit 1\nif [ -e '{seen}' ]; then /bin/sleep 2.5; fi\n: > '{seen}'\nprintf '%s\\n' ActiveState=active SubState=running MainPID=42 Result=success NRestarts=0 ExecMainStartTimestampMonotonic={started} ExecMainCode=0 ExecMainStatus=0\n",
-            seen = seen.display()
-        ),
-    )
-    .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
-        .args(["status", "--json"])
-        .env_clear()
-        .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home.join("config"))
-        .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", home.join("system"))
-        .env("PATH", home.join("bin"))
-        .env("INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS", "4000")
-        .output()
-        .unwrap();
-    let text = String::from_utf8(output.stdout).unwrap();
-    assert!(seen.exists(), "the manager was never asked: {text}");
-    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(envelope["state"], "running", "{text}");
 }

@@ -877,6 +877,13 @@ fn manager_properties(
     if std::time::Instant::now() >= deadline {
         return Err("service manager query timed out");
     }
+    #[cfg(test)]
+    let mut command = Command::new(
+        tests::MANAGER_PROGRAM
+            .with(|program| program.borrow().clone())
+            .unwrap_or_else(|| "systemctl".into()),
+    );
+    #[cfg(not(test))]
     let mut command = Command::new("systemctl");
     if scope == Scope::User {
         command.arg("--user");
