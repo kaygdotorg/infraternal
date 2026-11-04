@@ -567,7 +567,9 @@ async fn execute(
             // The browser may hold several login generations while old requests
             // are still in flight. Revoke every valid presented capability so
             // those replies cannot refresh an older session after logout.
-            let tokens = super::cookies::session_tokens(headers);
+            // More bearers than a browser can hold is not a real logout; refuse it
+            // before any database work (see `MAX_LOGOUT_SESSIONS`).
+            let tokens = super::cookies::session_tokens(headers).ok_or(Error::Invalid)?;
             if tokens.is_empty() {
                 return Err(Error::Denied);
             }

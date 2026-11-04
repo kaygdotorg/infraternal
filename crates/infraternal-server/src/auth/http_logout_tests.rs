@@ -150,3 +150,82 @@ async fn logout_revokes_every_presented_session_when_cookie_selection_is_ambiguo
         "logout must revoke every presented session bearer"
     );
 }
+
+/// Logout needs no live session, so the bearers it deletes are capped: a request
+/// carrying more than a browser can hold is refused before any database work.
+#[tokio::test]
+async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_any() {
+    use super::super::cookies::MAX_LOGOUT_SESSIONS;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    auth.set_test_http_time(NOW);
+
+    let user = "logout-cookie-cap";
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'owner',1,'unused','owner','Owner')")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let live = "L".repeat(43);
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, 1, 1)")
+        .bind(hash(&live))
+        .bind(user)
+        .bind(NOW + SESSION)
+        .bind(NOW)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The live bearer plus `extra` made-up ones, each under its own generation name.
+    let headers = |extra: usize| {
+        let mut cookies = vec![format!(
+            "__Host-infraternal-session-1-{}={live}",
+            NOW + SESSION
+        )];
+        for index in 0..extra {
+            cookies.push(format!(
+                "__Host-infraternal-session-{}-{}={:0>43}",
+                index + 2,
+                NOW + SESSION,
+                index
+            ));
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, HeaderValue::from_static(ORIGIN));
+        headers.insert(header::COOKIE, cookies.join("; ").parse().unwrap());
+        headers
+    };
+    let live_rows = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions WHERE token_hash=?")
+            .bind(hash(&live))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+
+    let refused = execute(&auth, "logout", &headers(MAX_LOGOUT_SESSIONS), json!({})).await;
+    assert!(
+        matches!(refused, Err(super::super::Error::Invalid)),
+        "more bearers than the cap must be refused"
+    );
+    assert_eq!(live_rows().await, 1, "a refused logout must delete nothing");
+
+    execute(
+        &auth,
+        "logout",
+        &headers(MAX_LOGOUT_SESSIONS - 1),
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        live_rows().await,
+        0,
+        "a logout at the cap revokes every bearer"
+    );
+}

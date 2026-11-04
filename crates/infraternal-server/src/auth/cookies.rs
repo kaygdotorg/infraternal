@@ -122,12 +122,24 @@ pub(crate) fn observed_session_names(headers: &HeaderMap) -> Vec<&str> {
     names
 }
 
-/// Return every distinct valid session bearer present in a logout request.
+/// Most distinct session bearers one logout revokes.
+///
+/// A browser holds one live login generation, plus briefly a newer one while a
+/// login races an older request. Eight leaves room for several such races. The
+/// cap exists because logout needs no live session: without it, one request with
+/// a large Cookie header of made-up bearers would cost one database delete each.
+pub(crate) const MAX_LOGOUT_SESSIONS: usize = 8;
+
+/// Return every distinct valid session bearer present in a logout request, or
+/// `None` when there are more than [`MAX_LOGOUT_SESSIONS`].
 ///
 /// A browser can send several login generations while an older request is
 /// still in flight. Logout revokes all of those capabilities so a delayed
-/// response cannot make an older live session usable again.
-pub(crate) fn session_tokens(headers: &HeaderMap) -> Vec<&str> {
+/// response cannot make an older live session usable again. Over the cap the
+/// caller revokes none of them: revoking a subset would report success while
+/// leaving a presented bearer live. Collection stops at the first bearer over the
+/// cap, so parsing cost is bounded too.
+pub(crate) fn session_tokens(headers: &HeaderMap) -> Option<Vec<&str>> {
     let mut tokens = Vec::new();
     for field in headers.get_all(header::COOKIE) {
         let Ok(field) = field.to_str() else {
@@ -140,11 +152,14 @@ pub(crate) fn session_tokens(headers: &HeaderMap) -> Vec<&str> {
             let session_name = name == LEGACY_SESSION_NAME
                 || (name.starts_with(SESSION_NAME_PREFIX) && parse_session_name(name).is_some());
             if session_name && valid_token(value) && !tokens.contains(&value) {
+                if tokens.len() == MAX_LOGOUT_SESSIONS {
+                    return None;
+                }
                 tokens.push(value);
             }
         }
     }
-    tokens
+    Some(tokens)
 }
 
 fn parse_session_name(name: &str) -> Option<(i64, i64)> {

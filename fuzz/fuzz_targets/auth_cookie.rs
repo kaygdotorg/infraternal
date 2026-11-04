@@ -37,15 +37,17 @@ fuzz_target!(|input: &[u8]| {
                 || session.name.starts_with("__Host-infraternal-session-")
         );
     }
-    // Logout revokes every presented bearer: each is well formed, none repeats,
-    // and the selected session is always among them.
-    let tokens = cookies::session_tokens(&headers);
-    for (index, token) in tokens.iter().enumerate() {
-        assert_eq!(token.len(), 43);
-        assert!(!tokens[..index].contains(token));
-    }
-    if let Some(session) = cookies::session(&headers) {
-        assert!(tokens.contains(&session.token));
+    // Logout revokes every presented bearer, up to its cap: each is well formed,
+    // none repeats, and the selected session is always among them.
+    if let Some(tokens) = cookies::session_tokens(&headers) {
+        assert!(tokens.len() <= cookies::MAX_LOGOUT_SESSIONS);
+        for (index, token) in tokens.iter().enumerate() {
+            assert_eq!(token.len(), 43);
+            assert!(!tokens[..index].contains(token));
+        }
+        if let Some(session) = cookies::session(&headers) {
+            assert!(tokens.contains(&session.token));
+        }
     }
     for name in cookies::observed_session_names(&headers) {
         assert!(name == "__Host-infraternal" || name.starts_with("__Host-infraternal-session-"));
