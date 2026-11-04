@@ -206,7 +206,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       it.card.dataset.hidden = String(behind);
       it.card.dataset.front = String(!behind && depth === 0);
       it.card.style.setProperty("--i", String(Math.min(behind ? VISIBLE - 1 : depth, VISIBLE - 1)));
-      it.card.style.setProperty("z-index", String(100 - k));
+      it.card.style.setProperty("z-index", String(100 + k));
       if (!behind) depth++;
     }
     wrap.hidden = items.length === 0;
