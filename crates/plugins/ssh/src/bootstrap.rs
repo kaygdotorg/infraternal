@@ -1329,6 +1329,11 @@ impl Bootstrap {
                                 return Err(Failure::install(CHANGED_WHILE_WAITING));
                             }
                             let replaced = mode == FreshMode::Replace;
+                            // One token for this attempt's set-aside and restore:
+                            // whichever takes the host's setup guard first decides,
+                            // and a restore that finds nothing moved stops the
+                            // set-aside from starting later (#305, J202 P2).
+                            let previous = previous.clone().with_cancel(uuid::Uuid::new_v4());
                             // Recorded before the stop: any later failure, even an
                             // attempt dropped while the script runs, puts the old
                             // install back (#305 P1-1, P2-1). A restore of what was

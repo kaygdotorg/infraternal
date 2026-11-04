@@ -638,9 +638,21 @@ stop_stage_shims() {
 # from $base/sessions, as an upgrade does (D337, D13).
 retire_stuck_service() {
  replace_expected=$1
+ replace_cancel=${2:--}
  aside=
  aside_origin=
  setup_guard
+ # This attempt's restore took the guard first and found nothing moved: the
+ # attempt was cancelled, so its set-aside never starts. The token is the
+ # attempt's own, so no other attempt is held back (#305, J202 P2).
+ if [ "$replace_cancel" != - ]; then
+  hex_id "$replace_cancel"
+  replace_cancelled="$base.bootstrap-cancel-$replace_cancel"
+  if [ -e "$replace_cancelled" ] || [ -L "$replace_cancelled" ]; then
+   rm -f -- "$replace_cancelled"
+   exit 75
+  fi
+ fi
  replace_observed=$(inspect_previous)
  [ "${replace_observed% *}" = "${replace_expected% *}" ] || exit 75
  # The agent started since the person confirmed an idle install (upgrade_liveness).
@@ -745,7 +757,7 @@ restore_stuck_service() {
 # a new enrollment commits.
 replace_stuck_install() {
  replace_inherit=yes
- retire_stuck_service "$1"
+ retire_stuck_service "$1" "${2:--}"
  replaced="$base.bootstrap-replaced-$replace_transaction"
  [ ! -e "$replaced" ] && [ ! -L "$replaced" ] || exit 72
  aside=$replaced
@@ -757,6 +769,16 @@ replace_stuck_install() {
 # the service and was killed before the move, so no trap ran (SIGKILL, power
 # loss): start and enable it again as found. Prints "restored", or
 # "untouched" when nothing was stopped (#305 P2-1).
+# A restore that finds nothing moved may have run before its attempt's
+# set-aside, which sshd keeps running after a cancel. Leave the attempt's
+# cancel token so that set-aside refuses when it gets the guard; the two are
+# then mutually exclusive whichever runs first (#305, J202 P2). `-` (Put it
+# back, from a later Check) has no set-aside of its own to stop.
+cancel_set_aside() {
+ [ "${1:--}" != - ] || return 0
+ hex_id "$1"
+ : >| "$base.bootstrap-cancel-$1"
+}
 restore_unmoved() {
  aside=
  found="$base/.bootstrap-lock/found-service"
@@ -783,6 +805,7 @@ restore_replaced_install() {
  replaced="$base.bootstrap-replaced-$1"
  if [ ! -e "$replaced" ] && [ ! -L "$replaced" ]; then
   [ -f "$base/.bootstrap-lock/transaction" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$1" ] || exit 71
+  cancel_set_aside "${2:--}"
   restore_unmoved
   return
  fi
@@ -807,9 +830,10 @@ supersede_stuck_install() {
  # it may be in use there (D337). The server refuses it before offering; an
  # idle record that turned live is refused by retire_stuck_service.
  supersede_record=$1
+ supersede_cancel=${2:--}
  set -- $supersede_record
  [ "${12-}" != live ] || [ "${9-}" = 0 ] || exit 75
- retire_stuck_service "$supersede_record"
+ retire_stuck_service "$supersede_record" "$supersede_cancel"
  aside="$base.bootstrap-superseded-$replace_transaction"
  aside_origin=$base
  [ ! -e "$aside" ] && [ ! -L "$aside" ] || { aside=; exit 72; }
@@ -830,6 +854,7 @@ restore_superseded_install() {
  aside_origin=$base
  if [ ! -e "$aside" ] && [ ! -L "$aside" ]; then
   [ -f "$base/.bootstrap-lock/transaction" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$1" ] || exit 71
+  cancel_set_aside "${2:--}"
   restore_unmoved
   return
  fi

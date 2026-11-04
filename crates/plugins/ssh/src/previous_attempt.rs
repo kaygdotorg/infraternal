@@ -66,6 +66,10 @@ pub struct PreviousAttempt {
     /// The stuck upgrade's agent is running and started after the journal's
     /// lease: it may be serving and connected to its server now (#305 P2-2).
     live: bool,
+    /// This attempt's cancel token, shared by its set-aside and its restore.
+    /// A restore that finds nothing moved leaves it on the host, and the
+    /// set-aside refuses to start once it is there (#305, J202 P2).
+    cancel: Option<uuid::Uuid>,
 }
 
 /// A stuck install an earlier attempt set aside, as Check found it (#305 P2-1).
@@ -230,6 +234,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         enrolled,
         set_aside: None,
         live,
+        cancel: None,
     }))
 }
 
@@ -257,6 +262,7 @@ fn parse_set_aside(record: &[&str]) -> Result<PreviousAttempt, Failure> {
         lease_owner: None,
         enrolled: None,
         live: false,
+        cancel: None,
         set_aside: Some(SetAside {
             replaced,
             machine: parse_machine(machine)?,
@@ -595,6 +601,20 @@ impl PreviousAttempt {
         )
     }
 
+    /// The same attempt, bound to `cancel`: its set-aside and its restore pass
+    /// this token, so the two never both act (#305, J202 P2).
+    #[must_use]
+    pub(crate) fn with_cancel(mut self, cancel: uuid::Uuid) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// This attempt's cancel token as the host scripts take it, or `-`.
+    fn cancel_argument(&self) -> String {
+        self.cancel
+            .map_or_else(|| "-".to_owned(), |cancel| cancel.simple().to_string())
+    }
+
     /// Run one upgrade-journal routine for this exact observed record (#305, D335).
     async fn upgrade_action(
         &self,
@@ -604,10 +624,11 @@ impl PreviousAttempt {
     ) -> Result<(), Failure> {
         target.validate()?;
         let body = format!(
-            "{}\n{}\n{INSPECT}\n{action} {}\n",
+            "{}\n{}\n{INSPECT}\n{action} {} {}\n",
             crate::install::SETUP_LOCK,
             crate::install::RUNTIME_CLEANUP,
-            crate::transport::shell_quote(&self.upgrade_record())
+            crate::transport::shell_quote(&self.upgrade_record()),
+            self.cancel_argument()
         );
         session
             .run(
@@ -644,7 +665,7 @@ impl PreviousAttempt {
     ) -> Result<bool, Failure> {
         target.validate()?;
         let body = format!(
-            "{}\n{}\n{INSPECT}\n{} {}\n",
+            "{}\n{}\n{INSPECT}\n{} {} {}\n",
             crate::install::SETUP_LOCK,
             crate::install::RUNTIME_CLEANUP,
             if replaced {
@@ -652,7 +673,8 @@ impl PreviousAttempt {
             } else {
                 "restore_superseded_install"
             },
-            self.transaction.simple()
+            self.transaction.simple(),
+            self.cancel_argument()
         );
         let output = session
             .run(

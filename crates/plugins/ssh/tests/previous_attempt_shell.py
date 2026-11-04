@@ -1082,6 +1082,41 @@ manager=slow_manager
     def test_a_replace_cancelled_during_the_stop_is_put_back(self):
         self.cancel_during_the_stop('replace_stuck_install', 'restore_replaced_install')
 
+    def restore_first_then_set_aside(self, action, restore):
+        # J202 P2: the cancelled attempt's restore takes the guard before the
+        # set-aside sshd keeps running; the set-aside must then never start.
+        stage, _ = self.make_upgrade_fixture()
+        expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+        token = '7' * 32
+        first = self.run_shell(f'\n{restore} {TRANSACTION} {token}\n')
+        self.assertEqual(first.returncode, 0, first.stderr.decode())
+        self.assertEqual(first.stdout, b'untouched\n')
+        late = self.run_shell(f'\n{action} "{expected}" {token}\n')
+        self.assertEqual(late.returncode, 75, late.stderr.decode())
+        self.assertEqual(self.mutating_calls(), [], 'nothing is stopped or disabled')
+        self.assertEqual(self.service_state(), (True, True))
+        self.assertTrue(stage.exists(), 'the install stays where it was')
+        self.assertFalse(Path(f'{self.base}.bootstrap-cancel-{token}').exists(), 'the token is spent')
+        # Another attempt, with its own token, is not held back.
+        other = self.run_shell(f'\n{action} "{expected}" {"8" * 32}\n')
+        self.assertEqual(other.returncode, 0, other.stderr.decode())
+
+    def test_a_reenroll_whose_restore_ran_first_never_sets_the_install_aside(self):
+        self.restore_first_then_set_aside('supersede_stuck_install', 'restore_superseded_install')
+
+    def test_a_replace_whose_restore_ran_first_never_moves_the_journal(self):
+        self.restore_first_then_set_aside('replace_stuck_install', 'restore_replaced_install')
+
+    def test_a_commit_clears_cancel_tokens_whose_set_aside_never_came(self):
+        self.make_upgrade_fixture()
+        token = '7' * 32
+        self.run_shell(f'\nrestore_replaced_install {TRANSACTION} {token}\n')
+        marker = Path(f'{self.base}.bootstrap-cancel-{token}')
+        self.assertTrue(marker.exists())
+        commit = self.run_shell('\nretire_set_aside\n')
+        self.assertEqual(commit.returncode, 0, commit.stderr.decode())
+        self.assertFalse(marker.exists())
+
     def test_a_set_aside_killed_between_the_stop_and_the_move_is_put_back(self):
         # SIGKILL or power loss after the stop: no trap ran, the journal is in
         # place and found-service says what to bring back (#305 P2-1).

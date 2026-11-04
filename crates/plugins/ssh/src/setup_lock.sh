@@ -80,4 +80,9 @@ retire_set_aside() {
   [ -d "$set_aside" ] && [ ! -L "$set_aside" ] && [ -O "$set_aside" ] || continue
   rm -rf "$set_aside"
  done
+ # Cancel tokens of attempts whose set-aside never arrived (#305, J202 P2).
+ for set_aside in "$base".bootstrap-cancel-*; do
+  [ -f "$set_aside" ] && [ ! -L "$set_aside" ] && [ -O "$set_aside" ] || continue
+  rm -f -- "$set_aside"
+ done
 }
