@@ -77,12 +77,15 @@ impl Home {
         }
         home
     }
+    /// The stuck install's setup directory under the private HOME.
     fn base(&self) -> PathBuf {
         self.root.join(".local/share/infraternal")
     }
+    /// The stuck install's user unit file.
     fn unit(&self) -> PathBuf {
         self.root.join(".config/systemd/user/infraternal-agent.service")
     }
+    /// Write `text` to `path` as an owner-only (0600) file.
     fn private(path: &std::path::Path, text: &str) {
         std::fs::write(path, text).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -127,6 +130,7 @@ impl Home {
         std::fs::remove_file(self.root.join(".local/bin/infraternal")).unwrap();
         self.stop();
     }
+    /// Stop and disable the mock service, as a set-aside leaves it.
     fn stop(&self) {
         for state in ["enabled", "active"] {
             std::fs::remove_file(self.root.join(state)).unwrap();
@@ -324,6 +328,7 @@ impl Run {
             release,
         }
     }
+    /// The running add-host batch; dropping it cancels the attempt.
     fn batch(&self) -> &Batch {
         self.batch.as_ref().unwrap()
     }
@@ -346,11 +351,13 @@ impl Run {
         .await
         .unwrap()
     }
+    /// Confirm the offered stuck-install action, as the person does.
     fn confirm(&self, challenge: Uuid) {
         self.runner
             .start_fresh(self.batch(), "owner", "one", challenge)
             .unwrap();
     }
+    /// Whether any host script containing `needle` has been sent.
     fn ran(&self, needle: &str) -> bool {
         self.scripts
             .lock()
@@ -386,6 +393,7 @@ async fn own_stuck_host(f: &Fixture) -> [u8; 32] {
         .unwrap()
 }
 
+/// A Replace whose join fails puts the stuck install back as found (#305).
 #[tokio::test]
 async fn a_replace_whose_join_fails_puts_the_stuck_install_back_as_found() {
     let f = fixture(true).await;
@@ -412,6 +420,7 @@ async fn a_replace_whose_join_fails_puts_the_stuck_install_back_as_found() {
     );
 }
 
+/// A Replace that passes its deadline puts the stuck install back as found (#305).
 #[tokio::test]
 async fn a_replace_that_passes_its_deadline_puts_the_stuck_install_back_as_found() {
     let f = fixture(true).await;
@@ -433,6 +442,7 @@ async fn a_replace_that_passes_its_deadline_puts_the_stuck_install_back_as_found
     home.assert_as_found();
 }
 
+/// A Replace the browser cancels puts the stuck install back as found (#305).
 #[tokio::test]
 async fn a_replace_the_browser_cancels_puts_the_stuck_install_back_as_found() {
     let f = fixture(true).await;
@@ -485,16 +495,19 @@ async fn cancel_during_the_stop(own: bool) {
     home.assert_as_found();
 }
 
+/// A Replace cancelled during the stop is put back as found (#305).
 #[tokio::test]
 async fn a_replace_cancelled_during_the_stop_is_put_back_as_found() {
     cancel_during_the_stop(true).await;
 }
 
+/// A Re-enroll cancelled during the stop is put back as found (#305).
 #[tokio::test]
 async fn a_reenroll_cancelled_during_the_stop_is_put_back_as_found() {
     cancel_during_the_stop(false).await;
 }
 
+/// Unanswered confirmations leave the add-host slots free (#305, J160 P3-2).
 #[tokio::test]
 async fn unanswered_confirmations_leave_the_add_host_slots_free() {
     // #305 P3-2: each attempt waiting for a person hands its server-wide slot
@@ -524,6 +537,7 @@ async fn unanswered_confirmations_leave_the_add_host_slots_free() {
     assert!(!run.ran("\nsupersede_stuck_install "), "nothing is stopped before a confirmation");
 }
 
+/// A host revoked while its confirmation waits is never stopped (#305).
 #[tokio::test]
 async fn a_host_revoked_while_its_confirmation_waits_is_never_stopped() {
     let f = fixture(true).await;
@@ -549,6 +563,7 @@ async fn a_host_revoked_while_its_confirmation_waits_is_never_stopped() {
     assert_eq!(home.service(), (true, true), "nothing was stopped");
 }
 
+/// A host revoked after the stop is put back as found (#305).
 #[tokio::test]
 async fn a_host_revoked_after_the_stop_is_put_back_as_found() {
     let f = fixture(true).await;
@@ -574,6 +589,7 @@ async fn a_host_revoked_after_the_stop_is_put_back_as_found() {
     home.assert_as_found();
 }
 
+/// A Re-enroll whose join fails puts the whole install back as found (#305).
 #[tokio::test]
 async fn a_reenroll_whose_join_fails_puts_the_whole_install_back_as_found() {
     let f = fixture(true).await;
@@ -596,6 +612,7 @@ async fn a_reenroll_whose_join_fails_puts_the_whole_install_back_as_found() {
     );
 }
 
+/// A Re-enroll dropped while it sets the install aside still puts it back (#305).
 #[tokio::test]
 async fn a_reenroll_dropped_while_it_sets_the_install_aside_still_puts_it_back() {
     let f = fixture(true).await;
@@ -617,6 +634,7 @@ async fn a_reenroll_dropped_while_it_sets_the_install_aside_still_puts_it_back()
     home.assert_as_found();
 }
 
+/// The confirmation wait does not use up the attempt deadline (#305).
 #[tokio::test]
 async fn the_confirmation_wait_does_not_use_up_the_attempt_deadline() {
     let f = fixture(true).await;
@@ -635,6 +653,7 @@ async fn the_confirmation_wait_does_not_use_up_the_attempt_deadline() {
     home.assert_as_found();
 }
 
+/// Check offers back an install an earlier attempt left set aside (#305).
 #[tokio::test]
 async fn check_offers_back_an_install_an_earlier_attempt_left_set_aside() {
     let f = fixture(true).await;
@@ -668,6 +687,7 @@ async fn check_offers_back_an_install_an_earlier_attempt_left_set_aside() {
     home.assert_as_found();
 }
 
+/// A live install is named live before it is disconnected from its server (#305).
 #[tokio::test]
 async fn a_live_install_is_named_live_before_it_is_disconnected_from_its_server() {
     let f = fixture(true).await;
@@ -694,6 +714,7 @@ async fn a_live_install_is_named_live_before_it_is_disconnected_from_its_server(
     assert!(!run.ran("\nsupersede_stuck_install "), "nothing is stopped before the person confirms");
 }
 
+/// Another server's install running with open terminals is refused by name (D337, #305).
 #[tokio::test]
 async fn another_servers_install_running_with_open_terminals_is_refused_by_name() {
     // D337: it may be in use by its server, and the host cannot see the
