@@ -191,6 +191,19 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
           fix: "replace-stuck-install",
           tone: "info",
         };
+        // D337: running with open terminals, it may be in use by its server. The host
+        // cannot see the connection, so it is refused until ownership can be proven.
+        if (lock.in_use) {
+          const server = lock.enrolled_with || "the server that enrolled it";
+          const open = lock.sessions === 1 ? "1 open terminal" : `${lock.sessions ?? 0} open terminals`;
+          return {
+            title: `${name} is in use by another server`,
+            happened: `Its infraternal agent is running with ${open} and may still be connected to ${server}.`,
+            next: `Prove you own ${server} to take it over. That isn't available yet.`,
+            fix: "none",
+            tone: "info",
+          };
+        }
         // D335: another server enrolled this machine; it can join this one as a new host.
         // An unnamed server: the identity could not be read, so nothing shows another server enrolled it.
         // A live agent may be connected to its server right now; joining here disconnects it (#305).

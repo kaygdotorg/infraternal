@@ -69,6 +69,11 @@ test("stuck-install sessions and the other server reach the wizard only when wel
     send({ sessions: -1, enrolled_with: "bad server" });
     expect(events[1]?.failure?.setup_lock?.sessions).toBeUndefined();
     expect(events[1]?.failure?.setup_lock?.enrolled_with).toBeUndefined();
+    // D337: the in-use refusal reaches the guide; only a literal true counts.
+    send({ sessions: 2, enrolled_with: "monitor01.example", live: true, in_use: true });
+    expect(events[2]?.failure?.setup_lock).toMatchObject({ live: true, in_use: true });
+    send({ in_use: "yes" });
+    expect(events[3]?.failure?.setup_lock?.in_use).toBeUndefined();
   } finally { globalThis.WebSocket = original; }
 });
 

@@ -1282,6 +1282,11 @@ impl Bootstrap {
                                 "This host is already added. Open its terminal from Console.",
                             ));
                         }
+                        StuckInstall::Reenroll if previous.in_use_elsewhere() => {
+                            // Running with open terminals: it may be in use by its
+                            // server. Refuse by name; nothing is offered (D337).
+                            return Err(previous.in_use_failure());
+                        }
                         StuckInstall::Replace | StuckInstall::Reenroll => {
                             let mode = if verdict == StuckInstall::Replace {
                                 FreshMode::Replace

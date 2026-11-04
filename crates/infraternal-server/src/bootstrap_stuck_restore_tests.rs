@@ -693,3 +693,34 @@ async fn a_live_install_is_named_live_before_it_is_disconnected_from_its_server(
     );
     assert!(!run.ran("\nsupersede_stuck_install "), "nothing is stopped before the person confirms");
 }
+
+#[tokio::test]
+async fn another_servers_install_running_with_open_terminals_is_refused_by_name() {
+    // D337: it may be in use by its server, and the host cannot see the
+    // connection. Nothing is offered and nothing is stopped.
+    let f = fixture(true).await;
+    let home = Arc::new(Home::new());
+    let check = String::from_utf8(home_check(&home, Uuid::new_v4(), &[9; 32], "old.example"))
+        .unwrap()
+        .replace(" 2026-11-02T04:05:06Z 0 ", " 2026-11-02T04:05:06Z 2 ")
+        .replace(" idle\n", " live\n")
+        .into_bytes();
+    let run = Run::start(&f, &home, check, [7; 32], Stop::Join);
+    let event = finished(run.batch()).await;
+    assert_eq!(event.step, Step::Failed);
+    let failure = serde_json::to_value(event.failure.as_ref().unwrap()).unwrap();
+    assert_eq!(failure["setup_lock"]["in_use"], true);
+    assert_eq!(failure["setup_lock"]["sessions"], 2);
+    let message = failure["message"].as_str().unwrap();
+    assert!(
+        message.contains("running with 2 open terminals and may still be connected to old.example")
+            && message.contains("Prove you own old.example to take it over"),
+        "{message}"
+    );
+    assert!(
+        run.batch().events(0).1.iter().all(|event| event.leftovers.is_none()),
+        "no confirmation is offered"
+    );
+    assert!(!run.ran("\nsupersede_stuck_install "));
+    assert_eq!(home.service(), (true, true), "nothing was stopped");
+}

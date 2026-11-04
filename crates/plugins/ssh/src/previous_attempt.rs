@@ -523,6 +523,23 @@ impl PreviousAttempt {
         self.enrolled.as_ref()
     }
 
+    /// Another server's install whose agent runs with open terminals may be in use
+    /// there. The host cannot see whether that agent is connected, so it is not
+    /// taken over until ownership of that server can be proven (D337).
+    #[must_use]
+    pub(crate) fn in_use_elsewhere(&self) -> bool {
+        self.live && self.sockets > 0
+    }
+
+    /// The refusal for an install [`Self::in_use_elsewhere`] keeps from being taken over.
+    #[must_use]
+    pub(crate) fn in_use_failure(&self) -> Failure {
+        let mut failure = self.stuck_failure(true).in_use_elsewhere();
+        // The step's own text: the public message names the server and terminals.
+        failure.message = "This machine is in use by another server.";
+        failure
+    }
+
     /// Confirmation for joining a machine another server enrolled as a new host (D335).
     #[must_use]
     pub fn reenroll_findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {

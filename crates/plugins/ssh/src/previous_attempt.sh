@@ -753,7 +753,13 @@ restore_replaced_install() {
 # join this server as a new host (D335). Nothing is deleted: the directory,
 # its unit and the service state it was found in stay restorable.
 supersede_stuck_install() {
- retire_stuck_service "$1"
+ # Never take over another server's install that runs with open terminals:
+ # it may be in use there (D337). The server refuses it before offering; an
+ # idle record that turned live is refused by retire_stuck_service.
+ supersede_record=$1
+ set -- $supersede_record
+ [ "${12-}" != live ] || [ "${9-}" = 0 ] || exit 75
+ retire_stuck_service "$supersede_record"
  aside="$base.bootstrap-superseded-$replace_transaction"
  aside_origin=$base
  [ ! -e "$aside" ] && [ ! -L "$aside" ] || { aside=; exit 72; }

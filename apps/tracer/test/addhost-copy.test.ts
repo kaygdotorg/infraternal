@@ -91,6 +91,19 @@ test("a machine enrolled with another server asks to join as a new host (D335)",
   expect(guideFor("code", unnamed).happened).toBe("Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.");
 });
 
+test("another server's install running with open terminals is refused by name, with no action (D337)", () => {
+  const lock = { machine: "code", pid: 254, since: "2026-11-02T04:05:06Z", active: false, sessions: 2, live: true, in_use: true };
+  const guide = (setup_lock: object) => guideFor("code", { kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock } as unknown as FailureDetail);
+  expect(guide({ ...lock, enrolled_with: "monitor01.example" })).toMatchObject({
+    title: "code is in use by another server",
+    happened: "Its infraternal agent is running with 2 open terminals and may still be connected to monitor01.example.",
+    next: "Prove you own monitor01.example to take it over. That isn't available yet.",
+    fix: "none",
+  });
+  expect(guide({ ...lock, sessions: 1, enrolled_with: "" }).happened)
+    .toBe("Its infraternal agent is running with 1 open terminal and may still be connected to the server that enrolled it.");
+});
+
 test("a live install says joining here disconnects it from its server, and an unread one claims no server (#305)", () => {
   const lock = { machine: "code", pid: 254, since: "2026-11-02T04:05:06Z", active: false, sessions: 0 };
   const guide = (setup_lock: object) => guideFor("code", { kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock } as unknown as FailureDetail);

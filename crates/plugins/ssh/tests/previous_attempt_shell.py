@@ -889,6 +889,31 @@ replace_stuck_install "$observed"
                 self.assertEqual(self.mutating_calls(), [])
                 self.assertEqual(self.service_state(), (True, True))
 
+    def test_another_servers_install_running_with_open_terminals_is_never_set_aside(self):
+        # D337: a running agent with a live terminal may be in use by its
+        # server; the set-aside refuses even a record the server confirmed.
+        stage, _ = self.make_upgrade_fixture()
+        previous = Path.cwd()
+        try:
+            os.chdir(self.socket.parent)
+            live = socket.socket(socket.AF_UNIX)
+            live.bind(self.socket.name)
+            os.chmod(self.socket.name, 0o600)
+            live.listen()
+        finally:
+            os.chdir(previous)
+        try:
+            expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
+            fields = expected.split(' ')
+            self.assertEqual((fields[8], fields[-1]), ('1', 'live'), expected)
+            result = self.run_shell(f'\nsupersede_stuck_install "{expected}"\n')
+            self.assertEqual(result.returncode, 75, result.stderr.decode())
+            self.assertEqual(self.mutating_calls(), [])
+            self.assertTrue(stage.exists())
+            self.assertEqual(self.service_state(), (True, True))
+        finally:
+            live.close()
+
     def test_an_agent_that_stopped_after_a_live_confirmation_is_still_replaced(self):
         # Confirmed with the live warning; stopping less than that is no surprise.
         self.make_upgrade_fixture()

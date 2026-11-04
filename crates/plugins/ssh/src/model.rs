@@ -273,6 +273,9 @@ struct FailureIds {
 }
 
 /// Host-local lease metadata parsed from the fixed setup-check record.
+// Each flag is its own optional field of the public wire shape the tracer
+// reads; an enum would change that JSON, not the meaning (#305, D337).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SetupLock {
     machine: String,
@@ -295,6 +298,11 @@ pub(crate) struct SetupLock {
     /// The stuck install's agent is running and may be connected to its other server (#305).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     live: bool,
+    /// Another server's install is running with open terminals, so it may be in use
+    /// there: taking it over is refused until ownership of that server can be
+    /// proven (D337).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_use: bool,
 }
 
 /// Serialize the failure's wire fields; each UUID has its own key and its own field.
@@ -383,6 +391,7 @@ impl Failure {
             attempt: None,
             sessions: None,
             enrolled_with: None,
+            in_use: false,
             set_aside: false,
             live: false,
         });
@@ -411,6 +420,19 @@ impl Failure {
             .and_then(|ids| ids.setup_lock.as_mut())
         {
             lock.attempt = attempt.map(|attempt| attempt.simple().to_string()[..8].to_owned());
+        }
+        self
+    }
+
+    /// Mark another server's stuck install as in use there, so it is refused, not offered (D337).
+    #[must_use]
+    pub(crate) fn in_use_elsewhere(mut self) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.in_use = true;
         }
         self
     }
@@ -465,6 +487,25 @@ impl Failure {
             "The failed setup on {} left a lease last held by {holder} since {}.",
             lock.machine, lock.since
         );
+        if lock.in_use {
+            // The host cannot see whether the old agent is connected; a running
+            // agent with open terminals may be, so it is not taken (D337).
+            let server = lock
+                .enrolled_with
+                .as_deref()
+                .filter(|server| !server.is_empty())
+                .unwrap_or("the server that enrolled it");
+            let open = lock.sessions.unwrap_or(0);
+            let terminals = if open == 1 {
+                "1 open terminal".to_owned()
+            } else {
+                format!("{open} open terminals")
+            };
+            return Cow::Owned(format!(
+                "{} is enrolled with {server}. Its infraternal agent is running with {terminals} and may still be connected to {server}. Prove you own {server} to take it over; that isn't available yet.",
+                lock.machine
+            ));
+        }
         if let Some(server) = &lock.enrolled_with {
             // An empty name: the host could not read its identity file, so
             // nothing shows that another server enrolled it (#305 P2-2).
