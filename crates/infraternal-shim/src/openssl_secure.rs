@@ -4,13 +4,18 @@
 use std::sync::OnceLock;
 
 unsafe extern "C" {
+    /// OpenSSL's secure-heap initializer. Returns 1 when the heap is locked and
+    /// excluded from core dumps, 2 when it works without that protection, 0 on
+    /// failure.
     fn CRYPTO_secure_malloc_init(size: usize, minsize: i32) -> i32;
+    /// OpenSSL's count of bytes currently allocated from the secure heap.
     fn CRYPTO_secure_used() -> usize;
 }
 
 /// One process heap, not one per host/session. 32-byte blocks fit Ed25519 and
 /// X25519 seeds; one MiB leaves headroom over 10,000 distinct live seed allocations.
 pub const HEAP_BYTES: usize = 1 << 20;
+/// Result of the one-time initialization, kept for the life of the process.
 static PROTECTION: OnceLock<i32> = OnceLock::new();
 
 /// Initialize OpenSSL before key import/generation; retain its result forever.

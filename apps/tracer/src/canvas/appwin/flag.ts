@@ -15,6 +15,7 @@ import { readLocal, writeLocal } from "../../../../../packages/ui/src/local-pref
 
 declare const __CLUSTERS_PREVIEW__: boolean;
 
+/** The local-storage key of the Settings switch. */
 const PREF = "infraternal.app-windows";
 /** Dispatched on `window` when the preference changes, so Settings and the canvas follow it live. */
 export const APPWIN_EVENT = "infraternal:app-windows";
@@ -31,6 +32,7 @@ export function appWindowsWanted(): boolean { return appwinPreviewFlag() || read
 /** The Settings switch alone, without the preview door. */
 export function readAppWindowsPref(): boolean { return readLocal(PREF) === "1"; }
 
+/** Remembers the Settings switch on this browser ("1" or "0") and fires `APPWIN_EVENT` so listeners can follow at once. */
 export function writeAppWindowsPref(on: boolean): void {
   writeLocal(PREF, on ? "1" : "0");
   window.dispatchEvent(new Event(APPWIN_EVENT));

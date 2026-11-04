@@ -1,4 +1,12 @@
 //! Prepares bounded public payload encodings once per file identity; no credential enters a compressor (#190).
+//!
+//! The infraternal binary uploaded to a host is public, so it can be compressed
+//! once on the server and reused for every host. The compressor is a fixed
+//! system tool run with the file on stdin; nothing secret is ever given to it.
+//! Results are cached by file identity (device, inode, size and times), never by
+//! path name, and a file that changes while being compressed is refused. Whenever
+//! compression does not help (tool missing, failure, output too big or not
+//! smaller), the caller gets `None` and streams the raw bytes instead.
 
 use crate::{model::Failure, payload::Identity};
 use std::{path::Path, process::Stdio, sync::Arc};
@@ -8,15 +16,21 @@ use tokio::{
     sync::{Mutex, OnceCell},
 };
 
+/// Largest file we compress and largest result we keep in memory (64 MiB).
 const LIMIT: usize = 64 * 1024 * 1024;
+/// Process-wide cache, at most eight entries, oldest evicted first.
 static CACHE: Mutex<Vec<Entry>> = Mutex::const_new(Vec::new());
 
+/// Compression format of an encoded payload.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Codec {
+    /// Zstandard at level 9, one thread.
     Zstd,
+    /// Gzip at level 9 without a stored file name or time, so output is reproducible.
     Gzip,
 }
 impl Codec {
+    /// The compressor command at a fixed absolute path (not found through `PATH`), writing to stdout.
     fn command(self) -> Command {
         match self {
             Self::Zstd => {
@@ -32,14 +46,23 @@ impl Codec {
         }
     }
 }
+/// One cached encoding, keyed by file identity and codec.
 struct Entry {
+    /// Identity of the source file when it was read.
     identity: Identity,
+    /// Format of the encoding.
     codec: Codec,
+    /// Single-flight cell: concurrent callers wait for the same compression.
+    /// Holds `None` when raw streaming should be used instead.
     bytes: Arc<OnceCell<Option<Arc<[u8]>>>>,
 }
 
+/// The compressed bytes of the file at `path`, shared and computed at most once per identity.
+///
 /// Eight bounded entries cover full/session payloads, two architectures and two codecs.
 /// Missing tools and oversized/non-improving results preserve raw streaming.
+/// Returns `Ok(None)` for that, and for files under 64 KiB or over 64 MiB. Fails
+/// if the file cannot be read or changed during compression.
 pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]>>, Failure> {
     // Opening and inspecting a local file are short syscalls; the compressor
     // reads the file itself, so no async file machinery is needed here.
@@ -78,6 +101,12 @@ pub(crate) async fn encoded(path: &Path, codec: Codec) -> Result<Option<Arc<[u8]
         .cloned()
 }
 
+/// Run the codec on the already opened `file` and collect at most 64 MiB of output.
+///
+/// The child's stderr is discarded. Returns `None` if the tool cannot start,
+/// exits with failure, exceeds the limit, or its output is not smaller than the
+/// input. Errors if the file at `path` no longer has `identity` afterwards,
+/// because the encoding might then not match what was hashed or promised.
 async fn compress(
     path: &Path,
     file: std::fs::File,
@@ -120,6 +149,7 @@ async fn compress(
     Ok(Some(bytes))
 }
 
+/// Generic read failure with no path or system detail.
 fn unavailable() -> Failure {
     Failure::install("The static infraternal binary could not be read.")
 }

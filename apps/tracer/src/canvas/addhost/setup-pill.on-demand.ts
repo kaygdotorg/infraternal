@@ -35,6 +35,7 @@ export interface SetupSource {
   retry?(hostId: string): void;
 }
 
+/** What `bindSetupPill` needs: the window's card, the host, and the source of setup events. `from` and `tickHold` only shape the animation. */
 export interface SetupPillOptions {
   card: WindowCard;
   /** What the person calls the host, for the popover's words. */
@@ -54,6 +55,7 @@ export interface SetupPillOptions {
   onComplete?(): void;
 }
 
+/** The pill's controls, used by the window that owns the card. */
 export interface SetupPill {
   /** The pill was pressed. True when the setup took the press (a failure is explained); false lets the details open. */
   handlePill(source: "pointer" | "keyboard"): boolean;
@@ -62,14 +64,24 @@ export interface SetupPill {
   dispose(): void;
 }
 
+/** How long the status glyph takes to fly from the wizard to the pill, in milliseconds. */
 const FLIGHT_MS = 280;
+/** True when the person asked their system for reduced motion. */
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 /** Strong ease-out (quartic): fast start, long settle, so the status visibly leaves the wizard at once. */
 const easeOut = (t: number): number => 1 - (1 - t) ** 4;
+/** Icon paths (a circular arrow) for the popover's "Try again" button. */
 const RETRY_ICON = '<path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 5.5v5h-5"/>';
 
+/** The ring's stage states for a view; the two types have the same values, so this is a plain read. */
 const stagesOf = (view: SetupView): RingStageState[] => view.stages;
 
+/**
+ * Shows the host's setup in the window's machine pill. It subscribes to `options.source`, folds each event into the view, repaints the
+ * ring, and on a failed stage lets `handlePill` open the explanation (with "Try again", and host removal once attempts run out).
+ * A card without a mark gets an inert pill. When the last stage completes it plays the tick, then calls `onComplete`.
+ * Call `dispose` when the window closes: it stops the subscription and removes the ring, any flying copy and the popover.
+ */
 export function bindSetupPill(options: SetupPillOptions): SetupPill {
   const { card, host, hostId, source } = options;
   const mark = card.pill.querySelector<HTMLElement>(".ui-window-mark");

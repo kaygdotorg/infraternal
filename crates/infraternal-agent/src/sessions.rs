@@ -9,18 +9,17 @@
 use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
+#[cfg(target_os = "linux")]
 use infraternal_shim::readiness::Registration;
-use nix::{
-    sys::inotify::{AddWatchFlags, InitFlags, Inotify},
-    unistd::Uid,
-};
+#[cfg(target_os = "linux")]
+use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+use nix::unistd::Uid;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::{
     fs::{self, DirBuilder},
     io,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{DirBuilderExt, MetadataExt},
-    },
+    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -42,12 +41,15 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 // bind (#324); HANDSHAKE refused launches that were still progressing, and
 // their shells kept running. Process exit is the progress signal; this bound
 // only detects a hang, well inside the server's 60 s connect budget (#29).
+#[cfg(target_os = "linux")]
 const LAUNCH: Duration = Duration::from_secs(30);
 // How long a failed launch keeps trying to close the shim it started. A shim
 // that missed its Hello is slow rather than gone, so one attempt can miss too.
+#[cfg(target_os = "linux")]
 const CLEANUP: Duration = Duration::from_secs(10);
 
 /// The hang bound for one launch. Tests shorten it per thread to reach the failure path.
+#[cfg(target_os = "linux")]
 fn launch_bound() -> Duration {
     #[cfg(test)]
     if let Some(bound) = tests::LAUNCH_BOUND.with(std::cell::Cell::get) {
@@ -67,6 +69,7 @@ pub enum Manager {
 impl Manager {
     /// A shim needs direct exec for a live login or the kernel self-image;
     /// choosing its launcher must not replace the host login backend.
+    #[cfg(target_os = "linux")]
     pub(crate) fn for_shim(self, exe: &Path, login: bool) -> Self {
         if login || exe == Path::new("/proc/self/exe") {
             Self::Detached
@@ -81,6 +84,7 @@ impl Manager {
         Self::resolve_with(cell, Self::probe).await
     }
 
+    /// `resolve` with the probe supplied, so a test can stall or answer it without a service manager.
     pub(crate) async fn resolve_with<F, Fut>(cell: &tokio::sync::OnceCell<Self>, probe: F) -> Self
     where
         F: FnOnce() -> Fut,
@@ -97,28 +101,35 @@ impl Manager {
     /// Probe the applicable manager without trusting environment hints alone.
     /// `None` means no answer within `HANDSHAKE`; a refusal is an answer.
     pub async fn probe() -> Option<Self> {
-        let root = Uid::effective().is_root();
-        let mut command = isolated(Path::new("systemctl"));
-        if !root {
-            command.arg("--user");
+        #[cfg(target_os = "macos")]
+        {
+            return Some(Self::Detached);
         }
-        let available = timeout(
-            HANDSHAKE,
-            command
-                .arg("show-environment")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await;
-        match available {
-            Err(_) => None,
-            Ok(Ok(status)) if status.success() => {
-                Some(if root { Self::System } else { Self::User })
+        #[cfg(target_os = "linux")]
+        {
+            let root = Uid::effective().is_root();
+            let mut command = isolated(Path::new("systemctl"));
+            if !root {
+                command.arg("--user");
             }
-            Ok(_) => Some(Self::Detached),
+            let available = timeout(
+                HANDSHAKE,
+                command
+                    .arg("show-environment")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .status(),
+            )
+            .await;
+            match available {
+                Err(_) => None,
+                Ok(Ok(status)) if status.success() => {
+                    Some(if root { Self::System } else { Self::User })
+                }
+                Ok(_) => Some(Self::Detached),
+            }
         }
     }
 }
@@ -556,7 +567,9 @@ pub fn process_birth_ticks(record: &[u8]) -> Option<u64> {
 }
 
 /// Directory retirement events keep the registry fresh without idle timers.
+#[cfg(target_os = "linux")]
 pub(crate) struct SessionEvents(Registration<Inotify>);
+#[cfg(target_os = "linux")]
 impl SessionEvents {
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
         let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
@@ -576,6 +589,19 @@ impl SessionEvents {
         }
     }
 }
+/// A no-op event source is sufficient while Darwin PTY sessions are unavailable.
+#[cfg(target_os = "macos")]
+pub(crate) struct SessionEvents;
+#[cfg(target_os = "macos")]
+impl SessionEvents {
+    pub(crate) fn new(_state: &Path) -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub(crate) async fn changed(&self) -> io::Result<()> {
+        std::future::pending::<io::Result<()>>().await
+    }
+}
 
 // Exclude the trusted leg-B descriptor at direct exec. Anonymous images need
 // /proc/self/exe to resolve before any intermediate program replaces the image.
@@ -591,6 +617,7 @@ pub(crate) fn isolated(program: &Path) -> Command {
 
 // bind emits IN_CREATE before listen, so a refused early connection must
 // also wake on chmod. The shim chmods to 0600 only after listen succeeds.
+#[cfg(target_os = "linux")]
 fn socket_readiness(state: &Path) -> io::Result<Registration<Inotify>> {
     let watch =
         Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
@@ -738,6 +765,7 @@ pub(crate) async fn launch_rootless_person(
 
 // Keep the ordered authentication/launch/handshake setup together.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[cfg(target_os = "linux")]
 async fn launch_configured(
     exe: &Path,
     state: &Path,
@@ -925,6 +953,7 @@ async fn launch_configured(
 /// session id in Hello), and the launcher process this call spawned and has not
 /// yet reaped. The shim's exit hangs up its PTY, which ends the shell. Another
 /// session is never addressed: every handle here is this launch's id or child.
+#[cfg(target_os = "linux")]
 async fn abandon_launch(
     path: &Path,
     id: uuid::Uuid,
@@ -969,6 +998,7 @@ async fn abandon_launch(
 
 /// Wait for a launched shim's Hello. Progress, not a short clock, decides failure: the launcher's exit before the
 /// rendezvous refuses the open at once, and `LAUNCH` only detects a hung start (#324).
+#[cfg(target_os = "linux")]
 async fn await_launch(
     path: &Path,
     id: uuid::Uuid,
@@ -984,6 +1014,7 @@ async fn await_launch(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
 }
 
+#[cfg(target_os = "linux")]
 async fn wait_for_hello(
     path: &Path,
     id: uuid::Uuid,
@@ -1027,11 +1058,57 @@ async fn wait_for_hello(
     }
 }
 
-#[cfg(test)]
+/// PTY session launch is unavailable while the Darwin session shim is compiled out.
+/// # Errors
+/// Always reports unsupported because macOS sessions are outside Mesh slice 1.
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
+async fn launch_configured(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    uid: u32,
+    cols: u16,
+    rows: u16,
+    login: Option<&Path>,
+    login_cgroup: Option<&Path>,
+    login_worker_pid: Option<i32>,
+    login_worker_parent: Option<i32>,
+    login_worker_proc: Option<&std::fs::File>,
+    readiness: bool,
+    person: Option<uuid::Uuid>,
+    retain_output: bool,
+    program: &[String],
+) -> io::Result<Session> {
+    let _ = (
+        exe,
+        state,
+        manager,
+        uid,
+        cols,
+        rows,
+        login,
+        login_cgroup,
+        login_worker_pid,
+        login_worker_parent,
+        login_worker_proc,
+        readiness,
+        person,
+        retain_output,
+        program,
+    );
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "PTY sessions are unavailable on macOS in this slice.",
+    ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
 #[path = "../tests/unit/sessions.rs"]
 mod tests;
 
 /// The startup pipe carries only bounded literal arguments; no shell or secret argv.
+#[cfg(target_os = "linux")]
 fn command_input(program: &[String], readiness: bool) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     for argument in program {

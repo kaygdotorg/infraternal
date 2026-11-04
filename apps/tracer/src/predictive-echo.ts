@@ -24,15 +24,23 @@ import {
   type TerminalTextOverlay,
 } from "../../../packages/ui/src/terminal-text-overlay";
 
+/** Prediction is used only when the round trip is longer than this; on a fast link the real echo is as quick. */
 const RTT_THRESHOLD_MS = 60;
+/** Time allowed for the host's echo to be shown after it arrives (about two frames). */
 const CONFIRMATION_FRAME_BUDGET_MS = 34;
 // The high-latency browser profile varies burst RTT by ±30 ms from the ping sample.
 const PROFILE_JITTER_GUARD_MS = 30;
+/** The most unconfirmed keys held at once. */
 const MAX_PENDING_OPS = 128;
+/** The longest input (bytes) that is predicted; anything longer, such as a paste, waits for the host. */
 const MAX_PREDICTED_INPUT_BYTES = 8;
+/** How much of one output chunk is examined when matching echoes. */
 const MAX_VISIBLE_ECHO_BYTES = 512;
+/** Splits text into user-perceived characters, so an emoji or an accented letter is one cell group. */
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+/** UTF-8 encoder for the echo bytes. */
 const encoder = new TextEncoder();
+/** The glyphs drawn once at idle so their shapes are cached before the first key. */
 const WARM_TEXT = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ";
 
 /** One unconfirmed key: a glyph written to a cell, or an erase of the cell left of the cursor. */
@@ -54,10 +62,13 @@ interface PredictionOp {
   reportedVisible: boolean;
 }
 
+/** The fields of an operation that the caller supplies; the rest are computed when it is placed. */
 type PredictionOpInput = Pick<PredictionOp, "kind" | "text" | "bytes" | "sequence" | "cells" | "enteredAt" | "reportedVisible">;
 
+/** Where the host cursor is and the cell metrics, as the terminal reports them. */
 export type PredictionPosition = TerminalTextOverlayPosition;
 
+/** A snapshot for tests and diagnostics; read it from {@link PredictiveEcho.state}. `reason` says why prediction is off, or `ready`. */
 export interface PredictiveEchoState {
   optedIn: boolean;
   enabled: boolean;
@@ -74,6 +85,15 @@ export interface PredictiveEchoState {
   overlay: import("../../../packages/ui/src/terminal-text-overlay").TerminalTextOverlaySnapshot | undefined;
 }
 
+/**
+ * What {@link PredictiveEcho} needs from its terminal.
+ * - `host`: the element the overlay is mounted in.
+ * - `optedIn`: whether the user turned prediction on.
+ * - `getPosition`: the host cursor and cell metrics, or `undefined` when unknown.
+ * - `onVisible`: called when the prediction for the key with this `sequence` first showed, at the frame time `at`.
+ * - `setHostCursorHidden`: hides the host cursor while the overlay draws its own.
+ * - `onRendererPainted`: called after the renderer painted an output frame.
+ */
 export interface PredictiveEchoOptions {
   host: HTMLElement;
   optedIn: boolean;
@@ -83,35 +103,53 @@ export interface PredictiveEchoOptions {
   onRendererPainted?: () => void;
 }
 
+/** Where the echo scanner is inside a terminal escape sequence. */
 type VtParserState = "text" | "escape" | "csi" | "string" | "string-escape";
 /** Visible echo bytes of one output chunk, and the offsets in `bytes` at which a complete `\b \b` erase occurred. */
 type VisibleOutput = { bytes: Uint8Array; erases: number[] };
 
 /** A single terminal session's bounded, client-only prediction state. */
 export class PredictiveEcho {
+  /** The drawing layer; absent when the user has not opted in. */
   private readonly overlay: TerminalTextOverlay | undefined;
+  /** A 1 by 1 canvas used only to measure glyph widths. */
   private readonly measureCanvas: HTMLCanvasElement | undefined;
   private readonly measureContext: CanvasRenderingContext2D | null | undefined;
   /** Unconfirmed operations in typing order; the host has not echoed these yet. */
   private readonly pending: PredictionOp[] = [];
   /** Operations whose echo is written to the renderer but not painted yet; still drawn until the paint. */
   private awaitingPaint: PredictionOp[] = [];
+  /** How many bytes of the head of the queue the host's output has already matched. */
   private matchedPrefixLength = 0;
+  /** The latest round trip, set by {@link PredictiveEcho.setRoundTrip}. */
   private roundTripMs: number | undefined;
+  /** Set when the host stopped echoing (a password prompt, a late echo) or mispredicted three times; cleared again when host output matches a saved echo proof (see `offerEchoProof`). */
   private muted = false;
   /** Echoes that would prove the host is echoing again: a timed-out run's late echo and the newest muted key. */
   private proofs: Uint8Array[] = [];
+  /** Wrong predictions so far; three mute prediction. */
   private mispredictions = 0;
+  /** Set after something that makes the cursor position uncertain; no key is predicted until host output has settled it. */
   private waitingForOutput = false;
+  /** Progress through matching the host's `\b \b` erase echo. */
   private backspaceEchoState: 0 | 1 | 2 = 0;
+  /** The pending echo or proof timeout. */
   private timeout = 0;
+  /** The pending animation frame for a render. */
   private renderFrame = 0;
+  /** The pending animation frame that reports when a prediction became visible. */
   private visibilityFrame = 0;
+  /** Where the output scanner is inside an escape sequence. */
   private parserState: VtParserState = "text";
+  /** The reason for the current state, as reported by `state.reason`. */
   private lastReason = "flag-off";
+  /** Keys sent without a prediction, counted by reason. */
   private readonly fallbacks: Record<string, number> = {};
+  /** Whether the latest call to `input` was predicted. */
   private predictedLastInput = false;
+  /** Main-thread milliseconds spent per key, kept to the latest 256. */
   private readonly inputCosts: number[] = [];
+  /** The idle callback or timer that warms the overlay. */
   private warmHandle = 0;
   /** The overlay geometry or glyph cache is cold: set at start and by every layout change. */
   private warmNeeded = true;
@@ -123,6 +161,7 @@ export class PredictiveEcho {
    */
   private echoExpectedAt = 0;
 
+  /** Mounts the overlay when `options.optedIn` is true; with it false the object does nothing. */
   constructor(private readonly options: PredictiveEchoOptions) {
     if (!options.optedIn) return;
     this.overlay = mountTerminalTextOverlay(options.host);
@@ -134,6 +173,7 @@ export class PredictiveEcho {
     this.measureContext = measureCanvas.getContext("2d");
   }
 
+  /** A snapshot of the state, for tests and diagnostics. */
   get state(): PredictiveEchoState {
     const enabled = this.isEnabled();
     return {
@@ -157,6 +197,7 @@ export class PredictiveEcho {
     else this.scheduleRender();
   }
 
+  /** Sets the measured round trip in milliseconds, or `undefined` when unknown. At or below 60 ms prediction is off and pending predictions are dropped. */
   setRoundTrip(milliseconds: number | undefined): void {
     this.roundTripMs = milliseconds;
     if (!this.isAboveThreshold()) this.clearPending("rtt-low");
@@ -230,6 +271,7 @@ export class PredictiveEcho {
     }
   }
 
+  /** Places and queues a prediction for `data` when it is safe, otherwise clears the queue or records why not. */
   private predictInput(data: string, sequence: bigint, bytes: Uint8Array, terminalSafe: boolean): void {
     if (!terminalSafe) {
       this.clearPending("unsafe-screen");
@@ -424,6 +466,7 @@ export class PredictiveEcho {
     this.clearPending("snapshot");
   }
 
+  /** The screen cannot be predicted into (for example a full-screen program): drop all predictions and wait for host output. */
   unsafeScreen(): void {
     this.proofs = [];
     this.waitingForOutput = true;
@@ -457,6 +500,7 @@ export class PredictiveEcho {
     this.scheduleRender();
   }
 
+  /** Redraws the overlay on the next frame, for example after a theme change. */
   refresh(): void {
     this.scheduleRender();
   }
@@ -466,6 +510,7 @@ export class PredictiveEcho {
     this.options.onRendererPainted?.();
   }
 
+  /** Cancels timers and frames, drops predictions and removes the overlay. */
   dispose(): void {
     window.clearTimeout(this.timeout);
     if (this.renderFrame) cancelAnimationFrame(this.renderFrame);
@@ -474,14 +519,17 @@ export class PredictiveEcho {
     this.overlay?.dispose();
   }
 
+  /** True when the round trip is known and above {@link RTT_THRESHOLD_MS}. */
   private isAboveThreshold(): boolean {
     return this.roundTripMs !== undefined && this.roundTripMs > RTT_THRESHOLD_MS;
   }
 
+  /** Whether keys are predicted right now: opted in, a slow link, not muted, fewer than three mispredictions, and no wait pending. */
   private isEnabled(): boolean {
     return this.options.optedIn && this.isAboveThreshold() && !this.muted && this.mispredictions < 3 && !this.waitingForOutput;
   }
 
+  /** How many cells wide `text` is (0 when it cannot be measured, otherwise 1 or 2). */
   private cellWidth(text: string, position: PredictionPosition): number {
     const context = this.measureContext;
     if (!context) return 1;
@@ -566,6 +614,7 @@ export class PredictiveEcho {
     return { glyphs, erased };
   }
 
+  /** Remembers the bytes of a key sent while muted, so a matching echo can show the host is echoing again. At most four are kept. */
   private offerEchoProof(bytes: Uint8Array): void {
     // The newest key while muted is the most direct proof; keep at most a few candidates.
     this.proofs.push(bytes.slice());
@@ -573,6 +622,7 @@ export class PredictiveEcho {
     this.armProofTimeout();
   }
 
+  /** Starts the timer that mutes prediction when the oldest pending key gets no echo within two round trips and a small margin. */
   private armTimeout(): void {
     window.clearTimeout(this.timeout);
     this.timeout = 0;
@@ -597,6 +647,7 @@ export class PredictiveEcho {
     }, Math.max(0, deadline - performance.now()));
   }
 
+  /** Starts the timer after which saved echo proofs expire. */
   private armProofTimeout(): void {
     window.clearTimeout(this.timeout);
     const expectedDelay = 2 * (this.roundTripMs ?? CONFIRMATION_FRAME_BUDGET_MS) + CONFIRMATION_FRAME_BUDGET_MS + PROFILE_JITTER_GUARD_MS;
@@ -606,6 +657,7 @@ export class PredictiveEcho {
     }, expectedDelay);
   }
 
+  /** Counts a wrong prediction, mutes prediction after the third, and clears the queue. */
   private noteMisprediction(): void {
     this.mispredictions += 1;
     this.lastReason = this.mispredictions >= 3 ? "repeated-mispredictions" : "misprediction";
@@ -613,11 +665,13 @@ export class PredictiveEcho {
     this.clearPending(this.lastReason);
   }
 
+  /** Records that the echo of a key sent at `sentAt` cannot arrive before one round trip later (less a jitter margin). */
   private expectEchoFrom(sentAt: number): void {
     if (this.roundTripMs === undefined) return;
     this.echoExpectedAt = Math.max(this.echoExpectedAt, sentAt + this.roundTripMs - PROFILE_JITTER_GUARD_MS);
   }
 
+  /** Drops every prediction, remembers `reason`, and hides the overlay. */
   private clearPending(reason: string): void {
     // Dropped predictions were sent: their echoes are still on the way.
     const newest = this.pending[this.pending.length - 1];
@@ -632,6 +686,7 @@ export class PredictiveEcho {
     this.hideOverlay();
   }
 
+  /** Cancels pending frames, hides the overlay and shows the host cursor again. */
   private hideOverlay(): void {
     if (this.renderFrame) cancelAnimationFrame(this.renderFrame);
     this.renderFrame = 0;
@@ -640,6 +695,7 @@ export class PredictiveEcho {
     this.options.setHostCursorHidden?.(false);
   }
 
+  /** Asks for one render on the next animation frame. */
   private scheduleRender(): void {
     if (!this.overlay || this.renderFrame) return;
     this.renderFrame = requestAnimationFrame((at) => {
@@ -648,6 +704,7 @@ export class PredictiveEcho {
     });
   }
 
+  /** Draws the queue, or hides the overlay when nothing may be shown. With `reportAtFrame` it tells `onVisible` about keys that became visible. */
   private render(at: number, reportAtFrame = false): void {
     const overlay = this.overlay;
     if (!overlay) return;
@@ -681,6 +738,7 @@ export class PredictiveEcho {
     }
   }
 
+  /** Reports visibility at the next frame, because insertion happens before display. */
   private scheduleVisibilityReport(): void {
     if (this.visibilityFrame) return;
     // DOM insertion precedes display; measure visibility only at the next frame boundary.
@@ -690,17 +748,20 @@ export class PredictiveEcho {
     });
   }
 
+  /** Cancels the pending visibility report. */
   private cancelVisibilityFrame(): void {
     if (this.visibilityFrame) cancelAnimationFrame(this.visibilityFrame);
     this.visibilityFrame = 0;
   }
 
+  /** Renders at once instead of waiting for a frame. */
   private renderNow(at: number): void {
     if (this.renderFrame) cancelAnimationFrame(this.renderFrame);
     this.renderFrame = 0;
     this.render(at, false);
   }
 
+  /** The printable echo bytes of one output chunk, with the offsets at which a `\b \b` erase finished. Escape sequences are skipped. */
   private visibleBytes(bytes: Uint8Array): VisibleOutput {
     const visible = new Uint8Array(Math.min(bytes.byteLength, MAX_VISIBLE_ECHO_BYTES));
     let length = 0;
@@ -752,6 +813,7 @@ export class PredictiveEcho {
   }
 }
 
+/** The characters of `data` when it is all printable (no control, surrogate or line-separator characters), otherwise `undefined`. */
 function printableGraphemes(data: string): string[] | undefined {
   if (data.length === 0) return undefined;
   for (const scalar of data) {
@@ -761,10 +823,12 @@ function printableGraphemes(data: string): string[] | undefined {
   return Array.from(graphemeSegmenter.segment(data), ({ segment }) => segment);
 }
 
+/** Whether `haystack` begins with `needle`. */
 function startsWith(haystack: Uint8Array, needle: Uint8Array): boolean {
   return needle.byteLength <= haystack.byteLength && commonPrefixLength(haystack, needle) === needle.byteLength;
 }
 
+/** How many leading bytes the two arrays share. */
 function commonPrefixLength(left: Uint8Array, right: Uint8Array): number {
   const limit = Math.min(left.byteLength, right.byteLength);
   let index = 0;
@@ -772,6 +836,7 @@ function commonPrefixLength(left: Uint8Array, right: Uint8Array): number {
   return index;
 }
 
+/** Joins byte arrays into one. */
 function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
   let length = 0;
   for (const part of parts) length += part.byteLength;

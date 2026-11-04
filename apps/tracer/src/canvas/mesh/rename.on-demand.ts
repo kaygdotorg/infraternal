@@ -32,6 +32,7 @@ export function beginRename(cx: Ctx, id: string): void {
   if (graph) graph.beginRename(id); else pending = id;
 }
 
+/** Returns the host id that a palette rename asked for before its card existed, and forgets it. `undefined` when there is none. */
 export function takePendingRename(): string | undefined {
   const id = pending;
   pending = undefined;

@@ -26,12 +26,17 @@ pub type Output = Pin<Box<dyn AsyncRead + Send>>;
 /// Validated terminal dimensions. Pixel dimensions are optional SSH metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalSize {
+    /// Width in character cells.
     pub columns: u16,
+    /// Height in character cells.
     pub rows: u16,
+    /// Width in pixels; 0 if the client did not say.
     pub width_pixels: u16,
+    /// Height in pixels; 0 if the client did not say.
     pub height_pixels: u16,
 }
 
+/// The classic 80 by 24 terminal with no pixel size.
 impl Default for TerminalSize {
     fn default() -> Self {
         Self {
@@ -46,14 +51,18 @@ impl Default for TerminalSize {
 /// Terminal setup is immutable after a shell/exec open; resize uses control.
 #[derive(Clone, Debug)]
 pub struct Terminal {
+    /// Terminal type the client asked for (the `TERM` value).
     pub name: String,
+    /// Initial size.
     pub size: TerminalSize,
+    /// Terminal modes the client requested, as opcode and value pairs.
     pub modes: Vec<(russh::Pty, u32)>,
 }
 
 /// One channel may request exactly one of these session kinds.
 #[derive(Clone, Debug)]
 pub enum SessionKind {
+    /// An interactive login shell.
     Shell,
     /// Raw command bytes go to the shared runtime, never a daemon-side shell.
     Exec(Vec<u8>),
@@ -62,44 +71,59 @@ pub enum SessionKind {
 /// Bounded control messages remain separate from blocked terminal input.
 #[derive(Debug)]
 pub enum Control {
+    /// The client changed its window size.
     Resize(TerminalSize),
+    /// The client sent a signal for the session's process.
     Signal(russh::Sig),
 }
 
 /// The runtime reports completion after its output streams reach EOF.
 #[derive(Clone, Copy, Debug)]
 pub enum Exit {
+    /// The process exit code.
     Status(u32),
 }
 
 /// A person-owned session attachment; dropping its streams detaches from the
 /// shim. Runtime ownership/lifetime and reattachment remain with the shim.
 pub struct Attachment {
+    /// Bytes from the client into the session.
     pub input: Input,
+    /// Standard output (and, with a terminal, everything the terminal prints).
     pub output: Output,
+    /// Separate error stream; `None` when the session has a terminal and merges it.
     pub errors: Option<Output>,
+    /// Resize and signal messages, kept apart from blocked input.
     pub control: mpsc::Sender<Control>,
+    /// Fires once with the exit status after the output streams end.
     pub exit: oneshot::Receiver<Exit>,
 }
 
 /// Constructible only by certificate verification under a current guard.
 /// There is deliberately no serializable/reusable authorization token.
 pub struct AuthorizedLogin<'guard> {
+    /// Ties the value's lifetime to the authority guard, so it cannot outlive a revocation check.
     _guard: std::marker::PhantomData<&'guard ()>,
+    /// Who was admitted.
     identity: Identity,
+    /// The host being logged into.
     target_node: u64,
+    /// The OS account requested.
     account: String,
 }
 
 impl AuthorizedLogin<'_> {
+    /// The registered identity the certificate resolved to.
     #[must_use]
     pub fn identity(&self) -> &Identity {
         &self.identity
     }
+    /// Mesh node of the host being logged into.
     #[must_use]
     pub fn target_node(&self) -> u64 {
         self.target_node
     }
+    /// Target OS account that login rules allowed.
     #[must_use]
     pub fn account(&self) -> &str {
         &self.account
@@ -113,8 +137,11 @@ impl AuthorizedLogin<'_> {
 /// The runtime must check person ownership on every reattachment. File handlers
 /// execute inside that person's target-account context, never as the SSH daemon.
 pub trait LoginGuard: CertificateAccess + Send + Sync {
+    /// The file-transfer handler type, running as the person in the target account.
     type Files: russh_sftp::server::Handler + Send + 'static;
 
+    /// Start or reattach a shell or command session for an authorized login.
+    /// Refuses (e.g. on revocation) with a [`Refusal`].
     fn open_session(
         &self,
         login: &AuthorizedLogin<'_>,
@@ -122,6 +149,7 @@ pub trait LoginGuard: CertificateAccess + Send + Sync {
         terminal: Option<Terminal>,
     ) -> impl Future<Output = Result<Attachment, Refusal>> + Send;
 
+    /// Create the file-transfer handler for an authorized login.
     fn open_files(
         &self,
         login: &AuthorizedLogin<'_>,
@@ -130,6 +158,7 @@ pub trait LoginGuard: CertificateAccess + Send + Sync {
 
 /// No production implementation is provided until the shared login runtime lands.
 pub trait LoginAuthority: Send + Sync + 'static {
+    /// A held read view of current authority; revocation waits for it to drop.
     type Guard<'a>: LoginGuard
     where
         Self: 'a;
@@ -141,6 +170,7 @@ pub trait LoginAuthority: Send + Sync + 'static {
 /// Verify under the same guard that will register the new runtime resource.
 /// `account` is the requested account; the authority resolves it on this host,
 /// refusing nonexistent/noncanonical accounts before evaluating login access.
+/// The returned value borrows `guard`, so it cannot be kept after the guard is released.
 ///
 /// # Errors
 /// Refuses invalid certificates, stale identity or either missing access rule.

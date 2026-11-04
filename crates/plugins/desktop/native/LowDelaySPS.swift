@@ -1,12 +1,21 @@
 /// Role: constrain bounded progressive H.264 capture SPS values while preserving valid no-reorder bytes exactly (#146).
+/// A browser decoder may hold back several pictures before showing one unless the stream's SPS (the
+/// sequence parameter set, a small header NAL unit) says it never reorders. The hardware encoder
+/// does not always say so, so this file rewrites that one header field. Everything else in the SPS
+/// is copied bit for bit.
 /// This is not a general media transformer: callers must have disabled encoder frame reordering.
 import Foundation
 
+/// Thrown when an SPS is malformed, too large or uses a feature this encoder never produces.
 enum SPSFailure: Error { case invalid }
 
+/// Reads bits, most significant first, from an SPS payload with emulation-prevention bytes removed.
 private struct SPSBits {
+    /// The payload being read.
     let bytes: [UInt8]
+    /// Index of the next unread bit.
     var position = 0
+    /// Reads `count` bits (0 to 32) as a number. Throws `SPSFailure.invalid` past the end.
     mutating func read(_ count: Int = 1) throws -> UInt32 {
         guard count >= 0, count <= 32, position + count <= bytes.count * 8 else { throw SPSFailure.invalid }
         var value: UInt32 = 0
@@ -16,6 +25,8 @@ private struct SPSBits {
         }
         return value
     }
+    /// Reads an unsigned Exp-Golomb number, the variable-length code H.264 uses for most fields.
+    /// Throws `SPSFailure.invalid` for codes longer than 31 bits or past the end.
     mutating func ue() throws -> UInt32 {
         var zeros = 0
         while try read() == 0 {
@@ -24,6 +35,7 @@ private struct SPSBits {
         }
         return ((UInt32(1) << zeros) - 1) + (try read(zeros))
     }
+    /// Skips over an HRD (hypothetical decoder timing) block, validating that it fits.
     mutating func hrd() throws {
         let entries = try ue()
         guard entries <= 31 else { throw SPSFailure.invalid }
@@ -33,20 +45,26 @@ private struct SPSBits {
     }
 }
 
+/// Builds the rewritten SPS payload bit by bit, most significant first.
 private struct SPSWriter {
+    /// The bits written so far, packed.
     var bytes: [UInt8] = []
+    /// Number of bits written.
     var count = 0
+    /// Appends the lowest bit of `value`.
     mutating func bit(_ value: UInt32) {
         if count % 8 == 0 { bytes.append(0) }
         bytes[bytes.count - 1] |= UInt8(value & 1) << (7 - count % 8)
         count += 1
     }
+    /// Appends `value` as an unsigned Exp-Golomb number.
     mutating func ue(_ value: UInt32) {
         let code = value + 1
         let width = 32 - code.leadingZeroBitCount
         for _ in 1..<width { bit(0) }
         for shift in (0..<width).reversed() { bit(code >> shift) }
     }
+    /// Appends the first `end` bits of `bytes` unchanged.
     mutating func copy(_ bytes: [UInt8], through end: Int) {
         for position in 0..<end { bit(UInt32(bytes[position / 8] >> (7 - position % 8))) }
     }
@@ -54,6 +72,15 @@ private struct SPSWriter {
 
 /// Rebuild one bounded SPS NAL, preserving profile, dimensions, VUI metadata and all picture data.
 /// Refuse unsupported encoder output instead of announcing an untrue one-buffer invariant.
+/// Returns an SPS NAL unit that declares no picture reordering.
+///
+/// `nal` is one complete SPS NAL unit without a start code (header byte first, at most 1024
+/// bytes). It is returned untouched when it already states zero reordered frames. Otherwise the
+/// VUI bitstream-restriction fields are rewritten (or added) with zero reordering and a buffer
+/// big enough for the reference frames, then byte-escaped again.
+///
+/// Only profiles 66, 77 and 100 are accepted. Throws `SPSFailure.invalid` for anything else or
+/// for a malformed SPS.
 func lowDelaySPS(_ nal: Data) throws -> Data {
     // Bound the borrowed input before making the parser's owned copy.
     guard nal.count >= 5, nal.count <= 1024 else { throw SPSFailure.invalid }
@@ -152,9 +179,21 @@ func lowDelaySPS(_ nal: Data) throws -> Data {
 
 /// One encoder-owned cache; callbacks are serialized by the one-in-flight submission invariant.
 /// Preserve the original in standard SEI so each viewer can select metadata without encoding again.
+/// Turns parameter-set NAL units from the encoder into Annex B packets, rewriting each SPS once.
+///
+/// The cache keeps the eight most recent distinct SPS values. Use from one thread. `reset` when
+/// the encoder session ends.
 final class LowDelayParameterSets {
+    /// Cached pairs of (original SPS, finished packet).
     private var entries: [(Data, Data)] = []
+    /// How many SPS values have been rewritten, counting each distinct one once; useful in tests.
     private(set) var rewrites = 0
+    /// Returns the bytes to send for one parameter-set NAL unit (no start code).
+    ///
+    /// Non-SPS NAL units just get a 00 00 00 01 start code. An SPS goes through `lowDelaySPS`; if it
+    /// changed, a standard SEI message holding the original SPS (marked `infraternal-sps1`) follows
+    /// it, so a viewer can still recover the encoder's exact original. Throws `SPSFailure.invalid`
+    /// for empty, oversized or unsupported input.
     func packet(_ nal: Data) throws -> Data {
         guard nal.count > 0, nal.count <= 1024 else { throw SPSFailure.invalid }
         if nal[nal.startIndex] & 31 != 7 { return Data([0,0,0,1]) + nal }
@@ -177,5 +216,6 @@ final class LowDelayParameterSets {
         entries.append((nal,packet)); rewrites += 1
         return packet
     }
+    /// Empties the cache.
     func reset() { entries.removeAll(keepingCapacity: true) }
 }

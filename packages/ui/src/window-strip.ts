@@ -29,6 +29,7 @@ export interface StripView {
   dismiss?: { label: string; run: () => void };
 }
 
+/** An icon-only button with an accessible name; `paths` is inner SVG markup. */
 const button = (cls: string, label: string, paths: string): HTMLButtonElement => {
   const node = el("button", cls);
   node.type = "button";

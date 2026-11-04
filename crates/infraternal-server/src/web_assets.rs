@@ -44,9 +44,18 @@ async fn headers(request: Request, next: Next) -> Response {
     } else {
         "no-cache"
     };
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    // No other site may frame the app: it hosts the passkey approval page
+    // (#263, J134 P3-1). The Strict session cookie already keeps a framed
+    // copy signed out; this is the policy, not just that side effect. Sent on
+    // every response, so a document served under another type is covered
+    // too. X-Frame-Options covers browsers without CSP frame-ancestors.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
 }
 

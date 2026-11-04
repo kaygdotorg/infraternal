@@ -277,10 +277,12 @@ fn change(home: &Path, proposal: &Proposal, undo: bool) -> io::Result<()> {
             None,
             Some(nix::unistd::Gid::from_raw(locked.metadata()?.gid())),
         )?;
-        fchmod(
-            &output,
-            Mode::from_bits_truncate(locked.metadata()?.mode() & 0o777),
-        )?;
+        let permissions = locked.metadata()?.mode() & 0o777;
+        #[cfg(target_os = "macos")]
+        let mode = Mode::from_bits_truncate(permissions as u16);
+        #[cfg(not(target_os = "macos"))]
+        let mode = Mode::from_bits_truncate(permissions);
+        fchmod(&output, mode)?;
         output.sync_all()?;
         let current = read_file(&directory, &filename)?;
         if current.metadata()?.ino() != locked.metadata()?.ino() || contents(&current)? != text {

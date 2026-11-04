@@ -9,5 +9,7 @@ export const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text
   return node;
 };
 
+/** True while the primary pointer is coarse (a finger). Live: it follows a change of input device. */
 export const coarse = matchMedia("(pointer: coarse)");
+/** True while the person asked for reduced motion. Live: it follows the setting. */
 export const reduced = matchMedia("(prefers-reduced-motion: reduce)");

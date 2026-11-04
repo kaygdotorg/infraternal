@@ -16,6 +16,7 @@
  * on-demand roots are found by their file name, and chunk names are never listed, so a rebuild, a split or a merge
  * of chunks cannot make the gate stale.
  */
+/** One output file of the bundler's metafile: the chunks it imports (with the import kind), its entry point if it is one, and the source files inside it. */
 export interface MetaOutput {
   imports: Array<{ path: string; kind: string }>;
   entryPoint?: string;
@@ -27,10 +28,17 @@ export const DEFERRED_ROOTS = ["src/canvas/product.ts", "src/canvas/mock/index.t
 /** Modules the person's action loads: named `*.on-demand.ts`. */
 export const ON_DEMAND_PATTERN = /\.on-demand\.ts$/;
 
+/** The chunk file names of each transfer class, sorted. */
 export interface ChunkClasses { critical: string[]; deferred: string[]; onDemand: string[] }
 
+/** A metafile path without a leading `./`, so paths from `outputs` and from `imports` compare equal. */
 const name = (path: string): string => path.replace(/^\.\//, "");
 
+/**
+ * Sorts the chunks of a build into critical, deferred and on-demand (see the module comment).
+ * @param outputs the `outputs` object of the bundler's metafile
+ * @returns the three lists; a chunk appears in exactly one of them. Chunks that no class reaches appear in none.
+ */
 export function classifyChunks(outputs: Record<string, MetaOutput>): ChunkClasses {
   const byName = new Map(Object.entries(outputs).map(([path, out]) => [name(path), out]));
   const hasInput = (chunk: string, test: (input: string) => boolean): boolean => Object.keys(byName.get(chunk)?.inputs ?? {}).some(test);

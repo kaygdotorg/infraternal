@@ -9,8 +9,11 @@ use std::{
     time::Duration,
 };
 
+/// Messages to the watchdog thread that holds Tokio's paused clock still.
 enum ClockMessage {
+    /// The test saw real I/O progress; restart the hang timer.
     Progress,
+    /// The test is finished; let the watchdog thread exit.
     Release,
 }
 
@@ -23,6 +26,7 @@ pub(crate) struct FrozenSocketTime {
 impl FrozenSocketTime {
     // Call from a start_paused test: the runtime's timer epoch and clock then
     // share an exact origin, without sub-millisecond rounding at boundaries.
+    /// Freezes the paused Tokio clock until the value is dropped. Needs a `start_paused` test.
     pub(crate) async fn new() -> Self {
         let (release, wait) = mpsc::channel::<ClockMessage>();
         let (started, ready) = tokio::sync::oneshot::channel();
@@ -74,6 +78,7 @@ impl FrozenSocketTime {
 }
 
 impl Drop for FrozenSocketTime {
+    /// Resumes time and stops the watchdog. Panics if the hang bound expired, unless already panicking.
     fn drop(&mut self) {
         tokio::time::resume();
         let _ = self.release.send(ClockMessage::Release);

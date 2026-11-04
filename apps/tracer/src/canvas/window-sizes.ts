@@ -17,19 +17,28 @@
  */
 import { readLocal, writeLocal } from "../../../../packages/ui/src/local-pref";
 
+/** The phone choices: `full` = exactly the screen width, `edge` = edge to edge with a slice of each neighbour showing, `comfortable` = the screen less the canvas margins. */
 export type PhoneSize = "full" | "edge" | "comfortable";
+/** The desktop choices: one third of the canvas (`comfortable`), half (`wide`) or 99% (`full`). */
 export type DesktopSize = "comfortable" | "wide" | "full";
+/** The person's window-size choices, one for each kind of device. */
 export interface WindowSizes { phone: PhoneSize; desktop: DesktopSize }
 
+/** The choices when the person has made none. */
 export const DEFAULT_SIZES: WindowSizes = { phone: "edge", desktop: "comfortable" };
 /** The gap between two columns (px). A neighbour's slice starts this far past the window's edge. */
 export const COLUMN_GAP = 12;
+/** Dispatched on `window` by `writeSize`, so the canvas can re-measure at once. */
 export const SIZE_EVENT = "tracer:window-size";
 
+/** The local-storage keys of the two choices. */
 const KEYS = { phone: "tracer.window-size.phone", desktop: "tracer.window-size.desktop" } as const;
+/** The values a stored phone choice may have; anything else is ignored. */
 const PHONE: readonly string[] = ["full", "edge", "comfortable"];
+/** The values a stored desktop choice may have; anything else is ignored. */
 const DESKTOP: readonly string[] = ["comfortable", "wide", "full"];
 
+/** The person's choices from this browser. A missing or unrecognised stored value gives the default for that device. */
 export function readSizes(): WindowSizes {
   const phone = readLocal(KEYS.phone), desktop = readLocal(KEYS.desktop);
   return {
@@ -38,6 +47,7 @@ export function readSizes(): WindowSizes {
   };
 }
 
+/** Saves one choice on this browser and fires `SIZE_EVENT`. */
 export function writeSize<K extends keyof WindowSizes>(kind: K, value: WindowSizes[K]): void {
   writeLocal(KEYS[kind], value);
   window.dispatchEvent(new CustomEvent(SIZE_EVENT));

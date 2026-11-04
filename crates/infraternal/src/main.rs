@@ -38,6 +38,8 @@ mod sign_in;
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
 mod ssh_internal;
+#[cfg(all(feature = "remote", target_os = "linux"))]
+mod up;
 
 #[cfg(feature = "plugin-server")]
 mod install;
@@ -101,13 +103,13 @@ fn run_invocation() -> ExitCode {
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
         return ExitCode::FAILURE;
     }
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", target_os = "linux"))]
     if let Some(result) =
         infraternal_plugin_remote::runtime_lock::command(&mut std::env::args_os().skip(1))
     {
         return ExitCode::from(result);
     }
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", target_os = "linux"))]
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
@@ -125,7 +127,7 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = ssh_internal::run_if_requested() {
         return result;
     }
-    #[cfg(feature = "session-payload")]
+    #[cfg(all(feature = "session-payload", target_os = "linux"))]
     if shim_cli::PAYLOAD_ONLY {
         return shim_cli::payload_entry();
     }
@@ -197,10 +199,12 @@ fn dispatch_action(
         CliHandler::NodeComponent | CliHandler::Sessions => {
             run_local_action(action, matches, json_output)
         }
+        CliHandler::MeshService => run_mesh_service(action, matches, json_output),
         CliHandler::Unavailable => run_unavailable(action, json_output),
         CliHandler::Status => run_status(registry, json_output),
         CliHandler::Skill => run_skill(registry, matches, json_output),
         CliHandler::SignIn => run_sign_in(action, matches, json_output),
+        CliHandler::Up | CliHandler::UpSystem => dispatch_up_action(action, matches, json_output),
         CliHandler::ServerPlugin => {
             #[cfg(feature = "release")]
             {
@@ -261,7 +265,10 @@ fn dispatch_action(
                 run_unavailable(action, json_output)
             }
         }
+        #[cfg(target_os = "linux")]
         CliHandler::SessionShim => run_shim_command(matches),
+        #[cfg(not(target_os = "linux"))]
+        CliHandler::SessionShim => run_unavailable(action, json_output),
         CliHandler::SshSession => {
             #[cfg(all(feature = "ssh", feature = "remote"))]
             {
@@ -289,6 +296,203 @@ fn dispatch_action(
     }
 }
 
+#[cfg(all(feature = "remote", target_os = "linux"))]
+fn dispatch_up_action(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
+    match action.cli_handler {
+        CliHandler::Up => run_up(matches, json_output),
+        CliHandler::UpSystem => run_up_system(matches, json_output),
+        _ => run_unavailable(action, json_output),
+    }
+}
+
+#[cfg(not(all(feature = "remote", target_os = "linux")))]
+fn dispatch_up_action(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
+    let _ = matches;
+    run_unavailable(action, json_output)
+}
+
+/// Control the fixed macOS system Mesh service, keeping the privileged re-entry silent.
+fn run_mesh_service(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
+    #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    {
+        let operation = action.command.last().map_or("", String::as_str);
+        let system_service = system_service_requested(matches);
+        let command = action.command.join(" ");
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(_) => {
+                return report_failure_as(
+                    &command,
+                    "The Mesh system service could not be started.",
+                    "The current executable path is unavailable.".to_owned(),
+                    json_output,
+                    Exit::Failed,
+                );
+            }
+        };
+        let result =
+            infraternal_plugin_mesh::macos_service::control(operation, system_service, &executable);
+        if system_service {
+            return report_mesh_service_system_result(&command, result, json_output);
+        }
+        report_mesh_service_status_result(command, operation, result, json_output)
+    }
+    #[cfg(not(all(feature = "plugin-mesh", target_os = "macos")))]
+    {
+        let _ = matches;
+        run_unavailable(action, json_output)
+    }
+}
+
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+fn report_mesh_service_system_result(
+    command: &str,
+    result: io::Result<Option<infraternal_plugin_mesh::macos_service::Status>>,
+    json_output: bool,
+) -> ExitCode {
+    match result {
+        Ok(None) => ExitCode::SUCCESS,
+        Ok(Some(_)) => report_failure_as(
+            command,
+            "The internal Mesh service request was invalid.",
+            "The privileged request did not complete the fixed service operation.".to_owned(),
+            json_output,
+            Exit::Failed,
+        ),
+        Err(error) => report_failure_as(
+            command,
+            "The Mesh system service operation failed.",
+            format!("The service operation was refused ({:?}).", error.kind()),
+            json_output,
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                Exit::NotAllowed
+            } else {
+                Exit::Failed
+            },
+        ),
+    }
+}
+
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+fn report_mesh_service_status_result(
+    command: String,
+    operation: &str,
+    result: io::Result<Option<infraternal_plugin_mesh::macos_service::Status>>,
+    json_output: bool,
+) -> ExitCode {
+    match result {
+        Ok(Some(status)) => {
+            let (state, message, exit) =
+                mesh_status_result(operation, status.loaded, status.running);
+            emit(
+                CommandResult::new(command, state, message, mesh_status_data(status))
+                    .with_details(MESH_ENFORCEMENT_DETAILS),
+                json_output,
+                exit,
+            )
+        }
+        Ok(None) => report_failure_as(
+            &command,
+            "The Mesh system service did not report its state.",
+            "The fixed service control operation returned no status.".to_owned(),
+            json_output,
+            Exit::Failed,
+        ),
+        Err(error) => report_failure_as(
+            &command,
+            "The Mesh system service operation failed.",
+            format!("The service operation failed ({:?}).", error.kind()),
+            json_output,
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                Exit::NotAllowed
+            } else {
+                Exit::Failed
+            },
+        ),
+    }
+}
+
+/// Says what `enforcement: unavailable` means for someone reading `mesh status`.
+///
+/// The server is named as something that can reach this Mac, not only as something
+/// the Mac connects to: until the slice-3 filter (#265), the coordinator's peer is
+/// installed without an inbound check, so the server host reaches every port here.
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+const MESH_ENFORCEMENT_DETAILS: &str = "Access rules are not enforced on this Mac yet. Until they are, the server can reach every port on this Mac, and other peers connect only if they are allowed to reach every port on it.";
+
+/// The machine-readable `mesh status` fields; `enforcement` reports the access-rule gap (#265).
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+fn mesh_status_data(status: infraternal_plugin_mesh::macos_service::Status) -> serde_json::Value {
+    json!({
+        "loaded": status.loaded,
+        "running": status.running,
+        "pid": status.pid,
+        "enforcement": infraternal_plugin_mesh::macos_node::ENFORCEMENT,
+    })
+}
+
+#[cfg(all(feature = "plugin-mesh", any(target_os = "macos", test)))]
+fn mesh_status_result(
+    operation: &str,
+    loaded: bool,
+    running: bool,
+) -> (CommandState, &'static str, Exit) {
+    match operation {
+        "status" | "up" if running => (
+            CommandState::Running,
+            "The Mesh system service is running.",
+            Exit::Ok,
+        ),
+        "status" if loaded => (
+            CommandState::Restarting,
+            "The Mesh system service is loaded but not running.",
+            Exit::Failed,
+        ),
+        "status" | "down" if !loaded => (
+            CommandState::Stopped,
+            "The Mesh system service is stopped.",
+            Exit::Ok,
+        ),
+        "up" => (
+            CommandState::Restarting,
+            "The Mesh system service was installed but has not started.",
+            Exit::Failed,
+        ),
+        "down" if loaded => (
+            CommandState::Failed,
+            "The Mesh system service is still loaded.",
+            Exit::Failed,
+        ),
+        _ => (
+            CommandState::Failed,
+            "The Mesh system service action is not supported.",
+            Exit::Usage,
+        ),
+    }
+}
+
+#[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+fn system_service_requested(matches: &ArgMatches) -> bool {
+    matches
+        .try_get_one::<bool>("system_service")
+        .ok()
+        .flatten()
+        .copied()
+        .unwrap_or(false)
+}
+
 fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bool) -> ExitCode {
     #[cfg(feature = "remote")]
     {
@@ -307,6 +511,34 @@ fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bo
     {
         run_unavailable(_action, json_output)
     }
+}
+
+#[cfg(all(feature = "remote", target_os = "linux"))]
+fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
+    let Some(server) = matches.get_one::<String>("server") else {
+        return report_failure_as(
+            "up",
+            "A server address is required.",
+            "provide an HTTPS server origin, for example https://infra.example.org".to_owned(),
+            json_output,
+            Exit::Usage,
+        );
+    };
+    up::run(server, json_output)
+}
+
+#[cfg(all(feature = "remote", target_os = "linux"))]
+fn run_up_system(matches: &ArgMatches, json_output: bool) -> ExitCode {
+    let Some(server) = matches.get_one::<String>("server") else {
+        return report_failure_as(
+            "up",
+            "A server address is required.",
+            "provide an HTTPS server origin, for example https://infra.example.org".to_owned(),
+            json_output,
+            Exit::Usage,
+        );
+    };
+    up::run_helper(server, json_output)
 }
 
 #[cfg(all(feature = "ssh", feature = "remote"))]
@@ -1199,7 +1431,7 @@ fn run_embedded_agent(
 }
 
 // Parse the paired private handoff capability without reserving fixed slots.
-#[cfg(feature = "plugin-agent")]
+#[cfg(all(feature = "plugin-agent", target_os = "linux"))]
 fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, ExitCode> {
     match (
         matches.get_one::<i64>("login_master_fd"),
@@ -1219,6 +1451,7 @@ fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, Ex
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
+#[cfg(target_os = "linux")]
 fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     let options = match (|| {
         Ok::<_, String>(shim_cli::Options {
@@ -1273,7 +1506,7 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
 }
 
 /// Dispatch the private login workers only when their authenticated fields are present.
-#[cfg(feature = "plugin-agent")]
+#[cfg(all(feature = "plugin-agent", target_os = "linux"))]
 #[cold]
 fn run_login_shim_if_requested(
     matches: &ArgMatches,
@@ -1355,7 +1588,7 @@ fn run_login_shim_if_requested(
     )
 }
 
-#[cfg(feature = "plugin-agent")]
+#[cfg(all(feature = "plugin-agent", target_os = "linux"))]
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
@@ -1414,6 +1647,7 @@ fn run_login_command(
 }
 
 /// Parse schema-generated integer inputs into the shim's platform-specific types.
+#[cfg(target_os = "linux")]
 fn shim_integer<T>(matches: &ArgMatches, name: &str, default: Option<T>) -> Result<T, String>
 where
     T: TryFrom<i64>,
@@ -1507,8 +1741,11 @@ mod failure_data_tests {
 
     #[test]
     fn unavailable_results_keep_registered_data_shapes() {
-        #[cfg(feature = "placeholders")]
-        assert_eq!(failure_data("up"), json!({"started": []}));
+        #[cfg(all(
+            feature = "placeholders",
+            not(all(feature = "remote", target_os = "linux"))
+        ))]
+        assert_eq!(failure_data("up"), json!({}));
         #[cfg(all(feature = "plugin-server", feature = "placeholders"))]
         assert_eq!(failure_data("server features"), json!({"features": []}));
     }
@@ -1749,7 +1986,7 @@ mod setup_token_tests {
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
-#[cfg(feature = "plugin-agent")]
+#[cfg(all(feature = "plugin-agent", target_os = "linux"))]
 fn run_shim(
     session: &str,
     uid: u32,
@@ -1833,7 +2070,34 @@ fn run_shim(
 mod dispatch_tests {
     //! Ensures internal CLI actions resolve and execute through their registered handler.
 
+    #[cfg(feature = "plugin-mesh")]
+    use super::mesh_status_result;
+
+    #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    #[test]
+    fn mesh_status_reports_that_access_rules_are_not_enforced() {
+        let data = super::mesh_status_data(infraternal_plugin_mesh::macos_service::Status {
+            loaded: true,
+            running: true,
+            pid: Some(42),
+        });
+        assert_eq!(data["enforcement"], "unavailable");
+        assert_eq!(data["running"], true);
+    }
+
+    /// J162 F1 (#265): the details must not hide that the server reaches every port here.
+    #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    #[test]
+    fn mesh_status_says_the_server_can_reach_every_port_on_this_mac() {
+        assert!(
+            super::MESH_ENFORCEMENT_DETAILS.contains("the server can reach every port on this Mac"),
+            "{}",
+            super::MESH_ENFORCEMENT_DETAILS
+        );
+    }
     use super::{ExitCode, dispatch_selected_action};
+    #[cfg(feature = "plugin-mesh")]
+    use crate::cli::output::{CommandState, Exit};
     use crate::cli::{actions, command_tree};
 
     #[test]
@@ -1856,15 +2120,91 @@ mod dispatch_tests {
             ExitCode::from(1)
         );
     }
+
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn mesh_service_status_maps_launchd_state_to_cli_result() {
+        assert_eq!(
+            mesh_status_result("status", true, true),
+            (
+                CommandState::Running,
+                "The Mesh system service is running.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("up", true, true),
+            (
+                CommandState::Running,
+                "The Mesh system service is running.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("status", true, false),
+            (
+                CommandState::Restarting,
+                "The Mesh system service is loaded but not running.",
+                Exit::Failed,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("status", false, false),
+            (
+                CommandState::Stopped,
+                "The Mesh system service is stopped.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("up", true, false),
+            (
+                CommandState::Restarting,
+                "The Mesh system service was installed but has not started.",
+                Exit::Failed,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("down", true, false),
+            (
+                CommandState::Failed,
+                "The Mesh system service is still loaded.",
+                Exit::Failed,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("down", false, false),
+            (
+                CommandState::Stopped,
+                "The Mesh system service is stopped.",
+                Exit::Ok,
+            )
+        );
+        assert_eq!(
+            mesh_status_result("unknown", false, false),
+            (
+                CommandState::Failed,
+                "The Mesh system service action is not supported.",
+                Exit::Usage,
+            )
+        );
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "startup_tests.rs"]
+mod startup_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "startup_macos_tests.rs"]
 mod startup_tests;
 
 /// First userspace entry protection applies equally to server and child modes.
 fn harden_startup() -> Result<(), nix::errno::Errno> {
+    #[cfg(target_os = "linux")]
     nix::sys::prctl::set_dumpable(false)?;
+    #[cfg(target_os = "macos")]
+    // Darwin has no per-process dumpability flag; deny core files before the remote identity is read.
+    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)?;
     #[cfg(all(feature = "remote", feature = "plugin-server"))]
     if std::env::args_os()
         .skip(1)
@@ -1970,6 +2310,19 @@ fn run_remote_agent(
                 &runtime,
                 Box::pin(remote::join(&url, &data, &invitation)),
             )?;
+            // A new enrolment must not inherit the previous one's mesh peers or
+            // WireGuard key (#265, #325), but a join into another data directory
+            // must not touch the service's (J162 F4). The Mac node runs only as root.
+            #[cfg(all(target_os = "macos", feature = "plugin-mesh"))]
+            if nix::unistd::Uid::effective().is_root()
+                && let Some(mesh_state) =
+                    infraternal_plugin_mesh::macos_service::join_state_to_forget(
+                        &data,
+                        state.as_deref(),
+                    )
+            {
+                infraternal_plugin_mesh::node::forget(&mesh_state)?;
+            }
             // SSH publishes staged state only after enrollment returns. Running
             // here would hold its transaction until the service was cancelled.
             if enroll_only {

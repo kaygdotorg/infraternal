@@ -77,17 +77,28 @@ impl Drop for Temporary {
 }
 
 fn executable_filesystem(path: &Path) -> io::Result<()> {
-    if nix::sys::statvfs::statvfs(path)
-        .map_err(io::Error::from)?
-        .flags()
-        .contains(nix::sys::statvfs::FsFlags::ST_NOEXEC)
+    #[cfg(target_os = "linux")]
     {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "host login image cache filesystem is not executable",
-        ));
+        if nix::sys::statvfs::statvfs(path)
+            .map_err(io::Error::from)?
+            .flags()
+            .contains(nix::sys::statvfs::FsFlags::ST_NOEXEC)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "host login image cache filesystem is not executable",
+            ));
+        }
+        Ok(())
     }
-    Ok(())
+    #[cfg(target_os = "macos")]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "host login images are unavailable in the macOS Mesh slice",
+        ))
+    }
 }
 
 /// A launch retains a shared image lock until readiness authenticates its exec.
@@ -443,6 +454,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn noexec_host_mount_is_refused_before_image_publication() {
         // proc is a read-only fixture here: this test neither remounts it nor

@@ -1,4 +1,9 @@
 //! Declares SSH component actions for CLI, help, and generated skill adapters.
+//!
+//! The `ssh up`, `ssh down` and `ssh status` commands are declared here so
+//! help and generated skills can list them, but each is marked "not available
+//! yet": the declarations are placeholders and are only compiled in when the
+//! plugin API's placeholder feature is on. None of them runs anything.
 
 use infraternal_plugin_api::{
     ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun as DryRun, JsonSchema,
@@ -9,6 +14,9 @@ use infraternal_plugin_api::{
 pub const ID: &str = "ssh";
 
 /// Register the SSH component actions exposed by this plugin.
+///
+/// Returns a plugin with id [`ID`]. Without the placeholder feature the action
+/// list is empty.
 #[must_use]
 pub fn plugin() -> PluginDefinition {
     PluginDefinition::new(

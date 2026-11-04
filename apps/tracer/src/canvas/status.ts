@@ -16,6 +16,8 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
   let lastShownAt = 0;
   let nextToastIdentity = 0;
   let ownedToastIdentity: number | undefined;
+  /** The stack's id for our toast: a bare dismiss spares errors, and this relay only shows errors. */
+  let ownedToastId: string | undefined;
   let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
   const observer = new MutationObserver(() => {
     const message = element.textContent?.trim() ?? "";
@@ -35,7 +37,7 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
         // Whatever passes the filter is bad news (a lost connection, a refusal or an ended terminal), never a
         // confirmation. The old guess by wording missed "The connection to the server ended."
         // Keep a connection reason visible until the status clears after a stable attach.
-        toast.show({ message, tone: "error", duration: connectionFailure ? 0 : 5000, onClose: () => {
+        ownedToastId = toast.show({ message, tone: "error", duration: connectionFailure ? 0 : 5000, onClose: () => {
           if (ownedToastIdentity === identity) ownedToastIdentity = undefined;
         } });
       }
@@ -47,7 +49,7 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
         relaying = false;
         lastMessage = undefined;
         lastShownAt = 0;
-        if (ownedToastIdentity !== undefined) toast.dismiss();
+        if (ownedToastIdentity !== undefined) toast.dismiss(ownedToastId);
         ownedToastIdentity = undefined;
       }, 300);
     } else {
@@ -63,7 +65,7 @@ export function createStatusRelay(toast: ToastController): { element: HTMLElemen
       observer.disconnect();
       clearTimeout(clearTimer);
       clearTimer = 0;
-      if (ownedToastIdentity !== undefined) toast.dismiss();
+      if (ownedToastIdentity !== undefined) toast.dismiss(ownedToastId);
       ownedToastIdentity = undefined;
     },
   };

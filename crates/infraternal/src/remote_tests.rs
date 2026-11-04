@@ -251,9 +251,13 @@ fn prepared_join_key_digest_is_stable_across_bootstrap_steps() {
 
     let first = prepared_key_digest(&data).unwrap();
     let second = prepared_key_digest(&data).unwrap();
+    let pkcs8 = prepared_join_key_pkcs8(&data).unwrap();
 
     assert_eq!(first, second, "the CSR must use the SSH-proved key");
+    assert_eq!(key_digest_from_pkcs8(&pkcs8).unwrap(), first);
     assert!(data.join("join-key.pk8").exists());
+    retire_prepared_join_key(&data).unwrap();
+    assert!(!data.join("join-key.pk8").exists());
 }
 
 #[tokio::test]

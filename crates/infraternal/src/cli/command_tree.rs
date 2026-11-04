@@ -341,6 +341,24 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    #[test]
+    fn up_accepts_a_server_as_its_positional_argument() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from(["infraternal", "up", "https://mesh.example.org"])
+            .expect("up server positional");
+        let selected = selected(&matches);
+        assert_eq!(selected.path, ["up"]);
+        assert_eq!(
+            selected
+                .matches
+                .get_one::<String>("server")
+                .map(String::as_str),
+            Some("https://mesh.example.org")
+        );
+    }
+
     #[test]
     fn every_command_in_the_tree_takes_json() {
         // D299: no command is exempt, hidden internal ones included.
@@ -540,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "plugin-mesh")]
+    #[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
     fn parser_uses_plugin_inputs_and_accepts_json_after_a_leaf_command() {
         let registry = registry().expect("action registry");
         let matches = build(&registry)
@@ -550,6 +568,19 @@ mod tests {
         assert_eq!(command.path, ["mesh", "up"]);
         assert!(matches.get_flag("json"));
         assert!(command.matches.get_flag("ssh"));
+    }
+
+    #[test]
+    #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    fn parser_uses_macos_mesh_service_input_and_accepts_json_after_a_leaf_command() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from(["infraternal", "mesh", "up", "--system-service", "--json"])
+            .expect("registered Mac system service input");
+        let command = selected(&matches);
+        assert_eq!(command.path, ["mesh", "up"]);
+        assert!(matches.get_flag("json"));
+        assert!(command.matches.get_flag("system_service"));
     }
 
     #[test]

@@ -11,10 +11,12 @@
  * samples a texture instead of building characters procedurally.
  */
 
+/** Full-screen quad vertex shader for the glyph field. */
 const VERT = `#version 300 es
 in vec2 p; out vec2 uv;
 void main() { uv = p * 0.5 + 0.5; gl_Position = vec4(p, 0.0, 1.0); }`;
 
+/** Fragment shader: samples the glyph atlas through low-frequency noise, adds scanlines, flicker and glitch bands, and inks light or dark by the `light` uniform. */
 const FRAG = `#version 300 es
 precision highp float;
 in vec2 uv; out vec4 o;
@@ -65,19 +67,35 @@ void main() {
   o = vec4(mix(vec3(v), paper, light), 1.0);
 }`;
 
+/** The characters drawn into the atlas, one cell each. */
 const GLYPHS = "01<>/\\|=+-_:;{}[]()#$%&*!?~^".split("");
+/** Minimum time between frames: 30 frames per second at most (DECISION 96). */
 const FRAME_INTERVAL_MS = 1000 / 30;
 
+/** The handle returned by {@link mountFaultyTerminal}. `destroy()` stops all drawing and releases the WebGL context. */
 export interface FaultyTerminal {
   /** Switches between the dark field (default) and the light field without remounting. */
   setLight(light: boolean): void;
   destroy(): void;
 }
 
+/**
+ * Starts the glyph-field backdrop on `canvas`. It renders in a worker through an offscreen canvas when the browser allows,
+ * and otherwise on the main thread at the same frame rate. Returns `undefined` when WebGL 2 is unavailable, so the caller
+ * can keep its plain background.
+ * @param light draw dark glyphs on a light field instead of the default pale-on-black
+ * @param font CSS font family used to draw the glyph atlas
+ */
 export function mountFaultyTerminal(canvas: HTMLCanvasElement, light = false, font = '"Geist Mono", monospace'): FaultyTerminal | undefined {
   return mountOffscreen(canvas, font, light) ?? mountOnMainThread(canvas, font, light);
 }
 
+/**
+ * A WebGL renderer for the field. The caller owns the schedule: call `resize` when the size changes and `draw` for each
+ * frame (`now` in milliseconds from `performance.now()`). `mouse` is the pointer as fractions of the canvas (x from the left,
+ * y from the bottom; -1 means no pointer). `glow` is state that `draw` owns: it eases toward `mouse` each frame, so pass the
+ * same object every time. `destroy()` frees the GL resources.
+ */
 export interface FaultyTerminalRenderer {
   setLight(light: boolean): void;
   resize(width: number, height: number, dpr: number): void;
@@ -85,7 +103,9 @@ export interface FaultyTerminalRenderer {
   destroy(): void;
 }
 
+/** A pointer position in canvas fractions; both axes are -1 when there is no pointer. */
 interface PointerPosition { x: number; y: number }
+/** A canvas the renderer can draw into: on the page, or transferred to a worker. */
 type ShaderCanvas = HTMLCanvasElement | OffscreenCanvas;
 
 /** Owns WebGL resources while the caller owns the frame schedule and input source. */
@@ -152,7 +172,11 @@ function createRenderer(canvas: ShaderCanvas, font: string, light: boolean): Fau
   };
 }
 
-/** Creates the worker-safe shader renderer without attaching browser input or frame loops. */
+/**
+ * Creates the worker-safe shader renderer on an offscreen canvas, without attaching browser input or frame loops.
+ * Used by the worker; the main-thread path uses the same code.
+ * Returns `undefined` when WebGL 2 is unavailable.
+ */
 export function createFaultyTerminalRenderer(canvas: OffscreenCanvas, font: string, light = false): FaultyTerminalRenderer | undefined {
   return createRenderer(canvas, font, light);
 }
@@ -343,6 +367,7 @@ function mountOffscreen(canvas: HTMLCanvasElement, font: string, initialLight: b
   };
 }
 
+/** Keeps only the red channel of RGBA pixels; the atlas is a one-channel texture. */
 function toRed(rgba: Uint8ClampedArray): Uint8Array {
   const out = new Uint8Array(rgba.length / 4);
   for (let i = 0; i < out.length; i++) out[i] = rgba[i * 4]!;

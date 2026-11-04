@@ -64,6 +64,14 @@ async fn upgrade(pool: &SqlitePool) {
 }
 
 #[tokio::test]
+async fn loopback_https_origin_with_explicit_port_initializes_auth() {
+    let pool = database().await;
+    Auth::new(pool, "localhost", "https://localhost:443")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn fresh_history_has_unique_versions_and_both_schemas() {
     let migrations = sqlx::migrate!("./migrations");
     let versions: std::collections::HashSet<_> = migrations

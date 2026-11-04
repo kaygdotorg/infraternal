@@ -1,7 +1,24 @@
 //! Per-user desktop helper entrypoint; no daemon or server is created [D203,D201].
+//!
+//! Usage: `infraternal-desktop-helper <private-runtime-directory> [--json]
+//! [--once] [--companion-runtime <dir>]`, or `--check-permissions` to test the
+//! macOS privacy permissions.
+//!
+//! The helper binds a Unix socket in the runtime directory and serves one client
+//! at a time with `infraternal_plugin_desktop::helper::session`, using a signed
+//! native companion app (named by the `INFRATERNAL_DESKTOP_COMPANION` environment
+//! variable) for window access. With `--once` it exits after the first client.
+//! On other platforms it only prints that desktop capture is unavailable and
+//! exits with status 2.
 #[cfg(target_os = "macos")]
 use std::io::Write as _;
 
+/// Handles `--help` and `--check-permissions`, makes sure the process runs with a
+/// 3-second `ScreenCaptureKit` callback timeout, then calls `run`.
+///
+/// The timeout is an environment variable that must be set before threads
+/// exist. If it is missing, the helper re-executes itself with it set (same pid,
+/// no extra process) instead of changing the environment in place.
 #[cfg(target_os = "macos")]
 fn main() -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
@@ -34,6 +51,16 @@ fn main() -> std::io::Result<()> {
     }
     run()
 }
+/// Parses arguments, binds the socket, starts the native companion and serves
+/// clients until a termination signal (or, with `--once`, the first client
+/// ends).
+///
+/// Each client session runs on a blocking thread and borrows the companion,
+/// which is handed back afterwards; if the companion stopped or the session
+/// task failed, a fresh one is started for the next client. On a signal, the
+/// active client socket is shut down and the session is awaited, so native
+/// state is restored before returning. Rejects duplicate or unexpected
+/// arguments.
 #[cfg(target_os = "macos")]
 #[tokio::main]
 async fn run() -> std::io::Result<()> {
@@ -136,6 +163,8 @@ async fn run() -> std::io::Result<()> {
     result
 }
 
+/// Starts a new native companion on a blocking thread, replacing one that
+/// stopped or whose session task failed.
 #[cfg(target_os = "macos")]
 async fn restart_companion(
     path: std::path::PathBuf,
@@ -146,6 +175,9 @@ async fn restart_companion(
 }
 /// A locally configured signed companion keeps its installed bundle identity.
 /// Remote action bodies cannot select this path; the supervising user owns it.
+///
+/// Reads `INFRATERNAL_DESKTOP_COMPANION`. Returns `None` when it is unset, the
+/// validated path when it is good, and an error when it is set but unsafe.
 #[cfg(target_os = "macos")]
 fn configured_companion() -> std::io::Result<Option<std::path::PathBuf>> {
     std::env::var_os("INFRATERNAL_DESKTOP_COMPANION")
@@ -154,6 +186,9 @@ fn configured_companion() -> std::io::Result<Option<std::path::PathBuf>> {
         .transpose()
 }
 
+/// Checks that `path` is the executable inside a companion app bundle and is
+/// safe to run: absolute, a regular file (not a symlink), owned by the current
+/// user, executable by its owner, and not writable by group or others.
 #[cfg(target_os = "macos")]
 fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
@@ -171,6 +206,8 @@ fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+/// Stand-in entry point where desktop capture cannot work: prints that it is
+/// unavailable (JSON with `--json`) and exits with status 2.
 #[cfg(not(target_os = "macos"))]
 fn main() {
     if std::env::args_os().any(|arg| arg == "--help" || arg == "-h") {

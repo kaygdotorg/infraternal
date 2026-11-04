@@ -12,6 +12,8 @@ use std::{
 
 /// A one-shot ceiling from child exit, never extended by reconnect or input.
 pub const MAX_RETENTION: Duration = Duration::from_secs(600);
+/// Exact size of an exit record file: a 4-byte little-endian length (13)
+/// followed by the 13-byte encoded `Exited` frame.
 const RECORD_SIZE: usize = 17;
 
 /// Save the existing frozen Exited frame before the socket disappears.

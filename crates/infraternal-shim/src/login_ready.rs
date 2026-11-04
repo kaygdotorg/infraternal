@@ -53,8 +53,16 @@ pub fn decode(bytes: &[u8]) -> io::Result<Ready> {
 /// Receive the original worker's process descriptor over the private launch socket.
 /// # Errors
 /// Refuses missing, truncated or extra descriptors and malformed records.
+#[cfg(target_os = "linux")]
 pub fn receive(peer: &impl std::os::fd::AsRawFd) -> io::Result<(Ready, std::fs::File)> {
     crate::pty::receive_login_ready(peer)
+}
+/// Darwin session launch is outside this slice, so it cannot accept worker identity records.
+/// # Errors
+/// Always reports unsupported while the Darwin session shim is compiled out.
+#[cfg(target_os = "macos")]
+pub fn receive(_peer: &impl std::os::fd::AsRawFd) -> io::Result<(Ready, std::fs::File)> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Identify child-local process pins without touching descriptors or files.
@@ -74,7 +82,7 @@ pub fn inherited_pin_descriptor(path: &std::path::Path) -> io::Result<Option<i32
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     //! Wire shape and malformed identity are checked independently of launch policy.
     use super::*;

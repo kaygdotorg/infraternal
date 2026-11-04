@@ -5,6 +5,10 @@ use std::io;
 /// A byte budget, not a row count: about 10,000 typical 200-column ASCII rows.
 /// Ghostty's page storage includes cell capacity and sparse style/grapheme data.
 const SCROLLBACK_BYTES: usize = 17 * 1024 * 1024;
+/// Second, lightweight parser that only watches whether the latest byte
+/// finished a sequence. `Terminal` uses it to know which bytes form an unfinished
+/// escape sequence at the end of the output, so a snapshot can carry that
+/// prefix and the live stream can continue it.
 #[derive(Default)]
 struct Observer {
     complete: bool,
@@ -33,12 +37,28 @@ impl vte::Perform for Observer {
 }
 // Geometry changes and lost state are separate recovery certificates; neither
 // permits raw reconstruction merely because the ring still has origin bytes.
+/// How trustworthy the terminal's rebuilt state is. Geometry changes and lost
+/// state are separate certificates; neither lets raw output be replayed
+/// exactly, even if the ring still holds every byte since the start.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Recovery {
+    /// State follows every byte seen so far at an unchanged size.
     Exact,
+    /// Earlier output was produced at another size, so replaying it raw would not
+    /// reproduce earlier reflow.
     GeometryChanged,
+    /// State was rebuilt without the original bytes (a reset plus whatever came
+    /// later) and cannot be called faithful.
     Approximate,
 }
+/// One session's terminal screen state, used to answer snapshot requests and
+/// to keep the screen in step with the output ring.
+///
+/// Feed every PTY output byte to `process` and every size change to `resize`.
+/// `snapshot` then yields bytes that reproduce the screen plus any unfinished
+/// escape sequence (the "carry"), so the stream can carry on from a snapshot.
+/// Memory is bounded: scrollback is a byte budget, and the carry never exceeds
+/// the frame limit.
 pub struct Terminal {
     engine: Engine,
     #[cfg(feature = "process-per-user")]
@@ -82,6 +102,8 @@ impl Terminal {
         terminal
     }
 
+    /// Creates a terminal of `cols` x `rows` with the default 17 MiB scrollback
+    /// budget. Fails if the terminal engine cannot allocate it.
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
         Self::build(
             cols,
@@ -138,6 +160,9 @@ impl Terminal {
         terminal.host_floor = floor_reservation;
         Ok(terminal)
     }
+    /// Shared constructor behind `new` and the shared-host variants. `history` is the
+    /// scrollback byte budget; `bounded` selects the shared-host engine that limits
+    /// control-string length and charges `host` and `floor_reservation`.
     fn build(
         cols: u16,
         rows: u16,
@@ -182,6 +207,12 @@ impl Terminal {
             recovery_pending: false,
         })
     }
+    /// Feeds a chunk of PTY output to the terminal.
+    ///
+    /// On a shared host, over-long control strings are cut down first (see
+    /// `terminal_limits`) so their payload never becomes printable text or commands.
+    /// Never fails: if memory for the engine cannot be had, output is skipped until
+    /// a later chunk can retry, so the PTY and ring keep moving.
     pub fn process(&mut self, bytes: &[u8]) {
         #[cfg(feature = "process-per-user")]
         if self.bounded {
@@ -210,6 +241,11 @@ impl Terminal {
         }
         self.process_unbounded(bytes);
     }
+    /// Applies bytes to the engine and keeps the unfinished-sequence carry up to
+    /// date. If a rebuild is pending, retries it first and skips the bytes when it
+    /// still fails. Carry bytes are limited (to `STRING_BYTES` on a shared host,
+    /// otherwise just under one frame); a longer sequence sets an overflow flag
+    /// so the carry is withheld.
     fn process_unbounded(&mut self, bytes: &[u8]) {
         // A persistent allocation refusal must not stop PTY/ring progress.
         // Retry fresh ownership on later output; until then, touch no handle.
@@ -267,6 +303,8 @@ impl Terminal {
             }
         }
     }
+    /// Changes the size to `cols` x `rows` without a ring to recover from. See
+    /// `resize_with_ring`.
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         self.resize_with_ring(cols, rows, None)
     }
@@ -290,6 +328,10 @@ impl Terminal {
         self.dimensions = (cols, rows);
         Ok(())
     }
+    /// Rebuilds the terminal from scratch at its last good size. When the ring
+    /// still holds all output from the start and the geometry never changed, the
+    /// original bytes are replayed and the state stays exact. Otherwise the screen
+    /// is reset and marked approximate. On error `self` is left untouched.
     fn recover(&mut self, ring: Option<&Ring>) -> io::Result<()> {
         #[cfg(feature = "process-per-user")]
         let mut restored = Self::build(
@@ -324,10 +366,14 @@ impl Terminal {
         *self = restored;
         Ok(())
     }
+    /// Memory figures from the engine; the third value is true when the engine had
+    /// to give up exact state because of its budget.
     #[cfg(feature = "process-per-user")]
     pub(super) fn memory(&self) -> (usize, usize, bool) {
         self.engine.memory()
     }
+    /// Breakdown of memory held: ordinary allocations, page allocations, resident
+    /// pages, encoded bytes and carry capacity, in that order.
     #[cfg(feature = "process-per-user")]
     pub(super) fn ownership(&self) -> io::Result<(usize, usize, usize, usize, usize)> {
         let (ordinary, pages, _) = self.engine.allocation_classes();
@@ -357,6 +403,8 @@ impl Terminal {
     // string and must be reproduced before the next live byte arrives.
     // Snapshot uses one interface across feature builds; the default has no
     // extra carry state beyond its existing parser prefix.
+    /// Bytes to append after the carry in a snapshot: an ESC left over from an
+    /// over-long control string on a shared host, otherwise nothing.
     #[cfg_attr(not(feature = "process-per-user"), allow(clippy::unused_self))]
     fn carry_suffix(&self) -> &'static [u8] {
         #[cfg(feature = "process-per-user")]
@@ -390,6 +438,13 @@ impl Terminal {
         out.extend_from_slice(extra);
         out
     }
+    /// Serializes the screen, then the unfinished escape sequence, so a client can
+    /// resume the live stream from it.
+    ///
+    /// Fails with `Unsupported` when `requires_approximation` is true, and with an
+    /// error when the unfinished sequence or the repaint cannot fit in one frame
+    /// (`MAX_FRAME`). It retries with progressively less scrollback tail (halving,
+    /// at most nine attempts); the visible screens themselves are mandatory.
     pub fn snapshot(&self) -> io::Result<Vec<u8>> {
         if self.requires_approximation() {
             return Err(io::Error::new(

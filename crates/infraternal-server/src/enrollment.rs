@@ -37,6 +37,19 @@ pub struct CertificateRecord {
 /// A secret capability intentionally lacking Debug, Display and serialization.
 pub struct JoinToken(String);
 
+/// Immutable facts for a receipt derived from one approved device-code request.
+pub(crate) struct ApprovedJoinReceipt<'a> {
+    pub(crate) owner: &'a str,
+    pub(crate) host: Uuid,
+    pub(crate) mode: Mode,
+    pub(crate) issued_at: i64,
+    pub(crate) expires_at: i64,
+    pub(crate) now: i64,
+    pub(crate) session_hash: &'a str,
+    pub(crate) invitation_secret: &'a str,
+    pub(crate) expected_key_digest: &'a [u8; 32],
+}
+
 impl JoinToken {
     /// Explicitly access the secret for a private stdin/descriptor handoff.
     #[must_use]
@@ -288,6 +301,67 @@ impl EnrollmentStore {
             return Err(EnrollmentError::Denied);
         }
         Ok(JoinToken(secret))
+    }
+
+    /// Publish the receipt for one passkey-approved request without extending or replacing it.
+    /// The derived invitation secret is stable across poll retries and bound to the approved key.
+    pub(crate) async fn issue_approved_receipt_in(
+        &self,
+        receipt: ApprovedJoinReceipt<'_>,
+        connection: &mut sqlx::SqliteConnection,
+    ) -> Result<JoinToken, EnrollmentError> {
+        let ApprovedJoinReceipt {
+            owner,
+            host,
+            mode,
+            issued_at,
+            expires_at,
+            now,
+            session_hash,
+            invitation_secret,
+            expected_key_digest,
+        } = receipt;
+        if invitation_secret.len() != 43 || issued_at < 0 || issued_at > now || expires_at <= now {
+            return Err(EnrollmentError::Denied);
+        }
+        let decoded = URL_SAFE_NO_PAD
+            .decode(invitation_secret)
+            .map_err(|_| EnrollmentError::Denied)?;
+        if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != invitation_secret {
+            return Err(EnrollmentError::Denied);
+        }
+        let digest = Sha256::digest(invitation_secret.as_bytes());
+        // On conflict, only the exact still-live request may read its original receipt.
+        // Existing expiry and consumption state are never refreshed by a poll retry.
+        let changed = sqlx::query(
+            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at, expected_key_digest) \
+             SELECT h.id, h.mode, ?, ?, ?, ? FROM remote_hosts h \
+             WHERE h.id = ? AND h.owner_id = ? AND h.mode = ? AND h.revoked_at IS NULL \
+             AND EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+                 WHERE s.token_hash=? AND s.user_id=h.owner_id AND s.unlocked=1 \
+                 AND s.expires>? AND u.owner=1) \
+             ON CONFLICT(host_id) DO UPDATE SET digest=excluded.digest \
+                 WHERE remote_join_tokens.digest=excluded.digest \
+                 AND remote_join_tokens.issued_at=excluded.issued_at \
+                 AND remote_join_tokens.expires_at=excluded.expires_at \
+                 AND remote_join_tokens.expected_key_digest=excluded.expected_key_digest",
+        )
+        .bind(digest.as_slice())
+        .bind(issued_at)
+        .bind(expires_at)
+        .bind(expected_key_digest.as_slice())
+        .bind(host.as_bytes().as_slice())
+        .bind(owner)
+        .bind(mode.as_str())
+        .bind(session_hash)
+        .bind(now)
+        .execute(connection)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(EnrollmentError::Denied);
+        }
+        Ok(JoinToken(invitation_secret.to_owned()))
     }
 
     /// Atomically consume an invitation and retain its signed public identity.

@@ -13,6 +13,7 @@ import type { HostEntry } from "../sessions/adapter";
 import type { StreamConnection } from "./adapter";
 import { parseInventory, sameInventory, type Inventory } from "./inventory";
 
+/** What is known about one machine: its last good inventory (kept through a failed poll), the status of the latest ask, and when it was answered. */
 export interface MachineState {
   machine: HostEntry;
   /** The last good answer. Kept through a failed poll, so the list does not vanish when the machine blinks. */
@@ -32,6 +33,12 @@ const ASK_TIMEOUT_MS = 8000;
 /** Whether a host can stream: a Mac the person reaches through an agent (the embedded host is the server itself). */
 export const canStream = (host: HostEntry): boolean => host.id !== "embedded" && host.os === "apple" && host.online !== false;
 
+/**
+ * The cache of every streamable machine's window list. `refresh` asks one machine (concurrent asks share one call); `refreshAll(maxAge)` asks
+ * those whose copy is older than `maxAge`; `poll()` keeps asking every `POLL_MS` while something is looking and returns the stop function.
+ * `onChange` fires only when the visible answer changed, not on every poll. A machine that does not answer within 8 seconds is marked
+ * `error`, and its last good inventory is kept. Call `dispose` to stop polling and forget everything.
+ */
 export class Machines {
   private readonly states = new Map<string, MachineState>();
   private readonly listeners = new Set<() => void>();
@@ -44,6 +51,7 @@ export class Machines {
   /** The hosts that can stream, in the canvas's own order. */
   streamable(): HostEntry[] { return this.hosts().filter(canStream); }
 
+  /** The cached state of machine `id`, or `undefined` if it was never asked. */
   state(id: string): MachineState | undefined { return this.states.get(id); }
 
   onChange(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }

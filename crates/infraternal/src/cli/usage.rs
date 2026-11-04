@@ -40,6 +40,8 @@ fn argument_name(raw: &str) -> Option<String> {
     (is_option || is_placeholder).then(|| first.to_owned())
 }
 
+/// Collects the strings clap attached to a parse error under `kind`, whatever shape it used
+/// (one string, several, or styled text). Returns an empty list when the error has none.
 fn context_strings(error: &clap::Error, kind: ContextKind) -> Vec<String> {
     match error.get(kind) {
         Some(ContextValue::String(value)) => vec![value.clone()],
@@ -51,6 +53,9 @@ fn context_strings(error: &clap::Error, kind: ContextKind) -> Vec<String> {
 }
 
 /// The envelope for `--help` or `--version` under `--json`: the text a person would have read.
+///
+/// `args` are the typed words without the program name; they pick which command's help this is.
+/// The result is `Ready`, with the text under `help` (or `version` for `--version`).
 #[must_use]
 pub fn help_result(root: &Command, args: &[String], error: &clap::Error) -> CommandResult<Value> {
     let path = command_path(root, args);
@@ -78,6 +83,10 @@ pub fn help_result(root: &Command, args: &[String], error: &clap::Error) -> Comm
 }
 
 /// Build the envelope for a parse failure of the typed `args` (without the program name).
+///
+/// The result is `Refused` and carries a plain sentence naming the command and the argument at
+/// fault (never the value typed), the argument under the `usage` key, and a next step that
+/// points at `<command> --help`.
 #[must_use]
 pub fn result(root: &Command, args: &[String], error: &clap::Error) -> CommandResult<Value> {
     let path = command_path(root, args);

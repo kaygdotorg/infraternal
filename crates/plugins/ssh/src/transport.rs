@@ -1,4 +1,11 @@
 //! Keeps bootstrap independent of an SSH engine; only the system OpenSSH adapter is selected by the brief.
+//!
+//! Defines the traits and value types that host provisioning uses to talk to a
+//! host: [`SshTransport`] opens an authenticated [`SshSession`] and can confirm a
+//! first-contact host key; a session runs commands with a chosen [`Input`] and
+//! returns a [`CommandOutput`]. Credentials travel as [`Secret`] values, which
+//! cannot be printed, are not serialized for output and are zeroed when dropped.
+//! Secrets and binary payloads go through stdin, never argv.
 
 use crate::{
     auth_order::{AuthProvider, Authentication},
@@ -17,11 +24,13 @@ impl Secret {
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
+    /// Borrow the secret bytes. Callers must not log, print or copy them into argv or the environment.
     #[must_use]
     pub fn expose(&self) -> &[u8] {
         &self.0
     }
 }
+/// Overwrites the bytes with zeros before the memory is released.
 impl Drop for Secret {
     fn drop(&mut self) {
         use zeroize::Zeroize;
@@ -31,31 +40,45 @@ impl Drop for Secret {
 
 /// Network-only attempts exclude local identities; later material is requested lazily per attempt.
 pub enum Credentials {
+    /// Authenticate with the mesh network identity only: no key, password or agent.
     Network,
+    /// Try methods in order; the provider hands out each credential only when asked.
     Automatic(Arc<dyn AuthProvider>),
+    /// A private key, with its passphrase if it is encrypted.
     PrivateKey {
+        /// The private key file contents.
         key: Secret,
+        /// Passphrase for `key`.
         passphrase: Option<Secret>,
     },
+    /// An account password.
     Password(Secret),
 }
 
 /// Command input is private stdin; neither binary bytes nor secrets enter argv.
 /// A public payload source has a known frame length before private invitation input.
 pub enum PayloadInput<'a> {
+    /// The payload is already in memory.
     Bytes(&'a [u8]),
+    /// Stream the payload from a file (`path`) whose length `size` in bytes is known up front.
     File { path: &'a Path, size: u64 },
 }
 
 /// Public transfer choices never convey authority or diagnostic text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferChoice {
+    /// Send the file uncompressed.
     Raw,
+    /// Send it gzip-compressed.
     Gzip,
+    /// Send it zstd-compressed.
     Zstd,
+    /// Do not send anything; the host already has the exact payload.
     Reuse,
 }
 impl TransferChoice {
+    /// Read the host's reply line, such as `TRANSFER gzip\n`. The match is
+    /// exact (including the newline); anything else returns `None`.
     #[must_use]
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         match bytes {
@@ -78,12 +101,17 @@ impl TransferChoice {
     }
 }
 
+/// What is written to a command's stdin.
 pub enum Input<'a> {
     /// A fixed public receipt selects a source before any invitation byte is sent.
     Negotiated {
+        /// The uncompressed payload.
         raw: PayloadInput<'a>,
+        /// Gzip-compressed form, if available.
         gzip: Option<&'a [u8]>,
+        /// Zstd-compressed form, if available.
         zstd: Option<&'a [u8]>,
+        /// Private invitation sent after the payload; never copied or concatenated.
         invitation: &'a [u8],
         /// Wait for verified staging before exposing private stdin to its reader.
         payload_ack: bool,
@@ -93,28 +121,39 @@ pub enum Input<'a> {
     },
     /// Public payload first, then private invitation; never concatenate/copy secrets.
     PayloadAndInvitation {
+        /// The public payload, sent first.
         payload: PayloadInput<'a>,
+        /// The private invitation, sent after it.
         invitation: &'a [u8],
     },
     /// Release a fixed commit command only after authenticated terminal proof.
     Signal(tokio::sync::oneshot::Receiver<()>),
+    /// No input; stdin is closed.
     Empty,
+    /// These bytes, then end of input.
     Bytes(&'a [u8]),
+    /// This file's contents, then end of input.
     File(&'a Path),
 }
 
 /// Outputs are bounded and never automatically logged or serialized.
 pub struct CommandOutput {
+    /// What the command wrote to stdout. Stderr is not kept.
     pub stdout: Vec<u8>,
 }
 
 /// The exact live owner capability is rechecked immediately before public pin publication.
 pub trait ConfirmationAuthority: Send + Sync {
+    /// Succeeds only if the person confirming still holds the right to do so now.
+    /// An error aborts the confirmation and nothing is pinned.
     fn authorize(&self) -> Operation<'_, ()>;
 }
 
 /// Every implementation must enforce strict host keys and cancellation-safe child cleanup.
 pub trait SshTransport: Send + Sync {
+    /// Connect and authenticate to `destination`, returning a live session.
+    /// An unknown host key fails closed; it is never trusted silently.
+    /// `mesh` is public evidence about the destination's network identity.
     fn open(
         &self,
         destination: Destination,
@@ -122,6 +161,9 @@ pub trait SshTransport: Send + Sync {
         mesh: MeshEvidence,
     ) -> Operation<'_, Arc<dyn SshSession>>;
     /// Confirm only a previously observed first-contact key; default engines refuse.
+    ///
+    /// The two strings are the challenge id from the failed `open` and the
+    /// fingerprint the person approved.
     fn confirm_host_key<'a>(
         &'a self,
         _: Destination,
@@ -175,6 +217,7 @@ pub trait SshSession: Send + Sync {
     fn authentication(&self) -> Option<Authentication> {
         None
     }
+    /// Run `script` on the host with `input` on stdin and return its bounded stdout.
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput>;
     /// Run one command under a caller-derived deadline when the adapter supports it.
     /// Adapters without per-command deadlines retain their configured bound.
@@ -189,6 +232,10 @@ pub trait SshSession: Send + Sync {
 }
 
 /// Shell quote trusted generated values; destinations are passed as SSH arguments separately.
+///
+/// The result is wrapped in single quotes, with each `'` and `\` replaced by a
+/// double-quoted segment so the text survives several levels of shell
+/// parsing unchanged and nothing in it is expanded.
 #[must_use]
 pub fn shell_quote(value: &str) -> String {
     // The supported login shells interpret backslashes differently inside
@@ -208,6 +255,7 @@ pub fn shell_quote(value: &str) -> String {
 }
 
 // Input-only private material decoding; no Debug/Display or output serialization.
+/// Reads a JSON string of at most 24576 bytes; longer input is refused.
 impl<'de> serde::Deserialize<'de> for Secret {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Input;

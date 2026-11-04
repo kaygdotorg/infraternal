@@ -145,10 +145,14 @@ struct Owner {
 impl Owner {
     fn node(&mut self) -> Result<&mut Node, PluginError> {
         if self.node.is_none() {
-            self.node = Some(
-                Node::restore(self.path.as_deref().ok_or(PluginError::Rejected)?)
-                    .map_err(|_| PluginError::Rejected)?,
-            );
+            let path = self.path.as_deref().ok_or(PluginError::Rejected)?;
+            #[cfg(target_os = "linux")]
+            let node = Node::restore(path);
+            // The Mac registry restores eagerly with its enrolment (`from_node`);
+            // only Linux reaches this lazy path, through `new`.
+            #[cfg(target_os = "macos")]
+            let node = Node::restore(path, None);
+            self.node = Some(node.map_err(|_| PluginError::Rejected)?);
         }
         self.node.as_mut().ok_or(PluginError::Rejected)
     }
@@ -158,15 +162,24 @@ pub struct MeshNodePlugin {
     changed: AtomicBool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
+    proxy_containment: Option<ProxyContainmentProbe>,
     // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
     dump: Option<(std::time::Instant, Counters)>,
 }
+#[cfg(target_os = "linux")]
 type Counters =
     std::collections::BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
+#[cfg(target_os = "macos")]
+type Counters =
+    std::collections::BTreeMap<crate::policy::model::PublicKey, crate::macos_node::Counters>;
 type ConfigurationObserver = Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
+/// How this node contains its proxy processes, as `(kind, detail)` for `mesh.status` [#281, D336].
+pub type ProxyContainmentProbe = Arc<dyn Fn() -> (&'static str, String) + Send + Sync>;
 /// Synchronous return path used by the proxy controller after Traefik applies a route snapshot.
 ///
 /// The flag says whether Traefik confirmed this state (see [`Node::set_proxy_ingress`]).
+/// Linux only: proxy ingress opens ports in the nftables firewall, which Darwin nodes do not have yet.
+#[cfg(target_os = "linux")]
 pub type ProxyIngressObserver = Arc<
     dyn Fn(infraternal_mesh::proxy_ports::MeshProxyIngress, bool) -> std::io::Result<()>
         + Send
@@ -234,6 +247,23 @@ impl MeshNodePlugin {
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
+            proxy_containment: None,
+            dump: None,
+        }
+    }
+
+    /// Bind an already restored node so Darwin resumes its utun before dialing the coordinator.
+    #[must_use]
+    pub fn from_node(node: Node) -> Self {
+        Self {
+            owner: Arc::new(Mutex::new(Owner {
+                node: Some(node),
+                path: None,
+            })),
+            changed: AtomicBool::new(false),
+            server_link: infraternal_plugin_api::server_path::ServerLink::default(),
+            configuration_observer: None,
+            proxy_containment: None,
             dump: None,
         }
     }
@@ -247,7 +277,16 @@ impl MeshNodePlugin {
         self
     }
 
+    /// Report the proxy's process containment in `mesh.status`, because the proxy's Mesh
+    /// listener is part of what this node exposes to its peers.
+    #[must_use]
+    pub fn with_proxy_containment(mut self, probe: ProxyContainmentProbe) -> Self {
+        self.proxy_containment = Some(probe);
+        self
+    }
+
     /// Give the proxy controller a way to update this node's firewall after route application.
+    #[cfg(target_os = "linux")]
     #[must_use]
     pub fn proxy_ingress_observer(&self) -> ProxyIngressObserver {
         let owner = Arc::clone(&self.owner);
@@ -272,6 +311,7 @@ impl Default for MeshNodePlugin {
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
+            proxy_containment: None,
             dump: None,
         }
     }
@@ -463,7 +503,12 @@ impl AgentPlugin for MeshNodePlugin {
                     json!({"state":"Off","version":null})
                 }
                 Request::Status => {
-                    json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link})
+                    let mut status = json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link});
+                    if let Some(probe) = &self.proxy_containment {
+                        let (kind, detail) = probe();
+                        status["proxy_containment"] = json!({"kind": kind, "detail": detail});
+                    }
+                    status
                 }
                 Request::Configure(chunk) => {
                     let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
@@ -485,8 +530,7 @@ impl AgentPlugin for MeshNodePlugin {
                             .is_some_and(|(at, _)| at.elapsed() < DUMP_REUSE);
                     if !reuse {
                         let counters = if node.active() {
-                            crate::wireguard::Device::counters()
-                                .map_err(|_| PluginError::Rejected)?
+                            read_counters(node)?
                         } else {
                             Counters::default()
                         };
@@ -513,6 +557,16 @@ impl AgentPlugin for MeshNodePlugin {
         }
         serde_json::to_vec(&result).map_err(|_| PluginError::Rejected)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_counters(_node: &mut Node) -> Result<Counters, PluginError> {
+    crate::wireguard::Device::counters().map_err(|_| PluginError::Rejected)
+}
+
+#[cfg(target_os = "macos")]
+fn read_counters(node: &mut Node) -> Result<Counters, PluginError> {
+    node.counters().map_err(|_| PluginError::Rejected)
 }
 
 impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
@@ -566,7 +620,7 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
@@ -805,7 +859,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod identity_upgrade_tests {
     #[test]
     fn ordinary_identity_reply_retains_the_legacy_shape() {
@@ -837,7 +891,7 @@ mod identity_upgrade_tests {
 }
 
 /// `mesh.peers` paging and its cost (#236).
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod peer_page_tests {
     #![allow(clippy::expect_used)]
     use super::{Counters, Cursor, peer_page};

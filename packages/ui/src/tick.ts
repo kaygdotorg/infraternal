@@ -16,12 +16,25 @@ import { Spring } from "./spring";
 /** The checkmark geometry, shared with copy feedback so every tick is the same tick. */
 export const TICK_PATH = "M5 14L8.5 17.5L19 6.5";
 
+/** Tuning constants for the animation: box swell, label opacity when done, strike-through delay and end point (see the formulas above). */
 const SWELL = 0.35, DONE_OPACITY = 0.42, STRIKE_LAG = 0.12, RULE_END = 0.84;
+/** Limits a value to 0 to 1. */
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
+/**
+ * A tick control. `set(checked, instant)` moves it, animated unless `instant` is true (use that for keyboard actions
+ * and first paint); `checked` is the current target state.
+ */
 export interface Tick { set(checked: boolean, instant?: boolean): void; readonly checked: boolean }
 
-/** Builds the box (fill + tick) inside `host` and returns its controller. */
+/**
+ * Builds the box (fill + tick) inside `host` and returns its controller.
+ * @param checked the initial state, shown without animation
+ * @param extras.word an element (the label) that fades when checked
+ * @param extras.rule an element drawn as a strike-through over the label
+ * @example
+ * const t = tick(document.querySelector(".box")!); t.set(true);
+ */
 export function tick(host: HTMLElement, checked = false, extras: { word?: HTMLElement; rule?: HTMLElement } = {}): Tick {
   host.classList.add("tick");
   host.innerHTML = `<span class="tick-fill"></span><svg viewBox="0 0 24 24" aria-hidden="true"><path pathLength="1" d="${TICK_PATH}"/></svg>`;
@@ -42,7 +55,11 @@ export function tick(host: HTMLElement, checked = false, extras: { word?: HTMLEl
   };
 }
 
-/** Upgrades a native checkbox (kept for forms and accessibility) into a spring check. */
+/**
+ * Upgrades a native checkbox (kept for forms and accessibility) into a spring check.
+ * The input stays in the DOM but visually hidden, and a tick box is inserted after it. A pointer toggle animates;
+ * a keyboard toggle is instant. Returns the same controller as {@link tick}.
+ */
 export function springCheckbox(input: HTMLInputElement): Tick {
   const box = document.createElement("span");
   input.after(box);

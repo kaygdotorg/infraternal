@@ -2,6 +2,7 @@
 
 use super::*;
 use axum::{body::Body, http::Request};
+use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD as FINGERPRINT_B64};
 use http_body_util::BodyExt;
 use openssl::{
     hash::MessageDigest,
@@ -210,6 +211,294 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
         StatusCode::BAD_REQUEST
     );
     assert_bound_join_response(&app, &store, &key, join).await;
+}
+
+async fn issue_bound_machine_invitation(
+    app: &Router,
+    token: &str,
+    host_id: Uuid,
+    key: &PKey<Private>,
+) -> JoinInvitation {
+    let response = request(
+        app,
+        "/remote/invitations",
+        json!({
+            "host_id": host_id,
+            "mode": "rootful",
+            "execution_uid": 0,
+            "expected_key_digest": openssl::sha::sha256(&key.raw_public_key().unwrap()),
+        }),
+        Some(token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn machine_invitation_spends_capability_after_key_mismatch() {
+    let (_, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+        material.issuer().clone(),
+    ));
+    let endpoint = EnrollmentEndpoint {
+        ca_der: material.issuer().to_der().unwrap(),
+        endpoint: "127.0.0.1:4443".parse().unwrap(),
+        server_name: "localhost".into(),
+    };
+    let app = router(auth, pool.clone(), source.clone(), endpoint);
+    let host_id = Uuid::new_v4();
+    let approved_key = PKey::generate_ed25519().unwrap();
+    let invitation = issue_bound_machine_invitation(&app, &token, host_id, &approved_key).await;
+    assert_eq!(invitation.host_id, host_id);
+    assert_eq!(invitation.mode, Mode::Rootful);
+    assert_eq!(invitation.execution_uid, 0);
+
+    let other_key = PKey::generate_ed25519().unwrap();
+    let response = request(
+        &app,
+        "/remote/join",
+        json!({
+            "host_id": host_id,
+            "mode": "rootful",
+            "token": invitation.token,
+            "csr_der": B64.encode(csr(&other_key)),
+        }),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "a copied invitation cannot enroll a different key"
+    );
+    let consumed: bool = sqlx::query_scalar(
+        "SELECT consumed_at IS NOT NULL FROM remote_join_tokens WHERE host_id=?",
+    )
+    .bind(host_id.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(consumed, "a definitive key mismatch spends the invitation");
+    let api_keys: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(api_keys, 0, "machine approval does not mint an API key");
+}
+
+#[tokio::test]
+async fn machine_invitation_redeems_with_the_approved_public_key() {
+    let (_, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+        material.issuer().clone(),
+    ));
+    let endpoint = EnrollmentEndpoint {
+        ca_der: material.issuer().to_der().unwrap(),
+        endpoint: "127.0.0.1:4443".parse().unwrap(),
+        server_name: "localhost".into(),
+    };
+    let app = router(auth, pool.clone(), source.clone(), endpoint);
+    let host_id = Uuid::new_v4();
+    let approved_key = PKey::generate_ed25519().unwrap();
+    let invitation = issue_bound_machine_invitation(&app, &token, host_id, &approved_key).await;
+    source.unlock_from(&Administrator(material)).unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "/remote/join",
+            json!({
+                "host_id": host_id,
+                "mode": "rootful",
+                "token": invitation.token,
+                "csr_der": B64.encode(csr(&approved_key)),
+            }),
+            None,
+            "",
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+        "the approved machine key can redeem its invitation"
+    );
+    let api_keys: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(api_keys, 0, "machine approval does not mint an API key");
+}
+
+#[tokio::test]
+// This test keeps approval, replay, and key-binding assertions in one real HTTP lifecycle.
+#[allow(clippy::too_many_lines)]
+async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() {
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let now = super::now().unwrap() + 1;
+    auth.set_test_http_time(now);
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+        material.issuer().clone(),
+    ));
+    let endpoint = EnrollmentEndpoint {
+        ca_der: material.issuer().to_der().unwrap(),
+        endpoint: "127.0.0.1:4443".parse().unwrap(),
+        server_name: "localhost".into(),
+    };
+    let issuer = InvitationIssuer::new(
+        auth.clone(),
+        pool.clone(),
+        store.clone(),
+        EnrollmentService {
+            source: source.clone(),
+            endpoint: endpoint.clone(),
+        },
+    );
+    let app = crate::auth::router_with_invitation_issuer(auth.clone(), Some(issuer)).merge(
+        router_with_store(auth.clone(), pool.clone(), store.clone(), source, endpoint),
+    );
+    let host_id = Uuid::new_v4();
+    let key = PKey::generate_ed25519().unwrap();
+    let key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
+    let key_fingerprint = format!("SHA256:{}", FINGERPRINT_B64.encode(key_digest));
+    let start = request(
+        &app,
+        "/auth/device-start",
+        json!({
+            "kind": "join_machine",
+            "device": "laptop",
+            "request": {
+                "host_id": host_id,
+                "hostname": "laptop",
+                "mode": "system",
+                "execution_uid": 0,
+                "key_fingerprint": key_fingerprint.clone(),
+            },
+        }),
+        None,
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(start.status(), StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&start.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(approval["expires_in"], 600);
+
+    let inspected = request(
+        &app,
+        "/auth/device-inspect",
+        json!({"code":approval["user_code"]}),
+        Some(&token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    let inspected: Value =
+        serde_json::from_slice(&inspected.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        inspected,
+        json!({
+            "kind": "join_machine",
+            "hostname": "laptop",
+            "mode": "system",
+            "key_fingerprint": key_fingerprint,
+        })
+    );
+    // The bound passkey ceremony itself is covered by the auth tests; this
+    // test is about what redemption does after an approval.
+    auth.approve_without_passkey_for_tests(&token, approval["user_code"].as_str().unwrap(), now)
+        .await
+        .unwrap();
+
+    let redeem = json!({"token":approval["poll_token"]});
+    let response = request(&app, "/auth/device-redeem", redeem.clone(), None, "").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: JoinInvitation =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(first.host_id, host_id);
+    assert_eq!(first.mode, Mode::Rootful);
+    assert_eq!(first.execution_uid, 0);
+    let receipt_expiry: i64 =
+        sqlx::query_scalar("SELECT expires_at FROM remote_join_tokens WHERE host_id=?")
+            .bind(host_id.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(receipt_expiry, now + 600);
+    let stored_key_digest: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT expected_key_digest FROM remote_join_tokens WHERE host_id=?")
+            .bind(host_id.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_key_digest.as_deref(), Some(key_digest.as_slice()));
+
+    auth.set_test_http_time(now + 123);
+    let response = request(&app, "/auth/device-redeem", redeem, None, "").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let retry: JoinInvitation =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        retry.token, first.token,
+        "the ten-minute receipt is exact-key stable"
+    );
+    let retry_expiry: i64 =
+        sqlx::query_scalar("SELECT expires_at FROM remote_join_tokens WHERE host_id=?")
+            .bind(host_id.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        retry_expiry, receipt_expiry,
+        "poll retry cannot extend the receipt"
+    );
+    let api_keys: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(api_keys, 0, "machine approval does not mint an API key");
+
+    auth.set_test_http_time(now + 601);
+    assert_eq!(
+        request(
+            &app,
+            "/auth/device-redeem",
+            json!({"token":approval["poll_token"]}),
+            None,
+            ""
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED,
+        "the exact-key receipt expires with the original approval"
+    );
 }
 
 #[tokio::test]

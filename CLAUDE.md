@@ -14,8 +14,9 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 
 ## Rules
 
-- License: AGPL-3.0-only. Every crate and package states it, except `ee/`
-  (commercial). Dependencies must be compatible with AGPL.
+- License: AGPL-3.0-only. Every crate and package states it. Commercial code
+  lives in its own repository, `kayg/infraternal-enterprise` (D277), never in
+  this one. Dependencies must be compatible with AGPL.
 - Vocabulary: "infraternal agent" means the host daemon. "AI agent" means
   Claude, Codex and similar tools. Never use "agent" alone in user-facing text
   when it could mean either.
@@ -51,6 +52,10 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 - A commit message says what changed and why: the problem, the choice made,
   and the alternatives you rejected. Put the decision number or the issue
   (`#N`) in it. A reader must understand the commit without this session.
+- Every piece of code ships with documentation-style comments (D345): each
+  module, type, function and exported symbol says in plain, friendly words
+  what it is for and how to use it, plus non-obvious invariants and reasons.
+  Comments never count as lines of code. Docs will be generated from them.
 - Code comments are the documentation. Each module starts with a doc comment
   that explains its role. Non-obvious code explains its invariants and the
   reason for it, not only what it does.

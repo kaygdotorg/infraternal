@@ -11,11 +11,16 @@
  */
 import { contrastRatio, oklabToHex } from "./color";
 
+/** How many colours the palette has; {@link entityColorIndex} returns 0 to this number minus one. */
 export const ENTITY_COLORS = 12;
+/** Chip text on the pale fills of the dark scheme. */
 const DARK_TEXT = "#17171a";
+/** Chip text on the deeper fills of the light scheme. */
 const LIGHT_TEXT = "#ffffff";
+/** The WCAG AA contrast ratio for normal text; every fill must reach it against its scheme's text colour. */
 const MIN_CONTRAST = 4.5;
 
+/** An OKLCH colour (lightness, chroma, hue in degrees) as hex. */
 const oklch = (l: number, c: number, hueDegrees: number): string => {
   const h = (hueDegrees * Math.PI) / 180;
   return oklabToHex([l, c * Math.cos(h), c * Math.sin(h)]);

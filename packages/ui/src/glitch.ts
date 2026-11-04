@@ -10,8 +10,18 @@
  *   paint every frame for nothing (DECISIONS 81).
  * - Reduced motion: no glitch at all, just the text.
  */
+/**
+ * Options for {@link glitchText}.
+ * - `speed`: seconds scale of the animation (default 0.5); the two copies run at 3x and 2x of it.
+ * - `settleAfter`: milliseconds until the effect stops and the text is clean; the effect runs until `destroy()` when omitted.
+ * - `colors`: the two offset copy colours (any CSS colour), default white and grey.
+ */
 export interface GlitchOptions { speed?: number; settleAfter?: number; colors?: [string, string] }
 
+/**
+ * Makes `el` show `text` with the glitch effect. Needs the `.glitch` styles from `packages/ui/styles.css`.
+ * Under reduced motion it shows clean text at once. Returns a handle: `destroy()` settles the text and cancels the timer.
+ */
 export function glitchText(el: HTMLElement, text: string, o: GlitchOptions = {}): { destroy(): void } {
   const speed = o.speed ?? 0.5;
   const [a, b] = o.colors ?? ["rgb(255 255 255 / 0.55)", "rgb(150 150 160 / 0.6)"];
