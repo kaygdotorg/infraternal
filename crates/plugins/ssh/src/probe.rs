@@ -60,7 +60,7 @@ pub struct Check {
 impl Check {
     /// Parse one exact versioned record, rejecting banners/suffixes instead of guessing.
     ///
-    /// Only Linux on x86_64 or aarch64 with systemd is supported. A non-systemd
+    /// Only Linux on `x86_64` or `aarch64` with systemd is supported. A non-systemd
     /// host gets a specific "unsupported" message; every other deviation gets the
     /// generic invalid-check message. The user id must be written canonically
     /// (no leading zeros or plus sign).
