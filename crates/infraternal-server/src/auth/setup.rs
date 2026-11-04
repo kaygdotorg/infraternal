@@ -1,6 +1,8 @@
 //! One-time owner setup capability and initial enrollment [24,26,53].
 use super::{Auth, Authority, DAY, Error, Result, Uuid, Value, hash, random};
 
+/// Stand-in digest compared when no setup capability is stored, so a missing
+/// capability costs the same constant-time comparison as a wrong one.
 const DUMMY_HASH: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 #[allow(clippy::missing_errors_doc)]
@@ -100,6 +102,9 @@ impl Auth {
     }
 }
 
+/// Accepts usernames of 2 to 32 bytes made only of lowercase ASCII letters,
+/// digits, `_` and `-`. Anything else, including uppercase, is rejected so one
+/// name cannot be spelled two ways.
 pub(super) fn valid_username(username: &str) -> bool {
     (2..=32).contains(&username.len())
         && username.bytes().all(|byte| {

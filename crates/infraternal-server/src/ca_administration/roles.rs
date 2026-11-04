@@ -103,6 +103,12 @@ impl CaAdministration {
         .await
         .map_err(|_| CaError)?
     }
+    /// Applies the change in one writer transaction: re-checks the owner's session and
+    /// membership generation, that the proof was for a registered owner passkey made
+    /// within the last 300 seconds, and that the role really changes. A revoke must
+    /// leave another active administrator who still holds a copy for the current
+    /// issuer. The generation goes up by one, the old encrypted copy file is removed,
+    /// and the role row is written. A no-op change commits nothing.
     async fn membership_publish(
         &self,
         entry: PendingUnlock,

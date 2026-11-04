@@ -47,6 +47,12 @@ pub async fn require_live(
     require_session(tx, token_hash, now, false).await
 }
 
+/// Shared check behind [`require_current`] and [`require_live`]. It first writes to
+/// the administrator row so the transaction holds SQLite's writer lock, then
+/// reads the membership in the same transaction. The row is returned only when
+/// the role is active, the session is unlocked and unexpired, its passkey still
+/// belongs to the user, and (when `fresh` is true) the passkey was used in the
+/// last 300 seconds. Every failure collapses into the same opaque `CaError`.
 async fn require_session(
     tx: &mut Transaction<'_, Sqlite>,
     token_hash: &str,
