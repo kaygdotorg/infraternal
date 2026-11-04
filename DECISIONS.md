@@ -3952,3 +3952,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - The documentation will be generated from these comments. Its
        structure is decided later, reusing the existing docs; the comments
        are written now.
+346. **GotaTun becomes the default once it is stable (owner, 2026-11-04;
+     amends D332's switch rule):** "if gotatun is stable, we should switch
+     our app to it already because we will find more bugs that way".
+     - The switch no longer waits for throughput and loss-aware p99 parity
+       with kernel WireGuard. It waits for stability: the integration
+       branch passes its final security re-review and `scripts/verify
+       fast`; there are 0 lost probes in the R4b hold; and a 1 h soak shows
+       flat memory and no reorder or retransmit regressions against the
+       control.
+     - Then GotaTun is the default engine on Linux, and the kernel path
+       stays an explicit opt-out per node.
+     - The D332 measurements continue unchanged as the performance goal.
+       Throughput and p99 against the kernel are still reported, and still
+       drive the latency work.
