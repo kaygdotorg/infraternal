@@ -31,10 +31,11 @@ test("the newest toast is in front, older ones are behind it, and only three are
 });
 
 test("an error is never removed or hidden by later info toasts", () => {
-  withFakeDom((parent) => {
+  withFakeDom((parent, clock) => {
     const toast = mount(parent);
     const error = toast.show({ message: "can't open a shell", tone: "error", duration: 0 });
     for (const n of [1, 2, 3, 4, 5]) toast.show({ message: `info ${n}`, duration: 0 });
+    clock.flushFrames();
     const stack = parent.children[0]!;
     expect(stack.children[0]!.dataset.hidden).toBe("false");
     expect(stack.children.filter((card) => card.dataset.hidden === "false")).toHaveLength(3);
@@ -138,11 +139,12 @@ test("a touch swipe down dismisses a toast, a short drag springs back, and a res
 });
 
 test("the dismiss control and an action each close only their own toast", () => {
-  withFakeDom((parent) => {
+  withFakeDom((parent, clock) => {
     const toast = mount(parent);
     const ran: string[] = [];
     toast.show({ message: "a", duration: 0, dismissible: true, action: { label: "Go", onSelect: () => ran.push("go") } });
     toast.show({ message: "b", duration: 0, dismissible: true });
+    clock.flushFrames();
     const [a, b] = parent.children[0]!.children as [FakeElement, FakeElement];
     b.children.find((child) => child.className.includes("ui-toast-close"))!.click();
     expect(b.dataset.open).toBe("false");

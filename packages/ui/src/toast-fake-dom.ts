@@ -47,7 +47,7 @@ export class FakeElement {
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = undefined; }
   /** Dispatches an event on this element, then bubbles it to its ancestors. */
   fire(name: string, event: Record<string, unknown> = {}): void {
-    const full = { target: this, ...event };
+    const full = { target: this, type: name, ...event };
     for (let node: FakeElement | undefined = this; node; node = node.parent) for (const run of node.listeners.get(name) ?? []) run({ ...full, currentTarget: node });
   }
   click() { this.fire("click"); }

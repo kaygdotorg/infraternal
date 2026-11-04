@@ -276,6 +276,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const sidebar = get<HTMLElement>("#sidebar");
   const sidebarToggle = get<HTMLButtonElement>("#sidebar-toggle");
   const toast = mountToast(stage);
+  // Preview builds only (removed from the product by the define): lets browser specs raise toasts without a real flow.
+  if (__CLUSTERS_PREVIEW__) (window as unknown as { __toast?: ToastController }).__toast = toast;
   // Whether any floating thing is open (the test-double badge steps aside for it). A flag from script:
   // `:has()` selectors on the screen or the body would re-evaluate on every change below them.
   const OVERLAYS = ".sidebar:not([hidden]), .palette:not([hidden]), .ui-toast:not([hidden]), .ah-float, .canvas-popover, .ui-settings, .ui-shortcuts";

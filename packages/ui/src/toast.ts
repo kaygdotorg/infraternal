@@ -130,10 +130,10 @@ interface Item {
   timer: number;
   exitTimer: number;
   leaving: boolean;
-  selectAction?: ToastAction["onSelect"];
-  selectSecondaryAction?: ToastAction["onSelect"];
+  selectAction?: ToastAction["onSelect"] | undefined;
+  selectSecondaryAction?: ToastAction["onSelect"] | undefined;
   iconRuns: readonly ToastIconAction[];
-  closeHandler?: () => void;
+  closeHandler?: (() => void) | undefined;
 }
 
 /** Mounts the one shared toast surface into `parent`, usually the active app shell. */

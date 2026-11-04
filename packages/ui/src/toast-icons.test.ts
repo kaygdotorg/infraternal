@@ -4,7 +4,7 @@ import { mountToast } from "./toast";
 import { withFakeDom } from "./toast-fake-dom";
 
 test("icon choices carry a tooltip and an accessible name, run once, and help keeps the notice open", () => {
-  withFakeDom((parent) => {
+  withFakeDom((parent, clock) => {
     const toast = mountToast(parent as unknown as HTMLElement);
     const ran: string[] = [];
     toast.show({ message: "Question?", duration: 0, iconActions: [
@@ -12,6 +12,7 @@ test("icon choices carry a tooltip and an accessible name, run once, and help ke
       { label: "No", icon: "<path/>", onSelect: () => { ran.push("no"); } },
       { label: "About", icon: "<path/>", keepOpen: true, onSelect: () => { ran.push("about"); } },
     ] });
+    clock.flushFrames();
     const card = parent.children[0]!.children[0]!;
     const icons = card.children.find((child) => child.className === "ui-toast-icons")!;
     expect(icons.hidden).toBe(false);
