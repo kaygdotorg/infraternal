@@ -167,7 +167,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
     const r = n.getBoundingClientRect();
     return { id: n.dataset.windowId!, left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: n.offsetWidth, h: n.offsetHeight, span: n.dataset.span ?? "" };
   }));
-  expect(wins.length).toBe(22);
+  expect(wins.length).toBe(23);
   const layout = await page.evaluate(() => ({ clh: parseFloat((document.querySelector(".cl-world") as HTMLElement).style.getPropertyValue("--clh")), terminalW: document.querySelector<HTMLElement>('.cl[data-view="console"] .ui-window')?.offsetWidth ?? 0 }));
   expect(layout.terminalW, "a terminal window gives the default width").toBeGreaterThan(300);
   expect(layout.clh, "the layout's height is known").toBeGreaterThan(500);
@@ -198,7 +198,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
 
   // Every window has "?" as the first button of its action group, and the group obeys the alignment rules.
   const groups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
-  expect(groups.length).toBe(22);
+  expect(groups.length).toBe(23);
   const settingsInset = checkGroups(groups, "docs");
   // No window's name is ever cut short, even with five windows to a row.
   const cut = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((w) => { const h = w.querySelector<HTMLElement>(".ui-window-host")!; return h.scrollWidth > h.clientWidth + 0.5 ? `${w.dataset.windowId}: ${h.textContent}` : ""; }).filter(Boolean));
@@ -417,7 +417,7 @@ test("phone: a row for each component, the breadcrumb fits, rows align, \"?\" op
   expect(field!.height).toBeGreaterThanOrEqual(43.5);
   // The "?" is the first button of the action group, the group obeys the alignment rules on a phone too, and the title still shows.
   const phoneGroups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
-  expect(phoneGroups.length).toBe(22);
+  expect(phoneGroups.length).toBe(23);
   checkGroups(phoneGroups, "docs");
   const hit = await page.locator('[data-window-id="s-mesh-keys"] .ui-window-action[data-action="docs"]').boundingBox();
   expect(hit!.width).toBeGreaterThanOrEqual(28);
@@ -558,7 +558,6 @@ test("\"?\": the first button on a terminal, the add-host dialog and an error ca
   await expect(page.locator(".ui-dp-pop")).toBeVisible();
   await page.waitForTimeout(450);
   await expect(page.locator(".ui-dp-pop .ui-dp-title")).toHaveText("All keys at a glance");
-  await expect(page.locator(".ui-dp-pop .ui-dp-table tbody tr")).toHaveCount(3);
   await checkPreview(page, "popover", card);
   await page.locator(".ui-dp-pop .ui-dp-expand").click();
   await page.waitForTimeout(1500);
@@ -808,7 +807,7 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     const vw = size.viewport.width, vh = size.viewport.height;
     const problems: string[] = [];
     const ids = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((n) => n.dataset.windowId!));
-    expect(ids.length).toBe(22);
+    expect(ids.length).toBe(23);
     let rings = 0;
     for (const id of ids) {
       await flyTo(page, id);

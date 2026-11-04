@@ -23,6 +23,7 @@
  */
 import type { Ctx } from "../context";
 import { el } from "../dom";
+import { nearestStop } from "../layout/stops";
 import { ICON, lineIcon, viewIcon } from "../views/icons";
 
 export interface Crumbs { paint(): void; dispose(): void }
@@ -88,21 +89,25 @@ export function createCrumbs(cx: Ctx): Crumbs {
     return row ? { rows, row, group: row.groups.find((g) => g.windowId === windowId)! } : undefined;
   };
   /**
-   * The Settings window in view: the one whose centre is nearest the centre of the screen. A view with rows of windows moves under the
-   * camera (a step to the next row, a scroll sideways) without anything being clicked, so the focused window cannot say where the
-   * person is. The drawn boxes decide, so a window narrowed by a drag or moved by the camera needs no bookkeeping.
+   * The Settings window in view. A view with rows of windows moves under the camera (a step to the next row, a scroll sideways)
+   * without anything being clicked, so the focused window cannot say where the person is. The COLUMN is the camera's stop (the
+   * window the canvas lock framed: a window at the first or last stop sits at the screen's edge, not its middle, so the middle
+   * of the screen would name its neighbour), and the ROW is the band drawn nearest the middle of the screen (the group scrolls
+   * inside the view). Drawn boxes decide the row, so a window moved or narrowed by a drag needs no bookkeeping.
    */
   const inView = (): string | undefined => {
-    const wins = views.get("settings")?.wins;
-    if (!wins) return undefined;
-    const screen = stage.getBoundingClientRect();
-    const mx = screen.left + screen.width / 2, my = screen.top + screen.height / 2;
+    const rec = views.get("settings");
+    if (!rec) return undefined;
+    const st = cx.nav.stopsFor(rec);
+    const column = rec.view.cols[st.owners[nearestStop(st, camera.cam.cx)] ?? -1];
+    if (!column) return undefined;
+    const screen = stage.getBoundingClientRect(), my = screen.top + screen.height / 2;
     let best: string | undefined, bestDistance = Infinity;
-    for (const [id, rec] of wins) {
-      const box = rec.card.root.getBoundingClientRect();
-      if (box.width === 0) continue;
-      const distance = Math.hypot(box.left + box.width / 2 - mx, box.top + box.height / 2 - my);
-      if (distance < bestDistance) { best = id; bestDistance = distance; }
+    for (const win of column.wins) {
+      const box = rec.wins.get(win.id)?.card.root.getBoundingClientRect();
+      if (!box || box.width === 0) continue;
+      const distance = Math.abs(box.top + box.height / 2 - my);
+      if (distance < bestDistance) { best = win.id; bestDistance = distance; }
     }
     return best;
   };
