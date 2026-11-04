@@ -945,12 +945,15 @@ pub(crate) fn prepare_proxy_child(
     working_directory: &File,
     descriptors: &[(i32, i32)],
     identity: Option<(u32, u32)>,
+    cgroup_procs: Option<&File>,
 ) -> io::Result<()> {
     let working_directory = working_directory.as_raw_fd();
+    let cgroup_procs = cgroup_procs.map(AsRawFd::as_raw_fd);
     let descriptors = descriptors.to_vec();
     if descriptors
         .iter()
         .any(|(source, target)| *source < 3 || *target < 64 || source == target)
+        || cgroup_procs.is_some_and(|procs| procs < 3)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -961,10 +964,19 @@ pub(crate) fn prepare_proxy_child(
     let owner = unistd::getpid();
     // SAFETY: the established shim hooks set signal defaults, close the trusted
     // control descriptor, and bind the process to its owner before this hook.
-    // This hook only remaps pre-opened descriptors, enters the pinned working
-    // directory, drops credentials and re-arms the parent-death signal before exec.
+    // This hook only joins the pre-opened cgroup, remaps pre-opened descriptors,
+    // enters the pinned working directory, drops credentials and re-arms the
+    // parent-death signal before exec. Every call is a plain syscall on stack data.
     unsafe {
         command.pre_exec(move || {
+            // First, while still privileged and before any remap can reuse its number: "0"
+            // moves the calling process. A failed join aborts the spawn rather than run the
+            // child uncontained [#281, D336].
+            if let Some(procs) = cgroup_procs
+                && nix::libc::write(procs, b"0".as_ptr().cast(), 1) != 1
+            {
+                return Err(io::Error::last_os_error());
+            }
             for (source, target) in &descriptors {
                 if nix::libc::dup2(*source, *target) == -1 {
                     return Err(io::Error::last_os_error());
