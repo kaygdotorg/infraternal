@@ -21,8 +21,6 @@
  */
 import type { DocsLink } from "../docs/docs-adapter";
 
-export type { SettingDef } from "./definitions.on-demand";
-
 export interface FactGroupDef { title: string; rows: Array<{ key: string; value: string }> }
 
 /** A key a person made (a command-line or AI-tool key): what is shown, and Revoke. */
