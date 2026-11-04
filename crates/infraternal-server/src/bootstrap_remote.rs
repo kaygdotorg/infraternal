@@ -650,7 +650,11 @@ impl Backend for RemoteBackend {
                 ours: owner == authority.owner && !revoked && matches,
                 stored,
                 reported: request.enrolled.map(|enrolled| enrolled.digest),
-                connected: self.hosts.installed(request.host).await,
+                // Connected means its agent is online now (Console's own signal).
+                // `installed` only says the host was admitted, and stays true
+                // after its agent stops; a dead install would then be "finished"
+                // and left stopped (#305).
+                connected: self.hosts.online(request.host).await,
                 ca_ready: self.issuer.ready(),
             })
         })

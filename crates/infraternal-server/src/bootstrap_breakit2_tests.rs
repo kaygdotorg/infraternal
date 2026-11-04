@@ -1866,7 +1866,7 @@ async fn replace_keeps_a_terminal(
     // as connected; wait until it does not, so it is Replace.
     let gone = Instant::now();
     tokio::time::timeout(Duration::from_secs(120), async {
-        while f.backend.hosts.installed(host).await {
+        while f.backend.hosts.online(host).await {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     })
