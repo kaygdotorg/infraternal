@@ -210,8 +210,8 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
         if (lock.enrolled_with !== undefined) return {
           title: lock.enrolled_with ? `${name} is enrolled with another server` : `${name} has an install this server did not enroll`,
           happened: lock.live
-            ? `Its infraternal agent is running and may be connected to ${lock.enrolled_with || "the server that enrolled it"} now. Joining it here disconnects it from that server; remove it there afterwards. It joins this server as a new host with a new key, and its old infraternal agent is set aside, not deleted.`
-            : `${lock.enrolled_with ? `It belongs to ${lock.enrolled_with}. ` : ""}Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.`,
+            ? `Its infraternal agent is running and may be connected to ${lock.enrolled_with || "the server that enrolled it"} now. Joining it here disconnects it from that server; remove it there afterwards. It joins this server as a new host with a new key, and its old infraternal agent and key are deleted once it has joined.`
+            : `${lock.enrolled_with ? `It belongs to ${lock.enrolled_with}. ` : ""}Join it to this server as a new host with a new key. Its old infraternal agent is stopped, and deleted with its key once the machine has joined.`,
           next: sessionsLine(lock),
           fix: "replace-stuck-install",
           tone: "info",

@@ -530,7 +530,7 @@ impl Failure {
                     " Its infraternal agent is running and may be connected to {other} now. Joining it here disconnects it from {other}; remove it there afterwards."
                 );
             }
-            text.push_str(" Joining it to this server makes it a new host with a new key; its old infraternal agent is set aside, not deleted.");
+            text.push_str(" Joining it to this server makes it a new host with a new key; its old infraternal agent and key are deleted once it has joined.");
         } else {
             text.push_str(" Replace the stuck install to continue.");
         }

@@ -376,13 +376,28 @@ no_redirect() {
   fi
  done
 }
+# $base is a committed install (no journal, no acquisition, no receipt), and
+# the setup guard is held. A crash between a commit and its retire_set_aside
+# leaves a superseded install, or a replaced journal beside the running agent.
+# Delete them now: no set-aside copy is kept (D337). A replaced journal beside
+# a stopped agent is a Replace whose restore never ran; it is kept, for Put it
+# back (report_set_aside).
+discard_committed_set_aside() {
+ for set_aside in "$base".bootstrap-superseded-* "$base".bootstrap-replaced-*; do
+  [ -d "$set_aside" ] && [ ! -L "$set_aside" ] && [ -O "$set_aside" ] || continue
+  case "$set_aside" in
+   "$base".bootstrap-replaced-*) $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || continue;;
+  esac
+  rm -rf "$set_aside"
+ done
+}
 # An earlier Replace or Re-enroll set the stuck install aside and could not
 # put it back: its restore never ran (a dropped session) or failed. Name it,
 # so the person can put it back instead of installing beside it (#305 P2-1).
-# A Re-enroll that committed keeps its old install beside the new $base, and
-# a Replace that committed removed its journal, so neither is reported. Nor
-# is a replaced journal while the unit is active: a newer install is serving,
-# and putting the stale journal into it would make a healthy host stuck again
+# A commit deletes both kinds, and so does discard_committed_set_aside for one
+# a crash left beside a committed install, so neither is reported. Nor is a
+# replaced journal while the unit is active: a newer install is serving, and
+# putting the stale journal into it would make a healthy host stuck again
 # (#305 P2-3).
 # Fails (1) when there is nothing to report.
 report_set_aside() {
@@ -451,6 +466,7 @@ inspect_previous() {
    [ "$(stat -c '%s' "$base/.bootstrap-owner")" = 33 ] || refuse owner
    hex_id "$(cat "$base/.bootstrap-owner")"
   fi
+  if [ -e "$base" ] || [ -L "$base" ]; then discard_committed_set_aside; fi
   report_set_aside && return
   printf 'INFRATERNAL_SETUP_CLEAR\n'
   return
@@ -803,5 +819,5 @@ finish_stuck_upgrade() {
  [ -f "$stage/activating" ] || exit 0
  retire_setup_lease
  rm -rf "$stage"
- retire_replaced
+ retire_set_aside
 }

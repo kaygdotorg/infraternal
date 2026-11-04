@@ -1078,7 +1078,7 @@ fi
 stage="$base/.bootstrap-lock"
 retire_setup_lease
 rm -rf "$stage"
-retire_replaced"#);
+retire_set_aside"#);
         let result = if let Some(timeout) = timeout {
             self.session
                 .run_with_timeout(&script, Input::Empty, timeout)
@@ -1124,7 +1124,7 @@ setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 retire_setup_lease
 rm -rf "$stage"
-retire_replaced"#
+retire_set_aside"#
             ),
         );
         let result = if let Some(timeout) = timeout {

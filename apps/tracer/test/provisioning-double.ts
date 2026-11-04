@@ -283,7 +283,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
             target.resume = () => walk(1);
             emit(target, "check", "This host has leftovers from an earlier setup", {
               kind: "stale_previous_attempt",
-              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. This machine is enrolled with another server, monitor01.example. Its infraternal agent is running and may be connected to monitor01.example now. Joining it here disconnects it from monitor01.example; remove it there afterwards. Joining it to this server makes it a new host with a new key; its old infraternal agent is set aside, not deleted. 1 open terminal session will end.",
+              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. This machine is enrolled with another server, monitor01.example. Its infraternal agent is running and may be connected to monitor01.example now. Joining it here disconnects it from monitor01.example; remove it there afterwards. Joining it to this server makes it a new host with a new key; its old infraternal agent and key are deleted once it has joined. 1 open terminal session will end.",
               log_tail: [],
               setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false, attempt: "d831a93a", sessions: 1, enrolled_with: "monitor01.example", live: true },
             }, undefined, {
@@ -315,13 +315,13 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
             target.resume = () => walk(1);
             emit(target, "check", "This host has leftovers from an earlier setup", {
               kind: "stale_previous_attempt",
-              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. This machine is enrolled with another server, monitor01.example. Joining it to this server makes it a new host with a new key; its old infraternal agent is set aside, not deleted. 1 open terminal session will end.",
+              message: "The failed setup on build-node left a lease last held by setup attempt d831a93a (process 254) since 2026-11-02T04:05:06Z. This machine is enrolled with another server, monitor01.example. Joining it to this server makes it a new host with a new key; its old infraternal agent and key are deleted once it has joined. 1 open terminal session will end.",
               log_tail: [],
               setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false, attempt: "d831a93a", sessions: 1, enrolled_with: "monitor01.example" },
             }, undefined, {
               challenge: target.challenge,
               mode: target.mode,
-              findings: ["Enrolled with another server: monitor01.example", "It joins this server as a new host; the old install is set aside, not deleted", "1 open terminal session will end"],
+              findings: ["Enrolled with another server: monitor01.example", "It joins this server as a new host; the old install and its key are deleted once it has joined", "1 open terminal session will end"],
             });
             return;
           }

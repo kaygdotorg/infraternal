@@ -54,7 +54,7 @@ pub enum StuckInstall {
     Finish,
     /// Another server enrolled this machine. After explicit confirmation it
     /// joins this server as a new host with a new key; its old install is
-    /// set aside, not deleted (D335).
+    /// set aside until the new enrollment commits, then deleted (D335, D337).
     Reenroll,
 }
 

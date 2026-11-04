@@ -555,7 +555,7 @@ impl PreviousAttempt {
             )
         } else {
             Cow::Borrowed(
-                "It joins this server as a new host; the old install is set aside, not deleted",
+                "It joins this server as a new host; the old install and its key are deleted once it has joined",
             )
         };
         leftovers
@@ -915,7 +915,7 @@ mod tests {
             message.contains("enrolled with another server, old.example."),
             "{message}"
         );
-        assert!(message.contains("set aside, not deleted"), "{message}");
+        assert!(message.contains("deleted once it has joined"), "{message}");
         assert!(
             message.ends_with("2 open terminal sessions will end."),
             "{message}"

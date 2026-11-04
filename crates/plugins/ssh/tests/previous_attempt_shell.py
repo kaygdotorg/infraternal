@@ -771,7 +771,7 @@ replace_stuck_install "$observed"
         replaced = Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}')
         self.assertFalse(stage.exists())
         self.assertEqual((replaced / 'previous-binary').read_bytes(), b'old agent', 'rollback copies survive replacement (#305 P2-3)')
-        commit = self.run_shell('\nretire_replaced\n')
+        commit = self.run_shell('\nretire_set_aside\n')
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(replaced.exists(), 'the next commit retires them')
 
@@ -1050,15 +1050,33 @@ supersede_stuck_install "{expected}"
             f'INFRATERNAL_SETUP_SET_ASIDE replaced {HOST} {TRANSACTION} {socket.gethostname()} yes no\n',
         )
 
-    def test_an_old_install_kept_beside_a_new_host_is_not_reported(self):
-        self.make_upgrade_fixture()
-        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
-        # The re-enrollment committed: a new install owns the setup directory.
+    def new_host_in_place(self):
+        """The re-enrollment committed: a new install owns the setup directory."""
         self.base.mkdir(mode=0o700)
         owner = self.base / '.bootstrap-owner'
         owner.write_text('5' * 32 + '\n')
         owner.chmod(0o600)
+
+    def test_a_commit_deletes_the_old_install_and_its_key(self):
+        # D337: no set-aside copy is kept once the machine has joined.
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
+        self.assertTrue((aside / 'state/identity.json').exists(), 'kept until the commit, for rollback')
+        self.new_host_in_place()
+        commit = self.run_shell('\nretire_set_aside\n')
+        self.assertEqual(commit.returncode, 0, commit.stderr.decode())
+        self.assertFalse(aside.exists())
+
+    def test_check_deletes_an_old_install_a_crash_left_beside_a_new_host(self):
+        # D337: a crash between the commit and its delete leaves the old
+        # install beside the new one; the next Check deletes it.
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
+        self.new_host_in_place()
         self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+        self.assertFalse(aside.exists(), 'the old install and its key are gone')
 
     def test_several_set_aside_installs_are_refused_by_name(self):
         self.make_upgrade_fixture()
@@ -1136,17 +1154,18 @@ supersede_stuck_install "{expected}"
 
     def test_a_replaced_journal_beside_an_active_agent_is_never_offered_or_put_back(self):
         # #305 P2-3: something newer is serving (a commit that predates
-        # retire_replaced, or a manual start). Check stays CLEAR and the
+        # retire_set_aside, or a manual start). Check stays CLEAR and the
         # restore refuses rather than make a healthy host stuck again.
         stage, _ = self.make_upgrade_fixture()
         self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
         replaced = Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}')
         self.manager_active.touch()
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
         restore = self.run_shell(f'\nrestore_replaced_install {TRANSACTION}\n')
         self.assertEqual(restore.returncode, 72, restore.stderr.decode())
         self.assertTrue(replaced.exists())
         self.assertFalse(stage.exists(), 'the stale journal is not planted into the live install')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+        self.assertFalse(replaced.exists(), 'and Check deletes it: no set-aside copy is kept (D337)')
 
     def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
         stage, _ = self.make_upgrade_fixture()

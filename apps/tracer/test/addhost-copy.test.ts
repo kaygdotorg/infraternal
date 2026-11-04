@@ -83,12 +83,12 @@ test("a machine enrolled with another server asks to join as a new host (D335)",
   } as unknown as FailureDetail;
   expect(guideFor("code", failure)).toMatchObject({
     title: "code is enrolled with another server",
-    happened: "It belongs to monitor01.example. Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.",
+    happened: "It belongs to monitor01.example. Join it to this server as a new host with a new key. Its old infraternal agent is stopped, and deleted with its key once the machine has joined.",
     next: "2 open terminal sessions will end.",
     fix: "replace-stuck-install",
   });
   const unnamed = { ...failure, setup_lock: { ...failure.setup_lock!, enrolled_with: "" } } as FailureDetail;
-  expect(guideFor("code", unnamed).happened).toBe("Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.");
+  expect(guideFor("code", unnamed).happened).toBe("Join it to this server as a new host with a new key. Its old infraternal agent is stopped, and deleted with its key once the machine has joined.");
 });
 
 test("another server's install running with open terminals is refused by name, with no action (D337)", () => {

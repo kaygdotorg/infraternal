@@ -118,7 +118,7 @@ for (const size of SIZES) {
 
       const failure = page.locator(".ah-page[data-page='failure']");
       await expect(page.getByRole("heading", { name: "foreign.lab is enrolled with another server" })).toBeVisible({ timeout: 30_000 });
-      await expect(failure.locator(".ah-lede")).toHaveText("It belongs to monitor01.example. Join it to this server as a new host with a new key. Its old infraternal agent is stopped and set aside, not deleted.");
+      await expect(failure.locator(".ah-lede")).toHaveText("It belongs to monitor01.example. Join it to this server as a new host with a new key. Its old infraternal agent is stopped, and deleted with its key once the machine has joined.");
       await expect(failure.locator(".ah-text")).toHaveText("1 open terminal session will end.");
       // Title, lede and the sessions line share one left edge (owner, 2026-11-01).
       const edges = await failure.evaluate((page) => [".ah-title", ".ah-lede", ".ah-text"].map((selector) => {
