@@ -80,12 +80,12 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         ),
     }
 }
-/// The TLS client for the removal routes: peer and hostname verification against public trust.
+/// The TLS client for the removal routes: the connector `sign-in` and the hosted actions use,
+/// so all of them trust the host's public CA bundle even when the linked OpenSSL's default paths
+/// hold no roots (a vendored build names its build prefix). TLS 1.3, peer and hostname
+/// verification, HTTP/1.1 ALPN.
 fn removal_tls_connector() -> io::Result<openssl::ssl::SslConnector> {
-    let mut tls = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())
-        .map_err(|_| denied())?;
-    tls.set_default_verify_paths().map_err(|_| denied())?;
-    Ok(tls.build())
+    crate::remote::outbound_tls_connector(None).map_err(|_| denied())
 }
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
