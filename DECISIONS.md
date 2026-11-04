@@ -3992,3 +3992,30 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      work on those CPUs during the run, and run-to-run spread no worse than
      the unpinned harness's. Earlier unpinned numbers stay valid for
      history, but aren't compared directly with pinned ones.
+349. **`infra` alias, Themes approved, app-window icons, takeover proof
+     (owner, 2026-11-04):**
+     - **`infra` is a second name for the CLI:** "can we also alias the
+       infraternal CLI to infra? sounds neater. of course both should work -
+       infraternal is the actual command, infra is the symlink. don't know
+       if the symlink is the best way to do the alias (but we shoudn't
+       change the shell config)". The installers add `infra` next to
+       `infraternal` (a symlink or an equivalent link), never by editing
+       shell configuration. Help and messages read the same through either
+       name.
+     - **Themes round 4 (#323) is approved:** "approved, though you're
+       misisng the requested additional colour schemes and fonts." The
+       product build must include D329's additional colour schemes and
+       fonts.
+     - **App windows are never split** (amends D200 V7): "correct! but our
+       agent needs to get the correct icon from the app". The infraternal
+       agent reports each app's real icon with its window list, and the
+       canvas shows it.
+     - **Takeover with live terminals (D337):** "please built (b) our
+       current state is just waiting for b to be built so it can be
+       tested". The "prove the old server is mine" confirmation is built
+       next, so a machine whose old agent still runs terminals can be taken
+       over by its owner.
+     - **The app-window controls need mockups** with the buttons we will
+       actually use, and a test of the Mac side: "screenshots look pretty
+       good but i want mockups with the buttons we are going to use, has the
+       mac agent been tested?"
