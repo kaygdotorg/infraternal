@@ -38,6 +38,8 @@ mod sign_in;
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
 mod ssh_internal;
+#[cfg(all(feature = "remote", target_os = "linux"))]
+mod up;
 
 #[cfg(feature = "plugin-server")]
 mod install;
@@ -201,6 +203,7 @@ fn dispatch_action(
         CliHandler::Status => run_status(registry, json_output),
         CliHandler::Skill => run_skill(registry, matches, json_output),
         CliHandler::SignIn => run_sign_in(action, matches, json_output),
+        CliHandler::Up | CliHandler::UpSystem => dispatch_up_action(action, matches, json_output),
         CliHandler::ServerPlugin => {
             #[cfg(feature = "release")]
             {
@@ -289,6 +292,29 @@ fn dispatch_action(
     }
 }
 
+#[cfg(all(feature = "remote", target_os = "linux"))]
+fn dispatch_up_action(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
+    match action.cli_handler {
+        CliHandler::Up => run_up(matches, json_output),
+        CliHandler::UpSystem => run_up_system(matches, json_output),
+        _ => run_unavailable(action, json_output),
+    }
+}
+
+#[cfg(not(all(feature = "remote", target_os = "linux")))]
+fn dispatch_up_action(
+    action: &ActionDefinition,
+    matches: &ArgMatches,
+    json_output: bool,
+) -> ExitCode {
+    let _ = matches;
+    run_unavailable(action, json_output)
+}
+
 fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bool) -> ExitCode {
     #[cfg(feature = "remote")]
     {
@@ -307,6 +333,34 @@ fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bo
     {
         run_unavailable(_action, json_output)
     }
+}
+
+#[cfg(all(feature = "remote", target_os = "linux"))]
+fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
+    let Some(server) = matches.get_one::<String>("server") else {
+        return report_failure_as(
+            "up",
+            "A server address is required.",
+            "provide an HTTPS server origin, for example https://infra.example.org".to_owned(),
+            json_output,
+            Exit::Usage,
+        );
+    };
+    up::run(server, json_output)
+}
+
+#[cfg(all(feature = "remote", target_os = "linux"))]
+fn run_up_system(matches: &ArgMatches, json_output: bool) -> ExitCode {
+    let Some(server) = matches.get_one::<String>("server") else {
+        return report_failure_as(
+            "up",
+            "A server address is required.",
+            "provide an HTTPS server origin, for example https://infra.example.org".to_owned(),
+            json_output,
+            Exit::Usage,
+        );
+    };
+    up::run_helper(server, json_output)
 }
 
 #[cfg(all(feature = "ssh", feature = "remote"))]
@@ -1507,8 +1561,11 @@ mod failure_data_tests {
 
     #[test]
     fn unavailable_results_keep_registered_data_shapes() {
-        #[cfg(feature = "placeholders")]
-        assert_eq!(failure_data("up"), json!({"started": []}));
+        #[cfg(all(
+            feature = "placeholders",
+            not(all(feature = "remote", target_os = "linux"))
+        ))]
+        assert_eq!(failure_data("up"), json!({}));
         #[cfg(all(feature = "plugin-server", feature = "placeholders"))]
         assert_eq!(failure_data("server features"), json!({"features": []}));
     }

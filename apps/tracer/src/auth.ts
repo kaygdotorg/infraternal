@@ -64,9 +64,23 @@ export interface AuthStatus {
 
 /** The exact device identity and access requested by the CLI, before passkey approval. */
 export interface DeviceApprovalReview {
+  kind: "sign_in";
   device: string;
   scopes: string[];
 }
+
+/**
+ * A machine asking to join this server (`infraternal up`): its name, how it will run, and the fingerprint of the key it
+ * will enroll with. The approval is bound to exactly this key and mode on the server.
+ */
+export interface JoinApprovalReview {
+  kind: "join_machine";
+  hostname: string;
+  mode: "system" | "user";
+  keyFingerprint: string;
+}
+
+export type ApprovalReview = DeviceApprovalReview | JoinApprovalReview;
 
 const DEVICE_APPROVAL_SCOPES = ["hosts:read", "terminal:connect", "actions:dry-run"] as const;
 
@@ -75,48 +89,95 @@ export function isDeviceUserCode(code: string): boolean {
   return /^[A-Za-z0-9_-]{16}$/.test(code);
 }
 
-/** Reads the requested device and scopes; the browser session is required by the server. */
-export async function inspectDeviceApproval(code: string): Promise<DeviceApprovalReview> {
-  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
-  let review: { device?: unknown; scopes?: unknown };
+/**
+ * A name a person will read: non-empty, bounded, and free of control and format characters. Format characters (bidi
+ * overrides and isolates, zero-width characters) can make one name read as another (#263, J134 P3-3).
+ */
+function isShownName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128 && !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(value);
+}
+
+/** A machine's host name: exactly the ASCII set `infraternal up` sends and the server accepts. */
+function isHostName(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value);
+}
+
+/**
+ * Reads what the code asks for; the browser session is required by the server. The link form decides which answer is
+ * acceptable (`expected`): a sign-in link only opens a sign-in review and a join link only a join review, so a link
+ * cannot dress one request up as the other.
+ */
+export async function inspectDeviceApproval(code: string, expected: "sign_in"): Promise<DeviceApprovalReview>;
+export async function inspectDeviceApproval(code: string, expected: "join_machine"): Promise<JoinApprovalReview>;
+export async function inspectDeviceApproval(code: string, expected: ApprovalReview["kind"] = "sign_in"): Promise<ApprovalReview> {
+  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink(expected);
+  let review: { kind?: unknown; device?: unknown; scopes?: unknown; hostname?: unknown; mode?: unknown; key_fingerprint?: unknown };
   try {
     review = await post("device-inspect", { code });
   } catch (error: unknown) {
-    throw deviceApprovalError(error);
+    throw deviceApprovalError(error, expected);
+  }
+  if (expected === "join_machine") {
+    if (review?.kind === "join_machine"
+      && isHostName(review.hostname)
+      && (review.mode === "system" || review.mode === "user")
+      && typeof review.key_fingerprint === "string"
+      && FINGERPRINT.test(review.key_fingerprint)) {
+      return { kind: "join_machine", hostname: review.hostname, mode: review.mode, keyFingerprint: review.key_fingerprint };
+    }
+    throw new AuthError("The server's request to add this machine could not be reviewed. Check that the server is up to date, then run infraternal up again.");
   }
   const scopes = review?.scopes;
-  if (typeof review?.device !== "string"
-    || review.device.length === 0
-    || review.device.length > 128
-    || /[\u0000-\u001f\u007f]/.test(review.device)
+  if ((review?.kind !== undefined && review.kind !== "sign_in")
+    || !isShownName(review?.device)
     || !Array.isArray(scopes)
     || scopes.length !== DEVICE_APPROVAL_SCOPES.length
     || !DEVICE_APPROVAL_SCOPES.every((scope, index) => scopes[index] === scope)) {
     throw new AuthError("The server's sign-in request could not be reviewed. Check that the server is up to date, then ask for a new link.");
   }
-  return { device: review.device, scopes: [...DEVICE_APPROVAL_SCOPES] };
+  return { kind: "sign_in", device: review.device as string, scopes: [...DEVICE_APPROVAL_SCOPES] };
 }
 
-/** Approves only after the caller has completed a fresh passkey login from a user action. */
-export async function approveDeviceApproval(code: string): Promise<void> {
-  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink();
+/** `SHA256:` and the 43 unpadded base64 characters of a SHA-256 digest. */
+const FINGERPRINT = /^SHA256:[A-Za-z0-9+/]{43}$/;
+
+/**
+ * Approves from a user action with a passkey tap for this request alone: the server binds the ceremony to this code
+ * and this session, so no earlier login can approve a CLI sign-in or a machine join (#263, J134 P3-2, J145 P3-3).
+ */
+export async function approveDeviceApproval(code: string, kind: ApprovalReview["kind"] = "sign_in"): Promise<void> {
+  if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink(kind);
   try {
-    await post("device-approve", { code });
+    const start = await post<AuthStart>("device-approve-start", { code });
+    const assertion = await navigator.credentials.get({ publicKey: requestOptions(start.options.publicKey) });
+    if (!(assertion instanceof PublicKeyCredential)) throw new AuthError("Passkey approval was cancelled.");
+    await post("device-approve-finish", {
+      code,
+      ceremony: requiredString(start.ceremony, "approval ceremony"),
+      proof: credentialProof(assertion),
+    });
   } catch (error: unknown) {
-    throw deviceApprovalError(error);
+    throw deviceApprovalError(error, kind);
   }
 }
 
-function invalidDeviceApprovalLink(): AuthError {
-  return new AuthError("This sign-in link is incomplete. Ask the person who started it to run infraternal sign-in again.");
+function invalidDeviceApprovalLink(kind: ApprovalReview["kind"]): AuthError {
+  return new AuthError(kind === "join_machine"
+    ? "This link is incomplete. Run infraternal up again on the machine you want to add."
+    : "This sign-in link is incomplete. Ask the person who started it to run infraternal sign-in again.");
 }
 
-function deviceApprovalError(error: unknown): unknown {
+function deviceApprovalError(error: unknown, kind: ApprovalReview["kind"]): unknown {
+  const join = kind === "join_machine";
   if (error instanceof AuthError && error.status === 401) {
-    return new AuthError("This sign-in request expired or was already used. Ask the person who started it to run infraternal sign-in again.", 401);
+    return new AuthError(join
+      ? "This request to add a machine expired or was already used. Run infraternal up again on the machine."
+      : "This sign-in request expired or was already used. Ask the person who started it to run infraternal sign-in again.", 401);
   }
   if (error instanceof AuthError && error.status === 404) {
-    return new AuthError("This server does not support device sign-in yet. Upgrade the server, then ask for a new link.", 404);
+    return new AuthError(join
+      ? "This server cannot add machines this way yet. Upgrade the server, then run infraternal up again."
+      : "This server does not support device sign-in yet. Upgrade the server, then ask for a new link.", 404);
   }
   return error;
 }
