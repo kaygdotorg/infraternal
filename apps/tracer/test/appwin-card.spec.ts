@@ -25,10 +25,10 @@ const machineState = async (page: Page) => (await page.request.get("/__mock/appw
 const appWindow = (page: Page) => page.locator(".ui-window[data-kind='app']");
 const stage = (page: Page) => appWindow(page).locator(".aw-stage");
 
-async function openCanvas(page: Page, before: Record<string, unknown> = {}): Promise<void> {
+async function openCanvas(page: Page, before: Record<string, unknown> = {}, theme?: "latte" | "mocha"): Promise<void> {
   await page.request.post("/__mock/reset");
   await config(page, { reset: true, ...before });
-  await page.goto("/?mock=1&proto=product&fresh=1&bg=none&appwin=1");
+  await page.goto(`/?mock=1&proto=product&fresh=1&bg=none&appwin=1${theme ? `&theme=${theme}` : ""}`);
   await expect(page.locator(".ui-window").first()).toBeVisible();
   await page.keyboard.press(paletteShortcut);
   await expect(page.getByRole("option", { name: /Open shell on build-01/ })).toBeVisible({ timeout: 25_000 });
@@ -162,12 +162,17 @@ async function contrast(page: Page, clip: { x: number; y: number; width: number;
   }, png);
 }
 
-for (const scheme of ["light", "dark"] as const) {
-  test(`a dimmed picture keeps its contrast in ${scheme} mode, so it reads as paused and not as a grey slab`, async ({ browser, baseURL }) => {
-    const context = await browser.newContext({ baseURL: baseURL!, colorScheme: scheme, viewport: { width: 1440, height: 900 } });
+/**
+ * The product themes through its own scheme (the chosen theme, `data-scheme` on the root), not through the operating
+ * system's, so the dim is checked in all four pairings: a light theme on a dark system must still dim the light way.
+ */
+for (const [os, theme, scheme] of [["light", "latte", "light"], ["dark", "mocha", "dark"], ["dark", "latte", "light"], ["light", "mocha", "dark"]] as const) {
+  test(`a dimmed picture keeps its contrast in the ${scheme} theme on a ${os} system, so it reads as paused and not as a grey slab`, async ({ browser, baseURL }) => {
+    const context = await browser.newContext({ baseURL: baseURL!, colorScheme: os, viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     try {
-      await openCanvas(page);
+      await openCanvas(page, {}, theme);
+      await expect(page.locator(":root")).toHaveAttribute("data-scheme", scheme);
       await openApp(page);
       const box = (await stage(page).boundingBox())!;
       const clip = { x: box.x, y: box.y, width: box.width, height: box.height };

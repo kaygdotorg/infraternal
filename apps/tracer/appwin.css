@@ -20,7 +20,9 @@
    paused. So the picture is also drained of colour, and keeps more of its own contrast in light mode. */
 .aw-stage[data-picture="none"] .aw-surface { opacity: 0; }
 .aw-stage[data-picture="dim"] .aw-surface { opacity: var(--aw-dim-opacity, 0.5); filter: saturate(var(--aw-dim-saturate, 0.45)); }
-@media (prefers-color-scheme: light) { .aw-stage { --aw-dim-opacity: 0.72; --aw-dim-saturate: 0.35; } }
+/* Keyed on the product's own scheme (the chosen theme, written on the root), not on the operating system's: a light theme on a
+   dark system still has the light card behind the picture. */
+:root[data-scheme="light"] .aw-stage { --aw-dim-opacity: 0.72; --aw-dim-saturate: 0.35; }
 
 /* The state card is the "No access" card's twin: same position, same type, same rhythm (message, 24 px, action). */
 .aw-card { z-index: 1; transition: opacity 200ms var(--ease-out, ease-out); }
