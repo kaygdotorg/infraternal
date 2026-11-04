@@ -15,11 +15,12 @@
 //!   gets `FAILURE`.
 //! - A signature is made only for the exact certificate blob this socket
 //!   listed. Any other key blob gets `FAILURE`.
-//! - Forwarded requests are refused (D235). OpenSSH 8.9 and later announce
-//!   a forwarded agent connection with `session-bind@openssh.com` and its
-//!   forwarding flag set; after that, this connection never signs. Older
-//!   clients send no binding, which is why the `ssh_config.d` file also keeps
-//!   `ForwardAgent` away from this socket.
+//! - Forwarded requests are refused (D235). A connection signs only after it
+//!   declared itself with `session-bind@openssh.com` and the forwarding flag
+//!   clear; one that never declared itself, or declared forwarding, never
+//!   signs. OpenSSH 8.9 and later send that binding, so 8.9 is the minimum
+//!   client for mesh SSH (J181 M5 on #221). Without the default-deny an
+//!   older client's forwarded request would look like a direct one.
 //! - Who may connect is decided before this code runs, by the socket
 //!   owner's peer-credential check ([`may_ask`]).
 
@@ -46,12 +47,13 @@ pub struct PersonKey {
 }
 
 /// The asking-process check: may the local account `uid` use the key of the
-/// person who added this machine? (Owner L1 rule in the access-rules spec,
-/// D235 Q2f.) Only ordinary accounts may; root and system accounts never
-/// act as a person.
+/// person who added this machine? Only the account the machine was added
+/// with (`added_with`, J181 M3: the narrow reading of D235 Q2a until the
+/// owner says otherwise), and only when it is an ordinary account: root and
+/// system accounts never act as a person.
 #[must_use]
-pub fn may_ask(uid: u32, ordinary: OrdinaryUids) -> bool {
-    uid != 0 && ordinary.contains(uid)
+pub fn may_ask(uid: u32, added_with: Option<u32>, ordinary: OrdinaryUids) -> bool {
+    uid != 0 && ordinary.contains(uid) && added_with == Some(uid)
 }
 
 struct Fields<'a>(&'a [u8]);
@@ -89,7 +91,16 @@ fn put_string(out: &mut Vec<u8>, bytes: &[u8]) -> Option<()> {
 /// Per-connection protocol state.
 #[derive(Default)]
 pub struct Session {
+    /// A non-forwarding `session-bind` arrived.
+    bound: bool,
+    /// Any `session-bind` with the forwarding flag arrived; permanent.
     forwarded: bool,
+}
+
+impl Session {
+    fn may_sign(&self) -> bool {
+        self.bound && !self.forwarded
+    }
 }
 
 impl Session {
@@ -122,7 +133,7 @@ impl Session {
                     return None;
                 }
                 let signature = identity
-                    .filter(|_| !self.forwarded)
+                    .filter(|_| self.may_sign())
                     .filter(|identity| {
                         identity
                             .certificate
@@ -155,7 +166,9 @@ impl Session {
                         return None;
                     }
                     // Any nonzero flag counts as forwarding: when in doubt, refuse.
-                    if forwarding != 0 {
+                    if forwarding == 0 {
+                        self.bound = true;
+                    } else {
                         self.forwarded = true;
                     }
                     reply.push(SUCCESS);

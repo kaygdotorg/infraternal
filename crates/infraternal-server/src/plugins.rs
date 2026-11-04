@@ -1344,7 +1344,7 @@ pub(crate) async fn compiled_with_hosts(
         Arc::new(infraternal_plugin_remote::inventory::InventoryPlugin(
             Arc::new(crate::remote_inventory::Source {
                 pool: pool.clone(),
-                hosts,
+                hosts: hosts.clone(),
                 #[cfg(feature = "mesh")]
                 mesh: Some(mesh_service),
             }),
@@ -1356,6 +1356,12 @@ pub(crate) async fn compiled_with_hosts(
         ))),
         #[cfg(feature = "desktop")]
         Arc::new(infraternal_plugin_desktop::server::DesktopServer::new(50)),
+        #[cfg(all(feature = "ssh", feature = "mesh", feature = "remote"))]
+        Arc::new(crate::mesh_ssh::MeshSshPlugin::new(
+            pool.clone(),
+            hosts.ca_source(),
+            public_origin,
+        )),
     ];
     PluginRuntime::new(plugins, "server")
         .with_store(pool.clone())

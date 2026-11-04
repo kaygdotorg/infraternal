@@ -90,6 +90,14 @@ pub trait SessionRuntime: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stale;
 
+/// Why a snapshot was not installed right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotInstalled {
+    Stale,
+    /// An open is still registering under the current snapshot; retry.
+    Busy,
+}
+
 struct Installed {
     snapshot: Snapshot,
     ca: Fingerprint,
@@ -128,6 +136,23 @@ impl<R: SessionRuntime> Authority<R> {
         let mut state = self.state.write().await;
         if snapshot.sequence <= state.sequence {
             return Err(Stale);
+        }
+        state.sequence = snapshot.sequence;
+        state.installed = Some(Arc::new(Installed { snapshot, ca }));
+        Ok(())
+    }
+
+    /// Install without waiting, for synchronous callers that must report the
+    /// outcome (J181 M1): never "accepted" for a snapshot not installed.
+    ///
+    /// # Errors
+    /// `Stale` for an older or repeated sequence, `Busy` while an open holds
+    /// the current snapshot.
+    pub fn try_install(&self, snapshot: Snapshot) -> Result<(), NotInstalled> {
+        let ca = KeyData::Ed25519(Ed25519PublicKey(snapshot.ca)).fingerprint(HashAlg::Sha256);
+        let mut state = self.state.try_write().map_err(|_| NotInstalled::Busy)?;
+        if snapshot.sequence <= state.sequence {
+            return Err(NotInstalled::Stale);
         }
         state.sequence = snapshot.sequence;
         state.installed = Some(Arc::new(Installed { snapshot, ca }));

@@ -39,7 +39,8 @@ silently. Keyless machine-identity authentication is rejected for a person's
 session because it cannot distinguish people sharing a client machine. No
 `~/.ssh` key or configuration handling and no host-key prompts are part of
 this flow; managed host trust vouches for the target. The minimum supported
-stock client is OpenSSH 8.0. A target's own OpenSSH authentication remains
+stock client is OpenSSH 8.9 (raised from 8.0 in slice 1: see "Slice 1
+threat model" below). A target's own OpenSSH authentication remains
 separate when that service is reachable.
 
 Authentication uses a verified person certificate or an explicit machine
@@ -63,10 +64,11 @@ The product supports local, remote and dynamic port forwarding (`-L`, `-R`,
 `-D`), rsync, scp and SFTP; command execution and exit status; signals and
 terminal resize; environment and locale; and managed host trust. These are
 part of the contract even where S0's recovered adapter does not yet implement
-them. Agent forwarding (`-A`) is NOT supported: D235 says the infraternal
-agent never signs a request that arrives through agent forwarding. A per-rule
-opt-in was proposed by the orchestrator on 2026-11-01 but not confirmed by the
-owner; it would need an explicit D235 amendment first (open question on #221).
+them. The infraternal key socket never signs a forwarded request (D235). The
+owner decided on 2026-11-02 (#221 comment 74668) that `-A` should forward the
+person's own agent; slice 1 does not do that yet (with `IdentityAgent` set,
+OpenSSH forwards the infraternal socket, whose forwarded connections never
+sign). Forwarding the person's own agent needs its own design.
 
 Prompt and scale targets for the fully wired product are about 0.3 s on a LAN
 and 1.5 s at 150 ms RTT, with first-login/link setup reported separately. Size
@@ -150,3 +152,51 @@ progress, certificate identity and revocation, file-worker cancellation,
 port ownership and original-port enforcement. These tests use test authority
 and runtime implementations until the shared #186 and #172 production paths
 are integrated. Their success does not enable SSH or satisfy Q14.
+
+## Slice 1 threat model and decisions (J175, J181 review, #221)
+
+Slice 1 is the smallest end-to-end cut: a person's machine runs plain
+`ssh`, the local infraternal agent signs with that person's certificate, and
+the embedded server on the target's mesh address checks the certificate,
+network access and login access. This table is what the code is reviewed
+against.
+
+| Attacker | Can | Stopped by |
+| --- | --- | --- |
+| Mesh peer without a person key, including a compromised node | Reach TCP/22 on nodes with mesh SSH on (network access is allow-all by default, D228 M2) and open connections. | Certificate signature, full-digest registry, `source-address` bound to one mesh address, both access checks on authentication and on every channel open. At most 8 unauthenticated connections per source node and 64 in total, a 20 s login deadline, and accept backoff when descriptors run out. |
+| Same machine, the account the machine was added with | Signs as the person. Inherent to a key socket. | `source-address` and the certificate lifetime (24 h). |
+| Same machine, any other account | Nothing: the key socket checks the kernel peer credentials on every connection and serves only the account the machine was added with (decision below). | `SO_PEERCRED` before any byte is read. |
+| Same machine, root or a system account | Never acts as a person. Root can still become the person's account, so this protects against mistakes, not against root. | Ordinary-UID check. |
+| Local user tampering with client files | Nothing: the `ssh_config.d` file and the known-hosts file are written only into directories owned by root and closed to group and other writes; the socket directory is checked the same way. | `trusted_directory`. |
+| Stolen node (root on it) | Uses the in-memory person key until the node is removed; impersonates only its own host names. | Node removal pushes a snapshot without its digests; turning mesh SSH off for a node ends its open connections. |
+| Compromised target | Sees a session-bound signature it cannot replay elsewhere. Cannot get a signature through agent forwarding. | The socket signs only on a connection that declared itself with `session-bind@openssh.com` without the forwarding flag (OpenSSH 8.9 and later); undeclared connections never sign. |
+| Server code reaching the CA | Can issue only the two mesh shapes. | The CA module exposes `issue_ssh_person` and `issue_ssh_host` only; it checks the issued shape again itself and every issued certificate is recorded by digest. |
+| Network partition | A node keeps its last snapshot; a revocation lands on reconnect. | The person certificate lifetime (at most 24 h) bounds the staleness. |
+| Replayed or delayed push | Nothing: a node installs a snapshot only if its sequence is higher, and reports a refused one, so the server retries. The sequence is stored and never below the clock, so it survives a server restart. | Sequence check in `mesh_authority`. |
+
+Decisions in slice 1:
+
+- **Who acts as the person (D235 Q2a, D344).** Only the local account the
+  machine was added with: the rootless execution account, or the user of a
+  rootful machine's add-host address. Other accounts, root and the server's
+  own host get no person identity in slice 1. Owner question on #221: did
+  D344 mean any ordinary account on a machine the person added?
+- **Push, not ask (owner question Q2 on #221).** The server pushes a
+  sequence-numbered snapshot (CA key, valid certificate digests, each
+  person's login grant for that host); the target checks network access
+  against the applied mesh configuration the firewall enforces.
+- **Signing key (Q1).** The D168 CA key signs mesh SSH certificates through
+  the typed issuers only. Any future use of that key needs its own
+  non-overlapping body prefix.
+- **Off by default (Q4).** A node serves and signs only after the owner turns
+  mesh SSH on for it. Turning it off, or the node leaving the mesh, ends its
+  open mesh SSH connections; a renewed host certificate does not.
+- **Authenticated sessions** use keepalives (15 s, 4 misses), not an idle
+  timeout, so an idle editor is not ended.
+
+Left for later slices: live revocation of running sessions for one person
+(L2), IPv6 person certificates (L3), warnings about user `ssh_config`
+overrides (L4), per-host snapshot contents (L5), measured lock contention
+(L6), a neutral server banner (L7), reattach re-checks, Secure Enclave and
+TPM keys, sign-in with a device code, SFTP and forwarding.
+

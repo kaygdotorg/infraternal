@@ -24,7 +24,7 @@
 //!   anything else (an X.509 body starts with a DER `0x30`).
 
 use russh::keys::{
-    Algorithm, Certificate, HashAlg, PublicKey,
+    Algorithm, HashAlg,
     signature::{self, Signer},
     ssh_key::{
         Signature,
@@ -32,6 +32,9 @@ use russh::keys::{
         public::{Ed25519PublicKey, KeyData},
     },
 };
+/// The key and certificate types callers of the issuer handle, re-exported
+/// so they need no direct dependency on the SSH engine.
+pub use russh::keys::{Certificate, PublicKey};
 use std::net::IpAddr;
 
 /// Longest certificate lifetime (D235 Q2b), also the default.
@@ -185,6 +188,66 @@ pub fn host_certificate(
             .map_err(|_| IssueError)?;
     }
     sign(builder, ca, sign_body)
+}
+
+/// Check an issued person certificate again, independently of how it was
+/// built: user type, exactly one principal, exactly one `source-address` for
+/// one address, only `permit-pty`, lifetime 1–24 h (J181 M6).
+///
+/// # Errors
+/// Refuses any other shape.
+pub fn check_person(certificate: &Certificate) -> Result<(), IssueError> {
+    let options = certificate.critical_options();
+    let single_address = options.len() == 1
+        && options.get("source-address").is_some_and(|source| {
+            source.split_once('/').is_some_and(|(address, prefix)| {
+                address
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| prefix == if address.is_ipv4() { "32" } else { "128" })
+            })
+        });
+    let extensions = certificate.extensions();
+    if certificate.cert_type() == CertType::User
+        && certificate.valid_principals().len() == 1
+        && !certificate.valid_principals()[0].is_empty()
+        && single_address
+        && extensions.len() == 1
+        && extensions.get("permit-pty").is_some_and(String::is_empty)
+        && lifetime_ok(certificate)
+    {
+        Ok(())
+    } else {
+        Err(IssueError)
+    }
+}
+
+/// Check an issued host certificate again: host type, at least one non-empty
+/// principal, no options or extensions, lifetime 1–24 h (J181 M6).
+///
+/// # Errors
+/// Refuses any other shape.
+pub fn check_host(certificate: &Certificate) -> Result<(), IssueError> {
+    if certificate.cert_type() == CertType::Host
+        && !certificate.valid_principals().is_empty()
+        && certificate
+            .valid_principals()
+            .iter()
+            .all(|principal| !principal.is_empty())
+        && certificate.critical_options().is_empty()
+        && certificate.extensions().is_empty()
+        && lifetime_ok(certificate)
+    {
+        Ok(())
+    } else {
+        Err(IssueError)
+    }
+}
+
+fn lifetime_ok(certificate: &Certificate) -> bool {
+    certificate
+        .valid_before()
+        .checked_sub(certificate.valid_after())
+        .is_some_and(|lifetime| (MIN_LIFETIME..=MAX_LIFETIME).contains(&lifetime))
 }
 
 #[cfg(test)]

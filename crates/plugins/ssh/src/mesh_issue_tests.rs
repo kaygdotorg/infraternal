@@ -181,3 +181,31 @@ fn host_certificate_needs_a_name() {
     // An empty list would make the certificate valid for every host name.
     assert!(host_certificate(ca_public(&ca), &sign_with(&ca), &request).is_err());
 }
+
+#[test]
+fn issued_certificates_pass_their_independent_checks_and_others_do_not() {
+    let ca = key();
+    let subject = key().public_key().clone();
+    let person = person_certificate(
+        ca_public(&ca),
+        &sign_with(&ca),
+        &person_request(&subject, 3600),
+    )
+    .unwrap();
+    assert!(check_person(&person).is_ok());
+    assert!(check_host(&person).is_err());
+    let principals = ["db-01".to_owned()];
+    let host = host_certificate(
+        ca_public(&ca),
+        &sign_with(&ca),
+        &HostRequest {
+            subject: &subject,
+            principals: &principals,
+            now: NOW,
+            lifetime: 3600,
+        },
+    )
+    .unwrap();
+    assert!(check_host(&host).is_ok());
+    assert!(check_person(&host).is_err());
+}

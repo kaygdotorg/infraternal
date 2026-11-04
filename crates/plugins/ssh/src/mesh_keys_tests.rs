@@ -75,6 +75,7 @@ fn lists_the_certificate_and_signs_with_its_key() {
     expected.extend(string(b"infraternal mesh"));
     assert_eq!(listed, expected);
 
+    session.answer(&session_bind(0), Some(&identity)).unwrap();
     let reply = session
         .answer(&sign_request(&blob, b"challenge"), Some(&identity))
         .unwrap();
@@ -100,11 +101,13 @@ fn lists_the_certificate_and_signs_with_its_key() {
 fn refuses_to_sign_for_any_other_key() {
     let identity = identity();
     let other = identity_blob_of_plain_key(&identity);
-    let reply = Session::default()
+    let mut session = Session::default();
+    session.answer(&session_bind(0), Some(&identity)).unwrap();
+    let reply = session
         .answer(&sign_request(&other, b"challenge"), Some(&identity))
         .unwrap();
     assert_eq!(reply, [FAILURE]);
-    let reply = Session::default()
+    let reply = session
         .answer(&sign_request(b"", b"challenge"), Some(&identity))
         .unwrap();
     assert_eq!(reply, [FAILURE]);
@@ -209,13 +212,17 @@ fn malformed_messages_end_the_connection() {
 }
 
 #[test]
-fn only_ordinary_accounts_may_ask() {
+fn only_the_account_used_to_add_the_machine_may_ask() {
+    // J181 M3: another ordinary account on the same machine is not the person.
     let linux = OrdinaryUids::LINUX;
-    assert!(!may_ask(0, linux));
-    assert!(!may_ask(999, linux));
-    assert!(may_ask(1000, linux));
-    assert!(!may_ask(65_534, linux));
-    assert!(may_ask(501, OrdinaryUids::MACOS));
+    assert!(may_ask(1000, Some(1000), linux));
+    assert!(!may_ask(1001, Some(1000), linux));
+    assert!(!may_ask(1000, None, linux));
+    // Root and system accounts never act as a person, even if recorded.
+    assert!(!may_ask(0, Some(0), linux));
+    assert!(!may_ask(999, Some(999), linux));
+    assert!(!may_ask(65_534, Some(65_534), linux));
+    assert!(may_ask(501, Some(501), OrdinaryUids::MACOS));
 }
 
 #[tokio::test]
@@ -283,4 +290,42 @@ async fn stock_ssh_add_lists_the_certificate() {
             .fingerprint(HashAlg::Sha256)
     );
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn an_undeclared_connection_never_signs() {
+    // J181 M5: OpenSSH before 8.9 sends no binding, so a forwarded request
+    // looks like a direct one. Only a declared, non-forwarding connection signs.
+    let identity = identity();
+    let blob = identity.certificate.to_bytes().unwrap();
+    let mut session = Session::default();
+    assert_eq!(
+        session
+            .answer(&sign_request(&blob, b"challenge"), Some(&identity))
+            .unwrap(),
+        [FAILURE]
+    );
+    session.answer(&session_bind(0), Some(&identity)).unwrap();
+    assert_eq!(
+        session
+            .answer(&sign_request(&blob, b"challenge"), Some(&identity))
+            .unwrap()[0],
+        SIGN_RESPONSE
+    );
+}
+
+#[test]
+fn a_later_forwarding_binding_revokes_signing() {
+    let identity = identity();
+    let blob = identity.certificate.to_bytes().unwrap();
+    let mut session = Session::default();
+    session.answer(&session_bind(0), Some(&identity)).unwrap();
+    session.answer(&session_bind(1), Some(&identity)).unwrap();
+    session.answer(&session_bind(0), Some(&identity)).unwrap();
+    assert_eq!(
+        session
+            .answer(&sign_request(&blob, b"challenge"), Some(&identity))
+            .unwrap(),
+        [FAILURE]
+    );
 }

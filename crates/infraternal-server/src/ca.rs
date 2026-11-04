@@ -217,6 +217,7 @@ impl CertificateAuthority {
     /// (owner question Q1 on #221: reuse the D168 key).
     /// # Errors
     /// Refuses a key that is not Ed25519.
+    #[cfg(feature = "ssh")]
     pub fn ssh_public_key(&self) -> Result<[u8; 32], CaError> {
         if self.0.key.id() != Id::ED25519 {
             return Err(CaError);
@@ -229,16 +230,52 @@ impl CertificateAuthority {
             .map_err(|_| CaError)
     }
 
-    /// Sign one SSH certificate body for mesh SSH [D235], #221.
+    /// Issue a mesh SSH person certificate [D235], #221: one principal, exactly
+    /// one `source-address` for one mesh address, `permit-pty` only, 1–24 h.
+    /// # Errors
+    /// Refuses any other shape, a non-Ed25519 key and signing failures.
+    #[cfg(feature = "ssh")]
+    pub fn issue_ssh_person(
+        &self,
+        request: &infraternal_plugin_ssh::mesh_issue::PersonRequest<'_>,
+    ) -> Result<infraternal_plugin_ssh::mesh_issue::Certificate, CaError> {
+        use infraternal_plugin_ssh::mesh_issue;
+        let sign = |body: &[u8]| self.sign_ssh(body).ok();
+        let certificate = mesh_issue::person_certificate(self.ssh_public_key()?, &sign, request)
+            .map_err(|_| CaError)?;
+        mesh_issue::check_person(&certificate).map_err(|_| CaError)?;
+        Ok(certificate)
+    }
+
+    /// Issue a mesh SSH host certificate [D235], #221: host type, at least one
+    /// principal (the server derives them from the node record), no options,
+    /// 1–24 h.
+    /// # Errors
+    /// Refuses any other shape, a non-Ed25519 key and signing failures.
+    #[cfg(feature = "ssh")]
+    pub fn issue_ssh_host(
+        &self,
+        request: &infraternal_plugin_ssh::mesh_issue::HostRequest<'_>,
+    ) -> Result<infraternal_plugin_ssh::mesh_issue::Certificate, CaError> {
+        use infraternal_plugin_ssh::mesh_issue;
+        let sign = |body: &[u8]| self.sign_ssh(body).ok();
+        let certificate = mesh_issue::host_certificate(self.ssh_public_key()?, &sign, request)
+            .map_err(|_| CaError)?;
+        mesh_issue::check_host(&certificate).map_err(|_| CaError)?;
+        Ok(certificate)
+    }
+
+    #[cfg(feature = "ssh")]
+    /// Sign one SSH certificate body. Private: only the typed issuers above
+    /// reach it (J181 M6), so no caller can mint another certificate shape.
     ///
-    /// Domain separation: the body must start with the Ed25519 SSH
-    /// certificate type string, so this path can never sign an X.509
-    /// structure (which starts with a DER `0x30`) or any other message with
-    /// the shared key. The certificate's shape is built and checked by
-    /// `infraternal_plugin_ssh::mesh_issue`; this only signs.
+    /// Invariant: the D168 key signs X.509 bodies (DER, starting `0x30`) and
+    /// these SSH certificate bodies (starting with the Ed25519 certificate
+    /// type string). Any future use of this key needs its own fixed prefix
+    /// that cannot overlap either.
     /// # Errors
     /// Refuses any other body and signing failures.
-    pub fn sign_ssh(&self, body: &[u8]) -> Result<[u8; 64], CaError> {
+    fn sign_ssh(&self, body: &[u8]) -> Result<[u8; 64], CaError> {
         const BODY_PREFIX: &[u8] = b"\0\0\0\x20ssh-ed25519-cert-v01@openssh.com";
         if !body.starts_with(BODY_PREFIX) || self.0.key.id() != Id::ED25519 {
             return Err(CaError);
@@ -454,6 +491,7 @@ pub(crate) mod tests {
         source(true).load().unwrap()
     }
 
+    #[cfg(feature = "ssh")]
     #[test]
     fn ssh_signing_is_limited_to_ssh_certificate_bodies() {
         let source = source(true);
@@ -473,6 +511,59 @@ pub(crate) mod tests {
         ] {
             assert!(ca.sign_ssh(refused).is_err());
         }
+    }
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn the_ca_issues_only_the_two_mesh_certificate_shapes() {
+        use infraternal_plugin_ssh::mesh_issue::{HostRequest, PersonRequest, PublicKey};
+        // J181 M6: callers get typed issuance, never a raw signature.
+        let ca = CertificateAuthority::from_source(&source(true)).unwrap();
+        let subject = PublicKey::from_openssh(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGXPXKkPzpN6tM1N1a8nGiE0pBsTzZAOZn3ZK7mFx0z0",
+        )
+        .unwrap();
+        let now = 1_800_000_000;
+        let person = ca
+            .issue_ssh_person(&PersonRequest {
+                subject: &subject,
+                person: "kayg-id",
+                source_address: "10.254.0.7".parse().unwrap(),
+                now,
+                lifetime: 24 * 3600,
+            })
+            .unwrap();
+        assert_eq!(person.valid_principals(), ["kayg-id"]);
+        let principals = ["db-01".to_owned()];
+        let host = ca
+            .issue_ssh_host(&HostRequest {
+                subject: &subject,
+                principals: &principals,
+                now,
+                lifetime: 3600,
+            })
+            .unwrap();
+        assert_eq!(host.valid_principals(), principals);
+        // A shape the mesh never needs is refused by the CA itself.
+        assert!(
+            ca.issue_ssh_host(&HostRequest {
+                subject: &subject,
+                principals: &[],
+                now,
+                lifetime: 3600,
+            })
+            .is_err()
+        );
+        assert!(
+            ca.issue_ssh_person(&PersonRequest {
+                subject: &subject,
+                person: "kayg-id",
+                source_address: "10.254.0.7".parse().unwrap(),
+                now,
+                lifetime: 48 * 3600,
+            })
+            .is_err()
+        );
     }
 
     #[test]

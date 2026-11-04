@@ -658,6 +658,18 @@ impl Store {
             .ok()??;
         u64::try_from(id).ok().map(NodeId)
     }
+    /// The deployment's IPv4 range, for services that match mesh addresses
+    /// (the mesh SSH client configuration, #221). `None` before the first allocation.
+    pub async fn ipv4_range(&self) -> Option<crate::policy::model::Ipv4Range> {
+        let serialized: Option<String> =
+            sqlx::query_scalar("SELECT allocation_json FROM mesh_dataplane WHERE singleton=1")
+                .fetch_optional(&self.pool)
+                .await
+                .ok()??;
+        let state: State = serde_json::from_str(&serialized?).ok()?;
+        state.settings.ipv4.validate().ok()?;
+        Some(state.settings.ipv4)
+    }
     /// Compile a consistent current configuration and persist every new allocation before delivery.
     /// # Errors
     /// Refuses absent server identity, invalid inventory, allocation exhaustion or storage errors.

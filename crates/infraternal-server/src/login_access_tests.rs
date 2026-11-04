@@ -163,20 +163,36 @@ async fn deleting_the_starter_rule_persists_and_leaves_own_username() {
     assert!(!grant.allows("root", 0, LINUX));
 }
 
+/// The login access migration's version, found by name, so renumbering it
+/// when another branch's migrations land first needs no test change.
+fn login_access_version() -> i64 {
+    sqlx::migrate!("./migrations")
+        .iter()
+        .find(|migration| migration.description == "login access")
+        .expect("login access migration")
+        .version
+}
+
 #[tokio::test]
-async fn upgrade_gives_an_existing_owner_the_starter_rule_once() {
+async fn every_migration_applies_to_a_populated_database_and_seeds_rules_once() {
     let mut before = sqlx::migrate!("./migrations");
-    before.migrations = std::borrow::Cow::Owned(
-        before
-            .migrations
-            .iter()
-            .filter(|migration| migration.version < 41)
-            .cloned()
-            .collect(),
-    );
+    let version = login_access_version();
+    before
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version < version);
     let pool = pool_with(&before).await;
     person(&pool, "kayg", true).await;
     person(&pool, "bob", false).await;
+    let host = host(&pool, "kayg").await;
+    sqlx::raw_sql(
+        "INSERT INTO preferred_accounts(user_id,account) VALUES('kayg','kayg'); \
+         INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES('t','kayg','d',unixepoch()+60,unixepoch(),1);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Every migration, including any that land after this one.
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     let rows: Vec<(Option<String>, String)> =
         sqlx::query_as("SELECT subject, account_kind FROM login_rules ORDER BY id")
@@ -190,6 +206,22 @@ async fn upgrade_gives_an_existing_owner_the_starter_rule_once() {
             (Some("kayg".into()), "any".into())
         ]
     );
+    let kept: (String, String, i64) = sqlx::query_as(
+        "SELECT u.username, p.account, (SELECT COUNT(*) FROM remote_hosts WHERE owner_id=u.id) \
+         FROM users u JOIN preferred_accounts p ON p.user_id=u.id WHERE u.id='kayg'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, ("kayg".into(), "kayg".into(), 1));
+    assert!(grant(&pool, "kayg", Some(host)).await.unwrap().any_account);
+    // Running the migrator again adds nothing.
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM login_rules")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
 }
 
 #[tokio::test]

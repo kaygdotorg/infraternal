@@ -202,6 +202,10 @@ impl RemoteHosts {
             )
         })
     }
+    /// The CA key source the enrollment issuer uses; mesh SSH signs with it too (#221).
+    pub(crate) fn ca_source(&self) -> Option<Arc<dyn crate::ca::CaKeySource>> {
+        self.1.clone()
+    }
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
         self.0
             .lock()
