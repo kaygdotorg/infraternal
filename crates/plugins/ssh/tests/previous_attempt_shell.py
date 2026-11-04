@@ -588,6 +588,24 @@ transaction={TRANSACTION}
         finally:
             live.close()
 
+    def test_upgrade_beside_the_proxy_credential_store_is_classified(self):
+        # A current agent keeps the proxy plugin's owner-only store in its
+        # runtime directory (#281). A stuck upgrade beside it is still this
+        # install's journal, not "ownership not proven" (71).
+        self.make_upgrade_fixture()
+        store = self.base / 'sessions/proxy-secrets/provider'
+        store.mkdir(parents=True, mode=0o700)
+        store.parent.chmod(0o700)
+        secret = store / 'token'
+        secret.write_text('x')
+        secret.chmod(0o600)
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertTrue(result.stdout.decode().startswith(f'INFRATERNAL_SETUP_UPGRADE {HOST} {TRANSACTION} '), result.stdout)
+        # Still owner-only: a readable credential is not ours to vouch for.
+        secret.chmod(0o644)
+        self.assertEqual(self.run_shell('\ninspect_previous').returncode, 71)
+
     def test_upgrade_with_a_running_old_agents_control_socket_is_classified(self):
         # The real b-0.1.0 binary, running against the restored #305 fixture,
         # bound sessions/plugins.sock as 0775 inside the 0700 sessions directory.

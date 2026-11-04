@@ -149,6 +149,9 @@ validate_upgrade_sessions() {
    plugins.sock)
     [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] || exit 71;;
    sessions) validate_upgrade_socket_dir "$setup_runtime_entry";;
+   # The proxy plugin's owner-only credential store (crates/plugins/proxy,
+   # custody.rs): 0700 directories and 0600 files, all this user's (#281).
+   proxy-secrets) private_tree "$setup_runtime_entry";;
    *)
     [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71
     setup_runtime_name=${setup_runtime_entry##*/}
