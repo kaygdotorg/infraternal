@@ -43,6 +43,7 @@ pub use release_latest::release_service;
 #[doc(hidden)]
 pub use terminal_queries::verify_terminal_query_sample;
 mod liveness;
+pub mod login_access;
 #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
 mod node_host;
 pub mod release_manifest;

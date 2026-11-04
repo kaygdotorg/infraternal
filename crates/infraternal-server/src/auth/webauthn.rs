@@ -183,6 +183,7 @@ impl Auth {
                     .bind(version).bind(version)
                     .execute(&mut *tx)
                     .await?;
+                crate::login_access::add_owner_defaults(&mut tx, &registration.user).await?;
             }
             Authority::Add(session) => {
                 require_session_tx(&mut tx, session, &registration.user, now).await?;
