@@ -1119,9 +1119,9 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    // TASTE "Phone window headers carry two actions": on a touch device the header holds "?" (read about this window, #304) and Close; the splits and the
-    // session manager are in the canvas row while a terminal is focused, and in ⌘K.
-    expect(pd.buttons).toEqual(["docs", "close"]);
+    // On a touch device a terminal's header holds Close alone: "?" (read about this window, #304) is not there, because with it the group folded into a "…"
+    // whose 44 px target overlapped its neighbours (J211). "?" stays in ⌘K; the splits and the session manager are in the canvas row while a terminal is focused.
+    expect(pd.buttons).toEqual(["close"]);
     // Header pills are one size (TASTE): on touch both are 36 px visible; the 44 px target is invisible padding (checked below).
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(1);
     expect(pd.aH).toBeLessThanOrEqual(38);
