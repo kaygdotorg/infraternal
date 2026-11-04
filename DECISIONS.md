@@ -3854,3 +3854,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        mirror: "why not push to both remotes?"
      - The kernel mesh path gets the same ownership check GotaTun got:
        "sure".
+341. **Appearance round 4 (owner, 2026-11-04, #323; amends D322, D338):**
+     - Presets are called Themes: "can it be called "Themes" instead of
+       Presets?" Colour keeps its name.
+     - Tint, Blur and Grain sit under one heading: "put the 3 sliders
+       tint / grain / glur under a "Windows" heading".
+     - Grain lies on the windows, not on the canvas background: "grain
+       should be applied to the window, not the background?"
+     - The grain scale is tamed the way blur's is (0 px to 24 px): "how
+       much is 100% grain btw? it looks like too much, can our slider be
+       tamed a little like we did with blur 0 being 0 and 100% being
+       24px?" 0% stays none; the job proposes the new maximum with
+       captures.
+     - A new theme copies the selected one and starts from there
+       (confirmed).
+     - Boot machines (#156) stay deferred, and their UI is grilled later:
+       "I would like to grill the UI when we get close to defininig /
+       building the architecture."
