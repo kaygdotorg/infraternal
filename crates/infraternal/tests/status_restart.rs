@@ -124,10 +124,12 @@ fn service_states_are_truthful_in_text_and_json() {
                 } else {
                     "test \"$1\" = show || exit 1\n"
                 };
-                // Responsive managers can exceed 40 ms on a busy host (#312).
-                // Keep the original delay too. A response above half the total
-                // budget must not be cut off by a per-observation split; the
-                // fresh active service needs two responses on one deadline.
+                // Delayed responses still exercise the child-exit wakeup and
+                // the two observations of a fresh active service. The matrix
+                // runs under a hang-sized budget: it checks how states read,
+                // and a cold debug binary can spend seconds of a 500 ms window
+                // on its own page faults (#334). shared_deadline() below keeps
+                // the budget's structure.
                 let delay = match active {
                     "delayed" => "/bin/sleep 0.025\n",
                     "busy" => "/bin/sleep 0.3\n",
@@ -164,6 +166,7 @@ fn service_states_are_truthful_in_text_and_json() {
                         .env("XDG_CONFIG_HOME", &config)
                         .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &system)
                         .env("PATH", home.join("bin"))
+                        .env("INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS", "30000")
                         .output()
                         .unwrap();
                     let text = String::from_utf8(output.stdout).unwrap();
@@ -200,5 +203,39 @@ fn service_states_are_truthful_in_text_and_json() {
             }
         }
     }
+    shared_deadline(&root.join("system-server"));
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A fresh active service is observed twice on one deadline. With a 4 s
+/// budget, an immediate first answer and a 2.5 s second answer must be read:
+/// a per-observation split (2 s each) would cut the second one. This runs after
+/// the matrix, so the binary is warm and 1.5 s of margin is only scheduling.
+fn shared_deadline(home: &std::path::Path) {
+    let started = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .unwrap()
+        .num_microseconds();
+    let seen = home.join("first-observation");
+    fs::write(
+        home.join("bin/systemctl"),
+        format!(
+            "#!/bin/sh\ntest \"$1\" = show || exit 1\nif [ -e '{seen}' ]; then /bin/sleep 2.5; fi\n: > '{seen}'\nprintf '%s\\n' ActiveState=active SubState=running MainPID=42 Result=success NRestarts=0 ExecMainStartTimestampMonotonic={started} ExecMainCode=0 ExecMainStatus=0\n",
+            seen = seen.display()
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args(["status", "--json"])
+        .env_clear()
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", home.join("system"))
+        .env("PATH", home.join("bin"))
+        .env("INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS", "4000")
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(seen.exists(), "the manager was never asked: {text}");
+    let envelope: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(envelope["state"], "running", "{text}");
 }
