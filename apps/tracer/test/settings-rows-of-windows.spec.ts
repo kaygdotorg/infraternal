@@ -1153,9 +1153,12 @@ function watchOverlaps(views: string[]): void {
  * Drags each edge of the given windows inward and outward, and returns the overlaps seen on any frame. On a phone there are no edge handles: a press and hold on a
  * window's header shows the four corner handles, and a finger drags those (window-resize.ts), so a phone drags the corners, with touch events.
  */
-async function dragEdges(page: Page, ids: string[], views: string[], amount = 110, touch = false): Promise<{ hits: string[]; skipped: string[]; widths: Record<string, number[]> }> {
+async function dragEdges(page: Page, ids: string[], views: string[], amount = 110, touch = false): Promise<{ hits: string[]; skipped: string[]; widths: Record<string, number[]>; changed: string[] }> {
   const viewport = page.viewportSize()!;
   const skipped: string[] = [];
+  /** Windows OTHER than the dragged one whose size changed during a drag (D323: a drag changes only its own window). */
+  const changed: string[] = [];
+  const sizes = (): Promise<Record<string, string>> => page.evaluate(() => Object.fromEntries([...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((n) => [n.dataset.windowId!, `${n.offsetWidth}x${n.offsetHeight}`])));
   const widths: Record<string, number[]> = {};
   const cdp = touch ? await page.context().newCDPSession(page) : undefined;
   const finger = (type: "touchStart" | "touchMove" | "touchEnd", x: number, y: number) => cdp!.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y, id: 1 }] });
@@ -1164,6 +1167,7 @@ async function dragEdges(page: Page, ids: string[], views: string[], amount = 11
     await page.evaluate((i) => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:win:${i}`, source: "keyboard" } })), id);
     await page.waitForTimeout(1100);
     widths[id] = [];
+    const before = await sizes();
     const handles = touch ? ["ne", "nw", "se", "sw"] as const : ["e", "w", "n", "s"] as const;
     for (const edge of handles) // Outward first on a desktop; inward first on a phone, where a window grown past the screen has no handle left to reach back with.
     for (const sign of (touch ? [-1, 1] : [1, -1]) as Array<1 | -1>) {
@@ -1197,10 +1201,12 @@ async function dragEdges(page: Page, ids: string[], views: string[], amount = 11
       }
       await page.waitForTimeout(450);
       widths[id]!.push(await page.evaluate((i) => document.querySelector<HTMLElement>(`[data-window-id="${i}"]`)!.offsetWidth, id));
+      const after = await sizes();
+      for (const [other, size] of Object.entries(after)) if (other !== id && before[other] !== size) changed.push(`${id} ${edge} ${sign}: ${other} ${before[other]} -> ${size}`);
     }
   }
   const hits = await page.evaluate(() => { const w = window as unknown as { __hits: string[]; __watch: boolean }; w.__watch = false; return [...new Set(w.__hits)]; });
-  return { hits, skipped, widths };
+  return { hits, skipped, widths, changed };
 }
 
 /** Resizing pushes or reflows the neighbours and never draws one window over another: each edge of three windows is dragged in and out, and on every frame no two
@@ -1211,15 +1217,17 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     const context = await browser.newContext({ ...size, baseURL: baseURL() });
     const page = await context.newPage();
     await open(page, "&at=appearance.theme");
-    // The windows of a row share a band and the windows of a column share a track, so a drag changes its neighbours too: each window is dragged on a fresh canvas.
-    const settings = { hits: [] as string[], skipped: [] as string[], widths: {} as Record<string, number[]> };
+    // Each window is dragged on a fresh canvas, so the sizes the last one left do not hide what the next one does.
+    const settings = { hits: [] as string[], skipped: [] as string[], widths: {} as Record<string, number[]>, changed: [] as string[] };
     for (const [k, id] of ["s-appearance-theme", "s-mesh-keys", "s-sharing-certificates"].entries()) {
       if (k > 0) await open(page, `&at=${id.slice(2).replace("-", ".")}`);
       const one = await dragEdges(page, [id], ["settings", "docs", "console"], size.isMobile ? 40 : 110, size.isMobile);
-      settings.hits.push(...one.hits); settings.skipped.push(...one.skipped); Object.assign(settings.widths, one.widths);
+      settings.hits.push(...one.hits); settings.skipped.push(...one.skipped); settings.changed.push(...one.changed); Object.assign(settings.widths, one.widths);
     }
     expect(settings.skipped.length, `most handles are reachable (${settings.skipped.join(", ")})`).toBeLessThanOrEqual(6);
     expect(settings.hits.join(" | "), "Settings windows never intersect").toBe("");
+    // The owner's answer (D323): a drag changes only its own window, never the rest of its column or its row.
+    expect(settings.changed.join(" | "), "no other window changed its size").toBe("");
     expect(new Set(settings.widths["s-appearance-theme"]).size, "the drags did change the window").toBeGreaterThan(1);
     if (SHOTS && !size.isMobile) {
       // After a narrowing drag, the way the owner met it: Theme's right edge pulled in.
@@ -1243,3 +1251,65 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     await context.close();
   });
 }
+
+/** The breadcrumb names the row in view (D323): a step of the canvas to the next row, with nothing clicked, changes it, and a step back changes it back. */
+for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phone]] as const) {
+  test(`the breadcrumb follows the row in view, at ${label}`, async ({ browser }) => {
+    test.setTimeout(240_000);
+    const context = await browser.newContext({ ...size, baseURL: baseURL() });
+    const page = await context.newPage();
+    await open(page, "&at=appearance.theme");
+    expect((await crumbs(page)).slice(1), "starts on Theme").toEqual(["Appearance", "Theme"]);
+    const focused = await active(page);
+    const pill = (await page.locator('[data-window-id="s-appearance-theme"] .ui-window-pill').boundingBox())!;
+    if (size.isMobile) {
+      // Two fingers up: the canvas steps one row, as in the rows test above.
+      const cdp = await page.context().newCDPSession(page);
+      const two = (type: "touchStart" | "touchMove" | "touchEnd", dy: number) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x: 150, y: 500 + dy, id: 1 }, { x: 250, y: 500 + dy, id: 2 }] });
+      await two("touchStart", 0);
+      for (let k = 1; k <= 10; k++) { await two("touchMove", -k * 20); await page.waitForTimeout(25); }
+      await two("touchEnd", -200);
+    } else {
+      await page.mouse.move(pill.x + pill.width / 2, pill.y + pill.height / 2);
+      await page.mouse.wheel(0, 200);
+    }
+    await page.waitForTimeout(1500);
+    expect(await active(page), "nothing was clicked: the focused window is the same").toBe(focused);
+    expect((await crumbs(page)).slice(1), "the breadcrumb names the next row, Terminal").toEqual(["Terminal", "Typing"]);
+    if (!size.isMobile) {
+      await page.mouse.wheel(0, -200);
+      await page.waitForTimeout(1500);
+      expect((await crumbs(page)).slice(1), "and back").toEqual(["Appearance", "Theme"]);
+      // Sideways, to the next window of the row: the group changes with the window in view.
+      await page.mouse.wheel(300, 0);
+      await page.waitForTimeout(1200);
+      expect((await crumbs(page)).slice(1), "the next window of the row").toEqual(["Appearance", "Font"]);
+    }
+    await context.close();
+  });
+}
+
+/** A resize drag changes only its own window (D323): the windows above, below and beside it keep their size, whichever edge is dragged. */
+test("desktop: narrowing one window leaves the rest of its column and its row as they were", async ({ browser }) => {
+  test.setTimeout(240_000);
+  const context = await browser.newContext({ ...SIZES.desktop, baseURL: baseURL() });
+  const page = await context.newPage();
+  await open(page, "&at=appearance.theme");
+  const sizes = (): Promise<Record<string, string>> => page.evaluate(() => Object.fromEntries([...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((n) => [n.dataset.windowId!, `${n.offsetWidth}x${n.offsetHeight}`])));
+  const before = await sizes();
+  const east = (await page.locator('[data-window-id="s-appearance-theme"] .ui-window-resize[data-edge="e"]').boundingBox())!;
+  const x = east.x + east.width / 2, y = east.y + east.height / 2 + 100;
+  await page.mouse.move(x, y); await page.mouse.down();
+  for (let k = 1; k <= 10; k++) { await page.mouse.move(x - k * 15, y); await page.waitForTimeout(25); }
+  await page.mouse.up();
+  await page.waitForTimeout(700);
+  const after = await sizes();
+  expect(Number(after["s-appearance-theme"]!.split("x")[0]), "Theme is narrower").toBeLessThan(Number(before["s-appearance-theme"]!.split("x")[0]) - 100);
+  expect(after["s-appearance-theme"]!.split("x")[1], "and as tall as it was").toBe(before["s-appearance-theme"]!.split("x")[1]);
+  for (const [id, size] of Object.entries(before)) if (id !== "s-appearance-theme") expect(after[id], `${id} kept its size`).toBe(size);
+  // Font, in the same row, did not follow Theme's edge: the column's other windows still fill the track.
+  const fontLeft = await page.evaluate(() => document.querySelector('[data-window-id="s-appearance-font"]')!.getBoundingClientRect().left);
+  const typingRight = await page.evaluate(() => document.querySelector('[data-window-id="s-terminal-typing"]')!.getBoundingClientRect().right);
+  expect(fontLeft - typingRight, "the track is as wide as its widest window").toBeGreaterThan(0);
+  await context.close();
+});
