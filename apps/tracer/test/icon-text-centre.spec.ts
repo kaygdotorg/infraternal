@@ -25,8 +25,9 @@ const STATES: Array<[string, string, (page: Page) => Promise<void>]> = [
     await p.keyboard.press("Control+Shift+K");
     await expect(p.locator("#palette-input")).toBeFocused();
     await p.keyboard.type("Terminal › Typing", { delay: 6 });
-    await expect(p.locator("#palette-results .result").first()).toContainText("Terminal › Typing");
-    await p.keyboard.press("Enter");
+    const row = p.locator('#palette-results .result[data-action="canvas:settings:terminal.typing"]');
+    await expect(row).toContainText("Terminal › Typing");
+    await row.click();
     await expect(p.locator("#palette")).toBeHidden();
     await sleep(p, 1600);
   }],

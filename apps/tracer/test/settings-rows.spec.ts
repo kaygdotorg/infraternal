@@ -13,6 +13,7 @@
  * the package has.
  * Review screenshots land in the external job evidence directory.
  */
+import { paletteOpen } from "./settings-palette";
 import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Page } from "playwright/test";
 import { mkdir } from "node:fs/promises";
@@ -23,8 +24,8 @@ const captures = tracerEvidencePath("settings-rows");
 const SIZES = [{ w: 375, h: 667, touch: true, dpr: 3 }, { w: 393, h: 852, touch: true, dpr: 3 }, { w: 1440, h: 900, touch: false, dpr: 2 }] as const;
 /** Each window (Settings in rows of windows, #304), the palette words that open it, and a list that proves the section is the one on screen. */
 const SECTIONS = [
-  { name: "Appearance › Theme", words: "Appearance › Theme", list: "Theme" },
-  { name: "Appearance › Layout", words: "Appearance › Layout", list: "Phones" },
+  { name: "Theme", words: "Appearance › Theme", target: "appearance.theme", list: "Theme" },
+  { name: "Layout", words: "Appearance › Layout", target: "appearance.layout", list: "Phones" },
 ] as const;
 
 /** True when the named list exists and lies inside the screen (its column is the one in view). */
@@ -73,9 +74,7 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch, dpr } of SIZES) 
     for (const section of SECTIONS) {
       // The palette can swallow the first keys while the canvas settles; retry until this section's list is on screen.
       for (let attempt = 0; attempt < 4; attempt++) {
-        await page.keyboard.press("Control+Shift+K");
-        await page.keyboard.type(section.words);
-        await page.keyboard.press("Enter");
+        await paletteOpen(page, section.words, section.target);
         const onScreen = await expect.poll(() => listOnScreen(page, section.list), { timeout: 5000 }).toBe(true).then(() => true, () => false);
         if (onScreen) break;
       }
@@ -126,8 +125,8 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch, dpr } of SIZES) 
       }
       // The whole list decides together, and by the list's width: phones stack the long Window Sizes descriptions under
       // their names; Theme's one-word descriptions stay beside at every width we ship.
-      if (section.name === "Appearance › Layout" && w < 600) for (const r of list.filter((x) => x.list === "Phones")) expect(r.mode, `${r.name}: narrow lists show subtitles`).toBe("stacked");
-      if (section.name === "Appearance › Theme") for (const r of list.filter((x) => x.list === "Theme")) expect(r.mode, `${r.name}: short descriptions stay beside`).toBe("beside");
+      if (section.name === "Layout" && w < 600) for (const r of list.filter((x) => x.list === "Phones")) expect(r.mode, `${r.name}: narrow lists show subtitles`).toBe("stacked");
+      if (section.name === "Theme") for (const r of list.filter((x) => x.list === "Theme")) expect(r.mode, `${r.name}: short descriptions stay beside`).toBe("beside");
       // The heading sits the shared gap above the first row: the gap is the heading's own bottom padding.
       const gap = await page.evaluate((listName) => {
         const l = document.querySelector(`.ui-sp-list[aria-label="${listName}"]`)!;

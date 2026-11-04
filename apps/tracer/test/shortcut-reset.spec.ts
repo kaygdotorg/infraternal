@@ -6,6 +6,7 @@
  * shared row menu) and by Delete on the focused row; "Reset all" is the last row, appears only while something is changed,
  * and asks in its own row (TASTE "A destructive row action asks in its own row"). 1440×900 and 393×852.
  */
+import { paletteOpen } from "./settings-palette";
 import { tracerEvidencePath } from "./evidence-path";
 import { expect, test, type Locator, type Page } from "playwright/test";import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -24,9 +25,7 @@ async function open(page: Page): Promise<void> {
   await page.addStyleTag({ content: ".test-double-badge, .cl-mockup, .perf-hud, .ui-toast { display: none !important; }" });
   await page.waitForTimeout(1000);
   for (let attempt = 0; attempt < 4; attempt++) {
-    await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("Terminal › Typing");
-    await page.keyboard.press("Enter");
+    await paletteOpen(page, "Terminal › Typing", "terminal.typing");
     const ok = await expect.poll(() => page.evaluate(() => document.querySelectorAll('.ui-window[data-window-id="s-terminal-typing"] .ui-ss-row').length), { timeout: 5000 }).toBeGreaterThan(3).then(() => true, () => false);
     if (ok) break;
   }

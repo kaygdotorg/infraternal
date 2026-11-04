@@ -2,6 +2,7 @@
  * Clusters concept mockup (`?proto=clusters`, issue #89): walks the six scenes and checks the
  * behaviours the owner's open questions are about. Everything runs against the test double.
  */
+import { paletteOpen } from "./settings-palette";
 import { expect, test, type Browser, type Page } from "playwright/test";
 
 type Probe = {
@@ -644,9 +645,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
     await page.locator(".keyedit-done").tap();
     await expect(page.locator("#terminal-screen")).not.toHaveAttribute("data-toolbar-edit", "");
     // Settings, Toolbar: the layout comes from the account until "Customise for this device".
-    await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("Terminal › Typing");
-    await page.keyboard.press("Enter");
+    await paletteOpen(page, "Terminal › Typing", "terminal.typing");
     await expect(page.locator(".ui-ts-tag")).toHaveText("Account layout");
     await page.getByRole("button", { name: "Customise for this device" }).click();
     await expect(page.locator(".ui-ts-tag")).toHaveText("This device");
@@ -657,9 +656,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
 
 test("shortcuts: Settings lists the registry, a row rebinds with a conflict warning, and the new key works everywhere", async ({ page }) => {
   await open(page, 3);
-  await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("Terminal › Typing");
-  await page.keyboard.press("Enter");
+  await paletteOpen(page, "Terminal › Typing", "terminal.typing");
   await expect(page.locator(".ui-ss-row")).not.toHaveCount(0);
   await page.waitForTimeout(1600);
   await expect(page.locator('.ui-ss-row[data-id="canvas-lock"]')).toContainText("G");
@@ -864,9 +861,7 @@ test("settings is a view: a gear after a divider, a row of windows for each comp
   await expect.poll(async () => { const lock = await probe(page, (p) => p.canvasLock()); return `${lock.view}:${lock.on}`; }, { timeout: 4000 }).toBe("settings:true");
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
   // The palette goes straight to a group's window.
-  await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("You › Devices");
-  await page.keyboard.press("Enter");
+  await paletteOpen(page, "You › Devices", "you.devices");
   await expect(page.locator('.ui-window[data-window-id="s-you-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
   // The sidebar is a layer over the canvas (it no longer docks), so it is closed before reaching under it.
   await page.locator("#sidebar-toggle").click();
@@ -1124,9 +1119,9 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    // TASTE "Phone window headers carry two actions": on a touch device the header holds Close only; the splits and the
+    // TASTE "Phone window headers carry two actions": on a touch device the header holds "?" (read about this window, #304) and Close; the splits and the
     // session manager are in the canvas row while a terminal is focused, and in ⌘K.
-    expect(pd.buttons).toEqual(["close"]);
+    expect(pd.buttons).toEqual(["docs", "close"]);
     // Header pills are one size (TASTE): on touch both are 36 px visible; the 44 px target is invisible padding (checked below).
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(1);
     expect(pd.aH).toBeLessThanOrEqual(38);
