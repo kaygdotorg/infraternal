@@ -3981,3 +3981,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        Median interactive latency isn't a separate goal for now.
      - **API keys with no expiry (D343):** "nah let's not make it
        complicated". "Never" means never: no inactivity end either.
+348. **GotaTun benchmark CPU pinning (owner, 2026-11-04; amends D332's
+     measurement setup):** "yeah can you pin it software wise? 2 cpus per
+     test in parallel is fine as long as no interference messes up the
+     benchmark". On the 4-vCPU perf VM, each side of a test (its infraternal
+     agent or engine, its load generator and its probe) is pinned in
+     software to its own 2 CPUs, through cpusets, for every case, kernel
+     WireGuard included, so the comparison stays fair. Before a pinned hold
+     counts, the setup proves there is no interference: no other runnable
+     work on those CPUs during the run, and run-to-run spread no worse than
+     the unpinned harness's. Earlier unpinned numbers stay valid for
+     history, but aren't compared directly with pinned ones.
