@@ -7,6 +7,11 @@
 //! This crate is the narrow syscall boundary required by Linux TUN. The caller owns the returned
 //! file descriptor and handles packet framing; this crate never changes addresses, routes, or
 //! interface policy. Permission to create or attach the device requires CAP_NET_ADMIN.
+//!
+//! Every queue this crate opens restricts its interface to the caller's effective user and group
+//! (`TUNSETOWNER`, `TUNSETGROUP`). A persistent TUN with no owner admits any local user's attach
+//! once its last queue closes, and that user would read and inject the interface's packets
+//! (#260 J213 P1).
 
 use std::{
     fs::{File, OpenOptions},
@@ -24,6 +29,8 @@ const TUN_F_TSO6: libc::c_ulong = 0x04;
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
 const TUNSETOFFLOAD: libc::c_ulong = 0x4004_54d0;
 const TUNSETPERSIST: libc::c_ulong = 0x4004_54cb;
+const TUNSETOWNER: libc::c_ulong = 0x4004_54cc;
+const TUNSETGROUP: libc::c_ulong = 0x4004_54ce;
 
 #[repr(C)]
 struct IfReq {
@@ -131,6 +138,7 @@ impl Device {
         if !vnet_header && request.flags & IFF_VNET_HDR != 0 {
             return Err(io::ErrorKind::InvalidData.into());
         }
+        restrict_to_caller(&file)?;
         let offloads_enabled = if vnet_header {
             // SAFETY: TUNSETOFFLOAD takes a value bitmask, not a pointer. The kernel validates
             // the requested checksum and TCP segmentation flags and returns an error if absent.
@@ -151,6 +159,23 @@ impl Device {
             offloads_enabled,
         })
     }
+}
+
+/// Admit only the caller's effective user and group to the attached interface, before the
+/// caller can make it persistent. Setting them again on a reattached interface is harmless.
+fn restrict_to_caller(file: &File) -> io::Result<()> {
+    // SAFETY: geteuid and getegid take no arguments, cannot fail and touch no memory.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    for (request, id) in [(TUNSETOWNER, uid), (TUNSETGROUP, gid)] {
+        // SAFETY: TUNSETOWNER and TUNSETGROUP take an integer value, not a pointer, on a TUN
+        // descriptor that TUNSETIFF attached; the kernel refuses any other descriptor.
+        let status =
+            unsafe { libc::ioctl(file.as_raw_fd(), request as _, libc::c_ulong::from(id)) };
+        if status < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

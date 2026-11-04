@@ -706,13 +706,27 @@ impl Node {
         Ok((key, public_key))
     }
     /// The index of this installation's persisted `GotaTun` TUN, if a live one passes the
-    /// ownership proof (D332); the engine reattaches only that link.
+    /// ownership proof (D332) and only this agent's user and group may attach it; the engine
+    /// reattaches only that link.
+    ///
+    /// A proven TUN that any local user could attach (one persisted before #260 J213 P1) is not
+    /// trusted: its queue may have been read or held while the agent was down. It is deleted by
+    /// its index and the engine starts a fresh, restricted one; routes added by hand to it go.
     fn persisted_tun_to_adopt(&self) -> io::Result<Option<u32>> {
         let (Some(store), Some(link)) = (&self.store, Device::active_link()?) else {
             return Ok(None);
         };
         let proof = gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?;
-        Ok(proven_gotatun_link(&link, proof).then_some(link.ifindex))
+        if !proven_gotatun_link(&link, proof) {
+            return Ok(None);
+        }
+        let restricted = link.tun_owner == Some(nix::unistd::geteuid().as_raw())
+            && link.tun_group == Some(nix::unistd::getegid().as_raw());
+        if restricted {
+            return Ok(Some(link.ifindex));
+        }
+        Device::delete_ifindex(link.ifindex)?;
+        Ok(None)
     }
     /// Start the selected data plane with a node-local key and advertise its UDP port.
     /// # Errors

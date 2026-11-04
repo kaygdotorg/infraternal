@@ -97,6 +97,10 @@ pub(crate) struct ActiveLink {
     /// The public key the link's marker names; `None` for the legacy unbound kernel and
     /// `GotaTun` markers.
     pub(crate) owner: Option<PublicKey>,
+    /// The TUN's owner and group, which alone may attach it (#260 J213 P1); `None` when unset,
+    /// and always `None` for kernel links.
+    pub(crate) tun_owner: Option<u32>,
+    pub(crate) tun_group: Option<u32>,
 }
 
 /// Put only the public node identity in the marker because the link name is shared across installs.
@@ -266,13 +270,26 @@ impl Device {
         let ifindex = netlink::u32_at(&reply, 4)?;
         let mut alias = None;
         let mut kind = None;
+        let (mut tun_owner, mut tun_group) = (None, None);
         for field in netlink::attributes(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)? {
             match field.kind {
                 20 => alias = Some(field.payload),
                 18 => {
                     for info in netlink::attributes(field.payload)? {
-                        if info.kind == 1 {
-                            kind = Some(info.payload);
+                        match info.kind {
+                            1 => kind = Some(info.payload),
+                            // IFLA_INFO_DATA: a TUN reports IFLA_TUN_OWNER (1) and
+                            // IFLA_TUN_GROUP (2) only when they are set.
+                            2 => {
+                                for data in netlink::attributes(info.payload)? {
+                                    match data.kind {
+                                        1 => tun_owner = Some(netlink::u32_at(data.payload, 0)?),
+                                        2 => tun_group = Some(netlink::u32_at(data.payload, 0)?),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -300,6 +317,8 @@ impl Device {
                     engine,
                     ifindex,
                     owner,
+                    tun_owner,
+                    tun_group,
                 }));
             }
         }
