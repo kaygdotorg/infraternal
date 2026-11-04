@@ -19,10 +19,12 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 struct Ack {}
 
+/// The agent's empty reply to a rotation acknowledgment.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RotationAck {}
 
+/// What happens to the connection after a rotation step: done, or reconnect so the next step uses the new state.
 enum RotationResult {
     Complete,
     Reconnect,
@@ -122,11 +124,14 @@ pub(crate) async fn run(
     }
 }
 
+/// When to try a failed exchange again: 5 s plus up to a minute of jitter, so hosts do not retry together.
 fn retry_deadline() -> tokio::time::Instant {
     let jitter = u64::from(Uuid::new_v4().as_bytes()[0]) % 60;
     tokio::time::Instant::now() + Duration::from_secs(5 + jitter)
 }
 
+/// Run one rotation step with the agent: send the challenge or the candidate certificate (then reconnect), or the
+/// acknowledgment (then done).
 async fn exchange_rotation(
     authority: &AuthorityGuard,
     actor: &EmbeddedAgent,

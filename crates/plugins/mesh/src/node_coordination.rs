@@ -344,6 +344,7 @@ pub async fn run(
     }
 }
 
+/// Sleep for `delay`, or forever when there is no deadline; the caller's other select arms then wake the worker.
 async fn sleep_optional(delay: Option<std::time::Duration>) {
     if let Some(delay) = delay {
         tokio::time::sleep(delay).await;
@@ -428,6 +429,7 @@ mod tests {
                 hostname,
             })
         }
+        /// A test channel that presents the candidate key and advertises rotation support.
         fn candidate() -> Arc<Self> {
             let mut channel = Self::named(false, None);
             let candidate = Arc::get_mut(&mut channel).expect("new test channel is uniquely owned");
@@ -1039,6 +1041,7 @@ mod tests {
             .unwrap();
     }
 
+    /// A coordinator restart in the overlap phase still publishes the previous key to peers.
     #[tokio::test]
     async fn coordinator_restart_restores_the_previous_key_during_overlap() {
         let service = service().await;
@@ -1095,6 +1098,7 @@ mod tests {
         );
     }
 
+    /// A node that reconnects with its predecessor key during the overlap keeps the recorded candidate.
     #[tokio::test]
     async fn reconnect_with_predecessor_preserves_candidate_during_overlap() {
         let service = service().await;
@@ -1148,6 +1152,7 @@ mod tests {
         assert_eq!(current, candidate.0);
     }
 
+    /// A node may already present the candidate key before the server records the retiring phase.
     #[tokio::test]
     async fn candidate_identity_reconnects_before_server_marks_rotation_retiring() {
         let service = service().await;
@@ -1213,6 +1218,7 @@ mod tests {
         assert!(!peer.previous_active);
     }
 
+    /// Applied views are durably acknowledged while a rotation needs them, and a new server instance asks again.
     #[tokio::test]
     async fn successful_peer_configuration_is_durably_acknowledged_until_restart() {
         let service = service().await;
@@ -1294,6 +1300,7 @@ mod tests {
         let _ = worker.await;
     }
 
+    /// Presence where one peer is reachable only through the relay and another is offline.
     fn live_with_relay_activity(
         rotating: NodeId,
         relay_peer: NodeId,
@@ -1342,6 +1349,7 @@ mod tests {
         live
     }
 
+    /// A peer reachable only through the relay counts as reachable, so its missing acknowledgment blocks retirement.
     #[tokio::test]
     async fn relay_only_peer_without_candidate_ack_blocks_rotation_retirement() {
         let service = service().await;

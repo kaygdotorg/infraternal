@@ -141,6 +141,7 @@ fn check(backend: Backend) {
     );
 }
 
+/// After a rotation, a restarted node still adopts its interface as its own.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn rotated_interface_remains_owned_after_process_restart() {

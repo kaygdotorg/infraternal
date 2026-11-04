@@ -314,6 +314,7 @@ impl AuthorityGuard {
     pub(crate) fn store(&self) -> EnrollmentStore {
         self.store.clone()
     }
+    /// The admitted host's ID.
     pub(crate) fn host_id(&self) -> Uuid {
         self.identity.host
     }

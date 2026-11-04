@@ -1331,6 +1331,7 @@ impl RemoteLink {
     pub(crate) fn supports_renewal(&self) -> bool {
         self.renewal.load(std::sync::atomic::Ordering::Acquire)
     }
+    /// Whether the agent's Hello offered live host identity rotation.
     pub(crate) fn supports_identity_rotation(&self) -> bool {
         self.peer_capabilities() & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0
     }

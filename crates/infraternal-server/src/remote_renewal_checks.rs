@@ -28,6 +28,7 @@ impl CertificatePublisher for Published {
     }
 }
 
+/// Records the challenge and proof the test agent produced, so the test can check them.
 #[derive(Default)]
 struct RotationFixture(std::sync::Mutex<Option<(Challenge, Vec<u8>)>>);
 
@@ -209,6 +210,7 @@ fn renewal_refuses_same_issuer_wrong_key_purpose_or_lifetime_before_publication(
     assert_eq!(publisher.0.load(Ordering::Relaxed), 1);
 }
 
+/// A replacement CSR carries a new Ed25519 key and is signed by the old identity.
 #[test]
 fn replacement_csr_is_bound_to_the_old_identity_and_a_new_ed25519_key() {
     let (_, retained, root, _) = identities();

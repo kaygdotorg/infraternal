@@ -503,6 +503,7 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
     assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
 }
 
+/// Candidate identity documents are written through zeroizing buffers, with no plain JSON copy in between.
 #[test]
 fn candidate_identity_buffers_are_zeroizing_without_an_intermediate_json_vec() {
     fn assert_zeroizing_string(_: &Zeroizing<String>) {}

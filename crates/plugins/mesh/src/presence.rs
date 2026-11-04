@@ -171,6 +171,8 @@ pub struct Tracker {
     peers: BTreeMap<NodeId, PeerObservation>,
 }
 
+/// What the last reading showed for one peer: the newest direct handshake, the received byte counter, and when that
+/// counter last grew (relayed packets count, so a relay-only peer stays live).
 #[derive(Clone, Copy, Debug, Default)]
 struct PeerObservation {
     handshake: u64,
@@ -306,6 +308,7 @@ mod tests {
         assert_eq!(live.get(&NodeId(3)), Some(&Some(NodePath::Direct)));
     }
 
+    /// A peer that is reachable only through the relay stays live while its received counter grows.
     #[test]
     fn a_relay_only_peer_stays_live_while_packets_arrive_without_a_direct_handshake() {
         let mut tracker = Tracker::default();
@@ -418,6 +421,7 @@ mod tests {
         );
     }
 
+    /// A counter that grew across a gap between readings still counts as recent traffic.
     #[test]
     fn a_counter_delta_after_a_stale_poll_gap_keeps_a_recent_relay_peer_live() {
         let mut tracker = tracked(vec![row(3, 0, 100, 0)]);
@@ -541,6 +545,7 @@ mod tests {
         assert_eq!(observe(&node).await, None);
     }
 
+    /// The server's own observation tracks relayed packets without a direct handshake.
     #[tokio::test]
     async fn a_server_observation_tracks_a_relay_packet_without_a_direct_handshake() {
         let mut tracker = Tracker::default();

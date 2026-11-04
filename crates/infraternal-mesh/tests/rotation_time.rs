@@ -27,6 +27,7 @@ fn unrepresentable_rotation_overlap_rejects_before_mutation() {
     assert_eq!(state.full_compile(), before);
 }
 
+/// Rotation retires after the 120 s overlap and waits only for acknowledgments from reachable peers.
 #[test]
 fn rotation_retires_after_120_seconds_and_only_waits_for_reachable_acknowledgements() {
     let mut state = Coordinator::new(MeshSettings::new([1; 5]), &[], node(0)).unwrap();
@@ -79,6 +80,7 @@ fn rotation_retires_after_120_seconds_and_only_waits_for_reachable_acknowledgeme
     }
 }
 
+/// A compromise replacement drops the old key at once and has no overlap deadline.
 #[test]
 fn compromise_replacement_does_not_keep_the_old_key_or_the_overlap_deadline() {
     let mut state = Coordinator::new(MeshSettings::new([1; 5]), &[], node(0)).unwrap();

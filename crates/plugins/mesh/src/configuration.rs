@@ -448,6 +448,7 @@ mod tests {
         );
     }
 
+    /// A compiled peer entry carries the rotating peer's previous key next to its new one.
     #[test]
     fn compiled_peer_configuration_keeps_the_previous_rotation_key() {
         let node = |id: u8| Node {

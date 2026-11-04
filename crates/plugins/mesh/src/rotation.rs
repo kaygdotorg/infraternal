@@ -14,7 +14,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Minimum overlap (120 s, D166) during which peers accept both the old and the candidate key.
 const OVERLAP_NANOS: i64 = 120_000_000_000;
+/// Back-off after a failed step. Each step is idempotent, so retrying it is safe.
 const RETRY: Duration = Duration::from_secs(5);
 
 /// Kernel clocks and the Linux boot ID keep schedule cadence and overlap independent of wall steps.
@@ -27,6 +29,7 @@ struct Clock {
 }
 
 impl Clock {
+    /// Read the wall clock, the boot ID and the monotonic clock together.
     fn read() -> io::Result<Self> {
         let wall_secs = i64::try_from(
             SystemTime::now()
@@ -57,6 +60,7 @@ impl Clock {
     }
 }
 
+/// A node's answer to prepare or commit: the key it now holds.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyReply {
@@ -118,6 +122,8 @@ pub(crate) async fn drive(
     }
 }
 
+/// Start a rotation once it is due, but only when every node in the mesh supports rotation, because a node that
+/// does not would lose the old key during the overlap.
 async fn start_due_rotation(
     store: &Store,
     service: &MeshService,
@@ -144,6 +150,8 @@ async fn start_due_rotation(
     }
 }
 
+/// Commit the candidate after the minimum overlap and once every reachable peer acknowledged the overlap view.
+/// The node must report the candidate key the store recorded.
 async fn advance_overlap(
     store: &Store,
     service: &MeshService,
@@ -199,6 +207,7 @@ async fn advance_overlap(
     }
 }
 
+/// Move to cleanup once every reachable peer acknowledged the view that routes on the candidate.
 async fn advance_retiring(
     store: &Store,
     service: &MeshService,
@@ -230,6 +239,8 @@ async fn advance_retiring(
     }
 }
 
+/// Finish once every reachable peer applied the cleanup view: the node drops the old key, and the store records
+/// the completion that schedules the next rotation.
 async fn advance_cleanup(
     store: &Store,
     service: &MeshService,
@@ -276,6 +287,7 @@ async fn advance_cleanup(
     }
 }
 
+/// Ask the node for its candidate key and record the overlap that publishes both keys to its peers.
 async fn run_preparation(
     store: &Store,
     service: &MeshService,
@@ -316,6 +328,7 @@ async fn run_preparation(
     }
 }
 
+/// The operation ID and sequence every rotation action names, so a stale step is refused.
 fn operation_input(record: &RotationRecord) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "operation_id": record.operation_id,

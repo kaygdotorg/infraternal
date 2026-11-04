@@ -200,6 +200,7 @@ fn created_interface_is_marked_for_restart_adoption() {
     Device::delete().unwrap();
 }
 
+/// During the overlap, routes stay on the old key, then move to the current key, and the old key is removed at retirement.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn rotation_overlap_keeps_routes_on_old_then_current_key_until_retirement() {

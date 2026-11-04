@@ -97,6 +97,7 @@ pub async fn run_with_identity_rotation(
     run_with_publishers(identity, state, publisher, Some(rotation), installation).await
 }
 
+/// The boxed client future. Boxing keeps the large connection state off the caller's stack.
 type ClientFuture<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 
 /// Keep public callers' stack futures small; this owns the long-lived reconnect state machine.

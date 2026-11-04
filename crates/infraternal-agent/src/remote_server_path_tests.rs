@@ -12,6 +12,7 @@ use infraternal_plugin_remote::remote_bindings::{Bindings, LeasedBinding};
 use infraternal_protocol::Frame;
 use std::net::IpAddr;
 
+/// Only TLS alert codes count as an identity refusal; other QUIC failures do not trigger the fallback.
 #[test]
 fn identity_admission_refusal_only_matches_tls_crypto_errors() {
     let closed_with = |error_code| {
@@ -478,6 +479,7 @@ fn identity(ca: &remote_tls::Identity, endpoint: SocketAddr) -> RemoteIdentity {
     }
 }
 
+/// A host identity signed by the test CA for `host`.
 fn host_identity(
     ca: &remote_tls::Identity,
     host: uuid::Uuid,
@@ -542,6 +544,7 @@ fn host_identity(
     }
 }
 
+/// An in-memory rotation store that starts with one pending rotation.
 struct PendingRotationPublisher(
     std::sync::Mutex<Option<infraternal_plugin_remote::identity_rotation::RotationStorage>>,
 );
@@ -571,6 +574,7 @@ impl infraternal_plugin_remote::identity_rotation::RotationPublisher for Pending
     }
 }
 
+/// A certificate publisher that accepts every renewal without storing it.
 struct TestCertificatePublisher;
 impl crate::remote_renewal::CertificatePublisher for TestCertificatePublisher {
     fn publish(&self, _: &openssl::x509::X509) -> io::Result<()> {
@@ -578,6 +582,7 @@ impl crate::remote_renewal::CertificatePublisher for TestCertificatePublisher {
     }
 }
 
+/// SHA-256 over a certificate's DER encoding.
 fn certificate_fingerprint(certificate: &openssl::x509::X509) -> [u8; 32] {
     use openssl::hash::MessageDigest;
     certificate
@@ -602,7 +607,7 @@ fn supervise(
 }
 
 #[tokio::test]
-// Keep the real TLS refusal, fallback dial and admission proof in one fixture.
+/// Keep the real TLS refusal, fallback dial and admission proof in one fixture.
 #[allow(clippy::too_many_lines)]
 async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
     use infraternal_plugin_remote::identity_rotation::{

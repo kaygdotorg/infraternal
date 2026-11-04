@@ -24,6 +24,7 @@ struct Set {
     default_policy: DefaultPolicy,
     expected_revision: i64,
 }
+/// Request body for changing the rotation interval, checked against the settings revision the person saw.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RotationIntervalSet {
@@ -167,6 +168,7 @@ pub async fn execute(
     }
 }
 
+/// The owner's view of key rotation: the interval and each node's support, last rotation and current phase.
 async fn get_rotation(pool: &SqlitePool, actor: &str) -> Result<Value, MeshApiError> {
     let mut tx = pool
         .begin()
@@ -240,6 +242,8 @@ async fn get_rotation(pool: &SqlitePool, actor: &str) -> Result<Value, MeshApiEr
     }))
 }
 
+/// Change the rotation interval. Only the owner may, with a fresh passkey confirmation, and only from the revision
+/// they saw.
 async fn set_rotation_interval(
     pool: &SqlitePool,
     actor: &str,

@@ -175,6 +175,8 @@ async fn connect(
     Ok(link)
 }
 
+/// Whether the server refused this host's TLS identity, directly or as a QUIC TLS alert under a stream error.
+/// Only that refusal falls back to the pending predecessor identity.
 fn identity_admission_refused(error: &io::Error) -> bool {
     if error.kind() == io::ErrorKind::PermissionDenied {
         return true;
@@ -196,6 +198,7 @@ fn identity_admission_refused(error: &io::Error) -> bool {
         .is_some_and(identity_admission_refused)
 }
 
+/// Whether a QUIC connection ended with a TLS alert code.
 fn connection_refused_by_tls(error: &quinn::ConnectionError) -> bool {
     match error {
         quinn::ConnectionError::TransportError(error) => is_tls_crypto_error(error.code),

@@ -103,6 +103,7 @@ async fn default_switch_requires_owner_freshness_and_the_preview_revision() {
     .await;
 }
 
+/// The rotation read shows the 7-day default interval and every mesh node.
 #[tokio::test]
 async fn rotation_read_exposes_the_seven_day_interval_and_each_mesh_node() {
     let (_pool, service, _store, now) = fixture().await;
@@ -125,6 +126,7 @@ async fn rotation_read_exposes_the_seven_day_interval_and_each_mesh_node() {
     }));
 }
 
+/// Changing the rotation interval needs the owner and a fresh passkey confirmation.
 #[tokio::test]
 async fn rotation_interval_change_requires_a_fresh_owner_confirmation() {
     let (pool, service, _store, now) = fixture().await;

@@ -41,6 +41,8 @@ struct Loaded {
     dns_placeholders: std::sync::Arc<BTreeSet<NodeId>>,
 }
 
+/// Where one node's key rotation stands: preparing the candidate, overlapping both keys, routing on the candidate
+/// (retiring), then dropping the old key (cleanup).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RotationPhase {
     Preparing,
@@ -49,6 +51,7 @@ pub(crate) enum RotationPhase {
     Cleanup,
 }
 impl RotationPhase {
+    /// The phase's name in `mesh_node_key_rotation.rotation_phase`.
     const fn as_str(self) -> &'static str {
         match self {
             Self::Preparing => "preparing",
@@ -89,6 +92,7 @@ pub(crate) struct Snapshot {
     default_dns_suffix: String,
 }
 impl Snapshot {
+    /// Whether any node is past preparation, so applied views need durable acknowledgments before the rotation moves on.
     pub(crate) fn acknowledgments_required(&self) -> bool {
         self.loaded
             .rotations
@@ -562,6 +566,7 @@ impl Store {
             default_dns_suffix,
         }
     }
+    /// The server instance ID that tags acknowledgment receipts.
     #[cfg(test)]
     pub(crate) fn server_instance(&self) -> &str {
         &self.server_instance
@@ -1053,6 +1058,8 @@ impl Store {
         )
         .await
     }
+    /// Move one node's rotation from `from` to `to` for the named operation in one immediate transaction that also
+    /// advances the configuration revision. Repeating a step already taken returns its revision unchanged.
     async fn advance_rotation(
         &self,
         node: NodeId,

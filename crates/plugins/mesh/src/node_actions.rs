@@ -469,6 +469,7 @@ fn identity_response(
         dns_names: identity.dns_names && requested_dns_names,
     })
 }
+/// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
 #[derive(serde::Serialize)]
 struct IdentityResponse {
     public_key: crate::policy::model::PublicKey,

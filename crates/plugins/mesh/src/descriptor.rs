@@ -459,6 +459,7 @@ mod rotation_action_tests {
     //! The socket adapter grants fresh-passkey context only to destructive actions.
     use super::*;
 
+    /// Changing the rotation interval is a destructive action, so the socket adapter requires a fresh passkey for it.
     #[test]
     fn changing_rotation_interval_requires_fresh_confirmation() {
         assert!(ACTIONS.iter().any(|action| {

@@ -19,9 +19,13 @@ use sqlx::Row;
 use std::{io, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+/// A host rotates its identity key once this long after its last completed rotation (7 days).
 const ROTATION_PERIOD_SECS: i64 = 604_800;
+/// An issued candidate certificate is sent again at most once an hour while the predecessor keeps reconnecting.
 const CANDIDATE_REDELIVERY_SECS: i64 = 3_600;
+/// Upper bound on a stored or delivered candidate certificate, well above a real Ed25519 leaf.
 const MAX_CANDIDATE_CERTIFICATE_DER: usize = 8192;
+/// Caps concurrent candidate verification and signing. A proof over the cap is refused, not queued.
 static SIGNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 /// A single server-authenticated action for the enrolled host.
@@ -41,6 +45,7 @@ pub(crate) struct Service {
     source: Arc<dyn CaKeySource>,
 }
 
+/// One host's persisted rotation row: the phase, the challenge it answers and the candidate it produced.
 #[derive(Clone)]
 struct Operation {
     host: Uuid,
@@ -352,6 +357,8 @@ impl Service {
         Ok(())
     }
 
+    /// Persist a fresh challenge for a due host, bound to the current key, issuer and next sequence.
+    /// Returns `None` while the CA is locked, because no candidate could be signed.
     async fn start(
         &self,
         host: Uuid,
@@ -424,7 +431,7 @@ impl Service {
         Ok(Some(challenge))
     }
 
-    // These writes form one idempotent authority transition and must commit together.
+    /// These writes form one idempotent authority transition and must commit together.
     #[allow(clippy::too_many_lines)]
     async fn persist_issued(&self, issued: IssuedCertificate<'_>) -> io::Result<Vec<u8>> {
         let IssuedCertificate {
@@ -552,6 +559,8 @@ impl Service {
         Ok(der.to_vec())
     }
 
+    /// Record that the candidate was admitted over mTLS: revoke the predecessor key's certificates and mark the
+    /// operation committed, so the next connection receives the acknowledgment.
     async fn commit_candidate(
         &self,
         host: Uuid,
@@ -611,6 +620,7 @@ impl Service {
         operation.acknowledgment()
     }
 
+    /// The public key of the host's live, unrevoked certificate with this fingerprint.
     async fn current_key(
         &self,
         host: Uuid,
@@ -633,6 +643,7 @@ impl Service {
         public.try_into().map_err(|_| denied())
     }
 
+    /// When the issued candidate certificate expires, if one was issued.
     async fn candidate_not_after(
         &self,
         host: Uuid,
@@ -651,6 +662,7 @@ impl Service {
         .map_err(|_| denied())
     }
 
+    /// The database clock, the one clock every rotation decision uses.
     async fn database_now(&self) -> io::Result<i64> {
         sqlx::query_scalar("SELECT unixepoch()")
             .fetch_one(&self.store.0)
@@ -658,6 +670,8 @@ impl Service {
             .map_err(|_| denied())
     }
 
+    /// Read the host's rotation row, first creating it as completed at enrollment for an unrevoked host.
+    /// A row whose completion lies in the future is refused rather than trusted.
     async fn load_or_seed(&self, host: Uuid) -> io::Result<Operation> {
         let now: i64 = self.database_now().await?;
         sqlx::query(
@@ -674,6 +688,7 @@ impl Service {
             .ok_or_else(denied)
     }
 
+    /// Read the host's rotation row outside a transaction.
     async fn read_operation(&self, host: Uuid) -> io::Result<Option<Operation>> {
         let row = sqlx::query(
             "SELECT sequence,last_completed_at,phase,operation_id,challenge,predecessor_fingerprint, \
@@ -688,6 +703,7 @@ impl Service {
         row.map(|row| operation_from_row(&row, host)).transpose()
     }
 
+    /// Read the host's rotation row inside `tx`, so the caller decides on the state it then writes.
     async fn read_operation_in(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -707,6 +723,8 @@ impl Service {
     }
 }
 
+/// Check that the CSR's key is new and that the predecessor key signed the challenge and CSR, then sign the leaf.
+/// Runs on the bounded blocking worker because both steps are CPU-bound.
 fn verify_and_sign_candidate(proof: &CandidateProof) -> io::Result<VerifiedCandidate> {
     let csr = ValidatedCsr::parse(&proof.csr_der).map_err(|_| denied())?;
     let public_key: [u8; 32] = csr
@@ -751,6 +769,7 @@ fn verify_and_sign_candidate(proof: &CandidateProof) -> io::Result<VerifiedCandi
 }
 
 impl Operation {
+    /// Rebuild the persisted challenge exactly as it was first sent.
     fn challenge(&self) -> io::Result<Challenge> {
         let operation_id =
             Uuid::from_slice(self.id.as_deref().ok_or_else(denied)?).map_err(|_| denied())?;
@@ -782,6 +801,7 @@ impl Operation {
         })
     }
 
+    /// The candidate certificate stored for this operation, for redelivery.
     fn candidate_certificate(&self) -> io::Result<CandidateCertificate> {
         Ok(CandidateCertificate {
             operation_id: Uuid::from_slice(self.id.as_deref().ok_or_else(denied)?)
@@ -795,6 +815,7 @@ impl Operation {
         })
     }
 
+    /// The acknowledgment that tells the host its candidate is now its identity.
     fn acknowledgment(&self) -> io::Result<Acknowledgment> {
         Ok(Acknowledgment {
             operation_id: Uuid::from_slice(self.id.as_deref().ok_or_else(denied)?)
@@ -804,6 +825,7 @@ impl Operation {
     }
 }
 
+/// Decode one `remote_identity_rotation` row.
 fn operation_from_row(row: &sqlx::sqlite::SqliteRow, host: Uuid) -> io::Result<Operation> {
     Ok(Operation {
         host,
@@ -830,6 +852,7 @@ fn operation_from_row(row: &sqlx::sqlite::SqliteRow, host: Uuid) -> io::Result<O
     })
 }
 
+/// Every refusal looks the same to the host, so it learns nothing about which check failed.
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
@@ -846,7 +869,7 @@ mod tests {
         x509::{X509NameBuilder, X509Req},
     };
 
-    // One flow checks restart, throttled redelivery, and exact-certificate idempotency together.
+    /// One flow checks restart, throttled redelivery, and exact-certificate idempotency together.
     #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn candidate_delivery_is_throttled_after_predecessor_reconnect() {

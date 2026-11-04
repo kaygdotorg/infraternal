@@ -61,9 +61,12 @@ impl Drop for RotationSecret {
     }
 }
 
+/// Marks the private rotation-secret file format, version 1.
 const ROTATION_MAGIC: &[u8; 8] = b"IMKEYV1\0";
+/// Exact size of that file: magic, phase, sequence, operation ID, previous and candidate private keys.
 const ROTATION_FIXED_BYTES: usize = 8 + 1 + 8 + 36 + 32 + 32;
 
+/// A canonical hyphenated UUID text, the only operation ID the secret file accepts.
 fn valid_operation_id(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| {
@@ -445,6 +448,7 @@ mod tests {
             0o600
         );
     }
+    /// Finishing a rotation removes only the predecessor key, and finishing it again is harmless.
     #[test]
     fn completed_rotation_retires_only_the_predecessor_and_is_retryable() {
         let directory = Directory::new();

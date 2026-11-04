@@ -17,7 +17,9 @@ use std::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+/// Domain separator for the predecessor key's signature, so it can never be replayed as another protocol's signature.
 const DOMAIN: &[u8] = b"infraternal/1 host-key-rotation\0";
+/// Largest candidate CSR the host sends; an Ed25519 CSR is a few hundred bytes.
 const MAX_CSR_DER: usize = 4096;
 
 /// Server state bound to the active certificate before the host creates a candidate.
@@ -125,6 +127,7 @@ pub trait RotationPublisher: Send + Sync {
     fn promote(&self, completed: &CompletedRotation) -> io::Result<()>;
 }
 
+/// The one rotation in flight: its challenge, the predecessor identity and the candidate key and certificate.
 struct Pending {
     challenge: Challenge,
     predecessor: Identity,
@@ -132,6 +135,7 @@ struct Pending {
     certificate: Option<X509>,
 }
 
+/// Rotation progress shared by every connection of this agent.
 struct State {
     pending: Option<Pending>,
     completed: Option<CompletedRotation>,
@@ -279,6 +283,8 @@ impl IdentityRotation {
         }
     }
 
+    /// Answer a challenge: make (or reuse) the candidate key, persist it, and sign the CSR with the predecessor key.
+    /// A first challenge must name the exact certificate this host presents now, and a sequence newer than any completed one.
     fn proof(&self, current: &Arc<RwLock<Identity>>, input: &[u8]) -> io::Result<Vec<u8>> {
         let challenge: Challenge = serde_json::from_slice(input).map_err(|_| denied())?;
         if challenge.sequence == 0 || challenge.issuer_generation == 0 {
@@ -320,6 +326,7 @@ impl IdentityRotation {
         .map_err(|_| denied())
     }
 
+    /// Accept the server-signed candidate certificate for the pending operation and persist it next to the candidate key.
     fn certificate(&self, current: &Arc<RwLock<Identity>>, input: &[u8]) -> io::Result<Vec<u8>> {
         let update: CandidateCertificate = serde_json::from_slice(input).map_err(|_| denied())?;
         if update.certificate_der.is_empty() || update.certificate_der.len() > 8192 {
@@ -352,6 +359,8 @@ impl IdentityRotation {
         serde_json::to_vec(&serde_json::json!({})).map_err(|_| denied())
     }
 
+    /// Promote the candidate once the server acknowledges candidate mTLS. Repeating the acknowledgment of the completed
+    /// operation succeeds without changing anything.
     fn acknowledge(&self, current: &Arc<RwLock<Identity>>, input: &[u8]) -> io::Result<Vec<u8>> {
         let acknowledgment: Acknowledgment = serde_json::from_slice(input).map_err(|_| denied())?;
         let mut state = self.state.write().map_err(|_| denied())?;
@@ -466,6 +475,7 @@ pub fn prove(
     })
 }
 
+/// A first challenge must name this host, its current certificate, and that certificate must carry its own key.
 fn validate_initial_predecessor(current: &Identity, challenge: &Challenge) -> io::Result<()> {
     if host_id(&current.certificate)? != challenge.host_id
         || fingerprint(&current.certificate)? != challenge.predecessor_fingerprint
@@ -506,6 +516,8 @@ pub fn transcript(challenge: &Challenge, csr_der: &[u8]) -> io::Result<Vec<u8>> 
     Ok(message)
 }
 
+/// Check that a candidate certificate carries the candidate key, names this host, lasts exactly 7 days and chains to
+/// the issuer the challenge named. `require_current` also requires it to be valid now.
 fn validate_certificate(
     certificate: &X509,
     candidate: &PKey<Private>,
@@ -566,6 +578,7 @@ fn validate_certificate(
     Ok(())
 }
 
+/// SHA-256 over the certificate's DER encoding.
 fn fingerprint(certificate: &X509) -> io::Result<[u8; 32]> {
     certificate
         .digest(MessageDigest::sha256())
@@ -575,6 +588,7 @@ fn fingerprint(certificate: &X509) -> io::Result<[u8; 32]> {
         .map_err(|_| denied())
 }
 
+/// The host ID from the certificate's single `urn:infraternal:host:` URI name.
 fn host_id(certificate: &openssl::x509::X509) -> io::Result<Uuid> {
     let names = certificate.subject_alt_names().ok_or_else(denied)?;
     if names.len() != 1 {
@@ -595,10 +609,12 @@ fn candidate_pkcs8(key: &PKey<Private>) -> io::Result<Zeroizing<Vec<u8>>> {
         .map_err(|_| denied())
 }
 
+/// Every refusal is the same opaque error.
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
 
+/// Proof transcript, renewal and key-handling checks for host identity rotation.
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -615,11 +631,13 @@ mod tests {
         },
     };
 
+    /// A host leaf signed by the test root with a fresh key.
     fn host_identity(root: &Identity, host: Uuid) -> Identity {
         let key = PKey::generate_ed25519().unwrap();
         host_identity_with_key(root, host, key, 4)
     }
 
+    /// A host leaf signed by the test root for a given key and serial, so tests can renew a predecessor.
     fn host_identity_with_key(
         root: &Identity,
         host: Uuid,
@@ -674,6 +692,7 @@ mod tests {
         }
     }
 
+    /// A challenge naming `identity` as the predecessor under the test root.
     fn challenge(identity: &Identity) -> Challenge {
         Challenge {
             host_id: Uuid::from_u128(42),
@@ -692,6 +711,7 @@ mod tests {
         }
     }
 
+    /// The signed transcript changes when the issuer fingerprint or generation changes.
     #[test]
     fn proof_transcript_binds_issuer_fingerprint_and_generation() {
         let root = crate::remote_tls::tests::root();
@@ -732,6 +752,7 @@ mod tests {
         );
     }
 
+    /// A predecessor renewed while a proof is pending still completes the same operation.
     #[test]
     fn pending_proof_survives_predecessor_certificate_renewal() {
         let root = crate::remote_tls::tests::root();
@@ -757,6 +778,7 @@ mod tests {
         );
     }
 
+    /// A new challenge is refused unless it names the exact certificate the host presents.
     #[test]
     fn new_challenge_requires_the_exact_predecessor_certificate() {
         let root = crate::remote_tls::tests::root();
@@ -769,6 +791,7 @@ mod tests {
         assert!(validate_initial_predecessor(&renewed, &challenge).is_err());
     }
 
+    /// The candidate's PKCS#8 encoding lives in a buffer that is wiped on drop.
     #[test]
     fn candidate_pkcs8_is_held_in_a_zeroizing_buffer() {
         fn assert_zeroizing(_: &zeroize::Zeroizing<Vec<u8>>) {}

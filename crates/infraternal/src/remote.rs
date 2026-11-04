@@ -49,6 +49,8 @@ struct StoredIdentity {
         Option<infraternal_plugin_remote::identity_rotation::CompletedRotation>,
 }
 
+/// A pending host identity rotation as stored on disk: the challenge, the candidate private key and, once issued, its
+/// certificate. The key is held in a buffer that is wiped on drop.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredRotation {
