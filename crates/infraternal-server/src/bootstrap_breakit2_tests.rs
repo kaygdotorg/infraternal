@@ -1370,6 +1370,11 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     let readd_private = std::env::var_os("BREAKIT2_READD")
         .is_some()
         .then(|| private.clone());
+    // D337: after the join, leave the install stuck with a terminal open, then
+    // Replace it and require that terminal in the new infraternal agent.
+    let replace_private = std::env::var_os("BREAKIT2_REPLACE_AFTER_JOIN")
+        .is_some()
+        .then(|| private.clone());
     let transport = Arc::new(FixtureTransport {
         transport: Arc::new(TimedTransport {
             adapter: OpenSsh {
@@ -1580,6 +1585,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
                         "METRIC breakit2 failed_step={:?} status={:?}",
                         failure.failed_step, failure.exit_status
                     );
+                    // The fixed public text and lease fields the person reads (#305, D337).
+                    let wire = serde_json::to_value(failure).unwrap();
+                    println!(
+                        "FAILURE breakit2 message={} setup_lock={}",
+                        wire["message"], wire["setup_lock"]
+                    );
                 }
                 if event.step == Step::Done {
                     joined_host = event.host_id;
@@ -1700,6 +1711,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
     {
         let host = joined_host.expect("a finished add names its host");
         already_added_opens_a_terminal(&f, &runner, &transport, private, host).await;
+    }
+    if let Some(private) = replace_private
+        && result == Step::Done
+    {
+        let host = joined_host.expect("a finished add names its host");
+        replace_keeps_a_terminal(&f, &runner, &transport, &scratch, private, host).await;
     }
     if std::env::var_os("BREAKIT2_REMOVE").is_some() {
         // #235: removal asks the joined host to uninstall itself through the
@@ -1829,6 +1846,175 @@ async fn already_added_opens_a_terminal(
         .await
         .unwrap();
     instant::EarlyTerminal::open_on_named_host(&actor, Uuid::from_bytes(session)).await;
+}
+
+/// D337: a host script (`BREAKIT2_REPLACE_AFTER_JOIN`, run over SSH with the
+/// fixture key `BREAKIT2_CRAFT_KEY`) leaves this server's freshly joined install
+/// stuck mid-upgrade: agent stopped, journal in place, one shim running. Adding
+/// the host again must Replace it, and that shim's terminal must carry over:
+/// it is attached through the new infraternal agent and runs a command.
+async fn replace_keeps_a_terminal(
+    f: &Fixture,
+    runner: &Bootstrap,
+    transport: &FixtureTransport,
+    scratch: &std::path::Path,
+    private: Vec<u8>,
+    host: Uuid,
+) {
+    let session = leave_install_stuck(scratch);
+    // The verdict is Finish while the server still counts the stopped agent
+    // as connected; wait until it does not, so it is Replace.
+    let gone = Instant::now();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while f.backend.hosts.installed(host).await {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("the server still counts the stopped infraternal agent as connected");
+    println!("SURVIVOR breakit2 disconnected_after_ms={}", gone.elapsed().as_millis());
+    *transport.private.lock().unwrap() = Some(Secret::new(private));
+    let finished = replace_again(f, runner).await;
+    assert_eq!(finished.host_id, Some(host), "a Replace keeps the host");
+    let echoed = echo_through_new_agent(f, host, session).await;
+    println!("SURVIVOR breakit2 attached=true echoed={echoed}");
+    assert!(echoed, "the carried-over terminal did not run the command");
+}
+
+/// Run the host script and return the session id of the shim it left running.
+fn leave_install_stuck(scratch: &std::path::Path) -> [u8; 16] {
+    use std::io::Write as _;
+    let script = std::fs::read(std::env::var_os("BREAKIT2_REPLACE_AFTER_JOIN").unwrap()).unwrap();
+    let key = std::env::var_os("BREAKIT2_CRAFT_KEY").expect("BREAKIT2_CRAFT_KEY names the fixture key");
+    let target = std::env::var("BREAKIT2_TARGET").unwrap();
+    let (login, port) = target.rsplit_once(':').expect("BREAKIT2_TARGET is user@host:port");
+    let mut craft = std::process::Command::new(scratch.join("ssh"))
+        .arg("-i")
+        .arg(&key)
+        .args(["-o", "IdentitiesOnly=yes", "-p", port, login, "sh -s"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    craft.stdin.take().unwrap().write_all(&script).unwrap();
+    let crafted = craft.wait_with_output().unwrap();
+    // The script prints only fixed lines: ids, counts and PIDs.
+    let report = String::from_utf8(crafted.stdout).unwrap();
+    print!("{report}");
+    assert!(
+        crafted.status.success(),
+        "the stuck-install script failed: {}",
+        String::from_utf8_lossy(&crafted.stderr)
+    );
+    let survivor = report
+        .lines()
+        .find_map(|line| line.strip_prefix("SURVIVOR session="))
+        .and_then(|rest| rest.split(' ').next())
+        .expect("the script names the shim it started");
+    *Uuid::parse_str(survivor).unwrap().as_bytes()
+}
+
+/// Add the host again, confirm the Replace it offers, and return its last event.
+async fn replace_again(f: &Fixture, runner: &Bootstrap) -> Event {
+    let target = std::env::var("BREAKIT2_TARGET").unwrap();
+    let mode = if std::env::var("BREAKIT2_MODE").unwrap_or_default() == "root" {
+        InstallMode::Root
+    } else {
+        InstallMode::Rootless
+    };
+    let batch = runner
+        .start_authenticated(
+            "owner".into(),
+            Secret::new(f.cookie.as_bytes().to_vec()),
+            vec![Target {
+                id: "replace".into(),
+                address: TargetAddress::Manual(target.clone()),
+                credential: None,
+                mode,
+                root_consent: mode == InstallMode::Root,
+            }],
+            None,
+        )
+        .unwrap();
+    let mut changed = batch.subscribe();
+    let mut confirmed = false;
+    let finished = tokio::time::timeout(Duration::from_secs(220), async {
+        loop {
+            let events = batch.events(0).1;
+            if !confirmed
+                && let Some(event) = events.iter().find(|event| event.leftovers.is_some())
+            {
+                let failure = serde_json::to_value(&event.failure).unwrap();
+                println!(
+                    "CONFIRMATION breakit2 replace message={} findings={:?}",
+                    failure["message"],
+                    event.leftovers.as_ref().unwrap().findings
+                );
+                let challenge = event.leftovers.as_ref().unwrap().challenge;
+                runner.start_fresh(&batch, "owner", "replace", challenge).unwrap();
+                confirmed = true;
+            }
+            if let Some(event) = events
+                .iter()
+                .find(|event| matches!(event.step, Step::Done | Step::Failed))
+            {
+                for phase in &events {
+                    println!(
+                        "METRIC breakit2 replace event={:?} cumulative_ms={} message={}",
+                        phase.step, phase.elapsed_ms, phase.message
+                    );
+                }
+                return event.clone();
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(confirmed, "the stuck install was not offered for Replace");
+    assert_eq!(finished.step, Step::Done, "the Replace did not finish: {}", finished.message);
+    finished
+}
+
+/// Attach to `session` through the host's current infraternal agent and run a command in it.
+async fn echo_through_new_agent(f: &Fixture, host: Uuid, session: [u8; 16]) -> bool {
+    use infraternal_protocol::{Frame, encode_muxed_frame_into};
+    let actor = f.backend.hosts.actor(host).await.unwrap();
+    let (handle, mut output) = actor
+        .attach(session, 0, 0, 2)
+        .await
+        .expect("the earlier terminal is attachable through the new infraternal agent")
+        .split();
+    let mut wire = Vec::new();
+    for frame in [
+        Frame::Credit { bytes: 65536 },
+        Frame::Input {
+            in_seq: 0,
+            bytes: b"echo carried-$((6*7))\n",
+        },
+    ] {
+        wire.clear();
+        encode_muxed_frame_into(1, &frame, &mut wire).unwrap();
+        handle
+            .send_frame(bytes::Bytes::copy_from_slice(&wire))
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut received = Vec::new();
+        while let Some(event) = output.recv().await {
+            if let TerminalOutput::Output { bytes, .. } | TerminalOutput::Snapshot { bytes, .. } = event {
+                received.extend_from_slice(&bytes);
+                if received.windows(9).any(|window| window == b"carried-4") {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Observe only whether the test fixture reaches the intended fixed failure step.
