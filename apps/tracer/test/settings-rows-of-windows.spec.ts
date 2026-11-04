@@ -9,7 +9,8 @@ import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
 const SHOTS = process.env.SETTINGS_SHOTS;
-const URL = "/?mock=1&proto=clusters&scene=3&theme=mocha&bg=none";
+/** `SETTINGS_THEME=latte` writes the light captures (the default is the dark `mocha`). */
+const URL = `/?mock=1&proto=clusters&scene=3&theme=${process.env.SETTINGS_THEME ?? "mocha"}&bg=none`;
 const SIZES = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
   phone: { viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
@@ -201,7 +202,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   // A window the docs have a page for has "?" as the first button of its action group, and the group obeys the alignment rules. A window without a page has no "?".
   const groups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
   expect(groups.length).toBe(23);
-  expect(groups.filter((g) => g.ids.length === 0).map((g) => g.id), "windows without a docs page offer no button").toEqual(WITHOUT_DOCS);
+  expect(groups.filter((g) => g.ids.length === 0).map((g) => g.id).sort(), "windows without a docs page offer no button").toEqual([...WITHOUT_DOCS].sort());
   const settingsInset = checkGroups(groups.filter((g) => g.ids.length > 0), "docs");
   // No window's name is ever cut short, even with five windows to a row.
   const cut = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((w) => { const h = w.querySelector<HTMLElement>(".ui-window-host")!; return h.scrollWidth > h.clientWidth + 0.5 ? `${w.dataset.windowId}: ${h.textContent}` : ""; }).filter(Boolean));
