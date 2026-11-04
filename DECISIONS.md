@@ -3782,3 +3782,27 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        choose which account they log in as on each host: "i agree but we
        also adjacently need some UI around what user one prefers on hosts
        as I wouldnt want to login as root all the time".
+337. **Taking over machines from another server; more morning answers
+     (owner, 2026-11-04, #305, #265, #263, #303):**
+     - Take over a machine that belongs to another server only when its old
+       install is not actually working: "we should allow takeovers if the
+       node is no longer connected, is in a broken state, any indicator
+       that it's not actually working - allow take over. WE should not
+       allow takeovers if there are actual terminals running + connected to
+       the previous server, in which case we need to design some UI and
+       machinery around proving that the old server is mine too."
+     - The set-aside old install is not kept: "None, delete it."
+     - Open terminals on a replaced install: "can't they just be
+       inherited?" They are adopted by the new infraternal agent rather than
+       ended, wherever that is safe.
+     - Mac shells join the person's session only for a screen or VNC
+       login, because macOS unlocks the keychain only then: "yeah sadly, I
+       think vnc login/screen login is the way to go".
+     - The Mac node letting the coordinator reach every port until slice 3
+       is accepted: "yeah okay temporarily is fine then".
+     - Many machines at once belong to setup keys or API keys that bring a
+       machine up without approval: "this sort of thing is better suited
+       for the "setup keys" feature / api keys feature where we can bring
+       them up with an API key and they don't need approval anymore."
+     - Keys from before D333 end within 24 h at upgrade ("i am the only
+       user so no problem"), and a key's lifetime is a hard end ("yes").
