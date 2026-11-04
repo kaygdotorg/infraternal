@@ -1083,8 +1083,13 @@ fn publication_list(
     } else {
         format!("{} published service(s).", services.len())
     };
-    serde_json::to_vec(&json!({"message": message, "services": services}))
-        .map_err(|_| infraternal_plugin_api::PluginError::Rejected)
+    let containment = crate::cgroup::containment();
+    serde_json::to_vec(&json!({
+        "message": message,
+        "services": services,
+        "containment": {"kind": containment.kind(), "detail": containment.describe()},
+    }))
+    .map_err(|_| infraternal_plugin_api::PluginError::Rejected)
 }
 
 fn find_publication(state: &ControllerState, target: &str) -> Option<u16> {

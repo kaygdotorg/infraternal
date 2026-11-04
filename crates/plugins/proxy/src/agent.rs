@@ -140,6 +140,11 @@ fn present_publications(value: Value) -> Result<Presented, PluginError> {
                 .unwrap_or("Mesh access unavailable");
             format!("{url} · {access}")
         })
+        .chain(
+            value["containment"]["detail"]
+                .as_str()
+                .map(|detail| format!("Containment: {detail}")),
+        )
         .collect::<Vec<_>>()
         .join("\n");
     Ok(Presented {

@@ -158,12 +158,15 @@ pub struct MeshNodePlugin {
     changed: AtomicBool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
+    proxy_containment: Option<ProxyContainmentProbe>,
     // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
     dump: Option<(std::time::Instant, Counters)>,
 }
 type Counters =
     std::collections::BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
 type ConfigurationObserver = Arc<dyn Fn(Option<Config>) -> std::io::Result<()> + Send + Sync>;
+/// How this node contains its proxy processes, as `(kind, detail)` for `mesh.status` [#281, D336].
+pub type ProxyContainmentProbe = Arc<dyn Fn() -> (&'static str, String) + Send + Sync>;
 /// Synchronous return path used by the proxy controller after Traefik applies a route snapshot.
 ///
 /// The flag says whether Traefik confirmed this state (see [`Node::set_proxy_ingress`]).
@@ -234,6 +237,7 @@ impl MeshNodePlugin {
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
+            proxy_containment: None,
             dump: None,
         }
     }
@@ -244,6 +248,14 @@ impl MeshNodePlugin {
     #[must_use]
     pub fn with_configuration_observer(mut self, observer: ConfigurationObserver) -> Self {
         self.configuration_observer = Some(observer);
+        self
+    }
+
+    /// Report the proxy's process containment in `mesh.status`, because the proxy's Mesh
+    /// listener is part of what this node exposes to its peers.
+    #[must_use]
+    pub fn with_proxy_containment(mut self, probe: ProxyContainmentProbe) -> Self {
+        self.proxy_containment = Some(probe);
         self
     }
 
@@ -272,6 +284,7 @@ impl Default for MeshNodePlugin {
             changed: AtomicBool::new(false),
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
+            proxy_containment: None,
             dump: None,
         }
     }
@@ -463,7 +476,12 @@ impl AgentPlugin for MeshNodePlugin {
                     json!({"state":"Off","version":null})
                 }
                 Request::Status => {
-                    json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link})
+                    let mut status = json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link});
+                    if let Some(probe) = &self.proxy_containment {
+                        let (kind, detail) = probe();
+                        status["proxy_containment"] = json!({"kind": kind, "detail": detail});
+                    }
+                    status
                 }
                 Request::Configure(chunk) => {
                     let applied = node.chunk(*chunk).map_err(|_| PluginError::Rejected)?;
