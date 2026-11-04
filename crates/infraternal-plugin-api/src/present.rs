@@ -38,9 +38,11 @@ pub struct Presented {
 /// A column's tint for the terminal. The core passes one; plugins print plain text.
 pub type Tint<'a> = &'a dyn Fn(usize, &str) -> Option<&'static str>;
 
+/// Terminal escape that ends a tint.
 const RESET: &str = "\u{1b}[0m";
 /// Narrowest a shrunk column may become before the table gives up and overflows.
 const MIN_COLUMN: usize = 6;
+/// Blank columns between two table columns, and between a label and its value in `pairs`.
 const GAP: usize = 2;
 
 /// Render rows as an aligned table indented by `indent` columns and fitted to `width`.
@@ -102,6 +104,9 @@ pub fn table(
     out
 }
 
+/// Appends one table row to `out`, as one or more lines: every cell but the last is truncated
+/// to its column width, the last wraps. A tint colours only a cell's first line. Trailing
+/// spaces are trimmed.
 fn push_row(
     out: &mut String,
     row: &[String],
