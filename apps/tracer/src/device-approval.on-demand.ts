@@ -119,7 +119,8 @@ function renderReview(
     const waiting: Loading = loading(button.querySelector<HTMLElement>(".busy-count")!, 400);
     void (async () => {
       try {
-        await loginWithPasskey(deviceName());
+        // The tap is bound to this one request's code (D336).
+        await loginWithPasskey(deviceName(), { kind: "device.approve", code });
         await approveDeviceApproval(code);
         onApproved();
         mountDeviceApprovalSuccess(host);

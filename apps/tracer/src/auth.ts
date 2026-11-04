@@ -279,9 +279,19 @@ export async function registerOwner(
   }
 }
 
+/**
+ * The one change a passkey tap is for (D336). The server binds the tap to exactly this action and
+ * these parameters, once, for two minutes; a sign-in without one authorizes none of these changes.
+ */
+export type TapAction =
+  | { kind: "device.approve"; code: string }
+  | { kind: "passkey.add" }
+  | { kind: "recovery.rotate" }
+  | { kind: "security.settings"; api_key_lifetime_days: number };
+
 /** Completes a UV-required passkey login and verifies its DEK envelope locally. */
-export async function loginWithPasskey(device: string): Promise<string> {
-  return unlockWithPasskey(device);
+export async function loginWithPasskey(device: string, action?: TapAction): Promise<string> {
+  return unlockWithPasskey(device, undefined, undefined, action);
 }
 
 /** Adding a key needs the same authenticated local unwrap, without retaining a DEK in the screen. */
@@ -300,11 +310,19 @@ export async function addSecondPasskey(userId: string): Promise<void> {
       const wrap = await wrapDek(prf, dek, userId, "passkey");
       await post("registration-finish", { ceremony: requiredString(start.ceremony, "registration ceremony"), proof: credentialProof(created), passkey_wrap: wrap });
     } finally { prf?.fill(0); input.fill(0); }
-  });
+  }, { kind: "passkey.add" });
 }
 
-async function unlockWithPasskey(device: string, expectedUser?: string, useKey?: (key: Uint8Array) => Promise<void>): Promise<string> {
-  const start = await post<AuthStart>("login-start", expectedUser ? { user_id: expectedUser } : {});
+async function unlockWithPasskey(
+  device: string,
+  expectedUser?: string,
+  useKey?: (key: Uint8Array) => Promise<void>,
+  action?: TapAction,
+): Promise<string> {
+  const start = await post<AuthStart>("login-start", {
+    ...(expectedUser ? { user_id: expectedUser } : {}),
+    ...(action ? { action } : {}),
+  });
   const publicKey = requestOptions(start.options.publicKey);
   let prf: Uint8Array | undefined;
   let userId: string;

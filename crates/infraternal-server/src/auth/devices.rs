@@ -1,5 +1,7 @@
 //! Single-use device approval and exact-scope API key authorization [27,28].
-use super::{Auth, B64, Engine, Error, Result, Row, Value, hash, json, random, require_session_tx};
+use super::{
+    Auth, B64, Engine, Error, Result, Row, TapAction, Value, hash, json, random, require_tap_tx,
+};
 
 /// A key's lifetime when the request names none (D333: "short by default, for example 24
 /// hours"), and the shortest lifetime a request may ask for.
@@ -75,16 +77,25 @@ impl Auth {
         Ok(json!({"poll_token":token,"user_code":code,"expires_in":600}))
     }
 
-    /// Signed-in browser approval requires a fresh passkey tap and binds exact requested scopes.
+    /// Approval spends a passkey tap made for this exact key request (D333, D336), and binds
+    /// the exact requested scopes.
     pub async fn device_approve(&self, session_token: &str, code: &str, now: i64) -> Result<()> {
         let session = self.session(session_token, now).await?;
-        session.require_fresh(now)?;
         let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE users SET name=name WHERE id=?")
             .bind(&session.user_id)
             .execute(&mut *tx)
             .await?;
-        require_session_tx(&mut tx, &hash(session_token), &session.user_id, now).await?;
+        require_tap_tx(
+            &mut tx,
+            &hash(session_token),
+            &session.user_id,
+            &TapAction::ApproveKey {
+                code: code.to_owned(),
+            },
+            now,
+        )
+        .await?;
         if sqlx::query(
             "UPDATE approvals SET user_id=? WHERE code_hash=? AND expires>? AND user_id IS NULL",
         )

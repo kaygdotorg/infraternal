@@ -8,6 +8,7 @@ async fn approve(f: &Fixture, lifetime: Option<i64>) -> String {
         .device_start_for("cli", vec!["status:read".to_owned()], lifetime, NOW)
         .await
         .unwrap();
+    bind_tap(&f.auth, &f.session, super::approve(&approval), NOW).await;
     f.auth
         .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
         .await
@@ -38,6 +39,7 @@ async fn a_key_request_defaults_to_24_hours_and_the_review_shows_it() {
         "the start response keeps the shape released CLIs accept"
     );
 
+    bind_tap(&f.auth, &f.session, super::approve(&approval), NOW).await;
     f.auth
         .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
         .await

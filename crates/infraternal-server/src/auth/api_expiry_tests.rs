@@ -5,12 +5,12 @@ use super::*;
 /// key behaves like one approved before D333: no approved end. The approved end is covered in
 /// `key_lifetime_tests`. Each approval gets its own tap, as D333 requires.
 async fn key(f: &Fixture) -> String {
-    retap(f).await;
     let approval = f
         .auth
         .device_start_for("cli", vec!["hosts:read".into()], Some(30 * 86_400), NOW)
         .await
         .unwrap();
+    bind_tap(&f.auth, &f.session, approve(&approval), NOW).await;
     f.auth
         .device_approve(&f.session, str_field(&approval, "user_code"), NOW)
         .await
@@ -29,13 +29,6 @@ async fn key(f: &Fixture) -> String {
 }
 
 /// Stand-in for a new sign-in tap on the fixture session (D333 spends one per change).
-async fn retap(f: &Fixture) {
-    sqlx::query("UPDATE sessions SET tap_spent=0")
-        .execute(&f.auth.pool)
-        .await
-        .unwrap();
-}
-
 async fn expiry(auth: &Auth, key: &str) -> i64 {
     sqlx::query_scalar("SELECT expires_at FROM api_keys WHERE token_hash=?")
         .bind(hash(key))
@@ -208,7 +201,13 @@ async fn api_key_lifetime_settings_validate_and_apply_to_existing_keys() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
     for days in [365, 1] {
-        retap(&f).await;
+        bind_tap(
+            &f.auth,
+            &f.session,
+            json!({"kind":"security.settings","api_key_lifetime_days":days}),
+            NOW,
+        )
+        .await;
         let (status, _, body) = http_post_json_with_cookie(
             &app,
             "security-settings-update",
@@ -242,6 +241,13 @@ async fn api_key_settings_require_live_owner_and_fresh_same_origin_mutation() {
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={}", f.session);
     let update = json!({"api_key_lifetime_days":1});
+    bind_tap(
+        &f.auth,
+        &f.session,
+        json!({"kind":"security.settings","api_key_lifetime_days":1}),
+        NOW,
+    )
+    .await;
     assert_eq!(
         http_post_json(&app, "security-settings", json!({})).await.0,
         StatusCode::UNAUTHORIZED
@@ -264,7 +270,8 @@ async fn api_key_settings_require_live_owner_and_fresh_same_origin_mutation() {
         app.clone().oneshot(foreign).await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    f.auth.set_test_http_time(NOW + FRESH);
+    f.auth
+        .set_test_http_time(NOW + super::super::action_tap::ACTION_TAP_SECONDS);
     assert_eq!(
         http_post_json_with_cookie(&app, "security-settings-update", update.clone(), &cookie)
             .await

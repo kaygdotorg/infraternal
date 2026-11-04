@@ -40,6 +40,8 @@ struct Setup {
 #[serde(deny_unknown_fields)]
 struct User {
     user_id: Option<String>,
+    /// The one per-action change this tap is for (`action_tap`, D336). Absent: a plain sign-in.
+    action: Option<super::TapAction>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -424,14 +426,15 @@ async fn login_start(
     now: i64,
 ) -> super::Result<Value> {
     let b: User = body(value)?;
+    let action = b.action.as_ref();
     match b.user_id {
         Some(user) => {
             if auth.session(cookie(headers)?, now).await?.user_id != user {
                 return Err(Error::Denied);
             }
-            auth.login_start(&user, now).await
+            auth.login_start_for(&user, action, now).await
         }
-        None => auth.discoverable_login_start(now).await,
+        None => auth.discoverable_login_start_for(action, now).await,
     }
 }
 

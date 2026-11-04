@@ -1,9 +1,9 @@
 //! Single-use registration/login ceremonies, verified metadata and writer-locked counters [24,28].
 use super::{
     Auth, Authority, B64, CEREMONY, Engine, Error, Login, LoginState, Passkey, Pending,
-    PublicKeyCredential, RegisterPublicKeyCredential, Registration, Result, Row, Uuid, Value, Wrap,
-    constant_prf_input, hash, insert_session, json, prf_salt, put_wrap, random, recovery_hash,
-    require_session_tx, setup::valid_username,
+    PublicKeyCredential, RegisterPublicKeyCredential, Registration, Result, Row, TapAction, Uuid,
+    Value, Wrap, action_tap, constant_prf_input, hash, insert_session, json, prf_salt, put_wrap,
+    random, recovery_hash, require_tap_tx, setup::valid_username,
 };
 
 // The successful verifier retains its counter transaction until the caller
@@ -13,6 +13,7 @@ struct VerifiedLogin {
     user: String,
     credential: String,
     expires: i64,
+    action: Option<String>,
 }
 
 #[allow(clippy::missing_errors_doc)]
@@ -182,7 +183,16 @@ impl Auth {
                     .await?;
             }
             Authority::Add(session) => {
-                require_session_tx(&mut tx, session, &registration.user, now).await?;
+                // `add_start` spent this session's `passkey.add` tap; the new authenticator may
+                // take longer than the tap window, so the finish checks the spend, not freshness.
+                action_tap::tap_spent_on_tx(
+                    &mut tx,
+                    session,
+                    &registration.user,
+                    &TapAction::AddPasskey,
+                    now,
+                )
+                .await?;
                 let count: i64 =
                     sqlx::query_scalar("SELECT COUNT(*) FROM passkeys WHERE user_id=?")
                         .bind(&registration.user)
@@ -266,8 +276,19 @@ impl Auth {
             .collect()
     }
 
-    /// Begin a UV-required login (also the fresh-tap ceremony).
+    /// Begin a UV-required login, with no per-action authority.
     pub async fn login_start(&self, user: &str, now: i64) -> Result<Value> {
+        self.login_start_for(user, None, now).await
+    }
+
+    /// Begin a UV-required login whose tap is also bound to `action` (`action_tap`, D336).
+    pub(crate) async fn login_start_for(
+        &self,
+        user: &str,
+        action: Option<&TapAction>,
+        now: i64,
+    ) -> Result<Value> {
+        let action = bound(action)?;
         // One read binds each allowed credential to its wrapping input. Separate reads
         // could race enrollment/recovery and also add an unnecessary storage round trip.
         let inputs = sqlx::query("SELECT id,credential,prf_input FROM passkeys WHERE user_id=?")
@@ -312,6 +333,7 @@ impl Auth {
                 state: LoginState::Identified(state, user.into()),
                 expires: now + CEREMONY,
                 binding: None,
+                action,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -319,6 +341,16 @@ impl Auth {
 
     /// Start identity-free UV authentication without publishing any credential list.
     pub async fn discoverable_login_start(&self, now: i64) -> Result<Value> {
+        self.discoverable_login_start_for(None, now).await
+    }
+
+    /// Identity-free login whose tap is also bound to `action` (`action_tap`, D336).
+    pub(crate) async fn discoverable_login_start_for(
+        &self,
+        action: Option<&TapAction>,
+        now: i64,
+    ) -> Result<Value> {
+        let action = bound(action)?;
         let (options, state) = self
             .webauthn
             .start_discoverable_authentication()
@@ -343,6 +375,7 @@ impl Auth {
                 state: LoginState::Discoverable(state),
                 expires: now + CEREMONY,
                 binding: None,
+                action,
             },
         );
         Ok(json!({"ceremony":id,"options":options}))
@@ -382,10 +415,19 @@ impl Auth {
             mut tx,
             user,
             credential,
+            action,
             ..
         } = self.verified_login(id, proof, device, now).await?;
         let token = random();
         insert_session(&mut tx, &token, &user, device, now, Some(&credential)).await?;
+        if let Some(action) = action {
+            // The new session carries the one action this tap was made for (D336).
+            sqlx::query("UPDATE sessions SET tap_action=? WHERE token_hash=?")
+                .bind(action)
+                .bind(hash(&token))
+                .execute(&mut *tx)
+                .await?;
+        }
         if pending_unlock {
             sqlx::query("UPDATE sessions SET unlocked=0,expires=? WHERE token_hash=?")
                 .bind(now + CEREMONY)
@@ -423,6 +465,7 @@ impl Auth {
             return Err(Error::Denied);
         }
         let expires = login.expires;
+        let action = login.action.clone();
         let user = match &login.state {
             LoginState::Identified(_, user) => {
                 if proof.get_user_unique_id().is_some_and(|handle| {
@@ -483,6 +526,7 @@ impl Auth {
             user,
             credential,
             expires,
+            action,
         })
     }
 
@@ -522,6 +566,9 @@ impl Auth {
             user,
             credential,
             expires,
+            // A CA ceremony is started by `ca_administration` with no auth action; any
+            // action on a login ceremony is spent only by `login_finish`.
+            action: _,
         } = self
             .verified_login(id, proof, "passkey operation", initial)
             .await?;
@@ -538,10 +585,19 @@ impl Auth {
         })
     }
 
-    /// Enroll the optional second passkey after a fresh tap.
+    /// Enroll the optional second passkey; spends this session's `passkey.add` tap (D336).
     pub async fn add_start(&self, token: &str, now: i64) -> Result<Value> {
         let session = self.session(token, now).await?;
-        session.require_fresh(now)?;
+        let mut tx = self.pool.begin().await?;
+        require_tap_tx(
+            &mut tx,
+            &hash(token),
+            &session.user_id,
+            &TapAction::AddPasskey,
+            now,
+        )
+        .await?;
+        tx.commit().await?;
         let identity = sqlx::query("SELECT username,display_name FROM users WHERE id=?")
             .bind(&session.user_id)
             .fetch_one(&self.pool)
@@ -556,6 +612,13 @@ impl Auth {
         )
         .await
     }
+}
+
+/// Validate a ceremony's action and keep only its digest on the pending login.
+fn bound(action: Option<&TapAction>) -> Result<Option<String>> {
+    action
+        .map(|action| action.validate().map(|()| action_tap::digest(action)))
+        .transpose()
 }
 
 pub(super) fn prune(p: &mut Pending, now: i64) {

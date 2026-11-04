@@ -6,6 +6,7 @@
 
 mod account_events;
 pub(crate) use account_events::AccountSubscription;
+mod action_tap;
 mod binding;
 #[path = "../bootstrap_authorization.rs"]
 mod bootstrap_authorization;
@@ -22,13 +23,13 @@ mod setup;
 mod webauthn;
 mod wraps;
 
+pub(crate) use action_tap::{TapAction, require_tap_tx};
 use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
 pub(crate) use crypto::{hash, session_incarnation};
 #[cfg(feature = "remote")]
 pub(crate) use http::cookie as session_cookie_from_headers;
 pub use sessions::Session;
 use sessions::insert_session;
-pub(crate) use sessions::require_session_tx;
 pub use wraps::Wrap;
 use wraps::put_wrap;
 mod migration_compat;
@@ -54,7 +55,6 @@ pub use http::router;
 const DAY: i64 = 86_400;
 const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
-const FRESH: i64 = infraternal_plugin_api::FRESH_SECONDS;
 
 /// Fresh real passkey verification without a browser session or implied role.
 /// Construction stays inside the verifier; identifiers alone cannot forge it.
@@ -141,6 +141,8 @@ struct Login {
     state: LoginState,
     expires: i64,
     binding: Option<String>,
+    /// Digest of the one action this tap is for (`action_tap`); `None` for a plain sign-in.
+    action: Option<String>,
 }
 #[derive(Default)]
 struct Pending {

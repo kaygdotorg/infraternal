@@ -49,6 +49,8 @@ async fn per_action_changes_still_need_a_recent_tap_inside_the_window() {
         .device_start("cli", vec!["status:read".to_owned()], NOW + 600)
         .await
         .unwrap();
+    // Even a tap bound to this very approval is too old ten minutes in (D336).
+    bind_tap(&f.auth, &f.session, approve(&approval), NOW).await;
     assert!(matches!(
         f.auth
             .device_approve(&f.session, str_field(&approval, "user_code"), NOW + 600)

@@ -1,5 +1,6 @@
-//! Sliding sessions, fresh-tap policy, provider diagnostics and transaction authority rechecks [28].
-use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
+//! Sliding sessions, the admin window, provider diagnostics and transaction authority rechecks
+//! [28]. Per-action taps are bound to one action in `action_tap` (D336).
+use super::{Auth, Error, Result, Row, SESSION, Serialize, hash};
 
 /// Authenticated browser device, including the last successful passkey verification.
 #[derive(Serialize)]
@@ -24,14 +25,6 @@ pub struct RecoveryPending {
     pub ready_at: i64,
 }
 impl Session {
-    /// The session's tap is recent enough to be spent on one per-action change (D333).
-    pub(super) fn require_fresh(&self, now: i64) -> Result<()> {
-        if self.fresh > now || now - self.fresh >= FRESH {
-            return Err(Error::Denied);
-        }
-        Ok(())
-    }
-
     /// The session is inside the browser's 15-minute admin window that its tap started (D333).
     pub(super) fn require_admin_window(&self, now: i64) -> Result<()> {
         if self.fresh > now || now - self.fresh >= infraternal_plugin_api::ADMIN_WINDOW_SECONDS {
@@ -234,35 +227,6 @@ impl Auth {
     }
 }
 
-/// Spend this session's passkey tap on one per-action change, inside that change's writer
-/// transaction (D333: "A tap for each action, even with a key: creating or widening a key,
-/// ... recovery-key and passkey changes ... turning these rules off").
-///
-/// The tap is the one that started the session (each sign-in or re-authentication is a new
-/// session) and must be recent (`FRESH`, 300 s). It is spent once: a second change needs a new
-/// tap, even inside the browser's admin window. A rollback leaves it unspent.
-pub(crate) async fn require_session_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    token_hash: &str,
-    user: &str,
-    now: i64,
-) -> Result<()> {
-    if !infraternal_plugin_api::fresh_session_tx(tx, token_hash, user, now, FRESH).await? {
-        return Err(Error::Denied);
-    }
-    let spent = sqlx::query(
-        "UPDATE sessions SET tap_spent=1 WHERE token_hash=? AND user_id=? AND tap_spent=0",
-    )
-    .bind(token_hash)
-    .bind(user)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
-    if spent != 1 {
-        return Err(Error::Denied);
-    }
-    Ok(())
-}
 pub(super) async fn insert_session(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token: &str,
