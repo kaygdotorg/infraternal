@@ -199,11 +199,13 @@ export function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
    */
   let rows: ReturnType<typeof import("./resize-rows.on-demand").rowsResize> | undefined;
   const preload = (): void => {
-    if (rows || !rowGroup(rec.card.root.parentElement as HTMLElement)) return;
+    if (rows) return;
     void onDemand(() => import("./resize-rows.on-demand")).then((m) => { rows ??= m.rowsResize(cx, rec); });
   };
-  rec.card.root.addEventListener("pointerenter", preload, { once: true });
-  rec.card.root.addEventListener("pointerdown", preload, { capture: true, once: true });
+  // A Settings window is always in a row group: fetch the code when the page is idle. Any other window that turns out to be in one
+  // fetches it when the pointer first reaches it.
+  if (rec.model.kind === "settings") whenIdle(preload, 1500);
+  else rec.card.root.addEventListener("pointerenter", () => { if (rowGroup(rec.card.root.parentElement as HTMLElement)) preload(); }, { once: true });
   const rowGroup = (colEl: HTMLElement): boolean => colEl.dataset.group !== undefined && !!colEl.parentElement?.classList.contains("cl-group");
   return {
     // The pill has its own long-press (arrows on demand), so the resize hold starts on the rest of the header.
