@@ -44,8 +44,11 @@ const RECORD_NAME: &str = ".traefik-cgroup";
 /// How the Traefik children of this infraternal agent are contained.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Containment {
-    /// Each child runs in its own cgroup leaf and is stopped with `cgroup.kill`.
+    /// Rootful: each child runs in its own root-owned leaf and is stopped with `cgroup.kill`.
     Cgroup,
+    /// Rootless: the same, but the child runs as the agent's user, who owns the leaf, so a
+    /// compromised child could move itself out (#281, J172 P3-2).
+    CgroupRootless,
     /// No usable cgroup delegation; children are reaped through their pidfd as before.
     Fallback(&'static str),
 }
@@ -56,6 +59,7 @@ impl Containment {
     pub fn describe(&self) -> String {
         match self {
             Self::Cgroup => "each Traefik process runs in its own cgroup; stopping it stops everything it started".to_owned(),
+            Self::CgroupRootless => "each Traefik process runs in its own cgroup, so stopping it also stops what it forks; a compromised Traefik running as your user could still move out of it".to_owned(),
             Self::Fallback(reason) => format!(
                 "limited: {reason}; a process Traefik forks may outlive it"
             ),
@@ -67,6 +71,7 @@ impl Containment {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Cgroup => "cgroup",
+            Self::CgroupRootless => "cgroup-rootless",
             Self::Fallback(_) => "fallback",
         }
     }
@@ -93,8 +98,20 @@ pub struct Leaf {
 #[must_use]
 pub fn containment() -> Containment {
     match own_base() {
-        Ok(_) => Containment::Cgroup,
+        Ok(_) => Containment::contained(),
         Err(reason) => Containment::Fallback(reason),
+    }
+}
+
+impl Containment {
+    /// The contained variant for this process: rootful or rootless.
+    #[must_use]
+    pub fn contained() -> Self {
+        if nix::unistd::Uid::effective().is_root() {
+            Self::Cgroup
+        } else {
+            Self::CgroupRootless
+        }
     }
 }
 
@@ -389,5 +406,8 @@ mod tests {
             Containment::Fallback("the infraternal agent's unit lacks Delegate=yes").describe();
         assert!(text.contains("Delegate=yes"), "{text}");
         assert_eq!(Containment::Cgroup.kind(), "cgroup");
+        let rootless = Containment::CgroupRootless.describe();
+        assert!(!rootless.contains("stops everything"), "{rootless}");
+        assert_eq!(Containment::CgroupRootless.kind(), "cgroup-rootless");
     }
 }

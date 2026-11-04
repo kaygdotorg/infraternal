@@ -1108,7 +1108,10 @@ impl TraefikSupervisor {
                         "stopped {stopped} proxy cgroup(s) left by an earlier infraternal agent"
                     ));
                 }
-                (Some(Arc::new(cgroups)), crate::cgroup::Containment::Cgroup)
+                (
+                    Some(Arc::new(cgroups)),
+                    crate::cgroup::Containment::contained(),
+                )
             }
             Err(reason) => (None, crate::cgroup::Containment::Fallback(reason)),
         };

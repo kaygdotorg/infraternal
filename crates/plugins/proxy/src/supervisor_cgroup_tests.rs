@@ -449,6 +449,25 @@ fn a_cgroup_made_inside_the_leaf_never_blocks_removal() {
     assert!(!leftover_path.exists(), "the leftover leaf must be gone");
 }
 
+// P3-2: rootless, a compromised child can leave its cgroup, so status must not claim more.
+#[test]
+fn rootless_status_says_what_is_really_contained() {
+    let containment = crate::cgroup::containment();
+    if !contained() {
+        assert!(!must_contain(), "this run must contain the proxy");
+        return;
+    }
+    let text = containment.describe();
+    eprintln!("status: kind={} text={text}", containment.kind());
+    if nix::unistd::Uid::effective().is_root() {
+        assert_eq!(containment.kind(), "cgroup");
+    } else {
+        assert_eq!(containment.kind(), "cgroup-rootless");
+        assert!(!text.contains("stops everything"), "{text}");
+        assert!(text.contains("compromised"), "{text}");
+    }
+}
+
 // P3-5: the leaf name carries the lock directory's device and inode, so two agents in one cgroup
 // whose lock directories share an inode on different filesystems never adopt each other's leaves.
 #[test]
