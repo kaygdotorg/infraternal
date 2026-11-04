@@ -33,6 +33,8 @@ use zeroize::Zeroizing;
 /// File name of the private key inside the node's state directory.
 pub const KEY_FILE: &str = "mesh-wireguard.key";
 pub(crate) const ROTATION_LOG: &str = "mesh-key-rotation.log";
+/// Present while the slice-1 keychain item may still exist; every start retries until it is gone.
+const LEGACY_PENDING: &str = "mesh-legacy-keychain.pending";
 const KEY_LENGTH: usize = 32;
 
 /// Why a key that the coordinator knew had to be replaced.
@@ -40,6 +42,9 @@ const KEY_LENGTH: usize = 32;
 pub enum RotationReason {
     /// A slice-1 keychain key existed; it was exposed to local users and is retired.
     LegacyKeyRetired,
+    /// The slice-1 keychain could not be checked, so a slice-1 key may exist;
+    /// the node starts with a new key and retries the deletion on later starts.
+    LegacyKeyUnconfirmed,
     /// The node was enrolled again (`agent join`, or state bound to another
     /// enrolment), so the key the previous coordinator knew is dropped.
     EnrolmentChanged,
@@ -49,6 +54,7 @@ impl RotationReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::LegacyKeyRetired => "legacy_keychain_key_retired",
+            Self::LegacyKeyUnconfirmed => "legacy_keychain_unconfirmed",
             Self::EnrolmentChanged => "enrolment_changed",
         }
     }
@@ -57,10 +63,14 @@ impl RotationReason {
 /// What retiring the slice-1 keychain item found. Its key is never read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Legacy {
-    /// No item exists: a node that never ran a slice-1 build.
+    /// The keychain answered and holds no item: a node that never ran a slice-1 build.
     Absent,
-    /// An item existed and was deleted (or could not be); the node needs a new key.
+    /// An item existed and was deleted; the node needs a new key.
     Retired,
+    /// The keychain could not be opened or the item could not be deleted, so
+    /// an exposed slice-1 key may still be there (J162 F5). Never reported as
+    /// `Absent`: the node rotates as if an item existed, and later starts retry.
+    Pending,
 }
 
 /// Load the node's key from `state`, creating it on the first start.
@@ -103,26 +113,101 @@ pub fn retire_key(state: &Path, reason: RotationReason) -> io::Result<()> {
 }
 
 /// The testable body of [`load_or_create`]; `retire_legacy` deletes the slice-1 item.
+///
+/// The keychain is consulted when no key file exists (a first start, or after
+/// a rotation) and on every start while an earlier deletion is pending.
 fn load_or_create_with(
     state: &Path,
     retire_legacy: impl FnOnce() -> Legacy,
 ) -> io::Result<(StaticSecret, PublicKey)> {
     check_directory(state)?;
     let path = state.join(KEY_FILE);
+    let pending = state.join(LEGACY_PENDING);
     if let Some(bytes) = read_key(&path)? {
+        if marker_present(&pending)? {
+            // The key on disk was generated fresh when the deletion first failed,
+            // so a retry only removes the old item; nothing rotates again.
+            match retire_legacy() {
+                Legacy::Pending => tracing::warn!(
+                    "The slice-1 Mesh keychain item still could not be checked or deleted; retrying on the next start"
+                ),
+                outcome => {
+                    clear_marker(state, &pending)?;
+                    tracing::warn!(
+                        deleted = outcome == Legacy::Retired,
+                        "Finished retiring the slice-1 Mesh keychain item"
+                    );
+                }
+            }
+        }
         return Ok(identity(&bytes));
     }
-    if retire_legacy() == Legacy::Retired {
-        record_rotation(&state.join(ROTATION_LOG), RotationReason::LegacyKeyRetired)?;
-        tracing::warn!(
-            "Retired the slice-1 keychain WireGuard key; starting with a new key for coordinator registration"
-        );
+    match retire_legacy() {
+        Legacy::Absent => clear_marker(state, &pending)?,
+        Legacy::Retired => {
+            clear_marker(state, &pending)?;
+            record_rotation(&state.join(ROTATION_LOG), RotationReason::LegacyKeyRetired)?;
+            tracing::warn!(
+                "Retired the slice-1 keychain WireGuard key; starting with a new key for coordinator registration"
+            );
+        }
+        Legacy::Pending => {
+            // The marker is written before the new key, so a crash in between still retries.
+            set_marker(state, &pending)?;
+            record_rotation(
+                &state.join(ROTATION_LOG),
+                RotationReason::LegacyKeyUnconfirmed,
+            )?;
+            tracing::warn!(
+                "The slice-1 Mesh keychain item could not be checked or deleted; starting with a new key and retrying on the next start"
+            );
+        }
     }
     let fresh = generate()?;
     publish(state, &fresh)?;
     // Another start may have published first; the file on disk is authoritative.
     let bytes = read_key(&path)?.ok_or(io::ErrorKind::NotFound)?;
     Ok(identity(&bytes))
+}
+
+/// Whether the pending-retirement marker exists; a marker that is not ours is refused.
+fn marker_present(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if owned_private_file(&metadata) => Ok(true),
+        Ok(_) => Err(io::ErrorKind::PermissionDenied.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Durably record that the slice-1 item must be retried.
+fn set_marker(state: &Path, path: &Path) -> io::Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    if !owned_private_file(&file.metadata()?) {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    file.sync_all()?;
+    File::open(state)?.sync_all()
+}
+
+fn clear_marker(state: &Path, path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => File::open(state)?.sync_all(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn owned_private_file(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && metadata.uid() == Uid::effective().as_raw()
+        && metadata.mode() & 0o777 == 0o600
 }
 
 /// The state directory must be a real directory owned by us and closed to everyone else.
@@ -252,16 +337,53 @@ mod legacy {
     pub(super) const ACCOUNT: &str = "wireguard-private-key";
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
-    /// Delete the slice-1 item from the System keychain. Runs only while no key file exists.
-    ///
-    /// A failed deletion still counts as retired: the node never uses that key
-    /// again, and the warning says the item could not be removed.
+    /// Delete the slice-1 item from the System keychain.
     pub(super) fn retire() -> Legacy {
-        let Ok(_no_interaction) = SecKeychain::disable_user_interaction() else {
-            return Legacy::Absent;
+        retire_from(std::path::Path::new(SYSTEM_KEYCHAIN))
+    }
+
+    /// Delete the slice-1 item from the keychain file at `path`.
+    ///
+    /// `Absent` needs proof: either no keychain file exists, or a file that is
+    /// really a keychain answers "no such item". Security also answers "no
+    /// such item" for a damaged file, so the file's signature is checked
+    /// first. Every failure (an unreadable or unrecognised file, no
+    /// user-interaction guard, the keychain will not open, the deletion is
+    /// refused) is `Pending` and logged, so the caller retries.
+    pub(super) fn retire_from(path: &std::path::Path) -> Legacy {
+        match keychain_signature(path) {
+            Ok(None) => return Legacy::Absent,
+            Ok(Some(signature)) if signature == *b"kych" => {}
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    "The System keychain is not readable as a keychain; the slice-1 Mesh item was not checked"
+                );
+                return Legacy::Pending;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "The System keychain could not be read; the slice-1 Mesh item was not checked");
+                return Legacy::Pending;
+            }
+        }
+        let _no_interaction = match SecKeychain::disable_user_interaction() {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(
+                    code = error.code(),
+                    "Keychain user interaction could not be disabled; the slice-1 Mesh item was not checked"
+                );
+                return Legacy::Pending;
+            }
         };
-        let Ok(mut keychain) = SecKeychain::open(SYSTEM_KEYCHAIN) else {
-            return Legacy::Absent;
+        let mut keychain = match SecKeychain::open(path) {
+            Ok(keychain) => keychain,
+            Err(error) => {
+                tracing::warn!(
+                    code = error.code(),
+                    "The System keychain could not be opened; the slice-1 Mesh item was not checked"
+                );
+                return Legacy::Pending;
+            }
         };
         // The System keychain may be locked on this host (lock-on-sleep); a
         // null-password unlock uses the system key.
@@ -271,9 +393,22 @@ mod legacy {
             Ok(false) => Legacy::Absent,
             Err(code) => {
                 tracing::warn!(code, "The slice-1 Mesh keychain item could not be deleted");
-                Legacy::Retired
+                Legacy::Pending
             }
         }
+    }
+
+    /// The first four bytes of the keychain file, or `None` when there is no file.
+    fn keychain_signature(path: &std::path::Path) -> std::io::Result<Option<[u8; 4]>> {
+        use std::io::Read as _;
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut signature = [0_u8; 4];
+        file.read_exact(&mut signature)?;
+        Ok(Some(signature))
     }
 
     /// Delete exactly the Mesh item from `keychain`; `true` when one existed.
@@ -296,7 +431,8 @@ mod legacy {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::{
-        KEY_FILE, Legacy, ROTATION_LOG, RotationReason, legacy, load_or_create_with, retire_key,
+        KEY_FILE, LEGACY_PENDING, Legacy, ROTATION_LOG, RotationReason, legacy,
+        load_or_create_with, retire_key,
     };
     use std::{
         fs,
@@ -439,6 +575,18 @@ mod tests {
             Ok(false),
             "a second retire finds nothing"
         );
+
+        // The whole path a start takes, against a real keychain file.
+        keychain
+            .add_generic_password(legacy::SERVICE, legacy::ACCOUNT, &[7_u8; 32])
+            .expect("add slice-1 item again");
+        let file = fs::read_dir(&state.0)
+            .expect("list state")
+            .map(|entry| entry.expect("entry").path())
+            .find(|path| path.to_string_lossy().contains("retire-test.keychain"))
+            .expect("keychain file");
+        assert_eq!(legacy::retire_from(&file), Legacy::Retired);
+        assert_eq!(legacy::retire_from(&file), Legacy::Absent);
     }
 
     #[test]
@@ -508,5 +656,61 @@ mod tests {
             })
             .map(str::to_owned)
             .collect()
+    }
+
+    /// J162 F5: a keychain that cannot be checked is never taken as "no item".
+    #[test]
+    fn an_unchecked_keychain_rotates_and_is_retried_until_it_answers() {
+        let state = state();
+        let (_, public) = load_or_create_with(&state.0, || Legacy::Pending).expect("new key");
+        assert_eq!(reasons(&state), ["legacy_keychain_unconfirmed"]);
+        let marker = state.0.join(LEGACY_PENDING);
+        assert_eq!(
+            fs::metadata(&marker).expect("marker").permissions().mode() & 0o777,
+            0o600
+        );
+
+        // Still unreachable: retried, the key is kept and nothing rotates again.
+        let mut calls = 0;
+        let (_, again) = load_or_create_with(&state.0, || {
+            calls += 1;
+            Legacy::Pending
+        })
+        .expect("reuse key");
+        assert_eq!((calls, again), (1, public));
+        assert!(marker.exists());
+
+        // The keychain answers: the item is deleted, the marker goes, the key stays.
+        let (_, after) = load_or_create_with(&state.0, || Legacy::Retired).expect("retry");
+        assert_eq!(after, public);
+        assert!(!marker.exists());
+        assert_eq!(reasons(&state), ["legacy_keychain_unconfirmed"]);
+        // Done: later starts do not consult the keychain.
+        load_or_create_with(&state.0, never).expect("no more retries");
+    }
+
+    #[test]
+    fn a_pending_retirement_ends_when_the_keychain_reports_no_item() {
+        let state = state();
+        load_or_create_with(&state.0, || Legacy::Pending).expect("new key");
+        load_or_create_with(&state.0, || Legacy::Absent).expect("retry");
+        assert!(!state.0.join(LEGACY_PENDING).exists());
+        load_or_create_with(&state.0, never).expect("no more retries");
+    }
+
+    /// Security answers "no such item" for a damaged file; that must not read as `Absent`.
+    #[test]
+    fn a_keychain_that_cannot_be_read_is_pending_not_absent() {
+        let state = state();
+        let path = state.0.join("damaged.keychain");
+        fs::write(&path, b"not a keychain").expect("write damaged keychain");
+        assert_eq!(legacy::retire_from(&path), Legacy::Pending);
+        fs::write(&path, b"").expect("truncate keychain");
+        assert_eq!(legacy::retire_from(&path), Legacy::Pending);
+        assert_eq!(
+            legacy::retire_from(&state.0.join("no-such.keychain")),
+            Legacy::Absent,
+            "without a keychain file no slice-1 item can exist"
+        );
     }
 }
