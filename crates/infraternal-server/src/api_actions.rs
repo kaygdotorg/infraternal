@@ -1096,8 +1096,10 @@ mod tests {
     /// plugins and the infraternal agent's descriptors), so new canvas or MCP-visible actions
     /// are covered without editing this test.
     /// - Actions in the per-action-tap categories carry `fresh_passkey` and no key can start
-    ///   them. Among compiled actions today that is CA setup; key creation, role changes and
-    ///   recovery or passkey changes are auth routes that spend a tap (`require_session_tx`).
+    ///   them. Among compiled actions today that is CA setup. Key approval, role changes and
+    ///   recovery or passkey changes are auth routes, each with its own tap bound to that one
+    ///   action (D336): `action_tap::require_tap_tx`, the approval ceremony in `devices.rs`, or
+    ///   the CA ceremonies.
     /// - A destructive action that declares an API scope also declares a required dry run.
     #[tokio::test]
     async fn every_compiled_action_follows_the_d333_tap_model() {
