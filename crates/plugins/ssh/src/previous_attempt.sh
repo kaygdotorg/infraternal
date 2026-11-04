@@ -380,7 +380,10 @@ no_redirect() {
 # put it back: its restore never ran (a dropped session) or failed. Name it,
 # so the person can put it back instead of installing beside it (#305 P2-1).
 # A Re-enroll that committed keeps its old install beside the new $base, and
-# a Replace that committed removed its journal, so neither is reported.
+# a Replace that committed removed its journal, so neither is reported. Nor
+# is a replaced journal while the unit is active: a newer install is serving,
+# and putting the stale journal into it would make a healthy host stuck again
+# (#305 P2-3).
 # Fails (1) when there is nothing to report.
 report_set_aside() {
  set_aside=
@@ -395,6 +398,7 @@ report_set_aside() {
     set_aside_service="$candidate/.superseded-service";;
    *)
     [ -d "$base" ] && [ ! -L "$base" ] || continue
+    ! $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || continue
     set_aside_kind=replaced
     set_aside_transaction=${candidate#"$base.bootstrap-replaced-"}
     set_aside_owner="$base/.bootstrap-owner"
@@ -718,6 +722,8 @@ restore_replaced_install() {
  [ -d "$replaced" ] && [ ! -L "$replaced" ] && [ -O "$replaced" ] || exit 71
  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] || exit 71
  [ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] || exit 72
+ # A newer install is serving: the replaced journal is stale (#305 P2-3).
+ ! $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || exit 72
  private_file "$replaced/found-service"
  read -r replace_enabled replace_active < "$replaced/found-service"
  case "$replace_enabled:$replace_active" in yes:yes|yes:no|no:yes|no:no) :;; *) exit 71;; esac
@@ -774,4 +780,5 @@ finish_stuck_upgrade() {
  [ -f "$stage/activating" ] || exit 0
  retire_setup_lease
  rm -rf "$stage"
+ retire_replaced
 }

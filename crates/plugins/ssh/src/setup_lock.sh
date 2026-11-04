@@ -68,3 +68,14 @@ handoff_setup_lease() {
  lease_runtime=$2
  start_setup_lease
 }
+
+# A commit retires the stuck journals an earlier Replace set aside, with their
+# rollback copies: the host now serves the committed install (#305). Every
+# commit runs this, including finish_stuck_upgrade (#305 P2-3). Only our own
+# private directories under that fixed name are removed.
+retire_replaced() {
+ for replaced in "$base".bootstrap-replaced-*; do
+  [ -d "$replaced" ] && [ ! -L "$replaced" ] && [ -O "$replaced" ] || continue
+  rm -rf "$replaced"
+ done
+}

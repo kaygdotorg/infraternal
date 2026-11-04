@@ -109,7 +109,7 @@ transaction={TRANSACTION}
         environment = dict(os.environ, HOME=str(self.home))
         return subprocess.run(['/bin/sh', '-c', script], capture_output=True, env=environment)
 
-    def make_upgrade_fixture(self, lease='99999999 1\n'):
+    def make_upgrade_fixture(self, lease='99999999 1\n', transaction=TRANSACTION):
         if self.listener:
             self.listener.close()
             self.listener = None
@@ -123,7 +123,7 @@ transaction={TRANSACTION}
         stage = self.base / '.bootstrap-lock'
         stage.mkdir(mode=0o700)
         for name, value in [
-            ('transaction', TRANSACTION + '\n'),
+            ('transaction', transaction + '\n'),
             ('kind', 'upgrade\n'),
             ('lease', lease),
         ]:
@@ -151,10 +151,11 @@ transaction={TRANSACTION}
         shutil.copyfile(os.environ['INFRATERNAL_TEST_RUNTIME_HELPER'], live)
         live.chmod(0o700)
         (binary_dir / 'current').symlink_to(live)
-        self.launcher.parent.mkdir(parents=True, mode=0o700)
+        self.launcher.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.launcher.unlink(missing_ok=True)
         self.launcher.symlink_to(binary_dir / 'current')
 
-        self.unit.parent.mkdir(parents=True, mode=0o700)
+        self.unit.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.unit.write_text(
             f'# infraternal bootstrap {HOST}\n[Unit]\n[Service]\n'
             f'ExecStart="{binary_dir / "current"}" agent --data "{self.base / "state"}" '
@@ -162,7 +163,8 @@ transaction={TRANSACTION}
         )
         self.unit.chmod(0o600)
         enabled = self.unit.parent / 'default.target.wants/infraternal-agent.service'
-        enabled.parent.mkdir(mode=0o700)
+        enabled.parent.mkdir(mode=0o700, exist_ok=True)
+        enabled.unlink(missing_ok=True)
         enabled.symlink_to(self.unit)
 
         state = self.base / 'state'
@@ -769,7 +771,7 @@ replace_stuck_install "$observed"
         replaced = Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}')
         self.assertFalse(stage.exists())
         self.assertEqual((replaced / 'previous-binary').read_bytes(), b'old agent', 'rollback copies survive replacement (#305 P2-3)')
-        commit = self.run_shell('\n' + CONSTANTS['RETIRE_REPLACED'])
+        commit = self.run_shell('\nretire_replaced\n')
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(replaced.exists(), 'the next commit retires them')
 
@@ -1055,6 +1057,36 @@ supersede_stuck_install "{expected}"
         self.assertFalse(stage.exists(), 'the lost commit is finished (#305 P2-2)')
         self.assertTrue((self.base / 'bin/live').exists())
         self.assertEqual(self.mutating_calls(), [], 'the running service is never touched')
+
+    def test_finishing_a_newer_upgrade_retires_a_replaced_journal(self):
+        # #305 P2-3: a Replace set journal tx1 aside; the new upgrade tx2
+        # reached START and lost its commit, so the next add-host finishes it.
+        # That is a commit: tx1 must go, or the healthy host is offered "Put
+        # it back" and gets the stale journal planted into it.
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        replaced = Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}')
+        self.assertTrue(replaced.exists())
+        newer = '4' * 32
+        self.make_upgrade_fixture(transaction=newer)
+        result = self.confirm('finish_stuck_upgrade')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertFalse(replaced.exists(), 'Finish is a commit and retires the replaced journal')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+
+    def test_a_replaced_journal_beside_an_active_agent_is_never_offered_or_put_back(self):
+        # #305 P2-3: something newer is serving (a commit that predates
+        # retire_replaced, or a manual start). Check stays CLEAR and the
+        # restore refuses rather than make a healthy host stuck again.
+        stage, _ = self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
+        replaced = Path(f'{self.base}.bootstrap-replaced-{TRANSACTION}')
+        self.manager_active.touch()
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+        restore = self.run_shell(f'\nrestore_replaced_install {TRANSACTION}\n')
+        self.assertEqual(restore.returncode, 72, restore.stderr.decode())
+        self.assertTrue(replaced.exists())
+        self.assertFalse(stage.exists(), 'the stale journal is not planted into the live install')
 
     def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
         stage, _ = self.make_upgrade_fixture()
