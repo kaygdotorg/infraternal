@@ -3,6 +3,8 @@
 #[path = "relocations.rs"]
 mod relocations;
 
+/// Build-script entry point: links the compact-relocation settings for the `infraternal`
+/// binary and, on Linux builds that include the stdin import adapter, the handoff note.
 fn main() {
     handoff_note();
     println!("cargo:rerun-if-changed=build.rs");
@@ -10,7 +12,11 @@ fn main() {
     relocations::emit("infraternal");
 }
 
-/// Emit a compatibility note only when the stdin import adapter is compiled.
+/// Adds the `handoff-note.ld` linker script to the link line.
+///
+/// Only Linux builds with the `remote` feature (the stdin import adapter) get it.
+/// musl targets pass the script to the linker directly with `-T`; other targets go
+/// through the compiler driver with `-Wl,-T,`. All other builds are left untouched.
 fn handoff_note() {
     println!("cargo:rerun-if-changed=handoff-note.ld");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")

@@ -23,11 +23,18 @@ pub(crate) fn scratch_root() -> PathBuf {
         .to_owned()
 }
 
+/// A replacement binary for restart tests, together with a freshly signed release manifest
+/// and the throwaway trust file that verifies it.
+///
+/// The signing key lives only in memory while the fixture is created; the files written next
+/// to the binary (`MANIFEST`, `MANIFEST.sig`, `VERSION`, `fixture.trust`) hold no secret.
 pub(crate) struct Signed {
     pub path: PathBuf,
     trust: String,
 }
 impl Signed {
+    /// Writes `bytes` to `path` as an executable and signs a manifest for it, in the same
+    /// folder. The manifest declares an `edge` release named for this platform's artifact.
     pub fn new(path: PathBuf, bytes: &[u8]) -> Self {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(&path, bytes).unwrap();
@@ -47,6 +54,8 @@ impl Signed {
         std::fs::write(parent.join("fixture.trust"), &trust).unwrap();
         Self { path, trust }
     }
+    /// Makes a fixture out of the running test executable. If it exceeds the largest image
+    /// the restart code accepts, debug info is stripped from the copy first.
     pub fn image(path: PathBuf) -> Self {
         std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
         if std::fs::metadata(&path).unwrap().len() > crate::restart_image::MAX_IMAGE {
@@ -62,13 +71,17 @@ impl Signed {
         let bytes = std::fs::read(&path).unwrap();
         Self::new(path, &bytes)
     }
+    /// Reopens a fixture made earlier: reads the trust file beside `path` instead of signing again.
     pub fn existing(path: PathBuf) -> Self {
         let trust = std::fs::read_to_string(path.parent().unwrap().join("fixture.trust")).unwrap();
         Self { path, trust }
     }
+    /// Opens the binary the way the restart code does, checking its manifest and signature
+    /// against this fixture's trust file.
     pub fn open(&self) -> io::Result<super::Opened> {
         super::Opened::open_with(self.path.clone(), |file, path| self.verify(file, path))
     }
+    /// Re-checks an already open `file` against the manifest next to this fixture's binary.
     pub fn verify_snapshot(&self, file: &File) -> io::Result<()> {
         self.verify(file, &self.path)
     }
@@ -84,6 +97,7 @@ impl Signed {
         })
     }
 }
+/// Lowercase hexadecimal text of `bytes`, as the manifest format writes digests.
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut output = String::with_capacity(bytes.len() * 2);
