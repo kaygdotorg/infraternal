@@ -7,16 +7,21 @@ referenced: D316 (Traefik as a managed sidecar), D330 (rootless `--public`), D33
 
 - Each child gets a leaf `proxy-<lock dir device>-<inode>-<n>` under the infraternal agent's own cgroup.
   It joins the leaf in the shim's pre-exec hook, before it can exec or fork. Stopping it
-  writes `cgroup.kill`, reaps the direct child, waits for `populated 0` and removes the leaf.
+  writes `cgroup.kill` and also kills the direct child (a rootless child may have left its
+  leaf), reaps it, waits for `populated 0`, then removes any cgroups the child made inside the
+  leaf, deepest first, and the leaf itself.
   No controller is enabled, so the agent stays where its init system put it.
 - On start, while holding the supervisor lock, the agent kills and removes every leaf with its
   tag, both under its current cgroup and under the cgroup recorded at the last leaf creation.
-  The J159 lock-holder reaper stays as the second line, and as the only line in fallback.
+  This also runs in fallback, so leaves from an earlier contained run (a unit that lost
+  `Delegate=yes`) are still killed. The J159 lock-holder reaper stays as the second line.
 - Rootful under systemd needs `Delegate=yes`, detected by the `trusted.delegate` /
   `user.delegate` xattr. Both generated units now carry it, next to `KillMode=process`.
   Rootless needs its own cgroup to be owned by the agent's user, which is true in a user
-  service and false in a login session scope. Otherwise the agent falls back to today's
-  reaping, and `infraternal mesh status` and `infraternal publish` say so.
+  service and false in a login session scope. An agent in the root cgroup falls back too. In
+  every fallback the agent reaps as before, and `infraternal mesh status` and
+  `infraternal publish` give the reason. Rootless status says that a compromised Traefik
+  could still leave its cgroup (kind `cgroup-rootless`).
 - Measured on #281 (perf VM): +37 µs per start and +36 µs per stop at p50, no steady-state CPU
   or RSS difference, and 5–10 KiB of kernel memory per leaf.
 - **Correction to option 1 below:** rootless, the cgroup files belong to the agent's user, so
