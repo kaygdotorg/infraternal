@@ -288,6 +288,21 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
       return sendJson(response, 200, { ok: true });
     }
   }
+  // The account's Themes (#323): the list of themes the person made and which one is selected, shared by every device. `themes` is null until a device saves.
+  // The double keeps one copy for each browser context (a cookie names it), so a spec never meets what another spec's browser saved; one context stands for
+  // one account here, and its devices are the pages of that context.
+  if (url.pathname === "/__mock/account/appearance") {
+    const cookie = /(?:^|; )mock-account=([a-z0-9]+)/.exec(request.headers.cookie ?? "")?.[1];
+    const id = cookie ?? Math.random().toString(36).slice(2, 12);
+    if (!cookie) response.setHeader("Set-Cookie", `mock-account=${id}; Path=/; SameSite=Lax`);
+    if (request.method === "GET") return sendJson(response, 200, { themes: accountAppearance.get(id) ?? null });
+    if (request.method === "PUT") {
+      const body = await readJson(request);
+      if (body === undefined || typeof body !== "object" || body === null || !("themes" in body)) return sendJson(response, 400, { error: "invalid request" });
+      accountAppearance.set(id, (body as { themes: unknown }).themes);
+      return sendJson(response, 200, { ok: true });
+    }
+  }
   // Shared layouts (D182): a copy sent to users or groups, and team layouts that stay linked (a revision per update).
   if (url.pathname === "/__mock/shares") {
     if (request.method === "GET") {
@@ -1357,9 +1372,12 @@ interface MockShare { id: string; from: string; to: string[]; publish: boolean; 
 const mockShares: MockShare[] = [];
 const mockGroups: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["ravi", "asha"] };
 let accountToolbar: unknown;
+/** The account's Themes as the last device saved them, for each browser context (`/__mock/account/appearance`). */
+const accountAppearance = new Map<string, unknown>();
 function resetMockState(): void {
   mockShares.length = 0;
   accountToolbar = undefined;
+  accountAppearance.clear();
   owner = undefined;
   activeAuthCookie = undefined;
   // A failed login can leave a half-finished unlock; it belongs to the retired fixture.
