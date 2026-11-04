@@ -26,16 +26,16 @@ export function createRowsSource(options: RowsOptions): Pick<SettingsSource, "ou
   const map = () => visibleMap(options.admin());
   const backed = (id: string): boolean => options.backing?.(id) !== undefined;
   // The wording of every setting loads when ⌘K first asks for the rows (D188); the palette is told when it has arrived.
-  let entries: typeof import("./entries.on-demand") | undefined, defaults: typeof import("./definitions.on-demand") | undefined, loading = false;
+  let entries: typeof import("./entries.on-demand") | undefined, loading = false;
   const waiting = new Set<() => void>();
   return {
     ...(options.backing ? { backing: options.backing } : {}),
     ...(options.data ? { data: options.data } : {}),
     outline: { rows: () => rowsOf(map()), entries: (): OutlineEntry[] => {
-      if (entries && defaults) return entries.entriesOf(map(), options.value ?? ((s) => defaults!.defaultOf(s)), backed);
+      if (entries) return entries.entriesOf(map(), options.value ?? entries.defaultOf, backed);
       if (!loading) {
         loading = true;
-        void Promise.all([onDemand(() => import("./entries.on-demand")), onDemand(() => import("./definitions.on-demand"))]).then(([e, d]) => { entries = e; defaults = d; for (const run of waiting) run(); }, () => { loading = false; });
+        void onDemand(() => import("./entries.on-demand")).then((e) => { entries = e; for (const run of waiting) run(); }, () => { loading = false; });
       }
       return [];
     },

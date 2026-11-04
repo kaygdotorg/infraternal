@@ -6,7 +6,10 @@
 import { formatValue, type SettingValue } from "../../../../../packages/ui/src/setting-value";
 import type { OutlineEntry } from "../views/settings-outline";
 import type { ComponentDef } from "./catalog";
-import { SETTING_DEFS, type SettingDef } from "./definitions.on-demand";
+import { SETTING_DEFS, defaultOf, type SettingDef } from "./definitions.on-demand";
+
+/** The definitions travel with the rows: one on-demand root, so the page never has an edge into the definitions themselves. */
+export { SETTING_DEFS, defaultOf };
 import { ICON_OF, spots } from "./model";
 
 /**

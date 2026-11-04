@@ -17,7 +17,7 @@ import type { MockWorld } from "./world";
 const values = new Map<string, SettingValue>();
 const valueOf = (s: SettingDef): SettingValue => values.get(s.id) ?? defaultValue(s.spec);
 /** The wording and rules of each setting load on demand, as they do in the product (D188). */
-const defOf = async (id: string): Promise<SettingDef | undefined> => (await onDemand(() => import("../settings-rows/definitions.on-demand"))).SETTING_DEFS[id];
+const defOf = async (id: string): Promise<SettingDef | undefined> => (await onDemand(() => import("../settings-rows/entries.on-demand"))).SETTING_DEFS[id];
 
 const EXAMPLE: Readonly<Record<string, GroupData>> = {
   "you.apps": { keys: [
