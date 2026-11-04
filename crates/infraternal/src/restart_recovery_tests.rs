@@ -65,8 +65,9 @@ fn material() -> (CaMaterial, X509) {
 #[cfg(target_os = "linux")]
 #[test]
 #[allow(clippy::too_many_lines)]
+/// Verify real execution and late recovery using private executable state and owned children.
 fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
-    use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
+    use std::os::unix::{ffi::OsStrExt, process::CommandExt};
     const NAME: &str =
         "restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca";
     if let Some(directory) = std::env::var_os("INFRATERNAL_RECOVERY_FIXTURE") {
@@ -156,39 +157,25 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         let outcome = replace(runtime, replacement, true);
         panic!("verified replacement or recovery returned: {outcome:?}");
     }
-    // Use the gate's private root for nested fixtures; retain the HOME fallback
-    // for standalone test runs that do not provide one.
-    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-        || {
-            PathBuf::from(std::env::var_os("HOME").unwrap())
-                .join(".cache/codex-scratch/release-pipeline-r4")
-        },
-        PathBuf::from,
-    );
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&root)
-        .unwrap();
     for case in ["replacement", "late"] {
-        let directory = root.join(uuid::Uuid::new_v4().to_string());
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&directory)
-            .unwrap();
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let directory = fixture.0.clone();
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture"])
-            .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
-            .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
-            .env("INFRATERNAL_RECOVERY_CASE", case)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = crate::restart_binary::fixture::ChildGuard::new(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
+                .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
+                .env("INFRATERNAL_RECOVERY_CASE", case)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
         let preparation_deadline = std::time::Instant::now() + Duration::from_secs(300);
         let mut recovery_deadline = None;
         while !directory.join("ready").exists() || !directory.join("recovered").exists() {
@@ -196,11 +183,11 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
                 recovery_deadline
                     .get_or_insert_with(|| std::time::Instant::now() + RESTART_TEST_HANG_BOUND);
             }
-            if child.try_wait().unwrap().is_some()
+            if child.process().try_wait().unwrap().is_some()
                 || std::time::Instant::now() >= recovery_deadline.unwrap_or(preparation_deadline)
             {
-                let _ = child.kill();
-                let output = child.wait_with_output().unwrap();
+                let _ = child.process().kill();
+                let output = child.output();
                 let _ = std::fs::remove_dir_all(&directory);
                 panic!(
                     "{case} did not recover: {}\n{}",
@@ -219,12 +206,12 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         assert_eq!(&alive, b"alive\n");
         let output_deadline = std::time::Instant::now() + RESTART_TEST_HANG_BOUND;
         loop {
-            if child.try_wait().unwrap().is_some() {
+            if child.process().try_wait().unwrap().is_some() {
                 break;
             }
             if std::time::Instant::now() >= output_deadline {
-                let _ = child.kill();
-                let output = child.wait_with_output().unwrap();
+                let _ = child.process().kill();
+                let output = child.output();
                 panic!(
                     "{case} child did not exit within its hang bound:\n{}\n{}",
                     String::from_utf8_lossy(&output.stdout),
@@ -233,7 +220,7 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let output = child.wait_with_output().unwrap();
+        let output = child.output();
         std::fs::remove_dir_all(&directory).unwrap();
         assert!(
             output.status.success(),

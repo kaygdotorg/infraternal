@@ -1,13 +1,14 @@
 //! Verifies that sealed recovery retains the installed executable when initial invocation uses PATH [217], #157/#188.
 use std::{
     ffi::CString,
-    os::unix::{ffi::OsStrExt, fs::DirBuilderExt, process::CommandExt},
+    os::unix::{ffi::OsStrExt, process::CommandExt},
     path::PathBuf,
     process::{Command, Stdio},
 };
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Exercise pathname recovery with private state and panic-safe child ownership.
 fn late_recovery_from_path_invocation_keeps_install_target() {
     const NAME: &str =
         "restart::tests::path_review::late_recovery_from_path_invocation_keeps_install_target";
@@ -42,13 +43,9 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
         let error = recovery.image.execute(&argv, &environment).unwrap_err();
         panic!("recovery exec refused: {error}");
     }
-    let state = crate::restart_binary::fixture::scratch_root()
-        .join(format!("review-recovery-path-{}", uuid::Uuid::new_v4()));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&state)
-        .unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let fixture = crate::restart_binary::fixture::Directory::new();
+    let state = fixture.0.clone();
+    let child = Command::new(std::env::current_exe().unwrap())
         .arg0("infraternal")
         .args(["--exact", NAME, "--nocapture"])
         .current_dir(&state)
@@ -56,20 +53,10 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .unwrap();
-    // A refused or stalled child must not keep this functional review open.
-    let deadline = std::time::Instant::now() + super::HANG_BOUND;
-    while child.try_wait().unwrap().is_none() {
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            std::fs::remove_dir_all(&state).unwrap();
-            panic!("path recovery child did not complete");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let output = child.wait_with_output().unwrap();
+    let output = super::bounded_output(child, super::HANG_BOUND, NAME);
     std::fs::remove_dir_all(state).unwrap();
     assert!(
         output.status.success(),

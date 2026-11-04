@@ -5,70 +5,10 @@
 mod deleted_path_review;
 
 use super::*;
-use crate::restart_binary::fixture::{RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed};
+use crate::restart_binary::fixture::{
+    ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed,
+};
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
-
-struct Directory(PathBuf, Option<PathBuf>);
-impl Directory {
-    fn new() -> Self {
-        const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
-        let socket_directory = format!("c{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let default_root = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/infraternal");
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
-            .map_or_else(|| default_root.clone(), PathBuf::from);
-        let path = root.join("restart-tests").join(&socket_directory);
-        let needs_short_root = path
-            .join("restart/control.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            > MAX_UNIX_SOCKET_PATH_BYTES;
-        // Executable fixtures must retain trusted HOME ancestry and share the
-        // running image's filesystem for hard-link checks. Only sockets use /tmp.
-        let directory = if needs_short_root {
-            Self(
-                default_root.join("restart-tests").join(socket_directory),
-                Some(nix::unistd::mkdtemp("/tmp/ir-XXXXXX").unwrap()),
-            )
-        } else {
-            Self(path, None)
-        };
-        let socket = directory.state().join("restart/control.sock");
-        assert!(
-            socket.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES,
-            "restart fixture socket path exceeds Linux sun_path: {} bytes",
-            socket.as_os_str().as_encoded_bytes().len()
-        );
-
-        // The running unit-test image is also used as a replacement fixture.
-        // A shared build umask can make it group-writable, which the production
-        // validator correctly refuses; keep this private test image executable.
-        std::fs::set_permissions(
-            std::env::current_exe().unwrap(),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&directory.0)
-            .unwrap();
-        directory
-    }
-
-    fn state(&self) -> &Path {
-        self.1.as_deref().unwrap_or(&self.0)
-    }
-}
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-        if let Some(root) = &self.1 {
-            let _ = std::fs::remove_dir_all(root);
-        }
-    }
-}
 
 fn copy_private_image(source: &Path, target: &Path) {
     std::fs::copy(source, target).unwrap();
@@ -149,21 +89,24 @@ fn copy_signed_private_image(source: &Path, target: &Path) -> Signed {
     Signed::new(target.to_owned(), &bytes)
 }
 
+/// Collect a private child with a hang bound, retaining cleanup ownership on every panic.
 fn bounded_output(
-    mut child: std::process::Child,
+    child: std::process::Child,
     deadline: Duration,
     description: &str,
 ) -> std::process::Output {
+    let mut child = ChildGuard::new(child);
     let until = std::time::Instant::now() + deadline;
     loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
+        if child.process().try_wait().unwrap().is_some() {
+            return child.output();
         }
         if std::time::Instant::now() >= until {
-            let process_group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+            let process_group =
+                nix::unistd::Pid::from_raw(i32::try_from(child.process().id()).unwrap());
             let _ = nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGKILL);
-            let _ = child.kill();
-            let output = child.wait_with_output().unwrap();
+            let _ = child.process().kill();
+            let output = child.output();
             panic!(
                 "{description} exceeded {deadline:?}; status={}\nstdout:\n{}\nstderr:\n{}",
                 output.status,

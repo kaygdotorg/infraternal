@@ -1,40 +1,15 @@
 //! Exercises the real replacement admission hook without running crafted candidates, #154 [224][226].
 
-use super::fixture::Signed;
+use super::fixture::{Directory, Signed};
 use super::*;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 
-struct Directory(PathBuf);
-impl Directory {
-    fn new() -> Self {
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-            || {
-                PathBuf::from(std::env::var_os("HOME").unwrap())
-                    .join(".cache/codex-scratch/audit-ca-update")
-            },
-            PathBuf::from,
-        );
-        let path = root
-            .join("restart-audit")
-            .join(uuid::Uuid::new_v4().to_string());
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&path)
-            .unwrap();
-        Self(path)
-    }
-    fn candidate(&self, name: &str, bytes: &[u8]) -> PathBuf {
-        let path = self.0.join(name);
-        std::fs::write(&path, bytes).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        path
-    }
-}
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+/// Write a small executable candidate in this test's trusted private directory.
+fn candidate(directory: &Directory, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = directory.0.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    path
 }
 
 #[test]
@@ -47,12 +22,12 @@ fn unsigned_or_tampered_replacement_is_refused_before_exec() {
         ("tampered", b"changed"),
         ("truncated", b""),
     ] {
-        let path = directory.candidate(name, bytes);
+        let path = candidate(&directory, name, bytes);
         if Opened::open(path).is_ok() {
             accepted += 1;
         }
     }
-    let path = directory.candidate("oversized", b"");
+    let path = candidate(&directory, "oversized", b"");
     std::fs::OpenOptions::new()
         .write(true)
         .open(&path)
@@ -73,7 +48,7 @@ fn unsigned_or_tampered_replacement_is_refused_before_exec() {
 fn admitted_inode_cannot_change_in_place_before_execution() {
     use std::os::unix::fs::FileExt;
     let directory = Directory::new();
-    let path = directory.candidate("candidate", b"original");
+    let path = candidate(&directory, "candidate", b"original");
     let signed = Signed::image(path.clone());
     let opened = signed.open().unwrap();
     let mut original = [0; 8];
@@ -90,7 +65,7 @@ fn admitted_inode_cannot_change_in_place_before_execution() {
 #[test]
 fn symlink_parent_escape_and_writable_candidates_are_refused() {
     let directory = Directory::new();
-    let path = directory.candidate("candidate", b"fixture");
+    let path = candidate(&directory, "candidate", b"fixture");
     let alias = directory.0.join("alias");
     std::os::unix::fs::symlink(&path, &alias).unwrap();
     assert!(Opened::open(alias).is_err());
@@ -103,13 +78,13 @@ fn symlink_parent_escape_and_writable_candidates_are_refused() {
 fn pathname_replacement_keeps_the_admitted_inode() {
     use std::os::unix::fs::FileExt;
     let directory = Directory::new();
-    let path = directory.candidate("candidate", b"original");
+    let path = candidate(&directory, "candidate", b"original");
     let signed = Signed::image(path.clone());
     let opened = signed.open().unwrap();
     let mut original = [0; 8];
     opened.file.read_exact_at(&mut original, 0).unwrap();
     std::fs::rename(&path, directory.0.join("retained")).unwrap();
-    directory.candidate("candidate", b"modified");
+    candidate(&directory, "candidate", b"modified");
     let mut bytes = [0; 8];
     opened.file.read_exact_at(&mut bytes, 0).unwrap();
     assert_eq!(bytes, original);
@@ -119,7 +94,7 @@ fn pathname_replacement_keeps_the_admitted_inode() {
 fn unusable_admitted_image_keeps_the_existing_service_running() {
     use std::net::{TcpListener, TcpStream};
     let directory = Directory::new();
-    let path = directory.candidate("invalid-executable", b"");
+    let path = candidate(&directory, "invalid-executable", b"");
     let signed = Signed::new(path, b"invalid image");
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
