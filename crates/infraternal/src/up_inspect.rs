@@ -930,6 +930,43 @@ mod tests {
             assert_eq!(result.is_err(), refuse, "manager form {index}: {result:?}");
         }
     }
+    /// Classify one owned stopped unit through the real system manager on a shared root host.
+    /// The external proof creates and removes the uniquely prefixed unit; unrelated
+    /// infraternal login workers may legitimately make a whole-host scan refuse.
+    #[test]
+    #[ignore = "requires real root and a stopped J198_REVIEW_UNIT planted in the system manager"]
+    fn real_system_manager_classifies_review_unit() {
+        assert!(nix::unistd::geteuid().is_root());
+        let unit = std::env::var("J198_REVIEW_UNIT").unwrap();
+        assert!(unit.starts_with("j198-p3-") && unit.ends_with(".service") && !unit.contains('/'));
+        let output = super::manager(
+            Path::new("/usr/bin/systemctl"),
+            &[
+                OsStr::new("show"),
+                OsStr::new("--property=LoadState"),
+                OsStr::new("--property=ExecStart"),
+                OsStr::new("--property=ExecStartPre"),
+                OsStr::new("--property=ExecStartPost"),
+                OsStr::new("--property=ExecCondition"),
+                OsStr::new("--property=ExecSearchPath"),
+                OsStr::new("--"),
+                OsStr::new(&unit),
+            ],
+        )
+        .unwrap();
+        let result = super::resolved_service(
+            OsStr::new(&unit),
+            &output,
+            &default_search_path(),
+            &mut KnownImages::new().unwrap(),
+        );
+        println!("real system manager {unit}: {result:?}");
+        assert_eq!(
+            result.is_err(),
+            std::env::var_os("J198_REVIEW_REFUSE").is_some()
+        );
+    }
+
     /// A byte-identical copy retains CLI identity even when its inode and name change.
     #[test]
     fn renamed_copy_of_known_build_is_detected() {
