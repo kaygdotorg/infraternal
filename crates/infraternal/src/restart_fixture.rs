@@ -96,6 +96,8 @@ impl Signed {
 /// private copy. A `source` that already is a stripped image is returned as is.
 pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    /// Serializes building the cached image within this test process.
+    static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     if source
         .file_name()
         .is_some_and(|name| name.to_string_lossy().ends_with(".all-stripped"))
@@ -123,6 +125,14 @@ pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
         source_metadata.len()
     ));
     let image = cache.join(&image_name);
+    // Single flight: tests start in parallel on a cold cache, and each used to
+    // copy and strip the ~500 MB debug image on its own. About eight
+    // concurrent 0.5 GB copy+strip passes starved the disk until even small
+    // strips passed their hang guard (#355). One caller per test process
+    // builds the image; the others wait here and reuse it.
+    let _building = BUILDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !image.exists() {
         let mut staging_name = image_name;
         staging_name.push(format!(".{}", uuid::Uuid::new_v4().simple()));
