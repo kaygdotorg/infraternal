@@ -1,8 +1,7 @@
-//! Serves one node's accepted mesh name snapshot on its Linux mesh address [#266].
+//! Serves one node's accepted, policy-filtered mesh name snapshot on its mesh address [#266].
 //!
-//! Slice 1 answers only queries sourced from this node's own mesh address. Other sources receive
-//! `REFUSED` without records, so a node cannot use another resolver's broader visibility. Remote
-//! DNS service needs a per-asker snapshot path and belongs to a later slice.
+//! A node's own snapshot contains only names it may reach. Queries from another source are treated
+//! as nonexistent inside the zone, so this listener never reveals names from its broader view.
 use crate::{dataplane::Config, policy::model::validate_dns};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
@@ -172,13 +171,10 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
 /// The outcomes, in order:
 /// - `Err` for an oversized or malformed packet, or one that is not a single
 ///   plain query.
-/// - `REFUSED` with no records if `source` is not this node's own mesh
-///   address. A node only holds its own filtered view of the names, so it must
-///   not answer anyone else from it.
 /// - `Ok(None)` if the name is outside every configured suffix.
 /// - `REFUSED` for a class other than `IN`.
-/// - `NXDOMAIN` plus a short-lived SOA if the host does not exist (a name with
-///   more than one label before the suffix never exists).
+/// - `NXDOMAIN` plus a short-lived SOA if `source` is not this node's own mesh
+///   address or the host is absent (a name with multiple host labels never exists).
 /// - An `A` or `AAAA` answer for existing hosts; any other record type gets an
 ///   empty answer plus the SOA (NODATA).
 fn response_for_source(
@@ -207,12 +203,6 @@ fn response_for_source(
     reply.edns.clone_from(&request.edns);
     // Responses copy RD, while the response constructor clears other query flags.
     reply.metadata.recursion_desired = request.metadata.recursion_desired;
-    if source != IpAddr::V4(records.local_address) {
-        // Each resolver has only its local node's filtered view. Never answer another node from it.
-        reply.metadata.response_code = ResponseCode::Refused;
-        return encode(&reply).map(Some);
-    }
-    reply.metadata.authoritative = true;
 
     let qname = question
         .name()
@@ -222,10 +212,16 @@ fn response_for_source(
     let Some((suffix, label)) = matching_zone(&qname, &records.suffixes) else {
         return Ok(None);
     };
+    reply.metadata.authoritative = true;
 
     if question.query_class() != DNSClass::IN {
         reply.metadata.response_code = ResponseCode::Refused;
         return encode(&reply).map(Some);
+    }
+    if source != IpAddr::V4(records.local_address) {
+        // A peer asking this node directly sees no names from its broader local view. Treat every
+        // such in-zone query as missing, so the answer cannot reveal whether the name exists here.
+        return negative_response(reply, suffix).map(Some);
     }
 
     let address = if label.contains('.') {
@@ -234,9 +230,7 @@ fn response_for_source(
         records.names.get(label).copied()
     };
     let Some(address) = address else {
-        reply.metadata.response_code = ResponseCode::NXDomain;
-        reply.authorities.push(negative_soa(suffix)?);
-        return encode(&reply).map(Some);
+        return negative_response(reply, suffix).map(Some);
     };
     let rdata = match question.query_type() {
         RecordType::A => Some(RData::A(address.ipv4.into())),
@@ -254,6 +248,14 @@ fn response_for_source(
         reply.authorities.push(negative_soa(suffix)?);
     }
     encode(&reply).map(Some)
+}
+
+/// Builds the negative answer shared by filtered queries and missing names.
+/// Keeping one path gives both cases the same NXDOMAIN response and SOA data.
+fn negative_response(mut reply: Message, suffix: &str) -> io::Result<Vec<u8>> {
+    reply.metadata.response_code = ResponseCode::NXDomain;
+    reply.authorities.push(negative_soa(suffix)?);
+    encode(&reply)
 }
 
 /// Finds which configured suffix `qname` (lowercase, no trailing dot) falls
