@@ -24,12 +24,12 @@ fn install_image(path: &Path, metadata: &fs::Metadata, current: &fs::Metadata) -
 }
 
 /// Refuse a running server or infraternal agent using its kernel image, never its chosen argv[0].
-pub(super) fn running_install() -> io::Result<()> {
-    processes(Path::new("/proc"))
+pub(super) fn running_install(recovery: &super::journal::Snapshot) -> io::Result<()> {
+    processes(Path::new("/proc"), recovery)
 }
 
 /// Inspect a process namespace; a pinned executable plus a second stat detects exec races.
-fn processes(root: &Path) -> io::Result<()> {
+fn processes(root: &Path, recovery: &super::journal::Snapshot) -> io::Result<()> {
     let current = fs::metadata("/proc/self/exe")?;
     for process in fs::read_dir(root)? {
         let process = process?;
@@ -82,6 +82,12 @@ fn processes(root: &Path) -> io::Result<()> {
                     "An infraternal server is running on this host. Use its embedded infraternal agent; run infraternal up on a different host.",
                 ));
             }
+            Some(b"agent")
+                if recovery.created.iter().any(|entry| {
+                    entry.path.ends_with("var/lib/infraternal/bin/infraternal")
+                        && entry.identity == (metadata.dev(), metadata.ino())
+                        && recovery.owns(&entry.path)
+                }) => {}
             Some(b"agent") => {
                 return Err(refused(
                     "An infraternal agent is already running on this host. Manage the existing service instead of running infraternal up.",
@@ -226,7 +232,11 @@ fn resolved_service(unit: &OsStr, output: &str) -> io::Result<()> {
 }
 
 /// Resolve installed services through the manager, including custom unit and data paths.
-pub(super) fn installed_services(root: &Path, systemctl: &Path) -> io::Result<()> {
+pub(super) fn installed_services(
+    root: &Path,
+    systemctl: &Path,
+    recovery: &super::journal::Snapshot,
+) -> io::Result<()> {
     let mut units = BTreeSet::new();
     for relative in [
         "etc/systemd/system",
@@ -241,6 +251,9 @@ pub(super) fn installed_services(root: &Path, systemctl: &Path) -> io::Result<()
         };
         for entry in entries {
             let entry = entry?;
+            if recovery.owns(&entry.path()) {
+                continue;
+            }
             if entry.file_name() == SERVICE_NAME {
                 return Err(refused(
                     "An infraternal agent service is already installed. Manage that service instead of running infraternal up.",
@@ -259,6 +272,9 @@ pub(super) fn installed_services(root: &Path, systemctl: &Path) -> io::Result<()
         manager_units(systemctl, &mut units)?;
     }
     for unit in units {
+        if unit == SERVICE_NAME && recovery.owns(&root.join("etc/systemd/system").join(&unit)) {
+            continue;
+        }
         if unit == SERVICE_NAME {
             return Err(refused(
                 "An infraternal agent service is already known to systemd. Manage that service instead of running infraternal up.",
@@ -298,20 +314,20 @@ mod tests {
         )
         .unwrap();
         assert!(
-            processes(&root)
+            processes(&root, &super::super::journal::Snapshot::default())
                 .unwrap_err()
                 .to_string()
                 .contains("server is running")
         );
         fs::write(root.join("123/cmdline"), b"harmless\0ssh\0host\0server\0").unwrap();
-        processes(&root).unwrap();
+        processes(&root, &super::super::journal::Snapshot::default()).unwrap();
         fs::write(
             root.join("123/cmdline"),
             b"harmless\0--unknown-output\0value\0server\0",
         )
         .unwrap();
         assert!(
-            processes(&root)
+            processes(&root, &super::super::journal::Snapshot::default())
                 .unwrap_err()
                 .to_string()
                 .contains("Could not resolve")
@@ -319,7 +335,7 @@ mod tests {
         fs::remove_file(root.join("123/exe")).unwrap();
         std::os::unix::fs::symlink("/usr/bin/true", root.join("123/exe")).unwrap();
         fs::write(root.join("123/cmdline"), b"infraternal\0server\0").unwrap();
-        processes(&root).unwrap();
+        processes(&root, &super::super::journal::Snapshot::default()).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

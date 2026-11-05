@@ -1376,7 +1376,7 @@ mod tests {
             fs::write(
                 &systemctl,
                 format!(
-                    "#!/bin/sh\n[ -e '{}' ] || [ -L '{}' ] || exit 2\nprintf reached > '{}'\nexit 1\n",
+                    "#!/bin/sh\n[ \"$1\" != stop ] || exit 0\n[ -e '{}' ] || [ -L '{}' ] || exit 2\nprintf reached > '{}'\nexit 1\n",
                     alias.display(), alias.display(), reached.display()
                 ),
             )
@@ -1737,22 +1737,31 @@ mod tests {
         );
     }
 
-    /// A service-start failure removes only the paths the attempted install created.
+    /// A service-start failure removes install paths and retains only the empty private lock journal.
     #[test]
     fn failed_install_rolls_back_new_paths() {
         let temporary = TemporaryDirectory::new();
         let source = temporary.0.join("source");
         fs::write(&source, b"binary").unwrap();
         fs::write(temporary.0.join("keep"), b"existing").unwrap();
-        assert!(
-            install_system_service(&temporary.0, &source, Path::new("/bin/false"), me()).is_err()
-        );
+        let manager = temporary.0.join("systemctl");
+        crate::test_executable::write(&manager, "#!/bin/sh\n[ \"$1\" != is-active ]\n", 0o755);
+        assert!(install_system_service(&temporary.0, &source, &manager, me()).is_err());
         let mut names = fs::read_dir(&temporary.0)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         names.sort();
-        assert_eq!(names, ["keep", "source"]);
+        assert_eq!(
+            names,
+            [".infraternal-up.journal", "keep", "source", "systemctl"]
+        );
+        let journal = temporary.0.join(".infraternal-up.journal");
+        assert_eq!(fs::read(&journal).unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            fs::metadata(journal).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
         assert_eq!(fs::read(temporary.0.join("keep")).unwrap(), b"existing");
     }
 

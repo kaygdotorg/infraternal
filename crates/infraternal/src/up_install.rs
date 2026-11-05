@@ -1,7 +1,8 @@
 //! Installs a fresh system service without modifying an existing installation (#338).
 //!
-//! Preflight only reads. The install owns each new inode until activation succeeds;
-//! errors and unwinding remove those inodes, leaving pre-existing paths alone.
+//! Preflight only reads, including when it models recovery of an unfinished install.
+//! Synced inode records precede publication; errors, signals and the next privileged
+//! attempt recover only those entries, leaving pre-existing paths alone.
 use super::{
     PATH_BINARY, SERVICE_BINARY, SERVICE_NAME, check_directory, hash_stream, run_systemctl,
     systemd_unit,
@@ -35,6 +36,10 @@ fn existing(path: &Path) -> io::Result<Option<fs::Metadata>> {
 #[path = "up_inspect.rs"]
 mod inspect;
 
+/// Durable ownership records permit a later privileged run to recover an interrupted install.
+#[path = "up_journal.rs"]
+mod journal;
+
 /// Check every installation destination and its ancestry before the first write.
 /// Existing empty bases must already be 0711: this command never repairs their modes.
 pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<()> {
@@ -49,17 +54,36 @@ pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<()> {
 
 /// Use the same trusted manager for read-only inspection and later activation.
 fn preflight_with_manager(root: &Path, owner: u32, systemctl: &Path) -> io::Result<()> {
+    let recovery = journal::inspect(root, owner)?;
+    check_preflight(root, owner, systemctl, &recovery)
+}
+
+/// Evaluate the filesystem as it will look after removing only proven pending ownership.
+fn check_preflight(
+    root: &Path,
+    owner: u32,
+    systemctl: &Path,
+    recovery: &journal::Snapshot,
+) -> io::Result<()> {
+    if recovery.committed {
+        return Err(refused(
+            "A completed infraternal installation is recorded on this host. Manage the existing service; inspect /.infraternal-up.journal as root before preparing a fresh host.",
+        ));
+    }
+    validate_recovery(recovery)?;
     // The early user check cannot read other users' executable descriptors. Only
     // the privileged repeat can authorize writes, and it inspects the whole host.
     if root == Path::new("/") && nix::unistd::geteuid().is_root() {
-        inspect::running_install()?;
+        inspect::running_install(recovery)?;
     }
-    inspect::installed_services(root, systemctl)?;
+    inspect::installed_services(root, systemctl, recovery)?;
     let base = root.join("var/lib/infraternal");
-    if let Some(metadata) = existing(&base)? {
+    if let Some(metadata) = remaining(&base, recovery)? {
         check_directory(&metadata, owner)?;
         let mut entries = fs::read_dir(&base).map_err(|_| refused("An existing protected infraternal data directory was found. Use the existing service; infraternal up requires a fresh host and will not change its permissions."))?;
-        if entries.next().transpose()?.is_some() || metadata.mode() & 0o7777 != 0o711 {
+        if entries.any(|entry| entry.map_or(true, |entry| !recovery.owns(&entry.path())))
+            || metadata.mode() & 0o7777 != 0o711
+        {
             return Err(refused(
                 "An existing infraternal data directory was found. Use the server's embedded infraternal agent or the existing machine service; infraternal up will not change this directory.",
             ));
@@ -72,14 +96,14 @@ fn preflight_with_manager(root: &Path, owner: u32, systemctl: &Path) -> io::Resu
         "etc/systemd/system/infraternal-agent.service",
         "etc/systemd/system/multi-user.target.wants/infraternal-agent.service",
     ] {
-        if existing(&root.join(relative))?.is_some() {
+        if remaining(&root.join(relative), recovery)?.is_some() {
             return Err(refused(
                 "An infraternal agent installation already exists. Manage the existing service; inspect an obsolete installation before removing it and retrying infraternal up.",
             ));
         }
     }
     let link = root.join(PATH_BINARY.trim_start_matches('/'));
-    if let Some(metadata) = existing(&link)?
+    if let Some(metadata) = remaining(&link, recovery)?
         && (!metadata.file_type().is_symlink()
             || metadata.uid() != owner
             || fs::read_link(&link)? != Path::new(SERVICE_BINARY))
@@ -106,6 +130,37 @@ fn preflight_with_manager(root: &Path, owner: u32, systemctl: &Path) -> io::Resu
     Ok(())
 }
 
+/// Hide only an exact pending inode from the hypothetical post-recovery filesystem.
+fn remaining(path: &Path, recovery: &journal::Snapshot) -> io::Result<Option<fs::Metadata>> {
+    if recovery.owns(path) {
+        Ok(None)
+    } else {
+        existing(path)
+    }
+}
+
+/// Refuse foreign descendants before recovery writes anything; enrollment alone owns its children.
+fn validate_recovery(recovery: &journal::Snapshot) -> io::Result<()> {
+    if recovery.committed {
+        return Ok(());
+    }
+    for entry in &recovery.created {
+        if entry.enrollment || !recovery.owns(&entry.path) {
+            continue;
+        }
+        if fs::symlink_metadata(&entry.path)?.is_dir() {
+            for child in fs::read_dir(&entry.path)? {
+                if !recovery.owns(&child?.path()) {
+                    return Err(refused(
+                        "An unfinished infraternal installation contains a path outside its recovery journal. Inspect it as root before retrying; no installation paths were changed.",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An inode created by this install; replacements at its pathname are never removed.
 struct Created {
     /// The pathname published by this run.
@@ -124,6 +179,8 @@ pub(super) struct Install {
     owner: u32,
     /// Reverse creation order removes children before their new parent directories.
     created: Vec<Created>,
+    /// The exclusive durable journal stays locked until commit or completed rollback.
+    journal: journal::Journal,
     /// A trusted service manager used for activation and rollback.
     systemctl: PathBuf,
     /// Registration may have succeeded even when the activation command returns an error.
@@ -138,15 +195,23 @@ impl Install {
     /// Repeat read-only preflight, then create the private enrollment layout under rollback.
     pub(super) fn begin(root: &Path, owner: u32, systemctl: &Path) -> io::Result<Self> {
         preflight_with_manager(root, owner, systemctl)?;
+        let (journal, recovery) = journal::Journal::open(root, owner)?;
+        // Recheck under the retained lock: a different install may have finished
+        // between the read-only preflight and lock acquisition.
+        check_preflight(root, owner, systemctl, &recovery)?;
         let mut install = Self {
             root: root.to_owned(),
             owner,
-            created: Vec::new(),
+            created: recovery.created,
+            journal,
             systemctl: systemctl.to_owned(),
-            registered: false,
+            registered: recovery.registered,
             committed: false,
             interrupted: None,
         };
+        install.rollback()?;
+        check_preflight(root, owner, systemctl, &journal::Snapshot::default())?;
+        install.journal.begin()?;
         install.directory("var/lib/infraternal", 0o711, false)?;
         install.directory("var/lib/infraternal/agent", 0o700, true)?;
         install.directory("var/lib/infraternal/bin", 0o755, true)?;
@@ -172,13 +237,22 @@ impl Install {
         Ok(())
     }
 
-    /// Record ownership immediately after creation, before any fallible write or fsync.
-    fn record(&mut self, path: PathBuf, metadata: &fs::Metadata, enrollment: bool) {
+    /// Persist ownership before publication, retaining in-memory cleanup even if persistence fails.
+    fn record(
+        &mut self,
+        path: PathBuf,
+        metadata: &fs::Metadata,
+        enrollment: bool,
+    ) -> io::Result<()> {
+        let result = self.journal.record(&path, metadata, enrollment);
+        // Failed journal writes still need ordinary in-memory rollback authority.
+        // Keep the inode before returning that error to the enclosing transaction.
         self.created.push(Created {
             path,
             identity: (metadata.dev(), metadata.ino()),
             enrollment,
         });
+        result
     }
 
     /// Make missing directories exclusively; existing ancestors are inspected and never chmodded.
@@ -188,52 +262,83 @@ impl Install {
         for component in Path::new(relative).components() {
             current.push(component);
             let final_entry = current == destination;
-            match fs::DirBuilder::new()
-                .mode(if final_entry { mode } else { 0o755 })
-                .create(&current)
-            {
-                Ok(()) => {
-                    let metadata = fs::symlink_metadata(&current)?;
-                    self.record(
-                        current.clone(),
-                        &metadata,
-                        relative.ends_with("/agent") && final_entry,
-                    );
-                    fs::set_permissions(
-                        &current,
-                        fs::Permissions::from_mode(if final_entry { mode } else { 0o755 }),
-                    )?;
+            if let Some(metadata) = existing(&current)? {
+                if final_entry && exclusive {
+                    return Err(io::ErrorKind::AlreadyExists.into());
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if final_entry && exclusive {
-                        return Err(error);
-                    }
-                    check_directory(&fs::symlink_metadata(&current)?, self.owner)?;
-                }
-                Err(error) => return Err(error),
+                check_directory(&metadata, self.owner)?;
+                continue;
             }
+            self.journal.step()?;
+            let staging = self.temporary(&current)?;
+            fs::DirBuilder::new().mode(0o700).create(&staging)?;
+            let metadata = fs::symlink_metadata(&staging)?;
+            self.record(staging.clone(), &metadata, false)?;
+            fs::set_permissions(
+                &staging,
+                fs::Permissions::from_mode(if final_entry { mode } else { 0o755 }),
+            )?;
+            self.record(
+                current.clone(),
+                &metadata,
+                relative.ends_with("/agent") && final_entry,
+            )?;
+            infraternal_shim::publish_install_directory(&staging, &current)?;
+            fs::File::open(
+                current
+                    .parent()
+                    .ok_or_else(|| io::Error::other("missing install parent"))?,
+            )?
+            .sync_all()?;
         }
         Ok(destination)
     }
 
+    /// Stage in the first pre-existing ancestor on the destination filesystem.
+    ///
+    /// Publication waits for a synced inode record. A stop between exclusive staging
+    /// creation and that record can leave only an empty unpublished entry, outside
+    /// directories recovery must remove. Unknown inodes never gain deletion authority.
+    fn temporary(&self, destination: &Path) -> io::Result<PathBuf> {
+        let mut parent = destination
+            .parent()
+            .ok_or_else(|| io::Error::other("missing install parent"))?;
+        while parent != self.root
+            && self.created.iter().any(|entry| {
+                entry.path == parent
+                    && existing(parent)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|metadata| entry.identity == (metadata.dev(), metadata.ino()))
+            })
+        {
+            parent = parent
+                .parent()
+                .ok_or_else(|| io::Error::other("missing install ancestor"))?;
+        }
+        Ok(parent.join(format!(".infraternal-up-{}.pending", uuid::Uuid::new_v4())))
+    }
+
     /// Open a unique private staging file and retain its inode even if writing later fails.
     fn staging(&mut self, destination: &Path) -> io::Result<(PathBuf, fs::File)> {
-        let path = destination.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
+        self.journal.step()?;
+        let path = self.temporary(destination)?;
         let file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o700)
             .custom_flags(nix::libc::O_NOFOLLOW)
             .open(&path)?;
-        self.record(path.clone(), &file.metadata()?, false);
+        self.record(path.clone(), &file.metadata()?, false)?;
         Ok((path, file))
     }
 
     /// Atomically publish completed bytes without overwriting an existing destination.
     fn publish(&mut self, staging: &Path, destination: &Path) -> io::Result<()> {
         let metadata = fs::symlink_metadata(staging)?;
+        self.journal.step()?;
+        self.record(destination.to_owned(), &metadata, false)?;
         fs::hard_link(staging, destination)?;
-        self.record(destination.to_owned(), &metadata, false);
         fs::remove_file(staging)?;
         fs::File::open(
             destination
@@ -266,12 +371,24 @@ impl Install {
 
     /// Create one symlink exclusively and record its own inode, without following the target.
     fn link(&mut self, target: &Path, destination: &Path) -> io::Result<()> {
-        std::os::unix::fs::symlink(target, destination)?;
-        self.record(
-            destination.to_owned(),
-            &fs::symlink_metadata(destination)?,
-            false,
-        );
+        if existing(destination)?.is_some() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        self.journal.step()?;
+        let staging = self.temporary(destination)?;
+        std::os::unix::fs::symlink(target, &staging)?;
+        let metadata = fs::symlink_metadata(&staging)?;
+        self.record(staging.clone(), &metadata, false)?;
+        if let Err(error) = self.publish(&staging, destination) {
+            if error.kind() == io::ErrorKind::AlreadyExists
+                && existing(&staging)?.is_some_and(|current| {
+                    (current.dev(), current.ino()) == (metadata.dev(), metadata.ino())
+                })
+            {
+                fs::remove_file(&staging)?;
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -338,6 +455,7 @@ impl Install {
             &enabled,
         )?;
         self.check_interruption()?;
+        self.journal.register()?;
         self.registered = true;
         run_systemctl(&self.systemctl, &["daemon-reload"], None)?;
         self.check_interruption()?;
@@ -349,25 +467,42 @@ impl Install {
             Some("active"),
         )?;
         self.check_interruption()?;
+        self.journal.commit()?;
         self.committed = true;
         Ok(())
     }
 }
 
-impl Drop for Install {
-    /// Undo activation and remove only this run's unchanged inodes, including partial enrollment.
-    fn drop(&mut self) {
+impl Install {
+    /// Recover only unchanged journaled inodes; keep the journal if any cleanup operation fails.
+    fn rollback(&mut self) -> io::Result<()> {
         if self.committed {
-            return;
+            return Ok(());
         }
+        let mut failure = None;
+        let unit = self
+            .root
+            .join("etc/systemd/system/infraternal-agent.service");
+        let own_unit = self.created.iter().any(|entry| {
+            entry.path == unit
+                && existing(&unit)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|metadata| entry.identity == (metadata.dev(), metadata.ino()))
+        });
         // Stop affects runtime state only. Disable would also delete administrator-owned
         // unit aliases; the inode journal already owns our sole enablement link.
-        if self.registered {
-            let _ = run_systemctl(&self.systemctl, &["stop", SERVICE_NAME], None);
+        if self.registered && own_unit {
+            run_systemctl(&self.systemctl, &["stop", SERVICE_NAME], None)?;
         }
         for created in self.created.iter().rev() {
-            let Ok(metadata) = fs::symlink_metadata(&created.path) else {
-                continue;
+            let metadata = match fs::symlink_metadata(&created.path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    continue;
+                }
             };
             if (metadata.dev(), metadata.ino()) != created.identity {
                 continue;
@@ -379,14 +514,30 @@ impl Drop for Install {
             } else {
                 fs::remove_file(&created.path)
             };
-            if result.is_err() {
-                eprintln!(
-                    "Could not remove a path created by this installation. Inspect the incomplete infraternal agent installation before retrying."
-                );
+            if let Err(error) = result {
+                failure.get_or_insert(error);
             }
         }
         if self.registered {
             let _ = run_systemctl(&self.systemctl, &["daemon-reload"], None);
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        self.journal.clear()?;
+        self.created.clear();
+        self.registered = false;
+        Ok(())
+    }
+}
+
+impl Drop for Install {
+    /// Normal errors and handled signals use the same cleanup as next-run durable recovery.
+    fn drop(&mut self) {
+        if self.rollback().is_err() {
+            eprintln!(
+                "Could not finish rollback of this infraternal installation. Retry sudo infraternal up to recover its private journal."
+            );
         }
     }
 }

@@ -155,9 +155,28 @@ fn enrollment_interruption(signal: nix::sys::signal::Signal) {
         identity.exists(),
         preflight(&fixture.0, nix::unistd::geteuid().as_raw()).is_err()
     );
+    if signal == nix::sys::signal::Signal::SIGKILL {
+        assert!(identity.exists(), "abrupt stop unexpectedly ran Drop");
+        let journal = fixture.0.join(".infraternal-up.journal");
+        let before = fs::read(&journal).unwrap();
+        preflight(&fixture.0, nix::unistd::geteuid().as_raw()).unwrap();
+        assert!(identity.exists(), "read-only preflight performed recovery");
+        assert_eq!(fs::read(&journal).unwrap(), before);
+        let retry = Install::begin(
+            &fixture.0,
+            nix::unistd::geteuid().as_raw(),
+            Path::new("/bin/false"),
+        )
+        .unwrap();
+        assert!(
+            !identity.exists(),
+            "next privileged run did not recover enrollment"
+        );
+        drop(retry);
+    }
     assert!(
         !identity.exists(),
-        "SIGTERM stranded enrollment; retry is refused"
+        "interrupted enrollment was not recovered"
     );
     preflight(&fixture.0, nix::unistd::geteuid().as_raw()).unwrap();
     assert!(!fixture.0.join("var").exists());
@@ -440,4 +459,287 @@ fn j226_replaced_enablement_inode_survives() {
     );
     let after = fs::symlink_metadata(&enabled).unwrap();
     assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+}
+/// An abrupt helper stop must leave a recoverable installation on its next attempt.
+#[test]
+fn j226_sigkill_retry_recovers_enrollment() {
+    enrollment_interruption(nix::sys::signal::Signal::SIGKILL);
+}
+
+/// Malformed or publicly writable recovery records must never authorize installation writes.
+#[test]
+fn j226_untrusted_recovery_record_is_read_only() {
+    for (mode, bytes) in [
+        (0o600, b"not a journal\n".as_slice()),
+        (0o600, b"{\"Begin\":{\"version\":2}}\n".as_slice()),
+        (0o666, b"".as_slice()),
+    ] {
+        let fixture = Fixture::new();
+        let journal = fixture.0.join(".infraternal-up.journal");
+        fs::write(&journal, bytes).unwrap();
+        fs::set_permissions(&journal, fs::Permissions::from_mode(mode)).unwrap();
+        let before = fs::symlink_metadata(&journal).unwrap();
+        assert!(
+            Install::begin(
+                &fixture.0,
+                nix::unistd::geteuid().as_raw(),
+                Path::new("/bin/false")
+            )
+            .is_err()
+        );
+        let after = fs::symlink_metadata(&journal).unwrap();
+        assert_eq!(
+            (after.dev(), after.ino(), after.mode()),
+            (before.dev(), before.ino(), before.mode())
+        );
+        assert_eq!(fs::read(&journal).unwrap(), bytes);
+        assert!(!fixture.0.join("var").exists());
+    }
+}
+
+/// A second installer cannot recover or remove the live installer's enrollment directory.
+#[test]
+fn j226_live_transaction_cannot_be_recovered() {
+    let fixture = Fixture::new();
+    let first = Install::begin(
+        &fixture.0,
+        nix::unistd::geteuid().as_raw(),
+        Path::new("/bin/false"),
+    )
+    .unwrap();
+    let path = fixture.0.join("var/lib/infraternal/agent");
+    let before = fs::symlink_metadata(&path).unwrap();
+    assert!(
+        Install::begin(
+            &fixture.0,
+            nix::unistd::geteuid().as_raw(),
+            Path::new("/bin/false")
+        )
+        .is_err()
+    );
+    let after = fs::symlink_metadata(&path).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    drop(first);
+    assert!(!fixture.0.join("var").exists());
+    assert_eq!(
+        fs::read(fixture.0.join(".infraternal-up.journal")).unwrap(),
+        Vec::<u8>::new()
+    );
+}
+
+/// Retry recovers a published but uncommitted installation while preserving a foreign short name.
+#[test]
+fn j226_sigkill_retry_recovers_published_install() {
+    use std::os::unix::process::CommandExt as _;
+    let fixture = Fixture::new();
+    let ready = fixture.0.join("ready");
+    let foreign = fixture.0.join("usr/local/bin/infra");
+    fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    fs::write(&foreign, b"earlier command").unwrap();
+    let foreign_before = fs::symlink_metadata(&foreign).unwrap();
+    fs::write(fixture.0.join("source"), b"fixture executable").unwrap();
+    crate::test_executable::write(
+        &fixture.0.join("systemctl"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = is-active ]; then\n touch '{}'\n while :; do sleep 1; done\nfi\nexit 0\n",
+            ready.display()
+        ),
+        0o755,
+    );
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "up::install::j218_review::j218_hold_activation_transaction",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("J218_ROOT", &fixture.0)
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    while !ready.exists() {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "activation helper exited before readiness"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "activation fixture did not become ready"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let identity = fixture.0.join("var/lib/infraternal/agent/identity.json");
+    fs::write(&identity, b"fixture enrollment").unwrap();
+    nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(i32::try_from(child.0.id()).unwrap()),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    let journal = fixture.0.join(".infraternal-up.journal");
+    let before = fs::read(&journal).unwrap();
+    assert_eq!(fs::metadata(&journal).unwrap().mode() & 0o777, 0o600);
+    preflight(&fixture.0, nix::unistd::geteuid().as_raw()).unwrap();
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        before,
+        "preflight wrote the journal"
+    );
+    assert!(identity.exists(), "read-only preflight performed recovery");
+    let retry = Install::begin(
+        &fixture.0,
+        nix::unistd::geteuid().as_raw(),
+        &fixture.0.join("systemctl"),
+    )
+    .unwrap();
+    assert!(
+        !identity.exists(),
+        "next privileged attempt did not recover enrollment"
+    );
+    drop(retry);
+    let foreign_after = fs::symlink_metadata(&foreign).unwrap();
+    assert_eq!(
+        (foreign_before.dev(), foreign_before.ino()),
+        (foreign_after.dev(), foreign_after.ino())
+    );
+    assert_eq!(fs::read(&foreign).unwrap(), b"earlier command");
+    assert!(!fixture.0.join("var").exists());
+    assert!(!fixture.0.join("etc").exists());
+}
+
+/// A durable commit transfers the installation to the service, so retry never removes it.
+#[test]
+fn j226_committed_install_is_not_recovered() {
+    let fixture = Fixture::new();
+    let manager = fixture.0.join("systemctl");
+    crate::test_executable::write(
+        &manager,
+        b"#!/bin/sh\nif [ \"$1\" = is-active ]; then printf 'active\\n'; fi\n",
+        0o755,
+    );
+    let source = fixture.0.join("source");
+    fs::write(&source, b"fixture executable").unwrap();
+    Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &manager)
+        .unwrap()
+        .activate(&source)
+        .unwrap();
+    let binary = fixture.0.join(SERVICE_BINARY.trim_start_matches('/'));
+    let before = fs::symlink_metadata(&binary).unwrap();
+    assert!(fixture.0.join(".infraternal-up.journal").exists());
+    assert!(Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &manager).is_err());
+    let after = fs::symlink_metadata(&binary).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    assert_eq!(fs::read(binary).unwrap(), b"fixture executable");
+}
+
+/// A replacement enrollment directory has no durable ownership and must refuse before recovery.
+#[test]
+fn j226_recovery_preserves_replaced_enrollment_inode() {
+    use std::os::unix::process::CommandExt as _;
+    let fixture = Fixture::new();
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "up::install::j218_review::j218_hold_enrollment_transaction",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("J218_ROOT", &fixture.0)
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(
+        std::io::BufReader::new(child.0.stdout.take().unwrap())
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == "J218_TRANSACTION_READY")
+    );
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(child.0.id()).unwrap()),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    let agent = fixture.0.join("var/lib/infraternal/agent");
+    let original = fixture.0.join("earlier-enrollment");
+    fs::rename(&agent, &original).unwrap();
+    fs::create_dir(&agent).unwrap();
+    fs::write(agent.join("keep"), b"administrator replacement").unwrap();
+    let before = fs::symlink_metadata(&agent).unwrap();
+    let journal = fixture.0.join(".infraternal-up.journal");
+    let recorded = fs::read(&journal).unwrap();
+    assert!(
+        Install::begin(
+            &fixture.0,
+            nix::unistd::geteuid().as_raw(),
+            Path::new("/bin/false")
+        )
+        .is_err()
+    );
+    let after = fs::symlink_metadata(&agent).unwrap();
+    assert_eq!(
+        (before.dev(), before.ino(), before.mode()),
+        (after.dev(), after.ino(), after.mode())
+    );
+    assert_eq!(
+        fs::read(agent.join("keep")).unwrap(),
+        b"administrator replacement"
+    );
+    assert_eq!(
+        fs::read(original.join("identity.json")).unwrap(),
+        b"fixture enrollment"
+    );
+    assert_eq!(
+        fs::read(journal).unwrap(),
+        recorded,
+        "refusal modified the durable journal"
+    );
+}
+
+/// A failed stop retains durable ownership, and a later healthy manager can recover it.
+#[test]
+fn j226_failed_stop_keeps_recovery_authority() {
+    let fixture = Fixture::new();
+    let manager = fixture.0.join("systemctl");
+    crate::test_executable::write(
+        &manager,
+        "#!/bin/sh\ncase \"$1\" in is-active|stop) exit 1;; esac\n",
+        0o755,
+    );
+    let source = fixture.0.join("source");
+    fs::write(&source, b"fixture executable").unwrap();
+    let install = Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &manager).unwrap();
+    let identity = fixture.0.join("var/lib/infraternal/agent/identity.json");
+    fs::write(&identity, b"fixture enrollment").unwrap();
+    assert!(install.activate(&source).is_err());
+    assert!(
+        identity.exists(),
+        "failed stop discarded enrollment before the service stopped"
+    );
+    assert!(
+        fixture
+            .0
+            .join(SERVICE_BINARY.trim_start_matches('/'))
+            .exists()
+    );
+    assert_ne!(
+        fs::read(fixture.0.join(".infraternal-up.journal")).unwrap(),
+        Vec::<u8>::new()
+    );
+    crate::test_executable::write(&manager, "#!/bin/sh\nexit 0\n", 0o755);
+    let retry = Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &manager).unwrap();
+    assert!(!identity.exists());
+    drop(retry);
+    assert!(!fixture.0.join("var").exists());
+    assert!(!fixture.0.join("etc").exists());
+    assert_eq!(
+        fs::read(fixture.0.join(".infraternal-up.journal")).unwrap(),
+        Vec::<u8>::new()
+    );
 }
