@@ -1,13 +1,11 @@
-//! Retains bounded host-login refusals independently of ordinary saves and callers.
+//! Retains bounded per-person login refusals independently of ordinary saves.
 //!
-//! A registry is the configured private host-login directory. Each has at most
-//! eighteen distinct pending people and one
-//! worker. Duplicate requests share a result. Security-only overflow coalesces
-//! into one host-wide refusal rather than allocating more person intents. That
-//! conservative refusal survives restart and needs administrator recovery with
-//! the daemon stopped: remove `infraternal-login-locks/host.revoked` before
-//! explicitly restoring people. Individual restoration never clears that latch. Idle registries
-//! retain no worker, descriptors or retry timer. Only failed active work retries.
+//! One registry owns at most eighteen accepted people and one retry worker.
+//! Duplicate requests share a receipt. A full security queue returns busy before
+//! retaining another intent or opening descriptors; the authoritative server
+//! keeps that person's durable intent unconfirmed and retries. Unrelated people
+//! remain permitted. Accepted work survives caller cancellation and retries until
+//! durable. Idle registries retain no worker, descriptors or retry timer.
 use super::{Manager, Path, PathBuf, io};
 use std::{
     collections::{HashMap, VecDeque},
@@ -40,12 +38,6 @@ struct State {
     pending: HashMap<uuid::Uuid, Intent>,
     /// Failed people go to the back, allowing unrelated security work to progress.
     queue: VecDeque<uuid::Uuid>,
-    /// A full security queue aggregates later requests into denial of the host.
-    lockdown: Option<Intent>,
-    /// Completed host lockdown remains in memory until its durable marker takes over.
-    locked: bool,
-    /// Alternate failed host attempts with individual work so one fault cannot starve people.
-    host_attempted: bool,
     /// Submission starts exactly one owner before yielding to the runtime.
     running: bool,
 }
@@ -75,7 +67,7 @@ pub(super) fn denied(root: &Path, person: uuid::Uuid) -> bool {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.lockdown.is_some() || state.pending.contains_key(&person)
+            state.pending.contains_key(&person)
         })
 }
 
@@ -110,21 +102,21 @@ pub(super) async fn submit(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let receipt = if let Some(intent) = state.pending.get(&person) {
             intent.reply.subscribe()
-        } else if let Some(intent) = &state.lockdown {
-            intent.reply.subscribe()
         } else {
+            if state.pending.len() == CAPACITY {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "security write queue is busy",
+                ));
+            }
             let (reply, receipt) = watch::channel(None);
             let intent = Intent {
                 manager,
                 rootless,
                 reply,
             };
-            if state.pending.len() == CAPACITY {
-                state.lockdown = Some(intent);
-            } else {
-                state.pending.insert(person, intent);
-                state.queue.push_back(person);
-            }
+            state.pending.insert(person, intent);
+            state.queue.push_back(person);
             receipt
         };
         let start = !state.running;
@@ -154,19 +146,12 @@ async fn run(registry: Arc<Registry>) {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !state.locked
-                && state.lockdown.is_some()
-                && (!state.host_attempted || state.queue.is_empty())
-            {
-                state.host_attempted = true;
-                state.lockdown.clone().map(|intent| (None, intent))
-            } else if let Some(person) = state.queue.pop_front() {
-                state.host_attempted = false;
+            if let Some(person) = state.queue.pop_front() {
                 state
                     .pending
                     .get(&person)
                     .cloned()
-                    .map(|intent| (Some(person), intent))
+                    .map(|intent| (person, intent))
             } else {
                 state.running = false;
                 None
@@ -175,11 +160,8 @@ async fn run(registry: Arc<Registry>) {
         let Some((person, intent)) = work else {
             return;
         };
-        let result = if let Some(person) = person {
-            super::revoke_once(&registry.root, intent.manager, person, intent.rootless).await
-        } else {
-            super::revoke_host_once(&registry.root, intent.manager, intent.rootless).await
-        };
+        let result =
+            super::revoke_once(&registry.root, intent.manager, person, intent.rootless).await;
         let failed = result.is_err();
         // Remove a completed intent before waking callers: an immediate explicit
         // restoration must observe completed cleanup. Disk is already durable.
@@ -188,14 +170,10 @@ async fn run(registry: Arc<Registry>) {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(person) = person {
-                if failed {
-                    state.queue.push_back(person);
-                } else {
-                    state.pending.remove(&person);
-                }
-            } else if !failed {
-                state.locked = true;
+            if failed {
+                state.queue.push_back(person);
+            } else {
+                state.pending.remove(&person);
             }
         }
         intent.reply.send_replace(Some(
@@ -216,6 +194,6 @@ pub(super) fn retained(root: &Path) -> usize {
         .and_then(Weak::upgrade)
         .map_or(0, |registry| {
             let state = registry.state.lock().unwrap();
-            state.pending.len() + usize::from(state.lockdown.is_some())
+            state.pending.len()
         })
 }

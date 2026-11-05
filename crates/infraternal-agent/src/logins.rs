@@ -459,15 +459,6 @@ fn runtime_root(state: &Path) -> &Path {
     }
 }
 
-/// Every host refusal object, including an unsafe or dangling link, fails closed.
-fn host_refused(root: &Path) -> io::Result<bool> {
-    match std::fs::symlink_metadata(root.join("infraternal-login-locks/host.revoked")) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-        Ok(_) => Ok(true),
-    }
-}
-
 /// Positive authority is deliberately process-local: a restarted daemon begins
 /// closed until the trusted server resends an authorized login request. Disk
 /// marker absence alone is never authority. Bound retained grants across roots.
@@ -514,7 +505,7 @@ fn permitted(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 
 /// Deny retained revocation intent before consulting the durable authority markers.
 fn not_refused(root: &Path, person: uuid::Uuid) -> io::Result<()> {
-    if revocations::denied(root, person) || host_refused(root)? {
+    if revocations::denied(root, person) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "host login revocation is pending or host access is denied",
@@ -535,8 +526,8 @@ fn not_refused(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 
 /// Restore access only at the trusted server's explicit authority transition.
 /// # Errors
-/// Refuses unsafe marker or registry objects, pending revocations and host-wide
-/// security overload refusal; ordinary opens never restore access.
+/// Refuses unsafe marker or registry objects and pending person revocations;
+/// ordinary opens never restore access.
 /// Returns `WouldBlock` when the durable queue is full, before opening a fence.
 pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
     restore_at(runtime_root(state), person).await
@@ -544,7 +535,7 @@ pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
 
 /// Admit restoration before opening its fence and retain it through an executing sync.
 async fn restore_at(root: &Path, person: uuid::Uuid) -> io::Result<()> {
-    if revocations::denied(root, person) || host_refused(root)? {
+    if revocations::denied(root, person) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "host login revocation must finish before restoration",
@@ -701,41 +692,6 @@ fn save_refusal(root: &Path, name: &str) -> io::Result<()> {
     file.sync_all()?;
     std::fs::File::open(&registry)?.sync_all()?;
     Ok(())
-}
-
-/// Security-only overload denies the whole host rather than forgetting a person.
-/// Persist that refusal first, then retire every login represented in the private
-/// registry. Recovery requires an administrator to remove the validated host
-/// refusal while the daemon is stopped; an individual restore cannot bypass it.
-async fn revoke_host_once(root: &Path, manager: Manager, rootless: bool) -> io::Result<()> {
-    let admission = crate::durable_io::security().await?;
-    let guard = acquire(root, "host-revocation").await?;
-    let state = root.to_owned();
-    let (saved, admission) = admission
-        .run(move || {
-            let _guard = guard;
-            save_refusal(&state, "host.revoked")
-        })
-        .await?;
-    saved?;
-    // Per-person cleanup reserves the same security lane; never nest its permit.
-    drop(admission);
-    let mut failure = None;
-    for entry in std::fs::read_dir(root.join("infraternal-login-locks"))? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(person) = name
-            .to_str()
-            .and_then(|name| name.strip_suffix(".person.lock"))
-            .and_then(|value| uuid::Uuid::parse_str(value).ok())
-        else {
-            continue;
-        };
-        if let Err(error) = revoke_once(root, manager, person, rootless).await {
-            failure = Some(error);
-        }
-    }
-    failure.map_or(Ok(()), Err)
 }
 
 #[path = "revocations.rs"]
