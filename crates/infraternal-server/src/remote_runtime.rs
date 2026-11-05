@@ -508,6 +508,7 @@ impl RemoteHosts {
         Ok(())
     }
 
+    /// Decide what retiring host `id` removes.
     fn retirement(
         &self,
         id: Uuid,

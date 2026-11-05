@@ -39,6 +39,7 @@ pub fn compile(
     compile_inner(coordinator, node, default, endpoints, "internal")
 }
 
+/// Compile one node's view of the mesh: its own addresses and key, then every other member as a peer with directional policy.
 fn compile_inner(
     coordinator: &Coordinator,
     node: NodeId,
@@ -425,6 +426,7 @@ impl Chunks {
     }
 }
 
+/// Configuration compilation checks: DNS suffix choice and the rotating peer's previous key.
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

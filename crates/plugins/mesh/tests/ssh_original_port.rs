@@ -70,6 +70,7 @@ with socket.socket(socket.AF_PACKET,socket.SOCK_RAW) as raw:
  raw.bind(('sshpeer',0));raw.send(mac('infraternal0')+mac('sshpeer')+ether+header+tcp)
 ";
 
+/// A configuration for the SSH original-port tests.
 fn configuration() -> Config {
     Config {
         local_key: None,

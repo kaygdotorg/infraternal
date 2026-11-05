@@ -21,6 +21,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// The host identity as stored on disk: its ID, account and certificate material.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredIdentity {
@@ -181,6 +182,7 @@ pub(crate) async fn join_with_key(
     join_with_key_inner(url, data, invitation, Some(key_pkcs8)).await
 }
 
+/// Join a server with a join key and store the resulting identity under `data`.
 async fn join_with_key_inner(
     url: &str,
     data: &Path,
@@ -896,6 +898,7 @@ struct Snapshot {
     bytes: Zeroizing<Vec<u8>>,
 }
 
+/// Read the stored identity and its snapshot through checked, no-follow files.
 fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     use std::{
         io::Read,
@@ -949,6 +952,7 @@ fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
     Ok(stored)
 }
 
+/// Run the remote client from the stored identity in `data`.
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let stored = migrate_identity(data)?;
     let public_origin = stored.public_origin.clone().ok_or_else(refused)?;

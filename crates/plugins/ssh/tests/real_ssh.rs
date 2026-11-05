@@ -15,7 +15,6 @@ use std::{
 };
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 #[ignore = "run through research/ssh-client/measure.py with the synthetic rootless sshd fixture"]
 async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
     let fixture = PathBuf::from(std::env::var_os("INFRATERNAL_SSH_FIXTURE").unwrap());

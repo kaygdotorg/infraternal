@@ -33,6 +33,7 @@ enum RotationResult {
 /// Only one exchange per admitted host; global admission bounds concurrent signer work.
 static SIGNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
+/// Run certificate renewal and identity rotation for one admitted host until its connection ends.
 pub(crate) async fn run(
     authority: &AuthorityGuard,
     actor: &EmbeddedAgent,

@@ -241,6 +241,7 @@ async fn ensure_service(
         .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
 }
 
+/// Run the remote client: check or recover the certificate, then serve the server path until it ends.
 async fn run_inner(
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
@@ -505,6 +506,7 @@ async fn quic_connect(
     })
 }
 
+/// The Hello this agent sends, offering renewal and identity rotation when available.
 fn client_greeting(renewal: bool, identity_rotation: bool) -> infraternal_protocol::Frame<'static> {
     infraternal_protocol::Frame::Hello {
         version: 1,
@@ -519,7 +521,7 @@ struct ProvedControl {
     receive: Receive,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Serve a server-path session over an established QUIC connection.
 async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,

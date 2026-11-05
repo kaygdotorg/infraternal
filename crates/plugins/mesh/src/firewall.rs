@@ -381,7 +381,6 @@ pub fn render(config: &Config, replace: bool) -> String {
     )
 }
 // Keep the complete owned inet transaction visible as one atomic batch.
-#[allow(clippy::too_many_lines)]
 fn render_with_aliases(
     config: &Config,
     replace: bool,
@@ -630,6 +629,7 @@ fn render_connection_checks(script: &mut String, config: &Config) {
     }
 }
 
+/// Firewall compilation and ownership checks.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -668,6 +668,7 @@ mod tests {
         assert!(!removes_only_permissions(&old, &changed));
     }
 
+    /// A two-peer configuration with stable test addresses.
     fn config() -> Config {
         let address = |id: u32| Addresses {
             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),

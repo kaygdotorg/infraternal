@@ -11,12 +11,13 @@ use std::{
     process::Command,
     time::Instant,
 };
+/// Retiring 1000 peers at once keeps the node's identity and the remaining routes.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
-    Device::create().unwrap();
-    let (local, _) = Key::generate().unwrap();
-    Device::configure(&local, 0).unwrap();
+    let (local, public) = Key::generate().unwrap();
+    let index = Device::create(public).unwrap();
+    Device::configure(index, public, &local, 0).unwrap();
     let identity = Device::identity().unwrap();
     let peers: Vec<_> = (1_u32..=1000)
         .map(|id| Peer {
@@ -59,12 +60,13 @@ fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+/// A real kernel device accepts a configuration applied in chunks.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_kernel_chunked_peers() {
-    Device::create().unwrap();
-    let (local, _) = Key::generate().unwrap();
-    Device::configure(&local, 0).unwrap();
+    let (local, public) = Key::generate().unwrap();
+    let index = Device::create(public).unwrap();
+    Device::configure(index, public, &local, 0).unwrap();
     let peers: Vec<_> = (1_u32..=1000)
         .map(|id| {
             let (_, key) = Key::generate().unwrap();
@@ -113,18 +115,20 @@ fn real_kernel_chunked_peers() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_kernel_ephemeral_identity() {
-    Device::create().unwrap();
     let (local, public) = Key::generate().unwrap();
-    Device::configure(&local, 0).unwrap();
+    let index = Device::create(public).unwrap();
+    Device::configure(index, public, &local, 0).unwrap();
     let (actual, port) = Device::identity().unwrap();
     assert_eq!(actual, public);
     assert_ne!(port, 0, "the advertised endpoint needs a bound UDP port");
     assert_ne!(port, 51820, "the mesh reserves no fixed UDP port");
     assert_eq!(
-        Device::configure(&local, 51820).unwrap_err().kind(),
+        Device::configure(index, public, &local, 51820)
+            .unwrap_err()
+            .kind(),
         std::io::ErrorKind::InvalidInput
     );
-    let changed = Device::allocate_port().unwrap();
+    let changed = Device::allocate_port(index).unwrap();
     assert_ne!(changed, 51820);
     assert_eq!(Device::identity().unwrap(), (public, changed));
     Device::delete().unwrap();
@@ -141,9 +145,9 @@ fn policy_table_route_conflict_is_refused() {
             .unwrap()
             .success()
     );
-    Device::create().unwrap();
-    let (key, _) = Key::generate().unwrap();
-    Device::configure(&key, 0).unwrap();
+    let (key, public) = Key::generate().unwrap();
+    let index = Device::create(public).unwrap();
+    Device::configure(index, public, &key, 0).unwrap();
     assert!(
         Command::new("ip")
             .args(["route", "add", "10.254.0.0/16", "dev", "lo", "table", "100"])
@@ -170,12 +174,13 @@ fn policy_table_route_conflict_is_refused() {
     Device::delete().unwrap();
 }
 
+/// Retired host routes can be replayed.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn retired_host_routes_can_be_replayed() {
-    Device::create().unwrap();
     let (key, public) = Key::generate().unwrap();
-    Device::configure(&key, 0).unwrap();
+    let index = Device::create(public).unwrap();
+    Device::configure(index, public, &key, 0).unwrap();
     let peer = Peer {
         key: public,
         previous_key: None,
@@ -195,7 +200,7 @@ fn retired_host_routes_can_be_replayed() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn created_interface_is_marked_for_restart_adoption() {
-    Device::create().unwrap();
+    Device::create(Key::generate().unwrap().1).unwrap();
     assert!(Device::owned().unwrap());
     Device::delete().unwrap();
 }
@@ -204,12 +209,12 @@ fn created_interface_is_marked_for_restart_adoption() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn rotation_overlap_keeps_routes_on_old_then_current_key_until_retirement() {
-    Device::create().unwrap();
-    let (local_previous, _) = Key::generate().unwrap();
+    let (local_previous, local_previous_public) = Key::generate().unwrap();
     let (local_current, _) = Key::generate().unwrap();
     let (_, previous_key) = Key::generate().unwrap();
     let (_, current_key) = Key::generate().unwrap();
-    Device::configure(&local_previous, 0).unwrap();
+    let index = Device::create(local_previous_public).unwrap();
+    Device::configure(index, local_previous_public, &local_previous, 0).unwrap();
     let mut peer = Peer {
         key: previous_key,
         previous_key: Some(current_key),
@@ -244,7 +249,9 @@ fn rotation_overlap_keeps_routes_on_old_then_current_key_until_retirement() {
         "IPv6 routes must stay on the old key before local key activation"
     );
 
-    Device::configure(&local_current, 0).unwrap();
+    // The local key switch is addressed by index and re-verifies the owner marker, which still
+    // names the predecessor until the node moves it (`Node::commit_rotation`).
+    Device::configure(index, local_previous_public, &local_current, 0).unwrap();
     peer.key = current_key;
     peer.previous_key = Some(previous_key);
     client.peers(std::slice::from_ref(&peer), &[]).unwrap();

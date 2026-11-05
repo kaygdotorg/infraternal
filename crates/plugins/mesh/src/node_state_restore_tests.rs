@@ -34,6 +34,7 @@ fn prior_reader<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Optio
     }
 }
 
+/// A public state with `peers` peers, for restore measurements.
 fn public_state(peers: u16) -> State {
     let mut config = Config {
         local_key: Some(PublicKey([1; 32])),

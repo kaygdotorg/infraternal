@@ -710,6 +710,7 @@ impl EmbeddedAgent {
     }
 }
 
+/// A request to the embedded agent actor, answered on its own reply channel.
 enum Command {
     #[cfg(all(feature = "remote", feature = "ssh"))]
     InstalledRoute(oneshot::Sender<bool>),
@@ -1155,10 +1156,6 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep link loss, capability invalidation, census publication, fallback retirement, and route ownership ordered in the same actor turn."
-)]
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
@@ -1722,7 +1719,6 @@ async fn apply_cached_ack(
 
 /// One handler services the owned shadow whether the primary is live or gone.
 #[cfg(feature = "remote")]
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn process_priming(
     event: priming::Event,
     hot: &mut priming::State,
@@ -1916,8 +1912,7 @@ fn retain_owned_input(
     Some(true)
 }
 
-// The command variants mutate one shared route table in one bounded actor turn.
-#[allow(clippy::too_many_lines)]
+/// The command variants mutate one shared route table in one bounded actor turn.
 async fn process_command(
     command: Command,
     connection: &mut AgentConnection,
@@ -2658,7 +2653,6 @@ where
 }
 
 // Incoming wire cases share actor-owned sequence accounting and bounded output senders.
-#[allow(clippy::too_many_lines)]
 async fn process_incoming(
     incoming: Incoming,
     connection: &mut AgentConnection,
@@ -3089,7 +3083,6 @@ fn decode_event(stream_id: u32, sub_id: u32, event_json: &[u8], wire: &Bytes) ->
     })
 }
 
-#[allow(clippy::too_many_lines)] // Keep shared codec validation and stream admission in one path.
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
     loop {
         match decode_muxed_frame(&connection.receive) {

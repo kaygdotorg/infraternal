@@ -1,9 +1,13 @@
-//! Owns the root-only Mesh node, staged public configuration and synchronous kernel lifecycle [163,166,198].
+//! Owns the root-only Mesh node, staged public configuration and synchronous data-plane lifecycle [163,166,198].
+pub use crate::gotatun_node::{EngineKind, EngineReason, EngineSelection};
 use crate::{
     dataplane::Config,
     firewall::Firewall,
+    gotatun_node::Engine,
     wireguard::{Client, Device, Key},
 };
+#[cfg(feature = "relay")]
+use std::sync::Arc;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -11,6 +15,18 @@ use std::{
 };
 
 pub use crate::dataplane::Chunk;
+
+/// Test seam (#260 J220 P2): runs once in `up` on the kernel engine, after this node created and
+/// claimed its link and before it configures the private key, so a namespace test can replace
+/// the link in that window.
+#[cfg(feature = "test-support")]
+pub static BEFORE_KERNEL_KEY: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
+/// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
+/// shared-filter decision, so a namespace test can start another installation in that window.
+#[cfg(feature = "test-support")]
+pub static BEFORE_SHARED_FILTER_DECISION: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 struct Pending {
     server: Option<crate::policy::model::NodeId>,
     next: u32,
@@ -19,10 +35,241 @@ struct Pending {
     default_policy: crate::dataplane::DefaultPolicy,
     config: Config,
 }
+
+fn restore_routes(
+    store: &crate::node_state::Store,
+    state: &crate::node_state::State,
+) -> io::Result<BTreeSet<IpAddr>> {
+    let mut routes = store.route_inventory()?;
+    // A crash may leave the accepted snapshot older than a pruned journal.
+    // Union its peer addresses before replay; never claim arbitrary routes.
+    if let Some(config) = &state.config {
+        routes.extend(config.peers.values().flat_map(|peer| {
+            [
+                IpAddr::V4(peer.peer.addresses.ipv4),
+                IpAddr::V6(peer.peer.addresses.ipv6),
+            ]
+        }));
+    }
+    Ok(routes)
+}
+
+/// The key that proves a live `GotaTun` link is this installation's: the state recorded the
+/// `GotaTun` engine, it names the interface key (or, for older state, the accepted snapshot's key),
+/// and the private key on disk derives that same key. Retirement, firewall adoption and TUN
+/// adoption all use this one proof (#235, D332).
+fn gotatun_owner_proof(
+    store: &crate::node_state::Store,
+    snapshot_key: Option<crate::policy::model::PublicKey>,
+) -> io::Result<Option<crate::policy::model::PublicKey>> {
+    if store.recorded_engine()? != Some(EngineKind::GotaTun) {
+        return Ok(None);
+    }
+    let Some(recorded) = store.recorded_interface()?.or(snapshot_key) else {
+        return Ok(None);
+    };
+    let private_public = store
+        .read_private_key()?
+        .map(|bytes| crate::gotatun_node::secret_from_bytes(&bytes).map(|pair| pair.1))
+        .transpose()?;
+    Ok((private_public == Some(recorded)).then_some(recorded))
+}
+
+/// Whether `link` is the `GotaTun` TUN that `proof` (from [`gotatun_owner_proof`]) owns.
+fn proven_gotatun_link(
+    link: &crate::wireguard::ActiveLink,
+    proof: Option<crate::policy::model::PublicKey>,
+) -> bool {
+    link.engine == EngineKind::GotaTun && proof.is_some() && link.owner == proof
+}
+
+/// The keys that prove a live kernel link is this installation's (D340, #285).
+///
+/// Normally exactly one: the interface key this node recorded, or for older state the key the
+/// coordinator bound. A kernel key rotation changes four things that cannot change at once: the
+/// device key, the link's owner marker, the recorded key and the rotation journal. While one is
+/// open, the journal's own keys are accepted too: the predecessor until the rotation completes,
+/// and the candidate once commit intent is durable. No key outside this installation's own
+/// private records is ever accepted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct KernelProof(Vec<crate::policy::model::PublicKey>);
+impl KernelProof {
+    /// A proof by exactly one key: the one this node created or committed its link for.
+    fn single(key: crate::policy::model::PublicKey) -> Self {
+        Self(vec![key])
+    }
+    /// Whether `key` is one of this installation's own.
+    fn accepts(&self, key: crate::policy::model::PublicKey) -> bool {
+        self.0.contains(&key)
+    }
+    /// Whether nothing can be proven, as for a node that never created a kernel link.
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// The proof that a live kernel link is this installation's: the state recorded the kernel
+/// engine (or no engine, as the kernel-only format did) and the interface key this node created
+/// its link for, bounded by an open key rotation (see [`KernelProof`]). Kernel `WireGuard` holds
+/// the private key itself, so there is no key file to check. Restore, `down`, retirement and the
+/// D346 key carry all use this one proof (D340).
+fn kernel_owner_proof(
+    store: &crate::node_state::Store,
+    snapshot_key: Option<crate::policy::model::PublicKey>,
+) -> io::Result<KernelProof> {
+    if store
+        .recorded_engine()?
+        .is_some_and(|engine| engine != EngineKind::Kernel)
+    {
+        return Ok(KernelProof::default());
+    }
+    let mut keys: Vec<_> = store
+        .recorded_interface()?
+        .or(snapshot_key)
+        .into_iter()
+        .collect();
+    if let Some(rotation) = store.rotation_secret()? {
+        if !rotation.completed {
+            keys.push(Key::from_private(&rotation.previous)?.1);
+        }
+        if rotation.commit_requested || rotation.completed {
+            keys.push(Key::from_private(&rotation.candidate)?.1);
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    Ok(KernelProof(keys))
+}
+
+/// Whether `link` is the kernel link that `proof` owns (D340). The link name and the engine
+/// marker are shared by every installation on the host, so neither proves anything. A link
+/// created since D340 names its owner in its marker, which holds before its key is set. A link
+/// with the older unbound marker is ours only when the kernel holds our recorded key; an unkeyed
+/// one cannot be proven and is left alone.
+fn proven_kernel_link(link: &crate::wireguard::ActiveLink, proof: &KernelProof) -> bool {
+    link.engine == EngineKind::Kernel
+        && !proof.is_empty()
+        && match link.owner {
+            Some(owner) => proof.accepts(owner),
+            None => Device::identity().is_ok_and(|(key, _)| proof.accepts(key)),
+        }
+}
+
+/// Retire this installation's own live link of the engine it no longer runs (D346): a node that
+/// ran kernel `WireGuard` as the old default moves to `GotaTun`, and an explicit opt-out moves
+/// back. The caller has proven `link` is ours.
+///
+/// The public key is kept both ways, so peers and the coordinator see no change. Kernel to
+/// `GotaTun`: the kernel's private key goes to the node's private key file before the link is
+/// deleted. `GotaTun` to kernel: the key file stays, and the kernel is configured from it. A
+/// disabled node keeps nothing; its link only goes.
+fn switch_engine(
+    store: &crate::node_state::Store,
+    link: crate::wireguard::ActiveLink,
+    enabled: bool,
+    kernel_proof: &KernelProof,
+) -> io::Result<()> {
+    if link.engine == EngineKind::Kernel {
+        if enabled {
+            carry_kernel_key(store, link.ifindex, kernel_proof)?;
+        }
+        // Retire peers before the link deletion removes all routes, as `down` does.
+        Client::new()?.clear_peers()?;
+        Device::delete_ifindex(link.ifindex)?;
+        // `GotaTun` does not rotate (D166, D352): its identity is the key carried above, so an
+        // open kernel rotation ends here. Keeping its journal would let a later kernel start
+        // reuse a key the device no longer holds (#285).
+        return store.discard_rotation_secret();
+    }
+    Device::delete_ifindex(link.ifindex)
+}
+
+/// Copy the proven kernel link's private key into the key file, unless the file already holds it.
+/// A device without a key yet has no identity to carry, and the engine makes a new one.
+///
+/// The key is read from the proven link by its index, never by the shared name, and must derive
+/// a key this node recorded (its interface key, or a key of its own open rotation), so a link
+/// substituted under the name cannot hand us its identity (#260 J220 P2, #285).
+fn carry_kernel_key(
+    store: &crate::node_state::Store,
+    ifindex: u32,
+    recorded: &KernelProof,
+) -> io::Result<()> {
+    let key = match Device::private_key_at(ifindex) {
+        Ok(key) => key,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let (_, public) = crate::gotatun_node::secret_from_bytes(&key[..])?;
+    if !recorded.accepts(public) {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    if let Some(existing) = store.read_private_key()? {
+        if crate::gotatun_node::secret_from_bytes(&existing)?.1 == public {
+            return Ok(());
+        }
+        store.remove_private_key()?;
+    }
+    store.write_private_key(&key[..])
+}
+
+fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<()> {
+    if let Some(bound) = saved_config.as_ref().and_then(|config| config.local_key) {
+        let bytes = node
+            .store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotFound)?
+            .read_private_key()?
+            .ok_or(io::ErrorKind::InvalidData)?;
+        let (_, public_key) = crate::gotatun_node::secret_from_bytes(&bytes)?;
+        if public_key != bound {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+    }
+    // Keep accepted public intent through startup, then clear only the in-memory
+    // applied view so replay sends the full snapshot to the newly empty device.
+    node.config.clone_from(&saved_config);
+    let identity = node.up()?;
+    if let Some(config) = saved_config {
+        if config
+            .local_key
+            .is_some_and(|key| key != identity.public_key)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        node.config = None;
+        node.apply(config)?;
+    }
+    Ok(())
+}
+
 pub use crate::dataplane::Identity;
+
+/// Where a node's engine choice came from (D346, #260 J213 P3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineSource {
+    /// Nothing chose: the Linux default.
+    Default,
+    /// The machine's `INFRATERNAL_MESH_ENGINE`.
+    Environment,
+    /// Code chose it (`with_engine`, `restore_with_engine`); the environment cannot change it.
+    Code,
+}
+
+impl EngineSource {
+    /// What `mesh status` reports: the default, or a choice by the machine or its code.
+    fn reason(self) -> EngineReason {
+        match self {
+            Self::Default => EngineReason::Default,
+            Self::Environment | Self::Code => EngineReason::Chosen,
+        }
+    }
+}
 
 /// The component has no polling loop. Its idle netlink socket closes on explicit down.
 pub struct Node {
+    engine_kind: EngineKind,
+    engine_source: EngineSource,
     identity: Option<Identity>,
     enabled: bool,
     store: Option<crate::node_state::Store>,
@@ -32,9 +279,13 @@ pub struct Node {
     firewall: Firewall,
     proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
+    /// The key the owned kernel link was created or proven for; `down` re-proves the live link
+    /// against it, because another installation can replace a link under the shared name (D340).
+    kernel_owner: KernelProof,
     // A committed revision remains restrictive until exact retirement succeeds.
     connection_cleanup_pending: bool,
     client: Option<Client>,
+    gotatun: Option<Engine>,
     #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
     // Only a newly accepted full snapshot replaces DNS names; coordinator loss keeps D166 state.
     dns_resolver: Option<crate::dns::Resolver>,
@@ -44,6 +295,8 @@ pub struct Node {
 impl Default for Node {
     fn default() -> Self {
         Self {
+            engine_kind: EngineKind::default(),
+            engine_source: EngineSource::Default,
             identity: None,
             enabled: true,
             store: None,
@@ -53,8 +306,10 @@ impl Default for Node {
             firewall: Firewall::default(),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
+            kernel_owner: KernelProof::default(),
             connection_cleanup_pending: false,
             client: None,
+            gotatun: None,
             #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
             dns_resolver: None,
             #[cfg(feature = "cutoff-measure")]
@@ -79,23 +334,71 @@ impl Node {
         }
     }
 
-    /// Restore public intent and adopt only an interface marked as this component's own.
+    /// Use an explicitly selected data-plane engine instead of the default.
+    ///
+    /// Engine-specific tests and fixtures name their engine, so they keep testing it when the
+    /// default changes. This choice wins over `INFRATERNAL_MESH_ENGINE` (#260 J213 P3).
+    #[must_use]
+    pub fn with_engine(mut self, engine: EngineKind) -> Self {
+        self.engine_kind = engine;
+        self.engine_source = EngineSource::Code;
+        self
+    }
+
+    /// Restore public intent and the selected, marked mesh data plane.
     /// # Errors
     /// Refuses unsafe state, unrelated interface ownership or failed policy recovery.
     pub fn restore(path: &std::path::Path) -> io::Result<Self> {
+        let requested = EngineKind::from_environment()?;
+        let source = if requested.is_some() {
+            EngineSource::Environment
+        } else {
+            EngineSource::Default
+        };
+        Self::restore_requesting(path, requested, source)
+    }
+
+    /// Restore with an engine chosen in code, in place of `INFRATERNAL_MESH_ENGINE`.
+    /// # Errors
+    /// The same as [`Node::restore`].
+    pub fn restore_with_engine(path: &std::path::Path, engine: EngineKind) -> io::Result<Self> {
+        Self::restore_requesting(path, Some(engine), EngineSource::Code)
+    }
+
+    /// Only the machine's explicit choice selects the engine (D346). The recorded engine says
+    /// which link this node created, for the ownership proofs; a node that recorded kernel
+    /// because it was the default before D346 never chose it.
+    fn restore_requesting(
+        path: &std::path::Path,
+        requested_engine: Option<EngineKind>,
+        engine_source: EngineSource,
+    ) -> io::Result<Self> {
         let (store, state) = crate::node_state::Store::open(path)?;
-        let mut routes = store.route_inventory()?;
-        // A crash may leave the accepted snapshot older than a pruned journal.
-        // Union its peer addresses before replay; never claim arbitrary routes.
-        if let Some(config) = &state.config {
-            routes.extend(config.peers.values().flat_map(|peer| {
-                [
-                    IpAddr::V4(peer.peer.addresses.ipv4),
-                    IpAddr::V6(peer.peer.addresses.ipv6),
-                ]
-            }));
+        let engine_kind = requested_engine.unwrap_or_default();
+        let snapshot_key = state.config.as_ref().and_then(|c| c.local_key);
+        let mut active_link = Device::active_link()?;
+        if let Some(link) = active_link.filter(|link| link.engine != engine_kind) {
+            // A link of the other engine: ours moves to the selected engine, another node's is
+            // left alone and keeps the name (D340).
+            let kernel_proof = kernel_owner_proof(&store, snapshot_key)?;
+            let ours = proven_kernel_link(&link, &kernel_proof)
+                || proven_gotatun_link(&link, gotatun_owner_proof(&store, snapshot_key)?);
+            if ours {
+                switch_engine(&store, link, state.enabled, &kernel_proof)?;
+                store.record_engine(engine_kind)?;
+                active_link = Device::active_link()?;
+            }
         }
+        let active_engine = active_link.map(|link| link.engine);
+        let foreign_link = active_engine.is_some_and(|engine| engine != engine_kind);
+        let routes = restore_routes(&store, &state)?;
+        let proof = gotatun_owner_proof(&store, snapshot_key)?;
+        let persisted = active_link.filter(|link| proven_gotatun_link(link, proof));
+        let kernel_proof = kernel_owner_proof(&store, snapshot_key)?;
+        let adopted_kernel = active_link.filter(|link| proven_kernel_link(link, &kernel_proof));
         let mut node = Self {
+            engine_kind,
+            engine_source,
             routes,
             enabled: state.enabled,
             store: Some(store),
@@ -104,13 +407,21 @@ impl Node {
                 .map_or_else(Firewall::default, Firewall::for_backend),
             ..Self::default()
         };
-        node.firewall.adopt()?;
-        if Device::owned()? {
+        // Both links outlive their process (D332). A live one is this installation's only under
+        // its engine's ownership proof; otherwise it is another node's, and so is the shared
+        // filter that enforces its policy: never adopt either (#260, D340). One proof decides
+        // both.
+        if active_link.is_none() || persisted.is_some() || adopted_kernel.is_some() {
+            node.firewall.adopt()?;
+        }
+        if let Some(link) = adopted_kernel {
             node.owned = true;
+            node.kernel_owner = kernel_proof.clone();
             let identity = Device::identity();
             // A process can stop after marking the interface but before setting
             // its key. With no saved configuration there are no retained mesh
-            // sessions to preserve; remove that incomplete owned startup only.
+            // sessions to preserve; remove that incomplete owned startup only,
+            // by the index the proof read.
             let incomplete = state.config.is_none()
                 && (identity
                     .as_ref()
@@ -119,8 +430,9 @@ impl Node {
                         .as_ref()
                         .is_ok_and(|(key, port)| key.0 == [0; 32] || *port == 0));
             if incomplete {
-                Device::delete()?;
+                Device::delete_ifindex(link.ifindex)?;
                 node.owned = false;
+                node.kernel_owner = KernelProof::default();
                 node.firewall.remove()?;
                 if !node.enabled {
                     node.retire_routes()?;
@@ -134,7 +446,7 @@ impl Node {
             // A retained interface from an older daemon may have selected the
             // reserved port. Rebind its socket while preserving its private key.
             if port == 51820 {
-                port = Device::allocate_port()?;
+                port = Device::allocate_port(link.ifindex)?;
             }
             node.identity = Some(Identity {
                 public_key,
@@ -142,12 +454,13 @@ impl Node {
                 compact_access: true,
                 #[cfg(feature = "mesh-dns-spike")]
                 dns_names: cfg!(target_os = "linux"),
+                // Kernel `WireGuard` rotates its key in place (#285, D166).
                 key_rotation: true,
             });
             node.client = Some(Client::new()?);
             if !node.enabled {
                 node.down()?;
-            } else if let Some(config) = state.config {
+            } else if let Some(config) = state.config.clone() {
                 // Recover public ownership while retained orphan keys still
                 // exist. Prove both durable writes before replay can retire any
                 // peer, route or policy. This republishes only accepted intent.
@@ -155,31 +468,49 @@ impl Node {
                 node.save(Some(&config), true)?;
                 node.apply(config)?;
             }
+        } else if engine_kind == EngineKind::GotaTun && node.enabled && !foreign_link {
+            restore_gotatun(&mut node, state.config.clone())?;
+        } else if let Some(link) = persisted.filter(|_| !node.enabled) {
+            // A stop inside down left our persisted TUN behind with disabled intent: finish
+            // that down. The filter and routes follow below, as for any disabled node.
+            Device::delete_ifindex(link.ifindex)?;
         }
         if !node.owned {
             node.routes.clear();
         }
         if !node.owned && !node.enabled {
-            node.firewall.remove()?;
             // A stopped process may already have deleted the link but not the
             // policy or journal. Disabled intent fences adoption; finish that
             // cleanup instead of leaving durable ownership behind forever.
+            node.remove_unshared_filter()?;
             node.retire_routes()?;
         }
         Ok(node)
     }
+    /// Remove an adopted mesh filter that no live link depends on.
+    ///
+    /// Every installation uses the same interface name and filter table, so
+    /// the table cannot name its owner. For a node without a live link of its
+    /// own, a live mesh link belongs to another running node whose policy the
+    /// filter enforces (#260). An unmarked interface with the shared name
+    /// counts as live: it may be another node's TUN before it is marked.
+    fn remove_unshared_filter(&mut self) -> io::Result<()> {
+        if !self.firewall.installed() {
+            return Ok(());
+        }
+        match Device::active_link() {
+            Ok(None) => self.firewall.remove(),
+            Ok(Some(_)) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
     /// Decide, changing nothing, which kernel objects host uninstall removes.
     ///
-    /// The interface name and the component marker are shared by every
-    /// infraternal agent on the machine, so neither proves the object is this
-    /// installation's: the server's embedded infraternal agent and `mesh up`
-    /// make the same marked `infraternal0`. Only an interface whose `WireGuard`
-    /// key is the one this state recorded, the key the coordinator bound for
-    /// older state, or a key in an interrupted local rotation is ours. A
-    /// pending candidate is accepted only after durable commit intent, when
-    /// the kernel update may have landed before its ownership marker. Its
-    /// packet filter is ours when the state recorded a frontend and no other
-    /// node's interface is live.
+    /// The interface name and marker are shared by infraternal components.
+    /// Match its engine and local public key against this node's durable record
+    /// before uninstall removes the link. Its packet filter is ours when the
+    /// state recorded a frontend and no other node's interface is live.
     ///
     /// Every object is decided before any is deleted (#235). An object with our
     /// name that is not ours is never an error: uninstall leaves it and names it,
@@ -187,37 +518,44 @@ impl Node {
     /// # Errors
     /// Reports unsafe state or a failed kernel or packet-filter query.
     pub fn plan_retirement(path: &std::path::Path) -> io::Result<Retirement> {
-        let (owned_keys, backend) = match crate::node_state::Store::open(path) {
-            Ok((store, state)) => {
-                let mut owned_keys = store.recorded_interface()?.into_iter().collect::<Vec<_>>();
-                if let Some(key) = state.config.and_then(|config| config.local_key)
-                    && !owned_keys.contains(&key)
-                {
-                    owned_keys.push(key);
+        let (recorded, backend, kernel_proof, gotatun_proof, store) =
+            match crate::node_state::Store::open(path) {
+                Ok((store, state)) => {
+                    let snapshot_key = state.config.and_then(|config| config.local_key);
+                    let recorded = store.recorded_interface()?.or(snapshot_key);
+                    let kernel_proof = kernel_owner_proof(&store, snapshot_key)?;
+                    let gotatun_proof = gotatun_owner_proof(&store, snapshot_key)?;
+                    (
+                        recorded,
+                        state.backend,
+                        kernel_proof,
+                        gotatun_proof,
+                        Some(store),
+                    )
                 }
-                if let Some(rotation) = store.rotation_secret()? {
-                    let (_, candidate) = Key::from_private(&rotation.candidate)?;
-                    if rotation.commit_requested || rotation.completed {
-                        owned_keys.push(candidate);
-                    }
-                    if !rotation.completed {
-                        let (_, previous) = Key::from_private(&rotation.previous)?;
-                        if !owned_keys.contains(&previous) {
-                            owned_keys.push(previous);
-                        }
-                    }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    (None, None, None, None, None)
                 }
-                (owned_keys, state.backend)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (Vec::new(), None),
-            Err(error) => return Err(error),
-        };
+                Err(error) => return Err(error),
+            };
         let mut left = Vec::new();
-        // None: no interface with our name. Some(ours?) otherwise.
-        let interface = match Device::owned() {
-            Ok(false) => None,
-            // A marked link without a readable key in durable local state is not ours.
-            Ok(true) => Some(Device::identity().is_ok_and(|(key, _)| owned_keys.contains(&key))),
+        let mut interface_index = None;
+        // None: no interface with our name. Some(ours?) otherwise. Ownership of the userspace
+        // TUN is its per-installation public-key marker, not the shared engine-kind alias.
+        let interface = match Device::active_link() {
+            Ok(None) => None,
+            Ok(Some(link)) => {
+                let owned = match link.engine {
+                    EngineKind::Kernel => proven_kernel_link(&link, &kernel_proof),
+                    EngineKind::GotaTun => proven_gotatun_link(&link, gotatun_proof),
+                };
+                if owned {
+                    interface_index = Some(link.ifindex);
+                    Some(true)
+                } else {
+                    Some(false)
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(false),
             Err(error) => return Err(error),
         };
@@ -227,7 +565,7 @@ impl Node {
         let mut firewall = backend.map_or_else(Firewall::default, Firewall::for_backend);
         let filter = match firewall.adopt() {
             Ok(()) if !firewall.installed() => None,
-            Ok(()) if backend.is_some() && !owned_keys.is_empty() && interface != Some(false) => {
+            Ok(()) if backend.is_some() && recorded.is_some() && interface != Some(false) => {
                 Some(firewall)
             }
             Ok(()) => {
@@ -252,8 +590,10 @@ impl Node {
         };
         Ok(Retirement {
             interface: interface == Some(true),
+            interface_index,
             filter,
             left,
+            store,
         })
     }
     /// Remove the kernel objects this installation created, without a running node.
@@ -301,7 +641,11 @@ impl Node {
     /// Disabled intent is not Off until retained kernel/socket ownership is gone.
     #[must_use]
     pub fn stopping(&self) -> bool {
-        !self.enabled && (self.owned || self.client.is_some() || self.identity.is_some())
+        !self.enabled
+            && (self.owned
+                || self.client.is_some()
+                || self.gotatun.is_some()
+                || self.identity.is_some())
     }
     /// Start only an enabled node; a coordinator reconnect cannot override local down.
     /// # Errors
@@ -324,6 +668,103 @@ impl Node {
         }
         Ok(())
     }
+    fn peer_counters(
+        &self,
+    ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
+        match self.engine_kind {
+            EngineKind::Kernel => Device::counters(),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .counters(),
+        }
+    }
+
+    /// Read counters from the selected node data plane.
+    /// # Errors
+    /// Reports a stopped node or a device query error.
+    pub fn counters(
+        &self,
+    ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
+        self.peer_counters()
+    }
+
+    /// The engine this node runs, and whether it is the default or the machine's choice (D346).
+    #[must_use]
+    pub fn engine_selection(&self) -> EngineSelection {
+        EngineSelection {
+            engine: self.engine_kind,
+            reason: self.engine_source.reason(),
+        }
+    }
+    /// Health of the running `GotaTun` engine; `None` under kernel `WireGuard` or when stopped.
+    #[must_use]
+    pub fn engine_health(&self) -> Option<crate::gotatun_node::EngineHealth> {
+        self.gotatun.as_ref().map(Engine::health)
+    }
+
+    /// Return a relay callback that starts a handshake through this node's selected engine.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_handshake_starter(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let peer = peer.clone();
+                Ok(Arc::new(move || {
+                    let _ = crate::relay_path::start_kernel_handshake(&peer);
+                }))
+            }
+            EngineKind::GotaTun => Ok(self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .handshake_starter(peer.key, peer.endpoint.ok_or(io::ErrorKind::InvalidInput)?)),
+        }
+    }
+
+    /// Return a callback that preserves a completed session or clears an incomplete relay handshake.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_handshake_preparer(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let peer = peer.clone();
+                Ok(Arc::new(move || {
+                    crate::relay_path::prepare_kernel_handshake(&peer)
+                }))
+            }
+            EngineKind::GotaTun => Ok(self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .handshake_preparer(peer.key, peer.endpoint.ok_or(io::ErrorKind::InvalidInput)?)),
+        }
+    }
+    fn apply_peer_changes(
+        &mut self,
+        config: &Config,
+        changed: &[crate::dataplane::Peer],
+        retired: &[crate::policy::model::PublicKey],
+    ) -> io::Result<()> {
+        match self.engine_kind {
+            EngineKind::Kernel => self
+                .client
+                .as_mut()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .peers(changed, retired),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .apply(config.clone())
+                .map(|_| ()),
+        }
+    }
     fn retire_routes(&mut self) -> io::Result<()> {
         // Publish an empty inventory only after kernel teardown is complete.
         // Keep the in-memory inventory on failure so an explicit retry remains
@@ -334,7 +775,68 @@ impl Node {
         self.routes.clear();
         Ok(())
     }
-    /// Generate the key on the node and configure its owned kernel interface once.
+    /// The key an interrupted kernel rotation left as this node's identity (#285): the candidate
+    /// once commit intent is durable (the kernel may already hold it), the predecessor before.
+    /// `GotaTun` keeps no rotation journal, so it always uses [`Self::local_key`].
+    fn rotation_key(&self) -> io::Result<Option<(Key, crate::policy::model::PublicKey)>> {
+        let Some(store) = self
+            .store
+            .as_ref()
+            .filter(|_| self.engine_kind == EngineKind::Kernel)
+        else {
+            return Ok(None);
+        };
+        let Some(rotation) = store.rotation_secret()? else {
+            return Ok(None);
+        };
+        // The copy is wiped on drop, like the journal record it came from.
+        let private = zeroize::Zeroizing::new(if rotation.commit_requested || rotation.completed {
+            rotation.candidate
+        } else {
+            rotation.previous
+        });
+        Key::from_private(&private[..]).map(Some)
+    }
+    fn local_key(&self) -> io::Result<(Key, crate::policy::model::PublicKey)> {
+        if let Some(store) = &self.store
+            && let Some(bytes) = store.read_private_key()?
+        {
+            let (secret, public_key) = crate::gotatun_node::secret_from_bytes(&bytes)?;
+            drop(secret);
+            return Ok((Key::from_private_bytes(&bytes)?, public_key));
+        }
+        let (key, public_key) = Key::generate()?;
+        if self.engine_kind == EngineKind::GotaTun
+            && let Some(store) = &self.store
+        {
+            store.write_private_key(key.private_bytes())?;
+        }
+        Ok((key, public_key))
+    }
+    /// The index of this installation's persisted `GotaTun` TUN, if a live one passes the
+    /// ownership proof (D332) and only this agent's user and group may attach it; the engine
+    /// reattaches only that link.
+    ///
+    /// A proven TUN that any local user could attach (one persisted before #260 J213 P1) is not
+    /// trusted: its queue may have been read or held while the agent was down. It is deleted by
+    /// its index and the engine starts a fresh, restricted one; routes added by hand to it go.
+    fn persisted_tun_to_adopt(&self) -> io::Result<Option<u32>> {
+        let (Some(store), Some(link)) = (&self.store, Device::active_link()?) else {
+            return Ok(None);
+        };
+        let proof = gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?;
+        if !proven_gotatun_link(&link, proof) {
+            return Ok(None);
+        }
+        let restricted = link.tun_owner == Some(nix::unistd::geteuid().as_raw())
+            && link.tun_group == Some(nix::unistd::getegid().as_raw());
+        if restricted {
+            return Ok(Some(link.ifindex));
+        }
+        Device::delete_ifindex(link.ifindex)?;
+        Ok(None)
+    }
+    /// Start the selected data plane with a node-local key and advertise its UDP port.
     /// # Errors
     /// Refuses missing privilege or any kernel error; never returns private material.
     pub fn up(&mut self) -> io::Result<Identity> {
@@ -346,80 +848,135 @@ impl Node {
         if let Some(identity) = &self.identity {
             return Ok(identity.clone());
         }
+        // The engine was settled when this node was made: by `Node::restore`, the infraternal
+        // agent's path, which alone reads `INFRATERNAL_MESH_ENGINE`, or by code (#260 J220 P3).
         self.firewall.adopt()?;
-        let retained_rotation = self
-            .store
-            .as_ref()
-            .map(crate::node_state::Store::rotation_secret)
-            .transpose()?
-            .flatten();
-        let (key, public_key) = if let Some(rotation) = retained_rotation {
-            let private = if rotation.commit_requested || rotation.completed {
-                rotation.candidate
-            } else {
-                rotation.previous
-            };
-            Key::from_private(&private)?
-        } else {
-            Key::generate()?
+        let (key, public_key) = match self.rotation_key()? {
+            Some(key) => key,
+            None => self.local_key()?,
         };
-        // Name the interface in this installation's state before it exists:
-        // host uninstall removes only an interface whose key matches (#235).
         if let Some(store) = &self.store {
+            store.record_engine(self.engine_kind)?;
             store.record_interface(&public_key)?;
         }
-        Device::create()?;
-        self.owned = true;
-        let port = 0;
-        if let Err(error) = Device::configure(&key, port) {
-            let _ = self.down();
-            return Err(error);
-        }
-        let prepared = (|| {
-            let (device_key, port) = Device::identity()?;
-            if device_key != public_key || port == 0 {
-                return Err(io::ErrorKind::InvalidData.into());
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let created = Device::create(public_key)?;
+                self.owned = true;
+                self.kernel_owner = KernelProof::single(public_key);
+                #[cfg(feature = "test-support")]
+                if let Some(hook) = BEFORE_KERNEL_KEY
+                    .lock()
+                    .ok()
+                    .and_then(|mut hook| hook.take())
+                {
+                    hook();
+                }
+                if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                    let _ = self.down();
+                    return Err(error);
+                }
+                let prepared = (|| {
+                    let (device_key, port) = Device::identity()?;
+                    if device_key != public_key || port == 0 {
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    let client = Client::new()?;
+                    self.routes.clear();
+                    self.save(None, true)?;
+                    Ok((port, client))
+                })();
+                match prepared {
+                    Ok((port, client)) => {
+                        self.enabled = true;
+                        self.client = Some(client);
+                        let identity = Identity {
+                            public_key,
+                            port,
+                            compact_access: true,
+                            #[cfg(feature = "mesh-dns-spike")]
+                            dns_names: cfg!(target_os = "linux"),
+                            key_rotation: true,
+                        };
+                        self.identity = Some(identity.clone());
+                        Ok(identity)
+                    }
+                    Err(error) => {
+                        // Delete exactly the link this call created, never by the shared name.
+                        Device::delete_ifindex(created)?;
+                        self.owned = false;
+                        self.kernel_owner = KernelProof::default();
+                        Err(error)
+                    }
+                }
             }
-            let client = Client::new()?;
-            // A fresh interface cannot inherit ownership from an older lifetime.
-            self.routes.clear();
-            self.save(None, true)?;
-            Ok((
-                Identity {
+            EngineKind::GotaTun => {
+                let adopt = self.persisted_tun_to_adopt()?;
+                let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None, adopt)?;
+                let (interface, port, thp_disabled, offloads_enabled) = engine.info();
+                if interface != crate::wireguard::INTERFACE
+                    || port == 0
+                    || !thp_disabled
+                    || !offloads_enabled
+                {
+                    let mut engine = engine;
+                    let _ = engine.stop();
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.owned = true;
+                self.gotatun = Some(engine);
+                if let Err(error) = self.save(self.config.as_ref(), true) {
+                    if let Some(mut engine) = self.gotatun.take() {
+                        let _ = engine.stop();
+                    }
+                    self.owned = false;
+                    return Err(error);
+                }
+                self.enabled = true;
+                let identity = Identity {
                     public_key,
                     port,
                     compact_access: true,
                     #[cfg(feature = "mesh-dns-spike")]
                     dns_names: cfg!(target_os = "linux"),
-                    key_rotation: true,
-                },
-                client,
-            ))
-        })();
-        match prepared {
-            Ok((identity, client)) => {
-                self.enabled = true;
-                self.client = Some(client);
+                    // `GotaTun` cannot rotate its key yet, so it says so and the coordinator
+                    // rotates no node in its mesh (D166, D352; #285 follow-up).
+                    key_rotation: false,
+                };
                 self.identity = Some(identity.clone());
                 Ok(identity)
             }
-            Err(error) => {
-                Device::delete()?;
-                self.owned = false;
-                Err(error)
-            }
         }
+    }
+    /// The proven kernel link every rotation step addresses by its index (#285). Only kernel
+    /// `WireGuard` rotates; `GotaTun` refuses before any state is read (D166, D352).
+    fn rotation_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
+        if self.engine_kind != EngineKind::Kernel {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
+        // Rotation moves the owner marker with the key, so only a link whose marker names its
+        // owner (every link since D340) can rotate.
+        if !self.owned || link.owner.is_none() || !proven_kernel_link(&link, &self.kernel_owner) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(link)
     }
 
     /// Prepare a new local `WireGuard` identity without changing the live interface.
     /// The old and candidate secrets reach the root-only journal before the public key returns.
+    /// The predecessor is read from our proven link by its index, never by the shared name.
     /// # Errors
-    /// Refuses an inactive node, unsafe state, a conflicting pending operation or a kernel failure.
+    /// Refuses `GotaTun`, an inactive node, unsafe state, a conflicting pending operation or a
+    /// kernel failure.
     pub(crate) fn prepare_rotation(
         &mut self,
         operation_id: &str,
         sequence: u64,
     ) -> io::Result<crate::policy::model::PublicKey> {
+        if self.engine_kind != EngineKind::Kernel {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
         let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         if sequence == 0
@@ -434,10 +991,11 @@ impl Node {
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
+        let link = self.rotation_link()?;
         if let Some(existing) = store.rotation_secret()? {
             let (_, existing_public) = Key::from_private(&existing.candidate)?;
             if existing.completed {
-                let current = Device::identity()?.0;
+                let current = crate::wireguard::identity_at(link.ifindex)?.0;
                 if current != existing_public
                     || identity.public_key != existing_public
                     || existing.operation_id == operation_id
@@ -451,7 +1009,8 @@ impl Node {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
         }
-        let (previous, previous_public) = (Device::private_key()?, Device::identity()?.0);
+        let previous = Device::private_key_at(link.ifindex)?;
+        let (_, previous_public) = Key::from_private(&previous[..])?;
         if previous_public != identity.public_key {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -459,10 +1018,7 @@ impl Node {
         let state = crate::node_state::RotationSecret {
             operation_id: operation_id.to_owned(),
             sequence,
-            previous: previous
-                .private_bytes()
-                .try_into()
-                .map_err(|_| io::ErrorKind::InvalidData)?,
+            previous: *previous,
             candidate: candidate
                 .private_bytes()
                 .try_into()
@@ -474,21 +1030,28 @@ impl Node {
         Ok(candidate_public)
     }
 
-    /// Switch the local interface to a prepared candidate; retry is safe after an abrupt stop.
+    /// Switch our proven kernel link to the prepared candidate; retry is safe after an abrupt stop.
+    ///
+    /// Order (#285): durable commit intent, then the key, sent by index after the owner marker is
+    /// re-verified (`Device::configure`), then the marker moved to the candidate
+    /// (`Device::remark`, again re-verified first), then the recorded key. Each step finds the
+    /// previous ones done on a retry, and [`KernelProof`] proves the link at every point between.
     /// # Errors
-    /// Refuses a stale operation, an altered local key or a failed durable/kernel update.
+    /// Refuses `GotaTun`, a stale operation, an altered local key or a failed durable/kernel
+    /// update.
     pub(crate) fn commit_rotation(
         &mut self,
         operation_id: &str,
         sequence: u64,
     ) -> io::Result<Identity> {
+        let link = self.rotation_link()?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let mut state = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
         if state.operation_id != operation_id || state.sequence != sequence {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let (candidate, candidate_public) = Key::from_private(&state.candidate)?;
-        let current_public = Device::identity()?.0;
+        let current_public = crate::wireguard::identity_at(link.ifindex)?.0;
         if state.completed {
             let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
             if current_public != candidate_public || identity.public_key != candidate_public {
@@ -497,7 +1060,8 @@ impl Node {
             store.record_interface(&candidate_public)?;
             return Ok(identity.clone());
         }
-        if current_public == Key::from_private(&state.previous)?.1 {
+        let previous_public = Key::from_private(&state.previous)?.1;
+        if current_public == previous_public {
             // Mark the operation before kernel mutation. After a stop here, restore
             // selects this candidate and the authenticated server can reconcile it.
             state.commit_requested = true;
@@ -507,16 +1071,27 @@ impl Node {
                 .as_ref()
                 .ok_or(io::ErrorKind::NotConnected)?
                 .port;
-            Device::configure(&candidate, port)?;
+            // The marker still names the predecessor; `configure` re-verifies it on this index
+            // right before the candidate key is sent.
+            Device::configure(link.ifindex, previous_public, &candidate, port)?;
         } else if current_public != candidate_public {
             return Err(io::ErrorKind::InvalidData.into());
         } else if !state.commit_requested {
             state.commit_requested = true;
             store.save_rotation_secret(&state)?;
         }
+        // The marker follows the key the link now holds.
+        match link.owner {
+            Some(owner) if owner == previous_public => {
+                Device::remark(link.ifindex, previous_public, candidate_public)?;
+            }
+            Some(owner) if owner == candidate_public => {}
+            _ => return Err(io::ErrorKind::InvalidData.into()),
+        }
         // Keep uninstall ownership aligned with the live link only after the
-        // kernel has accepted the candidate key above.
+        // kernel has accepted the candidate key and its marker above.
         store.record_interface(&candidate_public)?;
+        self.kernel_owner = KernelProof::single(candidate_public);
         let identity = self.identity.as_mut().ok_or(io::ErrorKind::NotConnected)?;
         identity.public_key = candidate_public;
         Ok(identity.clone())
@@ -524,15 +1099,16 @@ impl Node {
 
     /// Drop retained predecessor material after the server retires the overlap.
     /// # Errors
-    /// Refuses a stale or not-yet-committed operation.
+    /// Refuses `GotaTun`, a stale or not-yet-committed operation.
     pub(crate) fn finish_rotation(&mut self, operation_id: &str, sequence: u64) -> io::Result<()> {
+        let link = self.rotation_link()?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let state = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
         if state.operation_id != operation_id || state.sequence != sequence {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let candidate = Key::from_private(&state.candidate)?.1;
-        if Device::identity()?.0 != candidate
+        if crate::wireguard::identity_at(link.ifindex)?.0 != candidate
             || self
                 .identity
                 .as_ref()
@@ -545,6 +1121,7 @@ impl Node {
         }
         store.complete_rotation_secret(operation_id, sequence)
     }
+
     /// Remove all owned kernel work before reporting off. A failed cleanup remains visible.
     /// # Errors
     /// Reports failed kernel cleanup rather than claiming the component is disabled.
@@ -557,31 +1134,94 @@ impl Node {
         {
             self.dns_resolver = None;
         }
-        if self.owned {
-            // Confirmed absence is idempotent; a foreign replacement or a
-            // privilege error must never be treated as successful deletion.
-            if Device::owned()? {
-                // Retire peers in one generic-netlink request before the link
-                // deletion removes all addresses/routes in one route request.
-                // Reuse the live client; partial startup may not have one yet.
-                if let Some(client) = &mut self.client {
-                    client.clear_peers()?;
-                } else {
-                    Client::new()?.clear_peers()?;
+        let mut foreign_live_link = false;
+        if !self.owned && self.engine_kind == EngineKind::GotaTun {
+            // A restore that failed after the TUN was proven ours never marked it owned, yet the
+            // TUN outlives the process (D332). Down still removes it, under the same proof.
+            if let (Some(store), Ok(Some(link))) = (&self.store, Device::active_link())
+                && proven_gotatun_link(
+                    &link,
+                    gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?,
+                )
+            {
+                if let Some(mut engine) = self.gotatun.take() {
+                    engine.stop()?;
                 }
-                Device::delete()?;
+                Device::delete_ifindex(link.ifindex)?;
+            }
+        }
+        if self.owned {
+            match Device::active_link()? {
+                Some(active) if active.engine == self.engine_kind => {
+                    if active.engine == EngineKind::Kernel {
+                        if proven_kernel_link(&active, &self.kernel_owner) {
+                            // Retire peers before the link deletion removes all routes.
+                            if let Some(client) = &mut self.client {
+                                client.clear_peers()?;
+                            } else {
+                                Client::new()?.clear_peers()?;
+                            }
+                            Device::delete_ifindex(active.ifindex)?;
+                        } else {
+                            // Another installation replaced this fixed-name link (D340): its
+                            // peers, routes and the shared firewall are its own.
+                            foreign_live_link = true;
+                        }
+                    } else {
+                        let owns_link = self
+                            .identity
+                            .as_ref()
+                            .is_some_and(|identity| active.owner == Some(identity.public_key));
+                        if let Some(mut engine) = self.gotatun.take() {
+                            engine.stop()?;
+                        }
+                        if owns_link {
+                            Device::delete_ifindex(active.ifindex)?;
+                        } else {
+                            // Another installation replaced this fixed-name TUN. Stop only our
+                            // stale worker; its link, routes and shared firewall belong to it.
+                            foreign_live_link = true;
+                        }
+                    }
+                }
+                None => {
+                    if let Some(mut engine) = self.gotatun.take() {
+                        engine.stop()?;
+                    }
+                }
+                Some(_) => return Err(io::ErrorKind::AlreadyExists.into()),
             }
             self.owned = false;
+            self.kernel_owner = KernelProof::default();
         }
-        self.firewall.remove()?;
+        #[cfg(feature = "test-support")]
+        if let Some(hook) = BEFORE_SHARED_FILTER_DECISION
+            .lock()
+            .ok()
+            .and_then(|mut hook| hook.take())
+        {
+            hook();
+        }
+        // The table's name is shared by every installation on the machine. Our link is gone by
+        // now, so its name is free: another installation can create its link and adopt the table
+        // before we get here (#260 J143 P3-4). Recheck for a live link right before removing it.
+        // This narrows the race to the recheck itself; a per-installation table would close it.
+        // A failed `up` can likewise leave another live node's filter adopted.
+        if !foreign_live_link {
+            self.remove_unshared_filter()?;
+        }
         self.retire_routes()?;
         self.firewall = Firewall::default();
         self.proxy_ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
         self.client = None;
+        self.gotatun = None;
         self.identity = None;
         self.config = None;
         self.connection_cleanup_pending = false;
         self.pending = None;
+        if let Some(store) = &self.store {
+            store.remove_private_key()?;
+        }
         Ok(())
     }
     /// Read the retained applied configuration, never partial incoming chunks.
@@ -627,7 +1267,6 @@ impl Node {
         Ok(())
     }
     // Keep version/binding checks and complete staging visible before installation.
-    #[allow(clippy::too_many_lines)]
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
         if !chunk.access_updates.is_empty()
             && (chunk.from_version.is_none()
@@ -836,8 +1475,7 @@ impl Node {
             .apply_with_aliases(fence, &aliases, connections)?;
         Ok(())
     }
-    // Keep the apply/fence/rollback transaction and its failure ordering visible together.
-    #[allow(clippy::too_many_lines)]
+    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
     fn apply(&mut self, config: Config) -> io::Result<()> {
         #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
         let dns_records = crate::dns::Records::from_config(&config)?;
@@ -914,22 +1552,51 @@ impl Node {
                         ));
                     }
                 }
-                self.client.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                match self.engine_kind {
+                    EngineKind::Kernel => {
+                        self.client.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                    }
+                    EngineKind::GotaTun => {
+                        self.gotatun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                    }
+                }
                 // Persist intent before installing endpoints. Restore replays it
                 // if the process stops between the save and kernel installation.
                 self.save(Some(&config), true)?;
-                let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
-                let installed = updates
-                    .iter()
-                    .try_for_each(|(previous, endpoint)| client.endpoint(previous.key, *endpoint));
+                let installed = match self.engine_kind {
+                    EngineKind::Kernel => {
+                        let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                        updates.iter().try_for_each(|(previous, endpoint)| {
+                            client.endpoint(previous.key, *endpoint)
+                        })
+                    }
+                    EngineKind::GotaTun => self
+                        .gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(config.clone())
+                        .map(|_| ()),
+                };
                 if let Err(error) = installed {
-                    for (previous, _) in &updates {
-                        if let Some(endpoint) = previous.endpoint {
-                            client.endpoint(previous.key, endpoint)?;
-                        } else {
-                            // Omitting the endpoint attribute cannot clear one.
-                            // Recreate only this peer to restore the saved absence.
-                            client.peers(std::slice::from_ref(*previous), &[previous.key])?;
+                    match self.engine_kind {
+                        EngineKind::Kernel => {
+                            let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                            for (previous, _) in &updates {
+                                if let Some(endpoint) = previous.endpoint {
+                                    client.endpoint(previous.key, endpoint)?;
+                                } else {
+                                    // Omitting the endpoint attribute cannot clear one.
+                                    // Recreate only this peer to restore the saved absence.
+                                    client
+                                        .peers(std::slice::from_ref(*previous), &[previous.key])?;
+                                }
+                            }
+                        }
+                        EngineKind::GotaTun => {
+                            self.gotatun
+                                .as_ref()
+                                .ok_or(io::ErrorKind::NotConnected)?
+                                .apply(old.clone())?;
                         }
                     }
                     // Keep the newer durable desired endpoints for recovery.
@@ -970,7 +1637,8 @@ impl Node {
             .flat_map(|peer| [Some(peer.peer.key), peer.peer.previous_key])
             .flatten()
             .collect();
-        let retired_keys: Vec<_> = Device::counters()?
+        let retired_keys: Vec<_> = self
+            .peer_counters()?
             .keys()
             .filter(|key| !desired.contains(key))
             .copied()
@@ -1029,7 +1697,7 @@ impl Node {
             })
             .collect();
         let mut recorded = self.routes.clone();
-        if self.config.is_none() {
+        if self.config.is_none() && self.engine_kind == EngineKind::Kernel {
             // Read retained AllowedIPs while orphan keys still exist. Persist
             // their public ownership before touching peers, routes or policy.
             recorded.extend(Device::peer_routes()?);
@@ -1059,10 +1727,7 @@ impl Node {
             }
             #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
-            self.client
-                .as_mut()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .peers(&changed, &retired_keys)?;
+            self.apply_peer_changes(&config, &changed, &retired_keys)?;
             Device::routes(&changed, false)?;
             if self.config.is_none()
                 || self
@@ -1100,17 +1765,26 @@ impl Node {
                 }
                 let restore: Vec<_> = old.peers.values().map(|peer| peer.peer.clone()).collect();
                 // If rollback itself fails the restrictive fence remains. Never report an applied version.
-                self.client
-                    .as_mut()
-                    .ok_or(io::ErrorKind::NotConnected)?
-                    .peers(
-                        &restore,
-                        &changed
-                            .iter()
-                            .filter(|peer| !old.peers.values().any(|old| old.peer.key == peer.key))
-                            .map(|peer| peer.key)
-                            .collect::<Vec<_>>(),
-                    )?;
+                if self.engine_kind == EngineKind::Kernel {
+                    self.client
+                        .as_mut()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .peers(
+                            &restore,
+                            &changed
+                                .iter()
+                                .filter(|peer| {
+                                    !old.peers.values().any(|old| old.peer.key == peer.key)
+                                })
+                                .map(|peer| peer.key)
+                                .collect::<Vec<_>>(),
+                        )?;
+                } else {
+                    self.gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(old.clone())?;
+                }
                 Device::routes(&restore, false)?;
                 let retained: Vec<_> = std::iter::once(old.addresses)
                     .chain(restore.iter().map(|peer| peer.addresses))
@@ -1118,13 +1792,22 @@ impl Node {
                 Device::retain_recorded_routes(&self.routes, &retained)?;
                 self.firewall.apply(old)?;
             } else {
-                self.client
-                    .as_mut()
-                    .ok_or(io::ErrorKind::NotConnected)?
-                    .peers(
-                        &[],
-                        &changed.iter().map(|peer| peer.key).collect::<Vec<_>>(),
-                    )?;
+                if self.engine_kind == EngineKind::Kernel {
+                    self.client
+                        .as_mut()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .peers(
+                            &[],
+                            &changed.iter().map(|peer| peer.key).collect::<Vec<_>>(),
+                        )?;
+                } else {
+                    let mut empty = config.clone();
+                    empty.peers.clear();
+                    self.gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .apply(empty)?;
+                }
                 Device::retain_recorded_routes(&self.routes, &[])?;
             }
             return Err(error);
@@ -1188,8 +1871,11 @@ impl Node {
 /// The kernel objects host uninstall removes, decided before any is deleted (#235).
 pub struct Retirement {
     interface: bool,
+    interface_index: Option<u32>,
     filter: Option<Firewall>,
     left: Vec<&'static str>,
+    /// This installation's state; its `GotaTun` private key file goes last.
+    store: Option<crate::node_state::Store>,
 }
 impl Retirement {
     /// Objects with our name that this installation did not create; they stay.
@@ -1200,20 +1886,82 @@ impl Retirement {
     /// Delete exactly the planned objects and return the names left in place.
     /// # Errors
     /// Reports a failed kernel deletion.
-    pub fn execute(self) -> io::Result<Vec<&'static str>> {
+    pub fn execute(mut self) -> io::Result<Vec<&'static str>> {
         if self.interface {
-            Device::delete()?;
+            Device::delete_ifindex(self.interface_index.ok_or(io::ErrorKind::InvalidData)?)?;
         }
-        if let Some(mut filter) = self.filter {
-            filter.remove()?;
+        // As in `down`: the deleted link freed the shared name, so recheck before removing the
+        // shared table (#260 J143 P3-4).
+        if let Some(mut filter) = self.filter.take() {
+            match Device::active_link() {
+                Ok(None) => filter.remove()?,
+                Ok(Some(_)) => self.left.push(filter.name()),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    self.left.push(filter.name());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // The key is this installation's own state, whoever holds the interface now. Removing it
+        // here, after the engine is gone, does not rely on uninstall deleting the directory
+        // (#260 J143 P3-3).
+        if let Some(store) = &self.store {
+            store.remove_private_key()?;
         }
         Ok(self.left)
     }
 }
+/// Node lifecycle, retirement and rotation checks that need no kernel.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// Retirement removes the `GotaTun` private key file itself (#260 J143 P3-3).
+    #[test]
+    fn retirement_removes_the_private_key_file() {
+        let directory = crate::node_state::tests::Directory::new();
+        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
+        store.write_private_key(&[5; 32]).expect("key");
+        let key = directory.0.join("mesh-private-key");
+        assert!(key.exists());
+        let retirement = Retirement {
+            interface: false,
+            interface_index: None,
+            filter: None,
+            left: Vec::new(),
+            store: Some(store),
+        };
+        assert_eq!(retirement.execute().expect("retire"), Vec::<&str>::new());
+        assert!(!key.exists(), "retirement leaves no private key behind");
+    }
+
+    /// `GotaTun` refuses every rotation step before reading any state (D166, D352; #285), while
+    /// a kernel node without a link fails for that reason instead.
+    #[test]
+    fn only_kernel_wireguard_accepts_rotation_steps() {
+        let operation = "00000000-0000-4000-8000-000000000005";
+        let mut gotatun = Node::default().with_engine(EngineKind::GotaTun);
+        for result in [
+            gotatun.prepare_rotation(operation, 1).map(|_| ()),
+            gotatun.commit_rotation(operation, 1).map(|_| ()),
+            gotatun.finish_rotation(operation, 1),
+        ] {
+            assert_eq!(
+                result.expect_err("GotaTun refuses").kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+        let mut kernel = Node::default().with_engine(EngineKind::Kernel);
+        assert_ne!(
+            kernel
+                .prepare_rotation(operation, 1)
+                .expect_err("no identity yet")
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
+
+    /// A staged snapshot cannot change the server's identity.
     #[test]
     fn server_identity_cannot_change_inside_a_staged_snapshot() {
         use crate::policy::model::{Addresses, NodeId, PublicKey};
@@ -1291,7 +2039,7 @@ mod tests {
                 rules::TrafficPolicy,
             },
         };
-        let mut node = Node::default();
+        let mut node = Node::default().with_engine(EngineKind::Kernel);
         node.up().expect("start");
         let addresses = |id: u32| Addresses {
             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
@@ -1317,8 +2065,6 @@ mod tests {
                         PeerPolicy {
                             peer: Peer {
                                 key,
-                                previous_key: None,
-                                previous_active: false,
                                 addresses: addresses(id),
                                 endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
                             },

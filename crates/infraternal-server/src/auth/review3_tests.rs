@@ -314,7 +314,6 @@ async fn busy_revocation(mode: &str) {
 }
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review3_pending_routes_and_idle_expiry_recovery() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -483,7 +482,6 @@ async fn review3_busy_expiry() {
 
 /// A tab's completion and cleanup must leave the replacement cookie's pending row untouched.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review3_completion_and_cleanup_are_transaction_bound() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -624,7 +622,6 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
 
 /// An unresponsive real Unix backend cannot monopolize a browser handler indefinitely.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review3_backend_reply_has_a_deadline() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -891,7 +888,6 @@ async fn review3_expired_handshake_must_not_welcome() {
 }
 /// A pending live open accepts its reply; committed revocation rejects a later reply.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review4_open_reply_and_revocation_preserve_authority() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -991,7 +987,6 @@ async fn review4_open_reply_and_revocation_preserve_authority() {
 /// Exercise slow connects at all 16 per-user sockets, with real SQLite and Unix replies.
 #[tokio::test]
 #[ignore = "release-only connect scale measurement; run without concurrent builds"]
-#[allow(clippy::too_many_lines)]
 async fn review4_slow_open_at_user_capacity() {
     let _guard = SERIAL.lock().await;
     for revoke in [false, true] {

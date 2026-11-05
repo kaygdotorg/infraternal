@@ -220,7 +220,6 @@ async fn node_counters(node: std::net::IpAddr, server_key: PublicKey) -> serde_j
 /// joining can precede Done and the report retains that order with signed deltas.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Run scripts/mesh-addhost-acceptance.py on the pinned perf VM under its shared lock."]
-#[allow(clippy::too_many_lines)]
 async fn mesh_acceptance_real_addhost() {
     assert_eq!(nix::unistd::Uid::effective().as_raw(), 0);
     // The runner supplies fresh Docker mount/network namespaces, never host mode.

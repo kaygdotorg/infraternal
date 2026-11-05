@@ -348,7 +348,6 @@ async fn quic_bulk_50m_kernel_latency() {
 /// round trip imposed by a kernel network namespace in milliseconds, or `None`
 /// to use the userspace delaying relay. Panics unless the host name is the
 /// authorized perf VM, since throughput numbers from other machines mean nothing.
-#[allow(clippy::too_many_lines)]
 async fn measure_quic_bulk(kernel_rtt: Option<u32>) {
     assert_eq!(
         std::fs::read_to_string("/proc/sys/kernel/hostname")

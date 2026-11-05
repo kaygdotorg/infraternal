@@ -134,6 +134,7 @@ async fn uid_and_privilege_mismatch_fails_before_key_generation() {
     }
 }
 
+/// Renewal publication replaces only the certificate and keeps the private metadata.
 #[test]
 fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata() {
     use infraternal_agent::remote_renewal::CertificatePublisher;
@@ -204,6 +205,7 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
     assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
 }
 
+/// A legacy port-7443 identity migrates atomically to its HTTPS origin.
 #[test]
 fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
     let directory = Directory::new();
@@ -277,6 +279,7 @@ async fn public_origin_preflight_fails_before_preparing_a_host_key() {
     );
 }
 
+/// Re-enrolling through the public origin keeps the legacy D168 server name.
 #[test]
 fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
     let directory = Directory::new();

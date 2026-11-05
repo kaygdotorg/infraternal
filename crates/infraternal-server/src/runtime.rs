@@ -549,7 +549,6 @@ async fn build_router_with_key_setup(
 
 // Keep startup ordering visible: persisted switches load before node workers
 // attach, and admitted transports exist before their dependent server features.
-#[allow(clippy::too_many_lines)]
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
@@ -1595,7 +1594,7 @@ mod tests {
     /// another host, a replay and a token on a dry run are refused, and refusals are audited.
     #[cfg(feature = "remote")]
     #[tokio::test]
-    #[allow(clippy::too_many_lines)] // One real-router sequence: each refusal, then the removal, then the audit.
+    // One real-router sequence: each refusal, then the removal, then the audit.
     async fn a_removal_needs_its_own_dry_run_token_once() {
         use axum::http::StatusCode;
         use serde_json::json;

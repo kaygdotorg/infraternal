@@ -5,7 +5,6 @@ use tokio::io::AsyncBufReadExt;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "weighted real-binary 300 ms Mesh/PTY measurement"]
-#[allow(clippy::too_many_lines)] // Keep the complete headroom exchange on one real shared socket.
 async fn mesh_snapshot_keystroke_latency_at_10000_nodes() {
     let _guard = SERIAL.lock().await;
     // The auth unit fixture has one connection. A long inventory transaction

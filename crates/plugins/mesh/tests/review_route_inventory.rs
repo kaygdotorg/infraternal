@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used)]
 use infraternal_plugin_mesh::{
     dataplane::{Chunk, DefaultPolicy, Peer},
-    node::Node,
+    node::{EngineKind, Node},
     policy::model::{Addresses, NodeId},
     wireguard::{Device, Key},
 };
@@ -16,7 +16,7 @@ fn fixture() -> (PathBuf, Node) {
     let directory = target.join(format!("review-inventory-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut node = Node::restore(&directory).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     node.up().unwrap();
     node.chunk(Chunk {
         access_updates: Vec::new(),
@@ -119,7 +119,7 @@ fn restart_preserves_unrecorded_direct_host_routes() {
             .all(|route| route.as_array().unwrap().len() == 1)
     );
     drop(node);
-    let mut restored = Node::restore(&directory).unwrap();
+    let mut restored = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     let after = [
         routes(false, "10.250.0.2/32"),
         routes(true, "fd02::2/128"),
@@ -132,6 +132,7 @@ fn restart_preserves_unrecorded_direct_host_routes() {
         "restart claimed routes outside its peer inventory"
     );
 }
+/// A refused inventory save during recovery retires no kernel peer or route.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
 fn refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes() {
@@ -154,11 +155,11 @@ fn refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes() {
     // Refuse the existing atomic-save boundary, without altering kernel privilege.
     let obstruction = directory.join(format!("mesh-public.{}.new", std::process::id()));
     fs::write(&obstruction, b"public fixture obstruction").unwrap();
-    assert!(Node::restore(&directory).is_err());
+    assert!(Node::restore_with_engine(&directory, EngineKind::Kernel).is_err());
     let retained = Device::counters().unwrap().contains_key(&key);
     let after = [routes(false, "10.254.0.2/32"), routes(true, "fd01::2/128")];
     fs::remove_file(obstruction).unwrap();
-    let mut restored = Node::restore(&directory).unwrap();
+    let mut restored = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     restored.down().unwrap();
     fs::remove_dir_all(directory).unwrap();
     assert!(

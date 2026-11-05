@@ -41,8 +41,8 @@ where
     }
 }
 
+/// Mesh plugin discovery, disable and restart keep the control socket working.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)] // Keep discovery, disable and same-socket restart together.
 async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     let _guard = SERIAL.lock().await;
     // Functional discovery/lifecycle checks must not spend their authority-read
@@ -251,7 +251,6 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)] // Keep writer cancellation and persisted-state evidence together.
 async fn disabling_mesh_joins_pending_writer_and_refuses_nonowner_switches() {
     let _guard = SERIAL.lock().await;
     let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
@@ -571,6 +570,7 @@ async fn mesh_coordinator_requires_an_existing_server_role() {
         "feature construction must not initialize another server"
     );
 }
+/// The Mesh actions that need confirmation are exactly the frozen destructive set.
 #[test]
 fn mesh_destructive_metadata_matches_frozen_confirmation_requirements() {
     let mut destructive: Vec<_> = infraternal_plugin_mesh::descriptor::ACTIONS

@@ -267,7 +267,6 @@ impl Server {
         Self::from_socket(identity, roots, socket, Some(reserved))
     }
     // Keep handshake, proof and connection ownership in one fixture boundary.
-    #[allow(clippy::too_many_lines)]
     fn from_socket(
         identity: &remote_tls::Identity,
         roots: &[openssl::x509::X509],
@@ -595,6 +594,7 @@ fn certificate_fingerprint(certificate: &openssl::x509::X509) -> [u8; 32] {
         .unwrap()
 }
 
+/// Run the server-path supervisor for `identity` on a background task.
 fn supervise(
     identity: RemoteIdentity,
     registry: &crate::plugin_control::Registry,
@@ -610,7 +610,6 @@ fn supervise(
 
 #[tokio::test]
 /// Keep the real TLS refusal, fallback dial and admission proof in one fixture.
-#[allow(clippy::too_many_lines)]
 async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
     use infraternal_plugin_remote::identity_rotation::{
         Challenge, PendingRotation, RotationStorage,

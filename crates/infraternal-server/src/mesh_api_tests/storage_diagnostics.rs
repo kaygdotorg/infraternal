@@ -339,8 +339,8 @@ async fn malformed_host_keeps_healthy_inventory_readable() {
     }
 }
 
+/// Storage failures report safe reasons and recover once storage is repaired.
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep ordered failure/repair assertions under one real pool and capture.
 async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
     let fixture = Fixture::new().await;
     let (capture, _guard) = Capture::start();

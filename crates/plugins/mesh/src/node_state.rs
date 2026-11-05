@@ -1,4 +1,8 @@
-//! Persists accepted public node intent and write-ahead peer-route ownership; kernel memory retains private keys [166,198].
+//! Persists accepted public node intent and write-ahead peer-route ownership [166,198]. Under
+//! kernel `WireGuard` the private key lives only in kernel memory; the `GotaTun` engine keeps it in
+//! one private 0600 file, which down and retirement remove (#260). That key never leaves its
+//! node (D163), so backups (D147: database, CA key, configuration) must never include this
+//! directory's `mesh-private-key`.
 use crate::dataplane::Config;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -10,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -28,6 +32,7 @@ impl Default for State {
         }
     }
 }
+/// This node's durable local state: the public snapshot, routes, interface key, engine, private key and rotation journal.
 pub struct Store {
     path: PathBuf,
     route_path: PathBuf,
@@ -38,6 +43,8 @@ pub struct Store {
     // Pending local rotation keys are separate from the public snapshot and are
     // readable only by this installation's effective UID.
     rotation_path: PathBuf,
+    engine_path: PathBuf,
+    key_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
@@ -93,6 +100,9 @@ impl Store {
         let route_path = parent.join("mesh-routes.json");
         let interface_path = parent.join("mesh-interface.json");
         let rotation_path = parent.join("mesh-key-rotation.bin");
+        let engine_path = parent.join("mesh-engine.json");
+        let key_path = parent.join("mesh-private-key");
+        sweep_private_temporaries(&key_path)?;
         let state = read_public(&path)?.unwrap_or_default();
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
@@ -102,6 +112,8 @@ impl Store {
                 route_path,
                 interface_path,
                 rotation_path,
+                engine_path,
+                key_path,
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -275,6 +287,89 @@ impl Store {
         state.completed = true;
         self.save_rotation_secret(&state)
     }
+    /// Remove the rotation journal, its keys included, when the engine that rotated is retired.
+    /// # Errors
+    /// Refuses an unsafe journal file and reports durable directory failures.
+    pub(crate) fn discard_rotation_secret(&self) -> io::Result<()> {
+        if self.rotation_secret()?.is_none() {
+            return Ok(());
+        }
+        fs::remove_file(&self.rotation_path)?;
+        FileSync::parent(&self.rotation_path)
+    }
+    /// Persist the selected engine separately from the legacy accepted snapshot.
+    /// # Errors
+    /// Refuses unsafe state files and reports durable-write failures.
+    pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
+        write_public(
+            &self.engine_path,
+            &serde_json::to_vec(&engine).map_err(io::Error::other)?,
+        )
+    }
+    /// Read the selected engine, if this node has recorded one.
+    /// # Errors
+    /// Refuses unsafe metadata and malformed engine values.
+    pub(crate) fn recorded_engine(&self) -> io::Result<Option<crate::gotatun_node::EngineKind>> {
+        read_public(&self.engine_path)
+    }
+    /// Create a durable private key file without replacing an existing identity.
+    /// The bytes never enter the public state snapshot or a log.
+    /// # Errors
+    /// Refuses malformed key sizes, existing files and unsafe directory state.
+    pub fn write_private_key(&self, key: &[u8]) -> io::Result<()> {
+        if key.len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        if self.key_path.exists() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        write_private(&self.key_path, key)
+    }
+    /// Read the private key through a checked no-follow descriptor.
+    /// # Errors
+    /// Refuses symlinks, wrong ownership or mode, and non-32-byte data.
+    pub fn read_private_key(&self) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&self.key_path)
+        {
+            Ok(mut file) => {
+                let metadata = file.metadata()?;
+                if !metadata.is_file()
+                    || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                    || metadata.mode() & 0o777 != 0o600
+                    || metadata.len() != 32
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                let mut key = Zeroizing::new(Vec::with_capacity(32));
+                file.read_to_end(&mut key)?;
+                if key.len() != 32 {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                Ok(Some(key))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    /// Remove the private key only after the owned userspace engine has stopped.
+    /// # Errors
+    /// Refuses unsafe key files and reports durable directory failures.
+    pub fn remove_private_key(&self) -> io::Result<()> {
+        if self.read_private_key()?.is_none() {
+            return Ok(());
+        }
+        fs::remove_file(&self.key_path)?;
+        FileSync::parent(&self.key_path)
+    }
     /// Persist route ownership separately from accepting an in-flight config.
     /// # Errors
     /// Uses the same private-file checks and atomic durable writer as `save`.
@@ -390,8 +485,75 @@ fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
     result
 }
 
+fn write_private(path: &Path, key: &[u8]) -> io::Result<()> {
+    let temporary = path.with_extension(format!("{}.new", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    let result = (|| {
+        file.write_all(key)?;
+        file.sync_all()?;
+        fs::hard_link(&temporary, path)?;
+        fs::remove_file(&temporary)?;
+        FileSync::parent(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+
+/// Remove the `<key>.<pid>.new` files that a stop between `create_new` and the cleanup in
+/// `write_private` leaves behind. Each holds a copy of the key, and nothing else ever removes
+/// one (#260 J143 P3-3). This holds the directory lock that `write_private_key` holds, so it
+/// never removes a live writer's file.
+fn sweep_private_temporaries(key_path: &Path) -> io::Result<()> {
+    let parent = key_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let prefix = format!(
+        "{}.",
+        key_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(io::ErrorKind::InvalidInput)?
+    );
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(parent)?;
+    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    let mut removed = false;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let is_temporary = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(prefix.as_str()))
+            .and_then(|rest| rest.strip_suffix(".new"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()));
+        // The entry's own type: a symlink with this name is not followed, and not ours.
+        if is_temporary && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        FileSync::parent(key_path)?;
+    }
+    Ok(())
+}
+
+struct FileSync;
+impl FileSync {
+    fn parent(path: &Path) -> io::Result<()> {
+        fs::File::open(path.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Provides isolated filesystem state for node persistence tests.
     #![allow(clippy::expect_used)]
     use super::*;
@@ -403,9 +565,9 @@ mod tests {
     // Tests run concurrently; this counter keeps their temporary paths distinct.
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
-    pub(super) struct Directory(pub(super) PathBuf);
+    pub(crate) struct Directory(pub(crate) PathBuf);
     impl Directory {
-        pub(super) fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("test clock")
@@ -486,6 +648,95 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    /// A stop inside `write_private` leaves `mesh-private-key.<pid>.new` holding the key. Opening
+    /// the store removes it and nothing else (#260 J143 P3-3).
+    #[test]
+    fn open_sweeps_stray_private_key_temporaries_only() {
+        let directory = Directory::new();
+        let stray = directory.0.join("mesh-private-key.4242.new");
+        fs::write(&stray, [7_u8; 32]).expect("stray key copy");
+        let kept = [
+            "mesh-private-key.new",
+            "mesh-private-key.x1.new",
+            "mesh-public.4242.new",
+        ];
+        for name in kept {
+            fs::write(directory.0.join(name), b"x").expect("unrelated file");
+        }
+        symlink(&stray, directory.0.join("mesh-private-key.99.new")).expect("symlink");
+        let (store, _) = Store::open(&directory.0).expect("open");
+        assert!(!stray.exists(), "the stray key copy is removed");
+        for name in kept {
+            assert!(directory.0.join(name).exists(), "{name} stays");
+        }
+        assert!(
+            fs::symlink_metadata(directory.0.join("mesh-private-key.99.new")).is_ok(),
+            "a symlink is never followed or removed"
+        );
+        store.write_private_key(&[9; 32]).expect("key");
+        drop(Store::open(&directory.0).expect("reopen"));
+        assert_eq!(
+            store
+                .read_private_key()
+                .expect("read")
+                .expect("key")
+                .as_slice(),
+            &[9; 32],
+            "the key itself is never swept"
+        );
+    }
+
+    #[test]
+    fn gotatun_private_key_round_trips_only_as_a_private_file() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let key = [0x5a; 32];
+
+        store.write_private_key(&key).expect("persist engine key");
+        let restored = store
+            .read_private_key()
+            .expect("read engine key")
+            .expect("persisted engine key");
+        assert_eq!(restored.as_slice(), key);
+        assert_eq!(
+            fs::metadata(&store.key_path)
+                .expect("private key metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store.remove_private_key().expect("remove private key");
+        assert!(store.read_private_key().expect("key removed").is_none());
+    }
+
+    #[test]
+    fn selected_engine_is_durable_outside_the_legacy_public_snapshot() {
+        let directory = Directory::new();
+        let (store, state) = Store::open(&directory.0).expect("initial state");
+        assert!(store.recorded_engine().expect("no saved engine").is_none());
+        store.save(&state).expect("save the legacy snapshot");
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("save engine");
+        assert_eq!(
+            store.recorded_engine().expect("saved engine"),
+            Some(crate::gotatun_node::EngineKind::GotaTun)
+        );
+        assert_eq!(
+            fs::metadata(&store.engine_path)
+                .expect("engine metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            !fs::read(&store.path)
+                .expect("legacy state remains readable")
+                .windows(b"gotatun".len())
+                .any(|window| window == b"gotatun")
         );
     }
     #[test]

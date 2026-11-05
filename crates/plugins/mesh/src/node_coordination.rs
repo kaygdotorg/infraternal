@@ -26,8 +26,8 @@ async fn update_listener(
         *listener = Some((address, lease));
     }
 }
-// Probe before advertising an extension. Strict older nodes reject the probe,
-// then answer the ordinary request without enabling a new representation.
+/// Probe before advertising an extension. Strict older nodes reject the probe,
+/// then answer the ordinary request without enabling a new representation.
 async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
     #[cfg(feature = "mesh-dns-spike")]
     let probe = br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.to_vec();
@@ -57,7 +57,6 @@ async fn read_hostname(channel: &dyn NodeChannel) -> Option<String> {
 /// One event-driven worker belongs to the generic plugin lifecycle; disabling
 /// aborts and joins it. A disconnect never deletes durable mesh membership.
 // Keep acknowledged-version recovery and source invalidation in one event loop.
-#[allow(clippy::too_many_lines)]
 pub async fn run(
     store: Store,
     service: MeshService,
@@ -353,6 +352,7 @@ async fn sleep_optional(delay: Option<std::time::Duration>) {
     }
 }
 
+/// Coordinator-side node worker checks against an in-memory node channel.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -385,6 +385,7 @@ mod tests {
             self.0.fetch_sub(1, Ordering::AcqRel);
         }
     }
+    /// An in-memory node channel whose identity, refusals and replies a test controls.
     struct Channel {
         server: bool,
         legacy_host_facts: bool,
@@ -409,6 +410,7 @@ mod tests {
         fn with_server(server: bool) -> Arc<Self> {
             Self::named(server, None)
         }
+        /// A channel for a server or ordinary node, optionally reporting a hostname.
         fn named(server: bool, hostname: Option<&'static str>) -> Arc<Self> {
             let (notices, _) = tokio::sync::watch::channel(());
             Arc::new(Self {

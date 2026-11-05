@@ -34,7 +34,6 @@ impl AsyncUdpSocket for NoSend {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[allow(clippy::too_many_lines)]
 #[ignore = "31 bookkeeping samples per profile on the authorized perf VM under its fair lock; not transport acceptance."]
 async fn copy_poll_cost_at_one_thousand_retained_histories() {
     const PEERS: usize = 1000;
@@ -135,7 +134,6 @@ async fn copy_poll_cost_at_one_thousand_retained_histories() {
 /// hide new work. Physical ciphertext repeats on return are intentional;
 /// authenticated stream tests separately verify plaintext deduplication.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn history_mutation_after_an_idle_poll_still_sends_every_due_datagram() {
     let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let logical = receiver.local_addr().unwrap();

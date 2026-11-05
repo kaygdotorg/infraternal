@@ -359,6 +359,7 @@ async fn old_uuid_mesh_placeholders_upgrade_to_audited_fallback_names() {
     assert!(last["automatic"].as_bool().unwrap_or(false));
 }
 
+/// The hostname migration upgrades a release-6 copy without changing its canvas or its migration checksums.
 #[tokio::test]
 async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_checksums() {
     let production = SqlitePoolOptions::new()

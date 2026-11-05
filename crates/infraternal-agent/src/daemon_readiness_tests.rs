@@ -222,6 +222,7 @@ impl Channel for Capture {
     }
 }
 
+/// A mux greeting does not repeat native provider capabilities cached from earlier.
 #[tokio::test]
 async fn mux_greeting_omits_cached_native_provider_capabilities() {
     let (bulk, bulk_rx) = mpsc::channel(1);
@@ -238,6 +239,7 @@ async fn mux_greeting_omits_cached_native_provider_capabilities() {
     );
 }
 
+/// Control replies overtake bulk output without reordering a snapshot notice.
 #[tokio::test]
 async fn control_precedes_bulk_without_reordering_snapshot_notice() {
     let (bulk, bulk_rx) = mpsc::channel(8);
@@ -381,6 +383,7 @@ async fn uninstall_handoff_runs_only_after_a_successful_real_socket_write() {
     }
 }
 
+/// A census and an open result keep their FIFO order on the wire.
 #[tokio::test]
 async fn census_and_open_result_share_fifo_order() {
     let (bulk, bulk_rx) = mpsc::channel(8);

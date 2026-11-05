@@ -28,5 +28,8 @@ bench = false
 unsafe_code = "forbid"
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
+# D351: review behaviour and cohesion instead of item line and argument counts.
+too_many_lines = "allow"
+too_many_arguments = "allow"
 unwrap_used = "deny"
 expect_used = "deny"

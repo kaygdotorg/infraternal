@@ -1548,6 +1548,7 @@ mod tests {
         thread,
     };
 
+    /// A one-peer configuration for the macOS node tests.
     fn config() -> Config {
         Config {
             local_key: Some(PublicKey([1; 32])),
@@ -1604,6 +1605,7 @@ mod tests {
         );
     }
 
+    /// A test peer `id` with the given inbound policy.
     fn peer_policy(id: u8, inbound: TrafficPolicy) -> PeerPolicy {
         PeerPolicy {
             peer: Peer {
@@ -1661,6 +1663,7 @@ mod tests {
         assert_eq!(super::ENFORCEMENT, "unavailable");
     }
 
+    /// Revoking a peer's arrow removes it from the installed peer set.
     #[test]
     fn revoking_an_arrow_removes_the_installed_peer() {
         let old = config();
@@ -1704,6 +1707,7 @@ mod tests {
         );
     }
 
+    /// A staged configuration is accepted only with its last chunk.
     #[test]
     fn staged_configuration_is_not_accepted_until_its_last_chunk() {
         let config = config();

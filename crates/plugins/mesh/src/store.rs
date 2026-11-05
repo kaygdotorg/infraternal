@@ -99,6 +99,7 @@ impl Snapshot {
             .values()
             .any(|rotation| rotation.phase != RotationPhase::Preparing)
     }
+    /// Compile `node`'s configuration from this snapshot, applying any key rotation phase to its own and its peers' keys.
     pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
         use crate::{api::MeshApiError, policy::model::MeshError};
         let coordinator = &self.loaded.coordinator;
@@ -551,6 +552,7 @@ async fn audit_renames(
     }
     Ok(())
 }
+/// The coordinator's durable store: inventory, addresses, policy and rotation state, with a cached snapshot.
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -659,7 +661,6 @@ impl Store {
     /// Read and reconcile one node's persisted schedule and overlap clock.
     /// A reboot restarts the minimum overlap instead of allowing wall time to retire a key early.
     // Keep schedule repair, phase validation, and commit in one writer transaction.
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn rotation_schedule(
         &self,
         node: NodeId,
@@ -1657,8 +1658,7 @@ impl Store {
             })
             .await
     }
-    // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
-    #[allow(clippy::too_many_lines)]
+    /// Keep one writer snapshot, allocation rebuild and public persistence boundary together.
     async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await

@@ -325,7 +325,6 @@ impl MeshApiError {
 ///
 /// # Errors
 /// Returns `InvalidInput` for unknown actions, malformed JSON, or an invalid mesh policy.
-#[allow(clippy::too_many_lines)]
 pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiError> {
     let request = match action {
         "mesh.default.get"
@@ -531,6 +530,7 @@ impl MeshService {
         )
     }
 
+    /// Build the service around an already opened store, with a fresh change broadcast.
     fn with_store(pool: SqlitePool, store: crate::store::Store) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
         Self {
@@ -740,7 +740,7 @@ impl MeshService {
             .await
     }
 
-    // Keep one parsed dispatch inside the entry point's diagnostic scope.
+    /// Keep one parsed dispatch inside the entry point's diagnostic scope.
     async fn execute_request(
         &self,
         actor: &str,
@@ -1606,7 +1606,6 @@ impl MeshService {
         Ok(tx)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn finish_change(
         &self,
         mut tx: Transaction<'static, Sqlite>,
@@ -1817,7 +1816,6 @@ async fn endpoint_scopes(
     }
 }
 
-#[allow(clippy::too_many_lines)] // Keep consistent row decoding and validation in one read transaction.
 async fn read_snapshot(
     tx: &mut Transaction<'_, Sqlite>,
     revision: i64,
