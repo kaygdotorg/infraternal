@@ -168,7 +168,7 @@ fn temporary_name() -> Vec<u8> {
 /// An interface index for a new link, chosen by us so that a successful creation proves which
 /// link is ours without a second lookup (#260 J220 P2). It comes from the same mix as
 /// [`temporary_name`], kept within `1 << 20 ..= i32::MAX`, well above the kernel's own counter.
-/// A taken index only fails one attempt (`EBUSY`), and creation retries.
+/// A taken index only fails one attempt (`EEXIST`), and creation retries.
 fn chosen_index() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -239,7 +239,8 @@ impl Device {
             attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
             match socket.request(16, 4 | 0x200 | 0x400, &payload) {
                 Ok(_) => return Ok((temporary, ifindex)),
-                // EBUSY: the index is taken; EEXIST: the temporary name is taken.
+                // EEXIST: the index or the temporary name is taken. EBUSY: a late recheck in
+                // device registration found the index taken.
                 Err(error) if matches!(error.raw_os_error(), Some(16 | 17)) => last = error,
                 Err(error) => return Err(error),
             }
