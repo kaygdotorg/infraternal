@@ -2,9 +2,9 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
-    // The Darwin Mesh daemon compiles out the Linux PTY/session engine and has
-    // no consumer for the native VT archive or its Linux-hosted Zig toolchain.
-    if target_os != "linux" {
+    // Linux and macOS shims own terminal state through the same pinned engine
+    // (D94, #328); other targets have no session engine to link it into.
+    if target_os != "linux" && target_os != "macos" {
         return Ok(());
     }
     let root =

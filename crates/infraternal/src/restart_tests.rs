@@ -12,8 +12,7 @@ use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
 /// Copy one executable into a private fixture path without inheriting a writable mode.
 fn copy_private_image(source: &Path, target: &Path) {
-    std::fs::copy(source, target).unwrap();
-    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_executable::copy(source, target, 0o700);
 }
 
 /// Remove non-executable sections under the same child cleanup and hang bound as exec tests.

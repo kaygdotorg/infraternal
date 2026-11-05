@@ -16,8 +16,8 @@ pub(super) struct Clock {
     started: std::time::Instant,
     /// Wakes the checkpoint task when a recovery starts.
     wake: std::sync::Arc<tokio::sync::Notify>,
-    /// Handle used to stop the checkpoint task when the clock is dropped.
-    worker: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    /// Handle used to stop and join the checkpoint task during database teardown.
+    worker: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(test)]
     pub(super) test_elapsed: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
@@ -80,6 +80,34 @@ impl Clock {
             .fetch_one(pool).await?)
     }
 
+    /// Stop and join the checkpoint worker before its database is closed or removed.
+    ///
+    /// An explicit join closes the gap between requesting cancellation and the task
+    /// dropping its pooled connection. Dropping the clock itself remains a best-effort
+    /// abort because `Drop` cannot wait asynchronously.
+    ///
+    /// # Errors
+    /// Returns the worker panic if it failed before cancellation completed.
+    #[cfg(test)]
+    pub(super) async fn shutdown_checkpointing(
+        &self,
+    ) -> std::result::Result<(), tokio::task::JoinError> {
+        let task = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(task) = task else {
+            return Ok(());
+        };
+        task.abort();
+        match task.await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     // The task owns only a weak clock reference while sleeping. Dropping the last
     // Auth aborts it, so neither the pool nor recovery timers outlive their owner.
     // With no active recovery it waits on notification, without an idle timer.
@@ -121,7 +149,7 @@ impl Clock {
         *self
             .worker
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task.abort_handle());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 }
 
@@ -188,6 +216,20 @@ impl Auth {
     /// Save only measured uptime before the server exits, even before the first minute.
     pub(crate) async fn checkpoint_recovery_clock(&self) -> Result<()> {
         self.recovery_clock.checkpoint(&self.pool).await
+    }
+
+    /// Stop and join the recovery checkpoint task before test database cleanup.
+    ///
+    /// All cloned auth handles share the same clock, so this stops its one writer
+    /// before the pool and its temporary directory are torn down.
+    ///
+    /// # Errors
+    /// Returns the worker panic if it failed before cancellation completed.
+    #[cfg(test)]
+    pub(crate) async fn shutdown_recovery_clock(
+        &self,
+    ) -> std::result::Result<(), tokio::task::JoinError> {
+        self.recovery_clock.shutdown_checkpointing().await
     }
 
     /// Start a 24-hour delayed recovery; repeat requests do not reset or accelerate it.

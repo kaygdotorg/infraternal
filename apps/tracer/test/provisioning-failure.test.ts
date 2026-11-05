@@ -35,3 +35,60 @@ test("readiness failure retains its trusted step through the socket", () => {
     expect(events[0]?.failure?.failed_step).toBe("readiness");
   } finally { globalThis.WebSocket = original; }
 });
+
+test("validated setup-lock coordinates reach the wizard through the socket", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 1, target: "host", attempt: 1, step: "check", message: "Stuck install", elapsed_ms: 1,
+      failure: { kind: "stale_previous_attempt", message: "Replace the stuck install.", log_tail: [], setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false } } }) }));
+    expect(events[0]?.failure?.setup_lock).toEqual({ machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false });
+  } finally { globalThis.WebSocket = original; }
+});
+
+test("stuck-install sessions and the other server reach the wizard only when well formed (#305, D335)", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    const send = (extra: Record<string, unknown>) => socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: events.length + 1, target: "host", attempt: 1, step: "check", message: "Stuck install", elapsed_ms: 1,
+      failure: { kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false, ...extra } } }) }));
+    send({ sessions: 2, enrolled_with: "monitor01.example" });
+    expect(events[0]?.failure?.setup_lock).toMatchObject({ sessions: 2, enrolled_with: "monitor01.example" });
+    send({ sessions: -1, enrolled_with: "bad server" });
+    expect(events[1]?.failure?.setup_lock?.sessions).toBeUndefined();
+    expect(events[1]?.failure?.setup_lock?.enrolled_with).toBeUndefined();
+    // D337: the in-use refusal reaches the guide; only a literal true counts.
+    send({ sessions: 2, enrolled_with: "monitor01.example", live: true, in_use: true });
+    expect(events[2]?.failure?.setup_lock).toMatchObject({ live: true, in_use: true });
+    send({ in_use: "yes" });
+    expect(events[3]?.failure?.setup_lock?.in_use).toBeUndefined();
+  } finally { globalThis.WebSocket = original; }
+});
+
+test("malformed setup-lock coordinates cannot expose the replacement action", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 1, target: "host", attempt: 1, step: "check", message: "Stuck install", elapsed_ms: 1,
+      failure: { kind: "stale_previous_attempt", message: "Replace the stuck install.", log_tail: [], setup_lock: { machine: "bad host", pid: 0, since: "not a time", active: false } } }) }));
+    expect(events[0]?.failure?.setup_lock).toBeUndefined();
+  } finally { globalThis.WebSocket = original; }
+});

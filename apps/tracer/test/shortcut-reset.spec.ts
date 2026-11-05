@@ -35,11 +35,19 @@ async function open(page: Page): Promise<void> {
 const WIN = '.ui-window[data-window-id="s-terminal-typing"]';
 const resetAllRow = (page: Page): Locator => page.locator(`${WIN} .ui-ss-row[data-reset-all]`);
 
-/** Right edge of every row's last key cap, and the left edge of every label. */
-const edges = (page: Page) => page.evaluate((win) => [...document.querySelectorAll<HTMLElement>(`${win} .ui-ss-row:not([data-reset-all])`)].map((row) => {
-  const caps = row.querySelectorAll("kbd");
-  return { id: row.dataset.id ?? "", right: caps[caps.length - 1]!.getBoundingClientRect().right, label: row.querySelector(".ui-ss-label")!.getBoundingClientRect().left };
-}), WIN);
+/**
+ * Right edge of every row's last key cap, and the left edge of every label, both measured from the window's own left edge.
+ * The window may still be settling on the canvas (the camera flies to it, and under load that takes longer than the wait in
+ * `open`), so a position on the page would differ between two calls by the camera's travel (2.8 to 78 px in J211's runs) without
+ * the rows having changed at all. From the window's edge, only the rows' own layout is measured.
+ */
+const edges = (page: Page) => page.evaluate((win) => {
+  const origin = document.querySelector(win)!.getBoundingClientRect().left;
+  return [...document.querySelectorAll<HTMLElement>(`${win} .ui-ss-row:not([data-reset-all])`)].map((row) => {
+    const caps = row.querySelectorAll("kbd");
+    return { id: row.dataset.id ?? "", right: caps[caps.length - 1]!.getBoundingClientRect().right - origin, label: row.querySelector(".ui-ss-label")!.getBoundingClientRect().left - origin };
+  });
+}, WIN);
 /** Every row's layout box (offsets, which no transform can fake). */
 const boxes = (page: Page) => page.evaluate((win) => [...document.querySelectorAll<HTMLElement>(`${win} .ui-ss-row`)].map((r) => [r.offsetTop, r.offsetHeight]), WIN);
 const changedIds = (page: Page): Promise<string[]> => page.evaluate((win) => [...document.querySelectorAll<HTMLElement>(`${win} .ui-ss-row[data-changed]`)].map((r) => r.dataset.id!), WIN);

@@ -1,4 +1,7 @@
-//! Audited Linux PTY and process boundary; all unsafe code is confined here [13][40].
+//! Audited Linux and macOS PTY and process boundary; all unsafe code is confined here [13][40].
+//!
+//! On macOS the PTY child only becomes the session leader here; its privilege
+//! drop and D335 placement happen after exec in `session_shell` (#328).
 #![allow(unsafe_code)]
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
@@ -6,9 +9,9 @@ use nix::{
     sys::signal::{Signal, killpg},
     unistd::{self, ForkResult, Uid, User},
 };
-use std::os::unix::ffi::OsStrExt as _;
+#[cfg(any(target_os = "linux", test))]
+use std::ffi::CString;
 use std::{
-    ffi::CString,
     fs::File,
     io,
     mem::MaybeUninit,
@@ -16,10 +19,11 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::process::CommandExt,
     },
-    path::Path,
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU8, Ordering},
 };
+#[cfg(target_os = "linux")]
+use std::{os::unix::ffi::OsStrExt as _, path::Path};
 
 // Broad TERM compatibility, true colour and the cooperative startup marker [D315].
 const TERMINAL_ENVIRONMENT: [(&str, &str); 3] = [
@@ -143,6 +147,7 @@ pub struct Pty {
 }
 
 /// Replacing a startup file must not silently discard ACLs or other security metadata.
+#[cfg(target_os = "linux")]
 pub(crate) fn file_has_attributes(file: &File) -> io::Result<bool> {
     // SAFETY: a null buffer and zero size query only the required list length;
     // the borrowed descriptor remains open and the kernel retains no pointer.
@@ -157,12 +162,80 @@ pub(crate) fn file_has_attributes(file: &File) -> io::Result<bool> {
         Err(error)
     }
 }
+/// Refuse debugger attach to this shim for its lifetime (the Darwin
+/// counterpart of Linux non-dumpability for ptrace). Core files are already
+/// refused by the hard `RLIMIT_CORE` of 0 that every infraternal process sets
+/// first. The flag is not inherited by the PTY child it forks.
+#[cfg(target_os = "macos")]
+pub(crate) fn deny_debugger() -> io::Result<()> {
+    /// `<sys/ptrace.h>`: the request that denies all future debugger attach.
+    const PT_DENY_ATTACH: nix::libc::c_int = 31;
+    // SAFETY: PT_DENY_ATTACH takes no pid, address or data; scalar arguments only.
+    if unsafe { nix::libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A live process's start time in microseconds since the epoch, from
+/// `proc_pidinfo(PROC_PIDTBSDINFO)`: the macOS counterpart of the Linux
+/// `/proc/<pid>/stat` birth tick that ties a PID to one process lifetime.
+/// `Ok(None)` for a zombie; `NotFound` when no such process exists.
+#[cfg(target_os = "macos")]
+pub(crate) fn process_start(pid: u32) -> io::Result<Option<u64>> {
+    /// `<sys/proc.h>` `SZOMB`: the process has exited and waits to be reaped.
+    const ZOMBIE: u32 = 5;
+    let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if pid <= 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut info = MaybeUninit::<nix::libc::proc_bsdinfo>::zeroed();
+    let size =
+        i32::try_from(std::mem::size_of::<nix::libc::proc_bsdinfo>()).map_err(io::Error::other)?;
+    // SAFETY: the kernel writes at most `size` bytes into this zeroed record
+    // and reports how many it wrote; no pointer is retained after the call.
+    let written = unsafe {
+        nix::libc::proc_pidinfo(
+            pid,
+            nix::libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written <= 0 {
+        let error = io::Error::last_os_error();
+        return Err(
+            if error.raw_os_error() == Some(nix::libc::ESRCH) || written == 0 {
+                io::ErrorKind::NotFound.into()
+            } else {
+                error
+            },
+        );
+    }
+    if written != size {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    // SAFETY: the record was zero-initialized and the kernel filled all of it.
+    let info = unsafe { info.assume_init() };
+    if info.pbi_status == ZOMBIE {
+        return Ok(None);
+    }
+    info.pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|micros| micros.checked_add(info.pbi_start_tvusec))
+        .map(Some)
+        .ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+
 fn errno(error: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(error as i32)
 }
 
 /// Keep sparse shim mappings out of khugepaged while retaining the caller's
 /// policy for the user's shell. This runs during single-threaded shim startup.
+// macOS has no transparent huge pages; the shared signature stays fallible.
+#[cfg_attr(target_os = "macos", allow(clippy::unnecessary_wraps))]
 pub(crate) fn disable_shim_thp() -> io::Result<Option<nix::libc::c_int>> {
     #[cfg(target_os = "linux")]
     {
@@ -202,6 +275,7 @@ fn set_thp_disabled(disabled: nix::libc::c_int) -> io::Result<()> {
 
 /// `PR_SET_THP_DISABLE` survives fork/exec. Undo only the shim's opt-out so
 /// shells and their programs retain the launcher's policy after exec.
+#[cfg(target_os = "linux")]
 fn restore_child_thp(inherited: Option<nix::libc::c_int>) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     if let Some(disabled) = inherited {
@@ -493,67 +567,13 @@ impl Pty {
         }
         nix::sys::stat::fchmod(&slave, nix::sys::stat::Mode::from_bits_truncate(0o600))
             .map_err(errno)?;
-        let name =
-            CString::new(user.name.clone()).map_err(|_| io::Error::other("invalid login name"))?;
-        let directory = CString::new(user.dir.as_os_str().as_bytes())
-            .map_err(|_| io::Error::other("invalid home directory"))?;
-        let root = Uid::effective().is_root();
-        let groups = if root {
-            unistd::getgrouplist(&name, user.gid).map_err(errno)?
-        } else {
-            Vec::new()
+        #[cfg(target_os = "macos")]
+        let mut command = {
+            let _ = child_thp;
+            darwin_command(&user, slave, readiness, program)?
         };
-        let target_uid = user.uid;
-        let group = user.gid;
-        let shell = if readiness || user.shell.as_os_str().is_empty() {
-            Path::new("/bin/sh")
-        } else {
-            user.shell.as_path()
-        };
-        let mut command = session_command(shell, readiness, program);
-        command
-            .env_clear()
-            .env("HOME", &user.dir)
-            .env("USER", &user.name)
-            .env("LOGNAME", &user.name)
-            .env("SHELL", shell)
-            .envs(TERMINAL_ENVIRONMENT)
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave));
-        // Keep only locale values from the host environment; all other inherited
-        // variables stay scrubbed, and an explicit user locale remains authoritative.
-        for (name, value) in crate::session_locale_environment() {
-            command.env(name, value);
-        }
-        // Preserve zsh's supported profile location for isolated canaries.
-        if let Some(directory) = std::env::var_os("ZDOTDIR") {
-            command.env("ZDOTDIR", directory);
-        }
-        // SAFETY: the callback runs after fork, uses only libc-backed syscalls
-        // and existing immutable data, and neither allocates nor takes locks.
-        // Descriptor 0 is Command's installed slave; privilege order prevents
-        // retaining supplementary root groups after dropping uid.
-        prepare_child(&mut command);
-        unsafe {
-            command.pre_exec(move || {
-                restore_child_thp(child_thp)?;
-                unistd::setsid().map_err(errno)?;
-                if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                if root {
-                    unistd::setgroups(&groups).map_err(errno)?;
-                    unistd::setgid(group).map_err(errno)?;
-                    unistd::setuid(target_uid).map_err(errno)?;
-                }
-                // CStr uses the preallocated pointer without allocating after fork.
-                // Validate home traversal as the target uid, after dropping root.
-                unistd::chdir(directory.as_c_str()).map_err(errno)?;
-                Ok(())
-            });
-        }
+        #[cfg(target_os = "linux")]
+        let mut command = linux_command(&user, slave, readiness, program, child_thp)?;
         let child = command.spawn()?;
         let master = File::from(terminal.master);
         fcntl(&master, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(errno)?;
@@ -939,7 +959,9 @@ pub(crate) fn prepare_parent_bound_child(command: &mut Command) {
 }
 
 /// Keep the proxy's rootful credential drop inside the audited child boundary [#281].
-#[cfg(unix)]
+// Linux only, like its public wrapper: on macOS the proxy child is refused
+// before this boundary (lib.rs), and Darwin has no nix `setgroups`.
+#[cfg(target_os = "linux")]
 pub(crate) fn prepare_proxy_child(
     command: &mut Command,
     working_directory: &File,
@@ -1120,6 +1142,242 @@ fn linux_prctl(
     }
 }
 
+/// Let the next program inherit only standard input, output and error.
+///
+/// Registers a post-fork hook that marks every descriptor above 2 close-on-exec.
+/// This is an allowlist: a descriptor reaches the program only if it is one of
+/// the three standard handles, or if a hook registered *after* this one admits
+/// it by name (the Linux login handoff does, through `inherit_descriptor`). It
+/// does not rely on every opener having set CLOEXEC, which on macOS is a second
+/// syscall racing other threads' forks (#328 P1). Marking rather than closing
+/// keeps Command's private exec-error pipe working until exec succeeds.
+pub(crate) fn only_standard_descriptors(command: &mut Command) {
+    // SAFETY: the hook makes only async-signal-safe syscalls on stack storage,
+    // with no allocation, lock or captured state.
+    unsafe {
+        command.pre_exec(cloexec_above_stderr);
+    }
+}
+
+/// Mark descriptors 3 and above close-on-exec (Linux): one `close_range` call
+/// on kernels 5.11 and later, otherwise an exact `/proc/self/fd` listing.
+#[cfg(target_os = "linux")]
+fn cloexec_above_stderr() -> io::Result<()> {
+    /// `<linux/close_range.h>`: mark the range close-on-exec instead of closing it.
+    const CLOSE_RANGE_CLOEXEC: nix::libc::c_uint = 1 << 2;
+    // SAFETY: scalar-argument syscall; the kernel retains nothing.
+    let marked = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_close_range,
+            3_u32,
+            u32::MAX,
+            CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if marked == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if !matches!(
+        error.raw_os_error(),
+        Some(nix::libc::ENOSYS | nix::libc::EINVAL)
+    ) {
+        return Err(error);
+    }
+    // Kernels before 5.11.
+    cloexec_listed_descriptors()
+}
+
+/// Mark every open descriptor above 2 close-on-exec by listing
+/// `/proc/self/fd`: the fallback for kernels without `CLOSE_RANGE_CLOEXEC`.
+///
+/// The listing is exact, so no descriptor is skipped however high its number
+/// (a walk up to `RLIMIT_NOFILE` misses descriptors opened before the limit
+/// was lowered, and a cap misses more; J215 P3-3). It is safe after fork:
+/// raw `open` and `getdents64` into stack storage, no allocation. Without a
+/// readable `/proc` it fails closed, and the spawn is refused.
+#[cfg(target_os = "linux")]
+fn cloexec_listed_descriptors() -> io::Result<()> {
+    // SAFETY: a NUL-terminated literal path; the kernel copies it.
+    let directory = unsafe {
+        nix::libc::open(
+            c"/proc/self/fd".as_ptr(),
+            nix::libc::O_RDONLY | nix::libc::O_DIRECTORY | nix::libc::O_CLOEXEC,
+        )
+    };
+    if directory < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = mark_listed(directory);
+    // SAFETY: closing the descriptor opened above; nothing else holds it.
+    unsafe { nix::libc::close(directory) };
+    result
+}
+
+/// Read `linux_dirent64` records from an open `/proc/self/fd` directory and
+/// mark each numbered descriptor above 2 (other than the directory) CLOEXEC.
+#[cfg(target_os = "linux")]
+fn mark_listed(directory: nix::libc::c_int) -> io::Result<()> {
+    // u64 storage keeps the records 8-byte aligned, as the kernel writes them.
+    let mut storage = [0_u64; 512];
+    loop {
+        // SAFETY: the kernel writes at most `size_of_val(&storage)` bytes of
+        // dirent records into this live buffer and returns how many.
+        let read = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_getdents64,
+                directory,
+                storage.as_mut_ptr(),
+                std::mem::size_of_val(&storage),
+            )
+        };
+        if read < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let read = usize::try_from(read).map_err(io::Error::other)?;
+        if read == 0 {
+            return Ok(());
+        }
+        // SAFETY: the first `read` bytes were just written by the kernel.
+        let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), read) };
+        let mut offset = 0;
+        while offset + 19 <= read {
+            // linux_dirent64: d_ino u64, d_off i64, d_reclen u16, d_type u8, d_name.
+            let length = usize::from(u16::from_ne_bytes([bytes[offset + 16], bytes[offset + 17]]));
+            if length < 20 || offset + length > read {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let mut number: nix::libc::c_int = 0;
+            let mut digits = 0;
+            for &byte in &bytes[offset + 19..offset + length] {
+                if byte == 0 {
+                    break;
+                }
+                if !byte.is_ascii_digit() {
+                    digits = 0;
+                    break;
+                }
+                number = number
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add(nix::libc::c_int::from(byte - b'0')))
+                    .ok_or(io::ErrorKind::InvalidData)?;
+                digits += 1;
+            }
+            if digits > 0 && number > 2 && number != directory {
+                set_cloexec(number)?;
+            }
+            offset += length;
+        }
+    }
+}
+
+/// Mark descriptors 3 and above close-on-exec (macOS), listed exactly by
+/// `proc_pidinfo(PROC_PIDLISTFDS)`. Fails closed if the list does not fit.
+#[cfg(target_os = "macos")]
+fn cloexec_above_stderr() -> io::Result<()> {
+    each_descriptor_above_stderr(set_cloexec)
+}
+
+/// Close every descriptor above standard error in this process (macOS). For
+/// the single-threaded session-shell entry, while it still runs as root.
+#[cfg(target_os = "macos")]
+pub(crate) fn close_above_stderr() -> io::Result<()> {
+    each_descriptor_above_stderr(|descriptor| {
+        // SAFETY: closing a listed descriptor this process owns; nothing in
+        // this fresh single-threaded entry holds it.
+        if unsafe { nix::libc::close(descriptor) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(nix::libc::EBADF) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Call `action` for each open descriptor above 2, from one kernel listing
+/// into stack storage (safe after fork: no allocation). When more descriptors
+/// are open than the listing holds, every number up to the process's
+/// descriptor limit is visited instead, so none is ever skipped.
+#[cfg(target_os = "macos")]
+fn each_descriptor_above_stderr(
+    mut action: impl FnMut(nix::libc::c_int) -> io::Result<()>,
+) -> io::Result<()> {
+    /// `<sys/proc_info.h>`: list the open descriptors of a process.
+    const PROC_PIDLISTFDS: nix::libc::c_int = 1;
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    /// One `proc_fdinfo` record: a descriptor number and its kind (8 bytes).
+    struct FdInfo {
+        descriptor: i32,
+        kind: u32,
+    }
+    /// 16 KiB of stack: within Clippy's large-array bound and fork-safe.
+    const SLOTS: usize = 2048;
+    let mut list = [FdInfo {
+        descriptor: -1,
+        kind: 0,
+    }; SLOTS];
+    let size = i32::try_from(std::mem::size_of_val(&list)).map_err(io::Error::other)?;
+    // SAFETY: the kernel writes at most `size` bytes of proc_fdinfo records
+    // (8 bytes each, layout matching FdInfo) and reports how many it wrote.
+    let written = unsafe {
+        nix::libc::proc_pidinfo(
+            nix::libc::getpid(),
+            PROC_PIDLISTFDS,
+            0,
+            list.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written <= 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let count = usize::try_from(written).map_err(io::Error::other)? / std::mem::size_of::<FdInfo>();
+    if count >= SLOTS {
+        // The listing may be truncated: walk every possible number instead.
+        // SAFETY: getdtablesize takes no arguments and only reads limits.
+        let limit = unsafe { nix::libc::getdtablesize() };
+        let highest = list.iter().map(|entry| entry.descriptor).max().unwrap_or(0);
+        for descriptor in 3..=limit.max(highest) {
+            action(descriptor)?;
+        }
+        return Ok(());
+    }
+    for entry in &list[..count] {
+        if entry.descriptor > 2 {
+            action(entry.descriptor)?;
+        }
+    }
+    Ok(())
+}
+
+/// Set close-on-exec on one descriptor; an already-closed one is fine.
+fn set_cloexec(descriptor: nix::libc::c_int) -> io::Result<()> {
+    // SAFETY: fcntl on a scalar descriptor is async-signal-safe.
+    let flags = unsafe { nix::libc::fcntl(descriptor, nix::libc::F_GETFD) };
+    if flags < 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(nix::libc::EBADF) {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
+    // SAFETY: as above.
+    if unsafe {
+        nix::libc::fcntl(
+            descriptor,
+            nix::libc::F_SETFD,
+            flags | nix::libc::FD_CLOEXEC,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Keep the public direct-exec policy on the same audited descriptor boundary.
 pub(super) fn prepare_child_without_control(command: &mut Command) {
     prepare_isolated_child(command);
@@ -1156,7 +1414,12 @@ fn reset_child_signals() -> io::Result<()> {
     let mut action: nix::libc::sigaction = unsafe { std::mem::zeroed() };
     action.sa_sigaction = nix::libc::SIG_DFL;
     unsafe { nix::libc::sigemptyset(&raw mut action.sa_mask) };
-    for signal in 1..=nix::libc::SIGRTMAX() {
+    // Darwin has no real-time signals: its signals are 1..NSIG-1 (31).
+    #[cfg(target_os = "linux")]
+    let last = nix::libc::SIGRTMAX();
+    #[cfg(target_os = "macos")]
+    let last = 31;
+    for signal in 1..=last {
         if signal == nix::libc::SIGKILL || signal == nix::libc::SIGSTOP {
             continue;
         }
@@ -1174,6 +1437,150 @@ fn reset_child_signals() -> io::Result<()> {
     nix::sys::signal::SigSet::empty()
         .thread_set_mask()
         .map_err(errno)
+}
+
+/// The standard-descriptor allowlist (#328 P1): a planted descriptor without
+/// close-on-exec must not reach a child, on its own or through a PTY shell.
+#[cfg(test)]
+mod descriptor_allowlist_tests {
+    use super::*;
+
+    /// These tests fork while descriptors are planted; run them one at a time.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A descriptor with no CLOEXEC flag, as a careless or racing opener leaves
+    /// it, at a high number no other test's descriptors will reuse.
+    fn planted() -> (File, File) {
+        let file = File::open("/dev/null").unwrap();
+        let copy = fcntl(&file, FcntlArg::F_DUPFD(50)).unwrap(); // no CLOEXEC
+        // SAFETY: F_DUPFD returned a fresh descriptor owned by nothing else.
+        (file, unsafe { File::from_raw_fd(copy) })
+    }
+
+    /// Whether `/bin/sh` in a child holds the descriptor open.
+    fn child_reads(descriptor: i32, allowlist: bool) -> bool {
+        let mut command = Command::new("/bin/sh");
+        // `[` is a builtin: it checks the shell's own descriptor table. (dash
+        // cannot redirect from descriptors above 9.)
+        command.args(["-c", &format!("[ -e /dev/fd/{descriptor} ]")]);
+        command.stderr(Stdio::null());
+        if allowlist {
+            only_standard_descriptors(&mut command);
+        }
+        command.status().unwrap().success()
+    }
+
+    #[test]
+    /// A planted descriptor is open in a plain child and absent in one behind the allowlist hook.
+    fn only_standard_descriptors_reach_the_child() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_file, copy) = planted();
+        let descriptor = copy.as_raw_fd();
+        assert!(
+            child_reads(descriptor, false),
+            "the fixture must plant a live descriptor"
+        );
+        assert!(
+            !child_reads(descriptor, true),
+            "a planted descriptor reached the child"
+        );
+    }
+
+    /// The pre-5.11 fallback finds a descriptor above the (lowered) descriptor
+    /// limit: the child lowers its soft `RLIMIT_NOFILE` below the planted
+    /// number, runs the fallback, and the shell must not see it (J215 P3-3).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_listing_fallback_marks_descriptors_above_the_limit() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let file = File::open("/dev/null").unwrap();
+        let high = fcntl(&file, FcntlArg::F_DUPFD(200)).unwrap(); // no CLOEXEC
+        // SAFETY: F_DUPFD returned a fresh descriptor owned by nothing else.
+        let _high = unsafe { File::from_raw_fd(high) };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &format!("[ -e /dev/fd/{high} ]")]);
+        // SAFETY: setrlimit and the listing fallback are async-signal-safe
+        // syscalls on stack storage.
+        unsafe {
+            command.pre_exec(|| {
+                let lowered = nix::libc::rlimit {
+                    rlim_cur: 64,
+                    rlim_max: nix::libc::RLIM_INFINITY,
+                };
+                let mut current = nix::libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &raw mut current) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let lowered = nix::libc::rlimit {
+                    rlim_max: current.rlim_max,
+                    ..lowered
+                };
+                if nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &raw const lowered) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                cloexec_listed_descriptors()
+            });
+        }
+        assert!(
+            !command.status().unwrap().success(),
+            "descriptor {high} above the lowered limit reached the child"
+        );
+    }
+
+    /// The real PTY shell builder applies the allowlist (Linux; on macOS the
+    /// child is the private session-shell entry, covered by the Mac proof).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pty_program_inherits_only_its_terminal() {
+        use std::io::Read as _;
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_file, copy) = planted();
+        // Keep the terminal open until the marker is read: Linux may drop
+        // output that is still pending when the terminal hangs up.
+        let probe = format!(
+            "exec 2>/dev/null; if [ -e /dev/fd/{} ]; then echo DESCRIPTOR-LEAKED; \
+             else echo DESCRIPTOR-CLEAN; fi; sleep 30",
+            copy.as_raw_fd()
+        );
+        let program = ["/bin/sh", "-c", probe.as_str()].map(std::ffi::OsString::from);
+        let mut pty =
+            Pty::spawn_with_command(Uid::effective().as_raw(), 80, 24, false, &program, None)
+                .unwrap();
+        let mut output = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !output
+            .windows(16)
+            .any(|w| w == b"DESCRIPTOR-CLEAN" || w.starts_with(b"DESCRIPTOR-LEAKE"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no probe output: {output:?}"
+            );
+            let mut chunk = [0; 256];
+            match pty.master.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&chunk[..n]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        let _ = pty.child.kill();
+        let _ = pty.child.wait();
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("DESCRIPTOR-CLEAN"), "{text}");
+    }
 }
 
 /// Real exec regressions for leg-B isolation and controller-owned sessions.
@@ -1309,8 +1716,164 @@ mod pin_exec_error_tests {
     }
 }
 
+/// The Linux PTY child: the account's shell with an explicit environment,
+/// dropping to the account in `pre_exec` after it becomes the session leader.
+#[cfg(target_os = "linux")]
+fn linux_command(
+    user: &User,
+    slave: File,
+    readiness: bool,
+    program: &[std::ffi::OsString],
+    child_thp: Option<nix::libc::c_int>,
+) -> io::Result<Command> {
+    let name =
+        CString::new(user.name.clone()).map_err(|_| io::Error::other("invalid login name"))?;
+    let directory = CString::new(user.dir.as_os_str().as_bytes())
+        .map_err(|_| io::Error::other("invalid home directory"))?;
+    let root = Uid::effective().is_root();
+    let groups = if root {
+        unistd::getgrouplist(&name, user.gid).map_err(errno)?
+    } else {
+        Vec::new()
+    };
+    let target_uid = user.uid;
+    let group = user.gid;
+    let shell = if readiness || user.shell.as_os_str().is_empty() {
+        Path::new("/bin/sh")
+    } else {
+        user.shell.as_path()
+    };
+    let mut command = session_command(shell, readiness, program);
+    command
+        .env_clear()
+        .env("HOME", &user.dir)
+        .env("USER", &user.name)
+        .env("LOGNAME", &user.name)
+        .env("SHELL", shell)
+        .envs(TERMINAL_ENVIRONMENT)
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    // Keep only locale values from the host environment; all other inherited
+    // variables stay scrubbed, and an explicit user locale remains authoritative.
+    for (name, value) in crate::session_locale_environment() {
+        command.env(name, value);
+    }
+    // Preserve zsh's supported profile location for isolated canaries.
+    // Only from a directory the person or root controls (#328 P3-1).
+    if let Some(directory) = crate::shell_startup::zsh_directory(user) {
+        command.env("ZDOTDIR", directory);
+    }
+    // SAFETY: the callback runs after fork, uses only libc-backed syscalls
+    // and existing immutable data, and neither allocates nor takes locks.
+    // Descriptor 0 is Command's installed slave; privilege order prevents
+    // retaining supplementary root groups after dropping uid.
+    prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
+    unsafe {
+        command.pre_exec(move || {
+            restore_child_thp(child_thp)?;
+            unistd::setsid().map_err(errno)?;
+            if nix::libc::ioctl(0, nix::libc::TIOCSCTTY, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if root {
+                unistd::setgroups(&groups).map_err(errno)?;
+                unistd::setgid(group).map_err(errno)?;
+                unistd::setuid(target_uid).map_err(errno)?;
+            }
+            // CStr uses the preallocated pointer without allocating after fork.
+            // Validate home traversal as the target uid, after dropping root.
+            unistd::chdir(directory.as_c_str()).map_err(errno)?;
+            Ok(())
+        });
+    }
+    Ok(command)
+}
+
+/// The Darwin PTY child: the private session-shell entry (behind `launchctl
+/// asuser` for a GUI login) with the slave as its standard handles. It becomes
+/// the terminal's session leader here and drops privileges after exec.
+#[cfg(target_os = "macos")]
+fn darwin_command(
+    user: &User,
+    slave: File,
+    readiness: bool,
+    program: &[std::ffi::OsString],
+) -> io::Result<Command> {
+    let start = if readiness {
+        crate::session_shell::Start::Readiness
+    } else if program.is_empty() {
+        crate::session_shell::Start::Login
+    } else {
+        crate::session_shell::Start::Program
+    };
+    let mut command = crate::session_shell::command(user, start, program)?;
+    command
+        .envs(TERMINAL_ENVIRONMENT)
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    for (name, value) in crate::session_locale_environment() {
+        command.env(name, value);
+    }
+    // macOS never forwards ZDOTDIR: zsh would run startup code from a
+    // directory the root agent's environment named (#328 P3-1).
+    prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
+    lead_terminal(&mut command);
+    Ok(command)
+}
+
+/// Make the PTY child the leader of a fresh session whose controlling terminal
+/// is its standard input (the slave). Privileges stay root until the private
+/// session-shell entry drops them after exec (`session_shell`).
+#[cfg(target_os = "macos")]
+fn lead_terminal(command: &mut Command) {
+    // SAFETY: setsid and ioctl are async-signal-safe and use no captured
+    // allocation or lock; Command has installed the slave as descriptor 0.
+    unsafe {
+        command.pre_exec(|| {
+            unistd::setsid().map_err(errno)?;
+            if nix::libc::ioctl(0, nix::libc::TIOCSCTTY.into(), 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// The Darwin shell for the non-worker login path: the same private entry as
+/// `spawn_with_command`. Inherited host-login environments are Linux-only.
+#[cfg(target_os = "macos")]
+fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Command> {
+    if inherited {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    let start = if readiness {
+        crate::session_shell::Start::Readiness
+    } else {
+        crate::session_shell::Start::Login
+    };
+    let mut command = crate::session_shell::command(user, start, &[])?;
+    command
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor");
+    for (name, value) in crate::session_locale_environment() {
+        command.env(name, value);
+    }
+    // macOS never forwards ZDOTDIR: zsh would run startup code from a
+    // directory the root agent's environment named (#328 P3-1).
+    prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
+    lead_terminal(&mut command);
+    Ok(command)
+}
+
 // The broker inherits the host login environment/limits; legacy PTYs start
 // from the existing explicit environment. Both paths use the same shell setup.
+#[cfg(target_os = "linux")]
 fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Command> {
     let name =
         CString::new(user.name.clone()).map_err(|_| io::Error::other("invalid login name"))?;
@@ -1362,7 +1925,8 @@ fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Co
         }
     }
     // Preserve zsh's supported profile location for isolated canaries.
-    if let Some(directory) = std::env::var_os("ZDOTDIR") {
+    // Only from a directory the person or root controls (#328 P3-1).
+    if let Some(directory) = crate::shell_startup::zsh_directory(user) {
         command.env("ZDOTDIR", directory);
     }
     // SAFETY: the callback runs after fork, uses only libc-backed syscalls
@@ -1370,6 +1934,7 @@ fn shell_command(user: &User, inherited: bool, readiness: bool) -> io::Result<Co
     // Descriptor 0 is Command's installed slave; privilege order prevents
     // retaining supplementary root groups after dropping uid.
     prepare_child(&mut command);
+    only_standard_descriptors(&mut command);
     unsafe {
         command.pre_exec(move || {
             unistd::setsid().map_err(errno)?;
@@ -1947,6 +2512,7 @@ mod child_environment_tests {
 pub(crate) mod handoff;
 
 /// Literal programs bypass login-shell argument conventions; the shell path is still exported.
+#[cfg(target_os = "linux")]
 fn session_command(shell: &Path, readiness: bool, program: &[std::ffi::OsString]) -> Command {
     let mut command = Command::new(
         program
