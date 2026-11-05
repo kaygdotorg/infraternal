@@ -51,6 +51,16 @@ pub struct PeerPolicy {
     pub peer: Peer,
     pub inbound: TrafficPolicy,
     pub outbound: TrafficPolicy,
+    /// Whether the Access policy lets this peer start TCP/22 toward this
+    /// node, sent only where `inbound` is wider than the policy: on the
+    /// server's own node, which admits every member so infraternal agents
+    /// always reach the server (D215). Mesh SSH enforces Access itself and
+    /// reads this instead (D235 "two checks", #221); see
+    /// [`Config::admits_ssh`]. Absent everywhere else, so strict parsers in
+    /// older infraternal agents never see it (only the server's embedded
+    /// infraternal agent, the same binary, receives a server-node snapshot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_ssh: Option<bool>,
 }
 
 /// Coordinator-owned DNS identity used by mesh-only listeners and names [#266, #281].
@@ -98,6 +108,29 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_names: BTreeMap<NodeId, String>,
 }
+impl Config {
+    /// Whether the Access policy lets `peer` start a TCP/22 connection to
+    /// this node: the check mesh SSH makes on every connection (#221).
+    ///
+    /// On the server's own node the installed inbound admits everything for
+    /// the control plane, so only `access_ssh` answers; a server-node
+    /// snapshot without it (written before #221) refuses rather than reading
+    /// the control-plane exemption as policy. On every other node the
+    /// installed inbound is the policy.
+    #[must_use]
+    pub fn admits_ssh(&self, peer: &PeerPolicy) -> bool {
+        let ssh = crate::policy::rules::Port {
+            protocol: crate::policy::rules::Protocol::Tcp,
+            number: 22,
+        };
+        match peer.access_ssh {
+            Some(admitted) => admitted,
+            None if self.server == Some(self.node) => false,
+            None => peer.inbound.allows(ssh),
+        }
+    }
+}
+
 /// Transport selector seam: a mesh destination never replaces the enrolled TLS server name [215].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerPath {

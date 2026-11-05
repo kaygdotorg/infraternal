@@ -95,12 +95,19 @@ fn compile_inner(
                 .filter(|peer| peer.outbound != TrafficPolicy::None)
                 .map_or_else(|| fallback.clone(), |peer| peer.outbound.clone())
         };
-        let inbound = if node == checkpoint.server {
-            TrafficPolicy::All
+        let policy_inbound = granted
+            .filter(|peer| peer.inbound != TrafficPolicy::None)
+            .map_or_else(|| fallback.clone(), |peer| peer.inbound.clone());
+        // The server's node admits every member for the control plane (D215);
+        // what Access really grants toward it still travels for mesh SSH (#221).
+        let (inbound, access_ssh) = if node == checkpoint.server {
+            let ssh = crate::policy::rules::Port {
+                protocol: crate::policy::rules::Protocol::Tcp,
+                number: 22,
+            };
+            (TrafficPolicy::All, Some(policy_inbound.allows(ssh)))
         } else {
-            granted
-                .filter(|peer| peer.inbound != TrafficPolicy::None)
-                .map_or_else(|| fallback.clone(), |peer| peer.inbound.clone())
+            (policy_inbound, None)
         };
         #[cfg(feature = "mesh-dns-spike")]
         if outbound != TrafficPolicy::None {
@@ -121,6 +128,7 @@ fn compile_inner(
                 },
                 inbound,
                 outbound,
+                access_ssh,
             },
         );
     }
@@ -418,6 +426,8 @@ impl Chunks {
             peer: peer.peer.clone(),
             inbound: TrafficPolicy::None,
             outbound: TrafficPolicy::None,
+            // Port continuations only union ports; the base part carries it.
+            access_ssh: None,
         });
         let policy = if inbound {
             &mut partial.inbound

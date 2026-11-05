@@ -592,3 +592,66 @@ fn review_j68b_explicit_internal_suffix_overrides_origin() {
         "explicit suffix overrides the origin-derived default"
     );
 }
+
+/// The server's node admits every member for the control plane (D215), but
+/// each peer also carries mesh SSH's own TCP/22 answer (#221), because the
+/// widened inbound is not the policy there. Other nodes never carry it, so
+/// older infraternal agents (strict parsers) never see the field, and a
+/// server-node snapshot without it (written before #221) refuses.
+#[test]
+fn only_the_server_node_carries_an_ssh_answer_and_a_missing_one_refuses() {
+    let coord = coordinator();
+    for default in [DefaultPolicy::Allow, DefaultPolicy::Deny] {
+        let server = configuration::compile(&coord, NodeId(1), default, &BTreeMap::new()).unwrap();
+        for peer in server.peers.values() {
+            assert_eq!(peer.inbound, TrafficPolicy::All, "control plane stays open");
+            assert!(peer.access_ssh.is_some());
+        }
+        let mut legacy = server.clone();
+        for peer in legacy.peers.values_mut() {
+            peer.access_ssh = None;
+        }
+        assert!(legacy.peers.values().all(|peer| !legacy.admits_ssh(peer)));
+        let ordinary =
+            configuration::compile(&coord, NodeId(2), default, &BTreeMap::new()).unwrap();
+        assert!(
+            ordinary
+                .peers
+                .values()
+                .all(|peer| peer.access_ssh.is_none())
+        );
+        assert_eq!(
+            ordinary.admits_ssh(&ordinary.peers[&NodeId(3)]),
+            default == DefaultPolicy::Allow
+        );
+        let wire = serde_json::to_value(&ordinary).unwrap();
+        assert!(
+            wire["peers"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|peer| peer.get("access_ssh").is_none())
+        );
+    }
+}
+
+/// Compact access updates carry only inbound and outbound. On the server's
+/// node those stay "all" while the SSH answer changes, so a changed answer
+/// must take the full path, or the node would never learn it.
+#[test]
+fn a_changed_ssh_answer_is_sent_even_when_inbound_and_outbound_are_unchanged() {
+    let coord = coordinator();
+    let old =
+        configuration::compile(&coord, NodeId(1), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
+    let mut new = old.clone();
+    new.version += 1;
+    let peer = new.peers.get_mut(&NodeId(2)).unwrap();
+    peer.access_ssh = Some(!peer.access_ssh.unwrap());
+    let chunks = infraternal_plugin_mesh::access_updates::chunks(Some(&old), &new).unwrap();
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.upserted.get(&NodeId(2)) == Some(&new.peers[&NodeId(2)])),
+        "the peer with the changed answer is sent whole"
+    );
+}

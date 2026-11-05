@@ -282,19 +282,15 @@ pub fn set_mesh_service(factory: MeshServiceFactory) {
 }
 
 /// Reduce an accepted mesh configuration to what mesh-only services use:
-/// this node's addresses and, per peer, whether its inbound policy (the one
-/// the kernel firewall enforces) admits TCP/22.
+/// this node's addresses and, per peer, whether the Access policy admits
+/// TCP/22 ([`Config::admits_ssh`](infraternal_plugin_mesh::dataplane::Config::admits_ssh):
+/// the policy itself, not the server node's control-plane exemption).
 #[cfg(all(feature = "mesh", target_os = "linux"))]
 fn mesh_view(
     config: &infraternal_plugin_mesh::dataplane::Config,
 ) -> infraternal_plugin_api::mesh_view::MeshView {
     use infraternal_plugin_api::mesh_view::{MeshPeer, MeshView};
-    use infraternal_plugin_mesh::policy::rules::{Port, Protocol};
     use std::net::IpAddr;
-    let ssh = Port {
-        protocol: Protocol::Tcp,
-        number: 22,
-    };
     MeshView {
         node: config.node.0,
         addresses: vec![
@@ -313,7 +309,7 @@ fn mesh_view(
                             IpAddr::V4(peer.peer.addresses.ipv4),
                             IpAddr::V6(peer.peer.addresses.ipv6),
                         ],
-                        ssh_allowed: peer.inbound.allows(ssh),
+                        ssh_allowed: config.admits_ssh(peer),
                     },
                 )
             })
@@ -474,6 +470,7 @@ mod proxy_mesh_context_tests {
             },
             inbound,
             outbound,
+            access_ssh: None,
         }
     }
 
