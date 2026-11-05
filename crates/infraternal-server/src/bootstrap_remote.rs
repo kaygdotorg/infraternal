@@ -374,6 +374,28 @@ impl RemoteBackend {
             .map_err(|_| unavailable())
     }
 
+    /// The end of [`completed`](Backend::completed), after the login checks: mark the
+    /// setup of this batch's attempt for `host` finished, then release the attempt.
+    ///
+    /// A Replace never recorded a retirement intent of its own (the host stays
+    /// enrolled if it fails), so it may find none (#305); it still consumes one its
+    /// host carries from a first setup that never finished (J247 P2).
+    async fn finish_completion(&self, owner: &str, batch: Uuid, host: Uuid) -> Result<(), Failure> {
+        let replacement = self
+            .attempts
+            .lock()
+            .map_err(|_| unavailable())?
+            .get(&host)
+            .filter(|attempt| attempt.owner == owner && attempt.batch == batch)
+            .map(|attempt| attempt.replacement)
+            .ok_or_else(unavailable)?;
+        self.finish_setup_record(owner, host, replacement).await?;
+        self.attempts
+            .lock()
+            .map_err(|_| unavailable())?
+            .remove(&host);
+        Ok(())
+    }
     /// Mark `host`'s setup finished by consuming its restart-retirement intent.
     ///
     /// A new install always has one. A Replace took on none of its own, but the
@@ -1041,19 +1063,8 @@ impl Backend for RemoteBackend {
                 confirm_preferred_login(&actor, person, account).await?;
                 self.authorize(authority).await?;
             }
-            self.uid(authority, host)?;
-            // A Replace never recorded a retirement intent (the host stays
-            // enrolled if it fails); requiring one failed every Replace after
-            // its host had already committed (#305).
-            let replacement = self
-                .attempts
-                .lock()
-                .map_err(|_| unavailable())?
-                .get(&host)
-                .is_some_and(|attempt| attempt.replacement);
-            self.finish_setup_record(&authority.owner, host, replacement)
-                .await?;
-            self.completed_record(authority, host)
+            self.finish_completion(&authority.owner, authority.batch, host)
+                .await
         })
     }
 }
@@ -2244,6 +2255,50 @@ mod tests {
             .bind(f.prior.as_bytes().as_slice()).bind(f.prior.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
         assert!(revoked, "the unfinished host must no longer count as added");
         assert_eq!(intents, 0);
+    }
+
+    /// J257 P3: P2 through its call site. A completed Replace (an attempt of this
+    /// batch marked `replacement`) of a host whose first setup never finished
+    /// consumes that intent and releases the attempt; another batch's attempt is
+    /// never completed by this one.
+    #[tokio::test]
+    async fn completing_a_replace_through_its_call_site_marks_the_host_finished() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        let batch = Uuid::new_v4();
+        f.backend.attempts.lock().unwrap().insert(
+            f.prior,
+            Attempt {
+                owner: "owner".into(),
+                batch,
+                uid: 1002,
+                link_round_trip: Duration::ZERO,
+                destination: Some(("user@fixture".into(), None)),
+                canary: None,
+                retirement: None,
+                replacement: true,
+            },
+        );
+        assert!(
+            f.backend
+                .finish_completion("owner", Uuid::new_v4(), f.prior)
+                .await
+                .is_err(),
+            "another batch must not complete this attempt"
+        );
+        f.backend
+            .finish_completion("owner", batch, f.prior)
+            .await
+            .unwrap();
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_bootstrap_retirement_intents WHERE host_id=?",
+        )
+        .bind(f.prior.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(open, 0, "the replaced host still reads as unfinished");
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
     }
 
     /// J247 P3: the stuck-install check runs before the person confirms anything, so

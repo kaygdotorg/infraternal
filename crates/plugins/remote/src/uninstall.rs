@@ -508,10 +508,18 @@ async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
 /// refused there with a bare "permission denied" (#305 F-C). Only the
 /// account's own `/run/user/<uid>`, a real directory it owns, is used.
 fn user_manager_runtime(uid: u32, current: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    user_manager_runtime_in(Path::new("/run/user"), uid, current)
+}
+/// [`user_manager_runtime`] under `root` (`/run/user` outside tests).
+fn user_manager_runtime_in(
+    root: &Path,
+    uid: u32,
+    current: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
     if current.is_some_and(|value| !value.is_empty()) {
         return None;
     }
-    let runtime = PathBuf::from(format!("/run/user/{uid}"));
+    let runtime = root.join(uid.to_string());
     let metadata = std::fs::symlink_metadata(&runtime).ok()?;
     (metadata.is_dir() && metadata.uid() == uid).then_some(runtime)
 }
@@ -665,24 +673,41 @@ mod tests {
 
     /// #305 F-C: the by-hand uninstall must reach the account's user manager from a
     /// login with no systemd user session (no `XDG_RUNTIME_DIR`), using only that
-    /// account's own runtime directory, and must keep a session's own value.
+    /// account's own runtime directory, and must keep a session's own value. Runs
+    /// against a private root, so it asserts on every machine (J257 P3).
     #[test]
     fn a_login_without_a_user_session_still_reaches_its_own_service_manager() {
+        use std::os::unix::fs::symlink;
         let uid = nix::unistd::Uid::effective().as_raw();
-        let own = PathBuf::from(format!("/run/user/{uid}"));
-        if std::fs::symlink_metadata(&own).is_ok_and(|m| m.is_dir() && m.uid() == uid) {
-            assert_eq!(user_manager_runtime(uid, None), Some(own.clone()));
-            assert_eq!(
-                user_manager_runtime(uid, Some(std::ffi::OsStr::new(""))),
-                Some(own)
-            );
-        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("run-user-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        // No directory for this uid: nothing to point at.
+        assert_eq!(user_manager_runtime_in(&root, uid, None), None);
+        let own = root.join(uid.to_string());
+        std::fs::create_dir(&own).unwrap();
+        assert_eq!(user_manager_runtime_in(&root, uid, None), Some(own.clone()));
         assert_eq!(
-            user_manager_runtime(uid, Some(std::ffi::OsStr::new("/run/user/elsewhere"))),
+            user_manager_runtime_in(&root, uid, Some(std::ffi::OsStr::new(""))),
+            Some(own.clone())
+        );
+        // A session that has its own value keeps it.
+        assert_eq!(
+            user_manager_runtime_in(&root, uid, Some(std::ffi::OsStr::new("/run/user/elsewhere"))),
             None
         );
-        // Never another account's directory.
-        assert_eq!(user_manager_runtime(uid.wrapping_add(7919), None), None);
+        // Never another account's directory, even one this account created.
+        let other = uid.wrapping_add(7919);
+        std::fs::create_dir(root.join(other.to_string())).unwrap();
+        assert_eq!(user_manager_runtime_in(&root, other, None), None);
+        // Never a link standing in for the directory.
+        std::fs::remove_dir(&own).unwrap();
+        symlink(root.join(other.to_string()), &own).unwrap();
+        assert_eq!(user_manager_runtime_in(&root, uid, None), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
     /// A complete rootless bootstrap layout under a private fixture home.
     fn installation(name: &str, locked: bool) -> Option<(PathBuf, Context, u32)> {
