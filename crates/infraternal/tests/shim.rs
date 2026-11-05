@@ -870,23 +870,65 @@ fn owned_exit_releases_promptly_on_window_close() {
     );
 }
 
+/// Hang guard for the retention tests below. Each of their waits ends on an
+/// event (a reply, the socket vanishing); this bound only detects a hang.
+const OWNERSHIP_HANG: Duration = Duration::from_secs(120);
+
+/// Proves the shim has run a retirement decision after every earlier peer
+/// event, without a clock. The shim decides retirement at the top of each
+/// loop iteration and answers peer requests later in the iteration, so two
+/// ownership round trips mean the second reply comes from an iteration whose
+/// retirement check already saw every close and exit that happened before
+/// the first request. A shim that retired there could not answer.
+fn retirement_fence(owner: &mut UnixStream) {
+    owner.set_read_timeout(Some(OWNERSHIP_HANG)).unwrap();
+    for _ in 0..2 {
+        send(owner, Frame::InputStateRequest);
+        assert_eq!(read(owner), Frame::InputState(0, 0));
+    }
+}
+
+/// The retention maximum bounds an owned exit. It holds the shim after the
+/// exit, is never extended by an owner, an unread data peer or later attaches,
+/// and still ends with the typed exit record. Ordering events, not a short
+/// window, decide each part.
 #[test]
 fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
+    // Not before: an owner and an unread data peer keep an exited shell's shim.
+    // A maximum far beyond any host stall keeps expiry out of this part.
+    {
+        let session = Session::start_retention(8192, false, None, 600_000);
+        let mut ownership = owner(&session);
+        let _stalled = session.attach(0);
+        exit_without_viewer(&session);
+        retirement_fence(&mut ownership);
+        assert!(
+            session.path().exists(),
+            "owner must retain exit before the maximum"
+        );
+    }
+    // At the maximum: the same peers stay connected and unread, and fresh
+    // peers keep attaching. A deadline that peers or attaches could renew
+    // would keep the shim forever; the one-shot maximum must still retire it.
     let session = Session::start_retention(8192, false, None, 700);
     let _ownership = owner(&session);
     let _stalled = session.attach(0);
     exit_without_viewer(&session);
-    assert!(
-        session.path().exists(),
-        "owner must retain exit before bound"
-    );
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + OWNERSHIP_HANG;
+    let mut later = Vec::new();
     while session.path().exists() {
         assert!(
             Instant::now() < deadline,
-            "owner/data peer extended the maximum"
+            "owner, data peer or later attaches extended the maximum"
         );
-        thread::sleep(Duration::from_millis(5));
+        // Best effort: the shim may retire between the check and the connect.
+        if let Ok(mut peer) = UnixStream::connect(session.path()) {
+            let _ = peer.write_all(&Frame::Attach(0).encode().unwrap());
+            let _ = peer.write_all(&Frame::ReadFrom(0).encode().unwrap());
+            later.push(peer);
+        }
+        // sleep: paces the fresh attaches; retirement itself is the event awaited.
+        thread::sleep(Duration::from_millis(50));
     }
     let (status, seq) = infraternal_shim::ended::read(&session.path())
         .unwrap()
@@ -901,11 +943,13 @@ fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
     );
 }
 
+/// A delivered exit releases only the window that received it: the shim stays
+/// while a sibling owner remains, and retires once every owner has gone.
 #[test]
 fn delivered_exit_cannot_release_another_owning_window() {
     let session = Session::new(8192, false);
     let first = owner(&session);
-    let second = owner(&session);
+    let mut second = owner(&session);
     exit_without_viewer(&session);
     let mut data = session.attach(0);
     let mut seq = 0;
@@ -924,13 +968,14 @@ fn delivered_exit_cannot_release_another_owning_window() {
     }
     drop(data);
     drop(first);
-    thread::sleep(Duration::from_millis(350));
+    // The sibling's round trips prove the shim decided after both closes.
+    retirement_fence(&mut second);
     assert!(
         session.path().exists(),
         "the sibling window still owns final output"
     );
     drop(second);
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + OWNERSHIP_HANG;
     while session.path().exists() {
         assert!(
             Instant::now() < deadline,
