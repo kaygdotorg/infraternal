@@ -332,13 +332,14 @@ mod refusal_tests {
 // Construct cold login futures only when requested. Keeping their creation
 // outside the dispatcher poll function avoids touching their much larger code
 // working set on every idle greeting/receive, without an eager heap allocation.
+/// Start one admitted `terminal.open` as its own task, so a slow launch never blocks the dispatcher.
 #[cold]
 #[inline(never)]
 fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) {
     opens.spawn(async move {
         let result = async {
             task.plugins.admit("terminal.open", task.context).await?;
-            let manager = *task.manager.get_or_init(Manager::detect).await;
+            let manager = Manager::resolve(&task.manager).await;
             open_requested(&task.exe, &task.state, manager, task.input, task.prepare)
                 .await
                 .map_err(|error| open_refusal(&error))
@@ -348,6 +349,7 @@ fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) 
     });
 }
 
+/// Revoke or restore one person's terminals on its own task, after the first login operation has chosen a manager.
 #[cold]
 #[inline(never)]
 fn spawn_revocation(
@@ -359,7 +361,7 @@ fn spawn_revocation(
 ) -> tokio::task::JoinHandle<()> {
     use infraternal_plugin_api::admission::OpenRefusal;
     tokio::spawn(async move {
-        let manager = *manager.get_or_init(Manager::detect).await;
+        let manager = Manager::resolve(&manager).await;
         let result = if restore {
             crate::logins::restore(&state, person).await
         } else {
@@ -400,7 +402,7 @@ pub async fn open_mesh_ssh_shell(
 ) -> io::Result<Session> {
     static MANAGER: tokio::sync::OnceCell<Manager> = tokio::sync::OnceCell::const_new();
     let exe = std::env::current_exe()?;
-    let manager = *MANAGER.get_or_init(Manager::detect).await;
+    let manager = Manager::resolve(&MANAGER).await;
     let input = Open {
         person: Some(person),
         account: Some(account.to_owned()),
@@ -766,7 +768,37 @@ impl<C: Channel> Drop for RetireChannel<'_, C> {
     }
 }
 
+/// Run the channel to its end, then give launch cleanups still in flight a bounded window to finish,
+/// so a runtime that outlives this agent does not drop them half done.
 async fn run_channel<const SESSION_ONLY: bool>(
+    socket: &impl Channel,
+    state: PathBuf,
+    execution_uid: Option<u32>,
+    renewal: Option<&RenewalIdentity>,
+    plugins: Option<crate::plugin_control::Registry>,
+    original: Option<Session>,
+) -> io::Result<()> {
+    // Boxed: the wrapper holds its arguments, and the loop's state would be counted again on top of
+    // them inside every caller's future (clippy large_futures, already within bytes of its bound).
+    // One allocation per channel run, in place of the same bytes inline.
+    let result = Box::pin(run_channel_inner::<SESSION_ONLY>(
+        socket,
+        state,
+        execution_uid,
+        renewal,
+        plugins,
+        original,
+    ))
+    .await;
+    if sessions::cleanups_pending() {
+        // Boxed: the wait is rare, and its state must not grow every channel future.
+        Box::pin(sessions::drain_cleanups()).await;
+    }
+    result
+}
+
+/// The channel loop itself, before the shutdown drain.
+async fn run_channel_inner<const SESSION_ONLY: bool>(
     socket: &impl Channel,
     state: PathBuf,
     execution_uid: Option<u32>,
@@ -813,7 +845,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
         if !SESSION_ONLY {
             let warm = manager.clone();
             tokio::spawn(async move {
-                warm.get_or_init(Manager::detect).await;
+                Manager::resolve(&warm).await;
             });
         }
         running
