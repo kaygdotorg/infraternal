@@ -10,6 +10,9 @@ Exit status: 0 when every target ran, including nights that found and filed
 failing inputs (findings are the point, not a service failure); 1 when
 something did not work: a target that failed without leaving an input, or a
 report that could not be filed.
+
+Timeouts are checked before they are filed: a `timeout-*` input is run again
+on its own and filed only if it times out again (#370).
 """
 import argparse
 import base64
@@ -78,6 +81,36 @@ def written_inputs(log_text, artifacts):
         if path.parent == artifacts and path.is_file() and path not in found:
             found.append(path)
     return found
+
+
+# libFuzzer's per-input time limit, shared by the fuzz run and the timeout re-check
+# so both apply the same bar.
+TIMEOUT_SECONDS = 10
+
+
+def confirmed_inputs(crashes, unconfirmed, reproduces):
+    """The artifacts worth filing; timeouts that do not happen again move to `unconfirmed`.
+
+    A panic is a property of the input. A timeout can also be a property of
+    the host: libFuzzer measures wall-clock time, and dev-02 is shared with
+    build gates. On 2026-11-05 the run started under heavy IO pressure, and
+    libFuzzer's opening empty-input call passed the 10 s limit. That input
+    then runs in 0 ms on its own (#370).
+    `reproduces(path)` runs one input in isolation and says whether it failed
+    again. Anything that cannot be confirmed is kept on disk, out of the
+    artifact directory, so it is neither filed nor re-checked every night.
+    A re-check that cannot run at all counts as reproduced, so a real hang is
+    never dropped because of a build or tool error.
+    """
+    kept = []
+    for crash in crashes:
+        if crash.name.startswith('timeout-') and not reproduces(crash):
+            unconfirmed.mkdir(parents=True, exist_ok=True)
+            crash.replace(unconfirmed / crash.name)
+            print(f'fuzz timeout not reproduced in isolation, not filed: {unconfirmed / crash.name}', flush=True)
+            continue
+        kept.append(crash)
+    return kept
 
 
 def issue_marker(name):
@@ -225,12 +258,27 @@ def main():
             if seed.is_file() and not destination.exists():
                 destination.write_bytes(seed.read_bytes())
         command = [rustup, 'run', 'nightly', 'cargo', 'fuzz', 'run', '--fuzz-dir', 'fuzz', *features, name, str(corpus), '--',
-                   f'-max_total_time={budget}', '-timeout=10', '-rss_limit_mb=2048', '-max_len=1048580', f'-artifact_prefix={artifacts}/']
+                   f'-max_total_time={budget}', f'-timeout={TIMEOUT_SECONDS}', '-rss_limit_mb=2048', '-max_len=1048580', f'-artifact_prefix={artifacts}/']
         started = time.monotonic()
         with (state / f'{name}.log').open('w') as log:
             result = subprocess.run(command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT)
-        crashes = sorted(path for path in artifacts.iterdir() if path.is_file())
         found = written_inputs((state / f'{name}.log').read_text(errors='replace'), artifacts.resolve())
+
+        def reproduces(crash, name=name):
+            """Run one input alone; any non-zero exit (timeout, crash, tool error) counts as reproduced."""
+            # A separate prefix keeps the re-check from writing into the artifacts it is judging.
+            recheck = state / 'recheck' / name
+            recheck.mkdir(parents=True, exist_ok=True)
+            rerun = [rustup, 'run', 'nightly', 'cargo', 'fuzz', 'run', '--fuzz-dir', 'fuzz', *features, name, str(crash), '--',
+                     f'-timeout={TIMEOUT_SECONDS}', '-rss_limit_mb=2048', f'-artifact_prefix={recheck}/']
+            with (state / f'{name}.log').open('a') as log:
+                log.write(f'\n== re-check of {crash.name} in isolation\n')
+                log.flush()
+                return subprocess.run(rerun, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT).returncode != 0
+
+        before = sorted(path for path in artifacts.iterdir() if path.is_file())
+        crashes = confirmed_inputs(before, state / 'unconfirmed' / name, reproduces)
+        unconfirmed = len(before) - len(crashes)
         unreported = 0
         for crash in crashes:
             # A reporting failure must not cost the remaining targets their
@@ -246,7 +294,8 @@ def main():
         failed |= broken or unreported > 0
         findings += len(found)
         summary.append({'target': name, 'exit': result.returncode, 'seconds': round(time.monotonic() - started, 3),
-                        'artifacts': len(crashes), 'new_inputs': len(found), 'broken': broken, 'unreported': unreported})
+                        'artifacts': len(crashes), 'new_inputs': len(found), 'unconfirmed': unconfirmed,
+                        'broken': broken, 'unreported': unreported})
         (state / 'last-run.json').write_text(json.dumps({'head': head, 'budget_seconds': args.budget_seconds, 'targets': summary}, indent=2) + '\n')
         print(f'fuzz target={name} exit={result.returncode} budget_s={budget} artifacts={len(crashes)}', flush=True)
     print(f'FUZZ_DONE targets={len(summary)} new_inputs={findings} failed={failed} head={head}', flush=True)

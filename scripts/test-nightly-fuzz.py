@@ -214,6 +214,37 @@ class NightlyFuzz(unittest.TestCase):
         log = 'error: target `mesh_node_json` requires the features: `mesh-node`\n'
         self.assertEqual(fuzz.written_inputs(log, artifacts), [])
 
+    def timeout_fixture(self):
+        """An artifact directory with #370's empty timeout input next to an ordinary crash."""
+        artifacts = self.state / 'artifacts'
+        artifacts.mkdir()
+        timeout = artifacts / 'timeout-da39a3ee5e6b4b0d3255bfef95601890afd80709'
+        timeout.write_bytes(b'')
+        crash = artifacts / 'crash-2ca3ce7494fb298a60da37b58c1be73bc15a8b94'
+        crash.write_bytes(b'0X.A-1')
+        return artifacts, timeout, crash
+
+    def test_timeout_that_does_not_recur_is_not_filed(self):
+        """#370: a host-load timeout that passes in isolation is set aside, not filed; crashes skip the re-check."""
+        artifacts, timeout, crash = self.timeout_fixture()
+        checked = []
+        unconfirmed = self.state / 'unconfirmed' / 'ssh_auth_once_decode'
+        kept = fuzz.confirmed_inputs(sorted(artifacts.iterdir()), unconfirmed,
+                                     lambda path: checked.append(path.name) or False)
+        self.assertEqual(kept, [crash])
+        self.assertEqual(checked, [timeout.name])
+        self.assertFalse(timeout.exists())
+        self.assertEqual((unconfirmed / timeout.name).read_bytes(), b'')
+        # Set aside means gone from the artifact directory, so the next night neither files nor re-checks it.
+        self.assertEqual(sorted(artifacts.iterdir()), [crash])
+
+    def test_timeout_that_recurs_is_filed(self):
+        """A timeout that happens again in isolation is a real finding and stays in place."""
+        artifacts, timeout, crash = self.timeout_fixture()
+        kept = fuzz.confirmed_inputs(sorted(artifacts.iterdir()), self.state / 'unconfirmed', lambda _path: True)
+        self.assertEqual(kept, [crash, timeout])
+        self.assertTrue(timeout.exists())
+
     def test_report_errors_are_caught_types(self):
         """HTTP and network failures are OSError subclasses, so the loop's catch covers them."""
         import urllib.error
