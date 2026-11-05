@@ -13,8 +13,6 @@ use nix::{
     poll::{PollFd, PollFlags, poll},
     sys::{
         signal::{SigSet, Signal},
-        signalfd::{SfdFlags, SignalFd},
-        socket::{getsockopt, sockopt::PeerCredentials},
         stat::{Mode, umask},
     },
     unistd::Uid,
@@ -406,11 +404,116 @@ mod peer_uid_tests {
     }
 }
 
+/// The connecting process's effective uid, recorded by the kernel at connect
+/// time: `SO_PEERCRED` on Linux, `getpeereid` (`LOCAL_PEERCRED`) on macOS.
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    Ok(getsockopt(stream, PeerCredentials)
+        .map_err(io::Error::from)?
+        .uid())
+}
+#[cfg(target_os = "macos")]
+/// The connecting process's effective uid on macOS, from `getpeereid` (`LOCAL_PEERCRED`).
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    Ok(nix::unistd::getpeereid(stream)
+        .map_err(io::Error::from)?
+        .0
+        .as_raw())
+}
+
+/// SIGCHLD readiness for the poll loop, with SIGCHLD blocked so no handler runs:
+/// a signalfd on Linux; on macOS a kqueue `EVFILT_SIGNAL` filter, which records
+/// delivery attempts of the blocked signal and whose descriptor is pollable.
+#[cfg(target_os = "linux")]
+struct ChildSignals(nix::sys::signalfd::SignalFd);
+#[cfg(target_os = "linux")]
+impl ChildSignals {
+    /// A signalfd for `mask`, which the caller has blocked.
+    fn new(mask: SigSet) -> io::Result<Self> {
+        use nix::sys::signalfd::{SfdFlags, SignalFd};
+        SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
+            .map(Self)
+            .map_err(io::Error::from)
+    }
+    /// The descriptor the poll loop waits on.
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+    /// Consume every queued signal so the descriptor reads as idle again.
+    fn drain(&self) -> io::Result<()> {
+        while self.0.read_signal().map_err(io::Error::from)?.is_some() {}
+        Ok(())
+    }
+}
+#[cfg(target_os = "macos")]
+/// SIGCHLD readiness on macOS: a kqueue with one `EVFILT_SIGNAL` filter per signal.
+struct ChildSignals(nix::sys::event::Kqueue);
+#[cfg(target_os = "macos")]
+impl ChildSignals {
+    /// A zero timeout: register or drain without blocking.
+    const NOW: nix::libc::timespec = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    /// A kqueue watching each signal in `mask`, which the caller has blocked.
+    fn new(mask: SigSet) -> io::Result<Self> {
+        use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+        let queue = Kqueue::new().map_err(io::Error::from)?;
+        let changes: Vec<KEvent> = mask
+            .iter()
+            .map(|signal| {
+                KEvent::new(
+                    signal as usize,
+                    EventFilter::EVFILT_SIGNAL,
+                    EvFlags::EV_ADD | EvFlags::EV_CLEAR,
+                    FilterFlag::empty(),
+                    0,
+                    0,
+                )
+            })
+            .collect();
+        queue
+            .kevent(&changes, &mut [], Some(Self::NOW))
+            .map_err(io::Error::from)?;
+        Ok(Self(queue))
+    }
+    /// The kqueue descriptor, which poll(2) reports readable when a signal arrived.
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+    /// Read queued signal events until none are left.
+    fn drain(&self) -> io::Result<()> {
+        use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent};
+        let mut events = [KEvent::new(
+            0,
+            EventFilter::EVFILT_SIGNAL,
+            EvFlags::empty(),
+            FilterFlag::empty(),
+            0,
+            0,
+        ); 4];
+        while self
+            .0
+            .kevent(&[], &mut events, Some(Self::NOW))
+            .map_err(io::Error::from)?
+            == events.len()
+        {}
+        Ok(())
+    }
+}
+
 fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let state = if let Some(path) = &config.state {
         path.clone()
     } else if Uid::effective().is_root() {
-        PathBuf::from("/run/infraternal")
+        // Root runtime state that the OS clears at boot: /run on Linux,
+        // /var/run (/private/var/run) on macOS, which has no /run.
+        PathBuf::from(if cfg!(target_os = "macos") {
+            "/var/run/infraternal"
+        } else {
+            "/run/infraternal"
+        })
     } else {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .ok_or_else(|| io::Error::other("rootless shim requires XDG_RUNTIME_DIR"))?;
@@ -573,8 +676,11 @@ fn run_configured(
     let mut mask = SigSet::empty();
     mask.add(Signal::SIGCHLD);
     mask.thread_block().map_err(io::Error::from)?;
-    let signals = SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC)
-        .map_err(io::Error::from)?;
+    let signals = ChildSignals::new(mask)?;
+    // A root shim on macOS refuses debugger attach for its lifetime; core files
+    // are already refused by the hard RLIMIT_CORE of 0 set in main (#328).
+    #[cfg(target_os = "macos")]
+    crate::pty::deny_debugger()?;
     #[cfg(feature = "host-login")]
     if !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness {
         // Own only this terminal's descendants, never every process of the
@@ -920,7 +1026,7 @@ fn run_configured(
             (flags(0), flags(1), flags(2), peer_flags, flags(4), flags(5))
         };
         if ready.1.contains(PollFlags::POLLIN) {
-            while signals.read_signal().map_err(io::Error::from)?.is_some() {}
+            signals.drain()?;
             #[cfg(feature = "host-login")]
             if !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness {
                 // Reap only on child readiness, with no idle scan or timer.
@@ -957,9 +1063,7 @@ fn run_configured(
             // starve PTY progress. Authenticate before replacing the old peer.
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let credentials =
-                        getsockopt(&stream, PeerCredentials).map_err(io::Error::from)?;
-                    if shim_peer_uid_allowed(credentials.uid(), Uid::effective().as_raw())
+                    if shim_peer_uid_allowed(peer_uid(&stream)?, Uid::effective().as_raw())
                         && peers.len() < MAX_PEERS
                     {
                         stream.set_nonblocking(true)?;

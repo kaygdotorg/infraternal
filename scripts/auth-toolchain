@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
-# Fetch the checksum-pinned Zig C compiler for vendored OpenSSL/SQLite musl builds [7,20].
+# Provide the checksum-pinned Zig C compiler in the target directory [7,20] (D213, D328).
+#
+# There is one Zig: version 0.15.2, from the official release tarball whose
+# SHA-256 is in scripts/zig.sha256 (shared with nix/zig.nix). Inside the nix
+# development shell INFRATERNAL_ZIG names that same tarball, already fetched
+# and checked as a fixed-output derivation, and it is copied here instead of
+# downloaded again; it must be that verified store path, nothing else.
+# Elsewhere the tarball is downloaded and checked.
 set -euo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-case "$(uname -m)" in
-    x86_64) host=x86_64; checksum=02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239 ;;
-    aarch64) host=aarch64; checksum=958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f ;;
+# Zig release names are <cpu>-<os>; macOS reports its CPU as arm64.
+case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) host=x86_64-linux ;;
+    Linux-aarch64) host=aarch64-linux ;;
+    Darwin-arm64) host=aarch64-macos ;;
     *) printf 'unsupported Zig build host\n' >&2; exit 1 ;;
 esac
 version=0.15.2
+archive="zig-$host-$version.tar.xz"
+checksum="$(awk -v file="$archive" '$2 == file { print $1 }' "$root/scripts/zig.sha256")"
+[[ -n "$checksum" ]] || { printf 'no pinned checksum for %s\n' "$archive" >&2; exit 1; }
 target_root="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target_root" = /* ]] || target_root="$root/$target_root"
 destination="$target_root/auth-tools/zig"
@@ -18,10 +30,36 @@ mkdir -p "$target_root/auth-tools"
 # A failed download or checksum never becomes the executable used by a build.
 staging="$(mktemp -d "$target_root/auth-tools/download.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
-curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-    "https://ziglang.org/download/$version/zig-$host-linux-$version.tar.xz" -o "$staging/zig.tar.xz"
-printf '%s  %s\n' "$checksum" "$staging/zig.tar.xz" | sha256sum --check --status
-tar -xJf "$staging/zig.tar.xz" --strip-components=1 -C "$staging"
-rm "$staging/zig.tar.xz"
+if [[ -n "${INFRATERNAL_ZIG:-}" ]]; then
+    # Only the nix output of nix/zig.nix may stand in for the checked download:
+    # a registered, verified store path with that derivation's name. A version
+    # string alone proves nothing, so any other directory is refused (#328 P3-2).
+    zig_store="$(realpath -- "$INFRATERNAL_ZIG" 2>/dev/null)" || zig_store=""
+    [[ "$zig_store" =~ ^/nix/store/[0-9a-df-np-sv-z]{32}-infraternal-zig-${version//./\\.}-unpacked$ ]] || {
+        printf 'INFRATERNAL_ZIG must be the nix store output of nix/zig.nix\n' >&2; exit 1; }
+    command -v nix-store >/dev/null || {
+        printf 'INFRATERNAL_ZIG needs nix-store to verify it\n' >&2; exit 1; }
+    nix-store --verify-path "$zig_store" >/dev/null 2>&1 || {
+        printf 'INFRATERNAL_ZIG failed nix store verification\n' >&2; exit 1; }
+    [[ "$("$zig_store/zig" version)" == "$version" ]] || {
+        printf 'INFRATERNAL_ZIG is not Zig %s\n' "$version" >&2; exit 1; }
+    # Copied, not linked: Zig finds its lib directory through its own resolved
+    # path, and the native remap flags (.cargo/musl-cc.sh) cover only the
+    # target directory. A link would put /nix/store paths into the binaries
+    # and make nix-shell builds differ from downloaded-Zig builds.
+    cp -R -- "$zig_store/." "$staging/"
+    chmod -R u+w -- "$staging"
+else
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        "https://ziglang.org/download/$version/$archive" -o "$staging/zig.tar.xz"
+    # macOS has shasum but no sha256sum outside the nix shell.
+    if command -v sha256sum >/dev/null; then
+        printf '%s  %s\n' "$checksum" "$staging/zig.tar.xz" | sha256sum --check --status
+    else
+        printf '%s  %s\n' "$checksum" "$staging/zig.tar.xz" | shasum -a 256 --check --status
+    fi
+    tar -xJf "$staging/zig.tar.xz" --strip-components=1 -C "$staging"
+    rm "$staging/zig.tar.xz"
+fi
 rm -rf -- "$destination"
 mv "$staging" "$destination"

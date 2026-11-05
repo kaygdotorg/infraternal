@@ -15,6 +15,9 @@ case "${TARGET:?Cargo target required}" in
     aarch64-unknown-linux-musl) vt_target=aarch64-linux-musl ;;
     x86_64-unknown-linux-gnu) vt_target=x86_64-linux-gnu ;;
     aarch64-unknown-linux-gnu) vt_target=aarch64-linux-gnu ;;
+    # The macOS shim links the same engine natively; the archive is static and
+    # needs no SDK framework (D94, #328).
+    aarch64-apple-darwin) vt_target=aarch64-macos ;;
     *) printf 'unsupported libghostty-vt target: %s\n' "$TARGET" >&2; exit 1 ;;
 esac
 vt_tools="$target_root/vt-tools"
@@ -41,7 +44,14 @@ key="$( { sha256sum "$root/crates/infraternal-shim/native/snapshot.zig" "$root/c
 cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
 exec 9> "$cache_dir/lock"
-flock 9
+if command -v flock > /dev/null; then
+    flock 9
+else
+    # macOS has flock(2) but no flock(1) (util-linux). The lock belongs to the
+    # open file description, so it stays held by this shell's descriptor 9
+    # after the short-lived locker exits.
+    perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or die "fd 9: $!"; flock($f, LOCK_EX) or die "flock: $!"'
+fi
 if [[ -f "$cache_dir/native/lib/libghostty-vt.a" ]]; then
     rm -rf -- "$output/native"
     ln -s "$cache_dir/native" "$output/native"
@@ -412,5 +422,9 @@ cd "$source_dir"
     -Dtarget="$vt_target" -Demit-xcframework=false -Dapp-runtime=none \
     --prefix "$cache_dir/native" --cache-dir "$cache_dir/zig-cache" \
     --global-cache-dir "$vt_tools/zig-cache"
+# The shim links only the static archive. Zig also installs a shared library,
+# and macOS's linker prefers it to the archive for -lghostty-vt (there is no
+# -Bstatic), which would make binaries load @rpath/libghostty-vt.dylib.
+rm -f -- "$cache_dir"/native/lib/libghostty-vt*.dylib "$cache_dir"/native/lib/libghostty-vt.so*
 rm -rf -- "$output/native"
 ln -s "$cache_dir/native" "$output/native"

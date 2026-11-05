@@ -249,7 +249,7 @@ fn outcome(
             // not create stay; say which, so nobody removes them by hand (#235).
             for object in left {
                 message.push(' ');
-                message.push_str(&infraternal_plugin_remote::uninstall::left_line(object));
+                message.push_str(&infraternal_plugin_remote::left_line(object));
             }
             (message, None)
         }
