@@ -42,6 +42,48 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 // only detects a hang, well inside the server's 60 s connect budget (#29).
 // The same bound applies to macOS shims (#328).
 const LAUNCH: Duration = Duration::from_secs(30);
+/// How long a failed launch keeps trying to reach the detached shim it started. A shim that missed its
+/// Hello is slow rather than gone, and one that binds late has no socket yet, so cleanup waits for it
+/// here, on its own bound, after the caller has stopped waiting.
+#[cfg(target_os = "linux")]
+const CLEANUP: Duration = Duration::from_secs(10);
+/// The cleanup budget when the runtime is already shutting down: the process is stopping, so wait less.
+#[cfg(target_os = "linux")]
+const SHUTDOWN_CLEANUP: Duration = Duration::from_secs(2);
+/// What one cleanup may spend. `retry` bounds waiting for a shim to bind or to answer; `total` bounds the
+/// whole cleanup, every inner wait included, so no nesting of handshakes can outlast it.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct Budget {
+    /// How long to keep asking a shim to close while it binds or answers.
+    retry: Duration,
+    /// The hard bound on the whole cleanup.
+    total: Duration,
+}
+/// A cleanup on a running runtime: the retry window, then the close and the exit observation.
+#[cfg(target_os = "linux")]
+const NORMAL: Budget = Budget {
+    retry: CLEANUP,
+    total: Duration::from_secs(14),
+};
+/// A cleanup run by `Abandoned::drop` while the process is stopping.
+#[cfg(target_os = "linux")]
+const SHUTDOWN: Budget = Budget {
+    retry: SHUTDOWN_CLEANUP,
+    total: SHUTDOWN_CLEANUP,
+};
+/// How long a stopping infraternal agent waits for launch cleanups still running.
+#[cfg(target_os = "linux")]
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(4);
+
+/// The hang bound for one launch, on every platform. Linux tests shorten it per thread to reach the failure path.
+fn launch_bound() -> Duration {
+    #[cfg(all(test, target_os = "linux"))]
+    if let Some(bound) = tests::LAUNCH_BOUND.with(std::cell::Cell::get) {
+        return bound;
+    }
+    LAUNCH
+}
 
 /// How long manager detection may wait for `systemctl show-environment`.
 ///
@@ -83,16 +125,37 @@ impl Manager {
         }
     }
 
+    /// The manager for this launch. `cell` keeps only a probe that answered;
+    /// a probe that timed out stands for this launch alone.
+    pub async fn resolve(cell: &tokio::sync::OnceCell<Self>) -> Self {
+        Self::resolve_with(cell, Self::probe).await
+    }
+
+    /// `resolve` with the probe supplied, so a test can stall or answer it without a service manager.
+    pub(crate) async fn resolve_with<F, Fut>(cell: &tokio::sync::OnceCell<Self>, probe: F) -> Self
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Option<Self>>,
+    {
+        // `get_or_try_init` serializes concurrent first launches and leaves the
+        // cell empty on `Err`, so the next launch probes again.
+        cell.get_or_try_init(|| async { probe().await.ok_or(()) })
+            .await
+            .copied()
+            .unwrap_or(Self::Detached)
+    }
+
     /// Probe the applicable manager without trusting environment hints alone.
+    /// `None` means no answer within the probe budget; a refusal is an answer.
     // launchd has no transient scopes: macOS shims always detach themselves.
     #[cfg_attr(
         target_os = "macos",
         allow(clippy::unused_async, clippy::unused_async_trait_impl)
     )]
-    pub async fn detect() -> Self {
+    pub async fn probe() -> Option<Self> {
         #[cfg(target_os = "macos")]
         {
-            Self::Detached
+            Some(Self::Detached)
         }
         #[cfg(target_os = "linux")]
         {
@@ -112,10 +175,12 @@ impl Manager {
                     .status(),
             )
             .await;
-            if available.is_ok_and(|result| result.is_ok_and(|status| status.success())) {
-                if root { Self::System } else { Self::User }
-            } else {
-                Self::Detached
+            match available {
+                Err(_) => None,
+                Ok(Ok(status)) if status.success() => {
+                    Some(if root { Self::System } else { Self::User })
+                }
+                Ok(_) => Some(Self::Detached),
             }
         }
     }
@@ -874,7 +939,6 @@ pub async fn launch(
 /// Fixed private readiness command retains the enrolled account and normal scope.
 /// # Errors
 /// Returns the same validation and launch errors as `launch`.
-#[allow(clippy::too_many_arguments)]
 pub async fn launch_with_readiness(
     exe: &Path,
     state: &Path,
@@ -890,7 +954,6 @@ pub async fn launch_with_readiness(
 /// Launch a literal program through a bounded private stdin pipe, never a shell string or argv secret.
 /// # Errors
 /// Returns invalid program arguments, startup or shim handshake failures.
-#[allow(clippy::too_many_arguments)]
 pub async fn launch_with_command(
     exe: &Path,
     state: &Path,
@@ -925,7 +988,6 @@ pub async fn launch_with_command(
 /// Launch a shim whose shell belongs to an authenticated host login worker.
 /// # Errors
 /// Returns the same validation/launch errors as `launch`.
-#[allow(clippy::too_many_arguments)]
 pub async fn launch_with_login(
     exe: &Path,
     state: &Path,
@@ -959,7 +1021,6 @@ pub async fn launch_with_login(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch_rootless_person(
     exe: &Path,
     state: &Path,
@@ -989,8 +1050,9 @@ pub(crate) async fn launch_rootless_person(
     .await
 }
 
-// Keep the ordered authentication/launch/handshake setup together.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Launch one shim and return its first authenticated session. The ordered authentication, launch and
+/// handshake setup stays together; on Linux a failure or cancellation after the spawn hands the launch to
+/// its own cleanup (`Launch`).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn launch_configured(
     exe: &Path,
@@ -1158,7 +1220,16 @@ async fn launch_configured(
     for (name, value) in infraternal_shim::session_locale_environment() {
         command.env(name, value);
     }
-    let mut child = command
+    // A detaching launch gets a lifeline: the write end of a pipe that the launcher and every process it
+    // forks inherit, and that the shim holds for its whole life. End-of-file on the read end, which stays
+    // here, therefore proves that no process of this launch is left (contracts/shim.md §2).
+    #[cfg(target_os = "linux")]
+    let lifeline = if detached {
+        Some(new_lifeline(&mut command)?)
+    } else {
+        None
+    };
+    let child = command
         .stdin(if program.is_empty() {
             Stdio::null()
         } else {
@@ -1167,30 +1238,568 @@ async fn launch_configured(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    if !program.is_empty() {
-        child
-            .stdin
-            .take()
-            .ok_or(io::ErrorKind::BrokenPipe)?
-            .write_all(&program_bytes)
-            .await?;
+    #[cfg(target_os = "macos")]
+    {
+        // macOS keeps the plain launch: the cleanup guard below is Linux-only (#324).
+        let mut child = child;
+        if !program.is_empty() {
+            child
+                .stdin
+                .take()
+                .ok_or(io::ErrorKind::BrokenPipe)?
+                .write_all(&program_bytes)
+                .await?;
+        }
+        drop(command);
+        let session = await_launch(&path, id, &watch, &mut child, detached).await;
+        // Scope launchers and directly owned login shims live until terminal exit.
+        // Reap independently; waiting here would hold terminal.open until close.
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        return session;
     }
     #[cfg(target_os = "linux")]
-    if let Some(reservation) = &mut reservation {
-        reservation.spawned();
+    {
+        // From here the launch owns a running process, and the guard stops exactly
+        // that launch on EVERY way out other than success: an error, or the caller
+        // dropping this future (automation's 4 s deadline does). The cleanup runs on
+        // its own task and bound, so a cancelled caller cannot cancel it.
+        let record = reservation
+            .as_mut()
+            .and_then(crate::rootless_sessions::Reservation::spawned);
+        let mut launch = Launch {
+            child: Some(child),
+            watch: Some(watch),
+            state: state.to_path_buf(),
+            path,
+            id,
+            manager,
+            name,
+            detached,
+            record,
+            lifeline,
+        };
+        let written = if program.is_empty() {
+            Ok(())
+        } else {
+            match launch.child.as_mut().and_then(|child| child.stdin.take()) {
+                Some(mut stdin) => stdin.write_all(&program_bytes).await,
+                None => Err(io::ErrorKind::BrokenPipe.into()),
+            }
+        };
+        // Command's callbacks retain descriptor duplicates even after spawn. These
+        // must close before awaiting Hello; only the privileged shim owns the lease.
+        drop(command);
+        drop(prestarted);
+        written?;
+        let (Some(child), Some(watch)) = (launch.child.as_mut(), launch.watch.as_ref()) else {
+            return Err(io::Error::other("launch state was released early"));
+        };
+        let session = await_launch(&launch.path, id, watch, child, detached).await?;
+        // Scope launchers and directly owned login shims live until terminal exit.
+        // Reap independently; waiting here would hold terminal.open until close.
+        if let Some(mut child) = launch.child.take() {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+        Ok(session)
     }
-    // Command's callbacks retain descriptor duplicates even after spawn. These
-    // must close before awaiting Hello; only the privileged shim owns the lease.
-    drop(command);
+}
+
+/// A launch whose process has started and whose Hello has not yet been accepted.
+/// Dropping it, on failure or cancellation, hands the launch to `abandon_launch`.
+#[cfg(target_os = "linux")]
+struct Launch {
+    /// The launcher this call spawned; `None` once it has been handed to its reaper (success).
+    child: Option<tokio::process::Child>,
+    /// Rendezvous directory watch for this launch's own Hello wait.
+    watch: Option<SocketReadiness>,
+    /// The state directory, so cleanup can watch the rendezvous directory itself.
+    state: PathBuf,
+    /// This launch's own rendezvous socket.
+    path: PathBuf,
+    /// This launch's own session id, the only identity cleanup may address.
+    id: uuid::Uuid,
+    /// The manager that placed the shim, naming the scope to stop.
+    manager: Manager,
+    /// The simple-form session id used in the scope name.
+    name: String,
+    /// Whether the shim detaches, so its launcher is not the shim and exits before it binds.
+    detached: bool,
+    /// The person-terminal record this launch wrote, retired only once the terminal is proven dead.
+    record: Option<PathBuf>,
+    /// The read end of this launch's lifeline: end-of-file proves no process of the launch remains.
+    lifeline: Option<std::os::fd::OwnedFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Launch {
+    /// Hand everything to a tracked cleanup task. With no runtime to run it on, finish it here.
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        let parts = Parts {
+            child,
+            state: std::mem::take(&mut self.state),
+            path: std::mem::take(&mut self.path),
+            id: self.id,
+            manager: self.manager,
+            name: std::mem::take(&mut self.name),
+            detached: self.detached,
+            record: self.record.take(),
+            lifeline: self.lifeline.take(),
+        };
+        let job = Abandoned {
+            parts: Some(parts),
+            _pending: Pending::new(),
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(abandon_launch(job));
+            }
+            Err(_) => drop(job),
+        }
+    }
+}
+
+/// Everything cleanup addresses, all of it this launch's own.
+#[cfg(target_os = "linux")]
+struct Parts {
+    /// The launcher this launch spawned, unreaped, so its pid cannot be reused.
+    child: tokio::process::Child,
+    /// The state directory holding the rendezvous directory.
+    state: PathBuf,
+    /// This launch's own rendezvous socket.
+    path: PathBuf,
+    /// This launch's own session id.
+    id: uuid::Uuid,
+    /// The manager that placed the shim.
+    manager: Manager,
+    /// The simple-form session id used in the scope name.
+    name: String,
+    /// Whether the shim detaches, so its launcher is not the shim.
+    detached: bool,
+    /// The person-terminal record to retire once the terminal is proven dead.
+    record: Option<PathBuf>,
+    /// The read end of the launch's lifeline, if it detaches; kept as a plain descriptor so it can move to
+    /// the shutdown thread's own runtime.
+    lifeline: Option<std::os::fd::OwnedFd>,
+}
+
+/// A cleanup owned apart from the caller's future. If it is dropped before it finished (the runtime shut
+/// down with it queued or suspended), `Drop` runs the same cleanup to completion on a dedicated thread.
+#[cfg(target_os = "linux")]
+struct Abandoned {
+    /// What is left to clean up; `None` once cleanup has run to its end.
+    parts: Option<Parts>,
+    /// Counts this cleanup in the process-wide tracker until it is dropped.
+    _pending: Pending,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Abandoned {
+    /// The shutdown path: finish a cleanup that never completed, on its own thread and runtime, within
+    /// `SHUTDOWN` in total. No part of it depends on the runtime that was just dropped. The launch's parts
+    /// are shared with the thread rather than moved into it, so if the thread cannot start, they are still
+    /// here to be stopped synchronously.
+    fn drop(&mut self) {
+        let Some(parts) = self.parts.take() else {
+            return;
+        };
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(parts)));
+        let worker = {
+            let shared = shared.clone();
+            spawn_cleanup_thread(move || {
+                let Some(mut parts) = shared.lock().ok().and_then(|mut parts| parts.take()) else {
+                    return;
+                };
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(cleanup(&mut parts, SHUTDOWN)),
+                    // No reactor to wait on: still stop the launcher this launch owns.
+                    Err(_) => stop_now(&mut parts),
+                }
+            })
+        };
+        match worker {
+            Ok(worker) => {
+                let _ = worker.join();
+            }
+            Err(_) => {
+                if let Some(mut parts) = shared.lock().ok().and_then(|mut parts| parts.take()) {
+                    stop_now(&mut parts);
+                }
+            }
+        }
+    }
+}
+
+/// Start the shutdown cleanup thread. A test can make this fail, to prove the launcher is still stopped.
+#[cfg(target_os = "linux")]
+fn spawn_cleanup_thread(
+    work: impl FnOnce() + Send + 'static,
+) -> io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if tests::FAIL_CLEANUP_THREAD.with(std::cell::Cell::get) {
+        return Err(io::Error::other("injected cleanup thread failure"));
+    }
+    std::thread::Builder::new()
+        .name("launch-cleanup".into())
+        .spawn(work)
+}
+
+/// Kill the launcher this launch owns and reap it, blocking for at most about 100 ms. Used where no
+/// runtime is available to wait on. It signals only this unreaped child, so it can never reach another
+/// process, and it leaves the socket and the person record alone.
+#[cfg(target_os = "linux")]
+fn stop_now(parts: &mut Parts) {
+    let _ = parts.child.start_kill();
+    for _ in 0..50 {
+        if !matches!(parts.child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Cleanups queued or running, so a stopping agent can wait for them.
+#[cfg(target_os = "linux")]
+struct Cleanups {
+    /// Cleanups not yet dropped.
+    pending: std::sync::atomic::AtomicUsize,
+    /// Woken when the last pending cleanup is dropped.
+    idle: tokio::sync::Notify,
+}
+
+/// The process-wide count of launch cleanups, so a stopping agent can wait for them.
+#[cfg(target_os = "linux")]
+static CLEANUPS: Cleanups = Cleanups {
+    pending: std::sync::atomic::AtomicUsize::new(0),
+    idle: tokio::sync::Notify::const_new(),
+};
+
+/// One cleanup in the tracker; dropping it ends the count.
+#[cfg(target_os = "linux")]
+struct Pending;
+
+#[cfg(target_os = "linux")]
+impl Pending {
+    /// Count a new cleanup.
+    fn new() -> Self {
+        CLEANUPS
+            .pending
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Pending {
+    /// End the count and wake a draining agent when it was the last one.
+    fn drop(&mut self) {
+        if CLEANUPS
+            .pending
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            CLEANUPS.idle.notify_waiters();
+        }
+    }
+}
+
+/// Whether any launch cleanup is still queued or running. A stopping agent asks this first, so the common
+/// case (none) adds no future, and no allocation, to its channel loop.
+pub(crate) fn cleanups_pending() -> bool {
     #[cfg(target_os = "linux")]
-    drop(prestarted);
-    let session = await_launch(&path, id, &watch, &mut child, detached).await;
-    // Scope launchers and directly owned login shims live until terminal exit.
-    // Reap independently; waiting here would hold terminal.open until close.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-    session
+    {
+        CLEANUPS.pending.load(std::sync::atomic::Ordering::SeqCst) != 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Wait, bounded, for launch cleanups still running. A stopping infraternal agent calls this so a
+/// runtime that outlives it finishes what it queued; a runtime that does not is covered by
+/// `Abandoned::drop`.
+#[cold]
+#[inline(never)]
+pub(crate) async fn drain_cleanups() {
+    #[cfg(target_os = "linux")]
+    {
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_DRAIN;
+        loop {
+            let mut idle = std::pin::pin!(CLEANUPS.idle.notified());
+            idle.as_mut().enable();
+            if CLEANUPS.pending.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, idle).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Run one abandoned launch's cleanup on its own task. See `cleanup` for what it may do.
+#[cfg(target_os = "linux")]
+async fn abandon_launch(mut job: Abandoned) {
+    if let Some(parts) = job.parts.as_mut() {
+        cleanup(parts, NORMAL).await;
+    }
+    job.parts = None;
+}
+
+/// Stop what a failed or cancelled launch started, by identity and never by name: the launcher child
+/// this launch spawned and has not reaped, its own scope, and the shim on its own rendezvous, authenticated
+/// by the session id in Hello. The shim's exit hangs up its PTY, which ends the shell.
+///
+/// A terminal counts as dead only on proof, and the launcher's exit is not proof when the shim detaches:
+/// the launcher is then the first of three processes and the shim a grandchild with no handle here.
+/// - A non-detaching launcher IS the shim: killed and reaped through its own child.
+/// - A detached launch carries a lifeline (a pipe whose write end every process of the launch holds):
+///   end-of-file on it proves no process of the launch is left (`prove_detached_dead`).
+/// - Otherwise only the shim's own authenticated exit counts (`close_detached`).
+///
+/// Without proof the rendezvous and the person record are left alone: a live terminal keeps its discovery
+/// and its revocation attribution. A detached shim's socket is unlinked only on lifeline proof, once no
+/// process of the launch is left to own it (`prove_detached_dead`). The launcher this
+/// launch owns is stopped and reaped either way, because killing it cannot touch the shim, and the whole
+/// cleanup, every inner wait and the final stop of the owned launcher included, ends within `budget.total`.
+#[cfg(target_os = "linux")]
+async fn cleanup(parts: &mut Parts, budget: Budget) {
+    // Everything, the final stop of the owned launcher included, sits under the one deadline.
+    let proven = timeout(budget.total, async {
+        let proven = stop_launch(parts, budget.retry).await;
+        // Whatever the outcome, the owned launcher does not outlive its cleanup.
+        let _ = parts.child.start_kill();
+        let _ = reaped(&mut parts.child, HANDSHAKE).await;
+        proven
+    })
+    .await
+    .unwrap_or(false);
+    // Past the deadline only a signal can still be sent: waiting would spend time the budget no longer
+    // has. The signal is not a wait, and a killed launcher is reaped when its handle drops.
+    let _ = parts.child.start_kill();
+    if proven && let Some(record) = parts.record.take() {
+        let _ = fs::remove_file(record);
+    }
+}
+
+/// Stop one launch; whether its terminal is proven dead.
+#[cfg(target_os = "linux")]
+async fn stop_launch(parts: &mut Parts, retry: Duration) -> bool {
+    let cap = HANDSHAKE.min(retry);
+    if !parts.detached {
+        let _ = timeout(cap, stop_scope(parts.manager, &parts.name)).await;
+        let _ = parts.child.start_kill();
+        let reaped = reaped(&mut parts.child, cap).await;
+        if reaped {
+            // The process that owned them is reaped; these are its own leftovers.
+            let _ = fs::remove_file(&parts.path);
+            let _ = fs::remove_file(parts.path.with_extension("stop"));
+        }
+        return reaped;
+    }
+    if matches!(parts.child.try_wait(), Ok(None)) {
+        // Killing the original launcher cannot touch a shim: its only remaining work is to exit. Do it
+        // first so it cannot outlive this cleanup; it proves nothing about the shim.
+        let _ = parts.child.start_kill();
+        let _ = reaped(&mut parts.child, cap).await;
+    }
+    prove_detached_dead(parts, retry).await
+}
+
+/// How a detached launch's death was shown.
+#[cfg(target_os = "linux")]
+enum Proof {
+    /// End-of-file on the lifeline: no process of the launch holds it any more.
+    Lifeline,
+    /// The shim answered an authenticated close and then showed its exit.
+    Close,
+}
+
+/// Wait up to `retry` for proof that no shim of this launch is alive. Two things can give it: end-of-file
+/// on the lifeline (every process that inherited the write end, the shim included, is gone, whether
+/// it exited, was killed or never started), or the shim's own authenticated exit after a close request.
+/// Nothing else counts, not the launcher's exit and not a missing socket (the shim may bind late). On
+/// lifeline proof the dead shim's own leftover socket files are removed, because nothing else will.
+#[cfg(target_os = "linux")]
+async fn prove_detached_dead(parts: &Parts, retry: Duration) -> bool {
+    let lifeline = async {
+        match &parts.lifeline {
+            Some(descriptor) => lifeline_eof(descriptor).await,
+            None => std::future::pending().await,
+        }
+    };
+    let closing = close_detached(&parts.state, &parts.path, parts.id, retry);
+    let waiting = async {
+        tokio::pin!(lifeline, closing);
+        let mut closing_ended = false;
+        loop {
+            tokio::select! {
+                () = &mut lifeline => return Proof::Lifeline,
+                observed = &mut closing, if !closing_ended => {
+                    if observed {
+                        return Proof::Close;
+                    }
+                    closing_ended = true;
+                }
+            }
+        }
+    };
+    match timeout(retry, waiting).await {
+        Ok(Proof::Lifeline) => {
+            let _ = fs::remove_file(&parts.path);
+            let _ = fs::remove_file(parts.path.with_extension("stop"));
+            true
+        }
+        Ok(Proof::Close) => true,
+        Err(_) => false,
+    }
+}
+
+/// A fresh lifeline for `command`'s child: returns the read end to keep here. The write end reaches the
+/// child by number (`--lifeline-fd`) and is not held by this process once the command is dropped.
+#[cfg(target_os = "linux")]
+fn new_lifeline(command: &mut Command) -> io::Result<std::os::fd::OwnedFd> {
+    let (read, write) =
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
+    let number = infraternal_shim::inherit_lifeline(command.as_std_mut(), &write)?;
+    command.arg("--lifeline-fd").arg(number.to_string());
+    Ok(read)
+}
+
+/// Resolve when the lifeline's read end reaches end-of-file; never on any other outcome. The read end is
+/// duplicated and registered on the current runtime, so this works on a shutdown thread's own runtime.
+#[cfg(target_os = "linux")]
+async fn lifeline_eof(descriptor: &std::os::fd::OwnedFd) {
+    let Ok(copy) = descriptor.try_clone() else {
+        return std::future::pending().await;
+    };
+    let Ok(receiver) = tokio::net::unix::pipe::Receiver::from_owned_fd(copy) else {
+        return std::future::pending().await;
+    };
+    let mut buffer = [0_u8; 16];
+    loop {
+        if receiver.readable().await.is_err() {
+            return std::future::pending().await;
+        }
+        match receiver.try_read(&mut buffer) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => return std::future::pending().await,
+        }
+    }
+}
+
+/// Reap an owned child within `bound`, by polling its status: this does not depend on the child
+/// reaper of whichever runtime spawned it, which may already be gone at shutdown.
+#[cfg(target_os = "linux")]
+async fn reaped(child: &mut tokio::process::Child, bound: Duration) -> bool {
+    // A test can make the reap stall for its whole bound, as a launcher stuck in uninterruptible sleep would.
+    #[cfg(test)]
+    if tests::REAP_STALLS.with(std::cell::Cell::get) {
+        // sleep: the test hook simulates a reap that cannot finish; this sleep is its whole bound
+        tokio::time::sleep(bound).await;
+        return false;
+    }
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Stop this launch's own scope; the name holds only the fresh session id. A missing manager is a no-op.
+#[cfg(target_os = "linux")]
+async fn stop_scope(manager: Manager, name: &str) {
+    if matches!(manager, Manager::Detached) {
+        return;
+    }
+    let mut stop = isolated(Path::new("systemctl"));
+    if matches!(manager, Manager::User) {
+        stop.arg("--user");
+    }
+    let _ = timeout(
+        HANDSHAKE,
+        stop.args(["stop", &format!("infraternal-session-{name}.scope")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+}
+
+/// Ask a detached shim to close its session, however late it binds or answers, within `budget`. The
+/// directory watch is made before the first connect, so a bind cannot slip between the two. Returns
+/// whether the shim's own exit was observed: its rendezvous gone or sealed by an exit record, after an
+/// authenticated close.
+#[cfg(target_os = "linux")]
+async fn close_detached(state: &Path, path: &Path, id: uuid::Uuid, budget: Duration) -> bool {
+    let Ok(watch) = SocketReadiness::new(state) else {
+        return false;
+    };
+    let deadline = tokio::time::Instant::now() + budget;
+    while tokio::time::Instant::now() < deadline {
+        match connect_sequenced(path.to_path_buf(), id.into_bytes()).await {
+            Ok(mut session) => {
+                let closed = session.caps & infraternal_shim::frame::CLOSE_SESSION != 0
+                    && timeout(HANDSHAKE, send(&mut session.peer, &Frame::CloseSession))
+                        .await
+                        .is_ok_and(|sent| sent.is_ok());
+                return closed && exit_observed(path).await;
+            }
+            // Slow, not gone: ask again.
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+            // Not bound yet: sleep on the directory watch, never poll.
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.kind() == io::ErrorKind::ConnectionRefused =>
+            {
+                let refused = error.kind() == io::ErrorKind::ConnectionRefused;
+                if !matches!(
+                    tokio::time::timeout_at(deadline, watch.changed(refused)).await,
+                    Ok(Ok(()))
+                ) {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// Whether the shim's exit shows within `HANDSHAKE` after a close request: the rendezvous is gone or
+/// carries a sealed exit record.
+#[cfg(target_os = "linux")]
+async fn exit_observed(path: &Path) -> bool {
+    let until = tokio::time::Instant::now() + HANDSHAKE;
+    loop {
+        if !path.exists() || matches!(infraternal_shim::ended::read(path), Ok(Some(_))) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Wait for a launched shim's Hello. Progress, not a short clock, decides failure: the launcher's exit before the
@@ -1202,9 +1811,12 @@ async fn await_launch(
     launcher: &mut tokio::process::Child,
     detached: bool,
 ) -> io::Result<Session> {
-    timeout(LAUNCH, wait_for_hello(path, id, watch, launcher, detached))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
+    timeout(
+        launch_bound(),
+        wait_for_hello(path, id, watch, launcher, detached),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
 }
 
 /// Connect once per readiness event until the shim says Hello, or its

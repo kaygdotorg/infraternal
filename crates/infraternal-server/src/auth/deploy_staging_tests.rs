@@ -180,7 +180,6 @@ async fn driver(root: &std::path::Path, config: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "exclusive perf VM staging proof; requires signed run artifacts and systemd"]
-#[allow(clippy::too_many_lines)]
 async fn signed_deploy_preserves_passkey_ca_and_live_sessions() {
     std::panic::set_hook(Box::new(|failure| {
         if let Some(location) = failure.location() {

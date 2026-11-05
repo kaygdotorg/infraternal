@@ -271,7 +271,6 @@ fn render(config: &Config, ipv6: bool, installed: Ownership) -> String {
     )
 }
 // A rotation temporarily owns both local addresses; keep their ingress fences in one batch.
-#[allow(clippy::too_many_lines)]
 fn render_with_aliases(
     config: &Config,
     ipv6: bool,
@@ -661,6 +660,7 @@ mod tests {
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
+                            access_ssh: None,
                         },
                     )
                 })

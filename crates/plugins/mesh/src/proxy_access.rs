@@ -91,6 +91,7 @@ mod tests {
             },
             inbound,
             outbound: TrafficPolicy::None,
+            access_ssh: None,
         }
     }
 

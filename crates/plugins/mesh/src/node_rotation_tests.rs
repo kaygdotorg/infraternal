@@ -23,7 +23,6 @@ fn command(program: &str, args: &[&str]) {
     );
 }
 // Keep the retained address, recovery fence and packet observation in one scenario.
-#[allow(clippy::too_many_lines)]
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
     node.up().unwrap();

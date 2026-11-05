@@ -14,6 +14,9 @@ pub use action::{
 pub mod admission;
 pub mod channel;
 pub mod host_name;
+pub mod login_access;
+pub mod mesh_ssh_files;
+pub mod mesh_view;
 pub mod node_channel;
 pub mod present;
 pub mod release_version;
@@ -26,6 +29,7 @@ pub mod datagrams;
 pub mod path;
 pub mod routing;
 pub mod server_path;
+pub mod stop_hook;
 #[cfg(feature = "socket-host")]
 pub mod storage;
 pub mod streams;

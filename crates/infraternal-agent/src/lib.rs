@@ -1,4 +1,8 @@
 //! Runs on each managed host and owns its local PTY and engine work [9][13][18].
+//!
+//! Benchmark probes are deliberately absent from the normal library, including
+//! release builds. The release exclusion check compiles a consumer against it.
+
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
 pub mod cli;
@@ -43,6 +47,7 @@ pub use infraternal_plugin_remote::remote_tls;
 #[cfg(target_os = "linux")]
 pub mod automation;
 pub mod sessions;
+pub mod shutdown;
 pub mod startup_guard;
 pub mod transport;
 #[cfg(any(test, feature = "native-streams"))]
@@ -73,7 +78,11 @@ pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Resu
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    block_on_io(&runtime, Box::pin(daemon::run(fd, state)))
+    // Components' host state goes when this daemon ends, by return or SIGTERM (#221).
+    block_on_io(
+        &runtime,
+        Box::pin(shutdown::run_then_stop(daemon::run(fd, state))),
+    )
 }
 
 /// Share the reactor poll loop across process entrypoints (D243, #189).
@@ -98,3 +107,10 @@ mod remote_native_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod process_exits_tests;
+
+/// Test and benchmark measurements with an injected slow file writer (D351).
+#[cfg(any(test, feature = "bench-probes"))]
+pub mod runtime_probe;
+/// Functional coverage for the optional responsiveness helper.
+#[cfg(test)]
+mod runtime_probe_tests;

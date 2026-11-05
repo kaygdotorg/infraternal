@@ -1045,7 +1045,6 @@ impl SocketPlugins {
         });
         Some(self.entries.len() - 1)
     }
-    #[allow(clippy::too_many_lines)]
     fn control(&mut self) -> Option<&mpsc::Sender<Bytes>> {
         if self.controller.is_none() {
             let (tx, mut rx) = mpsc::channel::<Bytes>(4);
@@ -1095,7 +1094,6 @@ impl SocketPlugins {
         self.controller.as_ref().map(|controller| &controller.0)
     }
     /// Route only declared actions/topics, retaining bounded independent queues.
-    #[allow(clippy::too_many_lines)]
     pub fn dispatch(&mut self, wire: &Bytes, encode: &mut Vec<u8>) -> Dispatch {
         let Ok(decoded) = decode_muxed_frame(wire) else {
             return Dispatch::Unhandled;
@@ -1344,6 +1342,25 @@ pub async fn compiled(pool: &sqlx::SqlitePool) -> Result<PluginRuntime, PluginEr
     )
     .await
 }
+/// The control-plane ports for the mesh compiler: the remote listener's
+/// bound port, TCP and UDP, read each time a snapshot is taken.
+#[cfg(all(feature = "mesh", feature = "remote"))]
+fn control_plane(
+    hosts: crate::remote_runtime::RemoteHosts,
+) -> infraternal_plugin_mesh::store::ControlPlane {
+    use infraternal_plugin_mesh::policy::rules::{Port, Protocol, TrafficPolicy};
+    Arc::new(move || {
+        hosts.listener_port().map_or(TrafficPolicy::None, |number| {
+            TrafficPolicy::Ports(
+                [Protocol::Tcp, Protocol::Udp]
+                    .into_iter()
+                    .map(|protocol| Port { protocol, number })
+                    .collect(),
+            )
+        })
+    })
+}
+
 pub(crate) async fn compiled_with_hosts(
     pool: &sqlx::SqlitePool,
     public_origin: Option<&str>,
@@ -1356,6 +1373,12 @@ pub(crate) async fn compiled_with_hosts(
     ));
     #[cfg(all(feature = "mesh", feature = "remote"))]
     let mesh_service = mesh_plugin.service();
+    // The server's own node admits every member only to the infraternal
+    // control plane; everything else there follows Access (D352, J236 P2-1).
+    #[cfg(all(feature = "mesh", feature = "remote"))]
+    mesh_service
+        .dataplane()
+        .set_control_plane(control_plane(hosts.clone()));
     let plugins: Vec<Arc<dyn Plugin>> = vec![
         #[cfg(feature = "ssh")]
         Arc::new(crate::preferred_accounts::AccountsPlugin::new(pool.clone())),
@@ -1367,7 +1390,7 @@ pub(crate) async fn compiled_with_hosts(
         Arc::new(infraternal_plugin_remote::inventory::InventoryPlugin(
             Arc::new(crate::remote_inventory::Source {
                 pool: pool.clone(),
-                hosts,
+                hosts: hosts.clone(),
                 #[cfg(feature = "mesh")]
                 mesh: Some(mesh_service),
             }),
@@ -1379,6 +1402,12 @@ pub(crate) async fn compiled_with_hosts(
         ))),
         #[cfg(feature = "desktop")]
         Arc::new(infraternal_plugin_desktop::server::DesktopServer::new(50)),
+        #[cfg(all(feature = "ssh", feature = "mesh", feature = "remote"))]
+        Arc::new(crate::mesh_ssh::MeshSshPlugin::new(
+            pool.clone(),
+            hosts.ca_source(),
+            public_origin,
+        )),
     ];
     PluginRuntime::new(plugins, "server")
         .with_store(pool.clone())

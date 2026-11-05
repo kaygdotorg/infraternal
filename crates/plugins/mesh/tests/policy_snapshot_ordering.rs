@@ -58,6 +58,7 @@ fn install(fallback: bool) -> (Node, Config) {
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,
+                access_ssh: None,
             },
         )]),
         #[cfg(feature = "mesh-dns-spike")]

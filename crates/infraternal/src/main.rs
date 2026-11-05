@@ -96,6 +96,23 @@ fn main() -> ExitCode {
     run_invocation()
 }
 
+/// The mesh SSH node component for one infraternal agent state directory [D235], #221.
+#[cfg(all(feature = "ssh", feature = "plugin-mesh", target_os = "linux"))]
+fn mesh_ssh_service(state: &std::path::Path) -> Option<infraternal_agent::plugins::MeshService> {
+    let node = infraternal_plugin_ssh::mesh_node::MeshSshNode::new(
+        state.to_owned(),
+        infraternal_agent::logins::account_uid,
+    )
+    .ok()?;
+    let observer = node.mesh_observer();
+    let stop = node.stop_hook();
+    Some(infraternal_agent::plugins::MeshService {
+        plugin: Box::new(node),
+        observer,
+        stop,
+    })
+}
+
 /// Re-enter the same action dispatch if both replacement exec attempts are refused.
 fn run_invocation() -> ExitCode {
     if harden_startup().is_err() {
@@ -111,6 +128,10 @@ fn run_invocation() -> ExitCode {
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
         return ExitCode::FAILURE;
     }
+    // Mesh SSH lives in a crate that depends on the infraternal agent, so it
+    // joins every agent registry through this hook (#221).
+    #[cfg(all(feature = "ssh", feature = "plugin-mesh", target_os = "linux"))]
+    infraternal_agent::plugins::set_mesh_service(mesh_ssh_service);
     #[cfg(all(feature = "remote", target_os = "linux"))]
     if let Some(result) =
         infraternal_plugin_remote::runtime_lock::command(&mut std::env::args_os().skip(1))
@@ -197,7 +218,7 @@ fn dispatch_selected_action(
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
 
-#[allow(clippy::too_many_lines)] // Keep feature-gated command handlers beside their registry mappings.
+// Keep feature-gated command handlers beside their registry mappings.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -1480,6 +1501,7 @@ fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, Ex
     }
 }
 
+/// Run the hidden `__shim` command: decode its options and start the shim.
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
@@ -1506,6 +1528,15 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             readiness: matches.get_flag("readiness"),
             command_stdin: matches.get_flag("command_stdin"),
             retain_output: matches.get_flag("retain_output"),
+            // Refuse a number that is not a descriptor, rather than dropping it: a shim must never
+            // start without the lifeline its launcher asked it to hold (contracts/shim.md §2).
+            lifeline_fd: matches
+                .get_one::<i64>("lifeline_fd")
+                .map(|descriptor| {
+                    i32::try_from(*descriptor)
+                        .map_err(|_| "--lifeline-fd is out of range".to_owned())
+                })
+                .transpose()?,
         })
     })() {
         Ok(options) => options,
@@ -2014,7 +2045,6 @@ mod setup_token_tests {
 }
 
 /// Validate identifiers before forking; clamp exited-screen retention inside the shim.
-#[allow(clippy::too_many_arguments)]
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
@@ -2251,7 +2281,6 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
 /// Startup reads an invitation once; reconnects use only the private local identity.
 #[cfg(feature = "remote")]
 // Keep enrollment and its ordered status reporting in one CLI lifecycle.
-#[allow(clippy::too_many_lines)]
 fn run_remote_agent(
     action: AgentAction,
     has_fd: bool,

@@ -203,7 +203,6 @@ impl Frame {
         wire.extend_from_slice(second);
         Ok(())
     }
-    #[allow(clippy::too_many_lines)]
     fn encode_mode<const APPEND: bool>(&self, wire: &mut Vec<u8>) -> io::Result<()> {
         #[cfg(feature = "process-per-user")]
         if let Self::Output(seq, bytes) = self {

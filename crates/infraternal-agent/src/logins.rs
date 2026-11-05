@@ -89,6 +89,16 @@ pub fn account(preferred: &str) -> io::Result<(User, bool)> {
     Ok((user, fallback))
 }
 
+/// The UID of an existing account on this host, for login access checks
+/// [D235]. An account the database does not know, or a failed lookup, is `None`.
+#[must_use]
+pub fn account_uid(name: &str) -> Option<u32> {
+    User::from_name(name)
+        .ok()
+        .flatten()
+        .map(|user| user.uid.as_raw())
+}
+
 /// Hold the launch fence through the shell's durable reservation and readiness.
 pub(crate) async fn rootless_launch_guard(
     state: &Path,
@@ -133,7 +143,6 @@ pub fn name(person: uuid::Uuid, uid: u32) -> String {
 /// `None` keeps the inherited own-account login on a rootless host [D18].
 /// `state` is the infraternal agent's resolved state directory; see
 /// [`runtime_root`] for where person locks and revocation markers live.
-#[allow(clippy::too_many_lines)]
 pub async fn ensure(
     exe: &Path,
     state: &Path,

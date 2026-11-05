@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)] // Keep writer contention and socket ordering in one regression.
 async fn review_pending_mesh_write_keeps_control_dispatch_available() {
     let _guard = SERIAL.lock().await;
     let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
@@ -153,7 +152,6 @@ async fn review_pending_mesh_write_keeps_control_dispatch_available() {
 
 /// Multiple waiting writers must leave SQLite slots for shared control authority.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)] // Keep pool saturation and socket progress in one regression.
 async fn pending_mesh_writers_preserve_authority_pool_capacity() {
     let _guard = SERIAL.lock().await;
     let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(

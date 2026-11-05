@@ -2029,10 +2029,6 @@ enum CachedHelper {
 }
 
 // Reuse one real-filesystem fixture for completion and component cancellation.
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep the real shell fixture and same-attempt admission assertions together."
-)]
 async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHelper) {
     use infraternal_plugin_api::{ComponentPlugin, PluginState};
     use infraternal_plugin_ssh::{

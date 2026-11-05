@@ -36,8 +36,78 @@ fn both_families_preserve_the_destination_and_guard_the_internal_port() {
         )));
         assert!(rules.contains(&format!("{family} daddr {address} tcp dport 22022 drop")));
         assert!(!rules.contains("flush ruleset"));
-        assert!(!rules.contains("accept; }"));
+        // Chains default to accept; no rule may add an accept verdict of its own.
+        assert!(
+            !rules
+                .lines()
+                .filter(|line| line.starts_with("add rule"))
+                .any(|line| line.contains("accept"))
+        );
     }
+}
+
+/// nftables 1.0.9 (Ubuntu 24.04) applies `create table X { …; chain … }` as
+/// the table and its comment only, silently dropping the chains, and still
+/// exits 0: measured on dev-02 (#221 comment 78954). Every chain and rule is
+/// therefore its own command in the one atomic transaction, and the table
+/// creation alone keeps `create`, which fails if the table already exists.
+#[test]
+fn every_chain_and_rule_is_its_own_command() {
+    let script = render("10.254.0.1".parse().unwrap(), "infraternal0", 34711);
+    let table = "infraternal_ssh4_0afe0001";
+    let first = script.lines().next().unwrap();
+    assert_eq!(
+        first,
+        format!("create table inet {table} {{ comment \"infraternal.ssh.v1\"; }}")
+    );
+    for chain in ["incoming", "local", "guard"] {
+        assert!(
+            script.contains(&format!("add chain inet {table} {chain} {{ type ")),
+            "{chain}: {script}"
+        );
+        assert!(
+            script.contains(&format!("add rule inet {table} {chain} ")),
+            "{chain}: {script}"
+        );
+    }
+    assert!(!script.contains("chain incoming {\n"));
+}
+
+/// An install is accepted only if every chain and rule is really there, so a
+/// tool that drops statements silently cannot leave a bare table that admits
+/// mesh TCP/22 to the host's own sshd.
+#[test]
+fn an_install_missing_a_chain_or_rule_is_detected() {
+    let table = |items: &[serde_json::Value]| {
+        let mut all = vec![serde_json::json!({"metainfo": {"version": "1.0.9"}})];
+        all.push(serde_json::json!({"table": {"family": "inet", "name": "t", "comment": "infraternal.ssh.v1"}}));
+        all.extend_from_slice(items);
+        serde_json::json!({ "nftables": all })
+    };
+    let chain =
+        |name: &str| serde_json::json!({"chain": {"family": "inet", "table": "t", "name": name}});
+    let rule =
+        |name: &str| serde_json::json!({"rule": {"family": "inet", "table": "t", "chain": name}});
+    let complete = table(&[
+        chain("incoming"),
+        chain("local"),
+        chain("guard"),
+        rule("incoming"),
+        rule("local"),
+        rule("guard"),
+        rule("guard"),
+    ]);
+    assert!(installed(&complete));
+    assert!(!installed(&table(&[])));
+    assert!(!installed(&table(&[
+        chain("incoming"),
+        chain("local"),
+        chain("guard"),
+        rule("local"),
+        rule("guard"),
+        rule("guard"),
+    ])));
+    assert!(!installed(&serde_json::json!({})));
 }
 
 fn ip(args: &[&str]) {
@@ -251,4 +321,82 @@ fn namespace_incoming_redirect_and_internal_port_refusal() {
         drop(control);
         assert!(peer.0.wait().unwrap().success());
     }
+}
+
+/// A run that ended without cleanup leaves its owned table behind (measured
+/// on dev-02, #221): the next run of the component recovers it and binds,
+/// while a table without our marker is still never touched.
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn namespace_restart_recovers_a_retained_owned_table() {
+    ip(&["link", "set", "lo", "up"]);
+    ip(&["address", "add", "10.254.0.3/32", "dev", "lo"]);
+    let address: IpAddr = "10.254.0.3".parse().unwrap();
+    let _host = TcpListener::bind("0.0.0.0:22").unwrap();
+    // The previous run's rules, as if it stopped without removing them.
+    transaction(&render(address, "infraternal0", 40_000)).unwrap();
+    assert!(presence(address).unwrap());
+    assert!(MeshPort::bind(address, "infraternal0").is_err());
+    let mut port = MeshPort::bind_after_restart(address, "infraternal0").unwrap();
+    assert_eq!(port.mode(), PortMode::Redirect);
+    assert_delivery(&port, SocketAddr::new(address, 22));
+    port.stop().unwrap();
+    assert!(!presence(address).unwrap());
+    // A same-named table without our marker stays foreign.
+    transaction(&format!("create table inet {} {{ }}\n", table(address))).unwrap();
+    assert!(MeshPort::bind_after_restart(address, "infraternal0").is_err());
+    transaction(&format!("delete table inet {}\n", table(address))).unwrap();
+}
+
+/// J236 P2-2 (#221): the redirect's internal port is one only root can bind,
+/// so after an abrupt exit no local account can take mesh TCP/22 over through
+/// the leftover table. A rootless infraternal agent never redirects at all,
+/// and neither does a host that lets every account bind low ports.
+#[test]
+fn internal_ports_are_privileged_and_rootless_never_redirects() {
+    let ports: Vec<u16> = internal_ports(0, 1024).unwrap().collect();
+    assert!(ports.contains(&1022), "{ports:?}");
+    assert!(ports.iter().all(|port| *port < 1024 && *port != 22));
+    assert_eq!(
+        internal_ports(1000, 1024).err().map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    // A host that lowered the bound below the whole range gets no redirect.
+    assert_eq!(
+        internal_ports(0, 0).err().map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert!(internal_ports(0, 1000).unwrap().all(|port| port < 1000));
+}
+
+/// The real redirect, end to end in a namespace: its internal port is below
+/// the kernel's unprivileged bound, and with that bound lowered to 0 the bind
+/// is refused and no table is left behind.
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn namespace_the_redirect_listens_only_on_a_privileged_port() {
+    const BOUND: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+    ip(&["link", "set", "lo", "up"]);
+    ip(&["address", "add", "10.254.0.5/32", "dev", "lo"]);
+    let address: IpAddr = "10.254.0.5".parse().unwrap();
+    let _host = TcpListener::bind("0.0.0.0:22").unwrap();
+    let start: u16 = std::fs::read_to_string(BOUND)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut port = MeshPort::bind(address, "infraternal0").unwrap();
+    assert_eq!(port.mode(), PortMode::Redirect);
+    let internal = port.listener().unwrap().local_addr().unwrap().port();
+    assert!(
+        internal < start,
+        "internal port {internal} is not below {start}"
+    );
+    assert_delivery(&port, SocketAddr::new(address, 22));
+    port.stop().unwrap();
+    std::fs::write(BOUND, "0").unwrap();
+    let refused = MeshPort::bind(address, "infraternal0");
+    std::fs::write(BOUND, start.to_string()).unwrap();
+    assert!(refused.is_err());
+    assert!(!presence(address).unwrap());
 }

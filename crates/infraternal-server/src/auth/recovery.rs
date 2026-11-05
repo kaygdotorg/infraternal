@@ -479,7 +479,6 @@ pub(super) async fn record(
 
 // Recovery delay/lifetime use the same elapsed clock as admission and status.
 // The short, process-local ceremony separately retains its wall expiry policy.
-#[allow(clippy::too_many_arguments)] // Keep both capability policies inside the consuming writer transaction.
 pub(super) async fn complete(
     auth: &Auth,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

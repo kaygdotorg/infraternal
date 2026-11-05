@@ -45,6 +45,8 @@ struct Loaded {
 pub(crate) struct Snapshot {
     loaded: Loaded,
     default_dns_suffix: String,
+    /// The server's infraternal control-plane ports when this snapshot was taken.
+    control_plane: TrafficPolicy,
 }
 impl Snapshot {
     pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
@@ -61,6 +63,7 @@ impl Snapshot {
             default,
             endpoints,
             &self.default_dns_suffix,
+            &self.control_plane,
         );
         let mut config = compiled.map_err(|error| match error {
             MeshError::UnknownNode => MeshApiError::NotFound,
@@ -439,7 +442,16 @@ pub struct Store {
     config_diagnostics: StorageDiagnostics,
     preview_diagnostics: StorageDiagnostics,
     default_dns_suffix: String,
+    /// Where the server's infraternal control plane listens; shared by every
+    /// clone, set once by the server ([`Self::set_control_plane`]).
+    control_plane: std::sync::Arc<std::sync::OnceLock<ControlPlane>>,
 }
+
+/// The ports every member may reach on the server's own node: the server's
+/// infraternal control-plane listeners (D215). Read again for each snapshot,
+/// because a fresh server starts its listener only after its CA is set up.
+pub type ControlPlane = std::sync::Arc<dyn Fn() -> TrafficPolicy + Send + Sync>;
+
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
@@ -461,7 +473,15 @@ impl Store {
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
             preview_diagnostics: StorageDiagnostics::new("mesh.default.preview"),
             default_dns_suffix,
+            control_plane: std::sync::Arc::default(),
         }
+    }
+
+    /// Tell every clone of this store where the server's control plane
+    /// listens. Only the first call takes effect. Until it is set, the
+    /// server's node admits peers only as Access allows (D352, #221).
+    pub fn set_control_plane(&self, control_plane: ControlPlane) {
+        let _ = self.control_plane.set(control_plane);
     }
     /// Attach an authenticated host using its approved inventory binding, never a public key as authority.
     /// # Errors
@@ -658,6 +678,18 @@ impl Store {
             .ok()??;
         u64::try_from(id).ok().map(NodeId)
     }
+    /// The deployment's IPv4 range, for services that match mesh addresses
+    /// (the mesh SSH client configuration, #221). `None` before the first allocation.
+    pub async fn ipv4_range(&self) -> Option<crate::policy::model::Ipv4Range> {
+        let serialized: Option<String> =
+            sqlx::query_scalar("SELECT allocation_json FROM mesh_dataplane WHERE singleton=1")
+                .fetch_optional(&self.pool)
+                .await
+                .ok()??;
+        let state: State = serde_json::from_str(&serialized?).ok()?;
+        state.settings.ipv4.validate().ok()?;
+        Some(state.settings.ipv4)
+    }
     /// Compile a consistent current configuration and persist every new allocation before delivery.
     /// # Errors
     /// Refuses absent server identity, invalid inventory, allocation exhaustion or storage errors.
@@ -671,6 +703,10 @@ impl Store {
         self.load().await.map(|loaded| Snapshot {
             loaded,
             default_dns_suffix: self.default_dns_suffix.clone(),
+            control_plane: self
+                .control_plane
+                .get()
+                .map_or(TrafficPolicy::None, |control_plane| control_plane()),
         })
     }
     /// Page directed reach losses at one revision without allocating the pair matrix.
@@ -712,9 +748,31 @@ impl Store {
             if offset > total {
                 return Err(MeshApiError::InvalidInput);
             }
+            // SSH and every other service on the server's own host follow
+            // Access (owner, #221, D352): closing the default closes them for
+            // every node without its own arrow there. Control-plane reach to the server is never lost, so
+            // these are listed apart from `loses_reach`: on the first page
+            // only, at most one entry per node, within the same frame budget.
+            let server = coordinator.server();
+            let mut ssh_to_server = Vec::new();
+            let mut bytes = 2usize;
+            if reducing && offset == 0 {
+                for node in views.keys().filter(|node| **node != server) {
+                    if coordinator.granted(*node, server) == TrafficPolicy::None {
+                        let length = serde_json::to_vec(node)
+                            .map_err(|_| storage_error("node serialization failed"))?
+                            .len()
+                            + 1;
+                        if bytes + length > (MAX_MESH_FRAME_LEN - 1024) / 2 {
+                            break;
+                        }
+                        bytes += length;
+                        ssh_to_server.push(*node);
+                    }
+                }
+            }
             let mut skip = offset;
             let mut pairs = Vec::new();
-            let mut bytes = 2usize;
             'sources: for (node, view) in views.iter().filter(|_| reducing) {
                 let count = losses(view);
                 if skip >= count {
@@ -754,7 +812,7 @@ impl Store {
                 offset: delivered,
             });
             Ok(
-                serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"next_cursor":cursor}),
+                serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"loses_ssh_to_server":ssh_to_server,"next_cursor":cursor}),
             )
         }).await
     }
@@ -781,7 +839,6 @@ impl Store {
             .await
     }
     // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
-    #[allow(clippy::too_many_lines)]
     async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await

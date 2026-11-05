@@ -36,7 +36,6 @@ async fn census(
 
 // Keep the scale setup and timed retirement sequence in one benchmark oracle.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 #[ignore = "real daemon artifact and 200 shim exits; run with INFRATERNAL_BIN in a weighted scope"]
 async fn shim_sigkill_to_server_inventory_latency() {
     let binary =

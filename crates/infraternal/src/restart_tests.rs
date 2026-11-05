@@ -6,75 +6,38 @@ mod deleted_path_review;
 
 use super::*;
 use crate::restart_binary::fixture::{
-    RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all, stripped_test_image,
+    ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all,
+    stripped_test_image,
 };
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
-struct Directory(PathBuf, Option<PathBuf>);
-impl Directory {
-    fn new() -> Self {
-        const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
-        let socket_directory = format!("c{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let default_root = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/infraternal");
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
-            .map_or_else(|| default_root.clone(), PathBuf::from);
-        let path = root.join("restart-tests").join(&socket_directory);
-        let needs_short_root = path
-            .join("restart/control.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            > MAX_UNIX_SOCKET_PATH_BYTES;
-        // Executable fixtures must retain trusted HOME ancestry and share the
-        // running image's filesystem for hard-link checks. Only sockets use /tmp.
-        let directory = if needs_short_root {
-            Self(
-                default_root.join("restart-tests").join(socket_directory),
-                Some(nix::unistd::mkdtemp("/tmp/ir-XXXXXX").unwrap()),
-            )
-        } else {
-            Self(path, None)
-        };
-        let socket = directory.state().join("restart/control.sock");
-        assert!(
-            socket.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES,
-            "restart fixture socket path exceeds Linux sun_path: {} bytes",
-            socket.as_os_str().as_encoded_bytes().len()
-        );
-
-        // The running unit-test image is also used as a replacement fixture.
-        // A shared build umask can make it group-writable, which the production
-        // validator correctly refuses; keep this private test image executable.
-        std::fs::set_permissions(
-            std::env::current_exe().unwrap(),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&directory.0)
-            .unwrap();
-        directory
-    }
-
-    fn state(&self) -> &Path {
-        self.1.as_deref().unwrap_or(&self.0)
-    }
-}
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-        if let Some(root) = &self.1 {
-            let _ = std::fs::remove_dir_all(root);
-        }
-    }
-}
-
-/// Copies `source` to an owner-only executable at `target`, which tests then exec.
+/// Copy one executable into a private fixture path without inheriting a writable mode.
 fn copy_private_image(source: &Path, target: &Path) {
     crate::test_executable::copy(source, target, 0o700);
+}
+
+/// Run snapshot-dependent assertions in a compact image, keeping production admission unchanged.
+fn run_in_stripped_image(name: &str) -> bool {
+    let source = std::env::current_exe().unwrap();
+    if std::fs::metadata(&source).unwrap().len() <= crate::restart_image::MAX_IMAGE {
+        return false;
+    }
+    let child = std::process::Command::new(stripped_test_image(&source))
+        .args(["--exact", name, "--nocapture"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let output = bounded_output(child, HANG_BOUND, name);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }
 
 /// Sign a stripped byte copy at an owner-only path so admission exercises release verification.
@@ -84,21 +47,24 @@ fn copy_signed_private_image(source: &Path, target: &Path) -> Signed {
     Signed::new(target.to_owned(), &bytes)
 }
 
-fn bounded_output(
-    mut child: std::process::Child,
+/// Collect a private child with a hang bound, retaining cleanup ownership on every panic.
+pub(super) fn bounded_output(
+    child: std::process::Child,
     deadline: Duration,
     description: &str,
 ) -> std::process::Output {
+    let mut child = ChildGuard::new(child);
     let until = std::time::Instant::now() + deadline;
     loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
+        if child.process().try_wait().unwrap().is_some() {
+            return child.output();
         }
         if std::time::Instant::now() >= until {
-            let process_group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+            let process_group =
+                nix::unistd::Pid::from_raw(i32::try_from(child.process().id()).unwrap());
             let _ = nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGKILL);
-            let _ = child.kill();
-            let output = child.wait_with_output().unwrap();
+            let _ = child.process().kill();
+            let output = child.output();
             panic!(
                 "{description} exceeded {deadline:?}; status={}\nstdout:\n{}\nstderr:\n{}",
                 output.status,
@@ -133,8 +99,14 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     assert!(!directory.state().join("restart/control.sock").exists());
 }
 
+/// Check default-path admission in a compact running image and refuse untrusted paths.
 #[tokio::test]
 async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
+    if run_in_stripped_image(
+        "restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths",
+    ) {
+        return;
+    }
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();
     let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
@@ -218,8 +190,14 @@ fn replacement_never_exports_to_a_general_purpose_binary() {
     );
 }
 
+/// Check cold rootless replacement and recovery snapshots independently of debug information.
 #[test]
 fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
+    if run_in_stripped_image(
+        "restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode",
+    ) {
+        return;
+    }
     if nix::unistd::Uid::effective().is_root() {
         return;
     }
@@ -349,8 +327,14 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
     );
 }
 
+/// Keep control alive after invalid replies and test valid reloads in a compact image.
 #[tokio::test]
 async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
+    if run_in_stripped_image(
+        "restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control",
+    ) {
+        return;
+    }
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();
     let path = control.path.clone();
@@ -383,6 +367,7 @@ async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
     assert!(!requested.unwrap());
 }
 
+/// Reopen a replaced installation path using a compact executable rather than debug sections.
 #[test]
 fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
     const NAME: &str =
@@ -406,9 +391,8 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
     }
     let directory = Directory::new();
     let installed = directory.0.join("installed");
-    // A hard link is an executable fixture without a write window after copy.
-    // The child unlinks only this name, leaving the cached image intact. The
-    // stripped image keeps the child's copy of /proc/self/exe small (#355).
+    // Link a compact image without a write window after publication.
+    // The child unlinks only this name, leaving the cargo test image intact.
     std::fs::hard_link(
         stripped_test_image(&std::env::current_exe().unwrap()),
         &installed,
@@ -475,6 +459,7 @@ async fn default_restart_opens_the_receiver_target_exactly_once() {
     );
 }
 
+/// Bound runtime shutdown in an owned compact child with a blocking waiter.
 #[test]
 fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
     const NAME: &str = "restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter";
@@ -505,14 +490,15 @@ fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
         let _ = child.wait();
         return;
     }
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME, "--nocapture"])
-        .env("INFRATERNAL_RUNTIME_BOUND_TEST", "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut child =
+        std::process::Command::new(stripped_test_image(&std::env::current_exe().unwrap()))
+            .args(["--exact", NAME, "--nocapture"])
+            .env("INFRATERNAL_RUNTIME_BOUND_TEST", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
     let deadline = std::time::Instant::now() + HANG_BOUND;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -573,6 +559,7 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
     );
 }
 
+/// Record authenticated request metadata from a compact restart fixture.
 #[test]
 fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
     const NAME: &str = "restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome";
@@ -756,6 +743,7 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Refuse FIFO replacement from a compact child without waiting for a writer.
 #[test]
 fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
     const NAME: &str =
@@ -772,14 +760,15 @@ fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
         nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME])
-        .env("INFRATERNAL_REVIEW_FIFO", &fifo)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child =
+        std::process::Command::new(stripped_test_image(&std::env::current_exe().unwrap()))
+            .args(["--exact", NAME])
+            .env("INFRATERNAL_REVIEW_FIFO", &fifo)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
     // A separate process bounds a synchronous open; an async timeout on the
     // same runtime thread cannot fire while that thread waits inside open(2).
     let deadline = std::time::Instant::now() + HANG_BOUND;

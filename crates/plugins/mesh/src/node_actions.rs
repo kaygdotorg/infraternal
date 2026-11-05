@@ -648,7 +648,6 @@ mod tests {
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
     // Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
-    #[allow(clippy::too_many_lines)]
     fn applied_server_route_and_observed_link_survive_only_explicit_component_up() {
         use crate::{
             dataplane::{DefaultPolicy, Peer, PeerPolicy},
@@ -699,6 +698,7 @@ mod tests {
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )]),
             merged: std::collections::BTreeMap::new(),
@@ -822,6 +822,7 @@ mod tests {
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )]),
             merged: BTreeMap::new(),
@@ -1064,6 +1065,7 @@ mod peer_page_tests {
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
+                            access_ssh: None,
                         },
                     )
                 })

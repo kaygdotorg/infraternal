@@ -24,6 +24,8 @@ target_root="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target_root" = /* ]] || target_root="$root/$target_root"
 # Some suites keep fixture state under the target directory, as in verify.
 export CARGO_TARGET_DIR="$target_root"
+# /bin/bash is 3.2 on macOS even when the development shell supplies a newer Bash.
+python3 scripts/test-path-remap-flags.py
 scripts/auth-toolchain
 scripts/test-auth-toolchain-pin
 printf 'zig %s\n' "$("$target_root/auth-tools/zig/zig" version)"

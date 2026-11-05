@@ -6,7 +6,6 @@ use std::net::Ipv4Addr;
 /// This calls the production receive adapter with public opaque fixtures. It
 /// measures neither QUIC authentication nor end-to-end terminal delivery.
 #[tokio::test(flavor = "current_thread")]
-#[allow(clippy::too_many_lines)]
 #[ignore = "Component timing on the authorized perf VM under its fair lock; not transport acceptance."]
 async fn repeated_mesh_ingress_cost_at_one_thousand_retained_histories() {
     const PEERS: u16 = 1000;

@@ -62,6 +62,7 @@ fn configure(node: &mut Node) {
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )
         })

@@ -1070,7 +1070,14 @@ impl Backend for RemoteBackend {
                     .await
                     .map_err(|_| unavailable())?
                 };
-                confirm_preferred_login(&actor, person, account).await?;
+                let grant = crate::login_access::grant(
+                    &self.issuer.store().0,
+                    &authority.owner,
+                    Some(host),
+                )
+                .await
+                .map_err(|_| unavailable())?;
+                confirm_preferred_login(&actor, person, account, grant).await?;
                 self.authorize(authority).await?;
             }
             self.finish_completion(&authority.owner, authority.batch, host)
@@ -1167,10 +1174,11 @@ async fn confirm_preferred_login(
     actor: &EmbeddedAgent,
     person: Uuid,
     account: String,
+    grant: crate::embedded::LoginGrant,
 ) -> Result<(), Failure> {
     // The PTY probe alone bypasses preferred account/PAM admission. Reuse the
     // exact preparation path used before real terminal opens, after restoration.
-    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, Some(account)))
+    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, Some(account), grant))
         .await.map_err(|_| unavailable())?.map_err(|_| Failure::install(
             "The host connected, but its preferred account login could not open. Check the host login path and try again."))
 }
@@ -2052,10 +2060,6 @@ mod tests {
         .expect("invitation was not committed within the test hang bound");
     }
     #[tokio::test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep every durable ownership dimension in one ledger fixture."
-    )]
     async fn automatic_cleanup_requires_the_exact_failed_server_host_binding() {
         let f = fixture(true).await;
         let target = Target {
@@ -2412,7 +2416,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn replacing_a_journaled_old_install_reissues_its_identity_without_a_duplicate_host() {
         let f = fixture(true).await;
         sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)")

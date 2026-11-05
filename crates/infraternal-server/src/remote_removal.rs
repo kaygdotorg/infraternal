@@ -206,7 +206,7 @@ impl Removal {
         .await
         .map_err(|_| crate::auth::Error::Denied)?
     }
-    #[allow(clippy::too_many_lines)] // Keep authority recheck, revocation, audit and cleanup inside one transaction.
+    // Keep authority recheck, revocation, audit and cleanup inside one transaction.
     async fn publish(
         &self,
         entry: Pending,

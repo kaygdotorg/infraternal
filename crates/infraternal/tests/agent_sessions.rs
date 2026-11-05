@@ -211,7 +211,6 @@ async fn detached_shim_is_discovered_and_replays_from_the_last_observed_offset()
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[allow(clippy::too_many_lines)]
 async fn restart_discovery_keeps_a_live_shim_and_drops_clean_exit_and_sigkill() {
     let fixture = fixture_state::fixture_state();
     let base = fixture.clone();

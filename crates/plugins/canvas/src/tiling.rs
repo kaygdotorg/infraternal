@@ -125,7 +125,6 @@ fn settle(columns: &mut [Value]) -> Result<(), ()> {
 /// `Err` (a refusal, with `columns` possibly half-edited) when the anchor is
 /// missing, `column_id` already exists, or a number would overflow; callers
 /// must therefore work on a copy and keep it only on success.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn split(
     columns: &mut Vec<Value>,
     anchor: &str,

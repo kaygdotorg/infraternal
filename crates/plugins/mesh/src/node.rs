@@ -112,7 +112,7 @@ fn proven_kernel_link(
     link.engine == EngineKind::Kernel
         && proof.is_some_and(|recorded| match link.owner {
             Some(owner) => owner == recorded,
-            None => Device::identity().is_ok_and(|(key, _)| key == recorded),
+            None => Device::identity_at(link.ifindex).is_ok_and(|(key, _)| key == recorded),
         })
 }
 
@@ -373,7 +373,7 @@ impl Node {
         if let Some(link) = adopted_kernel {
             node.owned = true;
             node.kernel_owner = kernel_proof;
-            let identity = Device::identity();
+            let identity = Device::identity_at(link.ifindex);
             // A process can stop after marking the interface but before setting
             // its key. With no saved configuration there are no retained mesh
             // sessions to preserve; remove that incomplete owned startup only,
@@ -802,11 +802,14 @@ impl Node {
                     hook();
                 }
                 if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                    // Delete exactly the link this call created: `down` proves links by the
+                    // shared name, which may no longer lead to ours (#260 J242).
+                    let _ = Device::delete_ifindex(created);
                     let _ = self.down();
                     return Err(error);
                 }
                 let prepared = (|| {
-                    let (device_key, port) = Device::identity()?;
+                    let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
@@ -1018,7 +1021,6 @@ impl Node {
         Ok(())
     }
     // Keep version/binding checks and complete staging visible before installation.
-    #[allow(clippy::too_many_lines)]
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
         if !chunk.access_updates.is_empty()
             && (chunk.from_version.is_none()
@@ -1228,7 +1230,6 @@ impl Node {
         Ok(())
     }
     // Keep the apply/fence/rollback transaction and its failure ordering visible together.
-    #[allow(clippy::too_many_lines)]
     fn apply(&mut self, config: Config) -> io::Result<()> {
         #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
         let dns_records = crate::dns::Records::from_config(&config)?;
@@ -1775,6 +1776,7 @@ mod tests {
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
+                            access_ssh: None,
                         },
                     )
                 })

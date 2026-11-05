@@ -101,7 +101,6 @@ async fn authority_read_stall_beyond_the_wait_still_fails_closed() {
 /// order, output the host wrote during it reaches the browser in order, and the
 /// socket stays open. Production read deadline (25 ms) throughout.
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep each stall beside its input and output order checks.
 async fn terminal_stream_survives_authority_stalls_without_loss_or_reorder() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;

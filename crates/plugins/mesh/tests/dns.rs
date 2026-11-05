@@ -32,6 +32,7 @@ fn query(name: &str, qtype: u16) -> Vec<u8> {
     wire
 }
 
+/// A one-peer mesh configuration under the `internal` DNS suffix, shared by the DNS tests.
 fn config() -> Config {
     let peer = NodeId(1);
     Config {
@@ -46,6 +47,7 @@ fn config() -> Config {
             ipv6: "fd66:6821:bc63:834e::2".parse().unwrap(),
         },
         default_policy: DefaultPolicy::Deny,
+        exposure: None,
         peers: BTreeMap::from([(
             peer,
             PeerPolicy {
@@ -59,6 +61,7 @@ fn config() -> Config {
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
+                access_ssh: None,
             },
         )]),
         peer_names: BTreeMap::from([(peer, "build-01".to_owned())]),
@@ -448,7 +451,6 @@ async fn exchange(
 }
 
 // Keep the coordinator policy and both sides of the UDP boundary in one regression.
-#[allow(clippy::too_many_lines)]
 #[test]
 fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
     use infraternal_plugin_mesh::{
