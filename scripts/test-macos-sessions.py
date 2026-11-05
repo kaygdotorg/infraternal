@@ -22,8 +22,9 @@ ZDOTDIR and a marker variable in the environment (#328 P1, P3-1). It then:
    GUI audit session), the other is a plain shell in a session of its own
    (`Background`, audit user = the person, no agent socket, neither the
    daemon's nor the GUI audit session);
-3. checks that neither shell nor shim holds the planted descriptor and that no
-   planted variable reached the shells;
+3. checks that neither shell nor shim holds the planted descriptor, that no
+   planted variable reached the shells, and that the root shims run with the
+   allow-listed environment only (no planted variable and no PATH);
 4. stops the infraternal agent abruptly (SIGKILL), starts the job again and
    reattaches: the same shell process answers;
 5. replaces the installed binary with `--upgrade` (atomic rename), starts the
@@ -383,6 +384,13 @@ def main():
                 leaked = [path for path in holders(holder) if path.endswith('/root-only')]
                 assert not leaked, ('the planted root descriptor is held', holder, leaked)
         print('PASS: no shell or shim holds the planted root descriptor; no planted variable reached a shell')
+        for session in (gui, plain):
+            shim = shim_pid(state, session)
+            environment = subprocess.run(['/bin/ps', '-E', '-ww', '-o', 'command=', '-p', str(shim)],
+                                         capture_output=True, text=True, check=True).stdout
+            leaked = [name for name in [*PLANTED_ENV, 'PATH'] if f' {name}=' in environment]
+            assert not leaked, ('planted variables reached a root shim', shim, leaked)
+        print('PASS: the root shims run with the allow-listed environment only (no planted variable, no PATH)')
 
         # An abrupt stop of the infraternal agent; the shims keep their shells.
         agent.kill()

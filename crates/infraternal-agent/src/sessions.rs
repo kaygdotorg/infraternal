@@ -664,6 +664,113 @@ impl DirectoryEvents {
     }
 }
 
+/// The variables a shim may inherit from the infraternal agent, from `vars`.
+///
+/// A root shim must not run with whatever its agent was started with: a
+/// planted `DYLD_LIBRARY_PATH`, `BASH_ENV`, `ENV` or `PATH` would follow it into
+/// a root process (#328 J215 P3-1). Allowed: locale (`LANG`, `LC_*`) and, on
+/// Linux, what `systemd-run --user` needs to reach the person's manager
+/// (`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`), plus `ZDOTDIR`, which the
+/// shim forwards to a shell only after checking its directory
+/// (`shell_startup::zsh_directory`).
+fn shim_environment(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    vars.into_iter()
+        .filter(|(name, _)| shim_variable(name))
+        .collect()
+}
+
+/// Whether one variable is on the shim's allow-list (see `shim_environment`).
+fn shim_variable(name: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let name = name.as_bytes();
+    name == b"LANG"
+        || name.starts_with(b"LC_")
+        || (cfg!(target_os = "linux")
+            && matches!(
+                name,
+                b"XDG_RUNTIME_DIR" | b"DBUS_SESSION_BUS_ADDRESS" | b"ZDOTDIR"
+            ))
+}
+
+/// Resolve a launcher by name through the agent's own `PATH`, so the shim it
+/// starts needs no `PATH` of its own. An unresolved name is returned as is.
+fn on_path(name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+#[cfg(test)]
+mod shim_environment_tests {
+    //! The shim's environment allow-list (#328, J215 P3-1).
+    use super::*;
+    use std::ffi::OsString;
+
+    /// Hostile variables planted in the agent's environment never reach a
+    /// shim; locale does, and on Linux the user-manager variables do.
+    #[test]
+    fn only_allow_listed_variables_reach_the_shim() {
+        let planted = [
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "BASH_ENV",
+            "ENV",
+            "PATH",
+            "HOME",
+            "J146_PLANTED",
+        ];
+        let kept = ["LANG", "LC_ALL", "LC_CTYPE"];
+        let linux_only = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "ZDOTDIR"];
+        let vars = planted
+            .iter()
+            .chain(&kept)
+            .chain(&linux_only)
+            .map(|name| (OsString::from(name), OsString::from("x")));
+        let passed: Vec<String> = shim_environment(vars)
+            .into_iter()
+            .map(|(name, _)| name.into_string().unwrap())
+            .collect();
+        for name in planted {
+            assert!(!passed.iter().any(|p| p == name), "{name} reached the shim");
+        }
+        for name in kept {
+            assert!(passed.iter().any(|p| p == name), "{name} was dropped");
+        }
+        for name in linux_only {
+            assert_eq!(
+                passed.iter().any(|p| p == name),
+                cfg!(target_os = "linux"),
+                "{name}"
+            );
+        }
+    }
+
+    /// A launcher found on the agent's `PATH` resolves to its absolute path.
+    #[test]
+    fn launchers_resolve_through_the_agents_path() {
+        assert!(
+            on_path("sh").is_absolute(),
+            "sh is on every test host's PATH"
+        );
+        assert_eq!(
+            on_path("no-such-launcher-j146"),
+            PathBuf::from("no-such-launcher-j146")
+        );
+    }
+}
+
 // Exclude the trusted leg-B descriptor at direct exec. Anonymous images need
 // /proc/self/exe to resolve before any intermediate program replaces the image.
 // CLOEXEC also preserves Command's private exec-error pipe if it occupies fd3.
@@ -912,7 +1019,7 @@ async fn launch_configured(
     let mut command = if matches!(manager, Manager::Detached) {
         isolated(exe)
     } else {
-        let mut command = isolated(Path::new("systemd-run"));
+        let mut command = isolated(&on_path("systemd-run"));
         if matches!(manager, Manager::User) {
             command.arg("--user");
         }
@@ -926,6 +1033,12 @@ async fn launch_configured(
     // the login handoff below admits by name; never a stray agent descriptor,
     // such as a shim or plugin connection authenticated as root (#328 P1).
     infraternal_shim::inherit_only_standard_descriptors(command.as_std_mut());
+    // ...and only the allow-listed environment: never the agent's DYLD_*,
+    // LD_*, BASH_ENV, ENV, PATH or other inherited variables (#328 J215 P3-1).
+    // Locale values are added again below from the host's locale files.
+    command
+        .env_clear()
+        .envs(shim_environment(std::env::vars_os()));
     command
         .args([
             "__shim",
