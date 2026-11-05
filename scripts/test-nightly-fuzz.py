@@ -22,6 +22,19 @@ fuzz = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(fuzz)
 
 
+def load_script(name):
+    """Import an extension-less script next to this file."""
+    import importlib.machinery
+    loader = importlib.machinery.SourceFileLoader(name.replace('-', '_'), str(Path(__file__).with_name(name)))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+installer = load_script('install-nightly-fuzz')
+service = load_script('nightly-fuzz-service')
+
+
 class FakeForgejo:
     """Just enough of the issue API to exercise the reporter, with failure switches.
 
@@ -208,6 +221,45 @@ class NightlyFuzz(unittest.TestCase):
         self.assertTrue(issubclass(urllib.error.URLError, OSError))
         self.assertTrue(issubclass(TimeoutError, OSError))
 
+
+class SeparateAccount(unittest.TestCase):
+    """The token and the fuzz run live in their own account, not claude's (79752 P2-3)."""
+
+    def test_units(self):
+        """System units, a root-owned fixed helper, and nothing under claude's home."""
+        unit = installer.service_unit()
+        self.assertIn(f'ExecStart={installer.SERVICE_HELPER}', unit)
+        self.assertNotIn('/home/claude', unit)
+        self.assertNotIn('token', unit)
+        self.assertIn('OnCalendar=*-*-* 02:00:00 Asia/Kolkata', installer.timer_unit())
+        self.assertEqual(str(installer.HOME), service.HOME)
+        self.assertEqual(installer.USER, service.USER)
+
+    def test_service_drops_privileges_before_any_repository_code(self):
+        """The slot is taken as claude through runuser; the fuzz pass runs via setpriv as the fuzz user."""
+        from unittest import mock
+        import subprocess
+        holder = mock.MagicMock()
+        holder.stdout.readline.return_value = service.READY
+        with mock.patch.object(service.subprocess, 'Popen', return_value=holder) as popen, \
+                mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertEqual(service.main(), 0)
+        slot = popen.call_args[0][0]
+        self.assertEqual(slot[:4], ['runuser', '-u', 'claude', '--'])
+        fuzz_run = run.call_args[0][0]
+        self.assertEqual(fuzz_run[:2], ['setpriv', '--reuid=infraternal-fuzz'])
+        self.assertIn('--reset-env', fuzz_run)
+        self.assertEqual(run.call_args[1]['cwd'], '/var/lib/infraternal-fuzz/checkout')
+        holder.stdin.write.assert_called_once()
+
+    def test_no_slot_means_no_run(self):
+        """If the slot holder never reports ready, no fuzz code runs and the unit fails."""
+        from unittest import mock
+        holder = mock.MagicMock()
+        holder.stdout.readline.return_value = b''
+        with mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
+                mock.patch.object(service.subprocess, 'run', side_effect=AssertionError('ran without a slot')):
+            self.assertEqual(service.main(), 1)
 
 
 if __name__ == '__main__':

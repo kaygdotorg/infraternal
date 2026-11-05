@@ -648,25 +648,44 @@ change, without deploying anything. Neither replaces the other.
 
 ## 12. Nightly parser fuzzing (D351, #344)
 
-On dev-02, provision an owner-readable mode-0600 Forgejo token file outside the
-checkout, then run `scripts/install-nightly-fuzz --token-file <private-path>`.
-The user timer runs at 02:00 IST, with up to fifteen minutes of jitter, through
-build-slot. Keep the checkout at the reviewed source revision; updating it is
-an explicit maintenance action. Install a nightly Rust toolchain and cargo-fuzz
-before enabling the service. The timer uses `nix develop` for native build
-prerequisites and the nightly compiler explicitly for fuzz instrumentation.
+**Where it runs:** dev-02, as the `infraternal-fuzz` system account, not as
+`claude`. Every branch gated on dev-02 runs as `claude`, so anything `claude`
+can read, a branch can read (review 79752). The fuzz account's home,
+`/var/lib/infraternal-fuzz` (mode 0700), holds the Forgejo token
+(`forgejo-token`, 0600), the pinned checkout, the nightly toolchain and
+cargo-fuzz (`.local/share/infraternal-fuzz/`), corpora, logs, report records
+and `last-run.json` (`.local/state/infraternal-fuzz/`), and the build target.
+The account has no sudo and no login shell.
 
-The 3,600-second mutation budget is divided across all 36 existing targets
-(100 seconds each), serially and at three build jobs. Initial compilation adds
-build time to the first run. Corpora, target logs, upload-deduplication records
-and `last-run.json` live under `~/.local/state/infraternal-fuzz/`; the build
-target lives in `~/.cache/infraternal-fuzz/target`, outside the idle-target sweep. Failures are
-filed as Forgejo issues with exact inputs attached; a failed upload resumes on
-the next run. Tokens are read from a file, never passed in argv or printed.
-Use `systemctl --user start infraternal-fuzz.service` for a foreground-observed
-manual run and `journalctl --user -u infraternal-fuzz.service` for its results.
-A shorter `--budget-seconds 36` run exercises all targets for one second each;
-it is a smoke check and is not an hour of fuzzing.
+**What runs as root:** only `/usr/local/libexec/infraternal-fuzz-service`, a
+fixed copy of `scripts/nightly-fuzz-service` started by the system unit. It
+takes one shared build slot by starting `claude`'s build-slot script through
+`runuser` (so that script runs as `claude`), then drops to the fuzz account
+with `setpriv` and runs the checkout's `scripts/nightly-fuzz.py` in the dev
+shell. No repository code runs as root.
+
+**Install or update** (as root; on dev-02, `sudo` from the meshtest account):
+`scripts/install-nightly-fuzz --ref <reviewed commit> [--token-from <file>]
+[--migrate-from <old home>]`. `--token-from` moves a token into place and
+deletes the source; it is never printed. The checkout is cloned from the
+public repository and pinned to `--ref`; moving it is an explicit reinstall,
+so the token is only ever exposed to reviewed code. The system timer runs at
+02:00 IST with up to fifteen minutes of jitter.
+
+**Budget and reports:** the 3,600-second budget is split across all 36
+targets (100 s each), serially at three build jobs; the first run also
+compiles. A failing input is filed on its target's open issue (found by a
+hidden marker, so a lost response cannot open a duplicate), with the exact
+bytes attached as a zip; a failed upload resumes on the next run. A known
+input found again counts as a finding, detected from libFuzzer's `Test unit
+written to` line, since artifacts are named by content hash. The unit exits 0
+when a night only found and filed inputs, and 1 for real errors (a target that
+failed without writing an input, or a report that could not be filed).
+
+**Operate:** `sudo systemctl start infraternal-fuzz.service` for a manual run,
+`journalctl -u infraternal-fuzz.service` for results (system unit, so both
+need root). A `--budget-seconds 36` run of `nightly-fuzz.py` exercises all
+targets for one second each; it is a smoke check, not an hour of fuzzing.
 
 ## 13. Runtime responsiveness probes (D351, #344)
 
