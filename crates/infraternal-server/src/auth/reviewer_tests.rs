@@ -180,7 +180,6 @@ async fn reviewer_http_expired_ceremony_cannot_complete_after_writer_wait() {
     expired_finish_after_writer_wait(true).await;
 }
 
-#[allow(clippy::too_many_lines)] // Keep writer contention and final authority assertions together.
 async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
     let _guard = SERIAL.lock().await;
     let (f, path) = disk_fixture().await;

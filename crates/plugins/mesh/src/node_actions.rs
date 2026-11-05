@@ -648,7 +648,6 @@ mod tests {
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
     // Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
-    #[allow(clippy::too_many_lines)]
     fn applied_server_route_and_observed_link_survive_only_explicit_component_up() {
         use crate::{
             dataplane::{DefaultPolicy, Peer, PeerPolicy},

@@ -4,7 +4,6 @@ use nix::sys::time::TimeValLike;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[test]
-#[allow(clippy::too_many_lines)] // Keep the complete role/scope/output matrix together.
 fn service_states_are_truthful_in_text_and_json() {
     let root = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(

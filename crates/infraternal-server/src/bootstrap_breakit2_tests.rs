@@ -628,10 +628,6 @@ impl SshSession for TimedSession {
     fn trust_lookup(&self) -> Option<String> {
         self.inner.trust_lookup()
     }
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep the test adapter's input classification beside its matching receipts."
-    )]
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let step = breakit2_step(script, &input);
@@ -1282,7 +1278,6 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
 
 #[tokio::test]
 #[ignore = "#169 live disposable Docker target; invoke docs/verification/addhost-breakit2/measure.py"]
-#[allow(clippy::too_many_lines)]
 async fn breakit2_live_ssh_install_join_and_terminal() {
     let scratch = PathBuf::from(std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").unwrap());
     let binary = PathBuf::from(std::env::var_os("INFRATERNAL_REMOTE_TEST_BINARY").unwrap());

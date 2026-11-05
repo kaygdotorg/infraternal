@@ -100,7 +100,6 @@ enum OwnedFrame {
 
 impl OwnedFrame {
     // Keep the golden manifest's 17 variants in one exhaustive conversion table.
-    #[allow(clippy::too_many_lines)]
     fn borrowed(&self) -> Frame<'_> {
         match self {
             Self::Hello {

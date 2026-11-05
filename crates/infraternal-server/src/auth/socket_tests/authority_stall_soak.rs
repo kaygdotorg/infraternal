@@ -293,7 +293,6 @@ async fn probe_pool(pool: SqlitePool, until: tokio::time::Instant) -> Vec<u64> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement for #240; run explicitly on the perf VM"]
-#[allow(clippy::too_many_lines)] // One run: setup, stall loop and the report line.
 async fn authority_stall_soak() {
     let _guard = SERIAL.lock().await;
     let secs = setting("SOAK_SECS", 300);

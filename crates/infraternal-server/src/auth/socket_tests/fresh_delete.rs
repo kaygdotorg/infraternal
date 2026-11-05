@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Exercise refusal and fresh authorization on the same real socket.
 async fn review_mesh_delete_requires_fresh_passkey_tap() {
     let _guard = SERIAL.lock().await;
     let (f, address, server) = socket_fixture().await;

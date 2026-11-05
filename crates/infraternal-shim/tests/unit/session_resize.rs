@@ -48,7 +48,6 @@ fn native_resize_refusal_preserves_peer_and_pty() {
 #[test]
 #[ignore = "isolated session probe invoked by its parent with a controlled shell profile"]
 // Keep the ordered refusal, notice and PTY continuation on the same peer.
-#[allow(clippy::too_many_lines)]
 fn resize_refusal_session_probe() {
     let case = std::env::var("VT_SESSION_RECOVERY_CASE").unwrap();
     with_refusing_engine(2, |engine| {

@@ -64,7 +64,6 @@ async fn input_state_probe_preserves_written_ack_before_input() {
     state_ack(false).await;
 }
 
-#[allow(clippy::too_many_lines)] // Keep the two wire-order fences and cleanup before assertions together.
 async fn state_ack(input_first: bool) {
     let id = *uuid::Uuid::new_v4().as_bytes();
     let root = PathBuf::from(
@@ -235,7 +234,6 @@ async fn detached_ping_preserves_written_ack_without_output_credit() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn terminal_probe_waits_for_the_shim_fence_and_keeps_stream_identity() {
     use infraternal_shim::frame::MULTI_WRITER;
     let id = *uuid::Uuid::new_v4().as_bytes();

@@ -3,10 +3,6 @@
 use super::*;
 use tokio::io::AsyncWriteExt;
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Keep diagnostic fixture inputs explicit without production state."
-)]
 pub(super) async fn run(
     f: &Fixture,
     auth: Auth,

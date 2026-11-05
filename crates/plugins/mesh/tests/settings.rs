@@ -137,7 +137,6 @@ async fn fixture() -> (
 }
 
 // Check the committed policy, notification, audit and replay fence together.
-#[allow(clippy::too_many_arguments)]
 async fn assert_applied(
     pool: &sqlx::SqlitePool,
     service: &MeshService,

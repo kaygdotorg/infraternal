@@ -485,7 +485,6 @@ async fn private_event_withdrawal_generation_cannot_collide_with_public_native_s
 
 #[cfg(feature = "desktop")]
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep two viewer admissions, refusal and sibling control in one ordered scenario.
 async fn duplicate_native_opening_retires_only_that_viewer_and_keeps_its_sibling() {
     use infraternal_plugin_desktop::{
         protocol::{Size, Start, Target},

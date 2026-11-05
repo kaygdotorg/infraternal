@@ -169,7 +169,6 @@ async fn healthy(address: std::net::SocketAddr) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit shipping-binary integration/benchmark; set INFRATERNAL_TEST_BINARY"]
-#[allow(clippy::too_many_lines)]
 async fn shipping_restart_reload_rollback_and_cold_start() {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let binary = PathBuf::from(std::env::var_os("INFRATERNAL_TEST_BINARY").unwrap());

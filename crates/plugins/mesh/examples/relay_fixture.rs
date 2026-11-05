@@ -12,7 +12,7 @@
 //! - `relay_fixture node`: read `{host,cert,key,ca,addresses,relays}`,
 //!   start the selected mesh data plane and print its public key; then commands
 //!   (see `Command`) until `"quit"` or end of input, which deletes the device.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use infraternal_mesh::{
     discovery::{Discovery, Observation},

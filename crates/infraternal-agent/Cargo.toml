@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Explicit benchmark instrumentation, absent from shipping feature selections (D351).
+bench-probes = []
 # Generic plugin media lanes stay absent from terminal-only builds (#146).
 native-streams = ["infraternal-plugin-api/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
 desktop = ["native-streams", "dep:infraternal-plugin-desktop"]
@@ -69,3 +71,8 @@ nix = { workspace = true, features = ["time"] }
 # Paused test time controls frame-expiry ordering without changing runtime timers.
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }
+
+# Opt-in probe driver; never linked into the product binary.
+[[example]]
+name = "runtime-responsiveness"
+required-features = ["bench-probes"]

@@ -472,7 +472,6 @@ async fn fixture_at_through_tls_proxy(
     fixture_at_with_options(directory, address, endpoint, false, true).await
 }
 
-#[allow(clippy::too_many_lines)]
 async fn fixture_at_with_options(
     directory: &Directory,
     address: SocketAddr,
@@ -992,7 +991,6 @@ fn cli(binary: &Path, directory: &Directory, join: bool, public_origin: &str) ->
 
 /// Restart only the supervising process; preserve its enrolled identity and live shim.
 // The proof passes the live fixture state directly so restart behavior stays visible in one place.
-#[allow(clippy::too_many_arguments)]
 async fn restart_proof(
     directory: &Directory,
     binary: &Path,
@@ -1094,7 +1092,6 @@ async fn remote_cli_enrollment_and_browser_terminal_443_through_tls_http2_proxy(
 
 /// Exercise enrollment and a real PTY through a chosen public app-listener port.
 // Keep the complete cross-process proof together so its ordering remains auditable.
-#[allow(clippy::too_many_lines)]
 async fn remote_cli_enrollment_and_browser_terminal_at(
     binary: &Path,
     address: SocketAddr,

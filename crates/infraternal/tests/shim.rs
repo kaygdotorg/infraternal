@@ -1275,7 +1275,6 @@ enum QueueProbe {
     FreshShared,
 }
 
-#[allow(clippy::too_many_lines)]
 fn assert_shared_queue_pressure(writer: u32, replacements: usize, probe: QueueProbe) {
     let legacy_output = matches!(probe, QueueProbe::LegacyOutput);
     let session = Session::new(8192, false);

@@ -341,7 +341,7 @@ async fn invite(
         .map(Json)
 }
 
-#[allow(clippy::too_many_lines)] // Keep session/key checks, host creation, and invitation issuance in one write transaction.
+// Keep session/key checks, host creation, and invitation issuance in one write transaction.
 async fn issue_invitation(
     api: Api,
     authority: IssueAuthority<'_>,

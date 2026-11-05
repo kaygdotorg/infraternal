@@ -52,7 +52,6 @@ pub(crate) fn reserve(state: &Path, person: uuid::Uuid, id: uuid::Uuid) -> io::R
 }
 
 #[cold]
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch(
     exe: &Path,
     state: &Path,

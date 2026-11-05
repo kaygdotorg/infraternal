@@ -214,7 +214,6 @@ fn negotiated_queue_deferral_validates_ranges_before_waiting() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_completed_deferred_frame_gives_its_trailing_input_a_fresh_ticket() {
     struct Child(Pty);
     impl Drop for Child {
@@ -369,7 +368,6 @@ fn new_frames_roundtrip_and_refuse_noncanonical_payloads() {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn coalesced_probe_and_input_preserve_the_written_ack_in_both_orders() {
     struct Child(Pty);
     impl Drop for Child {
