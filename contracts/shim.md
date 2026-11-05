@@ -40,6 +40,27 @@ because a VT parser changes rarely and does not depend on our protocol.
     PID 1.
   - The installer tests this: it restarts the agent with a canary session
     open, and the canary must survive (contracts/bootstrap.md).
+- **Launch lifeline (#324).** A shim that detaches (`--detach`: init systems
+  without a transient scope, and macOS) cannot be identified by its launcher:
+  the launcher is the first of three processes, and the shim a grandchild that
+  is nobody's child by the time the launcher exits. The agent therefore passes
+  `--lifeline-fd N`, the write end of a fresh pipe, as the launcher's **last**
+  arguments, and keeps the read end.
+  - Every process of the double fork inherits the write end. The original and
+    the intermediate drop it when they exit. The shim keeps it **for its whole
+    life** and marks it close-on-exec before it starts anything, so the user's
+    shell and its children never hold it.
+  - The shim fails closed: if `N` is not an open pipe, or is a standard handle,
+    it exits before it forks. A shim never runs without its lifeline.
+  - **End-of-file on the read end proves that no process of that launch is
+    left**, whether the shim never started, exited or was killed. The agent
+    uses it, and only it (or the shim's own authenticated close and exit, §7
+    explicit saved-shell close), as proof that a failed launch's terminal is dead. The
+    launcher's exit, a missing socket and process-statistics heuristics are
+    never proof.
+  - The shim never writes to it. No EOF within the agent's bound means
+    "unproven": the agent keeps the rendezvous socket and the person record,
+    and stops only the launcher it owns.
 - The shim drops privileges to the target user **before** it execs the
   shell. A rootful agent can start sessions as any user. A rootless agent can
   only start sessions as itself.

@@ -8,9 +8,10 @@
  * - State lives in a private temporary directory; the certificate stays in memory; nothing secret is logged.
  */
 import { recordAttachment } from "./attachment-bookkeeping";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
+import { rmSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { createServer as createHttpsServer } from "node:https";
 import { request as httpRequest } from "node:http";
@@ -114,7 +115,10 @@ export interface Bridge {
   cookie: string;
 }
 
+/** The listeners, process generations, and private state owned by one real-server fixture. */
 export interface RealServer {
+  /** The private remote endpoint chosen for this fixture, retained across its restarts. */
+  remoteListen?: string;
   origin: string;
   backend: string;
   bridges: Bridge[];
@@ -165,6 +169,7 @@ const text = new TextDecoder();
  * `latencyMs` (or `REAL_ONE_WAY_MS`) delays every browser-socket message by that many milliseconds in each direction
  * (so 150 is the 300 ms round-trip profile of docs/PROCESS.md); order is kept. Page loads are not delayed.
  */
+/** Start an isolated real server; dispose owns its private listeners, children, and state. */
 export async function startRealServer(options: {
   latencyMs?: number;
   /** Delay the real protocol upgrade so cached renderers can register before socket open (#257). */
@@ -217,6 +222,14 @@ export async function startRealServer(options: {
   const reservation = createServer();
   await new Promise<void>((r) => reservation.listen(0, "127.0.0.1", r));
   const port = (reservation.address() as AddressInfo).port;
+  // Keep the backend reservation held while choosing a separate ephemeral remote port.
+  let remoteListen = options.remoteListen;
+  if (remoteListen === "127.0.0.1:0") {
+    const remote = createServer();
+    await new Promise<void>((resolve, reject) => { remote.once("error", reject); remote.listen(0, "127.0.0.1", resolve); });
+    remoteListen = `127.0.0.1:${(remote.address() as AddressInfo).port}`;
+    await new Promise<void>((resolve, reject) => remote.close((error) => error ? reject(error) : resolve()));
+  }
   await new Promise<void>((r) => reservation.close(() => r()));
   const backend = `http://127.0.0.1:${port}`;
 
@@ -246,18 +259,45 @@ export async function startRealServer(options: {
   const origin = `https://${hostname}:${(tls.address() as AddressInfo).port}`;
 
   let unit: string | undefined;
-  const args = ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(options.remoteListen ? ["--remote-listen", options.remoteListen, "--remote-ca-dir", `${state}/ca`] : [])];
+  const ownedChildren = new Set<ChildProcess>();
+  const ownedUnits = new Set<string>();
+  const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
+  /** Stop only this fixture's private units and process groups, including a failed stop. */
+  const forceStop = (): void => {
+    for (const name of ownedUnits) spawnSync("systemctl", ["--user", "kill", "--kill-whom=all", "--signal=KILL", name], { stdio: "ignore", timeout: 5_000 });
+    for (const ownedChild of ownedChildren) if (ownedChild.pid) signalProcessGroup(ownedChild.pid, "SIGKILL");
+  };
+  /** Synchronous exit cleanup also covers uncaught errors and interrupted test workers. */
+  const emergencyCleanup = (): void => {
+    forceStop();
+    spawnSync("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", shimState], { cwd: root, stdio: "ignore", timeout: 10_000 });
+    rmSync(runtime, { recursive: true, force: true });
+    rmSync(state, { recursive: true, force: true });
+  };
+  /** Exit with the conventional interrupt status after the exit guard cleans up. */
+  const interrupt = (): never => process.exit(130);
+  /** Exit with the conventional termination status after the exit guard cleans up. */
+  const terminate = (): never => process.exit(143);
+  const args = ["server", "--listen", `127.0.0.1:${port}`, "--data", state, "--public-origin", origin, "--behind-proxy", "--trusted-proxy", "127.0.0.1", "--web-root", `${state}/web`, ...(remoteListen ? ["--remote-listen", remoteListen, "--remote-ca-dir", `${state}/ca`] : [])];
+  /** Launch one owned generation; stopped units stay tracked until their shims are disposed. */
   const launch = (): ChildProcess => {
     // A stopped transient unit may await garbage collection after its launcher
     // exits. A fresh name avoids racing that collection while keeping the same data/runtime.
     unit = options.systemd ? `s199-${randomUUID()}` : undefined;
-    return spawn(unit ? "systemd-run" : binary, unit ? ["--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "-p", "KillMode=process", `--setenv=XDG_RUNTIME_DIR=${runtime}`, `--setenv=ZDOTDIR=${resolve(root, "crates/infraternal/tests/profile")}`, binary, ...args] : args, {
+    if (unit) ownedUnits.add(unit);
+    const launched = spawn(unit ? "systemd-run" : binary, unit ? ["--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", unit, "-p", "KillMode=process", `--setenv=XDG_RUNTIME_DIR=${runtime}`, `--setenv=ZDOTDIR=${resolve(root, "crates/infraternal/tests/profile")}`, binary, ...args] : args, {
     cwd: root, detached: true,
     env: { ...process.env, XDG_RUNTIME_DIR: runtime, ZDOTDIR: options.startupDirectory ?? resolve(root, "crates/infraternal/tests/profile") },
     stdio: ["ignore", process.env.REAL_SERVER_LOG === "1" ? "pipe" : "ignore", "pipe"],
     });
+    ownedChildren.add(launched);
+    return launched;
   };
   let child = launch();
+  process.once("exit", emergencyCleanup);
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  /** Stop a server generation while retaining its detached session shims for restart. */
   const stop = async (): Promise<void> => {
     const stoppedChild = child;
     const group = stoppedChild.pid;
@@ -282,6 +322,7 @@ export async function startRealServer(options: {
     if (!await waitForChildExit(stoppedChild, 1_000)) {
       throw new Error("real-server fixture launcher did not exit after its process group stopped");
     }
+    ownedChildren.delete(stoppedChild);
   };
   if (process.env.REAL_SERVER_LOG === "1") { child.stderr?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); child.stdout?.on("data", (b) => process.stderr.write(`SERVER ${b}`)); } else child.stderr?.resume();
 
@@ -464,19 +505,28 @@ export async function startRealServer(options: {
   // rejected startup must join the same owned cleanup as a successful fixture,
   // or retries retain its port and private processes without a returned owner.
   let disposal: Promise<void> | undefined;
+  /** Dispose every owned resource even when the normal service stop fails. */
   const dispose = (): Promise<void> => disposal ??= (async () => {
     front.close();
     tls.close();
-    await stop();
-    // Reuse authenticated fixture teardown so detached shims cannot outlive
-    // the runtime directory that identifies them. Never scan unrelated PIDs.
-    // Root measurements run in a private mount namespace whose /run and passwd
-    // belong to this fixture; ordinary jobs always use their XDG runtime directory.
-    const shimState = process.env.REAL_ROOT_NAMESPACE === "1" ? "/run/infraternal" : resolve(runtime, "infraternal");
-    const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", shimState], { cwd: root, stdio: "ignore" });
-    await once(cleanup, "exit");
-    await rm(runtime, { recursive: true, force: true });
-    await rm(state, { recursive: true, force: true });
+    try { await stop(); }
+    finally {
+      try {
+        forceStop();
+        // Authenticated runtime cleanup also reaches shims that detached into their own groups.
+        const cleanup = spawn("python3", ["-c", "import sys;sys.path.insert(0,'scripts');from pathlib import Path;from agent_fixture import cleanup;cleanup(Path(sys.argv[1]))", shimState], { cwd: root, stdio: "ignore" });
+        await once(cleanup, "exit");
+      } finally {
+        try {
+          await rm(runtime, { recursive: true, force: true });
+          await rm(state, { recursive: true, force: true });
+        } finally {
+          process.off("exit", emergencyCleanup);
+          process.off("SIGINT", interrupt);
+          process.off("SIGTERM", terminate);
+        }
+      }
+    }
   })();
 
   try {
@@ -508,6 +558,7 @@ export async function startRealServer(options: {
     token = "";
 
     const fixture: RealServer = {
+      ...(remoteListen ? { remoteListen } : {}),
       origin, backend, bridges, token: setupToken, binary, dataDir: state, get pid() { return child.pid!; },
       retainBrowserRoutes() { for (const browser of activeBrowsers) retainedBrowsers.add(browser); },
       async restart(whileStopped) {

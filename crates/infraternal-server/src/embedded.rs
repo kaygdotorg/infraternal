@@ -7,6 +7,7 @@ type RemoteLink = ();
 use crate::liveness::{Liveness, TICK};
 use crate::stream_close::{CloseWho, safe_agent_close_reason};
 use bytes::{Buf, Bytes, BytesMut};
+pub use infraternal_plugin_api::login_access::LoginGrant;
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
@@ -494,7 +495,7 @@ impl EmbeddedAgent {
     /// Open a terminal on the embedded infraternal agent's host (legacy fixtures).
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
-        self.open_metadata(size, None, None, false)
+        self.open_metadata(size, None, false)
             .await
             .map(|opened| opened.session_id)
     }
@@ -506,41 +507,52 @@ impl EmbeddedAgent {
         size: TerminalSize,
         person: uuid::Uuid,
         account: Option<String>,
+        grant: LoginGrant,
     ) -> Result<[u8; 16], AgentError> {
-        self.open_for_with_metadata(size, person, account)
+        self.open_for_with_metadata(size, person, account, grant)
             .await
             .map(|opened| opened.session_id)
     }
 
     /// Preserve the host's resolved account and fallback note for the terminal window.
+    /// `grant` is the person's login access on this host; the infraternal
+    /// agent opens nothing it does not allow (D235 Q14).
     pub async fn open_for_with_metadata(
         &self,
         size: TerminalSize,
         person: uuid::Uuid,
         account: Option<String>,
+        grant: LoginGrant,
     ) -> Result<TerminalOpened, AgentError> {
-        self.open_metadata(size, Some(person), account, false).await
+        self.open_metadata(
+            size,
+            Some(PersonLogin {
+                person,
+                account,
+                grant,
+            }),
+            false,
+        )
+        .await
     }
     /// Open a private fixed readiness command under the enrolled account.
     #[cfg(feature = "remote")]
     pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
-        self.open_metadata(size, None, None, true)
+        self.open_metadata(size, None, true)
             .await
             .map(|opened| opened.session_id)
     }
     async fn open_metadata(
         &self,
         size: TerminalSize,
-        person: Option<uuid::Uuid>,
-        account: Option<String>,
+        login: Option<PersonLogin>,
         readiness: bool,
     ) -> Result<TerminalOpened, AgentError> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Open {
                 size,
-                person,
-                account,
+                login,
                 readiness,
                 reply,
             })
@@ -554,12 +566,16 @@ impl EmbeddedAgent {
         &self,
         person: uuid::Uuid,
         account: Option<String>,
+        grant: LoginGrant,
     ) -> Result<(), AgentError> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::PrepareLogin {
-                person,
-                account,
+                login: PersonLogin {
+                    person,
+                    account,
+                    grant,
+                },
                 reply,
             })
             .await
@@ -696,6 +712,14 @@ impl EmbeddedAgent {
     }
 }
 
+/// One person's login on a host: the account the server prefers and the
+/// login access grant the host checks the opened account against.
+struct PersonLogin {
+    person: uuid::Uuid,
+    account: Option<String>,
+    grant: LoginGrant,
+}
+
 enum Command {
     #[cfg(all(feature = "remote", feature = "ssh"))]
     InstalledRoute(oneshot::Sender<bool>),
@@ -722,14 +746,12 @@ enum Command {
     },
     Open {
         size: TerminalSize,
-        person: Option<uuid::Uuid>,
-        account: Option<String>,
+        login: Option<PersonLogin>,
         readiness: bool,
         reply: oneshot::Sender<Result<TerminalOpened, AgentError>>,
     },
     PrepareLogin {
-        person: uuid::Uuid,
-        account: Option<String>,
+        login: PersonLogin,
         reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
     },
     #[cfg(feature = "remote")]
@@ -2000,8 +2022,7 @@ async fn process_command(
         }
         Command::Open {
             size,
-            person,
-            account,
+            login,
             readiness,
             reply,
         } => {
@@ -2029,9 +2050,10 @@ async fn process_command(
                 "cols": size.cols,
                 "rows": size.rows,
             });
-            if let Some(person) = person {
-                request["person"] = serde_json::json!(person);
-                request["account"] = serde_json::json!(account);
+            if let Some(login) = login {
+                request["person"] = serde_json::json!(login.person);
+                request["account"] = serde_json::json!(login.account);
+                request["grant"] = serde_json::json!(login.grant);
             }
             if readiness {
                 request["readiness"] = serde_json::Value::Bool(true);
@@ -2052,11 +2074,7 @@ async fn process_command(
             pending.insert(call_id, PendingCall::Open(reply));
             true
         }
-        Command::PrepareLogin {
-            person,
-            account,
-            reply,
-        } => {
+        Command::PrepareLogin { login, reply } => {
             if reply.is_closed() {
                 return true;
             }
@@ -2081,7 +2099,7 @@ async fn process_command(
                 return true;
             };
             let Ok(json) = serde_json::to_vec(
-                &serde_json::json!({"uid":connection.execution_uid,"person":person,"account":account,"cols":80,"rows":24}),
+                &serde_json::json!({"uid":connection.execution_uid,"person":login.person,"account":login.account,"grant":login.grant,"cols":80,"rows":24}),
             ) else {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
