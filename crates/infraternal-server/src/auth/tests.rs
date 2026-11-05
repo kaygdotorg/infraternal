@@ -811,7 +811,7 @@ async fn recovery_session_delay_latency_at_capacity() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // One flow: sliding, tap freshness and key scoping.
+// One flow: sliding, tap freshness and key scoping.
 async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;

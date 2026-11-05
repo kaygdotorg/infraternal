@@ -197,7 +197,7 @@ fn dispatch_selected_action(
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
 
-#[allow(clippy::too_many_lines)] // Keep feature-gated command handlers beside their registry mappings.
+// Keep feature-gated command handlers beside their registry mappings.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
