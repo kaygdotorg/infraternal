@@ -15,12 +15,20 @@ import { COLUMN_GAP, type Rect } from "../layout/geometry";
 import { columnEls, scrollToWindow } from "../layout/columns";
 import { drawnWidthOf } from "../layout/column-els";
 import { isFreeView, nearestStop as nearest, stopsFor as stops, type Stops } from "../layout/stops";
+import { onDemand } from "../../on-demand";
 import { bounds, clamp, type Cam } from "./camera";
 
 export interface Nav {
   stopsFor(c: ViewRec): Stops;
   nearestStop(c: ViewRec, cx: number): number;
-  goStop(c: ViewRec, i: number, instant?: boolean): void;
+  /** `band` is the row the camera will show; absent, the row drawn nearest the middle of the screen. */
+  goStop(c: ViewRec, i: number, instant?: boolean, band?: number): void;
+  /**
+   * In a view of rows of windows (Settings): the window in view. Its column is the camera's stop (a window at the first or last
+   * stop sits at the screen's edge, not its middle) and its row is the band drawn nearest the middle of the screen. The breadcrumb
+   * names it and the active window follows it (D323).
+   */
+  windowInView(c: ViewRec): string | undefined;
   /** Sets the lock and repaints; does not move the camera. */
   applyCanvasLock(on: boolean): void;
   /** Sets the lock; turning it on snaps to the nearest stop of the current view. */
@@ -33,6 +41,8 @@ export interface Nav {
   focusWindow(rec: WinRec, instant?: boolean, keepFree?: boolean): void;
   /** After the camera rests: the view that contains the camera centre (else the nearest) becomes the current one. */
   updateCurrentView(): void;
+  /** The camera or a row came to rest: see `follow`. */
+  settled(): void;
   /** Listens for lock changes (and the first paint). */
   onLockChange(listener: () => void): () => void;
 }
@@ -48,13 +58,27 @@ export function createNav(cx: Ctx): Nav {
   };
   const stopsFor = (c: ViewRec): Stops => stops(c.view, cx.view.contentRect(c), camera.vw, camera.vh, state.metrics.narrow, state.metrics.minW, state.metrics.maxW);
   const nearestStop = (c: ViewRec, x: number): number => nearest(stopsFor(c), x);
-  const snapCam = (c: ViewRec, i: number): Cam => {
+  const rowGroups = (c: ViewRec): boolean => c.view.layout === "tiled" && c.view.cols.some((col) => col.group !== undefined);
+  // The rules for a view of rows of windows (Settings) load once such a view exists (D188): `camera/rows.on-demand.ts`.
+  let rows: import("./rows.on-demand").Rows | undefined, rowsLoading = false;
+  const ensureRows = (c: ViewRec): void => {
+    if (rows || rowsLoading || !rowGroups(c)) return;
+    rowsLoading = true;
+    void onDemand(() => import("./rows.on-demand")).then((m) => { rows = m.createRows(cx, stopsFor, (v, i) => { goStop(v, i); }); }, () => { rowsLoading = false; });
+  };
+  const snapCam = (c: ViewRec, i: number, band?: number): Cam => {
     const st = stopsFor(c);
-    state.snapIdx = clamp(i, 0, st.lefts.length - 1);
-    return { cx: st.lefts[state.snapIdx]! + st.view / 2, cy: st.cy, z: st.z };
+    ensureRows(c);
+    // In a view of rows the stops are the columns' up to the end of the row being shown, and then the end itself (the last window,
+    // whole on screen) if no column's stop reaches it. Stepping past it stays there.
+    const limit = rows?.limit(c, st, band);
+    const stops = limit === undefined ? st.lefts : [...st.lefts.filter((l) => l <= limit), ...(st.lefts.some((l) => Math.abs(l - limit) < 2) ? [] : [limit])];
+    const idx = clamp(i, 0, stops.length - 1), left = stops[idx]!;
+    state.snapIdx = idx;
+    return { cx: left + st.view / 2, cy: st.cy, z: st.z };
   };
   const applyCanvasLock = (on: boolean): void => { state.canvasLock = on; paintLock(); };
-  const goStop = (c: ViewRec, i: number, instant = false): void => { camera.flyTo(() => snapCam(c, i), instant); };
+  const goStop = (c: ViewRec, i: number, instant = false, band?: number): void => { camera.flyTo(() => snapCam(c, i, band), instant); };
   const overviewCam = (): Cam => {
     const frames = [...views.values()].map(cx.view.frameOf);
     if (!frames.length) return camera.fit({ x: 0, y: 0, w: 1, h: 1 }, 0.92, 1);
@@ -71,8 +95,12 @@ export function createNav(cx: Ctx): Nav {
     cx.pill.paint();
     goStop(c, 0, instant);
   };
+  let settleTimer = 0;
+  const settle = (): void => { window.clearTimeout(settleTimer); settleTimer = window.setTimeout(() => { rows?.follow(); }, 160); };
+  viewport.addEventListener("scroll", settle, { capture: true, passive: true, signal: cx.signal });
   return {
-    stopsFor, nearestStop, goStop, applyCanvasLock, overviewCam, flyView,
+    settled: settle,
+    stopsFor, nearestStop, goStop, windowInView: (c) => rows?.windowInView(c), applyCanvasLock, overviewCam, flyView,
     setCanvasLock(on, instant = false) {
       applyCanvasLock(on);
       const c = views.get(state.currentView);
@@ -117,7 +145,7 @@ export function createNav(cx: Ctx): Nav {
         // column's centre is compared with the stops' centres. Comparing its left edge with a stop's left edge picked the
         // NEXT column's stop on a wide viewport, which left the window at the screen's left edge, or off it, with its
         // neighbour out of view (#141).
-        goStop(c, nearest(st, content + left + colW / 2), instant);
+        goStop(c, nearest(st, content + left + colW / 2), instant, rec.model.row);
       }
       scrollToWindow(colEl, rec.card.root, instant);
     },

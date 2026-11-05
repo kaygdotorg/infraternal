@@ -1881,17 +1881,20 @@ async fn active_transaction_is_live_between_ssh_setup_commands() {
     let session = Local {
         root: fixture.root.clone(),
     };
-    let result = session
+    let output = session
         .run(
             &infraternal_plugin_ssh::previous_attempt::check_script(fixture.target.mode),
             Input::Empty,
         )
-        .await;
-    let refused = infraternal_plugin_ssh::previous_attempt::classify(result.err().unwrap());
+        .await
+        .unwrap();
+    let refused =
+        infraternal_plugin_ssh::previous_attempt::parse_check(&output.stdout).unwrap_err();
     assert_eq!(
         refused.kind,
         infraternal_plugin_ssh::model::FailureKind::SetupRunning
     );
+    assert!(refused.to_string().contains("has held the setup lock"));
     assert!(fixture.base().join(".bootstrap-lock").exists());
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
@@ -1922,6 +1925,64 @@ fn earlier_attempt_records_reject_suffixes_truncation_and_unbounded_counts() {
     ] {
         assert!(infraternal_plugin_ssh::previous_attempt::parse_check(invalid.as_bytes()).is_err());
     }
+}
+
+#[test]
+fn earlier_attempt_lock_diagnostic_names_machine_process_and_start_time() {
+    use infraternal_plugin_ssh::model::FailureKind;
+
+    let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
+    let lock = format!(
+        "{check}INFRATERNAL_SETUP_LOCKED build-node 254 9917 2026-11-02T04:05:06Z {}\n",
+        "2".repeat(32)
+    );
+    let error = infraternal_plugin_ssh::previous_attempt::parse_check(lock.as_bytes()).unwrap_err();
+    assert_eq!(error.kind, FailureKind::SetupRunning);
+    let message = serde_json::to_value(error).unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(message.contains("build-node"));
+    assert!(message.contains("254"));
+    assert!(message.contains("2026-11-02T04:05:06Z"));
+    assert!(message.contains("setup attempt 22222222 (process 254) has held the setup lock"));
+    // A running setup can only be waited for; replacement is offered only for
+    // an upgrade journal whose lease is gone (#305).
+    assert!(!message.contains("replace"), "{message}");
+    let unknown = lock.replace(&"2".repeat(32), "unknown");
+    let message = serde_json::to_value(
+        infraternal_plugin_ssh::previous_attempt::parse_check(unknown.as_bytes()).unwrap_err(),
+    )
+    .unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("process 254 has held the setup lock"),
+        "{message}"
+    );
+    for bad in ["2", "Z".repeat(32).as_str(), ""] {
+        let record = lock.replace(&"2".repeat(32), bad);
+        assert!(infraternal_plugin_ssh::previous_attempt::parse_check(record.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn earlier_attempt_refusal_names_its_cause_from_fixed_text() {
+    let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
+    let parse = |cause: &str| {
+        let record = format!("{check}INFRATERNAL_SETUP_REFUSED {cause}\n");
+        infraternal_plugin_ssh::previous_attempt::parse_check(record.as_bytes())
+            .unwrap_err()
+            .message
+    };
+    assert!(parse("entry").contains("holds a file this version does not recognize"));
+    assert!(parse("receipt").contains("older or changed format"));
+    // A token this version does not know never reaches the person verbatim.
+    assert_eq!(
+        parse("something-new"),
+        "The earlier setup journal has an unsupported or changed format. Host provisioning left it untouched."
+    );
 }
 
 #[test]
@@ -3720,4 +3781,110 @@ async fn every_setup_command_fits_one_kernel_argument_in_both_modes() {
             "{mode:?} command lengths {lengths:?}"
         );
     }
+}
+
+/// A successful bootstrap publishes both CLI names and rollback retires its alias.
+#[tokio::test]
+async fn infra_alias_follows_bootstrap_and_is_removed_on_rollback() {
+    let fixture = Fixture::new();
+    let install = fixture.transaction();
+    install.stage(&fixture.binary).await.unwrap();
+    install.enroll_and_start(&fixture.join).await.unwrap();
+    let alias = fixture.root.join(".local/bin/infra");
+    assert_eq!(
+        std::fs::read_link(&alias).unwrap(),
+        std::path::Path::new("infraternal")
+    );
+    assert_eq!(
+        std::fs::read(&alias).unwrap(),
+        std::fs::read(&fixture.binary).unwrap()
+    );
+    install.rollback().await.unwrap();
+    assert!(alias.symlink_metadata().is_err());
+}
+
+/// A foreign alias, including a dangling symlink, must survive installation and rollback.
+#[tokio::test]
+async fn infra_alias_preserves_foreign_paths() {
+    for linked in [false, true] {
+        let fixture = Fixture::new();
+        let alias = fixture.root.join(".local/bin/infra");
+        std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        if linked {
+            std::os::unix::fs::symlink("missing-foreign-binary", &alias).unwrap();
+        } else {
+            std::fs::write(&alias, b"foreign binary").unwrap();
+        }
+        let install = fixture.transaction();
+        install.stage(&fixture.binary).await.unwrap();
+        install.enroll_and_start(&fixture.join).await.unwrap();
+        assert!(install.alias_skipped());
+        install.rollback().await.unwrap();
+        if linked {
+            assert_eq!(
+                std::fs::read_link(&alias).unwrap(),
+                std::path::Path::new("missing-foreign-binary")
+            );
+        } else {
+            assert_eq!(std::fs::read(&alias).unwrap(), b"foreign binary");
+        }
+    }
+}
+
+/// Compound setup must surface the same occupied-name receipt as individual steps.
+#[tokio::test]
+async fn infra_alias_compound_setup_reports_foreign_name() {
+    let fixture = Fixture::new();
+    let alias = fixture.root.join(".local/bin/infra");
+    std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::fs::write(&alias, b"foreign").unwrap();
+    let install = Installation::new(
+        Arc::new(Compound(Local {
+            root: fixture.root.clone(),
+        })),
+        &fixture.target,
+        &fixture.join,
+    )
+    .unwrap();
+    install.stage(&fixture.binary).await.unwrap();
+    install.setup(&fixture.join).await.unwrap();
+    assert!(install.alias_skipped());
+    install.rollback().await.unwrap();
+    assert_eq!(std::fs::read(alias).unwrap(), b"foreign");
+}
+
+/// Unvalidated receipt text must never turn into a setup warning or a successful parse.
+#[test]
+fn infra_alias_receipt_is_fixed_and_only_valid_during_install() {
+    use infraternal_plugin_ssh::install::{interrupted_setup_step, parse_setup};
+    let receipt = "STEP join\nSTEP install\nALIAS skipped\nSTEP start\nSTEP linger\nyes\nDONE\n";
+    assert!(parse_setup(receipt.as_bytes()).unwrap());
+    for invalid in [
+        receipt.replace("ALIAS skipped", "ALIAS arbitrary"),
+        receipt.replace("ALIAS skipped\n", "ALIAS skipped\nALIAS skipped\n"),
+        receipt.replace("STEP install\nALIAS skipped", "ALIAS skipped\nSTEP install"),
+    ] {
+        assert!(parse_setup(invalid.as_bytes()).is_err());
+    }
+    assert!(matches!(
+        interrupted_setup_step(b"STEP join\nSTEP install\nALIAS skipped\n"),
+        Some(infraternal_plugin_ssh::model::InstallStep::Install)
+    ));
+}
+
+/// A replaced alias belongs to its new owner even if bootstrap later rolls back.
+#[tokio::test]
+async fn infra_alias_replaced_after_install_survives_rollback() {
+    let fixture = Fixture::new();
+    let install = fixture.transaction();
+    install.stage(&fixture.binary).await.unwrap();
+    install.enroll_and_start(&fixture.join).await.unwrap();
+    let alias = fixture.root.join(".local/bin/infra");
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink("foreign", &alias).unwrap();
+    install.rollback().await.unwrap();
+    assert_eq!(
+        std::fs::read_link(alias).unwrap(),
+        std::path::Path::new("foreign")
+    );
 }

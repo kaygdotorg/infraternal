@@ -145,6 +145,9 @@ pub fn prepare_parent_bound_child(command: &mut std::process::Command) {
 ///
 /// Descriptors are duplicated to reserved child slots before credentials are dropped. The
 /// working directory is entered while the parent still has permission to traverse its path.
+/// With `cgroup_procs` (an open, write-only `cgroup.procs` of the child's own leaf), the child
+/// moves itself into that cgroup first, before it can exec or fork, so nothing it starts is
+/// ever outside the leaf. The caller keeps the file open until spawn returns.
 /// # Errors
 /// Rejects invalid descriptor mappings; operating-system setup errors are returned by spawn.
 #[cfg(target_os = "linux")]
@@ -153,8 +156,15 @@ pub fn prepare_proxy_child(
     working_directory: &std::fs::File,
     descriptors: &[(std::os::fd::RawFd, std::os::fd::RawFd)],
     identity: Option<(u32, u32)>,
+    cgroup_procs: Option<&std::fs::File>,
 ) -> std::io::Result<()> {
-    pty::prepare_proxy_child(command, working_directory, descriptors, identity)
+    pty::prepare_proxy_child(
+        command,
+        working_directory,
+        descriptors,
+        identity,
+        cgroup_procs,
+    )
 }
 /// Darwin has no audited descriptor and identity boundary for the proxy child
 /// yet, so the proxy cannot start one there. This fails at spawn setup instead

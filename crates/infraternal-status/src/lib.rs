@@ -81,6 +81,20 @@ const MESH_INTERFACE: &str = "infraternal0";
 /// stalled manager cannot multiply the wait by the number of installed units.
 const MANAGER_QUERY_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// The budget in force. Debug builds let integration tests widen it, because
+/// a 470 MB debug binary page-faulting on a contended build disk can spend
+/// seconds inside the window (#334); release builds always use the constant.
+fn manager_query_budget() -> std::time::Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = std::env::var("INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return std::time::Duration::from_millis(milliseconds);
+    }
+    MANAGER_QUERY_BUDGET
+}
+
 /// Which service manager owns a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -326,7 +340,7 @@ pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
             (unit, state)
         })
         .collect();
-    let admission = std::time::Instant::now() + MANAGER_QUERY_BUDGET;
+    let admission = std::time::Instant::now() + manager_query_budget();
     // Discovery orders system units before user units. Keep observations in
     // that order, so component rows and diagnostics use the same first unit.
     let system = units.partition_point(|(unit, _)| unit.scope == Scope::System);
@@ -817,7 +831,7 @@ fn manager_activity_result(scope: Scope, unit: &str) -> Result<Activity, &'stati
     manager_activity_before(
         scope,
         unit,
-        std::time::Instant::now() + MANAGER_QUERY_BUDGET,
+        std::time::Instant::now() + manager_query_budget(),
     )
 }
 
@@ -863,6 +877,13 @@ fn manager_properties(
     if std::time::Instant::now() >= deadline {
         return Err("service manager query timed out");
     }
+    #[cfg(test)]
+    let mut command = Command::new(
+        tests::MANAGER_PROGRAM
+            .with(|program| program.borrow().clone())
+            .unwrap_or_else(|| "systemctl".into()),
+    );
+    #[cfg(not(test))]
     let mut command = Command::new("systemctl");
     if scope == Scope::User {
         command.arg("--user");

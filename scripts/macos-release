@@ -291,6 +291,8 @@ archive_name="infraternal-macos-arm64-${version}-${short_commit}${flavor}.zip"
 release_root="$scratch/infraternal-macos-arm64-${version}-${short_commit}${flavor}"
 mkdir -p "$release_root"
 install -m 0755 "$cli" "$release_root/infraternal"
+# A relative link keeps both CLI names together when the release directory moves [349].
+ln -s infraternal "$release_root/infra"
 install -m 0755 "$rust_helper" "$release_root/infraternal-desktop-helper"
 "$root/scripts/desktop-helper-bundle" "$release_root/InfraternalCaptureHelper.app"
 

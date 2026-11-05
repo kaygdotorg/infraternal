@@ -98,8 +98,27 @@ pub struct Installation {
     // Cloned retries share at most the original session image and the full
     // exact-version image. Neither digest comes from the target or its journal.
     images: Arc<[std::sync::OnceLock<Arc<str>>; 2]>,
+    /// Fixed, validated setup receipt used to report an occupied short CLI name.
+    alias_skipped: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Installation {
+    /// Whether setup preserved a foreign `infra` path; callers should show a warning.
+    #[must_use]
+    pub fn alias_skipped(&self) -> bool {
+        self.alias_skipped
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Retain only the fixed warning from an already validated setup response.
+    fn record_alias_warning(&self, bytes: &[u8]) {
+        self.alias_skipped.store(
+            bytes
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == b"ALIAS skipped"),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// Rebind a failed retry to a freshly authenticated SSH route without changing shell ownership or image pins.
     pub(crate) fn with_session(&self, session: Arc<dyn SshSession>) -> Self {
         Self {
@@ -108,6 +127,7 @@ impl Installation {
             transaction: self.transaction,
             mode: self.mode,
             images: self.images.clone(),
+            alias_skipped: self.alias_skipped.clone(),
         }
     }
 }
@@ -345,6 +365,7 @@ impl Installation {
             transaction: cleanup.transaction,
             mode: cleanup.mode,
             images: Arc::default(),
+            alias_skipped: Arc::default(),
         })
     }
     /// Validate consent and URL again at the mutation boundary.
@@ -375,6 +396,7 @@ impl Installation {
             transaction: uuid::Uuid::new_v4(),
             mode: target.mode,
             images: Arc::default(),
+            alias_skipped: Arc::default(),
         })
     }
 
@@ -393,6 +415,7 @@ impl Installation {
             transaction: uuid::Uuid::new_v4(),
             mode: target.mode,
             images: Arc::default(),
+            alias_skipped: Arc::default(),
         })
     }
 
@@ -525,7 +548,10 @@ start_setup_lease
                 }
                 error.in_mode(self.mode)
             })?;
-        parse_transfer_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+        let linger =
+            parse_transfer_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))?;
+        self.record_alias_warning(&output.stdout);
+        Ok(linger)
     }
 
     async fn negotiated_payload(binary: &Path) -> Result<Transfer, Failure> {
@@ -931,8 +957,11 @@ fi
         } else {
             "700"
         };
+        // The shared routines read their control flags with defaults; a login
+        // environment must never preset them (an inherited setup_check=yes would
+        // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -956,10 +985,15 @@ fi
         // Never replace unrelated launcher/unit files. A previous installation is
         // recognizable only through the same host marker and exact launcher target.
         let start_body = setup_scripts::ACTIVATE;
-        self.session
+        let output = self
+            .session
             .run(&self.script(start_body), Input::Empty)
             .await
             .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+        if !matches!(output.stdout.as_slice(), b"" | b"ALIAS skipped\n") {
+            return Err(invalid_setup().in_mode(self.mode));
+        }
+        self.record_alias_warning(&output.stdout);
         self.session
             .run(&self.script(setup_scripts::START), Input::Empty)
             .await
@@ -991,7 +1025,9 @@ fi
                 }
                 error.in_mode(self.mode)
             })?;
-        parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))
+        let linger = parse_setup(&output.stdout).map_err(|error| error.in_mode(self.mode))?;
+        self.record_alias_warning(&output.stdout);
+        Ok(linger)
     }
 
     /// Each step still runs a fresh errexit child with the full ownership
@@ -1084,7 +1120,7 @@ fi
 stage="$base/.bootstrap-lock"
 retire_setup_lease
 rm -rf "$stage"
-"#);
+retire_set_aside"#);
         let result = if let Some(timeout) = timeout {
             self.session
                 .run_with_timeout(&script, Input::Empty, timeout)
@@ -1130,7 +1166,7 @@ setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 retire_setup_lease
 rm -rf "$stage"
-"#
+retire_set_aside"#
             ),
         );
         let result = if let Some(timeout) = timeout {
@@ -1357,6 +1393,9 @@ pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
 // The shell keeps the same open description until all receipt cleanup ends.
 // Legacy runtimes without that file use the binary's conservative socket probe.
 // A private parent-directory setup guard fences startup during final lock unlink.
+// `refuse <cause>` names why an earlier journal is not recoverable with a fixed
+// token (#305). The read-only check sets setup_check=yes, so the record reaches
+// parse_check and the person sees the cause; every mutating caller still exits 75.
 pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats
@@ -1524,8 +1563,16 @@ case "$kind" in
     upgrade) :;;
     *) exit 71;;
 esac
+if [ -e "$stage/activating" ] || [ -L "$stage/activating" ]; then
+    [ -f "$stage/activating" ] && [ ! -L "$stage/activating" ] && [ -O "$stage/activating" ] && [ "$(stat -c '%a:%h:%s' "$stage/activating")" = 600:1:0 ] || exit 71
+    [ ! -e "$stage/failed" ] && [ ! -L "$stage/failed" ] || exit 71
+    mv -T "$stage/activating" "$stage/failed"
+fi
+if [ -e "$stage/failed" ] || [ -L "$stage/failed" ]; then
+    [ -f "$stage/failed" ] && [ ! -L "$stage/failed" ] && [ -O "$stage/failed" ] && [ "$(stat -c '%a:%h:%s' "$stage/failed")" = 600:1:0 ] || exit 71
+fi
 retire_setup_lease
-if [ -f "$stage/activating" ]; then
+if [ -f "$stage/failed" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
 fi
 if [ "$kind" = fresh ]; then
@@ -1539,12 +1586,16 @@ if [ -f "$stage/linger-requested" ]; then
     fi
     rm -f "$stage/linger-requested"
 fi
-if [ -f "$stage/activating" ]; then
+if [ -f "$stage/failed" ]; then
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
     if [ "${preserve_session:-no}" != yes ] || [ "$kind" != fresh ]; then
         if [ -f "$stage/replacing-state" ] || [ -d "$stage/previous-state" ]; then rm -rf "$base/state"; fi
     fi
+    # Only this attempt's newly created short link belongs to rollback.
+    # Inspect the link itself: its live binary has already been retired above.
+    alias="${launcher%/*}/infra"
+    if [ -f "$stage/creating-alias" ] && [ -L "$alias" ] && [ "$(stat -c '%u' "$alias")" = "$(id -u)" ] && [ "$(readlink "$alias")" = infraternal ] && [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$base/bin/current" ]; then rm -f "$alias"; fi
     if [ -f "$stage/replacing-launcher" ] && [ ! -f "$stage/had-launcher" ]; then rm -f "$launcher"; fi
     [ ! -f "$stage/replacing-unit" ] || rm -f "$unit"
     rm -f "$stage/replacing-binary" "$stage/replacing-state" "$stage/replacing-unit" "$stage/replacing-launcher"
@@ -1561,7 +1612,7 @@ if [ -f "$stage/activating" ]; then
     [ ! -f "$stage/was-enabled" ] || $manager enable infraternal-agent.service
     [ ! -f "$stage/was-active" ] || $manager start infraternal-agent.service
 fi
-if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ]; then
+if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ] && [ ! -f "$stage/failed" ]; then
     $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then
@@ -1728,6 +1779,7 @@ fn hex_nibble(byte: u8) -> Result<u8, Failure> {
     }
 }
 
+/// Validate ordered setup steps, admitting only the fixed optional alias warning.
 fn parse_steps(bytes: &[u8], upload: bool) -> Result<bool, Failure> {
     if bytes.len() > 256 {
         return Err(invalid_setup());
@@ -1758,6 +1810,9 @@ fn parse_steps(bytes: &[u8], upload: bool) -> Result<bool, Failure> {
             if crate::transport::TransferChoice::parse(choice.as_bytes()).is_none() {
                 return Err(invalid_setup());
             }
+        }
+        if name == "install" && lines.clone().next() == Some("ALIAS skipped") {
+            lines.next();
         }
         let next = lines.clone().next().ok_or_else(invalid_setup)?;
         if let Some(failed) = next.strip_prefix("FAIL ") {
@@ -1799,6 +1854,7 @@ pub fn interrupted_transfer_step(bytes: &[u8]) -> Option<InstallStep> {
     interrupted_steps(bytes, true)
 }
 
+/// Recover the last complete setup step, allowing its fixed alias warning receipt.
 fn interrupted_steps(bytes: &[u8], upload: bool) -> Option<InstallStep> {
     if bytes.len() > 256 {
         return None;
@@ -1820,6 +1876,9 @@ fn interrupted_steps(bytes: &[u8], upload: bool) -> Option<InstallStep> {
         };
         if line != format!("STEP {name}") {
             return None;
+        }
+        if name == "install" && lines.peek() == Some(&"ALIAS skipped") {
+            lines.next();
         }
         last = Some(if upload && index == 0 {
             InstallStep::Upload
@@ -1927,6 +1986,41 @@ mod tests {
         ] {
             assert_eq!(TransferCaps::parse(invalid.as_bytes()), None, "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn inherited_control_variables_cannot_change_a_setup_program() {
+        // The login environment can carry any of these names. A mutating
+        // program must still refuse with 75, never report success (#305).
+        let body = format!(
+            "{RUNTIME_CLEANUP}\nprintf '%s ' \"$setup_check\" \"$setup_blocked\" \"$setup_guarded\" \"$setup_allow_locked_inspection\" \"$runtime_locked\" \"$lease_runtime\" \"$preserve_session\" \"${{previous_kind:-unset}}\" \"${{parent:-unset}}\"\nrefuse kind"
+        );
+        let script = Installation::script_for(
+            InstallMode::Rootless,
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            &body,
+        );
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", "/nonexistent/j93d-prelude")
+            .env("setup_check", "yes")
+            .env("setup_blocked", "yes")
+            .env("setup_guarded", "yes")
+            .env("setup_allow_locked_inspection", "yes")
+            .env("runtime_locked", "yes")
+            .env("lease_runtime", "yes")
+            .env("preserve_session", "yes")
+            .env("previous_kind", "upgrade")
+            .env("parent", "/tmp")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(75));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "no no no no no no no unset unset INFRATERNAL_SETUP_REFUSED kind\n"
+        );
     }
 
     #[test]

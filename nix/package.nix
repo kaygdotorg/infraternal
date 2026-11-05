@@ -200,6 +200,9 @@ in stdenv.mkDerivation {
     mkdir -p "$out/bin" "$out/share/infraternal"
     cp -R "$TMPDIR/bundle/." "$out/share/infraternal/"
     ln -s ../share/infraternal/infraternal "$out/bin/infraternal"
+    # Both entry directories expose the same replaceable canonical executable [349].
+    ln -s infraternal "$out/share/infraternal/infra"
+    ln -s infraternal "$out/bin/infra"
     runHook postInstall
   '';
   passthru = { inherit binaries bunDeps vtDeps cargoDeps zig; };

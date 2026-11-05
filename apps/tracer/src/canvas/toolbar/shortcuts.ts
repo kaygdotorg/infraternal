@@ -13,6 +13,8 @@ import { isKeyboardLocked } from "../../../../../packages/ui/src/keyboard-lock";
 import { bindTerminalFont } from "../../terminal-font-shortcuts";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
+import { onDemand } from "../../on-demand";
+import { WINDOW_DOCS_KEYS } from "./window-docs-keys";
 
 /** The digit-row chord that flies to view `n` (1 to 9): ⌘n on a Mac, Ctrl+Shift+n elsewhere. A position, so the digit row is matched by physical key. */
 const viewCombo = (n: number): Combo => platformCombo({ code: `Digit${n}`, mod: true }, { code: `Digit${n}`, mod: true, shift: true });
@@ -46,6 +48,10 @@ export function installShortcuts(cx: Ctx): () => void {
     { id: "move-right", label: "Move to the window on the right", keys: "", combo: platformCombo({ code: "ArrowRight", mod: true, alt: true }, { code: "ArrowRight", mod: true, shift: true }) },
     { id: "move-up", label: "Move to the window above", keys: "", combo: platformCombo({ code: "ArrowUp", mod: true, alt: true }, { code: "ArrowUp", mod: true, shift: true }) },
     { id: "move-down", label: "Move to the window below", keys: "", combo: platformCombo({ code: "ArrowDown", mod: true, alt: true }, { code: "ArrowDown", mod: true, shift: true }) },
+    // "Read about this window" (#304, only with a docs adapter): the "?" button of the window's action group. ⌥⌘/ on a Mac and Ctrl+Shift+Alt+/ on a PC,
+    // the pair D222 gives every window action (⌘ is Ctrl+Shift, Option is Alt). Plain Ctrl+/ is the terminal's (^_, undo in readline and
+    // emacs), ⌘/ and Ctrl+Shift+/ are the shortcuts panel, and Ctrl+Alt is AltGr: all three are taken.
+    ...(cx.adapters.docs ? [{ id: "window-docs", label: "Read about this window", keys: "", combo: platformCombo(WINDOW_DOCS_KEYS.mac, WINDOW_DOCS_KEYS.other) }] : []),
     { id: "overview", label: "All views (overview)", keys: "Esc" },
     { id: "pan", label: "Next window or column", keys: "Scroll" },
     { id: "views", label: "Go to view 1 to 3", keys: { mac: "⌘1–3", other: "Ctrl+Shift+1–3" } },
@@ -68,6 +74,7 @@ export function installShortcuts(cx: Ctx): () => void {
     bindShortcut("new-window-right", (e) => windowKey(e, (w) => cx.win.newWindow(w, "right", true))),
     bindShortcut("new-window-below", (e) => windowKey(e, (w) => cx.win.newWindow(w, "below", true))),
     bindShortcut("close-window", closeActive),
+    ...(cx.adapters.docs ? [bindShortcut("window-docs", (e) => { const w = state.activeWin; if (!e.repeat && w && !cx.inputLock.state) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, w); }); })] : []),
     // Keyboard Lock (fullscreen only, D222): ⌘W on a Mac and Ctrl+Shift+W elsewhere close the window too, but only while the
     // browser has handed those keys over. Otherwise the browser keeps them (it closes the tab), so the chord is not bound.
     bindCombo(platformCombo({ code: "KeyW", key: "w", mod: true, shift: false }, { code: "KeyW", key: "w", mod: true, shift: true }), closeActive, () => isKeyboardLocked()),
