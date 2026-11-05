@@ -8,8 +8,11 @@ import { ActionRefused } from "./connection";
 
 const ROOTLESS = "This server runs without root, so it can only open shells as its own user. Add a host to work elsewhere.";
 
-/** The one action that helps after a refusal: ask again, add another host, or none (only closing the window is left). */
-export type RefusalAction = "retry" | "add-host" | "none";
+/**
+ * The one action that helps after a refusal: ask again, add another host, open the host's sessions (to close one), or none
+ * (only closing the window is left).
+ */
+export type RefusalAction = "retry" | "add-host" | "sessions" | "none";
 
 /** What a refusal says (`message`), whether the sessions list helps (`sessionList`), and its one helpful `action`. */
 export interface TerminalRefusal { message: string; sessionList: boolean; action: RefusalAction }
@@ -22,7 +25,7 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
       case "host_memory_low": {
         const memory = error.memory;
         const details = memory ? ` (${memory.availableMiB} MiB free, ${memory.sessionCount} ${memory.sessionCount === 1 ? "session" : "sessions"} running)` : "";
-        return { message: `${host} is low on memory${details}. Close sessions you no longer need.`, sessionList: true, action: "none" };
+        return { message: `${host} is low on memory${details}. Close sessions you no longer need.`, sessionList: true, action: "sessions" };
       }
       case "invalid": return { message: "This terminal request is not valid. Try opening a new window.", sessionList: false, action: "none" };
       // A server that runs without root can only log in as its own user; say so and name the way forward (#327).

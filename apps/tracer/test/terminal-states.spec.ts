@@ -33,6 +33,7 @@ const ROOTLESS = "This server runs without root, so it can only open shells as i
 const HOSTS = [
   { id: "11111111-1111-4111-8111-111111111111", name: "denied-host", user: "operator", online: true, os: "Debian", refusal: "forbidden" },
   { id: "22222222-2222-4222-8222-222222222222", name: "offline-host", user: "operator", online: false, os: "Debian", refusal: "unavailable" },
+  { id: "33333333-3333-4333-8333-333333333333", name: "busy-host", user: "operator", online: true, os: "Debian", refusal: "host_memory_low", counters: { available_mib: 212, session_count: 9 } },
 ];
 
 /** What the scripted socket does with the server's own `ssh.session.open`: pass it on, refuse it, or never answer. */
@@ -50,13 +51,13 @@ async function script(page: Page, state: { console: Console; listed: number[] })
       const { frame } = decodeMuxedFrame(message);
       if (frame.type === "Call" && frame.actionId === "remote.host.list") {
         state.listed.push(Date.now());
-        reply(socket, frame.callId, true, { hosts: HOSTS.map(({ refusal: _refusal, ...host }) => host), next: null });
+        reply(socket, frame.callId, true, { hosts: HOSTS.map(({ refusal: _refusal, counters: _counters, ...host }) => host), next: null });
         return;
       }
       if (frame.type === "Call" && frame.actionId === "ssh.session.open") {
         const { host_id: hostId } = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { host_id?: string };
         const host = HOSTS.find((entry) => entry.id === hostId);
-        if (host) { reply(socket, frame.callId, false, { error: "terminal unavailable", reason: host.refusal }); return; }
+        if (host) { reply(socket, frame.callId, false, { error: "terminal unavailable", reason: host.refusal, ..."counters" in host ? host.counters : {} }); return; }
         if (state.console === "no_login") { reply(socket, frame.callId, false, { error: "terminal unavailable", reason: "no_login" }); return; }
         if (state.console === "silent") return;
       }
@@ -170,6 +171,21 @@ for (const viewport of VIEWPORTS) {
         // Neither window spins: both read offline, not connecting.
         await expect(denied).not.toHaveAttribute("data-status", "connecting");
         await expect(offline).not.toHaveAttribute("data-status", "connecting");
+      });
+
+      test("a host short of memory keeps a way to its sessions", async ({ page }) => {
+        test.setTimeout(90_000);
+        await boot(page, "forward");
+        await expect(page.locator(".ui-window[data-kind='terminal']").first()).toHaveAttribute("data-status", "live", { timeout: 20_000 });
+        const busy = await openFromPalette(page, "busy-host");
+        const strip = busy.locator(".cl-sx-strip");
+        await expect(strip.locator(".cl-sx-strip-text")).toHaveText("busy-host is low on memory (212 MiB free, 9 sessions running). Close sessions you no longer need.");
+        await expectAligned(busy, strip);
+        await shot(page, "low-memory");
+        // The sentence asks for sessions to be closed, so the one action opens them.
+        await strip.getByRole("button", { name: "Sessions" }).click();
+        await expect(page.locator(".cl-sx-pop")).toBeVisible();
+        await expect(page.locator(".cl-sx-pop")).toContainText("busy-host");
       });
 
       test("a host that never answers says it cannot be reached, and Try again brings it live", async ({ page }) => {

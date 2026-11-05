@@ -121,7 +121,9 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     signature: `refused:${action}:${message}`, result: "refused", label: message, text: message,
     // One action at most: asking again, or a host that can do what this one cannot. "none" leaves only closing the window.
     ...(action === "retry" ? { action: { label: "Try again", icon: ICON.plus, run: () => newShell(rec) } }
-      : action === "add-host" && cx.adapters.addHost ? { action: { label: "Add host", icon: ICON.plus, run: () => cx.adapters.addHost?.() } } : {}),
+      : action === "add-host" && cx.adapters.addHost ? { action: { label: "Add host", icon: ICON.plus, run: () => cx.adapters.addHost?.() } }
+      // A host short of memory asks the person to close sessions: the strip opens that host's list, as the toast's button did.
+      : action === "sessions" ? { action: { label: "Sessions", icon: SESSION_ICON.sessions, run: () => cx.sessionUi?.toggleManager(rec, rec.card.root.querySelector<HTMLElement>('[data-action="sessions"]'), "pointer") } } : {}),
     dismiss: closeStrip(rec),
   });
   /** A window that stayed connecting too long: the same strip, with a retry that asks again without dropping its session. */

@@ -34,7 +34,7 @@ test("product copy names the host and counters and never renders untrusted serve
     message: "The infraternal agent on code cannot reach the server. Check that outbound TCP 443 is allowed from code.", sessionList: false, action: "retry",
   });
   expect(terminalRefusal(await refusal({ reason: "host_memory_low", available_mib: 180, session_count: 212 }), "monitor01")).toEqual({
-    message: "monitor01 is low on memory (180 MiB free, 212 sessions running). Close sessions you no longer need.", sessionList: true, action: "none",
+    message: "monitor01 is low on memory (180 MiB free, 212 sessions running). Close sessions you no longer need.", sessionList: true, action: "sessions",
   });
   expect(terminalRefusal(new ActionRefused(undefined, "internal input: do not render"), "monitor01")).toEqual({
     message: "The server could not open this terminal. Try again.", sessionList: false, action: "retry",
