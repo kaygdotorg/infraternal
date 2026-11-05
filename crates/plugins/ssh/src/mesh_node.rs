@@ -622,6 +622,30 @@ fn write_client_files(
     write_file(config_path, config, 0o644)
 }
 
+/// The identity a key-socket connection from `uid` may use, read per message.
+///
+/// Invariant (J236 P3-3, #221): `uid` must still be the allowed account each
+/// time. A connection accepted while it was allowed gets nothing once the
+/// machine's added-with account changes or the client is turned off, even
+/// if a new identity arrives later.
+fn socket_identity(
+    shared: Arc<Shared>,
+    uid: u32,
+    ordinary: infraternal_plugin_api::login_access::OrdinaryUids,
+) -> impl Fn() -> Option<Arc<PersonKey>> + Send + Sync + 'static {
+    move || {
+        let allowed = shared.allowed.read().ok().and_then(|allowed| *allowed);
+        if !crate::mesh_keys::may_ask(uid, allowed, ordinary) {
+            return None;
+        }
+        shared
+            .identity
+            .read()
+            .ok()
+            .and_then(|identity| identity.clone())
+    }
+}
+
 /// Serve the key socket. Every connection's kernel peer credentials decide
 /// whether it may ask ([`crate::mesh_keys::may_ask`]); the identity is read
 /// per message, so renewal and removal apply at once.
@@ -653,24 +677,19 @@ async fn serve_socket(shared: Arc<Shared>) {
         backoff = Duration::from_millis(10);
         // Checked on every connection before a byte is read (J181 M4): the
         // kernel's peer credentials must be the account the machine was
-        // added with (M3).
+        // added with (M3). Checked again on every message (J236 P3-3).
         let allowed = shared.allowed.read().ok().and_then(|allowed| *allowed);
-        let permitted = stream.peer_cred().is_ok_and(|credentials| {
-            crate::mesh_keys::may_ask(credentials.uid(), allowed, ordinary)
-        });
-        if !permitted {
+        let Some(uid) = stream
+            .peer_cred()
+            .ok()
+            .map(|credentials| credentials.uid())
+            .filter(|uid| crate::mesh_keys::may_ask(*uid, allowed, ordinary))
+        else {
             continue;
-        }
-        let shared = Arc::clone(&shared);
+        };
+        let identity = socket_identity(Arc::clone(&shared), uid, ordinary);
         tokio::spawn(async move {
-            let _ = crate::mesh_keys::serve(stream, || {
-                shared
-                    .identity
-                    .read()
-                    .ok()
-                    .and_then(|identity| identity.clone())
-            })
-            .await;
+            let _ = crate::mesh_keys::serve(stream, identity).await;
         });
     }
 }

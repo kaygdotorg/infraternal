@@ -389,3 +389,51 @@ fn turning_the_client_off_removes_only_files_infraternal_wrote() {
     assert!(!at(KNOWN_HOSTS_PATH).exists());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// J236 P3-3 (#221): the key socket decides per message, not only when a
+/// connection is accepted. A connection from the allowed account keeps no
+/// signing power once that account is no longer allowed, even if a new
+/// identity arrives later.
+#[test]
+fn a_key_socket_connection_loses_the_identity_when_its_account_is_no_longer_allowed() {
+    use russh::keys::signature::Signer as _;
+    let node = MeshSshNode::new(std::env::temp_dir(), |_| None).unwrap();
+    let ca = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+    let key = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let certificate = crate::mesh_issue::person_certificate(
+        ca.public_key().key_data().ed25519().unwrap().0,
+        &|body: &[u8]| {
+            let signature: russh::keys::ssh_key::Signature = ca.try_sign(body).ok()?;
+            signature.as_bytes().try_into().ok()
+        },
+        &crate::mesh_issue::PersonRequest {
+            subject: key.public_key(),
+            person: "0b5c8a64-7d1f-4c43-9d0e-0c6a8a5b7f10",
+            source_address: "10.254.0.7".parse().unwrap(),
+            now,
+            lifetime: 3600,
+        },
+    )
+    .unwrap();
+    *node.shared.identity.write().unwrap() = Some(Arc::new(PersonKey { certificate, key }));
+    *node.shared.allowed.write().unwrap() = Some(1500);
+    let ordinary = infraternal_plugin_api::login_access::OrdinaryUids::LINUX;
+    let identity = socket_identity(Arc::clone(&node.shared), 1500, ordinary);
+    assert!(
+        identity().is_some(),
+        "the allowed account gets the identity"
+    );
+    // Another account is allowed now (the machine's added-with changed).
+    *node.shared.allowed.write().unwrap() = Some(1600);
+    assert!(
+        identity().is_none(),
+        "the earlier connection kept the identity"
+    );
+    // Turned off, then on again for this account: it may ask again.
+    *node.shared.allowed.write().unwrap() = Some(1500);
+    assert!(identity().is_some());
+}
