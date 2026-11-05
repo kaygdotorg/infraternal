@@ -218,6 +218,27 @@ mod durable_state {
     };
     use std::sync::atomic::AtomicBool;
 
+    /// Hang guard for this module's positive waits (#334 rule). Each wait ends
+    /// on its event; the bound only detects a hang. The events here follow
+    /// `Store::save`, which takes the state directory's lock and fsyncs the
+    /// file and directory: that durability is what this test is about. On
+    /// dev-02 with two looping agent suites beside it (load 13-30), one save
+    /// took p50 4.9 s, p90 68 s and at most 112 s (n=40, including the lock
+    /// wait), so the guard sits well above that (#355).
+    const HANG: Duration = Duration::from_secs(300);
+
+    /// Saves through the real store and prints how long it took, so loaded
+    /// runs record the fsync cost the waits above must tolerate.
+    fn timed_save(store: &Store, state: &State, site: &str) -> io::Result<()> {
+        let started = std::time::Instant::now();
+        let saved = store.save(state);
+        println!(
+            "METRIC node_state_save_ms={} site={site}",
+            started.elapsed().as_millis()
+        );
+        saved
+    }
+
     const REPLACE: ActionDef = ActionDef {
         id: "review.replace",
         summary: "Replace fixture network access",
@@ -259,7 +280,7 @@ mod durable_state {
                 while !*open {
                     open = self.release.changed.wait(open).unwrap();
                 }
-                let committed = store.save(&snapshot).is_ok();
+                let committed = timed_save(&store, &snapshot, "released-callback").is_ok();
                 self.restored.send(committed).unwrap();
             }
             None
@@ -272,7 +293,7 @@ mod durable_state {
             let config = current.config.as_mut().unwrap();
             config.version = 2;
             config.default_policy = DefaultPolicy::Deny;
-            store.save(&current).map_err(|_| PluginError::Rejected)?;
+            timed_save(&store, &current, "replacement-call").map_err(|_| PluginError::Rejected)?;
             Ok(b"{}".to_vec())
         }
     }
@@ -282,6 +303,10 @@ mod durable_state {
         }
     }
 
+    /// A network-access change acknowledged while an older, superseded worker
+    /// is paused mid-restore must survive that worker's late completion: once
+    /// the change is acknowledged, the persisted state keeps the newer revision
+    /// (version 2, Deny), never the superseded worker's older snapshot.
     #[tokio::test]
     async fn acknowledged_network_access_survives_superseded_worker_completion() {
         let directory = StateDirectory::new();
@@ -328,9 +353,7 @@ mod durable_state {
             directory.0.clone(),
         );
         tokio::task::yield_now().await;
-        observed_start
-            .recv_timeout(Duration::from_secs(30))
-            .unwrap();
+        observed_start.recv_timeout(HANG).unwrap();
         tokio::time::sleep(TEST_LIMIT + Duration::from_millis(100)).await;
         tokio::task::yield_now().await;
         let state = directory.0.clone();
@@ -343,19 +366,16 @@ mod durable_state {
         let early = tokio::time::timeout(Duration::from_secs(1), &mut change).await;
         let accepted_before_release = matches!(&early, Ok(Ok(Ok(_))));
         drop(cleanup);
-        let old_committed = prior_write.recv_timeout(Duration::from_secs(30)).unwrap();
+        let old_committed = prior_write.recv_timeout(HANG).unwrap();
         let result = match early {
             Ok(joined) => joined.unwrap(),
-            Err(_) => tokio::time::timeout(Duration::from_secs(10), change)
-                .await
-                .unwrap()
-                .unwrap(),
+            Err(_) => tokio::time::timeout(HANG, change).await.unwrap().unwrap(),
         };
         task.abort();
         let _ = task.await;
         tokio::task::yield_now().await;
         loop {
-            match terminations.recv_timeout(Duration::from_secs(30)) {
+            match terminations.recv_timeout(HANG) {
                 Ok(()) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(error) => panic!("state worker cleanup did not complete: {error:?}"),
