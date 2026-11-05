@@ -23,7 +23,7 @@ async function open(page: Page, scene: number, query = ""): Promise<void> {
   // These specs check gestures, geometry and timing, not a look: they run on the Solid theme (`look=solid`). Under the default Tinted theme the windows' 6 px blur costs
   // enough frames in software rendering (17 ms a frame becomes 27 ms on a phone-sized page and 64 ms on a desktop one) that held fingers and wheel steps coalesce and a
   // gesture is sometimes lost. The cost of the blur is measured on its own, with the frame times, on #323.
-  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft&look=solid${query}`);
+  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft${query.includes("look=") ? "" : "&look=solid"}${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await expect.poll(() => probe(page, (p) => p.views().length)).toBeGreaterThan(0);
   // Let the camera come to rest before measuring.
@@ -183,7 +183,8 @@ test("canvas lock off frees pan and zoom in place; the overview is its own actio
 });
 
 test("the dots sit on the gradient: the gradient shows everywhere, the dot layers are plain tiles with no cover or mask", async ({ page }) => {
-  await open(page, 3);
+  // The one spec that needs a gradient: Tinted's own (the other looks are asked for with `look=`; see `open`).
+  await open(page, 3, "&look=tinted");
   const info = await page.evaluate(() => {
     const fill = document.querySelector<HTMLElement>(".ui-canvas-backdrop-fill")!;
     const layers = [...document.querySelectorAll<HTMLElement>(".ui-canvas-backdrop-layer")];
