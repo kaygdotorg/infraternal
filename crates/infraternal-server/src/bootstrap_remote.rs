@@ -947,7 +947,14 @@ impl Backend for RemoteBackend {
                     .await
                     .map_err(|_| unavailable())?
                 };
-                confirm_preferred_login(&actor, person, account).await?;
+                let grant = crate::login_access::grant(
+                    &self.issuer.store().0,
+                    &authority.owner,
+                    Some(host),
+                )
+                .await
+                .map_err(|_| unavailable())?;
+                confirm_preferred_login(&actor, person, account, grant).await?;
                 self.authorize(authority).await?;
             }
             self.uid(authority, host)?;
@@ -1053,10 +1060,11 @@ async fn confirm_preferred_login(
     actor: &EmbeddedAgent,
     person: Uuid,
     account: String,
+    grant: crate::embedded::LoginGrant,
 ) -> Result<(), Failure> {
     // The PTY probe alone bypasses preferred account/PAM admission. Reuse the
     // exact preparation path used before real terminal opens, after restoration.
-    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, Some(account)))
+    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, Some(account), grant))
         .await.map_err(|_| unavailable())?.map_err(|_| Failure::install(
             "The host connected, but its preferred account login could not open. Check the host login path and try again."))
 }

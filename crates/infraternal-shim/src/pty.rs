@@ -860,6 +860,24 @@ pub fn finish_final_output() {
     }
 }
 
+/// End the process the way an unhandled SIGTERM ends it, after the caller
+/// handled one: restore the default action, unblock it on this thread and
+/// re-raise. Service managers then record a clean stop by SIGTERM rather than
+/// an exit status (#221). Exits with 143 only if the signal cannot end the
+/// process, which the default action never allows.
+pub fn terminate_by_default() -> ! {
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, raise, sigaction};
+    let action = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
+    // SAFETY: the default action runs no user code, so replacing any handler
+    // (the runtime's signal driver) cannot leave a handler half installed.
+    let _ = unsafe { sigaction(Signal::SIGTERM, &action) };
+    let mut terminate = SigSet::empty();
+    terminate.add(Signal::SIGTERM);
+    let _ = terminate.thread_unblock();
+    let _ = raise(Signal::SIGTERM);
+    std::process::exit(143)
+}
+
 /// On SIGINT before final output starts, write the notice and re-raise SIGINT. During the final
 /// write, let that complete line finish and then re-raise without appending another one. A later
 /// runtime handler may chain this handler first; in that case it returns to the runtime's handler.

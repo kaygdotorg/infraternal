@@ -95,6 +95,7 @@ fn configuration() -> Config {
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,
+                access_ssh: None,
             },
         )]),
     }

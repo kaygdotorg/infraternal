@@ -592,3 +592,189 @@ fn review_j68b_explicit_internal_suffix_overrides_origin() {
         "explicit suffix overrides the origin-derived default"
     );
 }
+
+/// The server's node admits every member for the control plane (D215), but
+/// each peer also carries mesh SSH's own TCP/22 answer (#221), because the
+/// widened inbound is not the policy there. Other nodes never carry it, so
+/// older infraternal agents (strict parsers) never see the field, and a
+/// server-node snapshot without it (written before #221) refuses.
+#[test]
+fn only_the_server_node_carries_an_ssh_answer_and_a_missing_one_refuses() {
+    let coord = coordinator();
+    for default in [DefaultPolicy::Allow, DefaultPolicy::Deny] {
+        let server = configuration::compile(&coord, NodeId(1), default, &BTreeMap::new()).unwrap();
+        for peer in server.peers.values() {
+            assert!(peer.access_ssh.is_some());
+        }
+        let mut legacy = server.clone();
+        for peer in legacy.peers.values_mut() {
+            peer.access_ssh = None;
+        }
+        assert!(legacy.peers.values().all(|peer| !legacy.admits_ssh(peer)));
+        let ordinary =
+            configuration::compile(&coord, NodeId(2), default, &BTreeMap::new()).unwrap();
+        assert!(
+            ordinary
+                .peers
+                .values()
+                .all(|peer| peer.access_ssh.is_none())
+        );
+        assert_eq!(
+            ordinary.admits_ssh(&ordinary.peers[&NodeId(3)]),
+            default == DefaultPolicy::Allow
+        );
+        let wire = serde_json::to_value(&ordinary).unwrap();
+        assert!(
+            wire["peers"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|peer| peer.get("access_ssh").is_none())
+        );
+    }
+}
+
+/// Compact access updates carry only inbound and outbound. On the server's
+/// node those stay "all" while the SSH answer changes, so a changed answer
+/// must take the full path, or the node would never learn it.
+#[test]
+fn a_changed_ssh_answer_is_sent_even_when_inbound_and_outbound_are_unchanged() {
+    let coord = coordinator();
+    let old =
+        configuration::compile(&coord, NodeId(1), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
+    let mut new = old.clone();
+    new.version += 1;
+    let peer = new.peers.get_mut(&NodeId(2)).unwrap();
+    peer.access_ssh = Some(!peer.access_ssh.unwrap());
+    let chunks = infraternal_plugin_mesh::access_updates::chunks(Some(&old), &new).unwrap();
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.upserted.get(&NodeId(2)) == Some(&new.peers[&NodeId(2)])),
+        "the peer with the changed answer is sent whole"
+    );
+}
+
+/// Access decides mesh SSH toward the server's own host like toward any
+/// other node (owner, #221 Q-A (b)): the implicit reach to the server covers
+/// only the infraternal control plane. An explicit arrow decides when one
+/// exists; otherwise the default does.
+#[test]
+fn ssh_toward_the_server_follows_explicit_arrows_and_the_default() {
+    let mut coord = coordinator();
+    let port = |number| Port {
+        protocol: Protocol::Tcp,
+        number,
+    };
+    coord
+        .add_arrow(Arrow {
+            id: RuleId(1),
+            from: Endpoint::Node(NodeId(2)),
+            to: Endpoint::Node(NodeId(1)),
+            both_ways: false,
+            ports: TrafficPolicy::Ports(BTreeSet::from([port(443)])),
+        })
+        .unwrap();
+    for default in [DefaultPolicy::Allow, DefaultPolicy::Deny] {
+        let server = configuration::compile(&coord, NodeId(1), default, &BTreeMap::new()).unwrap();
+        // A 443-only arrow narrows SSH away even under an open default.
+        assert_eq!(server.peers[&NodeId(2)].access_ssh, Some(false));
+        assert!(!server.admits_ssh(&server.peers[&NodeId(2)]));
+        // No arrow: the default decides.
+        assert_eq!(
+            server.peers[&NodeId(3)].access_ssh,
+            Some(default == DefaultPolicy::Allow)
+        );
+        let node = configuration::compile(&coord, NodeId(3), default, &BTreeMap::new()).unwrap();
+        assert_eq!(node.peers[&NodeId(1)].outbound, TrafficPolicy::All);
+    }
+    // An explicit SSH arrow allows it under a closed default.
+    coord
+        .add_arrow(Arrow {
+            id: RuleId(2),
+            from: Endpoint::Node(NodeId(3)),
+            to: Endpoint::Node(NodeId(1)),
+            both_ways: false,
+            ports: TrafficPolicy::Ports(BTreeSet::from([port(22)])),
+        })
+        .unwrap();
+    let server =
+        configuration::compile(&coord, NodeId(1), DefaultPolicy::Deny, &BTreeMap::new()).unwrap();
+    assert_eq!(server.peers[&NodeId(3)].access_ssh, Some(true));
+}
+
+/// D352 / J236 P2-1 (#221): on the server's own node the kernel admits every
+/// peer only to the infraternal control-plane ports; SSH and every other
+/// service on the server's host follow Access (an explicit arrow, or the
+/// default), the same as on any node.
+#[test]
+fn the_server_node_admits_the_control_plane_and_otherwise_follows_access() {
+    let tcp = |number| Port {
+        protocol: Protocol::Tcp,
+        number,
+    };
+    let control = TrafficPolicy::Ports(BTreeSet::from([
+        tcp(47_176),
+        Port {
+            protocol: Protocol::Udp,
+            number: 47_176,
+        },
+    ]));
+    let mut coord = coordinator();
+    coord
+        .add_arrow(Arrow {
+            id: RuleId(1),
+            from: Endpoint::Node(NodeId(2)),
+            to: Endpoint::Node(NodeId(1)),
+            both_ways: false,
+            ports: TrafficPolicy::Ports(BTreeSet::from([tcp(443)])),
+        })
+        .unwrap();
+    let mut with_arrow = control.clone();
+    with_arrow.union(&TrafficPolicy::Ports(BTreeSet::from([tcp(443)])));
+    for default in [DefaultPolicy::Allow, DefaultPolicy::Deny] {
+        let server = configuration::compile_with_control_plane(
+            &coord,
+            NodeId(1),
+            default,
+            &BTreeMap::new(),
+            &control,
+        )
+        .unwrap();
+        // The control plane is always open; nothing else is implied.
+        for peer in server.peers.values() {
+            assert!(peer.inbound.allows(tcp(47_176)));
+        }
+        // An explicit arrow narrows even an open default.
+        assert_eq!(server.peers[&NodeId(2)].inbound, with_arrow);
+        assert!(!server.peers[&NodeId(2)].inbound.allows(tcp(22)));
+        // Without an arrow the default decides.
+        if default == DefaultPolicy::Allow {
+            assert_eq!(server.peers[&NodeId(3)].inbound, TrafficPolicy::All);
+        } else {
+            assert_eq!(server.peers[&NodeId(3)].inbound, control);
+            assert!(!server.peers[&NodeId(3)].inbound.allows(tcp(22)));
+        }
+        // Other nodes compile as before: the server is still always reachable
+        // from them (its own inbound decides what is admitted).
+        let node = configuration::compile(&coord, NodeId(3), default, &BTreeMap::new()).unwrap();
+        assert_eq!(node.peers[&NodeId(1)].outbound, TrafficPolicy::All);
+    }
+}
+
+/// J236 P3-4 (#221): a saved configuration from before the `server` field
+/// existed cannot say whether it is the server's node, whose installed
+/// inbound used to be "all". Mesh SSH refuses on it until a current
+/// configuration arrives, instead of reading "all" as the policy.
+#[test]
+fn a_saved_config_without_the_server_field_refuses_ssh() {
+    let coord = coordinator();
+    let mut legacy =
+        configuration::compile(&coord, NodeId(2), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
+    legacy.server = None;
+    for peer in legacy.peers.values_mut() {
+        peer.inbound = TrafficPolicy::All;
+        peer.access_ssh = None;
+    }
+    assert!(legacy.peers.values().all(|peer| !legacy.admits_ssh(peer)));
+}

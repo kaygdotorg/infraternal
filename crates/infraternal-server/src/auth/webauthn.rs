@@ -181,6 +181,7 @@ impl Auth {
                     .bind(version).bind(version)
                     .execute(&mut *tx)
                     .await?;
+                crate::login_access::add_owner_defaults(&mut tx, &registration.user).await?;
             }
             Authority::Add(session) => {
                 // `add_start` spent this session's `passkey.add` tap; the new authenticator may

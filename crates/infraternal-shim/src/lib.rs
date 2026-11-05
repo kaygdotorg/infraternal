@@ -233,6 +233,13 @@ pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
 }
 
+/// Restore SIGTERM's default action and re-raise it, after a process handled
+/// SIGTERM to finish its shutdown steps (#221).
+#[cfg(target_os = "linux")]
+pub fn terminate_by_default() -> ! {
+    pty::terminate_by_default()
+}
+
 /// Tell the SIGINT handler that the final JSON result is about to be written.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn begin_final_output() {

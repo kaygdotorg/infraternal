@@ -10,12 +10,13 @@ import uuid
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from agent_fixture import Binary, cleanup, fixture_state, varint
+from agent_fixture import Binary, cleanup, fixture_state, varint, with_login_grant
 
 
 def control(client, number, action, values):
     """Read one exact control result while retaining unrelated fixture events."""
     name = action.encode()
+    values = with_login_grant(action, values)
     client.send(0, 0x30, struct.pack('<I', number) + varint(len(name)) + name + json.dumps(values).encode())
     while True:
         frame = client.read()
