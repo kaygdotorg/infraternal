@@ -159,6 +159,18 @@ const KNOWN_HOSTS: &str = infraternal_plugin_api::mesh_ssh_files::KNOWN_HOSTS_PA
 /// The uid that must own every trusted directory.
 const ROOT: u32 = 0;
 
+/// How long `configure` waits for a queued install before replying "busy".
+const INSTALL_WAIT: Duration = Duration::from_secs(2);
+
+/// Why a pushed snapshot is not installed yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotInstalled {
+    /// An older or repeated sequence.
+    Stale,
+    /// Still queued behind logins in flight; it lands once they finish.
+    Busy,
+}
+
 /// What the server last asked for: listener on or off, and its host certificate.
 #[derive(Clone)]
 struct Desired {
@@ -352,7 +364,7 @@ impl MeshSshNode {
         // Installed before replying, so the server learns of a stale or
         // contended push and retries; it is never told "accepted" for state
         // this node does not hold.
-        let installed = self.shared.authority.try_install(input.snapshot);
+        let installed = self.install(input.snapshot);
         if installed.is_ok() && input.enabled {
             self.desired.send_replace(Desired {
                 enabled: true,
@@ -373,6 +385,31 @@ impl MeshSshNode {
         }
         installed.map_err(|_| PluginError::Rejected)?;
         Ok(br#"{"accepted":true}"#.to_vec())
+    }
+
+    /// Install a pushed snapshot, waiting its turn behind logins in flight.
+    ///
+    /// Invariant (J236 P1-1, #221): a revocation always gets in. The install
+    /// queues on the authority's fair lock, so logins that start after it wait
+    /// behind it, and it lands once the logins already in flight finish (each
+    /// is bounded by `mesh_authority::OPEN_BOUND`). Never trying-and-giving-up:
+    /// that let two overlapping logins hold a revocation off forever.
+    ///
+    /// The plugin thread waits at most [`INSTALL_WAIT`]. Past that the reply
+    /// is "busy", but the queued install still lands, and the server's retry
+    /// brings a newer snapshot.
+    fn install(&mut self, snapshot: Snapshot) -> Result<(), NotInstalled> {
+        let runtime = self.handle().map_err(|_| NotInstalled::Busy)?;
+        let shared = Arc::clone(&self.shared);
+        let (done, outcome) = std::sync::mpsc::sync_channel(1);
+        runtime.spawn(async move {
+            let _ = done.send(shared.authority.install(snapshot).await);
+        });
+        match outcome.recv_timeout(INSTALL_WAIT) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(NotInstalled::Stale),
+            Err(_) => Err(NotInstalled::Busy),
+        }
     }
 
     /// Make a person's in-memory key and return its public half.

@@ -277,3 +277,82 @@ fn stopping_the_agent_removes_the_redirect_and_mesh_22_reaches_sshd() {
     drop(node);
     assert!(eventually(|| weak.upgrade().is_none()));
 }
+
+/// J236 P1-1 (#221 comment 79805): while logins keep overlapping, a
+/// revoking push must still land, and a login that starts after it must see
+/// it. Before the fix every push came back busy (J236: 0 of 30), so a person
+/// who still had access could hold off their own revocation.
+#[test]
+fn a_revoking_push_lands_while_logins_keep_overlapping() {
+    use crate::mesh_admission::CurrentAccess as _;
+    const PERSON: &str = "0b5c8a64-7d1f-4c43-9d0e-0c6a8a5b7f10";
+    let mut node = MeshSshNode::new(std::env::temp_dir(), |_| None).unwrap();
+    let push = |node: &mut MeshSshNode, sequence: u64, grants: serde_json::Value| {
+        let input = json!({
+            "enabled": false,
+            "snapshot": {"sequence": sequence, "node": 9, "ca": vec![7_u8; 32], "certificates": [], "grants": grants},
+        });
+        node.call(
+            "mesh-ssh-node.configure",
+            &serde_json::to_vec(&input).unwrap(),
+        )
+        .is_ok()
+    };
+    assert!(push(&mut node, 1, json!({ PERSON: {"any_account": true} })));
+    node.mesh_observer()(Some(MeshView {
+        node: 9,
+        addresses: vec!["10.254.0.9".parse().unwrap()],
+        interface: "infraternal0".into(),
+        peers: std::collections::BTreeMap::new(),
+    }));
+    let runtime = node.handle().unwrap();
+    let shared = Arc::clone(&node.shared);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while runtime.block_on(shared.authority.current()).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mesh view never applied"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Two staggered logins, each holding the guard 300 ms, as a channel open
+    // does across the shim login.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let logins: Vec<_> = [0_u64, 150]
+        .into_iter()
+        .map(|offset| {
+            let shared = Arc::clone(&shared);
+            let stop = Arc::clone(&stop);
+            runtime.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(offset)).await;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let guard = shared.authority.current().await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    drop(guard);
+                }
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(200));
+    let mut accepted = None;
+    for attempt in 0..30_u64 {
+        if push(&mut node, 10 + attempt, json!({})) {
+            accepted = Some(attempt);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let still_allowed = runtime.block_on(async {
+        shared
+            .authority
+            .current()
+            .await
+            .is_ok_and(|guard| guard.login_access(PERSON, 9, "kayg"))
+    });
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for login in logins {
+        runtime.block_on(login).unwrap();
+    }
+    assert!(accepted.is_some(), "a revoking push never installed");
+    assert!(!still_allowed, "a login after the revocation still passed");
+}

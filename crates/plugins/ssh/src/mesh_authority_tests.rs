@@ -323,3 +323,53 @@ fn snapshot_wire_form_refuses_unknown_fields() {
     json["extra"] = serde_json::json!(true);
     assert!(serde_json::from_value::<Snapshot>(json).is_err());
 }
+
+/// A runtime whose login never finishes, like a hung PAM call.
+struct HungRuntime;
+impl SessionRuntime for HungRuntime {
+    async fn open(
+        &self,
+        _: &str,
+        _: &str,
+        _: SessionKind,
+        _: Option<Terminal>,
+    ) -> Result<Attachment, Refusal> {
+        std::future::pending().await
+    }
+}
+
+/// J236 P1-1 (#221): a login holds the access snapshot while it registers,
+/// so a revocation waits for it. A hung login must not make that wait
+/// endless: it is refused at `OPEN_BOUND`, and the queued revocation lands.
+#[tokio::test(start_paused = true)]
+async fn a_hung_login_is_refused_at_its_bound_and_the_revocation_lands() {
+    let fixture = fixture();
+    let revoking = snapshot(&fixture, 2, LoginGrant::default());
+    let authority = std::sync::Arc::new(Authority::new(HungRuntime, accounts));
+    authority.set_mesh(Some(mesh(true))).await;
+    authority
+        .install(snapshot(&fixture, 1, own_kayg()))
+        .await
+        .unwrap();
+    let holder = std::sync::Arc::clone(&authority);
+    let login = tokio::spawn(async move {
+        let guard = holder.current().await?;
+        let login = mesh_login::authorize(
+            &guard,
+            &fixture.certificate,
+            SOURCE.parse().unwrap(),
+            TARGET_NODE,
+            "kayg",
+            now(),
+        )?;
+        guard
+            .open_session(&login, SessionKind::Shell, None)
+            .await
+            .map(|_| ())
+    });
+    // The login now holds the snapshot inside the hung runtime.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let installed = tokio::time::timeout(OPEN_BOUND * 2, authority.install(revoking)).await;
+    assert_eq!(installed, Ok(Ok(())), "the revocation waited forever");
+    assert_eq!(login.await.unwrap(), Err(Refusal::LoginAccess));
+}

@@ -92,12 +92,11 @@ pub trait SessionRuntime: Send + Sync + 'static {
 pub struct Stale;
 
 /// Why a snapshot was not installed right now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NotInstalled {
-    Stale,
-    /// An open is still registering under the current snapshot; retry.
-    Busy,
-}
+/// The longest one login may hold the access snapshot: a bound for a hung
+/// PAM or user-manager start only. Measured logins take about 2 s (#221
+/// comment 79163); a revocation waits at most this long for logins already
+/// in flight.
+pub const OPEN_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The installed snapshot with its CA fingerprint computed once.
 struct Installed {
@@ -131,7 +130,8 @@ impl<R: SessionRuntime> Authority<R> {
         }
     }
 
-    /// Install a pushed snapshot.
+    /// Install a pushed snapshot. Waits its turn on the fair lock: logins
+    /// that start after this call queue behind it (J236 P1-1, #221).
     ///
     /// # Errors
     /// Refuses a snapshot whose sequence is not higher than the last one.
@@ -140,23 +140,6 @@ impl<R: SessionRuntime> Authority<R> {
         let mut state = self.state.write().await;
         if snapshot.sequence <= state.sequence {
             return Err(Stale);
-        }
-        state.sequence = snapshot.sequence;
-        state.installed = Some(Arc::new(Installed { snapshot, ca }));
-        Ok(())
-    }
-
-    /// Install without waiting, for synchronous callers that must report the
-    /// outcome (J181 M1): never "accepted" for a snapshot not installed.
-    ///
-    /// # Errors
-    /// `Stale` for an older or repeated sequence, `Busy` while an open holds
-    /// the current snapshot.
-    pub fn try_install(&self, snapshot: Snapshot) -> Result<(), NotInstalled> {
-        let ca = KeyData::Ed25519(Ed25519PublicKey(snapshot.ca)).fingerprint(HashAlg::Sha256);
-        let mut state = self.state.try_write().map_err(|_| NotInstalled::Busy)?;
-        if snapshot.sequence <= state.sequence {
-            return Err(NotInstalled::Stale);
         }
         state.sequence = snapshot.sequence;
         state.installed = Some(Arc::new(Installed { snapshot, ca }));
@@ -286,9 +269,16 @@ impl<R: SessionRuntime> LoginGuard for Guard<'_, R> {
         kind: SessionKind,
         terminal: Option<Terminal>,
     ) -> Result<Attachment, Refusal> {
-        self.runtime
-            .open(&login.identity().person, login.account(), kind, terminal)
-            .await
+        // The guard is held across the login so a revocation cannot slip in
+        // between the check and the session; a hung login must not hold it
+        // (and so every revocation) forever (J236 P1-1).
+        tokio::time::timeout(
+            OPEN_BOUND,
+            self.runtime
+                .open(&login.identity().person, login.account(), kind, terminal),
+        )
+        .await
+        .map_err(|_| Refusal::LoginAccess)?
     }
 
     async fn open_files(&self, _: &AuthorizedLogin<'_>) -> Result<NoFiles, Refusal> {
