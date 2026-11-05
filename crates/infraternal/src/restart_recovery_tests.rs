@@ -18,6 +18,8 @@ use openssl::{
 use std::sync::Arc;
 
 /// Restart fixtures must work from an oversized debug image without raising production's limit.
+/// Pad a staging inode and publish a separate executable: sibling tests may fork
+/// while the staging writer is open, so closing our descriptor alone cannot make it executable.
 #[cfg(target_os = "linux")]
 #[test]
 fn oversized_debug_image_does_not_limit_restart_fixtures() {
@@ -31,17 +33,19 @@ fn oversized_debug_image_does_not_limit_restart_fixtures() {
         return;
     }
     let directory = Directory::new();
-    let image = Signed::image(directory.0.join("oversized-debug-image"));
+    let image = Signed::image(directory.0.join("oversized-debug-staging"));
     std::fs::OpenOptions::new()
         .write(true)
         .open(&image.path)
         .unwrap()
         .set_len(512 * 1024 * 1024 + 1)
         .unwrap();
+    let executable = directory.0.join("oversized-debug-image");
+    crate::test_executable::copy(&image.path, &executable, 0o700);
     // ELF ignores trailing padding; strip removes it along with debug sections.
     // A sparse extension crosses the real bound without manufacturing debug symbols.
     for check_bound in [true, false] {
-        let mut command = std::process::Command::new(&image.path);
+        let mut command = std::process::Command::new(&executable);
         if check_bound {
             command
                 .args(["--exact", NAME, "--nocapture"])
