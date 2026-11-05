@@ -150,9 +150,58 @@ impl Auth {
         Ok(session)
     }
 
+    /// Revoke the presented bearers that belong to the signed-in account, and no others (#285).
+    ///
+    /// The account is the owner of the selected (newest) session cookie. When the selection is
+    /// ambiguous or already revoked, it is the one account all live presented bearers share; bearers
+    /// of more than one account then refuse the logout with nothing deleted. A browser may hold
+    /// another account's cookie, and logging out here must never end that session.
+    pub async fn logout_presented(&self, selected: Option<&str>, tokens: &[&str]) -> Result<()> {
+        let account = self.logout_account(selected, tokens).await?;
+        for token in tokens {
+            self.revoke_session(token, Some(&account)).await?;
+        }
+        Ok(())
+    }
+
+    /// The account a logout acts for; see `logout_presented`.
+    async fn logout_account(&self, selected: Option<&str>, tokens: &[&str]) -> Result<String> {
+        if let Some(selected) = selected
+            && let Some(user) =
+                sqlx::query_scalar::<_, String>("SELECT user_id FROM sessions WHERE token_hash=?")
+                    .bind(hash(selected))
+                    .fetch_optional(&self.pool)
+                    .await?
+        {
+            return Ok(user);
+        }
+        let mut owners = Vec::new();
+        for token in tokens {
+            if let Some(user) =
+                sqlx::query_scalar::<_, String>("SELECT user_id FROM sessions WHERE token_hash=?")
+                    .bind(hash(token))
+                    .fetch_optional(&self.pool)
+                    .await?
+                && !owners.contains(&user)
+            {
+                owners.push(user);
+            }
+        }
+        match owners.as_slice() {
+            [only] => Ok(only.clone()),
+            _ => Err(Error::Denied),
+        }
+    }
+
     /// Revoke the current session immediately.
     pub async fn logout(&self, token: &str) -> Result<()> {
+        self.revoke_session(token, None).await
+    }
+
+    /// Delete one session by bearer, only within `account` when given, and publish the revocation.
+    async fn revoke_session(&self, token: &str, account: Option<&str>) -> Result<()> {
         let session_hash = hash(token);
+        let account = account.map(str::to_owned);
         let revocations = self.revocations.clone();
         // Pool waiters remain cancellable. Only work that already owns a connection
         // is detached, so the pool also bounds unfinished logout tasks.
@@ -165,11 +214,13 @@ impl Auth {
         super::committed::run(Box::pin(async move {
             // Keep connection ownership through publication. Returning it to the pool
             // also fences the notification, even after the requesting future is gone.
-            let mut users: Vec<String> =
-                sqlx::query_scalar("DELETE FROM sessions WHERE token_hash=? RETURNING user_id")
-                    .bind(&session_hash)
-                    .fetch_all(&mut *connection)
-                    .await?;
+            let mut users: Vec<String> = sqlx::query_scalar(
+                "DELETE FROM sessions WHERE token_hash=? AND (?2 IS NULL OR user_id=?2) RETURNING user_id",
+            )
+            .bind(&session_hash)
+            .bind(&account)
+            .fetch_all(&mut *connection)
+            .await?;
             if let Some(user) = users.pop() {
                 revocations.publish(&user, Some(session_hash));
             }

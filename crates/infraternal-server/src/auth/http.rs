@@ -568,17 +568,17 @@ async fn execute(
                 return Ok(Json(json!({"ok":true})).into_response());
             }
             // The browser may hold several login generations while old requests
-            // are still in flight. Revoke every valid presented capability so
-            // those replies cannot refresh an older session after logout.
+            // are still in flight. Revoke every valid presented capability of the
+            // signed-in account so those replies cannot refresh an older session
+            // after logout; another account's cookie in the same browser is left alone.
             // More bearers than a browser can hold is not a real logout; refuse it
             // before any database work (see `MAX_LOGOUT_SESSIONS`).
             let tokens = super::cookies::session_tokens(headers).ok_or(Error::Invalid)?;
             if tokens.is_empty() {
                 return Err(Error::Denied);
             }
-            for token in tokens {
-                auth.logout(token).await?;
-            }
+            let selected = super::cookies::session(headers).map(|cookie| cookie.token);
+            auth.logout_presented(selected, &tokens).await?;
             return Ok(Json(json!({"ok":true})).into_response());
         }
         _ => return Err(Error::Invalid),

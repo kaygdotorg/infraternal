@@ -242,3 +242,137 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
         "a logout at the cap revokes every bearer"
     );
 }
+
+/// Logging out of the selected account must not revoke another account's cookie from the same browser.
+#[tokio::test]
+async fn logout_does_not_revoke_a_presented_session_for_another_user() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    auth.set_test_http_time(NOW);
+
+    for (user, owner, name) in [("current-user", 1, "Current"), ("other-user", 0, "Other")] {
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,?,'unused',?,?)")
+            .bind(user)
+            .bind(name)
+            .bind(owner)
+            .bind(user)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let current = "c".repeat(43);
+    let other = "o".repeat(43);
+    for (token, user, sequence) in [
+        (&current, "current-user", 2_i64),
+        (&other, "other-user", 1_i64),
+    ] {
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, ?, 1)")
+            .bind(hash(token))
+            .bind(user)
+            .bind(NOW + SESSION)
+            .bind(NOW)
+            .bind(sequence)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::ORIGIN, HeaderValue::from_static(ORIGIN));
+    headers.insert(
+        header::COOKIE,
+        format!(
+            "__Host-infraternal-session-2-{}={current}; __Host-infraternal-session-1-{}={other}",
+            NOW + SESSION,
+            NOW + SESSION
+        )
+        .parse()
+        .unwrap(),
+    );
+    run(&auth, "logout", &headers).await.unwrap();
+
+    let current_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(&current))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let other_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(&other))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        current_rows, 0,
+        "logout revokes the selected account's session"
+    );
+    assert_eq!(
+        other_rows, 1,
+        "logout must leave another user's session row untouched"
+    );
+}
+
+/// With no single selected session, bearers of two accounts leave no one account to log out:
+/// the request is refused and neither session ends.
+#[tokio::test]
+async fn ambiguous_logout_across_accounts_is_refused_without_deleting_either() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    auth.set_test_http_time(NOW);
+    let first = "f".repeat(43);
+    let second = "s".repeat(43);
+    for (user, owner, token) in [("first-user", 1, &first), ("second-user", 0, &second)] {
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,?,'unused',?,?)")
+            .bind(user)
+            .bind(user)
+            .bind(owner)
+            .bind(user)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, 1, 1)")
+            .bind(hash(token))
+            .bind(user)
+            .bind(NOW + SESSION)
+            .bind(NOW)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // The same ordering key twice: no cookie is selected.
+    let name = format!("__Host-infraternal-session-1-{}", NOW + SESSION);
+    let mut headers = HeaderMap::new();
+    headers.insert(header::ORIGIN, HeaderValue::from_static(ORIGIN));
+    headers.insert(
+        header::COOKIE,
+        format!("{name}={first}; {name}={second}").parse().unwrap(),
+    );
+
+    let refused = run(&auth, "logout", &headers).await;
+    assert!(
+        matches!(refused, Err(super::super::Error::Denied)),
+        "bearers of two accounts name no account to log out"
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash IN (?, ?)")
+            .bind(hash(&first))
+            .bind(hash(&second))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 2, "a refused logout deletes neither session");
+}
