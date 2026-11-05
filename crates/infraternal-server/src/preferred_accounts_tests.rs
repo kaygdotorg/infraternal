@@ -246,3 +246,91 @@ async fn queued_writer_rechecks_session_after_lock_wait() {
     pool.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Adds one host owned by `user` the way add-host records it: its mode and the SSH
+/// address it was added with.
+async fn added_host(pool: &SqlitePool, user: &str, mode: &str, address: &str) -> uuid::Uuid {
+    let host = uuid::Uuid::new_v4();
+    // The schema requires uid 0 for a rootful host and a non-zero uid otherwise.
+    let uid = if mode == "rootful" { 0 } else { 1000 };
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,?,?,?,unixepoch())")
+        .bind(host.as_bytes().as_slice()).bind(user).bind(mode).bind(uid).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES (?,?,NULL)",
+    )
+    .bind(host.as_bytes().as_slice())
+    .bind(address)
+    .execute(pool)
+    .await
+    .unwrap();
+    host
+}
+
+/// #305 F-A: production's owner is named "K Gopal Krishna" and added `kayg@code`
+/// rootless. A rootless infraternal agent can open only its own account, so with no
+/// stored preference the login must be the SSH account the host was added with, not
+/// the infraternal username; otherwise every such add stops at its login check.
+#[tokio::test]
+async fn a_rootless_host_with_no_preference_logs_in_as_the_account_it_was_added_with() {
+    let pool = open(std::path::Path::new(":memory:")).await;
+    person(&pool, "alice", "alice-token").await;
+    sqlx::query("UPDATE users SET username='K Gopal Krishna' WHERE id='alice'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rootless = added_host(&pool, "alice", "rootless", "kayg@code.vpn.kayg.org").await;
+    assert_eq!(
+        resolve(&pool, "alice", "alice-token", Some(rootless))
+            .await
+            .unwrap(),
+        "kayg"
+    );
+    #[cfg(feature = "remote")]
+    assert_eq!(
+        resolve_for_key(&pool, "alice", rootless).await.unwrap(),
+        "kayg"
+    );
+    // An explicit global choice cannot work on a rootless host either; it still
+    // never replaces the only account that host's infraternal agent can open.
+    let service = AccountsPlugin::new(pool.clone());
+    change(&service, Scope::Global, None, Some("deploy"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(&pool, "alice", "alice-token", Some(rootless))
+            .await
+            .unwrap(),
+        "kayg"
+    );
+    // A rootful host honours the explicit global choice; without one it also
+    // defaults to the account it was added with.
+    let rootful = added_host(&pool, "alice", "rootful", "admin@db.example:2222").await;
+    assert_eq!(
+        resolve(&pool, "alice", "alice-token", Some(rootful))
+            .await
+            .unwrap(),
+        "deploy"
+    );
+    change(&service, Scope::Global, None, None).await.unwrap();
+    assert_eq!(
+        resolve(&pool, "alice", "alice-token", Some(rootful))
+            .await
+            .unwrap(),
+        "admin"
+    );
+    // An explicit per-host choice always wins; with no host at all the infraternal
+    // username stays the fallback.
+    change(&service, Scope::Host, Some(rootless), Some("other"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(&pool, "alice", "alice-token", Some(rootless))
+            .await
+            .unwrap(),
+        "other"
+    );
+    assert_eq!(
+        resolve(&pool, "alice", "alice-token", None).await.unwrap(),
+        "K Gopal Krishna"
+    );
+}
