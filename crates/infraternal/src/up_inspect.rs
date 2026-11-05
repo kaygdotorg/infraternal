@@ -22,7 +22,9 @@ fn image_name(path: &Path) -> bool {
 
 /// Recognize supported executable names and renamed links to this exact running image.
 fn install_image(path: &Path, metadata: &fs::Metadata, current: &fs::Metadata) -> bool {
-    image_name(path) || (metadata.dev(), metadata.ino()) == (current.dev(), current.ino())
+    image_name(path)
+        || fs::canonicalize(path).is_ok_and(|canonical| image_name(&canonical))
+        || (metadata.dev(), metadata.ino()) == (current.dev(), current.ino())
 }
 
 /// Refuse a running server or infraternal agent using its kernel image, never its chosen argv[0].
@@ -288,6 +290,22 @@ fn default_search_path() -> String {
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned()
 }
 
+/// Conservatively recognize literal CLI references in manager-resolved env and shell wrappers.
+/// We do not evaluate shell programs: dynamically constructed commands and external
+/// scripts require runtime executable inspection rather than static interpretation.
+fn wrapper_mentions_install(program: &str, arguments: &str) -> bool {
+    let wrapper = Path::new(program).file_name().unwrap_or_default();
+    if !["env", "sh", "bash", "dash", "zsh", "ksh", "fish"]
+        .iter()
+        .any(|name| wrapper == OsStr::new(name))
+    {
+        return false;
+    }
+    arguments
+        .split(|character: char| character.is_whitespace() || "\"';|&()=".contains(character))
+        .any(|word| image_name(Path::new(word)))
+}
+
 /// Ignore inert stock units and classify executable identity rather than every resolution failure.
 /// Only unresolved commands mentioning infraternal refuse; missing unrelated programs do not.
 fn resolved_service(unit: &OsStr, output: &str, default: &str) -> io::Result<()> {
@@ -310,17 +328,27 @@ fn resolved_service(unit: &OsStr, output: &str, default: &str) -> io::Result<()>
     let search = search_path(output, default).unwrap_or_default();
     let commands = output
         .lines()
-        .find_map(|line| line.strip_prefix("ExecStart="))
-        .unwrap_or_default();
+        .filter_map(|line| {
+            [
+                "ExecStart=",
+                "ExecStartPre=",
+                "ExecStartPost=",
+                "ExecCondition=",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     let current = fs::metadata("/proc/self/exe")?;
     for record in commands.split("{ path=").skip(1) {
-        let Some((program, _)) = record.split_once(" ; ") else {
+        let Some((program, arguments)) = record.split_once(" ; ") else {
             if relevant {
                 return Err(unresolved(unit));
             }
             continue;
         };
-        if image_name(Path::new(program)) {
+        if image_name(Path::new(program)) || wrapper_mentions_install(program, arguments) {
             return Err(installed(unit));
         }
         let Some(path) = executable_path(program, &search) else {
@@ -427,6 +455,9 @@ pub(super) fn installed_services(
                 OsStr::new("--no-pager"),
                 OsStr::new("--property=LoadState"),
                 OsStr::new("--property=ExecStart"),
+                OsStr::new("--property=ExecStartPre"),
+                OsStr::new("--property=ExecStartPost"),
+                OsStr::new("--property=ExecCondition"),
                 OsStr::new("--property=Environment"),
                 OsStr::new("--property=ExecSearchPath"),
                 OsStr::new("--"),
@@ -637,5 +668,112 @@ mod tests {
             resolved_service(OsStr::new("custom.service"), &value).is_err(),
             "unit PATH was ignored"
         );
+    }
+    /// Stopped wrappers and secondary startup commands cannot conceal our executable.
+    #[test]
+    fn indirect_service_commands_are_refused() {
+        for value in [
+            "LoadState=loaded\nExecStart={ path=/usr/bin/env ; argv[]=/usr/bin/env infra server ; }\n",
+            "LoadState=loaded\nExecStart={ path=/bin/sh ; argv[]=/bin/sh -c exec /opt/infra server ; }\n",
+            "LoadState=loaded\nExecStart={ path=/usr/bin/true ; argv[]=true ; }\nExecStartPre={ path=/opt/infra ; argv[]=infra server ; }\n",
+            "LoadState=loaded\nExecStart={ path=/usr/bin/true ; argv[]=true ; }\nExecStartPost={ path=/opt/infraternal ; argv[]=infraternal server ; }\n",
+        ] {
+            assert!(
+                resolved_service(OsStr::new("custom.service"), value).is_err(),
+                "hidden install accepted: {value}"
+            );
+        }
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let named = fixture.0.join("infraternal-old");
+        fs::write(&named, b"different fixture build").unwrap();
+        let alias = fixture.0.join("ctl");
+        std::os::unix::fs::symlink(&named, &alias).unwrap();
+        assert!(
+            resolved_service(
+                OsStr::new("custom.service"),
+                &format!(
+                    "LoadState=loaded\nExecStart={{ path={} ; argv[]=ctl server ; }}\n",
+                    alias.display()
+                )
+            )
+            .is_err()
+        );
+    }
+
+    /// Real manager serialization must expose direct, wrapped and secondary infraternal commands.
+    #[test]
+    #[ignore = "requires a live systemd user manager; run explicitly as its ordinary user"]
+    fn real_user_manager_refuses_stopped_installs() {
+        let runtime =
+            std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("user runtime"));
+        let units = runtime.join("systemd/user");
+        fs::create_dir_all(&units).unwrap();
+        let name = format!("j198-{}.service", uuid::Uuid::new_v4());
+        let path = units.join(&name);
+        let _guard = UserUnits {
+            paths: vec![path.clone()],
+        };
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let visible = fixture.0.join("etc/systemd/system");
+        fs::create_dir_all(&visible).unwrap();
+        std::os::unix::fs::symlink(&path, visible.join(&name)).unwrap();
+        let manager = fixture.0.join("systemctl");
+        crate::test_executable::write(
+            &manager,
+            format!(
+                "#!/bin/sh\nexport XDG_RUNTIME_DIR='{}'\nexport DBUS_SESSION_BUS_ADDRESS='unix:path={}/bus'\nexec /usr/bin/systemctl --user \"$@\"\n",
+                runtime.display(),
+                runtime.display()
+            ),
+            0o700,
+        );
+        for (index, (body, refuse)) in [
+            ("ExecStart=/usr/bin/true", false),
+            (
+                "ExecStart=@/opt/infraternal harmless server --data /srv/private",
+                true,
+            ),
+            ("ExecStart=/opt/infra \\x73erver --data /srv/private", true),
+            (
+                "Environment=MODE=server\nExecStart=/opt/infra ${MODE} --data /srv/private",
+                true,
+            ),
+            ("ExecStart=infra server", true),
+            ("ExecStart=-infra server", true),
+            ("ExecStart=/opt/infra \\\n server --data /srv/private", true),
+            ("ExecStart=/usr/bin/env infra server", true),
+            ("ExecStart=/bin/sh -c \"exec /opt/infra server\"", true),
+            (
+                "ExecStartPre=/opt/infra server\nExecStart=/usr/bin/true",
+                true,
+            ),
+            (
+                "ExecStart=/usr/bin/true\nExecStartPost=/opt/infraternal server",
+                true,
+            ),
+            ("ExecStart=/usr/bin/true", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            fs::write(&path, format!("[Service]\nType=oneshot\n{body}\n")).unwrap();
+            assert!(
+                Command::new("/usr/bin/systemctl")
+                    .args(["--user", "daemon-reload"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let result = installed_services(
+                &fixture.0,
+                &manager,
+                &super::super::journal::Snapshot::default(),
+            );
+            println!(
+                "real user manager form {index}: refused={}",
+                result.is_err()
+            );
+            assert_eq!(result.is_err(), refuse, "manager form {index}: {result:?}");
+        }
     }
 }
