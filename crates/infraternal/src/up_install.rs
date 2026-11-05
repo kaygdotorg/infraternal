@@ -55,6 +55,11 @@ pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<()> {
 /// Use the same trusted manager for read-only inspection and later activation.
 fn preflight_with_manager(root: &Path, owner: u32, systemctl: &Path) -> io::Result<()> {
     let recovery = journal::inspect(root, owner)?;
+    if recovery.needs_root {
+        // The ordinary-user stage cannot model private enrollment descendants.
+        // It may hand off to root, but this result can never authorize writes.
+        return Ok(());
+    }
     check_preflight(root, owner, systemctl, &recovery)
 }
 
@@ -194,6 +199,11 @@ pub(super) struct Install {
 impl Install {
     /// Repeat read-only preflight, then create the private enrollment layout under rollback.
     pub(super) fn begin(root: &Path, owner: u32, systemctl: &Path) -> io::Result<Self> {
+        if nix::unistd::geteuid().as_raw() != owner {
+            return Err(refused(
+                "This infraternal installation needs its privileged owner. Retry sudo infraternal up to validate and recover it.",
+            ));
+        }
         preflight_with_manager(root, owner, systemctl)?;
         let (journal, recovery) = journal::Journal::open(root, owner)?;
         // Recheck under the retained lock: a different install may have finished

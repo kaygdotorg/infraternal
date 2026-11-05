@@ -48,6 +48,8 @@ enum Record {
 /// A read-only view of the last complete transaction, used by both preflight and recovery.
 #[derive(Default)]
 pub(super) struct Snapshot {
+    /// An ordinary user cannot read root's journal; only the privileged repeat may validate or recover it.
+    pub(super) needs_root: bool,
     /// Entries stay in publication order so rollback visits children first.
     pub(super) created: Vec<Created>,
     /// The manager might already have started this run's service.
@@ -216,6 +218,27 @@ pub(super) fn inspect(root: &Path, owner: u32) -> io::Result<Snapshot> {
     {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Snapshot::default()),
+        Err(error)
+            if error.kind() == io::ErrorKind::PermissionDenied
+                && owner == 0
+                && !nix::unistd::geteuid().is_root() =>
+        {
+            let metadata = fs::symlink_metadata(&path).map_err(|_| invalid())?;
+            if !metadata.is_file()
+                || metadata.uid() != 0
+                || metadata.mode() & 0o7777 != 0o600
+                || metadata.nlink() != 1
+                || metadata.len() > LIMIT
+            {
+                return Err(invalid());
+            }
+            // This is no deletion authority. Root must reopen, lock and validate
+            // both the inode and records before any installation write.
+            return Ok(Snapshot {
+                needs_root: true,
+                ..Snapshot::default()
+            });
+        }
         Err(_) => return Err(invalid()),
     };
     checked(&file, &path, owner)?;

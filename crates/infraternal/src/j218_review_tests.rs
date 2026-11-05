@@ -110,6 +110,9 @@ fn j218_hold_enrollment_transaction() {
 /// A normal termination signal must not strand enrollment state that blocks every retry.
 #[test]
 fn j218_sigterm_rolls_back_enrollment() {
+    if isolated_enrollment_proof("j218_sigterm_rolls_back_enrollment") {
+        return;
+    }
     for signal in [
         nix::sys::signal::Signal::SIGTERM,
         nix::sys::signal::Signal::SIGINT,
@@ -117,6 +120,31 @@ fn j218_sigterm_rolls_back_enrollment() {
     ] {
         enrollment_interruption(signal);
     }
+}
+
+/// Run the complete lock-sensitive proof outside the multithreaded suite's concurrent forks.
+/// Until exec, unrelated forked children can inherit this test's flock descriptors.
+fn isolated_enrollment_proof(test: &str) -> bool {
+    if std::env::var_os("J198_ISOLATED_ENROLLMENT").is_some() {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("up::install::j218_review::{test}"),
+            "--nocapture",
+        ])
+        .env("J198_ISOLATED_ENROLLMENT", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated enrollment proof failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    true
 }
 
 /// Deliver one signal to a child in the production cancellation scope, then prove retry succeeds.
@@ -463,6 +491,9 @@ fn j226_replaced_enablement_inode_survives() {
 /// An abrupt helper stop must leave a recoverable installation on its next attempt.
 #[test]
 fn j226_sigkill_retry_recovers_enrollment() {
+    if isolated_enrollment_proof("j226_sigkill_retry_recovers_enrollment") {
+        return;
+    }
     enrollment_interruption(nix::sys::signal::Signal::SIGKILL);
 }
 
@@ -761,4 +792,112 @@ fn j245_real_host_manager_accepts_stock_units() {
         result.is_ok(),
         "stock units refused a fresh host: {result:?}"
     );
+}
+
+/// J245: the documented `infraternal up` runs its first preflight unprivileged.
+/// A retained root-owned 0600 journal from an earlier attempt must not refuse it.
+#[test]
+#[ignore = "needs J245_ROOT prepared by root with a retained journal; run as an ordinary user"]
+fn j245_unprivileged_preflight_reads_retained_journal() {
+    let root = PathBuf::from(std::env::var_os("J245_ROOT").unwrap());
+    let result = journal::inspect(&root, 0).map(|_| ());
+    println!(
+        "J245 euid={} journal inspect: {result:?}",
+        nix::unistd::geteuid()
+    );
+    assert!(
+        result.is_ok(),
+        "retained journal refused the unprivileged preflight: {result:?}"
+    );
+}
+
+/// Retry the public read-only stage with the same ordinary-user privileges as the CLI.
+#[test]
+#[ignore = "child of the privileged abrupt-stop retry probe"]
+fn j245_retry_as_normal_user() {
+    assert!(!nix::unistd::geteuid().is_root());
+    let root = PathBuf::from(std::env::var_os("J218_ROOT").unwrap());
+    preflight(&root, 0).expect("ordinary-user preflight must hand private recovery to root");
+    println!("J245_USER_RETRY_ACCEPTED");
+}
+
+/// A root transaction interrupted during enrollment must remain retryable through the normal user stage.
+#[test]
+#[ignore = "requires root and J198_UNPRIVILEGED_IMAGE accessible to uid 1500"]
+fn j245_sigkill_then_normal_user_retry_recovers() {
+    use std::os::unix::process::CommandExt as _;
+    assert!(nix::unistd::geteuid().is_root());
+    let fixture = Fixture(PathBuf::from(format!(
+        "/tmp/j198-retry-{}",
+        uuid::Uuid::new_v4()
+    )));
+    fs::DirBuilder::new()
+        .mode(0o755)
+        .create(&fixture.0)
+        .unwrap();
+    fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "up::install::j218_review::j218_hold_enrollment_transaction",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("J218_ROOT", &fixture.0)
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(
+        std::io::BufReader::new(child.0.stdout.take().unwrap())
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == "J218_TRANSACTION_READY")
+    );
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(child.0.id()).unwrap()),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    let journal = fixture.0.join(".infraternal-up.journal");
+    let bytes = fs::read(&journal).unwrap();
+    let identity = fixture.0.join("var/lib/infraternal/agent/identity.json");
+    assert!(identity.exists());
+    let retry = std::process::Command::new(std::env::var_os("J198_UNPRIVILEGED_IMAGE").unwrap())
+        .args([
+            "--exact",
+            "up::install::j218_review::j245_retry_as_normal_user",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("J218_ROOT", &fixture.0)
+        .uid(1500)
+        .gid(1500)
+        .output()
+        .unwrap();
+    println!("{}", String::from_utf8_lossy(&retry.stdout));
+    assert!(
+        retry.status.success(),
+        "normal-user retry failed: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        bytes,
+        "normal-user preflight changed private recovery"
+    );
+    assert!(
+        identity.exists(),
+        "normal-user preflight performed recovery"
+    );
+    let transaction = Install::begin(&fixture.0, 0, Path::new("/bin/false")).unwrap();
+    assert!(
+        !identity.exists(),
+        "privileged handoff did not recover enrollment"
+    );
+    drop(transaction);
+    assert!(!fixture.0.join("var").exists());
 }
