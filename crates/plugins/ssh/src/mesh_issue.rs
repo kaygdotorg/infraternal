@@ -64,20 +64,27 @@ impl std::error::Error for IssueError {}
 /// What a person certificate binds: a key, a person and the one mesh address
 /// of the node it was issued to.
 pub struct PersonRequest<'a> {
+    /// The person key this certificate certifies (made on the node, never stored).
     pub subject: &'a PublicKey,
     /// The person's stable ID, never a username or display name.
     pub person: &'a str,
+    /// The one mesh address the certificate may be used from (`source-address`).
     pub source_address: IpAddr,
     /// Trusted server time, Unix seconds.
     pub now: u64,
+    /// Seconds the certificate is valid from `now`, within `MIN_LIFETIME..=MAX_LIFETIME`.
     pub lifetime: u64,
 }
 
 /// What a host certificate binds: the host's key and its mesh names and addresses.
 pub struct HostRequest<'a> {
+    /// The node's in-memory host key this certificate certifies.
     pub subject: &'a PublicKey,
+    /// The node's mesh names and addresses, derived by the server from the node record.
     pub principals: &'a [String],
+    /// Trusted server time, Unix seconds.
     pub now: u64,
+    /// Seconds the certificate is valid from `now`, within `MIN_LIFETIME..=MAX_LIFETIME`.
     pub lifetime: u64,
 }
 

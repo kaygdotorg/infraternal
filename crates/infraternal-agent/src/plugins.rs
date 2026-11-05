@@ -226,7 +226,9 @@ pub type MeshObserver =
 /// without a state directory (tests, CLI listings) never get one.
 #[cfg(all(feature = "mesh", target_os = "linux"))]
 pub struct MeshService {
+    /// The component, registered in the agent's plugin registry.
     pub plugin: Box<dyn infraternal_plugin_api::AgentPlugin>,
+    /// Receives each accepted mesh configuration.
     pub observer: MeshObserver,
     /// Removes the service's host state when the agent ends ([`crate::shutdown`]).
     pub stop: infraternal_plugin_api::stop_hook::StopHook,

@@ -37,7 +37,9 @@ use std::collections::BTreeSet;
 /// account is never mistaken for a person's own account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryUids {
+    /// The lowest ordinary uid.
     pub first: u32,
+    /// The highest ordinary uid.
     pub last: u32,
 }
 impl OrdinaryUids {
@@ -104,14 +106,18 @@ pub enum Hosts {
 /// One stored login rule: subject, account and hosts must all match.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
+    /// Who the rule is for.
     pub subject: Subject,
+    /// Which account it lets them become.
     pub account: Account,
+    /// Where it applies.
     pub hosts: Hosts,
 }
 
 /// Server-verified facts about the target host for one person.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostFacts {
+    /// The machine being checked.
     pub host: HostRef,
     /// The person added this machine, from enrollment provenance, never a
     /// mutable label.
@@ -125,8 +131,10 @@ pub struct HostFacts {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoginGrant {
+    /// Any account, including root.
     #[serde(default)]
     pub any_account: bool,
+    /// Exactly these account names.
     #[serde(default)]
     pub accounts: BTreeSet<String>,
     /// Set only where name matching applies on this host.

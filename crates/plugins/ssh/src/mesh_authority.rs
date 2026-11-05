@@ -48,10 +48,15 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Issued {
+    /// SHA-256 of the whole encoded certificate: only an exact match counts.
     pub digest: [u8; 32],
+    /// The person's stable ID the certificate names.
     pub person: String,
+    /// The mesh node the certificate was issued to.
     pub source_node: u64,
+    /// That node's mesh address, the certificate's only `source-address`.
     pub source_address: IpAddr,
+    /// Unix seconds after which the certificate is no longer accepted.
     pub valid_before: u64,
 }
 
@@ -65,6 +70,7 @@ pub struct Snapshot {
     pub node: u64,
     /// The CA's Ed25519 public key.
     pub ca: [u8; 32],
+    /// Every person certificate currently valid; a certificate not listed is revoked.
     pub certificates: Vec<Issued>,
     /// Login access grant for this host, by person ID.
     pub grants: BTreeMap<String, LoginGrant>,

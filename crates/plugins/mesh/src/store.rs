@@ -748,9 +748,9 @@ impl Store {
             if offset > total {
                 return Err(MeshApiError::InvalidInput);
             }
-            // Mesh SSH toward the server's own host follows Access (owner, #221):
-            // closing the default closes it for every node without its own
-            // arrow there. Control-plane reach to the server is never lost, so
+            // SSH and every other service on the server's own host follow
+            // Access (owner, #221, D352): closing the default closes them for
+            // every node without its own arrow there. Control-plane reach to the server is never lost, so
             // these are listed apart from `loses_reach`: on the first page
             // only, at most one entry per node, within the same frame budget.
             let server = coordinator.server();

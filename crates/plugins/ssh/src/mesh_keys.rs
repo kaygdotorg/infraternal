@@ -49,7 +49,9 @@ const EXTENSION: u8 = 27;
 
 /// One person's identity on this machine: the certificate and its key.
 pub struct PersonKey {
+    /// The server-issued person certificate for `key`.
     pub certificate: Certificate,
+    /// The private key, kept only in this process's memory.
     pub key: PrivateKey,
 }
 
