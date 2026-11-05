@@ -1,8 +1,10 @@
 //! Enrolls a Linux machine through device approval and starts its system service (#263).
 
+/// Keep fresh-host preflight, installation and rollback in one transaction.
 #[path = "up_install.rs"]
 mod install;
 
+/// Route termination signals through enrollment cancellation and transaction cleanup.
 #[path = "up_termination.rs"]
 mod termination;
 

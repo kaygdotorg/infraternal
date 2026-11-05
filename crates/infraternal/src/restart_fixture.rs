@@ -150,6 +150,7 @@ fn child_guard_stops_its_process_group_on_drop_and_unwind() {
                 std::time::Instant::now() < deadline,
                 "fixture descendant survived cleanup"
             );
+            // sleep: poll owned child exit without spinning while its hang guard is active.
             std::thread::sleep(Duration::from_millis(20));
         }
     }

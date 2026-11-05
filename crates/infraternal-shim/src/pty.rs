@@ -141,6 +141,7 @@ pub(super) fn protect_login_process_at(path: &std::path::Path) -> io::Result<()>
     Ok(())
 }
 
+/// Own the terminal master and its supervised child for one interactive session.
 pub struct Pty {
     pub master: File,
     pub child: crate::child::OwnedChild,

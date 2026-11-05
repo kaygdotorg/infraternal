@@ -12,6 +12,7 @@ fn candidate(directory: &Directory, name: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
+/// Unsigned, modified and oversized candidates must fail admission before execution.
 #[test]
 fn unsigned_or_tampered_replacement_is_refused_before_exec() {
     let directory = Directory::new();
@@ -44,6 +45,7 @@ fn unsigned_or_tampered_replacement_is_refused_before_exec() {
     );
 }
 
+/// An admitted snapshot must retain its original bytes after the source is modified.
 #[test]
 fn admitted_inode_cannot_change_in_place_before_execution() {
     use std::os::unix::fs::FileExt;
@@ -62,6 +64,7 @@ fn admitted_inode_cannot_change_in_place_before_execution() {
     );
 }
 
+/// Untrusted candidate ancestry and writable images must fail admission.
 #[test]
 fn symlink_parent_escape_and_writable_candidates_are_refused() {
     let directory = Directory::new();
@@ -74,6 +77,7 @@ fn symlink_parent_escape_and_writable_candidates_are_refused() {
     assert!(Opened::open(path).is_err());
 }
 
+/// Replacing the source pathname must leave the admitted snapshot pinned.
 #[test]
 fn pathname_replacement_keeps_the_admitted_inode() {
     use std::os::unix::fs::FileExt;
@@ -90,6 +94,7 @@ fn pathname_replacement_keeps_the_admitted_inode() {
     assert_eq!(bytes, original);
 }
 
+/// Executable probing must preserve the existing listener when a candidate cannot run.
 #[test]
 fn unusable_admitted_image_keeps_the_existing_service_running() {
     use std::net::{TcpListener, TcpStream};
