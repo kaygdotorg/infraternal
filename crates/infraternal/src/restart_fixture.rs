@@ -145,14 +145,35 @@ pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
 }
 
 /// Removes all symbols and debug sections from the image at `path`, in place.
-/// `strip` runs as its own single-threaded process, which owns every writer.
+/// `strip` runs as its own single-threaded process in its own process group,
+/// which owns every writer. Its run is bounded by [`RESTART_TEST_HANG_BOUND`]
+/// as a hang guard only: a stuck `strip` kills its group and fails the test
+/// instead of blocking it forever (J223 on #355).
 pub(crate) fn strip_all(path: &Path) {
-    let output = std::process::Command::new("strip")
+    use std::os::unix::process::CommandExt;
+    let mut child = std::process::Command::new("strip")
         .arg("--strip-all")
         .arg(path)
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
         .unwrap();
+    let deadline = std::time::Instant::now() + RESTART_TEST_HANG_BOUND;
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+            let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+            let _ = child.wait();
+            panic!(
+                "strip {} exceeded {RESTART_TEST_HANG_BOUND:?}",
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "strip {} failed: {}",
