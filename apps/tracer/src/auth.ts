@@ -248,8 +248,9 @@ export async function readKeyLifetime(): Promise<number | undefined> {
 }
 
 /**
- * Sets that lifetime. The server wants a passkey login from the last few minutes, so a refusal is answered once with a fresh
- * passkey confirmation (a user action, as for a device approval) and the same request again; a second refusal is final.
+ * Sets that lifetime. The server wants a passkey tap bound to this exact value (D336): a plain sign-in authorizes no
+ * security-settings change. So a refusal is answered once with a passkey confirmation that names the action and the new
+ * value (a user action, as for a device approval), then the same request again; a second refusal is final.
  */
 export async function writeKeyLifetime(days: number, device: string): Promise<void> {
   const body = { api_key_lifetime_days: days };
@@ -257,7 +258,7 @@ export async function writeKeyLifetime(days: number, device: string): Promise<vo
     await post("security-settings-update", body);
   } catch (error: unknown) {
     if (!(error instanceof AuthError) || (error.status !== 401 && error.status !== 403)) throw error;
-    await loginWithPasskey(device);
+    await loginWithPasskey(device, { kind: "security.settings", api_key_lifetime_days: days });
     await post("security-settings-update", body);
   }
 }
