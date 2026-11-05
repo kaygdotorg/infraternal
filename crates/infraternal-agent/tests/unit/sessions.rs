@@ -513,6 +513,9 @@ async fn unanswered_manager_probe_is_not_remembered() {
 }
 
 thread_local! {
+    /// Makes the shutdown cleanup thread fail to start on this thread, so a test can prove the launcher is
+    /// still stopped when the OS refuses a thread.
+    pub(super) static FAIL_CLEANUP_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// A per-thread shortening of the launch hang bound, so a test reaches the failure path in milliseconds.
     pub(super) static LAUNCH_BOUND: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
@@ -859,11 +862,10 @@ fn person_records(locks: &std::path::Path) -> usize {
         .count()
 }
 
-/// J200 round 2, P1 (shutdown): the runtime is dropped while the failed launch's cleanup is queued and has
-/// never been polled. Dropping the task must not leave the owned launcher running: the drop fallback runs
-/// the cleanup to its end on its own thread.
-#[test]
-fn runtime_shutdown_with_a_queued_cleanup_still_stops_the_owned_launcher() {
+/// Fail a launch whose launcher never binds, drop its runtime with the cleanup queued and never polled, and
+/// report whether the owned launcher was left running. With `fail_thread` the shutdown cleanup thread cannot
+/// start either.
+fn launcher_left_running_after_shutdown(fail_thread: bool) -> bool {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
@@ -887,7 +889,9 @@ fn runtime_shutdown_with_a_queued_cleanup_still_stops_the_owned_launcher() {
     LAUNCH_BOUND.with(|bound| bound.set(None));
     assert!(result.is_err(), "a shim that never binds fails the launch");
     // The cleanup task was spawned by the failing launch, and block_on returned without polling it.
+    FAIL_CLEANUP_THREAD.with(|fail| fail.set(fail_thread));
     drop(runtime);
+    FAIL_CLEANUP_THREAD.with(|fail| fail.set(false));
     let pid: i32 = fs::read_to_string(&pid_file)
         .unwrap()
         .trim()
@@ -899,9 +903,34 @@ fn runtime_shutdown_with_a_queued_cleanup_still_stops_the_owned_launcher() {
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    let left = alive(pid);
+    if left {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    left
+}
+
+/// J200 round 2, P1 (shutdown): the runtime is dropped while the failed launch's cleanup is queued and has
+/// never been polled. Dropping the task must not leave the owned launcher running: the drop fallback runs
+/// the cleanup to its end on its own thread.
+#[test]
+fn runtime_shutdown_with_a_queued_cleanup_still_stops_the_owned_launcher() {
     assert!(
-        !alive(pid),
-        "runtime shutdown discarded the cleanup and left launcher {pid} running"
+        !launcher_left_running_after_shutdown(false),
+        "runtime shutdown discarded the cleanup and left the launcher running"
+    );
+}
+
+/// J222 (79291): the shutdown cleanup thread cannot start. The launch's parts must still be here to stop
+/// the launcher, not dropped with it left running.
+#[test]
+fn a_cleanup_thread_that_cannot_start_still_stops_the_owned_launcher() {
+    assert!(
+        !launcher_left_running_after_shutdown(true),
+        "a failed cleanup thread left the owned launcher running"
     );
 }
 
@@ -1084,4 +1113,63 @@ async fn a_launcher_that_has_reaped_its_child_is_not_proof_no_shim_exists() {
     );
     assert_eq!(sockets, 1, "the live shim's rendezvous was deleted");
     assert!(!launcher_alive, "the owned launcher was left running");
+}
+
+/// J222 (79292): the whole shutdown cleanup ends within its budget, however slowly the shim behaves. This
+/// shim answers its Hello after 1.5 s, takes the close and never retires, so the nested waits (the Hello,
+/// then the exit observation) add up past the 2 s budget unless one outer deadline holds. Runs on the
+/// runtime's paused clock, so it asserts the bound in virtual time, never wall-clock speed.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn the_shutdown_cleanup_ends_within_its_budget_whatever_the_shim_does() {
+    use infraternal_shim::frame::{CLOSE_SESSION, Frame, SEQUENCED_INPUT};
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let name = id.simple().to_string();
+    let path = state.join(format!("sessions/{name}.sock"));
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let shim = tokio::spawn(async move {
+        let (mut peer, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        super::send(
+            &mut peer,
+            &Frame::Hello {
+                version: 1,
+                caps: CLOSE_SESSION | SEQUENCED_INPUT,
+                session: id.into_bytes(),
+                pid: 1,
+                cols: 80,
+                rows: 24,
+                created: 0,
+                head: 0,
+                start: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = super::Reader::default();
+        while reader.read(&mut peer).await.is_ok() {}
+    });
+    let mut child = launcher("true", &[]);
+    child.wait().await.unwrap();
+    let mut parts = super::Parts {
+        child,
+        state: state.clone(),
+        path,
+        id,
+        manager: super::Manager::Detached,
+        name,
+        detached: true,
+        record: None,
+    };
+    let started = tokio::time::Instant::now();
+    super::cleanup(&mut parts, super::SHUTDOWN).await;
+    let spent = started.elapsed();
+    shim.abort();
+    assert!(
+        spent <= super::SHUTDOWN_CLEANUP + std::time::Duration::from_millis(250),
+        "the shutdown cleanup spent {spent:?} against a {:?} budget",
+        super::SHUTDOWN_CLEANUP
+    );
 }

@@ -51,6 +51,28 @@ const CLEANUP: Duration = Duration::from_secs(10);
 /// The cleanup budget when the runtime is already shutting down: the process is stopping, so wait less.
 #[cfg(target_os = "linux")]
 const SHUTDOWN_CLEANUP: Duration = Duration::from_secs(2);
+/// What one cleanup may spend. `retry` bounds waiting for a shim to bind or to answer; `total` bounds the
+/// whole cleanup, every inner wait included, so no nesting of handshakes can outlast it.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct Budget {
+    /// How long to keep asking a shim to close while it binds or answers.
+    retry: Duration,
+    /// The hard bound on the whole cleanup.
+    total: Duration,
+}
+/// A cleanup on a running runtime: the retry window, then the close and the exit observation.
+#[cfg(target_os = "linux")]
+const NORMAL: Budget = Budget {
+    retry: CLEANUP,
+    total: Duration::from_secs(14),
+};
+/// A cleanup run by `Abandoned::drop` while the process is stopping.
+#[cfg(target_os = "linux")]
+const SHUTDOWN: Budget = Budget {
+    retry: SHUTDOWN_CLEANUP,
+    total: SHUTDOWN_CLEANUP,
+};
 /// How long a stopping infraternal agent waits for launch cleanups still running.
 #[cfg(target_os = "linux")]
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(4);
@@ -1055,29 +1077,69 @@ struct Abandoned {
 
 #[cfg(target_os = "linux")]
 impl Drop for Abandoned {
-    /// The shutdown path: finish a cleanup that never completed, on its own thread and runtime, with a
-    /// short budget. No part of it depends on the runtime that was just dropped.
+    /// The shutdown path: finish a cleanup that never completed, on its own thread and runtime, within
+    /// `SHUTDOWN` in total. No part of it depends on the runtime that was just dropped. The launch's parts
+    /// are shared with the thread rather than moved into it, so if the thread cannot start, they are still
+    /// here to be stopped synchronously.
     fn drop(&mut self) {
-        let Some(mut parts) = self.parts.take() else {
+        let Some(parts) = self.parts.take() else {
             return;
         };
-        let worker = std::thread::Builder::new()
-            .name("launch-cleanup".into())
-            .spawn(move || {
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Some(parts)));
+        let worker = {
+            let shared = shared.clone();
+            spawn_cleanup_thread(move || {
+                let Some(mut parts) = shared.lock().ok().and_then(|mut parts| parts.take()) else {
+                    return;
+                };
                 match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                 {
-                    Ok(runtime) => runtime.block_on(cleanup(&mut parts, SHUTDOWN_CLEANUP)),
-                    // No reactor: stopping a launcher that never forked is still safe and needs none.
-                    Err(_) => {
-                        let _ = parts.child.start_kill();
-                    }
+                    Ok(runtime) => runtime.block_on(cleanup(&mut parts, SHUTDOWN)),
+                    // No reactor to wait on: still stop the launcher this launch owns.
+                    Err(_) => stop_now(&mut parts),
                 }
-            });
-        if let Ok(worker) = worker {
-            let _ = worker.join();
+            })
+        };
+        match worker {
+            Ok(worker) => {
+                let _ = worker.join();
+            }
+            Err(_) => {
+                if let Some(mut parts) = shared.lock().ok().and_then(|mut parts| parts.take()) {
+                    stop_now(&mut parts);
+                }
+            }
         }
+    }
+}
+
+/// Start the shutdown cleanup thread. A test can make this fail, to prove the launcher is still stopped.
+#[cfg(target_os = "linux")]
+fn spawn_cleanup_thread(
+    work: impl FnOnce() + Send + 'static,
+) -> io::Result<std::thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if tests::FAIL_CLEANUP_THREAD.with(std::cell::Cell::get) {
+        return Err(io::Error::other("injected cleanup thread failure"));
+    }
+    std::thread::Builder::new()
+        .name("launch-cleanup".into())
+        .spawn(work)
+}
+
+/// Kill the launcher this launch owns and reap it, blocking for at most about 100 ms. Used where no
+/// runtime is available to wait on. It signals only this unreaped child, so it can never reach another
+/// process, and it leaves the socket and the person record alone.
+#[cfg(target_os = "linux")]
+fn stop_now(parts: &mut Parts) {
+    let _ = parts.child.start_kill();
+    for _ in 0..50 {
+        if !matches!(parts.child.try_wait(), Ok(None)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -1164,7 +1226,7 @@ pub(crate) async fn drain_cleanups() {
 #[cfg(target_os = "linux")]
 async fn abandon_launch(mut job: Abandoned) {
     if let Some(parts) = job.parts.as_mut() {
-        cleanup(parts, CLEANUP).await;
+        cleanup(parts, NORMAL).await;
     }
     job.parts = None;
 }
@@ -1184,11 +1246,13 @@ async fn abandon_launch(mut job: Abandoned) {
 /// launch owns is stopped and reaped either way, because killing it cannot touch the shim, and the whole
 /// cleanup, every inner wait included, ends within `budget.total`.
 #[cfg(target_os = "linux")]
-async fn cleanup(parts: &mut Parts, budget: Duration) {
-    let proven = stop_launch(parts, budget).await;
-    // The owned launcher does not outlive its cleanup.
+async fn cleanup(parts: &mut Parts, budget: Budget) {
+    let proven = timeout(budget.total, stop_launch(parts, budget.retry))
+        .await
+        .unwrap_or(false);
+    // Whatever the outcome or a timeout left behind: the owned launcher does not outlive its cleanup.
     let _ = parts.child.start_kill();
-    let _ = reaped(&mut parts.child, HANDSHAKE).await;
+    let _ = reaped(&mut parts.child, HANDSHAKE.min(budget.total)).await;
     if proven && let Some(record) = parts.record.take() {
         let _ = fs::remove_file(record);
     }
@@ -1197,7 +1261,7 @@ async fn cleanup(parts: &mut Parts, budget: Duration) {
 /// Stop one launch; whether its terminal is proven dead.
 #[cfg(target_os = "linux")]
 async fn stop_launch(parts: &mut Parts, retry: Duration) -> bool {
-    let cap = HANDSHAKE;
+    let cap = HANDSHAKE.min(retry);
     if !parts.detached {
         let _ = timeout(cap, stop_scope(parts.manager, &parts.name)).await;
         let _ = parts.child.start_kill();
