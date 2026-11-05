@@ -2562,3 +2562,55 @@ fn session_command(shell: &Path, readiness: bool, program: &[std::ffi::OsString]
     }
     command
 }
+
+#[cfg(test)]
+mod lifeline_tests {
+    //! The shim's own handling of its launch lifeline, apart from what its shell spawn also does (#324).
+    use super::*;
+    use nix::fcntl::FdFlag;
+
+    /// Whether `descriptor` is close-on-exec, read straight from the kernel.
+    fn close_on_exec(descriptor: &impl std::os::fd::AsFd) -> bool {
+        fcntl(descriptor, FcntlArg::F_GETFD)
+            .map(FdFlag::from_bits_truncate)
+            .unwrap()
+            .contains(FdFlag::FD_CLOEXEC)
+    }
+
+    /// `hold_lifeline` itself marks the pipe close-on-exec. The shell spawn also masks inherited
+    /// descriptors, so only a direct check shows this step: remove it and nothing else would fail.
+    #[test]
+    fn holding_the_lifeline_marks_it_close_on_exec() {
+        let (_read, write) = nix::unistd::pipe().unwrap();
+        fcntl(&write, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+        assert!(
+            !close_on_exec(&write),
+            "the fixture must start without close-on-exec"
+        );
+        hold_lifeline(write.as_raw_fd()).unwrap();
+        assert!(
+            close_on_exec(&write),
+            "the held lifeline can still be inherited by an exec"
+        );
+    }
+
+    /// Anything but an open pipe above the standard handles is refused: a shim must never run without it.
+    #[test]
+    fn a_descriptor_that_is_not_an_open_pipe_is_refused() {
+        let file = File::open("/dev/null").unwrap();
+        for descriptor in [0, 1, 2] {
+            assert_eq!(
+                hold_lifeline(descriptor).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "standard handle {descriptor}"
+            );
+        }
+        assert_eq!(
+            hold_lifeline(file.as_raw_fd()).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "a regular file"
+        );
+        // A number no test opens: beyond any descriptor limit this suite uses.
+        assert!(hold_lifeline(1_000_000).is_err(), "a closed descriptor");
+    }
+}
