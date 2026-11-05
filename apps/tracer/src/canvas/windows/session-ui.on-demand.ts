@@ -132,6 +132,16 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     action: { label: "Try again", icon: SESSION_ICON.again, run: () => { unreachables.delete(rec); rec.binding?.retry?.(); paint(rec); } },
     dismiss: closeStrip(rec),
   });
+  /**
+   * Takes a strip away the way it came: it fades out over the same 200 ms its entrance takes (reduced motion removes it at
+   * once). It is inert while it goes, and a strip that is leaving is never reused: a new state builds a fresh one.
+   */
+  const fadeOut = (strip: HTMLElement): void => {
+    if (reduced.matches) { strip.remove(); return; }
+    strip.dataset.leaving = "";
+    strip.inert = true;
+    strip.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: "ease-out", fill: "forwards" }).onfinish = () => strip.remove();
+  };
   const paint = (rec: WinRec): void => {
     if (!isTerminal(rec)) return;
     const s = recordOf(rec);
@@ -145,11 +155,12 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const unreachable = unreachables.get(rec);
     // Only a refusal reads offline. A window that is still trying keeps its connecting (or reconnecting) indicator and status.
     paintLink(rec, exited, refusal?.message);
-    let strip = body.querySelector<HTMLElement>(".cl-sx-strip");
+    let strip: HTMLElement | null = body.querySelector<HTMLElement>(".cl-sx-strip");
     const view: StripView | undefined = exited && s ? stripOf(rec, s)
       : refusal && !s ? refusedStrip(rec, refusal.message, refusal.action)
       : unreachable ? unreachableStrip(rec, unreachable) : undefined;
     if (view) {
+      if (strip?.dataset.leaving !== undefined) { strip.remove(); strip = null; }
       if (!strip) {
         strip = el("div", "cl-sx-strip ui-pill");
         strip.setAttribute("role", "group");
@@ -177,7 +188,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         dismiss.addEventListener("click", view.dismiss.run);
         strip.replaceChildren(...nodes, dismiss);
       }
-    } else strip?.remove();
+    } else if (strip && strip.dataset.leaving === undefined) fadeOut(strip);
     // Another device typed last: shown scaled to fit, with a badge that offers the size back.
     const preview = body.querySelector<HTMLElement>(".cl-preview");
     const badge = body.querySelector<HTMLElement>(".cl-sx-badge");
@@ -295,10 +306,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const rec = cx.state.activeWin;
     if (!rec || event.key !== "Enter" || event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
     if ((event.target as Element | null)?.closest?.("input, textarea, button, a, [contenteditable], [role='dialog'], .ui-overlay-surface")) return;
-    const result = rec.card.body.querySelector<HTMLElement>(".cl-sx-strip")?.dataset.result;
+    const result = rec.card.body.querySelector<HTMLElement>(".cl-sx-strip:not([data-leaving])")?.dataset.result;
     if (result !== "ended" && result !== "refused" && result !== "unreachable") return;
     // Enter does what the strip's one button does; a strip without a button (nothing helps) leaves Enter alone.
-    const again = rec.card.body.querySelector<HTMLButtonElement>(".cl-sx-strip .cl-sx-again");
+    const again = rec.card.body.querySelector<HTMLButtonElement>(".cl-sx-strip:not([data-leaving]) .cl-sx-again");
     if (!again) return;
     event.preventDefault();
     again.click();

@@ -223,8 +223,21 @@ for (const viewport of VIEWPORTS) {
         await shot(page, "cannot-reach");
         // The host starts answering; asking again attaches the window in place.
         state.console = "forward";
+        // Sample the strip every frame: it must fade out (opacity between 0 and 1 while leaving), not vanish in one step.
+        await page.evaluate(() => {
+          const seen: Array<[boolean, number]> = [];
+          Reflect.set(window, "__stripFade", seen);
+          const tick = (): void => {
+            const node = document.querySelector(".cl-sx-strip");
+            if (node) seen.push([node.hasAttribute("data-leaving"), Number(getComputedStyle(node).opacity)]);
+            requestAnimationFrame(tick);
+          };
+          tick();
+        });
         await strip.getByRole("button", { name: "Try again" }).click();
         await expect(strip).toHaveCount(0, { timeout: 10_000 });
+        const fade = await page.evaluate(() => Reflect.get(window, "__stripFade") as Array<[boolean, number]>);
+        expect(fade.some(([leaving, opacity]) => leaving && opacity > 0.02 && opacity < 0.98), `the strip faded out: ${JSON.stringify(fade.slice(-12))}`).toBe(true);
         await expect(win).toHaveAttribute("data-status", "live", { timeout: 20_000 });
         await shot(page, "cannot-reach-recovered");
       });
