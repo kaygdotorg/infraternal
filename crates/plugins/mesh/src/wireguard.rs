@@ -731,6 +731,13 @@ impl Device {
     pub fn identity() -> io::Result<(PublicKey, u16)> {
         identity_from(header())
     }
+    /// The public key and listen port of the `WireGuard` device at `ifindex`, for a link whose
+    /// index is already known, so the read is bound to that link rather than to the shared name.
+    /// # Errors
+    /// The same as [`Device::identity`].
+    pub(crate) fn identity_at(ifindex: u32) -> io::Result<(PublicKey, u16)> {
+        identity_at(ifindex)
+    }
     /// Read the kernel device's private key, only to carry this node's identity to `GotaTun`
     /// when it leaves kernel `WireGuard` (D346). The caller must have proven the link is ours.
     /// Every reply buffer is zeroized on drop, and so is the returned key.

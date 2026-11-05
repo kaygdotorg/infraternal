@@ -112,7 +112,7 @@ fn proven_kernel_link(
     link.engine == EngineKind::Kernel
         && proof.is_some_and(|recorded| match link.owner {
             Some(owner) => owner == recorded,
-            None => Device::identity().is_ok_and(|(key, _)| key == recorded),
+            None => Device::identity_at(link.ifindex).is_ok_and(|(key, _)| key == recorded),
         })
 }
 
@@ -373,7 +373,7 @@ impl Node {
         if let Some(link) = adopted_kernel {
             node.owned = true;
             node.kernel_owner = kernel_proof;
-            let identity = Device::identity();
+            let identity = Device::identity_at(link.ifindex);
             // A process can stop after marking the interface but before setting
             // its key. With no saved configuration there are no retained mesh
             // sessions to preserve; remove that incomplete owned startup only,
@@ -809,7 +809,7 @@ impl Node {
                     return Err(error);
                 }
                 let prepared = (|| {
-                    let (device_key, port) = Device::identity()?;
+                    let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
