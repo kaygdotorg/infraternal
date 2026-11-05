@@ -490,6 +490,15 @@ fn denied_remote_names_match_the_nonexistent_name_response() {
             ports: TrafficPolicy::All,
         })
         .unwrap();
+    coordinator
+        .add_arrow(Arrow {
+            id: RuleId(2),
+            from: Endpoint::Node(NodeId(2)),
+            to: Endpoint::Node(NodeId(1)),
+            both_ways: false,
+            ports: TrafficPolicy::All,
+        })
+        .unwrap();
     let compile = |id| {
         configuration::compile(
             &coordinator,
