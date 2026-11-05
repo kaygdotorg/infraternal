@@ -1573,6 +1573,20 @@ fn a_missing_lifeline_descriptor_stops_the_shim_before_it_runs() {
     );
 }
 
+/// A lifeline number that does not fit a descriptor is refused too, never dropped: the shim must not start
+/// without the lifeline the launcher asked it to hold (contracts/shim.md §2).
+#[test]
+fn an_out_of_range_lifeline_descriptor_stops_the_shim_before_it_runs() {
+    let output = shim_exit_within(&["--lifeline-fd", "4294967296"], REFUSAL_GUARD)
+        .expect("a shim ran with a lifeline descriptor it could not hold");
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a shim ran without its lifeline");
+    assert!(
+        message.contains("out of range"),
+        "the shim refused for another reason: {message}"
+    );
+}
+
 /// One frame, or `None` at end of stream or on a read timeout.
 fn try_read(peer: &mut UnixStream) -> Option<Frame> {
     let mut prefix = [0; 4];
