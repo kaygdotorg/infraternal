@@ -1516,11 +1516,16 @@ fn the_shell_and_its_children_never_hold_the_lifeline() {
     assert!(!lifeline_eof_within(&read, Duration::from_millis(200)));
 }
 
-/// Without its lifeline a shim refuses to run, instead of letting the launch's proof of death lie.
-#[test]
-fn a_missing_lifeline_descriptor_stops_the_shim_before_it_runs() {
-    let state = std::env::temp_dir().join(format!("lifeline-missing-{}", std::process::id()));
-    let status = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+/// How long a refusal test waits for a shim that should have exited at once. A hang guard only: a shim that
+/// runs instead of refusing would otherwise sit in the foreground until the gate's own limit.
+const REFUSAL_GUARD: Duration = Duration::from_secs(30);
+
+/// Run `infraternal __shim` with `extra` arguments, expecting it to exit by itself within `limit`. Returns its
+/// output, or `None` after killing it if it was still running (it ran instead of refusing).
+fn shim_exit_within(extra: &[&str], limit: Duration) -> Option<std::process::Output> {
+    let counter = NEXT.fetch_add(1, Ordering::Relaxed);
+    let state = std::env::temp_dir().join(format!("shim-refusal-{}-{counter}", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_infraternal"))
         .args([
             "__shim",
             "--session",
@@ -1530,14 +1535,38 @@ fn a_missing_lifeline_descriptor_stops_the_shim_before_it_runs() {
             "--state",
         ])
         .arg(&state)
-        .args(["--lifeline-fd", "77"])
+        .args(extra)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let deadline = Instant::now() + limit;
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    if !exited {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().unwrap();
     let _ = fs::remove_dir_all(&state);
-    let message = String::from_utf8_lossy(&status.stderr);
-    assert!(!status.status.success(), "a shim ran without its lifeline");
+    exited.then_some(output)
+}
+
+/// Without its lifeline a shim refuses to run, instead of letting the launch's proof of death lie. If this
+/// check regresses the shim runs a shell until killed, so the wait is bounded and fails instead of hanging.
+#[test]
+fn a_missing_lifeline_descriptor_stops_the_shim_before_it_runs() {
+    let output = shim_exit_within(&["--lifeline-fd", "77"], REFUSAL_GUARD)
+        .expect("a shim ran without its lifeline");
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a shim ran without its lifeline");
     assert!(
         message.contains("Bad file descriptor"),
         "the shim refused for another reason: {message}"
