@@ -264,6 +264,28 @@ async fn connected_remote_host_prepares_its_persons_preferred_account() {
     fixture.peer.abort();
 }
 
+/// Wait until the server observes a test peer's disconnect and releases its
+/// unique host claim. This fences reconnect ordering without a timing assertion.
+async fn cleanup_disconnected(host: Uuid) {
+    // A generous deadlock guard, not a response-time assertion. Completion is
+    // ordered by the server releasing its host claim after the socket closes.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let held = crate::remote_runtime::LOGIN_CLEANUPS
+                .hosts
+                .lock()
+                .unwrap()
+                .contains(&host);
+            if !held {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnected cleanup retained its host claim");
+}
+
 /// Reconnect a tombstoned host using its real enrolled mTLS identity. The only
 /// admitted request must be the persisted person's cleanup, never a new login.
 async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
@@ -308,6 +330,8 @@ async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
         );
         let Some(durable) = durable else {
             // Dropping the socket after receipt models a lost acknowledgement.
+            drop(connection);
+            cleanup_disconnected(fixture.host).await;
             return;
         };
         let json = serde_json::json!({"revoked": durable}).to_string();
@@ -327,6 +351,8 @@ async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
     if durable == Some(false) {
         // Busy replies retain the operation. Disconnect to model a retryable
         // transport loss instead of expecting a finite retry budget to close it.
+        drop(connection);
+        cleanup_disconnected(fixture.host).await;
         return;
     }
     // Completion closes the private cleanup actor and never publishes it.
@@ -574,4 +600,38 @@ async fn pending_revocation_survives_database_reopen_before_acceptance() {
     drop(restarted);
     reopened.close().await;
     std::fs::remove_file(path).unwrap();
+}
+
+/// Queued cleanup must not consume the reserve used by ordinary reconnects.
+/// Count actual owned permits instead of relying on handshake response timing.
+#[tokio::test]
+async fn cleanup_delivery_returns_handshake_admission_before_waiting() {
+    let fixture = login_host(None).await;
+    let normal = AuthorityGuard::admit(fixture.store.clone(), fixture.fingerprint)
+        .await
+        .unwrap();
+    let retirement = pending_retirement(&fixture).await;
+    let cleanup = AuthorityGuard::admit_transport(fixture.store.clone(), fixture.fingerprint)
+        .await
+        .unwrap();
+    for authority in [normal, cleanup] {
+        let is_cleanup = authority.cleanup_person().is_some();
+        let slots = Arc::new(tokio::sync::Semaphore::new(2));
+        let permits = (
+            slots.clone().acquire_owned().await.unwrap(),
+            slots.clone().acquire_owned().await.unwrap(),
+        );
+        let mut admission =
+            crate::remote_standby::Admission::new(authority, permits, Arc::default());
+        assert_eq!(slots.available_permits(), 0);
+        admission.release_cleanup_handshake();
+        assert_eq!(
+            slots.available_permits(),
+            if is_cleanup { 2 } else { 0 },
+            "cleanup retained normal handshake admission"
+        );
+    }
+    retirement.abort();
+    let _ = retirement.await;
+    fixture.peer.abort();
 }

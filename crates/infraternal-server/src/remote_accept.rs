@@ -119,6 +119,9 @@ pub(crate) async fn quic(
             let admitted = async {
                 let link =
                     RemoteLink::quic_admitted(connection.clone(), Some(&mut admission)).await?;
+                // The validated cleanup link now uses its own bounded host lane,
+                // so queued delivery must not retain normal reconnect capacity.
+                admission.release_cleanup_handshake();
                 #[cfg(all(test, feature = "mesh-transport-proof"))]
                 crate::remote_autoswitch_probe::record(
                     crate::remote_autoswitch_probe::Kind::ControlReady,
@@ -241,6 +244,8 @@ pub(crate) async fn tcp(
             else {
                 return;
             };
+            // Cleanup's bounded identity lane replaces handshake ownership.
+            admission.release_cleanup_handshake();
             #[cfg(all(test, feature = "mesh-transport-proof"))]
             let link = {
                 probe::record(probe::Kind::ControlReady, diagnostic_peer, 0);

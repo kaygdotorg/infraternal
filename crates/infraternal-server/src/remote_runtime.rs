@@ -17,10 +17,72 @@ use tokio::{
 };
 use uuid::Uuid;
 
-/// Cleanup-only connections never enter the bounded host map. Give them their
-/// own fixed concurrency and no waiting queue, below the sixteen reserved host
-/// handshakes so a revoked-host flood cannot consume all normal reconnect slots.
-static LOGIN_CLEANUPS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+/// Cleanup-only connections share eight active slots and sixteen waiting host
+/// claims. Ordinary traffic uses separate admission; repeated cleanup links from
+/// one host cannot occupy another host's slot or FIFO queue position.
+static LOGIN_CLEANUPS: std::sync::LazyLock<CleanupSlots> =
+    std::sync::LazyLock::new(CleanupSlots::default);
+
+/// Fixed delivery capacity and a bounded set of distinct active or waiting hosts.
+struct CleanupSlots {
+    slots: tokio::sync::Semaphore,
+    hosts: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+}
+impl Default for CleanupSlots {
+    /// Reserve eight concurrent deliveries and at most sixteen queued hosts.
+    fn default() -> Self {
+        Self {
+            slots: tokio::sync::Semaphore::new(8),
+            hosts: std::sync::Mutex::default(),
+        }
+    }
+}
+
+/// Own one host's queue position until cancellation or delivery completion.
+struct CleanupClaim<'a> {
+    hosts: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    host: Uuid,
+}
+impl Drop for CleanupClaim<'_> {
+    /// Cancelled waiting connections must immediately release their host claim.
+    fn drop(&mut self) {
+        self.hosts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.host);
+    }
+}
+
+/// A delivery keeps both its global slot and its unique host claim alive.
+struct CleanupPermit<'a> {
+    _slot: tokio::sync::SemaphorePermit<'a>,
+    _claim: CleanupClaim<'a>,
+}
+impl CleanupSlots {
+    /// Claim one host before joining the semaphore's FIFO queue. Duplicate and
+    /// excess hosts return busy before retaining any actor or queue entry.
+    async fn acquire(&self, host: Uuid) -> io::Result<CleanupPermit<'_>> {
+        let claim = {
+            let mut hosts = self.hosts.lock().map_err(|_| io::ErrorKind::Other)?;
+            if hosts.len() >= 24 || !hosts.insert(host) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            CleanupClaim {
+                hosts: &self.hosts,
+                host,
+            }
+        };
+        let slot = self
+            .slots
+            .acquire()
+            .await
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        Ok(CleanupPermit {
+            _slot: slot,
+            _claim: claim,
+        })
+    }
+}
 
 /// Deliver one server-retained refusal without publishing a host or normal actor.
 /// Busy admission and failed/lost replies leave the durable obligation untouched.
@@ -29,21 +91,29 @@ async fn deliver_login_cleanup(
     link: RemoteLink,
     person: Uuid,
 ) -> io::Result<()> {
-    let _cleanup = LOGIN_CLEANUPS
-        .try_acquire()
-        .map_err(|_| io::ErrorKind::WouldBlock)?;
+    let _cleanup = LOGIN_CLEANUPS.acquire(authority.identity.host).await?;
     // This transport never enters inventory, plugin routing or the host
-    // actor map. The handshake limits bound simultaneous cleanup jobs.
+    // actor map. The distinct-host lane bounds active and waiting cleanup jobs.
     // A lost acknowledgement leaves the durable outbox for next reconnect.
     let store = authority.store();
     let host = authority.identity.host;
     let (actor, accepts) = EmbeddedAgent::remote(authority.identity.execution_uid);
+    let mut inventory = actor.session_inventory();
     accepts
         .try_send(link.authorize(authority))
         .map_err(|_| io::ErrorKind::WouldBlock)?;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(300),
-        crate::remote_guard::durable_cleanup(actor.downgrade(), person),
+        async {
+            tokio::select! {
+                biased;
+                durable = crate::remote_guard::durable_cleanup(actor.downgrade(), person) => durable,
+                // This private actor owns one transport. After a busy reply,
+                // disconnect can precede the next retry; its unavailable census
+                // ends that attempt instead of awaiting an impossible replacement.
+                _ = inventory.wait_for(|state| matches!(state, crate::embedded::SessionInventoryState::Unavailable)) => false,
+            }
+        },
     )
     .await;
     if matches!(result, Ok(true)) {
@@ -792,3 +862,78 @@ impl RemoteListeners {
 #[cfg(test)]
 #[path = "remote_runtime_tests.rs"]
 pub(crate) mod tests;
+
+/// Cleanup admission must isolate a repeated host and queue distinct hosts fairly.
+#[cfg(test)]
+mod cleanup_admission_tests {
+    use super::*;
+
+    /// A stalled host cannot occupy another host's delivery slot.
+    #[tokio::test]
+    async fn cleanup_delivery_deduplicates_hosts() {
+        let lane = CleanupSlots::default();
+        let host = Uuid::new_v4();
+        let _first = lane.acquire(host).await.unwrap();
+        assert!(
+            lane.acquire(host).await.is_err(),
+            "duplicate host occupied another slot"
+        );
+    }
+}
+
+/// Distinct hosts receive FIFO admission with a finite waiting population.
+#[cfg(test)]
+mod cleanup_fairness_tests {
+    use super::*;
+    use std::{future::Future, task::Poll};
+
+    /// A returning host cannot jump a queued host; excess waiting is refused,
+    /// and dropping a queued connection releases its host claim immediately.
+    #[tokio::test]
+    async fn cleanup_delivery_is_fair_and_bounded() {
+        let lane = CleanupSlots::default();
+        let mut active = Vec::new();
+        for _ in 0..8 {
+            active.push(lane.acquire(Uuid::new_v4()).await.unwrap());
+        }
+        let mut waiting = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..16 {
+            let id = Uuid::new_v4();
+            let mut request = Box::pin(lane.acquire(id));
+            assert!(
+                matches!(
+                    std::future::poll_fn(|cx| Poll::Ready(request.as_mut().poll(cx))).await,
+                    Poll::Pending
+                ),
+                "a distinct host must queue"
+            );
+            waiting.push(request);
+            ids.push(id);
+        }
+        assert!(
+            lane.acquire(Uuid::new_v4()).await.is_err(),
+            "waiting queue grew past sixteen"
+        );
+        drop(waiting.pop());
+        let mut replacement = Box::pin(lane.acquire(*ids.last().unwrap()));
+        assert!(
+            matches!(
+                std::future::poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx))).await,
+                Poll::Pending
+            ),
+            "cancelled host claim was retained"
+        );
+        drop(active.pop());
+        assert!(
+            matches!(
+                std::future::poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx))).await,
+                Poll::Pending
+            ),
+            "new host jumped the FIFO queue"
+        );
+        let admitted = waiting.remove(0).await.unwrap();
+        drop(admitted);
+        let _next = waiting.remove(0).await.unwrap();
+    }
+}
