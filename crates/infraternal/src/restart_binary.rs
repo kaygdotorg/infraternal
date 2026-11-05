@@ -203,7 +203,7 @@ pub(crate) fn artifact_name() -> &'static str {
 /// and test builds carries debug sections. Debug test binaries of the whole
 /// CLI reached 540 MB with mesh SSH (#221), past the earlier 512 MiB; release
 /// binaries are about 22 MB, and replacements keep the 128 MiB bound.
-const RUNNING_IMAGE_LIMIT: u64 = 768 * 1024 * 1024;
+pub(crate) const RUNNING_IMAGE_LIMIT: u64 = 768 * 1024 * 1024;
 
 fn public_file(path: &Path, limit: u64) -> io::Result<File> {
     let file = OpenOptions::new()
