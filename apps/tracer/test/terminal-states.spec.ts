@@ -96,7 +96,7 @@ for (const viewport of VIEWPORTS) {
         await mkdir(dir, { recursive: true });
         await page.screenshot({ path: resolve(dir, `${state}-${viewport.name}-${theme}.png`), animations: "disabled" });
       };
-      const boot = async (page: Page, console: Console): Promise<{ listed: number[] }> => {
+      const boot = async (page: Page, console: Console): Promise<{ console: Console; listed: number[] }> => {
         await page.request.post("/__mock/reset");
         const state = { console, listed: [] as number[] };
         await script(page, state);
