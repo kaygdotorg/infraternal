@@ -71,6 +71,7 @@ interface GhosttyActivityControls {
   };
 }
 
+/** How a terminal reports to the window that shows it: attach, output, disconnects, exit, refusals and session ids. All optional. */
 export interface TerminalHooks {
   /** Return true when a product surface presents the refusal and its session-list action. */
   onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction) => boolean;
@@ -1170,6 +1171,7 @@ export class TerminalClient {
     this.streamRetryTimer = 0;
   }
 
+  /** Asks the server for a new session on this terminal's host. A refusal goes to the window's `onOpenRefused` (its strip), else to the status line. */
   private openSession(): void {
     if (this.openCallSent || this.closed) return;
     const hostId = this.config.hostId ?? new URLSearchParams(location.search).get("host");

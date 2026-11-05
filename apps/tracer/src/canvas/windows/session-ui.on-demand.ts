@@ -66,6 +66,7 @@ const button = (cls: string, label: string, paths: string): HTMLButtonElement =>
   return node;
 };
 
+/** Makes the on-demand session surfaces for one canvas: the manager, the strip (ended, exited, refused, can't reach) and the size badge. */
 export function createSessionUi(cx: Ctx): SessionUiPart {
   const inventory = cx.adapters.inventory!;
   const { stage, signal } = cx;

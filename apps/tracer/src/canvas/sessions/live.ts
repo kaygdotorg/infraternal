@@ -31,6 +31,7 @@ import type { RefusalAction } from "../../terminal-refusal";
 import type { HostEntry, LinkInfo, SessionBinding, SessionService } from "./adapter";
 import type { ScreenCache } from "./screen-cache.on-demand";
 
+/** The product's sessions service: terminal windows bound to real sessions, plus the host list the palette and sidebar read. */
 export interface LiveSessionsOptions {
   core: CoreScreen;
   connection: MuxConnection;
@@ -77,6 +78,7 @@ function cannotReach(hostName: string): string {
   return `Can't reach ${hostName.trim() || "this host"}. It keeps trying in the background.`;
 }
 
+/** Makes the sessions service for one signed-in page: it binds each terminal window to a terminal stream and keeps the admitted hosts. */
 export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
   const { core, connection, host, pool } = options;
   const listeners = new Set<() => void>();
@@ -120,12 +122,14 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private approximateAt: number | undefined;
     private heldKeys = 0;
     get link(): LinkInfo { return { everConnected: this.everConnected, resumedAt: this.resumedAt, approximateAt: this.approximateAt, heldKeys: this.heldKeys }; }
+    /** Notes that the host link missed a reply but is kept, so the pill reads reconnecting until it answers or retires. */
     private setDoubted(doubted: boolean): void {
       if (doubted === this.doubted) return;
       const before = this.connected;
       this.doubted = doubted;
       if (before !== this.connected) this.linkChanged();
     }
+    /** Records whether this window's stream is attached. A resumed stream waits `settleMs` before it counts as live, so a failed retry never flashes green. */
     private setConnected(connected: boolean, settleMs = 0): void {
       if (!connected) {
         window.clearTimeout(this.connectionStabilityTimer);
@@ -187,6 +191,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
+    /** Binds one window's model to the callbacks the canvas gave it: saving, exit, the session picker, refusals, link changes and the unreachable notice. */
     constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string, action?: RefusalAction) => boolean, private readonly connectionChanged?: () => void, private readonly unreachable?: (message: string | undefined) => void) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
@@ -219,6 +224,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       return true;
     }
 
+    /** Puts the terminal's host element in the window body, shows the last known screen, starts the unreachable watchdog and begins opening the terminal. */
     mount(body: HTMLElement): void {
       let hostEl: HTMLElement;
       if (!firstHostUsed) {
@@ -244,6 +250,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     /** The socket this window's terminal uses (taken from the pool, given back on dispose). */
     private conn: MuxConnection | undefined;
 
+    /** Opens the terminal client for this window (loading it on demand) and wires its hooks: attach, output, disconnects, exit, refusals and session ids. */
     private async start(): Promise<void> {
       const hostEl = this.hostEl;
       if (!hostEl) return;
@@ -368,6 +375,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     wheelUse(deltaY: number): boolean | undefined { return this.client?.wheelUse(deltaY); }
 
+    /** Starts a new shell on the same host in this same window, after its session ended or a refusal; the renderer and layout stay. */
     openNew(): void {
       this.retired = undefined;
       this.setConnected(false);
@@ -386,6 +394,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       if (this.model.sessionId) client.retarget(this.model.sessionId); else client.openNewSession();
     }
 
+    /** Closes the window's terminal and timers and gives its socket back. The session keeps running on the host (D178). */
     dispose(): void {
       this.keepScreen();
       this.endGhost();

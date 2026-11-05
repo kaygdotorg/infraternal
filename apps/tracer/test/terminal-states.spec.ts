@@ -18,14 +18,18 @@ import { expect, test, type Locator, type Page } from "playwright/test";
 import { decodeMuxedFrame, encodeMuxedFrame } from "../../../packages/protocol/src/codec";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** The three screens every state is checked on: a desktop, a large phone and a small phone. */
 const VIEWPORTS = [
   { name: "1440x900", width: 1440, height: 900, touch: false },
   { name: "393x852", width: 393, height: 852, touch: true },
   { name: "375x667", width: 375, height: 667, touch: true },
 ] as const;
+/** One dark and one light theme. */
 const THEMES = ["ink", "paper"] as const;
 
+/** The sentence a refused login shows. */
 const ROOTLESS = "This server runs without root, so it can only open shells as its own user. Add a host to work elsewhere.";
+/** Remote hosts the scripted server lists, and how each refuses to open a shell. */
 const HOSTS = [
   { id: "11111111-1111-4111-8111-111111111111", name: "denied-host", user: "operator", online: true, os: "Debian", refusal: "forbidden" },
   { id: "22222222-2222-4222-8222-222222222222", name: "offline-host", user: "operator", online: false, os: "Debian", refusal: "unavailable" },

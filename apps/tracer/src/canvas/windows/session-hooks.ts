@@ -17,6 +17,7 @@ import { isTerminal } from "../views/body";
 import type { SessionUiPart } from "./session-ui.on-demand";
 import type { RefusalAction } from "../../terminal-refusal";
 
+/** What the rest of the canvas asks of the session surfaces: repaint a window, open the manager, say a window was refused or cannot connect. */
 export interface SessionUi {
   /** Brings a window's own surfaces (final-screen strip, size badge, status dot) in line with its session. */
   paint(rec: WinRec): void;
@@ -39,6 +40,7 @@ function canManage(rec: WinRec): boolean {
   return isTerminal(rec) && !rec.model.noAccess && !rec.owner.view.team;
 }
 
+/** Makes the always-loaded part of the session surfaces; it loads the on-demand strip and manager the first time one is needed. */
 export function createSessionHooks(cx: Ctx): SessionUi {
   const inventory = cx.adapters.inventory!;
   let part: SessionUiPart | undefined;

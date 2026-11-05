@@ -82,6 +82,7 @@ export interface ProductCanvas {
   dispose(): void;
 }
 
+/** Mounts the product canvas on the signed-in page: the live sessions, the host list, the layout and every window, and returns the handle that tears it all down. */
 export async function mountProductCanvas(core: CoreScreen, options: ProductCanvasOptions): Promise<ProductCanvas> {
   // The embedded host's system names the mark in its windows' pills. It is asked once, after the first welcome, with the
   // light read (no live figures); until it answers the pill shows the machine glyph.
