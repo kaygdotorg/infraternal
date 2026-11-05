@@ -415,6 +415,25 @@ if [[ "$optimize" == ReleaseFast ]]; then
     sed -i '/lib.bundle_compiler_rt = true;/a\
         lib.root_module.strip = true;' "$source_dir/$build_definition"
 fi
+# The pinned recipe configures benchmark executables even when they are not
+# installed. Their full app graph fetches GUI dependencies on native macOS.
+# Configure only the requested artifacts; the VT modules and SIMD stay intact.
+# Restore first so retries always apply this adjustment to the pinned source.
+tar -xOf "$archive" "ghostty-$version/build.zig" > "$source_dir/build.zig"
+python3 - "$source_dir/build.zig" <<'PY_BENCH'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+source = path.read_text()
+before = '''    const bench = try buildpkg.GhosttyBench.init(b, &deps);
+    if (config.emit_bench) bench.install();'''
+after = '''    if (config.emit_bench) {
+        const bench = try buildpkg.GhosttyBench.init(b, &deps);
+        bench.install();
+    }'''
+assert source.count(before) == 1, 'native benchmark configuration boundary changed'
+path.write_text(source.replace(before, after))
+PY_BENCH
 # Baseline CPU keeps distributed binaries valid on hosts older than the builder.
 # ReleaseSafe retains bounds checks in development; release uses ReleaseFast.
 cd "$source_dir"
