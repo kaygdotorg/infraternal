@@ -175,3 +175,31 @@ fn a_replacement_after_the_claim_never_receives_the_key() {
         "up succeeded on a link it did not make: {up:?}"
     );
 }
+
+/// J242 P3: when the key cannot be configured, `up` deletes the link it created by its index,
+/// even though the shared name no longer leads to a link it can prove.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn a_failed_configure_deletes_the_link_it_created() {
+    let _ = ip(&["link", "del", INTERFACE]);
+    let created = Arc::new(Mutex::new(None));
+    let record = Arc::clone(&created);
+    // Before the key goes in, something replaces our marker, so configure refuses the link.
+    *BEFORE_KERNEL_KEY.lock().unwrap() = Some(Box::new(move || {
+        *record.lock().unwrap() = index_named(INTERFACE);
+        assert!(ip(&["link", "set", INTERFACE, "alias", "tampered-by-test"]));
+    }));
+    let mut node = Node::default().with_engine(EngineKind::Kernel);
+    let up = node.up().map(|identity| identity.public_key);
+    let index = created.lock().unwrap().unwrap();
+    let left = links().into_iter().find(|link| link.0 == index);
+    let _ = ip(&["link", "del", INTERFACE]);
+    assert!(
+        up.is_err(),
+        "up succeeded on a link whose marker was replaced: {up:?}"
+    );
+    assert!(
+        left.is_none(),
+        "the link this node created was left behind: {left:?}"
+    );
+}
