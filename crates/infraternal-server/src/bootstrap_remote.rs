@@ -357,6 +357,25 @@ impl RemoteBackend {
             .map_err(|_| unavailable())
     }
 
+    /// Mark `host`'s setup finished by consuming its restart-retirement intent.
+    ///
+    /// A new install always has one. A Replace took on none of its own, but the
+    /// host it replaced may still carry its first setup's open intent, when that
+    /// setup never finished: consume it too, or the working host keeps reading as
+    /// an abandoned setup that a later re-add retires while its agent is offline
+    /// (#305, J247 P2). Only a Replace may find none.
+    async fn finish_setup_record(
+        &self,
+        owner: &str,
+        host: Uuid,
+        replacement: bool,
+    ) -> Result<(), Failure> {
+        match self.issuer.store().complete_bootstrap(owner, host).await {
+            Ok(()) => Ok(()),
+            Err(crate::enrollment::EnrollmentError::Denied) if replacement => Ok(()),
+            Err(_) => Err(unavailable()),
+        }
+    }
     fn completed_record(&self, authority: &Authority, host: Uuid) -> Result<(), Failure> {
         self.uid(authority, host)?;
         self.attempts
@@ -1014,13 +1033,8 @@ impl Backend for RemoteBackend {
                 .map_err(|_| unavailable())?
                 .get(&host)
                 .is_some_and(|attempt| attempt.replacement);
-            if !replacement {
-                self.issuer
-                    .store()
-                    .complete_bootstrap(&authority.owner, host)
-                    .await
-                    .map_err(|_| unavailable())?;
-            }
+            self.finish_setup_record(&authority.owner, host, replacement)
+                .await?;
             self.completed_record(authority, host)
         })
     }
@@ -2212,6 +2226,47 @@ mod tests {
             .bind(f.prior.as_bytes().as_slice()).bind(f.prior.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
         assert!(revoked, "the unfinished host must no longer count as added");
         assert_eq!(intents, 0);
+    }
+
+    /// #305, J247 P2: a Replace of a host whose first setup never finished must mark
+    /// it finished, or a later re-add while its agent is offline would retire a
+    /// working host. A Replace with nothing open stays fine; a new install with no
+    /// intent is still refused.
+    #[tokio::test]
+    async fn a_completed_replace_marks_an_unfinished_host_finished() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        f.backend
+            .finish_setup_record("owner", f.prior, true)
+            .await
+            .unwrap();
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_bootstrap_retirement_intents WHERE host_id=?",
+        )
+        .bind(f.prior.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(open, 0, "the replaced host still reads as unfinished");
+        // Now finished, so a re-add while it is offline names it, never retires it.
+        let event = finished(&start(&f, "owner")).await;
+        assert!(
+            event
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.already_added),
+            "{event:?}"
+        );
+        f.backend
+            .finish_setup_record("owner", f.prior, true)
+            .await
+            .unwrap();
+        assert!(
+            f.backend
+                .finish_setup_record("owner", f.prior, false)
+                .await
+                .is_err()
+        );
     }
 
     /// The retirement above never reaches a setup still running in this server: a second
