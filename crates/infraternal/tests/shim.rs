@@ -674,9 +674,37 @@ fn detached_shell_exit_reaps_shim() {
     kill_shell_and_await_reap(&mut session);
 }
 
+/// True while `pid` is a live process (not missing, not a zombie) whose
+/// command is `comm`, so a recycled PID never counts.
+fn running_as(pid: i32, comm: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.split_once(" (")
+            .and_then(|(_, rest)| rest.rsplit_once(") "))
+            .is_some_and(|(name, tail)| name == comm && !tail.starts_with('Z'))
+    })
+}
+
+/// Stops the test's background `sleep` on every exit path, including a panic
+/// in the middle of the test, and only while that PID is still the sleeper.
+struct Sleeper(i32);
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        if running_as(self.0, "sleep") {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.0),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
 /// A descendant holding the PTY slave cannot retain a dead shell's shim. The
 /// descendant would hold it for 600 s, far past the reap hang guard, so a shim
-/// that waited for it fails instead of passing slowly.
+/// that waited for it fails instead of passing slowly. The descendant must be
+/// alive when the shell dies, so the case is really exercised. At shim exit,
+/// the product's rule decides its fate: a non-root shim with host login
+/// (`plugin-agent` builds) adopts the terminal's jobs and retires them before
+/// it records the end; otherwise the descendant outlives the shim.
 #[test]
 fn detached_shell_exit_reaps_even_with_a_live_background_descendant() {
     let mut session = Session::new(8192, false);
@@ -693,12 +721,24 @@ fn detached_shell_exit_reaps_even_with_a_live_background_descendant() {
         .and_then(|(_, tail)| tail.split_once("_PID"))
         .and_then(|(pid, _)| pid.parse().ok())
         .expect("background descendant PID");
+    let _sleeper = Sleeper(descendant);
     drop(peer);
+    // `$!` is printed right after the fork; wait for the subshell's exec of
+    // `sleep`, so the descendant is provably live when the shell dies.
+    let deadline = Instant::now() + REAP_HANG_BOUND;
+    while !running_as(descendant, "sleep") {
+        assert!(
+            Instant::now() < deadline,
+            "the PTY-holding descendant never started sleeping"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
     kill_shell_and_await_reap(&mut session);
-    // Never leave the 600 s sleeper behind, whether or not the shim ended it.
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(descendant),
-        nix::sys::signal::Signal::SIGKILL,
+    let adopts = cfg!(feature = "plugin-agent") && !nix::unistd::Uid::effective().is_root();
+    assert_eq!(
+        running_as(descendant, "sleep"),
+        !adopts,
+        "descendant after shim exit (shim adopts and retires jobs: {adopts})"
     );
 }
 
