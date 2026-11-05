@@ -61,6 +61,53 @@ class PrivilegedAreas(unittest.TestCase):
         ):
             self.assertEqual(p.areas([path]), expected, path)
 
+    def test_dependency_crate_selects_its_area(self):
+        """A diff touching only infraternal-linux-tun selects the mesh (TUN) area (J266 P2-2)."""
+        graph = {'infraternal-plugin-mesh': ('crates/plugins/mesh', {'infraternal-linux-tun', 'infraternal-protocol'}),
+                 'infraternal-linux-tun': ('crates/infraternal-linux-tun', set()),
+                 'infraternal-protocol': ('crates/infraternal-protocol', set()),
+                 'unrelated': ('crates/unrelated', set())}
+        root = Path(__file__).resolve().parents[1]
+        dirs = p.dependency_directories(root, graph)
+        self.assertIn('crates/infraternal-linux-tun', dirs['mesh'])
+        self.assertEqual(p.areas(['crates/infraternal-linux-tun/src/lib.rs']), set())
+        self.assertEqual(p.areas(['crates/infraternal-linux-tun/src/lib.rs'], dirs), {'mesh'})
+        self.assertEqual(p.areas(['crates/unrelated/src/lib.rs'], dirs), set())
+        # A sibling directory sharing a prefix is not inside the crate.
+        self.assertEqual(p.areas(['crates/infraternal-linux-tunnel/x.rs'], dirs), set())
+
+    def test_real_graph_covers_the_reviewed_crates(self):
+        """On the real workspace, the four crates J266 listed select the mesh area."""
+        root = Path(__file__).resolve().parents[1]
+        if not shutil.which('cargo'):
+            self.skipTest('cargo is not on PATH')
+        dirs = p.dependency_directories(root, p.workspace_graph(root))
+        for path in ('crates/infraternal-linux-tun/src/lib.rs', 'crates/plugins/relay/src/lib.rs',
+                     'crates/infraternal-protocol/src/lib.rs', 'crates/infraternal-plugin-api/src/lib.rs'):
+            self.assertIn('mesh', p.areas([path], dirs), path)
+        self.assertEqual(p.areas(['docs/ENGINEERING.md'], dirs), set())
+
+    def test_skip_exits_with_the_skip_code(self):
+        """With nothing selected the row exits 77, which the gate prints as SKIP (J266 P2-2)."""
+        with mock.patch.object(p.subprocess, 'check_output', side_effect=['base\n', b'docs/x.md\0', b'']), \
+                mock.patch.object(p, 'workspace_graph', return_value={}), \
+                mock.patch.object(sys, 'argv', ['verify-privileged']), \
+                self.assertRaises(SystemExit) as stop:
+            p.main()
+        self.assertEqual(stop.exception.code, p.SKIP_EXIT)
+
+    def test_gate_prints_skip_for_77(self):
+        """rust_run_gate records exit 77 as SKIP without failing the gate, and other codes as FAIL."""
+        rust = Path(__file__).resolve().parent / 'verify.d/rust.sh'
+        script = ('source "$1"; rust_run_gate skipped bash -c "exit 77"; rust_run_gate ok true; '
+                  'echo "failed=$RUST_GATE_FAILED"; rust_run_gate bad bash -c "exit 3"; '
+                  'echo "failed=$RUST_GATE_FAILED"; printf "%s\\n" "${RUST_GATE_ROWS[@]}"')
+        out = subprocess.run(['bash', '-c', script, 'gate', str(rust)], capture_output=True, text=True).stdout
+        self.assertIn('skipped|SKIP', out)
+        self.assertIn('ok|PASS', out)
+        self.assertIn('bad|FAIL (3)', out)
+        self.assertLess(out.index('failed=0'), out.index('failed=1'))
+
     def test_gaps_are_named(self):
         """Real-root behaviour the row cannot reach is stated, not silently skipped."""
         self.assertTrue(all(p.NOT_COVERED.get(area) for area in ('proxy', 'install', 'shim')))

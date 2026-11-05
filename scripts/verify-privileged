@@ -68,6 +68,9 @@ TEST_TIMEOUT_SECONDS = int(os.environ.get('VERIFY_PRIVILEGED_TEST_TIMEOUT', '900
 # systemd user scope when the user manager is reachable from this runner.
 SANDBOX_MEMORY_MAX = os.environ.get('VERIFY_PRIVILEGED_MEMORY_MAX', '4G')
 
+# Exit status for "nothing to run": rust_run_gate prints SKIP for it.
+SKIP_EXIT = 77
+
 # Path globs that put a change in an area. fnmatch's `*` already crosses
 # directories; `**` only reads clearer.
 GLOBS = {
@@ -199,18 +202,64 @@ exec unshare --user --map-root-user --net --mount --pid --fork --kill-child --mo
 '''
 
 
-def areas(paths):
-    """Return the areas whose globs match any changed path.
+def areas(paths, dependency_dirs=None):
+    """Return the areas a set of changed paths can affect.
 
-    Shared build inputs (workspace manifest, lockfile, toolchain, cargo config)
-    and this script itself select every area, because they can change any
-    area's behaviour.
+    An area is selected when a path matches its globs, or when it lies inside
+    a workspace crate that the area's test binaries depend on
+    (`dependency_dirs`, from `dependency_directories()`). Without the second
+    rule, a change only to e.g. `infraternal-linux-tun` skipped the mesh area
+    that tests it (J266, #344 80581 P2-2). Shared build inputs (workspace
+    manifest, lockfile, toolchain, cargo config) and this script select every
+    area, because they can change any area's behaviour.
     """
     shared = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify-privileged')
     if any(path in shared or path.startswith('.cargo/') for path in paths):
         return set(GLOBS)
-    return {area for area, patterns in GLOBS.items()
-            if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)}
+    selected = {area for area, patterns in GLOBS.items()
+                if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)}
+    for area, directories in (dependency_dirs or {}).items():
+        if any(path.startswith(directory.rstrip('/') + '/') for path in paths for directory in directories):
+            selected.add(area)
+    return selected
+
+
+def workspace_graph(root):
+    """Map each workspace package to (its directory, the workspace packages it depends on).
+
+    Read from `cargo metadata --no-deps`, so it follows Cargo.toml and cannot go
+    stale the way a list of globs can. Every dependency kind counts: a dev- or
+    build-dependency also changes what a test binary does.
+    """
+    output = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1', '--offline'],
+                            cwd=root, capture_output=True, text=True, check=True).stdout
+    packages = json.loads(output)['packages']
+    names = {package['name'] for package in packages}
+    return {package['name']: (str(Path(package['manifest_path']).parent.relative_to(root)),
+                              {dependency['name'] for dependency in package['dependencies']
+                               if dependency.get('path') and dependency['name'] in names})
+            for package in packages}
+
+
+def dependency_directories(root, graph):
+    """For each area, the directories of every workspace crate its candidate test binaries depend on.
+
+    Only packages that hold at least one candidate count: an area whose
+    packages have no namespace tests has nothing a dependency change could
+    break here, and is still selected by its own globs.
+    """
+    result = {}
+    for area, packages in PACKAGES.items():
+        todo = [package for package, directory, _ in packages
+                if package in graph and privileged_ignored(root, package, directory)]
+        seen = set()
+        while todo:
+            name = todo.pop()
+            if name not in seen:
+                seen.add(name)
+                todo.extend(graph[name][1])
+        result[area] = sorted(graph[name][0] for name in seen)
+    return result
 
 
 def target_of(relative, src_target):
@@ -566,10 +615,11 @@ def main():
     base = subprocess.check_output(['git', 'merge-base', 'HEAD', args.base], cwd=root, text=True).strip()
     paths = subprocess.check_output(['git', 'diff', '--name-only', '-z', base], cwd=root).decode().split('\0')
     paths += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z'], cwd=root).decode().split('\0')
-    selected = areas([path for path in paths if path])
+    selected = areas([path for path in paths if path], dependency_directories(root, workspace_graph(root)))
     if not selected:
-        print('privileged integration: SKIP (no install, proxy, mesh or shim changes)')
-        return
+        print('privileged integration: SKIP (no change to install, proxy, mesh or shim code, or a crate they depend on)')
+        # 77 is the gate's "skipped" code, so the summary reads SKIP, not PASS.
+        raise SystemExit(SKIP_EXIT)
     print(f'privileged integration: areas={",".join(sorted(selected))}', flush=True)
     for area in sorted(selected & set(NOT_COVERED)):
         print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)

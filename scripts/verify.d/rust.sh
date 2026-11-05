@@ -14,8 +14,14 @@ rust_run_gate() {
         result="PASS"
     else
         local exit_code=$?
-        result="FAIL (${exit_code})"
-        RUST_GATE_FAILED=1
+        # 77 means the row had nothing to check here (the common test-suite
+        # "skipped" code): show it as SKIP, never as PASS, and don't fail.
+        if ((exit_code == 77)); then
+            result="SKIP"
+        else
+            result="FAIL (${exit_code})"
+            RUST_GATE_FAILED=1
+        fi
     fi
     RUST_GATE_ROWS+=("${name}|${result}")
     printf '(%s: %ss)\n' "$name" "$((SECONDS - started))"
@@ -36,7 +42,9 @@ verify_diff_docs() {
 
 # Root-only paths complement browser/passkey coverage on the test server (D351).
 verify_privileged() {
-    python3 scripts/test-verify-privileged.py && scripts/verify-privileged
+    python3 scripts/test-verify-privileged.py || return
+    # Exit 77 (nothing selected) passes through to rust_run_gate as SKIP.
+    scripts/verify-privileged
 }
 
 rust_print_summary() {

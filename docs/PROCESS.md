@@ -580,9 +580,13 @@ TUN links, nftables rules, routes, DNS on a mesh address. They are
 namespace". When a change touches install/bootstrap/removal, proxy, mesh or
 shim/host-login code (the path globs in `scripts/verify-privileged`, against
 the merge base `VERIFY_QUICK_BASE`, default `origin/dev`), the `privileged
-integration` row of `scripts/verify fast` runs those tests. Shared build inputs
-(workspace manifest, lockfile, toolchain) select all four areas; other changes
-skip the row.
+integration` row of `scripts/verify fast` runs those tests. A change inside
+any workspace crate those tests' binaries depend on also selects the area,
+from `cargo metadata` (for example `infraternal-linux-tun`, `relay`,
+`protocol` and `plugin-api` select mesh), so a dependency change can't skip
+the tests that cover it (J266, 80581). Shared build inputs (workspace
+manifest, lockfile, toolchain) select all four areas. Other changes skip the
+row, which exits 77 and shows as `SKIP` in the gate table, never as `PASS`.
 
 **Which tests:** every ignored test in the area's packages whose reason asks
 for root or a disposable namespace, each alone in a fresh sandbox. The reason
