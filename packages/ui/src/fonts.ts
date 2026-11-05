@@ -96,6 +96,15 @@ const staticFaces = (id: string, styles: ReadonlyArray<"roman-400" | "roman-700"
 const uprightOnly = (id: string): FontFaceSource[] => [{ file: `${id}/roman.latin.woff2`, style: "normal", weight: "400 700" }];
 
 /**
+ * One of the D329 families from its faces: the body weight is its terminal weight too unless `terminal` says otherwise, bold is 700, and a family with a
+ * 700 static face (regular and bold only, `staticPair` or `staticFaces`) snaps its weights to those two.
+ */
+const added = (id: string, label: string, body: number, faces: FontFaceSource[], extra: { hint?: string; terminal?: number; placeGlyphs?: boolean } = {}): MonoFont => ({
+  id, label, family: label, hint: extra.hint ?? "", bodyWeight: body, terminalWeight: extra.terminal ?? body, boldWeight: 700, range: [400, 700],
+  ...(faces.some((f) => f.weight === "700") ? { discrete: [400, 700] as const } : {}), ...(extra.placeGlyphs ? { placeGlyphs: true } : {}), faces,
+});
+
+/**
  * The curated fonts (D87), default first, then in the order the palette lists them.
  *
  * Weights come from ink measurements: ink per glyph at 14 px (canvas text, mean of DPR 1 and
@@ -131,35 +140,18 @@ export const FONTS: readonly MonoFont[] = [
     bodyWeight: 550, terminalWeight: 550, boldWeight: 700, range: [400, 700], faces: variable("source-code-pro") },
   // D329 (#323): fourteen more families, all fetched only when previewed or picked (never on the first load). Their weights are the common
   // defaults, not ink measurements: variable families at 450 like most of the list, static families at their regular (400) with bold at 700.
-  { id: "iosevka", label: "Iosevka", family: "Iosevka", hint: "",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticPair("iosevka") },
-  { id: "victor-mono", label: "Victor Mono", family: "Victor Mono", hint: "",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticPair("victor-mono") },
-  { id: "recursive-mono", label: "Recursive Mono", family: "Recursive Mono", hint: "",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], faces: variable("recursive-mono") },
-  { id: "martian-mono", label: "Martian Mono", family: "Martian Mono", hint: "wide",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], faces: uprightOnly("martian-mono") },
-  { id: "intel-one-mono", label: "Intel One Mono", family: "Intel One Mono", hint: "",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticPair("intel-one-mono") },
-  { id: "fantasque-sans-mono", label: "Fantasque Sans Mono", family: "Fantasque Sans Mono", hint: "",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticPair("fantasque-sans-mono") },
-  { id: "hack", label: "Hack", family: "Hack", hint: "",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticPair("hack") },
-  { id: "inconsolata", label: "Inconsolata", family: "Inconsolata", hint: "",
-    bodyWeight: 500, terminalWeight: 500, boldWeight: 700, range: [400, 700], faces: uprightOnly("inconsolata") },
-  { id: "0xproto", label: "0xProto", family: "0xProto", hint: "",
-    bodyWeight: 400, terminalWeight: 400, boldWeight: 700, range: [400, 700], discrete: [400, 700], faces: staticFaces("0xproto", ["roman-400", "roman-700", "italic-400"]) },
-  { id: "lilex", label: "Lilex", family: "Lilex", hint: "",
-    bodyWeight: 450, terminalWeight: 450, boldWeight: 700, range: [400, 700], faces: variable("lilex") },
+  added("iosevka", "Iosevka", 400, staticPair("iosevka")),
+  added("victor-mono", "Victor Mono", 400, staticPair("victor-mono")),
+  added("recursive-mono", "Recursive Mono", 400, variable("recursive-mono")),
+  added("martian-mono", "Martian Mono", 400, uprightOnly("martian-mono"), { hint: "wide" }),
+  added("intel-one-mono", "Intel One Mono", 400, staticPair("intel-one-mono")),
+  added("fantasque-sans-mono", "Fantasque Sans Mono", 400, staticPair("fantasque-sans-mono")),
+  added("hack", "Hack", 400, staticPair("hack")),
+  added("inconsolata", "Inconsolata", 500, uprightOnly("inconsolata")),
+  added("0xproto", "0xProto", 400, staticFaces("0xproto", ["roman-400", "roman-700", "italic-400"])),
+  added("lilex", "Lilex", 450, variable("lilex")),
   // The other four Monaspace faces share Neon's metrics, so they take its terminal weight and per-glyph placement (see `placeGlyphs`).
-  { id: "monaspace-argon", label: "Monaspace Argon", family: "Monaspace Argon", hint: "",
-    bodyWeight: 450, terminalWeight: 500, boldWeight: 700, range: [400, 700], placeGlyphs: true, faces: variable("monaspace-argon") },
-  { id: "monaspace-xenon", label: "Monaspace Xenon", family: "Monaspace Xenon", hint: "",
-    bodyWeight: 450, terminalWeight: 500, boldWeight: 700, range: [400, 700], placeGlyphs: true, faces: variable("monaspace-xenon") },
-  { id: "monaspace-radon", label: "Monaspace Radon", family: "Monaspace Radon", hint: "",
-    bodyWeight: 450, terminalWeight: 500, boldWeight: 700, range: [400, 700], placeGlyphs: true, faces: variable("monaspace-radon") },
-  { id: "monaspace-krypton", label: "Monaspace Krypton", family: "Monaspace Krypton", hint: "",
-    bodyWeight: 450, terminalWeight: 500, boldWeight: 700, range: [400, 700], placeGlyphs: true, faces: variable("monaspace-krypton") },
+  ...["argon", "xenon", "radon", "krypton"].map((name) => added(`monaspace-${name}`, `Monaspace ${name[0]!.toUpperCase()}${name.slice(1)}`, 450, variable(`monaspace-${name}`), { terminal: 500, placeGlyphs: true })),
 ];
 
 /** The font used when nothing is saved. It is the one preloaded for the sign-in card. */

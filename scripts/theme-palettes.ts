@@ -2,7 +2,7 @@
 /**
  * The published palettes of the colour schemes added by D329 (#323), and the D80 repair of each.
  *
- * Run `bun scripts/theme-palettes.ts` from the repository root. For every scheme it prints (1) the `theme(...)` lines to paste into
+ * Run `bun scripts/theme-palettes.ts` from the repository root. For every scheme it prints (1) the compact `scheme(...)` lines to paste into
  * `packages/ui/src/themes.ts`, with every colour repaired by `repair` (OKLab lightness only: D80), and (2) a log of each colour that
  * changed, as published -> repaired with both ratios. The log is the record D80 asks for; it is kept in docs/design/THEME-AUDIT.md.
  *
@@ -112,7 +112,8 @@ for (const s of SCHEMES) {
   const failures = auditTheme(theme);
   if (failures.length) throw new Error(`${s.id} still fails: ${failures.map((f) => `${f.role} ${f.ratio.toFixed(2)}`).join(", ")}`);
   const q = (v: string): string => JSON.stringify(v);
-  out.push(`  // ${s.source}\n  ${s.id.includes("-") ? q(s.id) : s.id}: theme(${q(s.name)}, ${s.dark}, ${q(s.bg)}, ${q(theme.fg)}, ${q(theme.fg2)}, ${q(fg3)}, ${q(accent)}, ${q(ok)},\n    [${ansi.map(q).join(", ")}],\n    [${theme.bright.map(q).join(", ")}]),`);
+  const h = (list: string[]): string => list.map((c) => c.slice(1)).join(" ");
+  out.push(`  // ${s.source}\n  ${s.id.includes("-") ? q(s.id) : s.id}: scheme(${q(s.name)}, ${s.dark}, ${q(h([s.bg, theme.fg, theme.fg2, fg3, accent, ok]))},\n    ${q(h(ansi))},\n    ${q(h(theme.bright))}),`);
 }
 console.log(out.join("\n"));
 console.log("\n--- D80 log: published -> repaired (OKLab lightness only) ---");

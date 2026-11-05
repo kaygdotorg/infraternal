@@ -30,6 +30,16 @@ const theme = (
 ): Theme => ({ name, dark, bg, fg, fg2, fg3, accent, ok, ansi, bright });
 
 /**
+ * A scheme written compactly (the D329 additions): `main` is "bg fg fg2 fg3 accent ok", `ansi` and `bright` are eight colours each, all as six hex digits without
+ * the `#`. The same {@link Theme} as `theme(...)` makes; only the table is smaller, which matters because this module is on the critical path (D188).
+ */
+const scheme = (name: string, dark: boolean, main: string, ansi: string, bright: string): Theme => {
+  const hex = (list: string): string[] => list.split(" ").map((h) => `#${h}`);
+  const [bg, fg, fg2, fg3, accent, ok] = hex(main) as [string, string, string, string, string, string];
+  return theme(name, dark, bg, fg, fg2, fg3, accent, ok, hex(ansi) as Ansi, hex(bright) as Ansi);
+};
+
+/**
  * Theme values are the approved mockup palettes; community ANSI colors stay published. The schemes after Dracula are D329's additions: each is the
  * upstream's published palette with every colour that was under D80's lines repaired by OKLab lightness only (`theme-audit.ts`; the generator is
  * `scripts/theme-palettes.ts` and the log of each change is docs/design/THEME-AUDIT.md). Their sources and licences are in THIRD_PARTY_NOTICES.md.
@@ -66,77 +76,77 @@ export const THEMES: Record<string, Theme> = {
     ["#21222c", "#ff6f6c", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2"],
     ["#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff"]),
   // Solarized (Ethan Schoonover), base3 background
-  "solarized-light": theme("Solarized Light", false, "#fdf6e3", "#3e535a", "#5f747c", "#839191", "#268bd2", "#667800",
-    ["#073642", "#d72d2b", "#667800", "#946900", "#0075bb", "#cd2f7d", "#007f77", "#eee8d5"],
-    ["#5f747c", "#c6131a", "#677800", "#936900", "#0075bb", "#be1c70", "#007f77", "#3e535a"]),
+  "solarized-light": scheme("Solarized Light", false, "fdf6e3 3e535a 5f747c 839191 268bd2 667800",
+    "073642 d72d2b 667800 946900 0075bb cd2f7d 007f77 eee8d5",
+    "5f747c c6131a 677800 936900 0075bb be1c70 007f77 3e535a"),
   // Solarized (Ethan Schoonover), base03 background
-  "solarized-dark": theme("Solarized Dark", true, "#002b36", "#b1c0bf", "#899a9c", "#5e747b", "#268bd2", "#859900",
-    ["#073642", "#fa5149", "#859900", "#b58900", "#3194db", "#ef5299", "#2aa198", "#eee8d5"],
-    ["#5e747b", "#fa5149", "#97ac29", "#c89c29", "#3d9ee6", "#ef539a", "#43b4ab", "#b1c0bf"]),
+  "solarized-dark": scheme("Solarized Dark", true, "002b36 b1c0bf 899a9c 5e747b 268bd2 859900",
+    "073642 fa5149 859900 b58900 3194db ef5299 2aa198 eee8d5",
+    "5e747b fa5149 97ac29 c89c29 3d9ee6 ef539a 43b4ab b1c0bf"),
   // Everforest (sainnhe), light medium
-  "everforest-light": theme("Everforest Light", false, "#fdf6e3", "#45535a", "#667565", "#889182", "#839700", "#677800",
-    ["#5c6a72", "#d43034", "#677800", "#9f6300", "#1378a7", "#b74495", "#008159", "#e6e2cc"],
-    ["#667565", "#d43235", "#667800", "#9f6400", "#1378a8", "#b74596", "#008158", "#45535a"]),
+  "everforest-light": scheme("Everforest Light", false, "fdf6e3 45535a 667565 889182 839700 677800",
+    "5c6a72 d43034 677800 9f6300 1378a7 b74495 008159 e6e2cc",
+    "667565 d43235 667800 9f6400 1378a8 b74596 008158 45535a"),
   // Everforest (sainnhe), dark medium
-  "everforest-dark": theme("Everforest Dark", true, "#2d353b", "#dccfb3", "#9da9a0", "#7a8478", "#a7c080", "#a7c080",
-    ["#475258", "#e67e80", "#a7c080", "#dbbc7f", "#7fbbb3", "#d699b6", "#83c092", "#d3c6aa"],
-    ["#7a8478", "#fb9192", "#bad393", "#efcf92", "#92cec6", "#eaacc9", "#96d3a5", "#dccfb3"]),
+  "everforest-dark": scheme("Everforest Dark", true, "2d353b dccfb3 9da9a0 7a8478 a7c080 a7c080",
+    "475258 e67e80 a7c080 dbbc7f 7fbbb3 d699b6 83c092 d3c6aa",
+    "7a8478 fb9192 bad393 efcf92 92cec6 eaacc9 96d3a5 dccfb3"),
   // Kanagawa (rebelot), Lotus
-  "kanagawa-lotus": theme("Kanagawa Lotus", false, "#f2ecbc", "#4b4b5b", "#43436c", "#87867d", "#4d699b", "#587137",
-    ["#1f1f28", "#bf374c", "#587137", "#716b39", "#4d699b", "#a34d6b", "#4e706a", "#c7d7e0"],
-    ["#43436c", "#b32b42", "#587137", "#66602e", "#3d5888", "#9f4968", "#486a64", "#4b4b5b"]),
+  "kanagawa-lotus": scheme("Kanagawa Lotus", false, "f2ecbc 4b4b5b 43436c 87867d 4d699b 587137",
+    "1f1f28 bf374c 587137 716b39 4d699b a34d6b 4e706a c7d7e0",
+    "43436c b32b42 587137 66602e 3d5888 9f4968 486a64 4b4b5b"),
   // Kanagawa (rebelot), Wave
-  "kanagawa-wave": theme("Kanagawa Wave", true, "#1f1f28", "#dcd7ba", "#c8c093", "#727169", "#7e9cd8", "#98bb6c",
-    ["#16161d", "#e46876", "#98bb6c", "#e6c384", "#7e9cd8", "#957fb8", "#7aa89f", "#c8c093"],
-    ["#727169", "#fb3d36", "#98bb6c", "#e6c384", "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba"]),
+  "kanagawa-wave": scheme("Kanagawa Wave", true, "1f1f28 dcd7ba c8c093 727169 7e9cd8 98bb6c",
+    "16161d e46876 98bb6c e6c384 7e9cd8 957fb8 7aa89f c8c093",
+    "727169 fb3d36 98bb6c e6c384 7fb4ca 938aa9 7aa89f dcd7ba"),
   // Ayu (ayu-theme), light
-  "ayu-light": theme("Ayu Light", false, "#fafafa", "#50555a", "#707378", "#8a9199", "#c48303", "#567f00",
-    ["#000000", "#d13c3f", "#567f00", "#a46400", "#0078bd", "#8a61b1", "#008361", "#c7c7c7"],
-    ["#707378", "#d13b3f", "#567f00", "#a46500", "#0078be", "#8a61b1", "#008360", "#50555a"]),
+  "ayu-light": scheme("Ayu Light", false, "fafafa 50555a 707378 8a9199 c48303 567f00",
+    "000000 d13c3f 567f00 a46400 0078bd 8a61b1 008361 c7c7c7",
+    "707378 d13b3f 567f00 a46500 0078be 8a61b1 008360 50555a"),
   // Ayu (ayu-theme), dark
-  "ayu-dark": theme("Ayu Dark", true, "#0b0e14", "#bfbdb6", "#8a9199", "#5b606b", "#e6b450", "#aad94c",
-    ["#11151c", "#d95757", "#aad94c", "#e6b450", "#59c2ff", "#d2a6ff", "#95e6cb", "#c7c7c7"],
-    ["#5b606b", "#ee6a69", "#bded62", "#fac764", "#6ed6ff", "#e6b9ff", "#a9fadf", "#bfbdb6"]),
+  "ayu-dark": scheme("Ayu Dark", true, "0b0e14 bfbdb6 8a9199 5b606b e6b450 aad94c",
+    "11151c d95757 aad94c e6b450 59c2ff d2a6ff 95e6cb c7c7c7",
+    "5b606b ee6a69 bded62 fac764 6ed6ff e6b9ff a9fadf bfbdb6"),
   // GitHub Primer, light
-  "github-light": theme("GitHub Light", false, "#ffffff", "#1f2328", "#59636e", "#818b98", "#0969da", "#1a7f37",
-    ["#24292f", "#cf222e", "#1a7f37", "#9a6700", "#0969da", "#8250df", "#1b7c83", "#6e7781"],
-    ["#59636e", "#b9001b", "#006d25", "#875600", "#0056c6", "#713cca", "#006a71", "#1f2328"]),
+  "github-light": scheme("GitHub Light", false, "ffffff 1f2328 59636e 818b98 0969da 1a7f37",
+    "24292f cf222e 1a7f37 9a6700 0969da 8250df 1b7c83 6e7781",
+    "59636e b9001b 006d25 875600 0056c6 713cca 006a71 1f2328"),
   // GitHub Primer, dark
-  "github-dark": theme("GitHub Dark", true, "#0d1117", "#e6edf3", "#9198a1", "#6e7681", "#4493f8", "#3fb950",
-    ["#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4"],
-    ["#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#e6edf3"]),
+  "github-dark": scheme("GitHub Dark", true, "0d1117 e6edf3 9198a1 6e7681 4493f8 3fb950",
+    "484f58 ff7b72 3fb950 d29922 58a6ff bc8cff 39c5cf b1bac4",
+    "6e7681 ffa198 56d364 e3b341 79c0ff d2a8ff 56d4dd e6edf3"),
   // Flexoki (Steph Ango), light (the 600 steps on paper)
-  "flexoki-light": theme("Flexoki Light", false, "#fffcf0", "#100f0f", "#6f6e69", "#94928a", "#205ea6", "#637d03",
-    ["#100f0f", "#af3029", "#637d03", "#966d00", "#205ea6", "#a02f6f", "#22817a", "#6f6e69"],
-    ["#6f6e69", "#9a1916", "#556e00", "#966d00", "#094c93", "#8c195e", "#00716a", "#100f0f"]),
+  "flexoki-light": scheme("Flexoki Light", false, "fffcf0 100f0f 6f6e69 94928a 205ea6 637d03",
+    "100f0f af3029 637d03 966d00 205ea6 a02f6f 22817a 6f6e69",
+    "6f6e69 9a1916 556e00 966d00 094c93 8c195e 00716a 100f0f"),
   // Flexoki (Steph Ango), dark (the 400 steps on black)
-  "flexoki-dark": theme("Flexoki Dark", true, "#100f0f", "#cecdc3", "#878580", "#61605d", "#4385be", "#879a39",
-    ["#1c1b1a", "#d34f42", "#879a39", "#d0a215", "#4385be", "#ce5d97", "#3aa99f", "#cecdc3"],
-    ["#61605d", "#e66053", "#99ad4d", "#e4b536", "#5597d2", "#e370aa", "#50bcb2", "#cecdc3"]),
+  "flexoki-dark": scheme("Flexoki Dark", true, "100f0f cecdc3 878580 61605d 4385be 879a39",
+    "1c1b1a d34f42 879a39 d0a215 4385be ce5d97 3aa99f cecdc3",
+    "61605d e66053 99ad4d e4b536 5597d2 e370aa 50bcb2 cecdc3"),
   // Gruvbox (morhetz), light medium
-  "gruvbox-light": theme("Gruvbox Light", false, "#fbf1c7", "#3c3836", "#665c54", "#7c6f64", "#b57614", "#757005",
-    ["#fbf1c7", "#9d0006", "#757005", "#9c5f00", "#076678", "#8f3f71", "#407956", "#7c6f64"],
-    ["#665c54", "#cc241d", "#737100", "#9b6000", "#36777a", "#a25478", "#467948", "#3c3836"]),
+  "gruvbox-light": scheme("Gruvbox Light", false, "fbf1c7 3c3836 665c54 7c6f64 b57614 757005",
+    "fbf1c7 9d0006 757005 9c5f00 076678 8f3f71 407956 7c6f64",
+    "665c54 cc241d 737100 9b6000 36777a a25478 467948 3c3836"),
   // Tokyo Night (folke/tokyonight.nvim), day
-  "tokyo-day": theme("Tokyo Night Day", false, "#e1e2e7", "#1b3f9b", "#51619e", "#777ea7", "#2e7de9", "#506d31",
-    ["#b4b5b9", "#c90043", "#506d31", "#7e5f31", "#0961cb", "#833bd8", "#006c92", "#6172b0"],
-    ["#51619e", "#c90043", "#476428", "#7a5b2d", "#0861cb", "#823ad8", "#005f85", "#1b3f9b"]),
+  "tokyo-day": scheme("Tokyo Night Day", false, "e1e2e7 1b3f9b 51619e 777ea7 2e7de9 506d31",
+    "b4b5b9 c90043 506d31 7e5f31 0961cb 833bd8 006c92 6172b0",
+    "51619e c90043 476428 7a5b2d 0861cb 823ad8 005f85 1b3f9b"),
   // Catppuccin, Frappé
-  frappe: theme("Catppuccin Frappé", true, "#303446", "#c6d0f5", "#a5adce", "#777d98", "#ca9ee6", "#a6d189",
-    ["#51576d", "#e78284", "#a6d189", "#e5c890", "#8caaee", "#f4b8e4", "#81c8be", "#b5bfe2"],
-    ["#777d98", "#fc9596", "#b9e59c", "#f9dca3", "#9ebdff", "#ffcbf8", "#94dcd1", "#c6d0f5"]),
+  frappe: scheme("Catppuccin Frappé", true, "303446 c6d0f5 a5adce 777d98 ca9ee6 a6d189",
+    "51576d e78284 a6d189 e5c890 8caaee f4b8e4 81c8be b5bfe2",
+    "777d98 fc9596 b9e59c f9dca3 9ebdff ffcbf8 94dcd1 c6d0f5"),
   // Catppuccin, Macchiato
-  macchiato: theme("Catppuccin Macchiato", true, "#24273a", "#cad3f5", "#a5adcb", "#6e738d", "#c6a0f6", "#a6da95",
-    ["#494d64", "#ed8796", "#a6da95", "#eed49f", "#8aadf4", "#f5bde6", "#8bd5ca", "#b8c0e0"],
-    ["#6e738d", "#ff9aa9", "#b9eea8", "#ffe8b2", "#9cc0ff", "#ffd0fa", "#9ee9dd", "#cad3f5"]),
+  macchiato: scheme("Catppuccin Macchiato", true, "24273a cad3f5 a5adcb 6e738d c6a0f6 a6da95",
+    "494d64 ed8796 a6da95 eed49f 8aadf4 f5bde6 8bd5ca b8c0e0",
+    "6e738d ff9aa9 b9eea8 ffe8b2 9cc0ff ffd0fa 9ee9dd cad3f5"),
   // Night Owl (Sarah Drasner), Light Owl
-  "owl-light": theme("Light Owl", false, "#fbfbfb", "#403f53", "#5d5f77", "#8a91a3", "#4876d6", "#00845e",
-    ["#403f53", "#d73535", "#00845e", "#996b00", "#4270cf", "#994cc3", "#008186", "#d9d9d9"],
-    ["#5d5f77", "#c82429", "#007f59", "#996b00", "#3764c2", "#8739af", "#008186", "#403f53"]),
+  "owl-light": scheme("Light Owl", false, "fbfbfb 403f53 5d5f77 8a91a3 4876d6 00845e",
+    "403f53 d73535 00845e 996b00 4270cf 994cc3 008186 d9d9d9",
+    "5d5f77 c82429 007f59 996b00 3764c2 8739af 008186 403f53"),
   // Night Owl (Sarah Drasner), Night Owl
-  "owl-night": theme("Night Owl", true, "#011627", "#d6deeb", "#a1b0c3", "#5f7e97", "#82aaff", "#addb67",
-    ["#011627", "#ef5350", "#addb67", "#ecc48d", "#82aaff", "#c792ea", "#7fdbca", "#ffffff"],
-    ["#5f7e97", "#ff6762", "#c0ef7b", "#ffd8a0", "#94bdff", "#dba5fe", "#93efdd", "#d6deeb"]),
+  "owl-night": scheme("Night Owl", true, "011627 d6deeb a1b0c3 5f7e97 82aaff addb67",
+    "011627 ef5350 addb67 ecc48d 82aaff c792ea 7fdbca ffffff",
+    "5f7e97 ff6762 c0ef7b ffd8a0 94bdff dba5fe 93efdd d6deeb"),
 };
 
 /** Mixes one curated hex color toward another to derive theme-matched surfaces. */

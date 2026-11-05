@@ -33,14 +33,15 @@ test("no palette row renders without a title, whole list and scoped to Settings"
   expect(await blank()).toEqual([]);
   // Every settings entry the palette offers carries its component and group ("Appearance › Theme").
   const settings: string[] = [];
-  for (const word of ["appearance", "terminal"]) {
+  // Appearance has two windows (Themes, Layout) since the Themes replaced Theme, Font and Size; Terminal has four.
+  for (const [word, rows] of [["appearance", 2], ["terminal", 4]] as const) {
     await page.locator("#palette-input").fill(word);
     // The wording of the settings loads on demand (D188) and the palette is refreshed when it arrives: wait for the group rows.
     const rowsOf = page.locator('#palette-results .result[data-action^="canvas:settings:"]').filter({ hasText: "›" });
-    await expect.poll(() => rowsOf.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(4);
+    await expect.poll(() => rowsOf.count(), { timeout: 10_000 }).toBeGreaterThanOrEqual(rows);
     settings.push(...await rowsOf.allTextContents());
   }
-  expect(settings.filter((t) => t.includes("›")).length).toBeGreaterThanOrEqual(8);
+  expect(settings.filter((t) => t.includes("›")).length).toBeGreaterThanOrEqual(6);
   await page.keyboard.press("Escape");
   // The list scoped to the Settings view: its windows are named by their groups.
   await page.evaluate(() => {
