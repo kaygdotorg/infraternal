@@ -50,6 +50,9 @@ import { createProductRows } from "./settings-rows/product-source";
 
 import type { CanvasStore } from "./model/store";
 
+/** How long the host list waits for the first terminal to settle before it starts on its own. */
+const HOSTS_FALLBACK_MS = 2000;
+
 export interface ProductCanvasOptions {
   /** Isolated preview documents never use the production transport. */
   previewStore?: CanvasStore;
@@ -324,6 +327,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }, () => { hostsStarted = false; });
   };
   const offHostWelcome = connection.onWelcome(() => { if (hostsReady) startHosts(); });
+  // The first terminal settling is the usual cue (above), but a canvas with no terminal, or one whose terminal never settles
+  // (a refused or unreachable host), would then never learn its remote hosts and the palette would list none (#305). So the
+  // list also starts once the page has been quiet for a moment: after the first frame had its chance, never instead of it.
+  const hostsFallback = window.setTimeout(() => whenIdle(() => { hostsReady = true; startHosts(); }), HOSTS_FALLBACK_MS);
   // The version pill and its panel join the sidebar footer once the canvas is up (#216); the first screen carries none of it (D188).
   let versionArea: { dispose(): void } | undefined;
   const build = buildVersion();
@@ -374,6 +381,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       disposed = true;
       offHosts?.();
       offHostWelcome();
+      window.clearTimeout(hostsFallback);
       offSessionInventory();
       offAuthorityWelcome();
       authority.dispose();
