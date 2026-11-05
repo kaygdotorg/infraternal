@@ -1224,6 +1224,15 @@ async fn launch_configured(
     for (name, value) in infraternal_shim::session_locale_environment() {
         command.env(name, value);
     }
+    // A detaching launch gets a lifeline: the write end of a pipe that the launcher and every process it
+    // forks inherit, and that the shim holds for its whole life. End-of-file on the read end, which stays
+    // here, therefore proves that no process of this launch is left (contracts/shim.md §2).
+    #[cfg(target_os = "linux")]
+    let lifeline = if detached {
+        Some(new_lifeline(&mut command)?)
+    } else {
+        None
+    };
     let child = command
         .stdin(if program.is_empty() {
             Stdio::null()
@@ -1273,6 +1282,7 @@ async fn launch_configured(
             name,
             detached,
             record,
+            lifeline,
         };
         let written = if program.is_empty() {
             Ok(())
@@ -1324,6 +1334,8 @@ struct Launch {
     detached: bool,
     /// The person-terminal record this launch wrote, retired only once the terminal is proven dead.
     record: Option<PathBuf>,
+    /// The read end of this launch's lifeline: end-of-file proves no process of the launch remains.
+    lifeline: Option<std::os::fd::OwnedFd>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1342,6 +1354,7 @@ impl Drop for Launch {
             name: std::mem::take(&mut self.name),
             detached: self.detached,
             record: self.record.take(),
+            lifeline: self.lifeline.take(),
         };
         let job = Abandoned {
             parts: Some(parts),
@@ -1375,6 +1388,9 @@ struct Parts {
     detached: bool,
     /// The person-terminal record to retire once the terminal is proven dead.
     record: Option<PathBuf>,
+    /// The read end of the launch's lifeline, if it detaches; kept as a plain descriptor so it can move to
+    /// the shutdown thread's own runtime.
+    lifeline: Option<std::os::fd::OwnedFd>,
 }
 
 /// A cleanup owned apart from the caller's future. If it is dropped before it finished (the runtime shut
@@ -1550,7 +1566,8 @@ async fn abandon_launch(mut job: Abandoned) {
 /// A terminal counts as dead only on proof, and the launcher's exit is not proof when the shim detaches:
 /// the launcher is then the first of three processes and the shim a grandchild with no handle here.
 /// - A non-detaching launcher IS the shim: killed and reaped through its own child.
-/// - A detaching launcher that has provably never forked (`never_forked`) cannot have started a shim.
+/// - A detached launch carries a lifeline (a pipe whose write end every process of the launch holds):
+///   end-of-file on it proves no process of the launch is left (`prove_detached_dead`).
 /// - Otherwise only the shim's own authenticated exit counts (`close_detached`).
 ///
 /// Without proof the rendezvous and the person record are left alone: a live terminal keeps its discovery
@@ -1586,96 +1603,96 @@ async fn stop_launch(parts: &mut Parts, retry: Duration) -> bool {
         return reaped;
     }
     if matches!(parts.child.try_wait(), Ok(None)) {
-        if never_forked(&mut parts.child).await {
-            // Frozen, with no children and none ever reaped, then killed: no shim lineage exists.
-            return reaped(&mut parts.child, cap).await;
-        }
-        // The shim lineage may exist. Killing the original launcher cannot touch it: its only remaining
-        // work is to exit. Do it now so it cannot outlive this cleanup, but prove nothing by it.
+        // Killing the original launcher cannot touch a shim: its only remaining work is to exit. Do it
+        // first so it cannot outlive this cleanup; it proves nothing about the shim.
         let _ = parts.child.start_kill();
         let _ = reaped(&mut parts.child, cap).await;
     }
-    close_detached(&parts.state, &parts.path, parts.id, retry).await
+    prove_detached_dead(parts, retry).await
 }
 
-/// Whether a running launcher has provably never forked. It is frozen with `SIGSTOP` (it is this launch's
-/// own unreaped child, so the pid cannot name another process) until the kernel reports it stopped, because
-/// a running process could fork between a check and the kill. A frozen process then shows no forks only if
-/// it has no children now AND has reaped none: the original launcher forks the intermediate, reaps it, and
-/// only then exits, and the detached shim, its grandchild, is not its child. A reaped child's minor faults
-/// and CPU time are added to the parent's counters, and any forked process that ran took a copy-on-write
-/// fault, so non-zero counters mean it forked even when its child list is empty. Anything else, or any
-/// doubt, resumes it and answers `false`; on `true` the launcher is killed.
+/// How a detached launch's death was shown.
 #[cfg(target_os = "linux")]
-async fn never_forked(child: &mut tokio::process::Child) -> bool {
-    use nix::sys::signal::{Signal, kill};
-    let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
-        return false;
-    };
-    let pid = nix::unistd::Pid::from_raw(pid);
-    if kill(pid, Signal::SIGSTOP).is_err() {
-        return false;
-    }
-    let mut stopped = false;
-    for _ in 0..200 {
-        if process_stopped(pid.as_raw()) {
-            stopped = true;
-            break;
+enum Proof {
+    /// End-of-file on the lifeline: no process of the launch holds it any more.
+    Lifeline,
+    /// The shim answered an authenticated close and then showed its exit.
+    Close,
+}
+
+/// Wait up to `retry` for proof that no shim of this launch is alive. Two things can give it: end-of-file
+/// on the lifeline (every process that inherited the write end, the shim included, is gone, whether
+/// it exited, was killed or never started), or the shim's own authenticated exit after a close request.
+/// Nothing else counts, not the launcher's exit and not a missing socket (the shim may bind late). On
+/// lifeline proof the dead shim's own leftover socket files are removed, because nothing else will.
+#[cfg(target_os = "linux")]
+async fn prove_detached_dead(parts: &Parts, retry: Duration) -> bool {
+    let lifeline = async {
+        match &parts.lifeline {
+            Some(descriptor) => lifeline_eof(descriptor).await,
+            None => std::future::pending().await,
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    if stopped
-        && matches!(has_children(pid.as_raw()), Ok(false))
-        && matches!(has_reaped_children(pid.as_raw()), Ok(false))
-    {
-        let _ = child.start_kill();
-        return true;
-    }
-    let _ = kill(pid, Signal::SIGCONT);
-    false
-}
-
-/// Whether `pid` has ever reaped a child, from its own wait statistics: the children's minor and major
-/// faults and user and system time (`cminflt`, `cmajflt`, `cutime`, `cstime` in `/proc/<pid>/stat`).
-/// An unreadable or malformed line is an error: no proof.
-#[cfg(target_os = "linux")]
-fn has_reaped_children(pid: i32) -> io::Result<bool> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let fields: Vec<&str> = stat
-        .rsplit_once(')')
-        .map(|(_, rest)| rest.split_whitespace().collect())
-        .unwrap_or_default();
-    // After the command name, field 3 (state) is index 0: cminflt 11, cmajflt 13, cutime 16, cstime 17.
-    let counter = |field: usize| -> io::Result<u64> {
-        fields
-            .get(field - 3)
-            .and_then(|value| value.parse().ok())
-            .ok_or_else(|| io::Error::other("malformed process statistics"))
     };
-    Ok(counter(11)? != 0 || counter(13)? != 0 || counter(16)? != 0 || counter(17)? != 0)
+    let closing = close_detached(&parts.state, &parts.path, parts.id, retry);
+    let waiting = async {
+        tokio::pin!(lifeline, closing);
+        let mut closing_ended = false;
+        loop {
+            tokio::select! {
+                () = &mut lifeline => return Proof::Lifeline,
+                observed = &mut closing, if !closing_ended => {
+                    if observed {
+                        return Proof::Close;
+                    }
+                    closing_ended = true;
+                }
+            }
+        }
+    };
+    match timeout(retry, waiting).await {
+        Ok(Proof::Lifeline) => {
+            let _ = fs::remove_file(&parts.path);
+            let _ = fs::remove_file(parts.path.with_extension("stop"));
+            true
+        }
+        Ok(Proof::Close) => true,
+        Err(_) => false,
+    }
 }
 
-/// Whether the kernel reports `pid` as stopped (`T`) or traced-stopped (`t`).
+/// A fresh lifeline for `command`'s child: returns the read end to keep here. The write end reaches the
+/// child by number (`--lifeline-fd`) and is not held by this process once the command is dropped.
 #[cfg(target_os = "linux")]
-fn process_stopped(pid: i32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit(')')
-            .next()
-            .is_some_and(|rest| rest.trim_start().starts_with(['T', 't']))
-    })
+fn new_lifeline(command: &mut Command) -> io::Result<std::os::fd::OwnedFd> {
+    let (read, write) =
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
+    let number = infraternal_shim::inherit_lifeline(command.as_std_mut(), &write)?;
+    command.arg("--lifeline-fd").arg(number.to_string());
+    Ok(read)
 }
 
-/// Whether any thread of `pid` has a child, from the kernel's per-thread child lists. Unreadable lists
-/// (a kernel without them) are an error: no proof.
+/// Resolve when the lifeline's read end reaches end-of-file; never on any other outcome. The read end is
+/// duplicated and registered on the current runtime, so this works on a shutdown thread's own runtime.
 #[cfg(target_os = "linux")]
-fn has_children(pid: i32) -> io::Result<bool> {
-    for task in fs::read_dir(format!("/proc/{pid}/task"))? {
-        let children = fs::read_to_string(task?.path().join("children"))?;
-        if !children.trim().is_empty() {
-            return Ok(true);
+async fn lifeline_eof(descriptor: &std::os::fd::OwnedFd) {
+    let Ok(copy) = descriptor.try_clone() else {
+        return std::future::pending().await;
+    };
+    let Ok(receiver) = tokio::net::unix::pipe::Receiver::from_owned_fd(copy) else {
+        return std::future::pending().await;
+    };
+    let mut buffer = [0_u8; 16];
+    loop {
+        if receiver.readable().await.is_err() {
+            return std::future::pending().await;
+        }
+        match receiver.try_read(&mut buffer) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => return std::future::pending().await,
         }
     }
-    Ok(false)
 }
 
 /// Reap an owned child within `bound`, by polling its status: this does not depend on the child

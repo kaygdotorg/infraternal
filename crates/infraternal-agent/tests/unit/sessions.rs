@@ -685,6 +685,16 @@ fn detached_fixture(
     (exe, shim, closed_rx)
 }
 
+/// A launcher body that stands in for a detaching launcher whose shim lineage lives on: a background loop,
+/// orphaned when the launcher exits, that holds the launch's lifeline until the test's directory is removed.
+/// (The fixture shim itself is a task, not a process, so something else must hold the lifeline.)
+fn live_shim_body(root: &std::path::Path) -> String {
+    format!(
+        "while [ -e '{}' ]; do sleep 0.2; done &\nexit 0",
+        root.display()
+    )
+}
+
 /// Launch through the public path with a detached manager, for the fixtures above.
 async fn launch_detached(
     exe: &std::path::Path,
@@ -719,8 +729,14 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) =
-        detached_fixture(&state, &root, std::time::Duration::ZERO, 2, true, "exit 0");
+    let (exe, shim, closed) = detached_fixture(
+        &state,
+        &root,
+        std::time::Duration::ZERO,
+        2,
+        true,
+        &live_shim_body(&root),
+    );
     let error = launch_detached(&exe, &state, None)
         .await
         .err()
@@ -741,8 +757,14 @@ async fn cancelling_the_launch_does_not_cancel_its_cleanup() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) =
-        detached_fixture(&state, &root, std::time::Duration::ZERO, 1, true, "exit 0");
+    let (exe, shim, closed) = detached_fixture(
+        &state,
+        &root,
+        std::time::Duration::ZERO,
+        1,
+        true,
+        &live_shim_body(&root),
+    );
     let launched = tokio::time::timeout(
         std::time::Duration::from_millis(700),
         launch_detached(&exe, &state, None),
@@ -769,7 +791,7 @@ async fn a_shim_that_binds_after_the_launch_gave_up_is_still_closed() {
         std::time::Duration::from_millis(1500),
         0,
         true,
-        "exit 0",
+        &live_shim_body(&root),
     );
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
     let result = launch_detached(&exe, &state, None).await;
@@ -1024,7 +1046,7 @@ async fn the_shims_own_observed_exit_retires_the_person_record() {
         std::time::Duration::from_millis(800),
         0,
         true,
-        "exit 0",
+        &live_shim_body(&root),
     );
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
     let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
@@ -1057,24 +1079,33 @@ async fn file_appears(file: &std::path::Path) {
     panic!("{} never appeared", file.display());
 }
 
-/// J222 (79368), P1: the original launcher has forked the intermediate and reaped it, so its child list is
-/// EMPTY, yet the detached shim, its grandchild, is alive. An empty child list is not proof that no shim
-/// exists. The launcher script reaps a child, then signals `ready` and waits, and the launch is cancelled at
-/// exactly that point (a deterministic stand-in for the post-reap window of the real double fork). The live
-/// shim answers the close but stays; its socket and person record must survive.
-#[tokio::test(flavor = "current_thread")]
-async fn a_launcher_that_has_reaped_its_child_is_not_proof_no_shim_exists() {
+/// What was left after a person launch was cancelled and cleaned up.
+struct Outcome {
+    /// Person-terminal records still on disk.
+    records: usize,
+    /// Rendezvous sockets still on disk.
+    sockets: usize,
+    /// Whether the launcher this launch owned is still running.
+    launcher_alive: bool,
+    /// Whether the stand-in for the detached shim's lineage is still running.
+    descendant_alive: bool,
+}
+
+/// Run a person launch whose launcher script (built by `body` from the launcher pid file, the descendant
+/// pid file and the `ready` marker) leaves a live process holding the launch's lifeline, cancel the launch
+/// once `ready` exists, let cleanup finish, and report what survived. The fixture shim answers the close
+/// but stays live. The stand-ins are stopped by their own pids before returning.
+async fn cancelled_lineage_outcome(
+    body: impl FnOnce(&std::path::Path, &std::path::Path, &std::path::Path) -> String,
+) -> Outcome {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
     let locks = person_locks(&state);
     let ready = root.join("reaped.ready");
     let launcher_pid = root.join("launcher.pid");
-    let body = format!(
-        "true &\nwait\necho $$ > '{}'\ntouch '{}'\nexec sleep 300",
-        launcher_pid.display(),
-        ready.display()
-    );
+    let descendant_pid = root.join("descendant.pid");
+    let body = body(&launcher_pid, &descendant_pid, &ready);
     let (exe, shim, closed) =
         detached_fixture(&state, &root, std::time::Duration::ZERO, 1, false, &body);
     let launch = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4()));
@@ -1084,36 +1115,159 @@ async fn a_launcher_that_has_reaped_its_child_is_not_proof_no_shim_exists() {
     }
     assert!(
         ready.exists(),
-        "the launch ended before the launcher reached the post-reap window"
+        "the launch ended before the launcher reached its post-fork state"
     );
     tokio::time::timeout(std::time::Duration::from_secs(20), closed)
         .await
         .expect("the live shim was never asked to close")
         .unwrap();
     cleanups_idle().await;
-    let launcher: i32 = fs::read_to_string(&launcher_pid)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    file_appears(&descendant_pid).await;
+    let read = |file: &std::path::Path| -> i32 {
+        fs::read_to_string(file).unwrap().trim().parse().unwrap()
+    };
+    let (launcher, descendant) = (read(&launcher_pid), read(&descendant_pid));
+    let outcome = Outcome {
+        records: person_records(&locks),
+        sockets: fs::read_dir(state.join("sessions"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".sock"))
+            .count(),
+        launcher_alive: alive(launcher),
+        descendant_alive: alive(descendant),
+    };
+    for pid in [launcher, descendant] {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    shim.abort();
+    outcome
+}
+
+/// The live descendant is the shim's lineage: it holds the lifeline, so cleanup must keep the socket and the
+/// person record, and still stop the launcher it owns.
+fn assert_live_lineage_kept(outcome: &Outcome, why: &str) {
+    assert_eq!(
+        outcome.records, 1,
+        "{why}: the live shim's person record was deleted"
+    );
+    assert_eq!(
+        outcome.sockets, 1,
+        "{why}: the live shim's rendezvous was deleted"
+    );
+    assert!(
+        !outcome.launcher_alive,
+        "{why}: the owned launcher was left running"
+    );
+    assert!(
+        outcome.descendant_alive,
+        "{why}: the shim lineage was touched"
+    );
+}
+
+/// J222 (79368), P1: the original launcher has forked the intermediate and reaped it, so its child list is
+/// EMPTY, yet the detached shim, its grandchild, is alive. The subshell below runs to completion in the
+/// foreground (so the launcher has reaped it), and leaves a `sleep` orphaned and alive; the launch is
+/// cancelled at that point, a deterministic stand-in for the real post-reap window.
+#[tokio::test(flavor = "current_thread")]
+async fn a_launcher_that_has_reaped_its_child_is_not_proof_no_shim_exists() {
+    let outcome = cancelled_lineage_outcome(|launcher_pid, descendant_pid, ready| {
+        format!(
+            "( sleep 300 & echo $! > '{}' )\necho $$ > '{}'\ntouch '{}'\nexec sleep 300",
+            descendant_pid.display(),
+            launcher_pid.display(),
+            ready.display()
+        )
+    })
+    .await;
+    assert_live_lineage_kept(&outcome, "post-reap window");
+}
+
+/// J230 P2-A: a launcher that ignores SIGCHLD has its children reaped by the kernel, which adds nothing to its
+/// wait statistics, so any proof built on them fails open. The lifeline does not care how a child went away.
+/// Here the launcher forks an intermediate that forks the lineage and exits, and `waitpid` finds nothing.
+#[tokio::test(flavor = "current_thread")]
+async fn an_auto_reaping_launcher_is_not_proof_no_shim_exists() {
+    let outcome = cancelled_lineage_outcome(|launcher_pid, descendant_pid, ready| {
+        let script = [
+            "import os, signal, time".to_owned(),
+            "signal.signal(signal.SIGCHLD, signal.SIG_IGN)".to_owned(),
+            format!(
+                "open('{}', 'w').write(str(os.getpid()))",
+                launcher_pid.display()
+            ),
+            "middle = os.fork()".to_owned(),
+            "if middle == 0:".to_owned(),
+            "    shim = os.fork()".to_owned(),
+            "    if shim == 0:".to_owned(),
+            format!(
+                "        open('{}', 'w').write(str(os.getpid()))",
+                descendant_pid.display()
+            ),
+            "        os.execvp('sleep', ['sleep', '300'])".to_owned(),
+            "    os._exit(0)".to_owned(),
+            "try:".to_owned(),
+            "    os.waitpid(middle, 0)".to_owned(),
+            "except ChildProcessError:".to_owned(),
+            "    pass".to_owned(),
+            format!("open('{}', 'w').write('x')", ready.display()),
+            "time.sleep(300)".to_owned(),
+        ]
+        .join("\n");
+        format!("exec python3 -c \"{script}\"")
+    })
+    .await;
+    assert_live_lineage_kept(&outcome, "SIGCHLD ignored");
+}
+
+/// J230: when the lifeline closes, the dead shim's own leftovers go with its record: a killed shim cannot
+/// unlink its socket, and a socket with no record would make person revocation refuse. Here the launcher
+/// is the only holder, and the fixture shim's socket stands for what a killed shim leaves behind.
+#[tokio::test(flavor = "current_thread")]
+async fn a_closed_lifeline_clears_the_dead_shims_socket_and_record() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let root = fs::canonicalize(&directory.0).unwrap();
+    let locks = person_locks(&state);
+    let ready = root.join("ready");
+    let body = format!("touch '{}'\nexec sleep 300", ready.display());
+    let (exe, shim, _closed) =
+        detached_fixture(&state, &root, std::time::Duration::ZERO, 1, false, &body);
+    let launch = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4()));
+    tokio::select! {
+        _ = launch => {}
+        () = file_appears(&ready) => {}
+    }
+    // Wait for the fixture's socket, so there is a leftover to clear.
+    for _ in 0..400 {
+        if fs::read_dir(state.join("sessions"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".sock"))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    cleanups_idle().await;
+    shim.abort();
     let sockets = fs::read_dir(state.join("sessions"))
         .unwrap()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".sock"))
         .count();
-    let records = person_records(&locks);
-    let launcher_alive = alive(launcher);
-    let _ = nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(launcher),
-        nix::sys::signal::Signal::SIGKILL,
-    );
-    shim.abort();
     assert_eq!(
-        records, 1,
-        "an empty child list was taken for proof, and the live shim's person record deleted"
+        sockets, 0,
+        "a dead shim's socket outlived its closed lifeline"
     );
-    assert_eq!(sockets, 1, "the live shim's rendezvous was deleted");
-    assert!(!launcher_alive, "the owned launcher was left running");
+    assert_eq!(
+        person_records(&locks),
+        0,
+        "a proven-dead launch kept its person record"
+    );
 }
 
 /// J222 (79292): the whole shutdown cleanup ends within its budget, however slowly the shim behaves. This
@@ -1163,6 +1317,7 @@ async fn the_shutdown_cleanup_ends_within_its_budget_whatever_the_shim_does() {
         name,
         detached: true,
         record: None,
+        lifeline: None,
     };
     let started = tokio::time::Instant::now();
     super::cleanup(&mut parts, super::SHUTDOWN).await;
