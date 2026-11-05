@@ -32,6 +32,7 @@ pub mod remote_path_socket;
 mod remote_peer_routes;
 #[cfg(feature = "transport")]
 pub mod remote_quic;
+/// Certificate recovery for an expired host identity, client side (#285).
 #[cfg(feature = "transport")]
 pub mod remote_recovery;
 #[cfg(feature = "transport")]

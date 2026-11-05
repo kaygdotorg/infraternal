@@ -26,6 +26,7 @@ pub(crate) struct Options {
 
 const MAX_PATH: usize = 4096;
 
+/// The private control endpoint: its socket, path and reload signal.
 pub(crate) struct Control {
     listener: UnixListener,
     path: PathBuf,
@@ -33,6 +34,7 @@ pub(crate) struct Control {
     clock_health: std::sync::Arc<infraternal_server::clock_health::ClockHealth>,
 }
 impl Control {
+    /// Start the control endpoint with a fresh clock-health signal, for tests.
     #[cfg(test)]
     pub(crate) fn start(data: &Path) -> io::Result<Self> {
         Self::start_with_clock(
@@ -102,6 +104,7 @@ impl Control {
             clock_health,
         })
     }
+    /// Wait for the next control request and answer it: status, or a restart into a verified replacement.
     pub(crate) async fn requested(
         &mut self,
         source: Option<&dyn infraternal_server::ca::CaKeySource>,
@@ -227,6 +230,7 @@ enum ControlRequest {
     Restart { binary: PathBuf, reload: bool },
 }
 
+/// Read one length-prefixed control request from `socket`.
 async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
     let length = usize::from(socket.read_u16().await?);
     if length == 0 {

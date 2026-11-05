@@ -17,6 +17,7 @@ import type { ProvisioningService } from "./service";
 
 export type AuthorityState = "unknown" | "locked" | "unlocked";
 
+/** The canvas's view of the CA: its lock state, root expiry warnings and the unlock ceremony. */
 export interface AuthorityControl {
   /** What was last learned from the server. */
   state(): AuthorityState;
@@ -47,6 +48,7 @@ export interface AuthorityOptions {
 /** Waits at most this long for the browser to be idle: the real control's first check is due 1.2 s after the handle. */
 const WARM_WITHIN_MS = 600;
 
+/** Create the thin CA control handle; the real control loads on demand when the browser is idle. */
 export function createAuthorityControl(core: CoreScreen, options: AuthorityOptions): AuthorityControl {
   const createdAt = Date.now();
   const listeners = new Set<() => void>();

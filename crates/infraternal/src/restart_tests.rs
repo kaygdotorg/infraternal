@@ -110,6 +110,7 @@ fn bounded_output(
     }
 }
 
+/// A client can neither steal nor create the private control endpoint.
 #[tokio::test]
 async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     let directory = Directory::new();

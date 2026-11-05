@@ -374,6 +374,7 @@ pub async fn accept_recovery_aware(
     }
 }
 
+/// Finish an accepted TLS connection: require the negotiated ALPN and a verified client certificate.
 fn finish(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> io::Result<Connection> {
     use openssl::{hash::MessageDigest, x509::X509VerifyResult};
     // Missing ALPN and missing client certificates cannot silently downgrade

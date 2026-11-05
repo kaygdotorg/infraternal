@@ -15,6 +15,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   try { return await response.json() as T; } catch { throw new ServiceError("Host connections are not configured on this server. Set up the remote component first."); }
 }
 
+/** Read the CA's public lock and root status, refusing malformed or unavailable answers. */
 export async function authorityStatus(): Promise<AuthorityStatus> {
   const status = await post<AuthorityStatus>("status", {});
   if (status.available === false) throw new ServiceError("Host connections are not configured on this server. Configure the remote component on the server, then try again.");

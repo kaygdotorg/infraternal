@@ -1190,6 +1190,7 @@ async fn device_join_code_allows_only_five_inspection_attempts() {
     }
 }
 
+/// The HTTP adapter's CSRF, cookie flags, body limit and latency hold together.
 #[tokio::test]
 async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     let _guard = SERIAL.lock().await;

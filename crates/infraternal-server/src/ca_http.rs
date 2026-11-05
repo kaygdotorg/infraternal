@@ -14,6 +14,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 use zeroize::Zeroizing;
 
+/// The CA HTTP API's shared state.
 #[derive(Clone)]
 struct Api {
     auth: Auth,
@@ -312,6 +313,7 @@ async fn finish_request(
     .await
     .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
 }
+/// Return the CA's public lock and root expiry status to an administrator.
 async fn status(
     State(api): State<Api>,
     headers: HeaderMap,

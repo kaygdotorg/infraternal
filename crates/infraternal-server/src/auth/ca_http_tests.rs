@@ -7,6 +7,7 @@ use axum::{
 };
 use tower::ServiceExt;
 
+/// An unlocked CA fixture and its HTTP router at the fixture's time.
 async fn http_fixture() -> (UnlockFixture, Router) {
     let f = unlock_fixture().await;
     let now = i64::try_from(
@@ -391,6 +392,7 @@ async fn first_machine_certificate_setup_starts_a_fresh_passkey_ceremony() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// CA status tells a server that was never set up from one whose retained trust is locked.
 #[tokio::test]
 async fn ca_status_distinguishes_initial_setup_from_locked_retained_trust() {
     let (f, retained) = http_fixture().await;

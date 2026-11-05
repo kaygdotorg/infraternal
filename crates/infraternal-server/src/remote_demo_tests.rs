@@ -472,6 +472,7 @@ async fn fixture_at_through_tls_proxy(
     fixture_at_with_options(directory, address, endpoint, false, true).await
 }
 
+/// A remote fixture at `address` in `directory`, with the given options.
 async fn fixture_at_with_options(
     directory: &Directory,
     address: SocketAddr,

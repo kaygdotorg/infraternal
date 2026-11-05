@@ -1062,6 +1062,7 @@ mod tests {
         let service = Service::new(store, source, clock.clone(), Arc::new(Limiter::default()));
         tokio::time::timeout(std::time::Duration::from_secs(6), async {
             while !clock.is_healthy() {
+                // sleep: `ClockHealth` has no change notification; poll its 1 s sampler within the bound.
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         })

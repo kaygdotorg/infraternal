@@ -86,6 +86,7 @@ export class ServiceError extends Error {
   constructor(message: string, readonly kind: "unavailable" | "refused" | "network" = "refused") { super(message); }
 }
 
+/** What the add-host flow needs from the server: discovery, CA status and unlock, and enrollment. */
 export interface ProvisioningService {
   /** Hosts this server can reach and the person may add. Empty when discovery is off or finds nothing. */
   discover(): Promise<DiscoveredHost[]>;

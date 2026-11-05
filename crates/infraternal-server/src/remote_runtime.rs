@@ -616,6 +616,7 @@ impl Drop for LeasedListener {
     }
 }
 impl LeasedListener {
+    /// Start a leased listener on `address`.
     async fn start(
         factory: &ListenerFactory,
         address: std::net::IpAddr,
@@ -697,6 +698,7 @@ impl RemoteListeners {
         self.endpoint.local_addr()
     }
 
+    /// Start the remote listeners on `address` with this identity and its trust roots.
     pub(crate) async fn start(
         address: SocketAddr,
         identity: &Identity,
@@ -762,6 +764,7 @@ impl RemoteListeners {
         Ok(listener)
     }
 
+    /// Start the listeners with explicit admission limits.
     async fn start_with_limits(
         address: SocketAddr,
         identity: &Identity,

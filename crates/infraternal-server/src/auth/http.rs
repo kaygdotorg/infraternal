@@ -20,6 +20,7 @@ mod account_summary_tests;
 #[cfg(test)]
 #[path = "http_hostname_tests.rs"]
 mod hostname_tests;
+/// Logout scope, replay and cookie-cap checks.
 #[cfg(test)]
 #[path = "http_logout_tests.rs"]
 mod logout_tests;
@@ -157,6 +158,7 @@ struct Revoke {
     id: String,
 }
 
+/// The selected session bearer, or `Denied` when there is none.
 pub(crate) fn cookie(headers: &HeaderMap) -> super::Result<&str> {
     super::cookies::session(headers)
         .map(|cookie| cookie.token)
@@ -184,6 +186,7 @@ fn authenticated_session(session: super::Session) -> AuthenticatedSession {
     }
 }
 
+/// The `Set-Cookie` value for a versioned session cookie with its absolute expiry.
 fn session_cookie(token: &str, login_sequence: i64, expires: i64) -> super::Result<HeaderValue> {
     let expires_at = SystemTime::UNIX_EPOCH
         .checked_add(Duration::from_secs(
@@ -203,6 +206,7 @@ fn expired_session_cookie(name: &str) -> super::Result<HeaderValue> {
     ))
     .map_err(|_| Error::Invalid)
 }
+/// A success response that sets the session's current versioned cookie.
 async fn session_response(auth: &Auth, token: &str, now: i64) -> super::Result<Response> {
     let state = auth.cookie_state(token, now).await?.ok_or(Error::Denied)?;
     let mut response = Json(json!({"ok":true})).into_response();
@@ -294,6 +298,7 @@ async fn no_store(mut response: Response) -> Response {
     response
 }
 
+/// Run one `/auth/{action}` request and map its errors to HTTP responses, refreshing the cookie.
 async fn dispatch(
     State(state): State<HttpState>,
     Path(action): Path<String>,
@@ -375,7 +380,7 @@ pub(super) fn current_time(auth: &Auth) -> super::Result<i64> {
     .map_err(|_| Error::Invalid)
 }
 
-// Keep typed action dispatch together so capability and response rules can be reviewed in one place.
+/// Keep typed action dispatch together so capability and response rules can be reviewed in one place.
 async fn execute(
     auth: &Auth,
     #[cfg(feature = "remote")] invitation_issuer: Option<&crate::remote_http::InvitationIssuer>,

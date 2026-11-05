@@ -16,6 +16,7 @@ mkdirSync(CAPTURES, { recursive: true });
 const LABEL = "Unlock host connections";
 const SETTINGS_ROW = '.ui-sp [data-kind="host-connections"]';
 
+/** Open the mock canvas with the given query and theme, and wait for it to render. */
 async function open(page: Page, query: string, theme: "ink" | "paper" = "ink"): Promise<void> {
   await page.goto(`/?mock=1&proto=clusters&scene=${query.includes("role=") ? 5 : 3}&theme=${theme}&${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
@@ -200,6 +201,7 @@ test("CA expiry Inbox actions stay visible on a short phone screen", async ({ br
 test("CA expiry warnings are hidden from viewers", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page, "ca=warning-30d&role=viewer");
+  // sleep: the authority status check runs 1.2 s after load, and an absence can only be shown after it.
   await page.waitForTimeout(1800);
   await expect(page.locator("body")).not.toContainText("CA expires:");
   await expect(page.locator(".ui-inbox:not([hidden])")).toHaveCount(0);

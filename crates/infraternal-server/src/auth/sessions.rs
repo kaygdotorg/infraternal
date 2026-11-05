@@ -337,6 +337,7 @@ pub(crate) async fn require_live_session_tx(
     Ok(())
 }
 
+/// Insert a session row with its login sequence inside the caller's transaction.
 pub(super) async fn insert_session(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token: &str,

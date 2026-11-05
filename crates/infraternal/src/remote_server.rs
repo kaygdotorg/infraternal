@@ -37,6 +37,7 @@ pub(crate) enum Outcome {
     Restart(crate::restart::Replacement),
 }
 
+/// Serve the remote server with this configuration and options.
 pub(crate) async fn serve(
     config: infraternal_server::ServerConfig,
     options: Options,

@@ -21,6 +21,7 @@ use openssl::{
 };
 use std::time::Duration;
 
+/// A server identity, a host identity, the root and the CA material, for `localhost`.
 pub(crate) fn identities() -> (Identity, Identity, X509, crate::ca::CaMaterial) {
     identities_for_name("localhost")
 }
@@ -55,6 +56,7 @@ async fn write_recovery_request(
     channel.write(&frame).await.unwrap();
 }
 
+/// The same identities for a server named `server_dns`.
 fn identities_for_name(server_dns: &str) -> (Identity, Identity, X509, crate::ca::CaMaterial) {
     let key = PKey::generate_ed25519().unwrap();
     let mut name = X509NameBuilder::new().unwrap();
@@ -408,8 +410,15 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     let (expired, csr_der) = expired_identity(&pool, host, material, current_time).await;
     let clock = std::sync::Arc::new(crate::clock_health::ClockHealth::default());
     clock.start_monitor();
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    assert!(clock.is_healthy());
+    // The clock turns healthy after three stable 1 s samples; wait for that, not a fixed time.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !clock.is_healthy() {
+            // sleep: `ClockHealth` has no change notification; poll its 1 s sampler within the bound.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
     let hosts = RemoteHosts::from_source(Some(source_for_hosts));
     let listeners = RemoteListeners::start_with_recovery(
         "127.0.0.1:0".parse().unwrap(),

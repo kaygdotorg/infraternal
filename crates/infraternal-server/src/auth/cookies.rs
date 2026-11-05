@@ -188,6 +188,7 @@ fn valid_token(token: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+/// Session cookie parsing and selection checks.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +216,7 @@ mod tests {
         }
     }
 
+    /// Duplicate, missing, invalid and non-text cookies fail closed.
     #[test]
     fn duplicates_missing_invalid_and_nontext_fail_closed() {
         let session = format!("{PREFIX}{TOKEN}");

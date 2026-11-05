@@ -350,8 +350,8 @@ async fn run_inner(
     .await
 }
 
-// Keep the race in its own future. Its losing socket is dropped when this
-// returns, rather than retained throughout the winning control dispatch.
+/// Keep the race in its own future. Its losing socket is dropped when this
+/// returns, rather than retained throughout the winning control dispatch.
 async fn dial_preferred(
     endpoint: &quinn::Endpoint,
     identity: &RemoteIdentity,
@@ -483,6 +483,7 @@ impl Channel for PrefixedControl {
     }
 }
 
+/// Dial the server over QUIC with this host's identity.
 async fn quic_connect(
     endpoint: &quinn::Endpoint,
     identity: &RemoteIdentity,

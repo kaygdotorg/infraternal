@@ -234,6 +234,7 @@ impl RenewalIdentity {
     }
 }
 
+/// Verify a renewed certificate chain now.
 fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Result<()> {
     validate_at(certificate, identity, roots, None, false)
 }
@@ -326,6 +327,7 @@ fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
 
+/// Renewal validation and time conversion checks.
 #[cfg(test)]
 mod tests {
     use super::*;

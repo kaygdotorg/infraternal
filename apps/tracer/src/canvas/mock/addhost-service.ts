@@ -9,6 +9,7 @@
 import { createRealProvisioning } from "../addhost/real";
 import type { ProvisioningService } from "../addhost/service";
 
+/** A scripted provisioning service for the mock canvas, with an optional scripted CA state. */
 export function createMockProvisioning(options: { savedKey: boolean; authority?: string }): ProvisioningService {
   const real = createRealProvisioning();
   // A scripted lock stays unlocked for the rest of the tab's life, as a real server's does until it restarts, so a

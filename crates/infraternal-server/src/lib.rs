@@ -22,12 +22,14 @@ pub mod ca_http;
 pub mod ca_membership;
 #[cfg(feature = "remote")]
 pub mod ca_memory;
+/// Public CA lock and root expiry status (D168, #285).
 #[cfg(feature = "remote")]
 pub mod ca_status;
 #[cfg(feature = "canvas")]
 pub mod canvas_store;
 #[cfg(feature = "cli-plugin")]
 pub mod cli;
+/// Whether the server's clock can be trusted for certificate decisions (#285).
 #[cfg(feature = "remote")]
 pub mod clock_health;
 mod completion;
@@ -88,6 +90,7 @@ pub use infraternal_plugin_remote::inventory::decode_list as decode_host_invento
 mod remote_link;
 #[cfg(all(test, feature = "mesh", feature = "remote"))]
 mod remote_mesh_revocation_tests;
+/// Recovery of an expired host certificate through its registered key (#285).
 #[cfg(feature = "remote")]
 mod remote_recovery;
 #[cfg(feature = "remote")]

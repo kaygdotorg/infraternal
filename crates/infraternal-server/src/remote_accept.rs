@@ -164,6 +164,7 @@ struct TcpAdmission {
     diagnostic_peer: std::net::SocketAddr,
 }
 
+/// Accept host TCP connections: TLS, then mTLS admission or, when enabled, certificate recovery.
 pub(crate) async fn tcp(
     tcp: TcpListener,
     tls: Arc<openssl::ssl::SslAcceptor>,
