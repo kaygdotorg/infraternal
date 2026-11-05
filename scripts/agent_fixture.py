@@ -207,6 +207,11 @@ class Binary:
         self.credit_pending = 0
         self.credit_available = 0
         self.fence_nonce = 0
+        # Leftover output of a terminal this client already left (see
+        # select_terminal): the old cursor its next frame would continue,
+        # and the credit it could still consume. None outside that window.
+        self.stale = None
+        self.stale_credit = 0
         self.cpu_weight = fixture_cpu_weight()
         self.events = []
         self.inventory = None
@@ -415,6 +420,19 @@ class Binary:
             self.inventory = json.loads(body[4:])
             return kind
         assert stream == 1, (stream, kind)
+        if self.stale is not None:
+            # The writer sends control replies (Pong) before queued terminal
+            # output, so output of the terminal we just left can still arrive
+            # after detach's fence. Its bulk queue is FIFO, so all of it comes
+            # before any frame of the new attachment, continuing the old cursor
+            # within the old credit. Drop exactly those frames; the first other
+            # stream-1 frame starts the new attachment (#347).
+            if kind == 0x11 and struct.unpack('<Q', body[:8])[0] == self.stale \
+                    and len(body) - 8 <= self.stale_credit:
+                self.stale += len(body) - 8
+                self.stale_credit -= len(body) - 8
+                return kind
+            self.stale = None
         if kind == 0x11:
             seq = struct.unpack('<Q', body[:8])[0]
             assert seq == self.out, (seq, self.out)
@@ -708,7 +726,17 @@ def with_login_grant(action, values):
 
 
 def select_terminal(client, session):
-    """Attach one fixture client to a returned session id with fresh cursors."""
+    """Attach one fixture client to a returned session id with fresh cursors.
+
+    Output the previous terminal had already queued may still arrive after
+    detach (Pong is not a drain barrier for terminal output). The old cursor
+    and credit window are kept, so process() can recognise and drop exactly
+    that leftover output before the new attachment's first frame. An old
+    attachment that had read nothing (cursor 0) cannot be told apart from a
+    fresh replay at 0, so no leftover window is opened for it (#347).
+    """
+    client.stale = client.out or None
+    client.stale_credit = client.credit_available
     client.id = uuid.UUID(session)
     client.out = client.entered = client.acked = 0
     client.credit_pending = client.credit_available = 0
