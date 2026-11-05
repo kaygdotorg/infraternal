@@ -9,6 +9,7 @@ use infraternal_plugin_mesh::{
     wireguard::INTERFACE,
 };
 use std::{
+    fmt::Write as _,
     fs,
     os::unix::{fs::PermissionsExt, process::CommandExt},
     process::Command,
@@ -78,5 +79,86 @@ fn an_unprivileged_user_cannot_attach_the_persisted_tun() {
     assert!(
         reattached.is_ok(),
         "the agent could not reattach after the refused attempt: {reattached:?}"
+    );
+}
+
+fn ip(args: &[&str]) {
+    let status = Command::new("ip").args(args).status().unwrap();
+    assert!(status.success(), "ip {args:?}");
+}
+
+/// `infraternal0`'s index and its TUN owner and group, as `ip -d link` prints them in the TUN
+/// details (a user or group may print as a name).
+fn tun_link() -> Option<(u32, Option<String>, Option<String>)> {
+    let output = Command::new("ip")
+        .args(["-o", "-d", "link", "show", INTERFACE])
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8(output.stdout).unwrap();
+    let index = line.split(':').next()?.trim().parse().ok()?;
+    // Only the TUN details section names the TUN's owner; the link's own `group` comes earlier.
+    let tun = line
+        .split_once("tun type tun")
+        .map_or("", |(_, details)| details);
+    let after = |word: &str| {
+        let mut words = tun.split_whitespace();
+        words.find(|w| *w == word)?;
+        words.next().map(str::to_owned)
+    };
+    Some((index, after("user"), after("group")))
+}
+
+/// An unrestricted TUN of ours, persisted by a build before #260 J213 P1, is never reattached:
+/// the agent deletes it and starts a fresh TUN restricted to its own user and group.
+#[test]
+#[ignore = "Run as real root inside a disposable network namespace."]
+fn an_old_unrestricted_tun_of_ours_is_replaced_by_a_restricted_one() {
+    let state = private_state("gotatun-old-tun");
+    let result = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
+        let key = node.up()?.public_key;
+        drop(node);
+        // What an earlier build left: a persistent TUN with our marker and no owner or group.
+        ip(&["link", "del", INTERFACE]);
+        ip(&["tuntap", "add", "dev", INTERFACE, "mode", "tun", "vnet_hdr"]);
+        let marker = key.0.iter().fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+        ip(&[
+            "link",
+            "set",
+            INTERFACE,
+            "alias",
+            &format!("infraternal.mesh.gotatun.v2:{marker}"),
+        ]);
+        let old = tun_link();
+        let mut restarted = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
+        restarted.up()?;
+        let new = tun_link();
+        restarted.down()?;
+        Ok::<_, std::io::Error>((old, new))
+    })();
+    let _ = Command::new("ip").args(["link", "del", INTERFACE]).status();
+    fs::remove_dir_all(&state).unwrap();
+    let (old, new) = result.unwrap();
+    let (old_index, old_user, old_group) = old.unwrap();
+    assert_eq!(
+        (old_user, old_group),
+        (None, None),
+        "the old TUN was not unrestricted"
+    );
+    let (new_index, new_user, new_group) = new.unwrap();
+    assert_ne!(
+        new_index, old_index,
+        "the agent reattached an unrestricted TUN"
+    );
+    let root = |id: Option<String>| id.is_some_and(|id| id == "0" || id == "root");
+    assert!(
+        root(new_user.clone()) && root(new_group.clone()),
+        "the new TUN is not restricted to the agent: user {new_user:?}, group {new_group:?}"
     );
 }
