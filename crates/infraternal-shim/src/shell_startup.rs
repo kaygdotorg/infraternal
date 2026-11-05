@@ -66,13 +66,14 @@ fn environment(command: &Command, name: &str, inherited: bool) -> Option<OsStrin
 /// The zsh startup directory (`ZDOTDIR`) a person's shell may inherit from
 /// the root infraternal agent's environment, or `None` (Linux, #328 P3-1).
 ///
-/// zsh runs startup code from this directory, so it must not belong to anyone
-/// but the person or root: the canonical directory and every ancestor must be
-/// owned by root or `uid`. None may be writable by others (a sticky ancestor
-/// such as /tmp is fine: others cannot rename entries in it). Group write is
-/// accepted only for the person's own user-private group (same name and gid
-/// as the account). The result is the canonical path, so a later symlink swap
-/// cannot redirect it. macOS never forwards `ZDOTDIR` (`session_shell`).
+/// zsh runs startup code from this directory, so nobody but the person or
+/// root may be able to change it: the canonical directory and every ancestor
+/// must be owned by root or `uid`, and none may be writable by its group or by
+/// others. Group write is refused outright, because group membership and
+/// named ACL entries cannot be proven exclusive (J215 P3-2). Only a sticky
+/// world-writable ancestor such as /tmp is accepted, since others cannot
+/// rename entries in it. The result is the canonical path, so a later symlink
+/// swap cannot redirect it. macOS never forwards `ZDOTDIR` (`session_shell`).
 #[cfg(target_os = "linux")]
 pub(crate) fn zsh_directory(user: &nix::unistd::User) -> Option<std::path::PathBuf> {
     let value = std::env::var_os("ZDOTDIR")?;
@@ -87,11 +88,6 @@ fn trusted_directory(path: &Path, user: &nix::unistd::User) -> Option<std::path:
         return None;
     }
     let real = path.canonicalize().ok()?;
-    // The person's user-private group: its name is the account name.
-    let private_group = nix::unistd::Group::from_gid(user.gid)
-        .ok()
-        .flatten()
-        .is_some_and(|group| group.name == user.name);
     let mut current = Some(real.as_path());
     let mut leaf = true;
     while let Some(directory) = current {
@@ -102,7 +98,7 @@ fn trusted_directory(path: &Path, user: &nix::unistd::User) -> Option<std::path:
         if !metadata.is_dir()
             || (owner != 0 && owner != user.uid.as_raw())
             || (mode & 0o002 != 0 && (leaf || !sticky))
-            || (mode & 0o020 != 0 && !(private_group && metadata.gid() == user.gid.as_raw()))
+            || mode & 0o020 != 0
         {
             return None;
         }
@@ -299,22 +295,34 @@ mod tests {
         let me = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
             .unwrap()
             .unwrap();
-        let own = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Fresh directories under the sticky /tmp, with exact modes: a
+        // checkout's own mode depends on the umask that cloned it.
+        let directory = |label: &str, mode: u32| {
+            let path = Path::new("/tmp").join(format!("zdotdir-{label}-{}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let own = directory("own", 0o755);
         assert!(
-            trusted_directory(own, &me).is_some(),
+            trusted_directory(&own, &me).is_some(),
             "the person's own directory"
         );
         assert!(trusted_directory(Path::new("relative/dir"), &me).is_none());
         assert!(trusted_directory(Path::new("/nonexistent-j146"), &me).is_none());
         // World-writable: anyone could plant startup code.
-        let open = std::env::temp_dir().join(format!("zdotdir-open-{}", std::process::id()));
-        fs::create_dir_all(&open).unwrap();
-        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        let open = directory("open", 0o777);
         assert!(
             trusted_directory(&open, &me).is_none(),
             "a world-writable directory"
         );
-        fs::remove_dir(&open).unwrap();
+        // Group-writable, even in the person's user-private group: other
+        // members or named ACL entries could write to it (J215 P3-2).
+        let shared = directory("group", 0o775);
+        assert!(
+            trusted_directory(&shared, &me).is_none(),
+            "a group-writable directory"
+        );
         // Another person's directory: what the root agent leaked before.
         if !nix::unistd::Uid::effective().is_root() {
             let other = nix::unistd::User {
@@ -324,9 +332,12 @@ mod tests {
                 ..me.clone()
             };
             assert!(
-                trusted_directory(own, &other).is_none(),
+                trusted_directory(&own, &other).is_none(),
                 "another account's directory"
             );
+        }
+        for path in [own, open, shared] {
+            fs::remove_dir(path).unwrap();
         }
     }
 }
