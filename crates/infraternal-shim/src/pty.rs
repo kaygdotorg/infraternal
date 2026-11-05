@@ -1148,7 +1148,7 @@ pub(crate) fn only_standard_descriptors(command: &mut Command) {
 }
 
 /// Mark descriptors 3 and above close-on-exec (Linux): one `close_range` call
-/// on kernels 5.11 and later, otherwise a walk up to the descriptor limit.
+/// on kernels 5.11 and later, otherwise an exact `/proc/self/fd` listing.
 #[cfg(target_os = "linux")]
 fn cloexec_above_stderr() -> io::Result<()> {
     /// `<linux/close_range.h>`: mark the range close-on-exec instead of closing it.
@@ -1172,21 +1172,91 @@ fn cloexec_above_stderr() -> io::Result<()> {
     ) {
         return Err(error);
     }
-    let mut limit = nix::libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
+    // Kernels before 5.11.
+    cloexec_listed_descriptors()
+}
+
+/// Mark every open descriptor above 2 close-on-exec by listing
+/// `/proc/self/fd`: the fallback for kernels without `CLOSE_RANGE_CLOEXEC`.
+///
+/// The listing is exact, so no descriptor is skipped however high its number
+/// (a walk up to `RLIMIT_NOFILE` misses descriptors opened before the limit
+/// was lowered, and a cap misses more; J215 P3-3). It is safe after fork:
+/// raw `open` and `getdents64` into stack storage, no allocation. Without a
+/// readable `/proc` it fails closed, and the spawn is refused.
+#[cfg(target_os = "linux")]
+fn cloexec_listed_descriptors() -> io::Result<()> {
+    // SAFETY: a NUL-terminated literal path; the kernel copies it.
+    let directory = unsafe {
+        nix::libc::open(
+            c"/proc/self/fd".as_ptr(),
+            nix::libc::O_RDONLY | nix::libc::O_DIRECTORY | nix::libc::O_CLOEXEC,
+        )
     };
-    // SAFETY: getrlimit writes this live record and keeps no pointer.
-    if unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
+    if directory < 0 {
         return Err(io::Error::last_os_error());
     }
-    // Older kernels only. A descriptor cannot be opened above the current limit;
-    // the cap keeps a huge configured limit from stalling the fork.
-    let last = nix::libc::c_int::try_from(limit.rlim_cur.min(1 << 20)).unwrap_or(1 << 20);
-    for descriptor in 3..last {
-        set_cloexec(descriptor)?;
+    let result = mark_listed(directory);
+    // SAFETY: closing the descriptor opened above; nothing else holds it.
+    unsafe { nix::libc::close(directory) };
+    result
+}
+
+/// Read `linux_dirent64` records from an open `/proc/self/fd` directory and
+/// mark each numbered descriptor above 2 (other than the directory) CLOEXEC.
+#[cfg(target_os = "linux")]
+fn mark_listed(directory: nix::libc::c_int) -> io::Result<()> {
+    // u64 storage keeps the records 8-byte aligned, as the kernel writes them.
+    let mut storage = [0_u64; 512];
+    loop {
+        // SAFETY: the kernel writes at most `size_of_val(&storage)` bytes of
+        // dirent records into this live buffer and returns how many.
+        let read = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_getdents64,
+                directory,
+                storage.as_mut_ptr(),
+                std::mem::size_of_val(&storage),
+            )
+        };
+        if read < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let read = usize::try_from(read).map_err(io::Error::other)?;
+        if read == 0 {
+            return Ok(());
+        }
+        // SAFETY: the first `read` bytes were just written by the kernel.
+        let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), read) };
+        let mut offset = 0;
+        while offset + 19 <= read {
+            // linux_dirent64: d_ino u64, d_off i64, d_reclen u16, d_type u8, d_name.
+            let length = usize::from(u16::from_ne_bytes([bytes[offset + 16], bytes[offset + 17]]));
+            if length < 20 || offset + length > read {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let mut number: nix::libc::c_int = 0;
+            let mut digits = 0;
+            for &byte in &bytes[offset + 19..offset + length] {
+                if byte == 0 {
+                    break;
+                }
+                if !byte.is_ascii_digit() {
+                    digits = 0;
+                    break;
+                }
+                number = number
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add(nix::libc::c_int::from(byte - b'0')))
+                    .ok_or(io::ErrorKind::InvalidData)?;
+                digits += 1;
+            }
+            if digits > 0 && number > 2 && number != directory {
+                set_cloexec(number)?;
+            }
+            offset += length;
+        }
     }
-    Ok(())
 }
 
 /// Mark descriptors 3 and above close-on-exec (macOS), listed exactly by
@@ -1403,6 +1473,52 @@ mod descriptor_allowlist_tests {
         assert!(
             !child_reads(descriptor, true),
             "a planted descriptor reached the child"
+        );
+    }
+
+    /// The pre-5.11 fallback finds a descriptor above the (lowered) descriptor
+    /// limit: the child lowers its soft `RLIMIT_NOFILE` below the planted
+    /// number, runs the fallback, and the shell must not see it (J215 P3-3).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_listing_fallback_marks_descriptors_above_the_limit() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let file = File::open("/dev/null").unwrap();
+        let high = fcntl(&file, FcntlArg::F_DUPFD(200)).unwrap(); // no CLOEXEC
+        // SAFETY: F_DUPFD returned a fresh descriptor owned by nothing else.
+        let _high = unsafe { File::from_raw_fd(high) };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &format!("[ -e /dev/fd/{high} ]")]);
+        // SAFETY: setrlimit and the listing fallback are async-signal-safe
+        // syscalls on stack storage.
+        unsafe {
+            command.pre_exec(|| {
+                let lowered = nix::libc::rlimit {
+                    rlim_cur: 64,
+                    rlim_max: nix::libc::RLIM_INFINITY,
+                };
+                let mut current = nix::libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, &raw mut current) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let lowered = nix::libc::rlimit {
+                    rlim_max: current.rlim_max,
+                    ..lowered
+                };
+                if nix::libc::setrlimit(nix::libc::RLIMIT_NOFILE, &raw const lowered) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                cloexec_listed_descriptors()
+            });
+        }
+        assert!(
+            !command.status().unwrap().success(),
+            "descriptor {high} above the lowered limit reached the child"
         );
     }
 
