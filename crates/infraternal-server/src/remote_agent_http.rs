@@ -84,8 +84,8 @@ async fn upgrade(State(api): State<Api>, ws: WebSocketUpgrade, request: Request)
         })
 }
 
-/// Authenticate the host proof and keep cleanup connections bounded through
-/// their complete durable receipt; ordinary links transfer into the host map.
+/// Authenticate the host proof and protocol Hello before returning handshake
+/// capacity. The bounded per-host cleanup lane owns durable delivery from here.
 async fn admit(
     mut socket: WebSocket,
     api: Api,
@@ -134,18 +134,15 @@ async fn admit(
         "protocol-greeting",
         crate::remote_link::RemoteLink::websocket(socket).await,
     )?;
-    // Ordinary links transfer into the bounded host map. A cleanup-only link
-    // never enters that map, so retain its source/global permits through cleanup
-    // to prevent repeated authenticated reconnects growing detached actors.
-    let cleanup_permits = authority.cleanup_person().map(|_| (source, permit));
-    let result = trace_test_phase(
+    // Proof and Hello are validated. Cleanup has its own bounded per-host
+    // lane, so neither its queue nor its durable receipt may hold handshake slots.
+    drop((source, permit));
+    trace_test_phase(
         "host-admission",
         api.hosts
             .admit_observed(authority, link, Some(address))
             .await,
-    );
-    drop(cleanup_permits);
-    result
+    )
 }
 
 async fn send_text<T: serde::Serialize>(socket: &mut WebSocket, message: &T) -> io::Result<()> {
@@ -282,5 +279,122 @@ mod tests {
             &[8; 32],
             &signature
         ));
+    }
+    /// A validated cleanup WebSocket must return both handshake permits before
+    /// its durable receipt. Receiving the revoke request is the ordering fence.
+    #[tokio::test]
+    async fn websocket_cleanup_returns_handshake_slots_before_receipt() {
+        use futures_util::{SinkExt, StreamExt};
+        use infraternal_protocol::{Frame, encode_muxed_frame_into};
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+        let (certificate, key) = signing_certificate();
+        let fingerprint = certificate.digest(MessageDigest::sha256()).unwrap();
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let person = Uuid::new_v4();
+        sqlx::query("INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,'cleanup','cleanup',0,'test')")
+            .bind(person.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE remote_hosts SET owner_id=? WHERE id=?")
+            .bind(person.to_string())
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE remote_certificates SET fingerprint=?,not_before=unixepoch()-1,not_after=unixepoch()+604799")
+            .bind(fingerprint.as_ref()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES (?,?)")
+            .bind(host.as_bytes().as_slice())
+            .bind(person.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let global = Arc::new(Semaphore::new(1));
+        let sources = Arc::new(crate::remote_admission::SourceSlots::new(1));
+        let address: IpAddr = "127.0.0.1".parse().unwrap();
+        let api = Api {
+            hosts: RemoteHosts::default(),
+            store,
+            admission: global.clone(),
+            sources: sources.clone(),
+        };
+        let router = Router::new()
+            .route("/remote/agent", get(upgrade))
+            .with_state(api);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{endpoint}/remote/agent"))
+                .await
+                .unwrap();
+        let challenge = socket.next().await.unwrap().unwrap();
+        let challenge: AgentLinkChallenge =
+            serde_json::from_str(challenge.to_text().unwrap()).unwrap();
+        let nonce = B64.decode(challenge.nonce).unwrap();
+        let signature = Signer::new_without_digest(&key)
+            .unwrap()
+            .sign_oneshot_to_vec(&proof_bytes(host, &nonce))
+            .unwrap();
+        let proof = AgentLinkProof {
+            message_type: "proof".to_owned(),
+            host_id: host,
+            certificate_der: B64.encode(certificate.to_der().unwrap()),
+            signature: B64.encode(signature),
+        };
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&proof).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+        let ready = socket.next().await.unwrap().unwrap();
+        assert!(ready.to_text().unwrap().contains("ready"));
+        let mut hello = Vec::new();
+        encode_muxed_frame_into(
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "cleanup-admission-test",
+            },
+            &mut hello,
+        )
+        .unwrap();
+        socket
+            .send(ClientMessage::Binary(hello.into()))
+            .await
+            .unwrap();
+        let _hello = socket.next().await.unwrap().unwrap();
+        let revoke = socket.next().await.unwrap().unwrap();
+        let bytes = revoke.into_data();
+        let request = infraternal_protocol::decode_muxed_frame(&bytes).unwrap();
+        assert!(
+            matches!(
+                request.frame,
+                Frame::Call {
+                    action_id: "terminal.login.revoke",
+                    ..
+                }
+            ),
+            "expected cleanup request before receipt"
+        );
+        assert_eq!(
+            global.available_permits(),
+            1,
+            "cleanup retained global handshake slot"
+        );
+        assert!(
+            sources.reserve(address).is_some(),
+            "cleanup retained source handshake slot"
+        );
+        drop(socket);
+        server.abort();
+        let _ = server.await;
     }
 }
