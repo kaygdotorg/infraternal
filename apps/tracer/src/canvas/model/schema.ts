@@ -1,5 +1,6 @@
 /** Pure v1 layout schema and bounded decoder, independent of runtime geometry and rendering (D180, D245). */
 import { isCanonicalUuid } from "../../identifiers";
+import { MAX_THEMES } from "../themes/limits";
 export const FORMAT = "infraternal.canvas";
 export const VERSION = 1;
 /** Smallest canonical column share accepted by the server. */
@@ -43,8 +44,7 @@ export interface DocTheme {
  */
 export interface DocLook { v: 1; selected: string; basics: { colors: string; font: string; uiSize: number }; themes: DocTheme[] }
 
-/** The most themes one account's look may hold: an intent carries the whole list and an intent is at most 8 KiB (the server's own bound). */
-export const MAX_THEMES = 16;
+export { MAX_THEMES };
 
 export interface CanvasDocument {
   format: typeof FORMAT;

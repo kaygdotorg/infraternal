@@ -19,7 +19,7 @@
 import { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, DEFAULT_GRADIENT, GRADIENT_IDS, MAX_STOPS, MIN_STOPS, SOLID_CUSTOM_ID, SOLID_IDS, type CustomGradient } from "./backgrounds";
 import { fontById } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
-import { MAX_THEMES } from "../model/schema";
+import { MAX_THEMES } from "./limits";
 
 /** Blur at 100%: the scale is linear from 0 px (0%) to this many pixels (D322: "0 px = 0% and 24 px = 100%"). */
 export const BLUR_AT_FULL_PX = 24;
