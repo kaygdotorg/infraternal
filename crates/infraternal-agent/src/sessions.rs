@@ -1176,47 +1176,60 @@ async fn abandon_launch(mut job: Abandoned) {
 /// A terminal counts as dead only on proof, and the launcher's exit is not proof when the shim detaches:
 /// the launcher is then the first of three processes and the shim a grandchild with no handle here.
 /// - A non-detaching launcher IS the shim: killed and reaped through its own child.
-/// - A detaching launcher that has provably never forked (stopped, with no children) cannot have started
-///   a shim: killed and reaped.
+/// - A detaching launcher that has provably never forked (`never_forked`) cannot have started a shim.
 /// - Otherwise only the shim's own authenticated exit counts (`close_detached`).
 ///
 /// Without proof the rendezvous and the person record are left alone: a live terminal keeps its discovery
-/// and its revocation attribution. A detached shim's socket is never unlinked here.
+/// and its revocation attribution. A detached shim's socket is never unlinked here. The launcher this
+/// launch owns is stopped and reaped either way, because killing it cannot touch the shim, and the whole
+/// cleanup, every inner wait included, ends within `budget.total`.
 #[cfg(target_os = "linux")]
 async fn cleanup(parts: &mut Parts, budget: Duration) {
-    let proven = if parts.detached {
-        stop_detached(parts, budget).await
-    } else {
-        stop_scope(parts.manager, &parts.name).await;
-        let _ = parts.child.start_kill();
-        let reaped = reaped(&mut parts.child, HANDSHAKE).await;
-        if reaped {
-            // The process that owned them is reaped; these are its own leftovers.
-            let _ = fs::remove_file(&parts.path);
-            let _ = fs::remove_file(parts.path.with_extension("stop"));
-        }
-        reaped
-    };
+    let proven = stop_launch(parts, budget).await;
+    // The owned launcher does not outlive its cleanup.
+    let _ = parts.child.start_kill();
+    let _ = reaped(&mut parts.child, HANDSHAKE).await;
     if proven && let Some(record) = parts.record.take() {
         let _ = fs::remove_file(record);
     }
 }
 
-/// Stop a detaching launch; whether its terminal is proven dead.
+/// Stop one launch; whether its terminal is proven dead.
 #[cfg(target_os = "linux")]
-async fn stop_detached(parts: &mut Parts, budget: Duration) -> bool {
-    if matches!(parts.child.try_wait(), Ok(None)) && never_forked(&mut parts.child).await {
-        // Stopped with no children and then killed: no shim lineage exists, and none can start.
-        return reaped(&mut parts.child, HANDSHAKE).await;
+async fn stop_launch(parts: &mut Parts, retry: Duration) -> bool {
+    let cap = HANDSHAKE;
+    if !parts.detached {
+        let _ = timeout(cap, stop_scope(parts.manager, &parts.name)).await;
+        let _ = parts.child.start_kill();
+        let reaped = reaped(&mut parts.child, cap).await;
+        if reaped {
+            // The process that owned them is reaped; these are its own leftovers.
+            let _ = fs::remove_file(&parts.path);
+            let _ = fs::remove_file(parts.path.with_extension("stop"));
+        }
+        return reaped;
     }
-    close_detached(&parts.state, &parts.path, parts.id, budget).await
+    if matches!(parts.child.try_wait(), Ok(None)) {
+        if never_forked(&mut parts.child).await {
+            // Frozen, with no children and none ever reaped, then killed: no shim lineage exists.
+            return reaped(&mut parts.child, cap).await;
+        }
+        // The shim lineage may exist. Killing the original launcher cannot touch it: its only remaining
+        // work is to exit. Do it now so it cannot outlive this cleanup, but prove nothing by it.
+        let _ = parts.child.start_kill();
+        let _ = reaped(&mut parts.child, cap).await;
+    }
+    close_detached(&parts.state, &parts.path, parts.id, retry).await
 }
 
 /// Whether a running launcher has provably never forked. It is frozen with `SIGSTOP` (it is this launch's
-/// own unreaped child, so the pid cannot name another process) until the kernel reports it stopped; only then
-/// is its child list read, because a running process could fork between the read and the kill. An empty
-/// list means no shim lineage exists, and the launcher is then killed. Anything else, or any doubt, resumes
-/// it and answers `false`.
+/// own unreaped child, so the pid cannot name another process) until the kernel reports it stopped, because
+/// a running process could fork between a check and the kill. A frozen process then shows no forks only if
+/// it has no children now AND has reaped none: the original launcher forks the intermediate, reaps it, and
+/// only then exits, and the detached shim, its grandchild, is not its child. A reaped child's minor faults
+/// and CPU time are added to the parent's counters, and any forked process that ran took a copy-on-write
+/// fault, so non-zero counters mean it forked even when its child list is empty. Anything else, or any
+/// doubt, resumes it and answers `false`; on `true` the launcher is killed.
 #[cfg(target_os = "linux")]
 async fn never_forked(child: &mut tokio::process::Child) -> bool {
     use nix::sys::signal::{Signal, kill};
@@ -1235,12 +1248,35 @@ async fn never_forked(child: &mut tokio::process::Child) -> bool {
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    if stopped && matches!(has_children(pid.as_raw()), Ok(false)) {
+    if stopped
+        && matches!(has_children(pid.as_raw()), Ok(false))
+        && matches!(has_reaped_children(pid.as_raw()), Ok(false))
+    {
         let _ = child.start_kill();
         return true;
     }
     let _ = kill(pid, Signal::SIGCONT);
     false
+}
+
+/// Whether `pid` has ever reaped a child, from its own wait statistics: the children's minor and major
+/// faults and user and system time (`cminflt`, `cmajflt`, `cutime`, `cstime` in `/proc/<pid>/stat`).
+/// An unreadable or malformed line is an error: no proof.
+#[cfg(target_os = "linux")]
+fn has_reaped_children(pid: i32) -> io::Result<bool> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .map(|(_, rest)| rest.split_whitespace().collect())
+        .unwrap_or_default();
+    // After the command name, field 3 (state) is index 0: cminflt 11, cmajflt 13, cutime 16, cstime 17.
+    let counter = |field: usize| -> io::Result<u64> {
+        fields
+            .get(field - 3)
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| io::Error::other("malformed process statistics"))
+    };
+    Ok(counter(11)? != 0 || counter(13)? != 0 || counter(16)? != 0 || counter(17)? != 0)
 }
 
 /// Whether the kernel reports `pid` as stopped (`T`) or traced-stopped (`t`).
