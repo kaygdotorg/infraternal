@@ -135,12 +135,19 @@ pub(crate) async fn durable_cleanup(
     actor: crate::embedded::WeakEmbeddedAgent,
     person: Uuid,
 ) -> bool {
-    for _ in 0..3 {
-        if actor.revoke_login(person).await.is_ok() {
-            return true;
+    loop {
+        match actor.revoke_login(person).await {
+            Ok(()) => return true,
+            Err(crate::embedded::AgentError::Rejected) => {
+                // Busy capacity and failed persistence leave server authority
+                // pending. Yield between active retries; never retire on a
+                // finite retry budget or enqueue an unanswered save twice.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // A lost transport leaves the persisted intent for reconnect.
+            Err(_) => return false,
         }
     }
-    false
 }
 
 /// Exact acknowledged public identity; only durable host Ack may advance its monotonic expiry cap.
