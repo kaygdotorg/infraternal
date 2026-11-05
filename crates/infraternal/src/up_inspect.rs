@@ -313,20 +313,45 @@ fn default_search_path() -> String {
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned()
 }
 
-/// Conservatively recognize literal CLI references in manager-resolved env and shell wrappers.
-/// We do not evaluate shell programs: dynamically constructed commands and external
-/// scripts require runtime executable inspection rather than static interpretation.
-fn wrapper_mentions_install(program: &str, arguments: &str) -> bool {
+/// Inspect literal arguments of a small explicit set of exec wrappers.
+/// env, shells, nice, setpriv, ionice, chrt, taskset and stdbuf may launch another
+/// program. Recognize its distributed name or an absolute known-build identity.
+/// This is a conservative scan, not shell evaluation or wrapper option parsing;
+/// dynamic commands and external scripts still need runtime process inspection.
+fn wrapper_mentions_install(
+    program: &str,
+    arguments: &str,
+    images: &mut KnownImages,
+) -> io::Result<bool> {
     let wrapper = Path::new(program).file_name().unwrap_or_default();
-    if !["env", "sh", "bash", "dash", "zsh", "ksh", "fish"]
-        .iter()
-        .any(|name| wrapper == OsStr::new(name))
+    if ![
+        "env", "sh", "bash", "dash", "zsh", "ksh", "fish", "nice", "setpriv", "ionice", "chrt",
+        "taskset", "stdbuf",
+    ]
+    .iter()
+    .any(|name| wrapper == OsStr::new(name))
     {
-        return false;
+        return Ok(false);
     }
-    arguments
+    for word in arguments
         .split(|character: char| character.is_whitespace() || "\"';|&()=".contains(character))
-        .any(|word| image_name(Path::new(word)))
+    {
+        let path = Path::new(word);
+        if image_name(path) {
+            return Ok(true);
+        }
+        if path.is_absolute()
+            && let Ok(mut file) = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NONBLOCK)
+                .open(path)
+            && file.metadata()?.is_file()
+            && images.matches(path, &mut file)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Ignore inert stock units and classify executable identity rather than every resolution failure.
@@ -375,7 +400,7 @@ fn resolved_service(
             }
             continue;
         };
-        if image_name(Path::new(program)) || wrapper_mentions_install(program, arguments) {
+        if image_name(Path::new(program)) || wrapper_mentions_install(program, arguments, images)? {
             return Err(installed(unit));
         }
         let Some(path) = executable_path(program, search) else {
@@ -722,6 +747,36 @@ mod tests {
             directory.display()
         );
         assert!(resolved_service(OsStr::new("custom.service"), &explicit).is_err());
+    }
+
+    /// Common literal exec wrappers must expose named binaries and renamed inode aliases.
+    #[test]
+    fn scheduling_and_privilege_wrappers_expose_installs() {
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let alias = fixture.0.join("control");
+        fs::hard_link(std::env::current_exe().unwrap(), &alias).unwrap();
+        for (wrapper, options) in [
+            ("nice", "-n5"),
+            ("setpriv", "--reuid=0"),
+            ("ionice", "-c3"),
+            ("chrt", "-f 1"),
+            ("taskset", "-c 0"),
+            ("stdbuf", "-oL"),
+        ] {
+            for image in ["/opt/infra", alias.to_str().unwrap()] {
+                let value = format!(
+                    "LoadState=loaded\nExecStart={{ path=/usr/bin/{wrapper} ; argv[]=/usr/bin/{wrapper} {options} {image} server ; }}\n"
+                );
+                assert!(
+                    resolved_service(OsStr::new("custom.service"), &value).is_err(),
+                    "wrapper {wrapper} hid {image}"
+                );
+            }
+            let benign = format!(
+                "LoadState=loaded\nExecStart={{ path=/usr/bin/{wrapper} ; argv[]=/usr/bin/{wrapper} {options} /usr/bin/true ; }}\n"
+            );
+            resolved_service(OsStr::new("custom.service"), &benign).unwrap();
+        }
     }
 
     /// Stopped wrappers and secondary startup commands cannot conceal our executable.
