@@ -758,7 +758,7 @@ mod tests {
             bad(&|v| v["themes"][0]["custom"]["stops"] = json!(["#ffffff"])),
             bad(&|v| {
                 v["themes"][0]["custom"]["stops"] =
-                    json!(["#ffffff", "#000000", "#111111", "#222222", "#333333"])
+                    json!(["#ffffff", "#000000", "#111111", "#222222", "#333333"]);
             }),
             bad(&|v| v["themes"][0]["custom"]["angle"] = json!(361)),
             bad(&|v| v["themes"][0]["name"] = json!("x".repeat(201))),
