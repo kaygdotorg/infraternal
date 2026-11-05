@@ -38,6 +38,8 @@ mod sign_in;
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
 mod ssh_internal;
+#[cfg(test)]
+mod test_executable;
 #[cfg(all(feature = "remote", target_os = "linux"))]
 mod up;
 

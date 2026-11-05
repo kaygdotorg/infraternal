@@ -70,9 +70,9 @@ impl Drop for Directory {
     }
 }
 
+/// Copies `source` to an owner-only executable at `target`, which tests then exec.
 fn copy_private_image(source: &Path, target: &Path) {
-    std::fs::copy(source, target).unwrap();
-    std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_executable::copy(source, target, 0o700);
 }
 
 fn strip_image(image: &Path) {

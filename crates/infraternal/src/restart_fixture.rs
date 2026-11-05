@@ -36,9 +36,8 @@ impl Signed {
     /// Writes `bytes` to `path` as an executable and signs a manifest for it, in the same
     /// folder. The manifest declares an `edge` release named for this platform's artifact.
     pub fn new(path: PathBuf, bytes: &[u8]) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&path, bytes).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Tests exec this file while sibling tests fork; see `test_executable`.
+        crate::test_executable::write(&path, bytes, 0o700);
         let version = b"edge-20261012T000000Z\n";
         let name = super::artifact_name();
         let manifest = format!(
@@ -57,7 +56,8 @@ impl Signed {
     /// Makes a fixture out of the running test executable. If it exceeds the largest image
     /// the restart code accepts, debug info is stripped from the copy first.
     pub fn image(path: PathBuf) -> Self {
-        std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+        crate::test_executable::copy(&std::env::current_exe().unwrap(), &path, 0o700);
+        // `strip` rewrites the copy in its own single-threaded process.
         if std::fs::metadata(&path).unwrap().len() > crate::restart_image::MAX_IMAGE {
             assert!(
                 std::process::Command::new("strip")

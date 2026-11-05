@@ -93,6 +93,8 @@ fn assert_proxy_file_identity(path: &std::path::Path, user: u32, group: u32, mod
     assert_eq!(metadata.mode() & 0o777, mode);
 }
 
+/// The child sees provider credentials only as file paths, never as values, and
+/// secrets it writes to stderr are redacted before they reach the plugin log.
 #[test]
 fn traefik_child_receives_only_credential_file_paths_and_redacts_its_logs() {
     let rootful = nix::unistd::Uid::effective().is_root();
@@ -157,19 +159,20 @@ fn traefik_child_receives_only_credential_file_paths_and_redacts_its_logs() {
     )
     .expect("spawn owned child");
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !capture.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // The fake child writes its stderr line only after the redirected printf has
+    // finished and closed the capture, so receiving that log line proves the
+    // capture is complete. The capture's existence proves nothing: the shell
+    // creates and truncates it before printf writes, and a read in that window
+    // sees an empty file.
+    let line = received
+        .recv_timeout(Duration::from_secs(2))
+        .expect("receive sanitized child log");
     let invocation = fs::read_to_string(&capture).expect("read child invocation");
     let token_file_path = invocation.lines().next().expect("provider file path");
     assert!(token_file_path.contains("/fd/"));
     assert!(token_file_path.ends_with("/dns-token"));
     assert!(invocation.contains("\n\n--configFile\nstatic.toml\n"));
     assert!(!invocation.contains("token-value-canary"));
-    let line = received
-        .recv_timeout(Duration::from_secs(2))
-        .expect("receive sanitized child log");
     for secret in [
         "header-secret",
         "cookie-secret",
