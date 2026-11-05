@@ -27,9 +27,10 @@ pub(crate) struct Reservation {
 }
 #[cfg(target_os = "linux")]
 impl Reservation {
-    /// Keep the durable record after spawn; the launch fence still covers readiness.
-    pub(crate) fn spawned(&mut self) {
-        self.path = None;
+    /// The shim has started: the record must now survive this reservation. Returns its path so a
+    /// launch that later fails can retire it once the terminal is proven stopped.
+    pub(crate) fn spawned(&mut self) -> Option<PathBuf> {
+        self.path.take()
     }
 }
 #[cfg(target_os = "linux")]

@@ -698,6 +698,7 @@ mod tests {
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )]),
             merged: std::collections::BTreeMap::new(),
@@ -821,6 +822,7 @@ mod tests {
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )]),
             merged: BTreeMap::new(),
@@ -1063,6 +1065,7 @@ mod peer_page_tests {
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
+                            access_ssh: None,
                         },
                     )
                 })

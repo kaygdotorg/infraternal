@@ -313,9 +313,14 @@ async fn readiness_refuses_a_host_whose_preferred_login_path_fails() {
     ));
     let actor = EmbeddedAgent::from_test_socket(socket);
     assert!(
-        confirm_preferred_login(&actor, Uuid::from_u128(0x88), "deploy".into())
-            .await
-            .is_err()
+        confirm_preferred_login(
+            &actor,
+            Uuid::from_u128(0x88),
+            "deploy".into(),
+            crate::embedded::LoginGrant::default(),
+        )
+        .await
+        .is_err()
     );
     drop(actor);
     task.abort();
@@ -335,9 +340,17 @@ async fn readiness_prepares_the_same_person_and_preferred_account_as_terminals()
         None,
     ));
     let actor = EmbeddedAgent::from_test_socket(socket);
-    confirm_preferred_login(&actor, Uuid::from_u128(0x88), "deploy".into())
-        .await
-        .unwrap();
+    confirm_preferred_login(
+        &actor,
+        Uuid::from_u128(0x88),
+        "deploy".into(),
+        crate::embedded::LoginGrant {
+            accounts: ["deploy".to_owned()].into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     drop(actor);
     task.abort();
     let _ = task.await;

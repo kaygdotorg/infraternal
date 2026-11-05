@@ -532,12 +532,13 @@ fn is_infraternal_program(program: &Path) -> bool {
             }))
 }
 
-/// Split the installer-generated systemd command into its arguments.
+/// Split a systemd `ExecStart` value into arguments for status and installation preflight.
 ///
 /// systemd quotes paths with spaces and backslash-escapes embedded quotes and
 /// backslashes. Unclosed quotes or a trailing escape are rejected so callers
-/// fall back to the ordinary data directory instead of guessing.
-fn exec_words(line: &str) -> Option<Vec<String>> {
+/// never guess the command or its data directory.
+#[must_use]
+pub fn exec_words(line: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;

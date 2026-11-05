@@ -53,8 +53,11 @@ impl Opened {
                     resolved
                 }
             };
-            let image =
-                crate::restart_image::Image::copy_limit(&file, Path::new("/"), 512 * 1024 * 1024)?;
+            let image = crate::restart_image::Image::copy_limit(
+                &file,
+                Path::new("/"),
+                RUNNING_IMAGE_LIMIT,
+            )?;
             let warm = nix::unistd::Uid::effective().is_root()
                 && infraternal_server::ca_handoff_binary::capable(&image.file).unwrap_or(false);
             Ok(Self { image, path, warm })
@@ -152,7 +155,7 @@ impl Opened {
         // Running development/test images may carry debug sections. Only the
         // kernel-pinned current image gets this larger bound; replacements stay at 128 MiB.
         let limit = if running {
-            512 * 1024 * 1024
+            RUNNING_IMAGE_LIMIT
         } else {
             crate::restart_image::MAX_IMAGE
         };
@@ -195,6 +198,12 @@ pub(crate) fn artifact_name() -> &'static str {
         _ => "unsupported-target",
     }
 }
+
+/// Bound for copying the kernel-pinned running image, which in development
+/// and test builds carries debug sections. Debug test binaries of the whole
+/// CLI reached 540 MB with mesh SSH (#221), past the earlier 512 MiB; release
+/// binaries are about 22 MB, and replacements keep the 128 MiB bound.
+const RUNNING_IMAGE_LIMIT: u64 = 768 * 1024 * 1024;
 
 fn public_file(path: &Path, limit: u64) -> io::Result<File> {
     let file = OpenOptions::new()

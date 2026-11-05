@@ -64,6 +64,10 @@ struct Open {
     person: Option<uuid::Uuid>,
     #[serde(default)]
     account: Option<String>,
+    /// Login access for `person` on this host (D235 Q14). A person open
+    /// without one is refused, so an older server cannot skip the check.
+    #[serde(default)]
+    grant: Option<infraternal_plugin_api::login_access::LoginGrant>,
     #[serde(default)]
     readiness: bool,
     uid: u32,
@@ -328,13 +332,14 @@ mod refusal_tests {
 // Construct cold login futures only when requested. Keeping their creation
 // outside the dispatcher poll function avoids touching their much larger code
 // working set on every idle greeting/receive, without an eager heap allocation.
+/// Start one admitted `terminal.open` as its own task, so a slow launch never blocks the dispatcher.
 #[cold]
 #[inline(never)]
 fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) {
     opens.spawn(async move {
         let result = async {
             task.plugins.admit("terminal.open", task.context).await?;
-            let manager = *task.manager.get_or_init(Manager::detect).await;
+            let manager = Manager::resolve(&task.manager).await;
             open_requested(&task.exe, &task.state, manager, task.input, task.prepare)
                 .await
                 .map_err(|error| open_refusal(&error))
@@ -344,6 +349,7 @@ fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) 
     });
 }
 
+/// Revoke or restore one person's terminals on its own task, after the first login operation has chosen a manager.
 #[cold]
 #[inline(never)]
 fn spawn_revocation(
@@ -355,7 +361,7 @@ fn spawn_revocation(
 ) -> tokio::task::JoinHandle<()> {
     use infraternal_plugin_api::admission::OpenRefusal;
     tokio::spawn(async move {
-        let manager = *manager.get_or_init(Manager::detect).await;
+        let manager = Manager::resolve(&manager).await;
         let result = if restore {
             crate::logins::restore(&state, person).await
         } else {
@@ -375,6 +381,61 @@ fn spawn_revocation(
         });
         let _ = finished.send(result);
     })
+}
+
+/// Open `person`'s shell as `account` for mesh SSH [D235, D240], #221.
+///
+/// It goes through the browser terminal's ordered admission path:
+/// account resolution, the login access check, the real login (PAM session,
+/// environment, limits) and its fencing. The caller, the mesh SSH authority,
+/// has already admitted exactly this person and account under its current
+/// snapshot, so the grant here names only that account: a fallback to root
+/// for an account that vanished in between is refused, never widened.
+/// # Errors
+/// Returns the same refusals as a browser terminal open.
+pub async fn open_mesh_ssh_shell(
+    state: &std::path::Path,
+    person: uuid::Uuid,
+    account: &str,
+    cols: u16,
+    rows: u16,
+) -> io::Result<Session> {
+    static MANAGER: tokio::sync::OnceCell<Manager> = tokio::sync::OnceCell::const_new();
+    let exe = std::env::current_exe()?;
+    let manager = Manager::resolve(&MANAGER).await;
+    let input = Open {
+        person: Some(person),
+        account: Some(account.to_owned()),
+        grant: Some(infraternal_plugin_api::login_access::LoginGrant {
+            accounts: [account.to_owned()].into(),
+            ..Default::default()
+        }),
+        readiness: false,
+        uid: nix::unistd::Uid::effective().as_raw(),
+        cols,
+        rows,
+    };
+    open_requested(&exe, state, manager, input, false)
+        .await?
+        .session
+        .ok_or_else(|| io::Error::other("login opened no session"))
+}
+
+/// Refuse a person's open unless their login access grant allows the account
+/// this host resolved [D235, D319].
+fn login_access_allows(
+    grant: Option<&infraternal_plugin_api::login_access::LoginGrant>,
+    user: &nix::unistd::User,
+) -> io::Result<()> {
+    let ordinary = infraternal_plugin_api::login_access::OrdinaryUids::host();
+    if grant.is_some_and(|grant| grant.allows(&user.name, user.uid.as_raw(), ordinary)) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "no login access to this account",
+        ))
+    }
 }
 
 /// Apply trusted server authority, resolve the account and fence shell creation.
@@ -417,6 +478,10 @@ async fn open_requested(
                 false,
             )
         };
+        // The account database here decides which account opens, including
+        // D231's fallback to root, so the grant is checked against that
+        // result, before any login unit exists for it.
+        login_access_allows(input.grant.as_ref(), &user)?;
         // This trusted server request is the positive authority resync for
         // this person after startup. It never clears a pending/durable refusal;
         // a revoked remote host cannot obtain such a request from the server.
@@ -708,7 +773,37 @@ impl<C: Channel> Drop for RetireChannel<'_, C> {
     }
 }
 
+/// Run the channel to its end, then give launch cleanups still in flight a bounded window to finish,
+/// so a runtime that outlives this agent does not drop them half done.
 async fn run_channel<const SESSION_ONLY: bool>(
+    socket: &impl Channel,
+    state: PathBuf,
+    execution_uid: Option<u32>,
+    renewal: Option<&RenewalIdentity>,
+    plugins: Option<crate::plugin_control::Registry>,
+    original: Option<Session>,
+) -> io::Result<()> {
+    // Boxed: the wrapper holds its arguments, and the loop's state would be counted again on top of
+    // them inside every caller's future (clippy large_futures, already within bytes of its bound).
+    // One allocation per channel run, in place of the same bytes inline.
+    let result = Box::pin(run_channel_inner::<SESSION_ONLY>(
+        socket,
+        state,
+        execution_uid,
+        renewal,
+        plugins,
+        original,
+    ))
+    .await;
+    if sessions::cleanups_pending() {
+        // Boxed: the wait is rare, and its state must not grow every channel future.
+        Box::pin(sessions::drain_cleanups()).await;
+    }
+    result
+}
+
+/// The channel loop itself, before the shutdown drain.
+async fn run_channel_inner<const SESSION_ONLY: bool>(
     socket: &impl Channel,
     state: PathBuf,
     execution_uid: Option<u32>,
@@ -755,7 +850,7 @@ async fn run_channel<const SESSION_ONLY: bool>(
         if !SESSION_ONLY {
             let warm = manager.clone();
             tokio::spawn(async move {
-                warm.get_or_init(Manager::detect).await;
+                Manager::resolve(&warm).await;
             });
         }
         running
