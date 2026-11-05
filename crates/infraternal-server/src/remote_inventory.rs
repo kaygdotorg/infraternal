@@ -329,7 +329,7 @@ mod cleanup_status_tests {
         let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
         let now = crate::runtime::unix_seconds().unwrap();
         sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=?")
-            .bind(now + 3600 - 604800)
+            .bind(now + 3600 - 604_800)
             .bind(now + 3600)
             .execute(&pool)
             .await
@@ -350,7 +350,7 @@ mod cleanup_status_tests {
         assert_eq!(inventory["hosts"][0]["state"], "pending");
         assert_eq!(inventory["hosts"][0]["online"], false);
         sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=?")
-            .bind(now - 604800)
+            .bind(now - 604_800)
             .bind(now)
             .execute(&pool)
             .await
