@@ -378,6 +378,10 @@ stop_activated_agent() {
  [ "${not_live_scan:-all}" = unit ] || return 0
  $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
  scan_holders all
+ for marker in "$base/sessions/sessions"/*.readiness; do
+  [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] || continue
+  rm -- "$marker"
+ done
  not_live_scan=all
 }
 # Whether this fresh journal was interrupted during activation and carries the
@@ -668,8 +672,16 @@ inspect_previous() {
     [ "$sockets" -le 1024 ] || refuse size
     continue
    fi
-   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
    name=${entry##*/}
+   case "$name" in *.readiness)
+    # The readiness marker of the setup's own terminal probe, whose shim died
+    # with the setup; stop_activated_agent removes it (see not_live).
+    activated_marker activating || exit 71
+    [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
+    hex_id "${name%.readiness}"
+    continue;;
+   esac
+   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
    socket_id=${name%.sock}
    [ "$name" = "$socket_id.sock" ] || exit 71
    hex_id "$socket_id"

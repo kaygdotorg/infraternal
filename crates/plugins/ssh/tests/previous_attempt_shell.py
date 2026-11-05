@@ -266,6 +266,10 @@ transaction={TRANSACTION}
         lifetime = runtime / '.lifetime-lock'
         lifetime.touch(mode=0o600)
         lifetime.chmod(0o600)
+        # As on the VM: the setup's terminal probe left its readiness marker.
+        readiness = runtime / 'sessions' / ('4' * 32 + '.readiness')
+        readiness.touch(mode=0o600)
+        readiness.chmod(0o600)
         self.manager_log.unlink(missing_ok=True)
         self.manager_active.touch()
         agent = subprocess.Popen(['flock', str(lifetime), str(live), '60'])
