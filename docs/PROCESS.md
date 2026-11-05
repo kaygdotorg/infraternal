@@ -592,31 +592,42 @@ fixture stay out. Binaries come from the `test` row's own `cargo test
 --workspace --no-run` build; mesh, and its default-off DNS test, are built
 again with the features their namespace tests need.
 
-**What is contained, exactly:** nothing in this row runs as host root, and it
-uses no sudo. Building and the scripts run as the calling user. Each test
-binary runs under `unshare --user --map-root-user --net --mount --pid`:
-- uid 0 inside is the caller's uid outside (`/proc/self/uid_map` is
-  `0 <uid> 1`), so in-namespace "root" has no rights over host files beyond
-  the caller's own;
-- the whole host filesystem is bind-mounted read-only *recursively*
-  (`ro=recursive`), `pivot_root` makes it the root and the old root is
-  detached, so no writable host mount stays reachable, including the caller's
-  home, the checkout and the build target;
-- the only writable places are new tmpfs mounts (`/tmp`, which also holds the
-  build-output view `CARGO_TARGET_DIR=/tmp/ut`, `/run`, `/var/tmp`,
-  `/dev/shm`), and they disappear with the namespace;
-- the network namespace has only loopback: no route, no host interfaces, no
-  internet;
-- the environment is passed explicitly (`env -i`), and bash stays PID 1 so
-  orphaned test processes are reaped.
+**What is contained, exactly:** only the test runs. Building the test
+binaries is not sandboxed: the branch's build scripts and proc macros run as
+the plain calling user, as in the ordinary `test` row, which also runs every
+non-ignored test as that user. Before review 79752 the test discovery call
+(`<binary> --list`) also ran unsandboxed; it now runs inside. For a hostile
+branch, the real boundary is the shared build account (`claude`), not this
+sandbox. Within that scope, nothing runs as host root and there is no sudo.
+Each test runs in two nested user namespaces:
+- the outer namespace builds the mounts: the host filesystem bind-mounted
+  read-only *recursively* (`ro=recursive`), `pivot_root`ed with the old root
+  detached; tmpfs with size caps at `/tmp` (512 MiB, which also holds the
+  build-output view `CARGO_TARGET_DIR=/tmp/ut`), `/run` (64 MiB), `/var/tmp`
+  and `/dev/shm` (256 MiB each); a minimal `/dev` (null, zero, full, random,
+  urandom, tty, `net/tun`, a private devpts); a tmpfs over the nix daemon
+  socket directory;
+- the inner namespace (`unshare --user --map-root-user --net --mount --pid
+  --kill-child`) runs the test. uid 0 there is the caller's uid outside, and
+  the kernel locks the inherited mounts, so the test cannot remount `/`
+  read-write or unmount `/run` or `/tmp`. The network namespace has only
+  loopback. The environment is passed explicitly (`env -i`).
+- Each run has a 900 s hang timeout (`VERIFY_PRIVILEGED_TEST_TIMEOUT`; a hang
+  guard, not a speed assertion), is SIGKILLed if the runner dies (parent-death
+  signal, then `--kill-child` takes the namespace), and runs in a systemd user
+  scope with `MemoryMax=4G` (`VERIFY_PRIVILEGED_MEMORY_MAX`) when the user
+  manager is reachable; otherwise the tmpfs caps are the only memory bound and
+  the row prints that.
 
-Before any test, the row plants escapes in the same sandbox: writes under the
-home directory, the checkout, the target and `/etc`; `mount -o remount,rw /`;
-a route off loopback; connections to the host's address and to the internet;
-a uid map onto host root; a file left in `/tmp`. The row fails unless every
-one fails and the file does not exist anywhere outside afterwards.
-`scripts/test-verify-privileged.py` runs the same check and a control showing
-the writes succeed outside the sandbox.
+Before any test, the row plants escapes in the same sandbox and fails unless
+every one fails: writes in the home directory, the checkout, the target and
+`/etc`; superblock and bind remounts of `/` read-write; unmounting `/run` and
+`/tmp`; the host user bus; the nix daemon socket; a host pty; a route off
+loopback; the host network and the internet; a uid map onto host root; a file
+left in `/tmp`. These probes are negative checks only. The evidence that they
+are live is J233's manual breakout of the earlier single-level layout (review
+79752 on #344), which these probes reproduce. **Any change to the sandbox
+layout needs a fresh manual escape review before merge.**
 
 **Not covered:** behaviour that only differs as *real* host root (rootful
 proxy supervision and installation, installing for other accounts and system

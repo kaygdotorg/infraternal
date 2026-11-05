@@ -13,9 +13,12 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
+import uuid
 
 
 def load(name):
@@ -162,52 +165,203 @@ class Builds(unittest.TestCase):
 class SandboxShape(unittest.TestCase):
     """The command line asks for every namespace and never for privilege."""
 
-    def test_command(self):
-        """User, net, mount and PID namespaces; read-only root; no sudo; explicit environment."""
+    def command(self):
+        """One sandbox argv and its setup script."""
         command = p.sandboxed(['/t/debug/deps/x', '--exact', 'y'], {'A': '1', 'BAD\nKEY': 'x', 'M': 'two\nlines'},
                               Path('/c'), Path('/s'), Path('/t'))
-        self.assertEqual(command[:8], ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid',
-                                       '--fork', '--mount-proc'])
+        return command, command[command.index('-c') + 1]
+
+    def test_outer_namespace(self):
+        """User, net, mount and PID namespaces; --kill-child; no sudo; explicit environment."""
+        command, _ = self.command()
+        self.assertEqual(command[:9], ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid',
+                                       '--fork', '--kill-child', '--mount-proc'])
         self.assertNotIn('sudo', command)
-        self.assertIn('env', command)
         self.assertEqual(command[command.index('env') + 1], '-i')
         self.assertIn('A=1', command)
         self.assertIn('CARGO_TARGET_DIR=/tmp/ut', command)
         self.assertNotIn('M=two\nlines', command)
         self.assertEqual(command[-3:], ['/t/debug/deps/x', '--exact', 'y'])
-        setup = command[command.index('-c') + 1]
+
+    def test_test_runs_one_namespace_down(self):
+        """The test runs in a nested user namespace, after pivot_root, with --kill-child (79752 P1)."""
+        _, setup = self.command()
         for step in ('ro=recursive', 'pivot_root . .', 'umount -l .'):
             self.assertIn(step, setup)
-        self.assertNotIn('exec "$@"', setup)
+        inner = setup.index('exec unshare --user --map-root-user --net --mount --pid --fork --kill-child')
+        self.assertGreater(inner, setup.index('pivot_root . .'))
+        self.assertNotIn('single', setup)
+
+    def test_tmpfs_sizes(self):
+        """Every tmpfs the sandbox mounts carries a size cap (79752 P3-2)."""
+        _, setup = self.command()
+        tmpfs = [line for line in setup.splitlines() if 'mount -t tmpfs' in line]
+        self.assertGreaterEqual(len(tmpfs), 6)
+        for line in tmpfs:
+            self.assertRegex(line, r'size=\d+[kmg]')
+
+    def test_minimal_dev(self):
+        """/dev is a fresh tmpfs with a private devpts, mounted before /dev/shm, and the nix socket is covered."""
+        _, setup = self.command()
+        dev = setup.index('tmpfs "$new/dev"\n')
+        self.assertLess(dev, setup.index('"$new/dev/shm"\n'))
+        self.assertIn('-o newinstance', setup)
+        self.assertNotIn('--rbind /dev', setup)
+        self.assertIn('"$new/nix/var/nix/daemon-socket"', setup)
+
+
+class Lifecycle(unittest.TestCase):
+    """Decisions around a sandbox run that need no namespaces to check."""
+
+    def test_memory_scope_when_user_manager_answers(self):
+        """With a working user manager each sandbox gets its own MemoryMax scope."""
+        with mock.patch.object(p.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            scope = p.memory_scope()
+        self.assertEqual(scope[:3], ['systemd-run', '--user', '--scope'])
+        self.assertIn(f'MemoryMax={p.SANDBOX_MEMORY_MAX}', scope)
+        self.assertIn('MemorySwapMax=0', scope)
+
+    def test_memory_scope_absent_without_user_manager(self):
+        """Without one the prefix is empty, so the tmpfs caps are the only bound."""
+        with mock.patch.object(p.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)):
+            self.assertEqual(p.memory_scope(), [])
+
+    def test_list_runs_inside_the_sandbox(self):
+        """Test discovery executes the branch's binary, so it goes through run_sandboxed (79752 P2-3)."""
+        calls = []
+
+        def fake(command, *_args, **_kwargs):
+            """Record the command and answer like a libtest listing."""
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, 'kernel::up: test\nother: test\n', '')
+
+        binaries = {('crates/plugins/mesh', 'test:kernel'): '/b/kernel'}
+        with mock.patch.object(p, 'run_sandboxed', side_effect=fake), \
+                mock.patch.object(p, 'privileged_ignored', return_value={'test:kernel': {'up': 'namespace'}}), \
+                mock.patch.object(p.subprocess, 'run', side_effect=AssertionError('unsandboxed run')):
+            runs, missing = p.plan(Path('/clone'), {'mesh'}, binaries, {}, Path('/s'), Path('/t'), [])
+        self.assertEqual(missing, [])
+        self.assertIn('--list', calls[0])
+        self.assertEqual([run[0] for run in runs], ['infraternal-plugin-mesh test:kernel kernel::up'])
+
+    def test_fails_closed_when_the_sandbox_cannot_start(self):
+        """A sandbox that exits early or prints nothing counts as an escape, never as contained."""
+        broken = subprocess.CompletedProcess([], 1, '', 'unshare: unshare failed: Operation not permitted')
+        with mock.patch.object(p, 'run_sandboxed', return_value=broken):
+            escaped = p.self_check(Path('/nonexistent-scratch'), Path('/t'), Path('/c'), [])
+        self.assertTrue(any('did not start cleanly' in line for line in escaped))
+
+    def test_partial_probe_output_fails_closed(self):
+        """Exit 0 with missing probe lines still fails: every probe must report contained."""
+        partial = subprocess.CompletedProcess([], 0, 'contained: write /etc\n', '')
+        with mock.patch.object(p, 'run_sandboxed', return_value=partial):
+            escaped = p.self_check(Path('/nonexistent-scratch'), Path('/t'), Path('/c'), [])
+        self.assertTrue(escaped)
+
+
+def survivors(marker):
+    """PIDs of this user's processes whose environment holds VP_MARKER=`marker` exactly.
+
+    Marking by environment, not argv[0], keeps multicall binaries (nix
+    coreutils picks its tool from argv[0]) working inside the sandbox.
+    """
+    wanted = f'VP_MARKER={marker}'.encode()
+    found = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid == os.getuid() and wanted in (entry / 'environ').read_bytes().split(b'\0'):
+                found.append(int(entry.name))
+        except OSError:
+            continue
+    return found
+
+
+def reap(pids):
+    """Kill leftover test processes by PID only."""
+    for pid in pids:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
 
 
 @unittest.skipUnless(userns_available(), 'unprivileged user namespaces unavailable on this host')
-class Containment(unittest.TestCase):
-    """Planted escapes fail inside the sandbox and succeed outside it."""
+class RealSandbox(unittest.TestCase):
+    """Run the real sandbox: escapes are contained, hangs are killed, nothing outlives the runner."""
+
+    def setUp(self):
+        """A throwaway home, checkout, target and scratch under ~/.cache."""
+        if not shutil.which('ip'):
+            self.skipTest('iproute2 is not on PATH (run inside the dev shell)')
+        self.home = Path(tempfile.mkdtemp(prefix='vp-home-', dir=Path.home() / '.cache'))
+        self.checkout, self.target = self.home / 'checkout', self.home / 'target'
+        (self.target / 'debug').mkdir(parents=True)
+        self.checkout.mkdir()
+        self.scratch = self.home / 'scratch'
+        (self.scratch / 'root').mkdir(parents=True)
+
+    def tearDown(self):
+        """Remove the throwaway tree."""
+        shutil.rmtree(self.home, ignore_errors=True)
 
     def test_planted_escapes(self):
         """Every escape probe is contained, and the persistence marker never appears outside."""
-        if not shutil.which('ip'):
-            self.skipTest('iproute2 is not on PATH (run inside the dev shell)')
-        home = tempfile.mkdtemp(prefix='vp-home-', dir=Path.home() / '.cache')
+        with mock.patch.object(p.Path, 'home', return_value=self.home):
+            escaped = p.self_check(self.scratch, self.target, self.checkout, [])
+        self.assertEqual(escaped, [])
+        # The same writes succeed outside, so "contained" is not a broken write.
+        for directory in (self.home, self.checkout, self.target):
+            probe = directory / '.privileged-escape'
+            probe.touch()
+            self.assertTrue(probe.exists())
+        self.assertEqual(sorted(path.name for path in (self.scratch / 'root').iterdir()), [])
+
+    def test_hang_timeout_kills_the_namespace(self):
+        """A test that outlives the hang guard is killed with every process in its sandbox."""
+        marker = f'vp-hang-{uuid.uuid4().hex[:8]}'
+        command = ['bash', '-c', 'sleep 300 & exec sleep 300']
         try:
-            checkout, target = Path(home) / 'checkout', Path(home) / 'target'
-            (target / 'debug').mkdir(parents=True)
-            checkout.mkdir()
-            scratch = Path(home) / 'scratch'
-            (scratch / 'root').mkdir(parents=True)
-            with mock.patch.object(p.Path, 'home', return_value=Path(home)):
-                escaped = p.self_check(scratch, target, checkout)
-            self.assertEqual(escaped, [])
-            # Control: the same writes succeed outside, so "contained" is not
-            # just a broken probe.
-            for directory in (Path(home), checkout, target):
-                probe = directory / '.privileged-escape'
-                probe.touch()
-                self.assertTrue(probe.exists())
-            self.assertEqual(sorted(path.name for path in (scratch / 'root').iterdir()), [])
+            result = p.run_sandboxed(command, {'PATH': os.environ['PATH'], 'VP_MARKER': marker}, '/',
+                                     self.scratch, self.target, [], capture=True, timeout=3)
+            self.assertEqual(result.returncode, 124)
+            time.sleep(1)  # sleep: give the kernel a moment to finish tearing down the PID namespace
+            self.assertEqual(survivors(marker), [])
         finally:
-            shutil.rmtree(home, ignore_errors=True)
+            reap(survivors(marker))
+
+    def test_killing_the_runner_kills_the_sandbox(self):
+        """SIGKILL of the runner process leaves no sandboxed process behind (79752 P2-2)."""
+        marker = f'vp-orphan-{uuid.uuid4().hex[:8]}'
+        runner = (
+            'import importlib.machinery, importlib.util, os, sys\n'
+            'from pathlib import Path\n'
+            f'l = importlib.machinery.SourceFileLoader("vp", {str(Path(__file__).with_name("verify-privileged"))!r})\n'
+            'm = importlib.util.module_from_spec(importlib.util.spec_from_loader("vp", l)); l.exec_module(m)\n'
+            'cmd = ["bash", "-c", "trap \\"\\" TERM; (trap \\"\\" TERM HUP; sleep 300) & sleep 300"]\n'
+            f'm.run_sandboxed(cmd, {{"PATH": os.environ["PATH"], "VP_MARKER": {marker!r}}}, "/", '
+            f'Path({str(self.scratch)!r}), Path({str(self.target)!r}), [])\n'
+        )
+        process = subprocess.Popen([sys.executable, '-c', runner])
+        try:
+            for _ in range(100):
+                if len(survivors(marker)) >= 3:
+                    break
+                time.sleep(0.1)  # sleep: polling until the sandboxed sleepers have started
+            # The inner bash (PID 1) and its two sleepers carry the marker.
+            self.assertGreaterEqual(len(survivors(marker)), 3)
+            process.kill()
+            process.wait()
+            for _ in range(50):
+                if not survivors(marker):
+                    break
+                time.sleep(0.1)  # sleep: polling until the namespace is torn down
+            self.assertEqual(survivors(marker), [])
+        finally:
+            reap(survivors(marker))
+            if process.poll() is None:
+                process.kill()
 
 
 if __name__ == '__main__':
