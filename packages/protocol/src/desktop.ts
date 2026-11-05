@@ -10,11 +10,12 @@
  */
 
 /**
- * The number 8, exported by the codec for callers that need a desktop-video identifier.
- * This module does not use it itself. (The tracer's capability negotiation in
- * `apps/tracer/src/connection.ts` uses its own `DESKTOP_VIDEO_CAP`.)
+ * The Hello capability bit for desktop video on the browser leg (leg A): bit 4 counting from zero, `1 << 4`, the same
+ * value as `CAPABILITY` in the Rust protocol crate and "caps bit 4" in contracts/wire.md §9. A browser sets it in its
+ * Hello to ask for app-window streams, and reads it from the server's Hello to learn they exist. (The agent's native
+ * lane on leg B is a different bit, `1 << 8`, and is not used by a browser.)
  */
-export const DESKTOP_VIDEO = 8n;
+export const DESKTOP_VIDEO = 16n;
 /**
  * Largest encoded video payload in bytes, and the largest `total` of a fragmented one:
  * 4 MiB minus 42 bytes. The Rust codec enforces the same bound.

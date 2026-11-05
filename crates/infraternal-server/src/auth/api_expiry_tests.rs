@@ -1,10 +1,19 @@
 //! API key inactivity deadlines, bounded renewal writes and upgrade grace (#269, D311).
 use super::*;
 
+/// These tests cover J90's policy mechanics (sliding renewal, clamping, tombstones), so each
+/// key behaves like one approved before D333: no approved end. The approved end is covered in
+/// `key_lifetime_tests`. Each approval gets its own tap, as D333 requires.
 async fn key(f: &Fixture) -> String {
     let approval = f
         .auth
-        .device_start("cli", vec!["hosts:read".into()], TEST_SOURCE, NOW)
+        .device_start_for(
+            "cli",
+            vec!["hosts:read".into()],
+            Some(30 * 86_400),
+            TEST_SOURCE,
+            NOW,
+        )
         .await
         .unwrap();
     // Key lifetimes, not the approval ceremony, are under test here.
@@ -12,12 +21,20 @@ async fn key(f: &Fixture) -> String {
         .approve_without_passkey_for_tests(&f.session, str_field(&approval, "user_code"), NOW)
         .await
         .unwrap();
-    f.auth
+    let key = f
+        .auth
         .device_redeem(str_field(&approval, "poll_token"), NOW)
         .await
-        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE api_keys SET hard_expires_at=NULL WHERE token_hash=?")
+        .bind(hash(&key))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    key
 }
 
+/// Stand-in for a new sign-in tap on the fixture session (D333 spends one per change).
 async fn expiry(auth: &Auth, key: &str) -> i64 {
     sqlx::query_scalar("SELECT expires_at FROM api_keys WHERE token_hash=?")
         .bind(hash(key))
@@ -144,8 +161,20 @@ async fn api_key_upgrade_starts_thirty_days_at_migration_once() {
         .execute(&pool)
         .await
         .unwrap();
-    auth.set_test_http_time(deadline - 1);
+    // J154 P3-1 (migration 0047): a key from before D333 also ends at most 24 hours after
+    // the upgrade, however long its sliding deadline still is.
+    let hard_end: i64 = sqlx::query_scalar("SELECT hard_expires_at FROM api_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!((before + 86_400..=after + 86_400).contains(&hard_end));
+    auth.set_test_http_time(hard_end - 1);
     auth.api_authorize(&key, "hosts:read").await.unwrap();
+    auth.set_test_http_time(hard_end);
+    assert!(matches!(
+        auth.api_authorize(&key, "hosts:read").await,
+        Err(Error::Denied)
+    ));
 }
 
 #[tokio::test]
@@ -178,6 +207,13 @@ async fn api_key_lifetime_settings_validate_and_apply_to_existing_keys() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
     for days in [365, 1] {
+        bind_tap(
+            &f.auth,
+            &f.session,
+            json!({"kind":"security.settings","api_key_lifetime_days":days}),
+            NOW,
+        )
+        .await;
         let (status, _, body) = http_post_json_with_cookie(
             &app,
             "security-settings-update",
@@ -211,6 +247,13 @@ async fn api_key_settings_require_live_owner_and_fresh_same_origin_mutation() {
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={}", f.session);
     let update = json!({"api_key_lifetime_days":1});
+    bind_tap(
+        &f.auth,
+        &f.session,
+        json!({"kind":"security.settings","api_key_lifetime_days":1}),
+        NOW,
+    )
+    .await;
     assert_eq!(
         http_post_json(&app, "security-settings", json!({})).await.0,
         StatusCode::UNAUTHORIZED
@@ -233,7 +276,8 @@ async fn api_key_settings_require_live_owner_and_fresh_same_origin_mutation() {
         app.clone().oneshot(foreign).await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
-    f.auth.set_test_http_time(NOW + FRESH);
+    f.auth
+        .set_test_http_time(NOW + super::super::action_tap::ACTION_TAP_SECONDS);
     assert_eq!(
         http_post_json_with_cookie(&app, "security-settings-update", update.clone(), &cookie)
             .await

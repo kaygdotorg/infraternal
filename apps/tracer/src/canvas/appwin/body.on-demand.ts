@@ -19,6 +19,9 @@ export function mountAppWindowBody(cx: Ctx, rec: WinRec): void {
     const binding = adapter.available() ? runtime?.bindingFor(rec) : undefined;
     if (!binding) { unavailable(); return; }
     rec.binding = binding;
+    // A window opened from the picker is made the active one before its binding exists, so nothing has told the binding yet:
+    // without this its first press would look like "already active" to the canvas and never be treated as the one that acts.
+    if (cx.state.activeWin === rec) binding.setActive(true);
     binding.mount(body);
     cx.visibility.watch(rec);
   }).catch(() => { if (!cx.signal.aborted && !rec.closing) unavailable(); });

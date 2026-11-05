@@ -1,5 +1,6 @@
-//! Sliding sessions, fresh-tap policy, provider diagnostics and transaction authority rechecks [28].
-use super::{Auth, Error, FRESH, Result, Row, SESSION, Serialize, hash};
+//! Sliding sessions, the admin window, provider diagnostics and transaction authority rechecks
+//! [28]. Per-action taps are bound to one action in `action_tap` (D336).
+use super::{Auth, Error, Result, Row, SESSION, Serialize, hash};
 
 /// Authenticated browser device, including the last successful passkey verification.
 #[derive(Serialize)]
@@ -29,8 +30,9 @@ pub struct RecoveryPending {
     pub ready_at: i64,
 }
 impl Session {
-    pub(super) fn require_fresh(&self, now: i64) -> Result<()> {
-        if self.fresh > now || now - self.fresh >= FRESH {
+    /// The session is inside the browser's 15-minute admin window that its tap started (D333).
+    pub(super) fn require_admin_window(&self, now: i64) -> Result<()> {
+        if self.fresh > now || now - self.fresh >= infraternal_plugin_api::ADMIN_WINDOW_SECONDS {
             return Err(Error::Denied);
         }
         Ok(())
@@ -143,10 +145,11 @@ impl Auth {
         Ok(())
     }
 
-    /// Authenticate a device and require a passkey tap within five minutes for destructive UI actions [28].
+    /// Authenticate a device inside the admin window its last tap started (D333: 15 minutes of
+    /// admin actions without taps) [28].
     pub async fn fresh_session(&self, token: &str, now: i64) -> Result<Session> {
         let session = self.session(token, now).await?;
-        session.require_fresh(now)?;
+        session.require_admin_window(now)?;
         Ok(session)
     }
 
@@ -306,17 +309,34 @@ impl Auth {
     }
 }
 
-pub(crate) async fn require_session_tx(
+/// Check, inside the caller's writer transaction, that this session is still live and unlocked
+/// by both the caller's clock and SQLite's.
+///
+/// This grants no per-action authority and checks no tap age. A change that needs a tap verifies
+/// its own ceremony, bound to that one action, before calling this (D336). For example, a key
+/// approval verifies the passkey ceremony `device_approve_start` bound to its code. This check
+/// only makes a logout or expiry that committed first refuse the change.
+pub(crate) async fn require_live_session_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token_hash: &str,
     user: &str,
     now: i64,
 ) -> Result<()> {
-    if !infraternal_plugin_api::fresh_session_tx(tx, token_hash, user, now, FRESH).await? {
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 \
+         AND expires>MAX(?,unixepoch()))",
+    )
+    .bind(token_hash)
+    .bind(user)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !live {
         return Err(Error::Denied);
     }
     Ok(())
 }
+
 pub(super) async fn insert_session(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token: &str,

@@ -297,6 +297,32 @@ async fn fixture_with_auth(auth: Auth, token: String) -> Fixture {
         dek,
     }
 }
+/// Fixture shortcut: give `token`'s session an unspent tap made at `now` for `action` (D336).
+/// `action_tap_tests` runs the real ceremony that binds a tap; tests about something else use
+/// this, as they set `fresh` directly elsewhere.
+async fn bind_tap(auth: &Auth, token: &str, action: Value, now: i64) {
+    let action: TapAction = serde_json::from_value(action).unwrap();
+    sqlx::query("UPDATE sessions SET tap_action=?,tap_spent=0,fresh=? WHERE token_hash=?")
+        .bind(super::action_tap::digest(&action))
+        .bind(now)
+        .bind(hash(token))
+        .execute(&auth.pool)
+        .await
+        .unwrap();
+}
+
+/// Another signed-in session for `user`, tapped at `now` for `action`.
+async fn tapped_session(auth: &Auth, user: &str, action: Value, now: i64) -> String {
+    let token = random();
+    let mut tx = auth.pool.begin().await.unwrap();
+    insert_session(&mut tx, &token, user, "browser", now, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    bind_tap(auth, &token, action, now).await;
+    token
+}
+
 async fn finish_replacement(f: &Fixture, start: &Value, software: &Software, now: i64) -> String {
     let old: Wrap = serde_json::from_value(start["old_recovery_wrap"].clone()).unwrap();
     let dek = unwrap_browser(&recovery_ikm(&f.words), &old, &f.user, "recovery").unwrap();
@@ -364,6 +390,7 @@ async fn ceremony_prf_wraps_and_optional_second_passkey() {
             .await
             .is_err()
     );
+    bind_tap(&f.auth, &session, json!({"kind":"passkey.add"}), NOW + 3).await;
     let add = f.auth.add_start(&session, NOW + 3).await.unwrap();
     assert!(add["recovery_words"].is_null());
     let second = Software::new();
@@ -446,6 +473,7 @@ async fn rejected_origin_uv_challenge_signature_prf_and_expired_ceremonies() {
             .await
             .is_err()
     );
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
     let add = f.auth.add_start(&f.session, NOW).await.unwrap();
     let software = Software::new();
     let wrap = browser_wrap(&software.prf(&add), &f.dek, &f.user, "passkey");
@@ -783,6 +811,7 @@ async fn recovery_session_delay_latency_at_capacity() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One flow: sliding, tap freshness and key scoping.
 async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -850,7 +879,13 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
             .await
             .is_err()
     );
-    assert!(f.auth.add_start(&f.session, NOW + FRESH).await.is_err());
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
+    assert!(
+        f.auth
+            .add_start(&f.session, NOW + super::action_tap::ACTION_TAP_SECONDS)
+            .await
+            .is_err()
+    );
     f.auth
         .api_revoke(&f.session, &hash(&key), NOW + 1)
         .await
@@ -881,6 +916,49 @@ async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     assert!(!stored.contains(&f.words));
     f.auth.logout(&f.session).await.unwrap();
     assert!(f.auth.session(&f.session, NOW).await.is_err());
+}
+
+#[tokio::test]
+async fn device_keys_accept_declared_action_scopes_without_broadening_to_unknown_scopes() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let scopes = [
+        "hosts:read",
+        "hosts:write",
+        "sessions:read",
+        "status:read",
+        "terminal:connect",
+        "actions:dry-run",
+    ];
+    let approval = f
+        .auth
+        .device_start(
+            "cli",
+            scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            TEST_SOURCE,
+            NOW,
+        )
+        .await
+        .expect("all declared narrow and existing scopes are valid");
+    let inspection = f
+        .auth
+        .device_inspect(&f.session, str_field(&approval, "user_code"), NOW)
+        .await
+        .expect("the signed-in owner can inspect the exact request");
+    assert_eq!(
+        inspection["scopes"],
+        json!(scopes),
+        "the browser must review the exact requested grants"
+    );
+    for scope in ["admin", "hosts:*", "*", "session:write"] {
+        assert!(
+            f.auth
+                .device_start("cli", vec![scope.to_owned()], TEST_SOURCE, NOW)
+                .await
+                .is_err(),
+            "unknown scope {scope:?} must not be issued"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1327,9 +1405,14 @@ async fn concurrent_owner_and_optional_passkey_enrollment_fail_closed() {
     let (first, second) = tokio::join!(finish(a, one), finish(b, two));
     assert_ne!(first.is_ok(), second.is_ok());
     let f = fixture().await;
+    // Each enrollment has its own tap (D336), so race two tapped sessions.
+    let (first_session, second_session) = (
+        tapped_session(&f.auth, &f.user, json!({"kind":"passkey.add"}), NOW).await,
+        tapped_session(&f.auth, &f.user, json!({"kind":"passkey.add"}), NOW).await,
+    );
     let (a, b) = tokio::join!(
-        f.auth.add_start(&f.session, NOW),
-        f.auth.add_start(&f.session, NOW)
+        f.auth.add_start(&first_session, NOW),
+        f.auth.add_start(&second_session, NOW)
     );
     let a = a.unwrap();
     let b = b.unwrap();
@@ -1446,6 +1529,7 @@ async fn stale_counters_recovery_cancellation_and_wrap_tampering() {
             .await
             .is_err()
     );
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
     let start = f.auth.add_start(&f.session, NOW).await.unwrap();
     let software = Software::new();
     f.auth.logout(&f.session).await.unwrap();
@@ -2845,6 +2929,7 @@ async fn discoverable_latency_at_pending_capacity() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
     let second = Software::new();
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
     let add = f.auth.add_start(&f.session, NOW).await.unwrap();
     f.auth
         .registration_finish(
@@ -3165,6 +3250,7 @@ async fn registration_aaguid_survives_none_attestation_and_binds_session_provide
     );
     let identity = serde_json::to_value(auth.session(&session, NOW).await.unwrap()).unwrap();
     assert_eq!(identity["passkey_provider"], "1Password");
+    bind_tap(&auth, &session, json!({"kind":"passkey.add"}), NOW + 1).await;
     let second_start = auth.add_start(&session, NOW + 1).await.unwrap();
     let mut second = Software::new();
     second.aaguid = Uuid::parse_str("d548826e-79b4-db40-a3d8-11116f7e8349").unwrap();
@@ -3225,6 +3311,7 @@ async fn redacted_unknown_and_failed_registrations_do_not_claim_a_provider() {
         .await
         .unwrap();
     assert!(serde_json::to_value(f.auth.session(&f.session, NOW).await.unwrap()).unwrap()["passkey_provider"].is_null());
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW + 1).await;
     let start = f.auth.add_start(&f.session, NOW + 1).await.unwrap();
     let mut software = Software::new();
     software.aaguid = Uuid::parse_str("bada5566-a7aa-401f-bd96-45619a55120d").unwrap();
@@ -3704,6 +3791,9 @@ mod verified_passkey_tests;
 mod ca_administration_tests;
 
 #[cfg(feature = "remote")]
+#[path = "api_actions_tests.rs"]
+mod api_actions_tests;
+#[cfg(feature = "remote")]
 #[path = "remote_removal_tests.rs"]
 mod remote_removal_tests;
 #[path = "terminal_refusal_tests.rs"]
@@ -3758,8 +3848,14 @@ async fn account_logout_does_not_notify_another_account() {
 #[path = "logout_commit_tests.rs"]
 mod logout_commit;
 
+#[path = "action_tap_tests.rs"]
+mod action_tap_tests;
+#[path = "admin_window_tests.rs"]
+mod admin_window_tests;
 #[path = "api_expiry_tests.rs"]
 mod api_expiry;
+#[path = "key_lifetime_tests.rs"]
+mod key_lifetime_tests;
 
 #[path = "device_pending_tests.rs"]
 mod device_pending;

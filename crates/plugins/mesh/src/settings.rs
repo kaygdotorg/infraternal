@@ -360,7 +360,7 @@ async fn set_default(
             hash,
             actor,
             now,
-            infraternal_plugin_api::FRESH_SECONDS,
+            infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
         )
         .await
         .map_err(|error| storage_sql_error(error))?
@@ -396,7 +396,7 @@ async fn set_default(
             hash,
             actor,
             now,
-            infraternal_plugin_api::FRESH_SECONDS,
+            infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
         )
         .await
         .map_err(|error| storage_sql_error(error))?

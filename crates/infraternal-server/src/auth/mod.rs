@@ -6,6 +6,7 @@
 
 mod account_events;
 pub(crate) use account_events::AccountSubscription;
+mod action_tap;
 mod binding;
 #[path = "../bootstrap_authorization.rs"]
 mod bootstrap_authorization;
@@ -25,13 +26,15 @@ mod setup;
 mod webauthn;
 mod wraps;
 
+pub(crate) use action_tap::{TapAction, require_tap_tx};
+/// 32 random bytes, base64url: an unguessable single-use capability id.
+pub(crate) use crypto::random as random_capability;
 use crypto::{constant_prf_input, prf_salt, random, recovery_hash};
 pub(crate) use crypto::{hash, session_incarnation};
 #[cfg(feature = "remote")]
 pub(crate) use http::cookie as session_cookie_from_headers;
 pub use sessions::Session;
-use sessions::insert_session;
-pub(crate) use sessions::require_session_tx;
+use sessions::{insert_session, require_live_session_tx};
 pub use wraps::Wrap;
 use wraps::put_wrap;
 mod migration_compat;
@@ -62,7 +65,6 @@ pub(crate) use http::router_with_invitation_issuer;
 const DAY: i64 = 86_400;
 const SESSION: i64 = 30 * DAY;
 const CEREMONY: i64 = 300;
-const FRESH: i64 = infraternal_plugin_api::FRESH_SECONDS;
 
 /// Fresh real passkey verification without a browser session or implied role.
 /// Construction stays inside the verifier; identifiers alone cannot forge it.
@@ -153,6 +155,8 @@ struct Login {
     state: LoginState,
     expires: i64,
     binding: Option<String>,
+    /// Digest of the one action this tap is for (`action_tap`); `None` for a plain sign-in.
+    action: Option<String>,
     /// For an anonymous (discoverable) ceremony started over HTTP, the
     /// caller's enclosing network; it bounds that network's share.
     network: Option<std::net::IpAddr>,
@@ -207,6 +211,12 @@ pub struct Auth {
 // any invalid/expired capability returns Denied; database failures return Storage.
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
+    /// Let sibling server adapters share the pool used by auth transactions.
+    #[must_use]
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Return the pinned public origin; HTTP proxy headers cannot override it.
     #[must_use]
     pub fn origin(&self) -> &str {

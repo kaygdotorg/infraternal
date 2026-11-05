@@ -18,6 +18,8 @@ async function open(page: Page) {
   await expect(page.getByRole("option", { name: /Terminal › Hosts/ })).toBeVisible({ timeout: 25_000 });
   await page.keyboard.press("Escape");
 }
+/** Gives the machine back the way a person does: the window loses typing focus (the pill's mark is not a button). */
+const letGo = (page: Page) => page.locator(".aw-stage").evaluate((el) => (el as HTMLElement).blur());
 async function enable(page: Page) {
   await requireFixtureH264(page);
   await page.keyboard.press(paletteShortcut);
@@ -43,12 +45,12 @@ test("the default setting keeps New window opening shells", async ({ page }) => 
 test("the production setting enables viewing, control and releasing its native lease", async ({ page }) => {
   await open(page);
   await enable(page);
-  await expect(page.locator(".aw-control")).toHaveCount(0);
+  await expect(page.locator(".aw-pillmark")).toHaveCount(0);
   await page.screenshot({ path: tracerEvidencePath("production-app-viewing.png") });
   await page.locator(".aw-stage").click();
-  await expect(page.locator(".aw-control")).toContainText("Controlled from infraternal");
+  await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal");
   await page.screenshot({ path: tracerEvidencePath("production-app-control.png") });
-  await page.locator(".aw-control").click();
+  await letGo(page);
   await expect.poll(async () => (await (await page.request.get("/__mock/appwin/state")).json()).sessions[0]?.controller).toBe(false);
   await expect(page.locator(".aw-stage")).toHaveAttribute("data-picture", "live");
 });

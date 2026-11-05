@@ -83,6 +83,8 @@ export async function replacePasskey(token: string, words: string,
 }
 
 /** Rotates a legacy recovery envelope from an unlocked device; no migration UI is implied.
+ * The caller's passkey tap must be bound to `{ kind: "recovery.rotate" }` (D336) and made
+ * less than two minutes before finish.
  * The caller owns the DEK and must acknowledge saving words before calling finish.
  * Copy the key for this operation so caller cleanup cannot race local wrapping.
  */

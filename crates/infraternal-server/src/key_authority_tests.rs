@@ -43,6 +43,7 @@ async fn key_export_rechecks_role_session_and_cold_lock() {
         key: key.clone(),
         owner: owner.clone(),
         session: Some(Secret::new(token)),
+        api_key_hash: None,
     };
     assert!(provider.server_key().await.unwrap().is_none());
     key.unlock_from(vault.as_ref()).unwrap();

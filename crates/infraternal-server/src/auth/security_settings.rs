@@ -1,5 +1,6 @@
-//! Server-wide API key inactivity policy; owner changes require fresh passkey authority (#269).
-use super::{Auth, Error, Result, hash, require_session_tx};
+//! Server-wide API key inactivity policy; an owner change spends a passkey tap made for that
+//! exact value (#269, D333, D336).
+use super::{Auth, Error, Result, TapAction, hash, require_tap_tx};
 use serde::{Deserialize, Serialize};
 
 /// Current API key policy, applied at check time even to keys issued before a policy change.
@@ -37,14 +38,22 @@ impl Auth {
             return Err(Error::Invalid);
         }
         let session = self.session(token, now).await?;
-        session.require_fresh(now)?;
         if !session.owner {
             return Err(Error::Denied);
         }
         // Take the writer before rechecking authority, so concurrent logout/recovery wins
         // if it committed before this mutation; never trust a pre-lock owner snapshot.
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool).await?;
-        require_session_tx(&mut tx, &hash(token), &session.user_id, now).await?;
+        require_tap_tx(
+            &mut tx,
+            &hash(token),
+            &session.user_id,
+            &TapAction::SecuritySettings {
+                api_key_lifetime_days: settings.api_key_lifetime_days,
+            },
+            now,
+        )
+        .await?;
         let owner: bool = sqlx::query_scalar("SELECT owner FROM users WHERE id=?")
             .bind(&session.user_id)
             .fetch_one(&mut *tx)

@@ -1027,6 +1027,8 @@ mod tests {
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     }];
     const CONTROL: &[ActionDef] = &[ActionDef {
         id: "fixture.control",
