@@ -499,7 +499,8 @@ class Binary:
             assert time.monotonic() < deadline, 'detached relay did not acknowledge its resize'
 
     def until(self, marker, credit=True):
-        deadline = time.monotonic() + 20
+        """Process frames until `marker` appears in recent output; HANG only detects a hang."""
+        deadline = time.monotonic() + HANG
         while marker not in self.data[max(0, len(self.data) - 32768):]:
             assert time.monotonic() < deadline
             self.process(credit)
