@@ -1,4 +1,4 @@
-//! Removes visible host inventory and owned SSH pins while retaining certificate denial tombstones [16][168][198], #87.
+//! Records host removal denial, retains pending cleanup details and forgets owned SSH pins [16][168][198], #87.
 //!
 //! A removal is a dry run, then the removal. In the browser both run inside the 15-minute
 //! admin window that a sign-in tap opens (D333, D339): the dry run returns a single-use review
@@ -208,7 +208,8 @@ impl Removal {
     }
 
     /// Persist verified denial and return pending instead of retaining admission
-    /// until an offline host returns. Only its durable receipt completes retirement.
+    /// until an offline host returns. Only its durable receipt completes retirement
+    /// and removes bootstrap coordinates needed for manual uninstall.
     async fn publish(
         &self,
         entry: Pending,
@@ -302,16 +303,23 @@ impl Removal {
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query("DELETE FROM remote_host_bootstrap WHERE host_id=?")
-            .bind(entry.host.as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await?;
+        // UUID owners need a durable person-cleanup receipt. Keep their install
+        // coordinates until that receipt; legacy identities retire immediately.
+        if Uuid::parse_str(&entry.user).is_err() {
+            sqlx::query("DELETE FROM remote_host_bootstrap WHERE host_id=?")
+                .bind(entry.host.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await?;
+        }
         #[cfg(feature = "ssh")]
         if let Some(lookup) = lookup {
+            // Retained pending removal coordinates are history, not another live user
+            // of this pin. They must not prevent forgetting the last live pin.
             let shared: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap WHERE trust_lookup=?)",
+                "SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b WHERE b.trust_lookup=? AND b.host_id<>? AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=b.host_id))",
             )
             .bind(&lookup)
+            .bind(entry.host.as_bytes().as_slice())
             .fetch_one(&mut *tx)
             .await?;
             if !shared {
@@ -341,7 +349,7 @@ impl Removal {
         );
         if pending {
             message = format!(
-                "{}: revoked, cleanup pending. Its infraternal agent must reconnect to confirm durable revocation.",
+                "{}: revoked, cleanup pending. {message}",
                 display_name(&name)
             );
         }
@@ -385,7 +393,7 @@ fn outcome(
             None,
         ),
         // Say plainly that the machine still runs it, and how to remove it
-        // there; the record is gone, so nothing here can retry (#235).
+        // there while automatic cleanup remains unconfirmed (#235).
         _ => {
             let commands = manual_uninstall(mode, installation.unwrap_or_default());
             let account = if mode == "rootful" {

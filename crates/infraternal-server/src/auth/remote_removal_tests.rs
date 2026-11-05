@@ -65,6 +65,15 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
     let message = result["message"].as_str().unwrap();
     assert_eq!(result["state"], "pending");
     assert!(message.contains("revoked, cleanup pending"));
+    let command = result["manual"].as_str().unwrap();
+    assert!(
+        message.contains(command),
+        "pending response hid the manual command: {message}"
+    );
+    assert!(
+        !message.contains("must reconnect"),
+        "online cleanup need not reconnect"
+    );
     // The commands run the installed binary's own ownership-checked uninstall
     // for exactly this host; they delete nothing by name.
     assert_eq!(
@@ -392,4 +401,82 @@ async fn offline_removals_do_not_block_other_revocations() {
         assert_eq!(result["state"], "pending");
     }
     eprintln!("J196 offline removal flood: nine distinct denials committed, cleanup pending");
+}
+
+/// Bootstrap coordinates remain available while denial is pending, and only
+/// the exact person's durable receipt may remove them.
+#[tokio::test]
+async fn pending_removal_retains_bootstrap_until_durable_receipt() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let start = service.start(&f.session, host, true, NOW).await.unwrap();
+    let result = service
+        .finish_host(&f.session, host, str_field(&start, "review"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "pending");
+    let coordinates: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        coordinates, 1,
+        "pending cleanup discarded its bootstrap coordinates"
+    );
+    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
+    store
+        .confirm_login_cleanup(host, Uuid::new_v4())
+        .await
+        .unwrap();
+    let coordinates: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        coordinates, 1,
+        "foreign receipt discarded bootstrap coordinates"
+    );
+    store
+        .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
+        .await
+        .unwrap();
+    let coordinates: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(coordinates, 0);
+}
+
+/// Pending describes a missing durable receipt, independently of whether the
+/// host is connected or whether its installation is retained.
+#[tokio::test]
+async fn pending_removal_does_not_claim_a_reconnect_is_required() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let start = service.start(&f.session, host, false, NOW).await.unwrap();
+    let result = service
+        .finish_host(&f.session, host, str_field(&start, "review"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "pending");
+    assert!(
+        !result["message"]
+            .as_str()
+            .unwrap()
+            .contains("must reconnect")
+    );
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("stays installed")
+    );
 }

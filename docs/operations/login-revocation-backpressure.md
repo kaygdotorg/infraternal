@@ -57,6 +57,16 @@ that the server recorded denial, not that the host has finished cleanup.
 The existing `host_cleanup` field describes the uninstall attempt, independently
 of the durable login revocation receipt.
 
+If setup installed the host and automatic uninstall could not be delivered, the
+pending response includes its ownership-checked `manual` uninstall command in
+both the status sentence and the structured field. The browser offers **Copy
+command** while leaving the host listed as pending; human CLI output also prints
+the command. Run it locally on the named host as root for a rootful installation,
+or as the account that installed a rootless one. Bootstrap coordinates remain
+stored until the host's durable cleanup receipt, so a pending removal does not
+discard the installation information. Pending means that confirmation is still
+outstanding; an already connected host need not reconnect to provide it.
+
 The eight-slot removal pool covers the authorized commit, not the wait for an
 offline host. Its durable outbox row retains the obligation across request
 cancellation and server restart without retaining a removal task or permit.

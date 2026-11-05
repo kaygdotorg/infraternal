@@ -1,6 +1,7 @@
 /**
  * Registry-labelled host removal for both machine details and the palette [D16, D168]. The server
  * dry-runs it, then removes it inside the 15-minute admin window, with no passkey of its own (D339).
+ * Pending cleanup keeps both the host row and the manual uninstall copy action available.
  */
 import { mountConfirmTip } from "../../../../packages/ui/src/tooltip";
 import type { CoreScreen } from "../core-screen";
@@ -32,16 +33,15 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
           if (start.action.host_id !== id || start.action.uninstall !== true || typeof start.review !== "string") throw new Error("Host confirmation changed. Try again.");
           const result = await post<Result>("remove/finish", { host_id: id, review: start.review });
           if (!["removed", "pending"].includes(result.state) || result.host_id !== id) throw new Error("Host removal could not be confirmed.");
-          if (result.state === "pending") {
-            core.toast.show({ message: result.message, duration: 5000 });
-            return;
-          }
-          removed(id);
+          if (result.state === "removed") removed(id);
           const manual = result.manual;
           if (typeof manual === "string" && manual) {
-            // The record is gone, so nothing here can retry: say so by name and hand over the commands (#235).
+            // Pending delivery must keep the same local uninstall action as a
+            // completed removal with a leftover installation (#235).
             core.toast.show({
-              message: `${name} was removed here, but infraternal is still installed on it. Copy the command and run it there.`,
+              message: result.state === "pending"
+                ? `${name}: revoked, cleanup pending. infraternal is still installed on it. Copy the command and run it there.`
+                : `${name} was removed here, but infraternal is still installed on it. Copy the command and run it there.`,
               tone: "error",
               dismissible: true,
               action: { label: "Copy command", onSelect: () => { void navigator.clipboard.writeText(manual).then(() => core.toast.show({ message: `Command copied. Run it on ${name}.`, duration: 5000 }), () => core.toast.show({ message: result.message, tone: "error", dismissible: true })); } },

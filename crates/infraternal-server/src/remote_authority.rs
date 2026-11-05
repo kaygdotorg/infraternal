@@ -96,6 +96,7 @@ impl EnrollmentStore {
     }
 
     /// Finalize retirement only on a durable daemon reply; lost replies stay pending.
+    /// A removal keeps bootstrap coordinates for manual cleanup until this receipt.
     pub(crate) async fn confirm_login_cleanup(
         &self,
         host: Uuid,
@@ -114,6 +115,12 @@ impl EnrollmentStore {
             .await?;
         sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NOT NULL)")
             .bind(host.as_bytes().as_slice()).execute(&mut *transaction).await?;
+        // Only removal owns this deletion. Other revocation paths may retain
+        // bootstrap coordinates for their existing restoration contract; a
+        // foreign receipt cannot erase either kind of installation information.
+        sqlx::query("DELETE FROM remote_host_bootstrap WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=remote_host_bootstrap.host_id) AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_host_bootstrap.host_id AND q.person_id=? AND q.confirmed=1)")
+            .bind(host.as_bytes().as_slice()).bind(person.to_string())
+            .execute(&mut *transaction).await?;
         transaction.commit().await?;
         self.1.tombstoned(host);
         self.publish_revoked_authority().await;
