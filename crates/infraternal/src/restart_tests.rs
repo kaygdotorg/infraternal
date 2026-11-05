@@ -6,7 +6,8 @@ mod deleted_path_review;
 
 use super::*;
 use crate::restart_binary::fixture::{
-    ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all, stripped_test_image,
+    ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all,
+    stripped_test_image,
 };
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
