@@ -36,13 +36,23 @@ fn remove_if_ours(path: &Path, prefix: &str) -> io::Result<()> {
     }
 }
 
+/// Remove the `ssh_config.d` file and the known-hosts file under `root`, each
+/// only if infraternal wrote it (checked by content). The mesh SSH component
+/// uses this when a person's client is turned off; the key socket stays.
+///
+/// # Errors
+/// Returns filesystem errors other than a missing file.
+pub fn remove_client_config(root: &Path) -> io::Result<()> {
+    remove_if_ours(&under(root, CONFIG_PATH), HEADER)?;
+    remove_if_ours(&under(root, KNOWN_HOSTS_PATH), "@cert-authority ")
+}
+
 /// Remove the mesh SSH client files under `root`.
 ///
 /// # Errors
 /// Returns filesystem errors other than a missing file.
 pub fn remove_client_files(root: &Path) -> io::Result<()> {
-    remove_if_ours(&under(root, CONFIG_PATH), HEADER)?;
-    remove_if_ours(&under(root, KNOWN_HOSTS_PATH), "@cert-authority ")?;
+    remove_client_config(root)?;
     match std::fs::remove_file(under(root, SOCKET_PATH)) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}

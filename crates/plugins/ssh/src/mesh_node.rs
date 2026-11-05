@@ -199,6 +199,9 @@ pub struct MeshSshNode {
     mesh: watch::Sender<Option<MeshView>>,
     desired: watch::Sender<Desired>,
     lifecycle: Arc<Lifecycle>,
+    /// Where the client files live: `/` in production, a scratch directory
+    /// in tests.
+    files_root: PathBuf,
     supervisor: Option<JoinHandle<()>>,
     socket: Option<JoinHandle<()>>,
     runtime: Option<Runtime>,
@@ -310,10 +313,24 @@ impl MeshSshNode {
                 stop: watch::Sender::new(false),
                 idle: watch::Sender::new(true),
             }),
+            files_root: PathBuf::from("/"),
             supervisor: None,
             socket: None,
             runtime: None,
         })
+    }
+
+    /// Write and remove the client files under `root` instead of `/`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_files_root(mut self, root: PathBuf) -> Self {
+        self.files_root = root;
+        self
+    }
+
+    /// `path` under this node's files root.
+    fn file(&self, path: &str) -> PathBuf {
+        self.files_root.join(path.trim_start_matches('/'))
     }
 
     /// The hook the infraternal agent runs when it shuts down: stop every
@@ -437,7 +454,8 @@ impl MeshSshNode {
     /// Install or remove the client side: certificate, files and key socket.
     fn client(&mut self, input: &[u8]) -> Result<Vec<u8>, PluginError> {
         let input: Client = serde_json::from_slice(input).map_err(|_| PluginError::Rejected)?;
-        let known_hosts = Path::new(KNOWN_HOSTS);
+        let known_hosts = self.file(KNOWN_HOSTS);
+        let config_path = self.file(crate::mesh_client_config::CONFIG_PATH);
         let Some(person) = input.person else {
             *self
                 .shared
@@ -449,7 +467,10 @@ impl MeshSshNode {
                 .allowed
                 .write()
                 .map_err(|_| PluginError::Rejected)? = None;
-            remove_client_files(known_hosts);
+            // Only files infraternal wrote: a person's own same-named file
+            // stays (J236 P3-2), as on uninstall.
+            infraternal_plugin_api::mesh_ssh_files::remove_client_config(&self.files_root)
+                .map_err(|_| PluginError::Rejected)?;
             return Ok(br#"{"accepted":true}"#.to_vec());
         };
         let allowed = match input.added_with {
@@ -499,13 +520,14 @@ impl MeshSshNode {
             network,
             prefix,
             Path::new(SOCKET),
-            known_hosts,
+            &known_hosts,
             &input.hosts,
         )
         .ok_or(PluginError::Rejected)?;
         let known = crate::mesh_client_config::known_hosts(&suffix, network, prefix, ca)
             .ok_or(PluginError::Rejected)?;
-        write_client_files(known_hosts, &known, &config).map_err(|_| PluginError::Rejected)?;
+        write_client_files(&known_hosts, &known, &config_path, &config)
+            .map_err(|_| PluginError::Rejected)?;
         *self
             .shared
             .allowed
@@ -591,21 +613,12 @@ fn write_file(path: &std::path::Path, contents: &str, mode: u32) -> std::io::Res
 fn write_client_files(
     known_hosts: &std::path::Path,
     known: &str,
+    config_path: &std::path::Path,
     config: &str,
 ) -> std::io::Result<()> {
     // Readable by every local account: they hold only public keys and paths.
     write_file(known_hosts, known, 0o644)?;
-    write_file(
-        std::path::Path::new(crate::mesh_client_config::CONFIG_PATH),
-        config,
-        0o644,
-    )
-}
-
-/// Remove both client files; missing files are fine.
-fn remove_client_files(known_hosts: &std::path::Path) {
-    let _ = std::fs::remove_file(crate::mesh_client_config::CONFIG_PATH);
-    let _ = std::fs::remove_file(known_hosts);
+    write_file(config_path, config, 0o644)
 }
 
 /// Serve the key socket. Every connection's kernel peer credentials decide

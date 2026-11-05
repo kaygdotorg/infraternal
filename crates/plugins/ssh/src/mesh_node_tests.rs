@@ -356,3 +356,36 @@ fn a_revoking_push_lands_while_logins_keep_overlapping() {
     assert!(accepted.is_some(), "a revoking push never installed");
     assert!(!still_allowed, "a login after the revocation still passed");
 }
+
+/// J236 P3-2 (#221): turning a person off (`{"person":null}`, pushed to every
+/// node with mesh SSH off) removes only client files infraternal wrote, the
+/// same content check uninstall makes; a same-named file it did not write
+/// stays.
+#[test]
+fn turning_the_client_off_removes_only_files_infraternal_wrote() {
+    use infraternal_plugin_api::mesh_ssh_files::{CONFIG_PATH, HEADER, KNOWN_HOSTS_PATH};
+    let root = directory(0o755);
+    let at = |path: &str| root.join(path.trim_start_matches('/'));
+    std::fs::create_dir_all(at(CONFIG_PATH).parent().unwrap()).unwrap();
+    let mut node = MeshSshNode::new(std::env::temp_dir(), |_| None)
+        .unwrap()
+        .with_files_root(root.clone());
+    let off = serde_json::to_vec(&json!({"person": null})).unwrap();
+    // Not ours: a person's own files of the same names stay.
+    std::fs::write(at(CONFIG_PATH), "Host *\n    User someone\n").unwrap();
+    std::fs::write(at(KNOWN_HOSTS_PATH), "db-01 ssh-ed25519 AAAA\n").unwrap();
+    node.call("mesh-ssh-node.client", &off).unwrap();
+    assert!(at(CONFIG_PATH).exists());
+    assert!(at(KNOWN_HOSTS_PATH).exists());
+    // Ours: removed.
+    std::fs::write(at(CONFIG_PATH), format!("{HEADER} for mesh names only.\n")).unwrap();
+    std::fs::write(
+        at(KNOWN_HOSTS_PATH),
+        "@cert-authority *.mesh ssh-ed25519 AAAA\n",
+    )
+    .unwrap();
+    node.call("mesh-ssh-node.client", &off).unwrap();
+    assert!(!at(CONFIG_PATH).exists());
+    assert!(!at(KNOWN_HOSTS_PATH).exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
