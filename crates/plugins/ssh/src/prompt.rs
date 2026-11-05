@@ -89,8 +89,12 @@ pub(crate) async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use tokio::io::AsyncReadExt;
 
+    // The helper is verified through /proc/<pid>; without /proc (macOS) every
+    // helper is refused, so the "served once" half can only pass on Linux.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn helper_reply_requires_the_registered_parent_and_is_served_once() {
         let root = PathBuf::from(std::env::var_os("HOME").unwrap())

@@ -5,13 +5,15 @@ from pathlib import Path
 import subprocess
 from evidence_path import evidence_directory
 
-scratch_root = evidence_directory("verify-vt-native").parent
-target_root = Path(os.environ.get("CARGO_TARGET_DIR", scratch_root / "target"))
+root = Path(__file__).resolve().parent.parent
+target_root = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+if not target_root.is_absolute():
+    target_root = root / target_root
 parser = argparse.ArgumentParser()
 parser.add_argument("probe", choices=["mouse", "allocation"])
 parser.add_argument("--library", type=Path)
 parser.add_argument("--evidence", type=Path, default=evidence_directory("verify-vt-native"))
-parser.add_argument("--build-dir", type=Path, default=scratch_root / "target" / "vt-probes")
+parser.add_argument("--build-dir", type=Path, default=target_root / "vt-probes")
 args = parser.parse_args()
 args.evidence.mkdir(parents=True, exist_ok=True)
 # Select the most recent completed adapter build, never an in-progress archive.
@@ -19,10 +21,14 @@ lib = args.library or max((target_root / "debug/build").glob("infraternal-shim-*
 lib = lib.resolve()
 include = lib.parents[2] / "ghostty-source/include"
 source = Path("crates/infraternal-shim/tests/native") / (args.probe + "_probe.c")
+# Match scripts/build-vt: stage the checksum-pinned compiler even when the
+# invoking dev shell has no Zig on PATH. Never substitute a host compiler.
+subprocess.run([str(root / "scripts/auth-toolchain")], cwd=root, check=True)
+zig = target_root / "auth-tools/zig/zig"
 args.build_dir.mkdir(parents=True, exist_ok=True)
 exe = args.build_dir / (args.probe + "-probe")
 with (args.evidence / (args.probe + "-build.log")).open("w") as log:
-    result = subprocess.run(["zig", "cc", "-I", str(include), str(source), str(lib), "-lpthread", "-lm", "-ldl", "-o", str(exe)], stdout=log, stderr=log)
+    result = subprocess.run([str(zig), "cc", "-I", str(include), str(source), str(lib), "-lpthread", "-lm", "-ldl", "-o", str(exe)], stdout=log, stderr=log)
 if result.returncode:
     raise SystemExit("native probe build FAIL")
 failed = False

@@ -48,16 +48,18 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
         .mode(0o700)
         .create(&state)
         .unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .arg0("infraternal")
-        .args(["--exact", NAME, "--nocapture"])
-        .current_dir(&state)
-        .env("REVIEW_RECOVERY_PATH_STATE", &state)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = Command::new(crate::restart_binary::fixture::stripped_test_image(
+        &std::env::current_exe().unwrap(),
+    ))
+    .arg0("infraternal")
+    .args(["--exact", NAME, "--nocapture"])
+    .current_dir(&state)
+    .env("REVIEW_RECOVERY_PATH_STATE", &state)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
     // A refused or stalled child must not keep this functional review open.
     let deadline = std::time::Instant::now() + super::HANG_BOUND;
     while child.try_wait().unwrap().is_none() {

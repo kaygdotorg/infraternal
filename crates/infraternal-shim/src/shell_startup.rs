@@ -63,6 +63,53 @@ fn environment(command: &Command, name: &str, inherited: bool) -> Option<OsStrin
     }
 }
 
+/// The zsh startup directory (`ZDOTDIR`) a person's shell may inherit from
+/// the root infraternal agent's environment, or `None` (Linux, #328 P3-1).
+///
+/// zsh runs startup code from this directory, so nobody but the person or
+/// root may be able to change it: the canonical directory and every ancestor
+/// must be owned by root or `uid`, and none may be writable by its group or by
+/// others. Group write is refused outright, because group membership and
+/// named ACL entries cannot be proven exclusive (J215 P3-2). Only a sticky
+/// writable ancestor such as /tmp (mode 1777) is accepted, since nobody but
+/// an entry's owner can rename or remove entries in it; the directory itself
+/// must never be writable by group or others. The result is the canonical path, so a later symlink
+/// swap cannot redirect it. macOS never forwards `ZDOTDIR` (`session_shell`).
+#[cfg(target_os = "linux")]
+pub(crate) fn zsh_directory(user: &nix::unistd::User) -> Option<std::path::PathBuf> {
+    let value = std::env::var_os("ZDOTDIR")?;
+    trusted_directory(Path::new(&value), user)
+}
+
+/// Whether `path` resolves to a directory only `user` or root controls.
+#[cfg(target_os = "linux")]
+fn trusted_directory(path: &Path, user: &nix::unistd::User) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    if !path.is_absolute() {
+        return None;
+    }
+    let real = path.canonicalize().ok()?;
+    let mut current = Some(real.as_path());
+    let mut leaf = true;
+    while let Some(directory) = current {
+        let metadata = std::fs::symlink_metadata(directory).ok()?;
+        let owner = metadata.uid();
+        let mode = metadata.mode();
+        let sticky = mode & 0o1000 != 0;
+        if !metadata.is_dir()
+            || (owner != 0 && owner != user.uid.as_raw())
+            // Group or other write is refused, except on a sticky ancestor,
+            // where nobody but an entry's owner can rename or remove it.
+            || (mode & 0o022 != 0 && (leaf || !sticky))
+        {
+            return None;
+        }
+        leaf = false;
+        current = directory.parent();
+    }
+    Some(real)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +287,59 @@ mod tests {
         )
         .unwrap();
         fixture
+    }
+
+    /// `ZDOTDIR` is forwarded only from directories the person or root
+    /// controls (#328 P3-1).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_directory_must_belong_to_the_person_or_root() {
+        let me = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+            .unwrap()
+            .unwrap();
+        // Fresh directories under the sticky /tmp, with exact modes: a
+        // checkout's own mode depends on the umask that cloned it.
+        let directory = |label: &str, mode: u32| {
+            let path = Path::new("/tmp").join(format!("zdotdir-{label}-{}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        let own = directory("own", 0o755);
+        assert!(
+            trusted_directory(&own, &me).is_some(),
+            "the person's own directory"
+        );
+        assert!(trusted_directory(Path::new("relative/dir"), &me).is_none());
+        assert!(trusted_directory(Path::new("/nonexistent-j146"), &me).is_none());
+        // World-writable: anyone could plant startup code.
+        let open = directory("open", 0o777);
+        assert!(
+            trusted_directory(&open, &me).is_none(),
+            "a world-writable directory"
+        );
+        // Group-writable, even in the person's user-private group: other
+        // members or named ACL entries could write to it (J215 P3-2).
+        let shared = directory("group", 0o775);
+        assert!(
+            trusted_directory(&shared, &me).is_none(),
+            "a group-writable directory"
+        );
+        // Another person's directory: what the root agent leaked before.
+        if !nix::unistd::Uid::effective().is_root() {
+            let other = nix::unistd::User {
+                uid: nix::unistd::Uid::from_raw(me.uid.as_raw() + 1),
+                gid: nix::unistd::Gid::from_raw(me.gid.as_raw() + 1),
+                name: format!("{}-other", me.name),
+                ..me.clone()
+            };
+            assert!(
+                trusted_directory(&own, &other).is_none(),
+                "another account's directory"
+            );
+        }
+        for path in [own, open, shared] {
+            fs::remove_dir(path).unwrap();
+        }
     }
 }

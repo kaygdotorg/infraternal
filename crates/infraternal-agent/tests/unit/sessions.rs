@@ -206,7 +206,8 @@ async fn post_listen_chmod_wakes_a_connection_refused_at_bind() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let path = state.join("sessions/01010101010101010101010101010101.sock");
-    let watch = super::socket_readiness(&state).unwrap();
+    // The fixture reads the raw inotify events behind the readiness wrapper.
+    let watch = super::SocketReadiness::new(&state).unwrap().0;
     let fd = socket(
         AddressFamily::Unix,
         SockType::Stream,
@@ -418,7 +419,7 @@ async fn slow_shim_start_is_not_refused_while_its_launcher_lives() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let id = uuid::Uuid::new_v4();
-    let watch = super::socket_readiness(&state).unwrap();
+    let watch = super::SocketReadiness::new(&state).unwrap();
     let mut child = launcher("sleep", &["60"]);
     let shim = fake_shim(
         &state,
@@ -440,7 +441,7 @@ async fn launcher_exit_before_rendezvous_refuses_without_waiting_for_the_bound()
     let state = state(Some(directory.0.clone())).unwrap();
     let id = uuid::Uuid::new_v4();
     let path = state.join(format!("sessions/{}.sock", id.simple()));
-    let watch = super::socket_readiness(&state).unwrap();
+    let watch = super::SocketReadiness::new(&state).unwrap();
     for (program, args) in [("sh", &["-c", "exit 3"][..]), ("true", &[][..])] {
         let mut child = launcher(program, args);
         let error = super::await_launch(&path, id, &watch, &mut child, false)
@@ -468,7 +469,7 @@ async fn detached_launcher_success_keeps_waiting_for_the_session_process() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let id = uuid::Uuid::new_v4();
-    let watch = super::socket_readiness(&state).unwrap();
+    let watch = super::SocketReadiness::new(&state).unwrap();
     let mut child = launcher("true", &[]);
     // Order the exit before the bind so the test covers the case, not a timing guess.
     let status = child.wait().await.unwrap();

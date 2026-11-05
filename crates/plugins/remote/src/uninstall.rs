@@ -195,11 +195,7 @@ impl Kernel {
         retire: |_| Ok(Vec::new()),
     };
 }
-/// Report line for a kernel object uninstall leaves in place.
-#[must_use]
-pub fn left_line(name: &str) -> String {
-    format!("Left {name} because infraternal didn't create it here.")
-}
+pub use crate::left_line;
 
 /// Enabled only for a checked managed remote installation, without an idle task.
 pub struct UninstallPlugin {

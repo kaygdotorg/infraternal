@@ -9,13 +9,12 @@
 use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
-#[cfg(target_os = "linux")]
 use infraternal_shim::readiness::Registration;
 #[cfg(target_os = "linux")]
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use nix::unistd::Uid;
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::fd::AsRawFd as _;
 use std::{
     fs::{self, DirBuilder},
     io,
@@ -41,7 +40,7 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 // bind (#324); HANDSHAKE refused launches that were still progressing, and
 // their shells kept running. Process exit is the progress signal; this bound
 // only detects a hang, well inside the server's 60 s connect budget (#29).
-#[cfg(target_os = "linux")]
+// The same bound applies to macOS shims (#328).
 const LAUNCH: Duration = Duration::from_secs(30);
 /// How long a failed launch keeps trying to reach the detached shim it started. A shim that missed its
 /// Hello is slow rather than gone, and one that binds late has no socket yet, so cleanup waits for it
@@ -87,6 +86,27 @@ fn launch_bound() -> Duration {
     LAUNCH
 }
 
+/// How long manager detection may wait for `systemctl show-environment`.
+///
+/// Release builds always use [`HANDSHAKE`] (2 s). Debug builds let an
+/// integration oracle widen it with `INFRATERNAL_TEST_MANAGER_PROBE_BUDGET_MS`,
+/// because the lazy-manager oracle holds the probe on purpose until it has seen
+/// the daemon answer Hello and Pong. On a contended build host a debug daemon
+/// can take longer than 2 s to get there, and the deadline then killed the held
+/// probe before the oracle could check it (#355). This is the same seam as the
+/// status crate's `INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS` (#334).
+#[cfg(target_os = "linux")]
+fn manager_probe_budget() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = std::env::var("INFRATERNAL_TEST_MANAGER_PROBE_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return Duration::from_millis(milliseconds);
+    }
+    HANDSHAKE
+}
+
 /// Init manager selected once for session work, never periodically re-probed.
 #[derive(Clone, Copy, Debug)]
 pub enum Manager {
@@ -98,7 +118,6 @@ pub enum Manager {
 impl Manager {
     /// A shim needs direct exec for a live login or the kernel self-image;
     /// choosing its launcher must not replace the host login backend.
-    #[cfg(target_os = "linux")]
     pub(crate) fn for_shim(self, exe: &Path, login: bool) -> Self {
         if login || exe == Path::new("/proc/self/exe") {
             Self::Detached
@@ -128,11 +147,16 @@ impl Manager {
     }
 
     /// Probe the applicable manager without trusting environment hints alone.
-    /// `None` means no answer within `HANDSHAKE`; a refusal is an answer.
+    /// `None` means no answer within the probe budget; a refusal is an answer.
+    // launchd has no transient scopes: macOS shims always detach themselves.
+    #[cfg_attr(
+        target_os = "macos",
+        allow(clippy::unused_async, clippy::unused_async_trait_impl)
+    )]
     pub async fn probe() -> Option<Self> {
         #[cfg(target_os = "macos")]
         {
-            return Some(Self::Detached);
+            Some(Self::Detached)
         }
         #[cfg(target_os = "linux")]
         {
@@ -142,7 +166,7 @@ impl Manager {
                 command.arg("--user");
             }
             let available = timeout(
-                HANDSHAKE,
+                manager_probe_budget(),
                 command
                     .arg("show-environment")
                     .stdin(Stdio::null())
@@ -263,7 +287,13 @@ pub fn state_path(path: Option<PathBuf>) -> io::Result<PathBuf> {
     let path = if let Some(path) = path {
         path
     } else if Uid::effective().is_root() {
-        PathBuf::from("/run/infraternal")
+        // Root runtime state that the OS clears at boot: /run on Linux,
+        // /var/run (/private/var/run) on macOS, which has no /run.
+        PathBuf::from(if cfg!(target_os = "macos") {
+            "/var/run/infraternal"
+        } else {
+            "/run/infraternal"
+        })
     } else {
         let runtime = PathBuf::from(
             std::env::var_os("XDG_RUNTIME_DIR")
@@ -618,17 +648,213 @@ impl SessionEvents {
         }
     }
 }
-/// A no-op event source is sufficient while Darwin PTY sessions are unavailable.
+/// Directory retirement events through a kqueue vnode filter: an entry
+/// added to or removed from `sessions/` is a `NOTE_WRITE` on the directory.
 #[cfg(target_os = "macos")]
-pub(crate) struct SessionEvents;
+pub(crate) struct SessionEvents(DirectoryEvents);
 #[cfg(target_os = "macos")]
 impl SessionEvents {
-    pub(crate) fn new(_state: &Path) -> io::Result<Self> {
-        Ok(Self)
+    /// Watch `state/sessions` for entries being added or removed.
+    pub(crate) fn new(state: &Path) -> io::Result<Self> {
+        DirectoryEvents::new(&state.join("sessions")).map(Self)
     }
 
     pub(crate) async fn changed(&self) -> io::Result<()> {
-        std::future::pending::<io::Result<()>>().await
+        self.0.changed().await
+    }
+}
+
+/// One `EVFILT_VNODE` watch on a directory, opened event-only, plus an
+/// optional one-shot timer used only to bridge the bind/listen gap below.
+#[cfg(target_os = "macos")]
+pub(crate) struct DirectoryEvents {
+    queue: Registration<nix::sys::event::Kqueue>,
+    // Keeps the watched vnode's descriptor open for the filter's lifetime.
+    _directory: fs::File,
+}
+#[cfg(target_os = "macos")]
+impl DirectoryEvents {
+    /// The kqueue identifier of the one-shot bind/listen bridge timer.
+    const TIMER: usize = 1;
+
+    /// Open `directory` event-only and watch it for `NOTE_WRITE` (an entry added or removed).
+    pub(crate) fn new(directory: &Path) -> io::Result<Self> {
+        use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+        use std::os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _};
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_EVTONLY | nix::libc::O_DIRECTORY | nix::libc::O_CLOEXEC)
+            .open(directory)?;
+        let queue = Kqueue::new()?;
+        nix::fcntl::fcntl(
+            &queue,
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        )?;
+        let watch = KEvent::new(
+            usize::try_from(directory.as_raw_fd()).map_err(io::Error::other)?,
+            EventFilter::EVFILT_VNODE,
+            EvFlags::EV_ADD | EvFlags::EV_CLEAR,
+            FilterFlag::NOTE_WRITE,
+            0,
+            0,
+        );
+        infraternal_shim::readiness::kevent_now(&queue, &[watch], &mut [])?;
+        Ok(Self {
+            queue: Registration::new(queue)?,
+            _directory: directory,
+        })
+    }
+
+    /// Wake once after `millis` even without a directory change.
+    fn wake_after(&self, millis: isize) -> io::Result<()> {
+        use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent};
+        let timer = KEvent::new(
+            Self::TIMER,
+            EventFilter::EVFILT_TIMER,
+            EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
+            FilterFlag::empty(),
+            millis,
+            0,
+        );
+        infraternal_shim::readiness::kevent_now(self.queue.get_ref(), &[timer], &mut [])?;
+        Ok(())
+    }
+
+    /// Wait until the directory changed or the bridge timer fired, then drain the queue.
+    pub(crate) async fn changed(&self) -> io::Result<()> {
+        use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent};
+        loop {
+            let mut ready = self.queue.readable().await?;
+            match ready.try_io(|queue| {
+                let mut events = [KEvent::new(
+                    0,
+                    EventFilter::EVFILT_VNODE,
+                    EvFlags::empty(),
+                    FilterFlag::empty(),
+                    0,
+                    0,
+                ); 8];
+                match infraternal_shim::readiness::kevent_now(queue, &[], &mut events)? {
+                    0 => Err(io::ErrorKind::WouldBlock.into()),
+                    _ => Ok(()),
+                }
+            }) {
+                // Signals outlasted the bounded retries: yield to the runtime
+                // and retry with readiness kept, never spin or fail (#328).
+                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                    tokio::task::yield_now().await;
+                }
+                Ok(result) => return result,
+                Err(_would_block) => {}
+            }
+        }
+    }
+}
+
+/// The variables a shim may inherit from the infraternal agent, from `vars`.
+///
+/// A root shim must not run with whatever its agent was started with: a
+/// planted `DYLD_LIBRARY_PATH`, `BASH_ENV`, `ENV` or `PATH` would follow it into
+/// a root process (#328 J215 P3-1). Allowed: locale (`LANG`, `LC_*`) and, on
+/// Linux, what `systemd-run --user` needs to reach the person's manager
+/// (`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`), plus `ZDOTDIR`, which the
+/// shim forwards to a shell only after checking its directory
+/// (`shell_startup::zsh_directory`).
+fn shim_environment(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    vars.into_iter()
+        .filter(|(name, _)| shim_variable(name))
+        .collect()
+}
+
+/// Whether one variable is on the shim's allow-list (see `shim_environment`).
+fn shim_variable(name: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let name = name.as_bytes();
+    name == b"LANG"
+        || name.starts_with(b"LC_")
+        || (cfg!(target_os = "linux")
+            && matches!(
+                name,
+                b"XDG_RUNTIME_DIR" | b"DBUS_SESSION_BUS_ADDRESS" | b"ZDOTDIR"
+            ))
+}
+
+/// Resolve a launcher by name through the agent's own `PATH`, so the shim it
+/// starts needs no `PATH` of its own. An unresolved name is returned as is.
+fn on_path(name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(name))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+#[cfg(test)]
+mod shim_environment_tests {
+    //! The shim's environment allow-list (#328, J215 P3-1).
+    use super::*;
+    use std::ffi::OsString;
+
+    /// Hostile variables planted in the agent's environment never reach a
+    /// shim; locale does, and on Linux the user-manager variables do.
+    #[test]
+    fn only_allow_listed_variables_reach_the_shim() {
+        let planted = [
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "BASH_ENV",
+            "ENV",
+            "PATH",
+            "HOME",
+            "J146_PLANTED",
+        ];
+        let kept = ["LANG", "LC_ALL", "LC_CTYPE"];
+        let linux_only = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "ZDOTDIR"];
+        let vars = planted
+            .iter()
+            .chain(&kept)
+            .chain(&linux_only)
+            .map(|name| (OsString::from(name), OsString::from("x")));
+        let passed: Vec<String> = shim_environment(vars)
+            .into_iter()
+            .map(|(name, _)| name.into_string().unwrap())
+            .collect();
+        for name in planted {
+            assert!(!passed.iter().any(|p| p == name), "{name} reached the shim");
+        }
+        for name in kept {
+            assert!(passed.iter().any(|p| p == name), "{name} was dropped");
+        }
+        for name in linux_only {
+            assert_eq!(
+                passed.iter().any(|p| p == name),
+                cfg!(target_os = "linux"),
+                "{name}"
+            );
+        }
+    }
+
+    /// A launcher found on the agent's `PATH` resolves to its absolute path.
+    #[test]
+    fn launchers_resolve_through_the_agents_path() {
+        assert!(
+            on_path("sh").is_absolute(),
+            "sh is on every test host's PATH"
+        );
+        assert_eq!(
+            on_path("no-such-launcher-j146"),
+            PathBuf::from("no-such-launcher-j146")
+        );
     }
 }
 
@@ -647,16 +873,53 @@ pub(crate) fn isolated(program: &Path) -> Command {
 // bind emits IN_CREATE before listen, so a refused early connection must
 // also wake on chmod. The shim chmods to 0600 only after listen succeeds.
 #[cfg(target_os = "linux")]
-fn socket_readiness(state: &Path) -> io::Result<Registration<Inotify>> {
-    let watch =
-        Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).map_err(io::Error::from)?;
-    watch
-        .add_watch(
-            state.join("sessions").as_path(),
-            AddWatchFlags::IN_CREATE | AddWatchFlags::IN_ATTRIB,
-        )
-        .map_err(io::Error::from)?;
-    Registration::new(watch)
+/// Wakes a shim launch when its rendezvous socket may have become connectable (inotify on `sessions/`, Linux).
+struct SocketReadiness(Registration<Inotify>);
+#[cfg(target_os = "linux")]
+impl SocketReadiness {
+    /// Watch `state/sessions` for socket creation and the post-listen chmod.
+    fn new(state: &Path) -> io::Result<Self> {
+        let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC)
+            .map_err(io::Error::from)?;
+        watch
+            .add_watch(
+                state.join("sessions").as_path(),
+                AddWatchFlags::IN_CREATE | AddWatchFlags::IN_ATTRIB,
+            )
+            .map_err(io::Error::from)?;
+        Registration::new(watch).map(Self)
+    }
+    /// Wait for the next directory event. `_refused` is unused: Linux also wakes on the chmod after listen.
+    async fn changed(&self, _refused: bool) -> io::Result<()> {
+        let mut readiness = self.0.readable().await?;
+        if let Ok(result) = readiness.try_io(|fd| fd.read_events().map_err(io::Error::from)) {
+            result?;
+        }
+        Ok(())
+    }
+}
+
+// The directory filter fires when bind creates the socket's entry. Rust's
+// bind also listens, but a connect between those two syscalls is refused and
+// no further directory change follows, and a socket file cannot be opened
+// for its own vnode filter. Only after such a refusal, arm one 1 ms timer;
+// the launch's two-second deadline still bounds the whole wait.
+#[cfg(target_os = "macos")]
+/// Wakes a shim launch when its rendezvous socket may have become connectable (kqueue on `sessions/`, macOS).
+struct SocketReadiness(DirectoryEvents);
+#[cfg(target_os = "macos")]
+impl SocketReadiness {
+    /// Watch `state/sessions` for socket creation.
+    fn new(state: &Path) -> io::Result<Self> {
+        DirectoryEvents::new(&state.join("sessions")).map(Self)
+    }
+    /// Wait for the next directory change; after a refused connect, also wake once 1 ms later (see above).
+    async fn changed(&self, refused: bool) -> io::Result<()> {
+        if refused {
+            self.0.wake_after(1)?;
+        }
+        self.0.changed().await
+    }
 }
 
 /// Launch the same binary in an independent scope, or the shim's double fork.
@@ -794,7 +1057,7 @@ pub(crate) async fn launch_rootless_person(
 
 // Keep the ordered authentication/launch/handshake setup together.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn launch_configured(
     exe: &Path,
     state: &Path,
@@ -829,14 +1092,21 @@ async fn launch_configured(
     let id = uuid::Uuid::new_v4();
     let name = id.simple().to_string();
     let path = state.join("sessions").join(format!("{name}.sock"));
+    #[cfg(target_os = "linux")]
     let mut reservation = person
         .map(|person| crate::rootless_sessions::reserve(state, person, id))
         .transpose()?;
-    let watch = socket_readiness(state)?;
+    // Durable rootless person records belong to inherited host logins, which
+    // are Linux-only (D247); a macOS person shell comes from the root agent.
+    #[cfg(target_os = "macos")]
+    if person.is_some() {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    let watch = SocketReadiness::new(state)?;
     let mut command = if matches!(manager, Manager::Detached) {
         isolated(exe)
     } else {
-        let mut command = isolated(Path::new("systemd-run"));
+        let mut command = isolated(&on_path("systemd-run"));
         if matches!(manager, Manager::User) {
             command.arg("--user");
         }
@@ -846,6 +1116,16 @@ async fn launch_configured(
             .arg(exe);
         command
     };
+    // The shim (and its launcher) inherit only the standard handles plus what
+    // the login handoff below admits by name; never a stray agent descriptor,
+    // such as a shim or plugin connection authenticated as root (#328 P1).
+    infraternal_shim::inherit_only_standard_descriptors(command.as_std_mut());
+    // ...and only the allow-listed environment: never the agent's DYLD_*,
+    // LD_*, BASH_ENV, ENV, PATH or other inherited variables (#328 J215 P3-1).
+    // Locale values are added again below from the host's locale files.
+    command
+        .env_clear()
+        .envs(shim_environment(std::env::vars_os()));
     command
         .args([
             "__shim",
@@ -891,13 +1171,21 @@ async fn launch_configured(
     if let Some(pid) = login_worker_parent {
         command.arg("--login-worker-parent").arg(pid.to_string());
     }
+    #[cfg(target_os = "linux")]
     if let Some(process) = login_worker_proc {
         let pin = infraternal_shim::inherit_login_process(command.as_std_mut(), process)?;
         command.arg("--login-worker-proc").arg(pin);
     }
+    // Host-login workers are Linux-only (D247); macOS shells are placed by the
+    // shim's session-shell entry instead (D335).
+    #[cfg(target_os = "macos")]
+    if login.is_some() || login_worker_proc.is_some() {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
     // Start the shell on the original authenticated connection before the
     // privileged shim exec. Cancellation/spawn failure drops every parent copy;
     // the worker observes lease EOF and cleans up only this terminal request.
+    #[cfg(target_os = "linux")]
     let prestarted = if let (Some(endpoint), Some(pid), Some(process)) =
         (login, login_worker_pid, login_worker_proc)
     {
@@ -945,49 +1233,73 @@ async fn launch_configured(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    // From here the launch owns a running process, and the guard stops exactly
-    // that launch on EVERY way out other than success: an error, or the caller
-    // dropping this future (automation's 4 s deadline does). The cleanup runs on
-    // its own task and bound, so a cancelled caller cannot cancel it.
-    let record = reservation
-        .as_mut()
-        .and_then(crate::rootless_sessions::Reservation::spawned);
-    let mut launch = Launch {
-        child: Some(child),
-        watch: Some(watch),
-        state: state.to_path_buf(),
-        path,
-        id,
-        manager,
-        name,
-        detached,
-        record,
-    };
-    let written = if program.is_empty() {
-        Ok(())
-    } else {
-        match launch.child.as_mut().and_then(|child| child.stdin.take()) {
-            Some(mut stdin) => stdin.write_all(&program_bytes).await,
-            None => Err(io::ErrorKind::BrokenPipe.into()),
+    #[cfg(target_os = "macos")]
+    {
+        // macOS keeps the plain launch: the cleanup guard below is Linux-only (#324).
+        let mut child = child;
+        if !program.is_empty() {
+            child
+                .stdin
+                .take()
+                .ok_or(io::ErrorKind::BrokenPipe)?
+                .write_all(&program_bytes)
+                .await?;
         }
-    };
-    // Command's callbacks retain descriptor duplicates even after spawn. These
-    // must close before awaiting Hello; only the privileged shim owns the lease.
-    drop(command);
-    drop(prestarted);
-    written?;
-    let (Some(child), Some(watch)) = (launch.child.as_mut(), launch.watch.as_ref()) else {
-        return Err(io::Error::other("launch state was released early"));
-    };
-    let session = await_launch(&launch.path, id, watch, child, detached).await?;
-    // Scope launchers and directly owned login shims live until terminal exit.
-    // Reap independently; waiting here would hold terminal.open until close.
-    if let Some(mut child) = launch.child.take() {
+        drop(command);
+        let session = await_launch(&path, id, &watch, &mut child, detached).await;
+        // Scope launchers and directly owned login shims live until terminal exit.
+        // Reap independently; waiting here would hold terminal.open until close.
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
+        return session;
     }
-    Ok(session)
+    #[cfg(target_os = "linux")]
+    {
+        // From here the launch owns a running process, and the guard stops exactly
+        // that launch on EVERY way out other than success: an error, or the caller
+        // dropping this future (automation's 4 s deadline does). The cleanup runs on
+        // its own task and bound, so a cancelled caller cannot cancel it.
+        let record = reservation
+            .as_mut()
+            .and_then(crate::rootless_sessions::Reservation::spawned);
+        let mut launch = Launch {
+            child: Some(child),
+            watch: Some(watch),
+            state: state.to_path_buf(),
+            path,
+            id,
+            manager,
+            name,
+            detached,
+            record,
+        };
+        let written = if program.is_empty() {
+            Ok(())
+        } else {
+            match launch.child.as_mut().and_then(|child| child.stdin.take()) {
+                Some(mut stdin) => stdin.write_all(&program_bytes).await,
+                None => Err(io::ErrorKind::BrokenPipe.into()),
+            }
+        };
+        // Command's callbacks retain descriptor duplicates even after spawn. These
+        // must close before awaiting Hello; only the privileged shim owns the lease.
+        drop(command);
+        drop(prestarted);
+        written?;
+        let (Some(child), Some(watch)) = (launch.child.as_mut(), launch.watch.as_ref()) else {
+            return Err(io::Error::other("launch state was released early"));
+        };
+        let session = await_launch(&launch.path, id, watch, child, detached).await?;
+        // Scope launchers and directly owned login shims live until terminal exit.
+        // Reap independently; waiting here would hold terminal.open until close.
+        if let Some(mut child) = launch.child.take() {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+        Ok(session)
+    }
 }
 
 /// A launch whose process has started and whose Hello has not yet been accepted.
@@ -997,7 +1309,7 @@ struct Launch {
     /// The launcher this call spawned; `None` once it has been handed to its reaper (success).
     child: Option<tokio::process::Child>,
     /// Rendezvous directory watch for this launch's own Hello wait.
-    watch: Option<Registration<Inotify>>,
+    watch: Option<SocketReadiness>,
     /// The state directory, so cleanup can watch the rendezvous directory itself.
     state: PathBuf,
     /// This launch's own rendezvous socket.
@@ -1411,7 +1723,7 @@ async fn stop_scope(manager: Manager, name: &str) {
 /// authenticated close.
 #[cfg(target_os = "linux")]
 async fn close_detached(state: &Path, path: &Path, id: uuid::Uuid, budget: Duration) -> bool {
-    let Ok(watch) = socket_readiness(state) else {
+    let Ok(watch) = SocketReadiness::new(state) else {
         return false;
     };
     let deadline = tokio::time::Instant::now() + budget;
@@ -1431,13 +1743,11 @@ async fn close_detached(state: &Path, path: &Path, id: uuid::Uuid, budget: Durat
                 if error.kind() == io::ErrorKind::NotFound
                     || error.kind() == io::ErrorKind::ConnectionRefused =>
             {
-                let Ok(Ok(mut ready)) = tokio::time::timeout_at(deadline, watch.readable()).await
-                else {
-                    return false;
-                };
-                if let Ok(result) = ready.try_io(|fd| fd.read_events().map_err(io::Error::from))
-                    && result.is_err()
-                {
+                let refused = error.kind() == io::ErrorKind::ConnectionRefused;
+                if !matches!(
+                    tokio::time::timeout_at(deadline, watch.changed(refused)).await,
+                    Ok(Ok(()))
+                ) {
                     return false;
                 }
             }
@@ -1465,11 +1775,10 @@ async fn exit_observed(path: &Path) -> bool {
 
 /// Wait for a launched shim's Hello. Progress, not a short clock, decides failure: the launcher's exit before the
 /// rendezvous refuses the open at once, and `LAUNCH` only detects a hung start (#324).
-#[cfg(target_os = "linux")]
 async fn await_launch(
     path: &Path,
     id: uuid::Uuid,
-    watch: &Registration<Inotify>,
+    watch: &SocketReadiness,
     launcher: &mut tokio::process::Child,
     detached: bool,
 ) -> io::Result<Session> {
@@ -1481,11 +1790,13 @@ async fn await_launch(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
 }
 
-#[cfg(target_os = "linux")]
+/// Connect once per readiness event until the shim says Hello, or its
+/// launcher fails first. The directory watch is inotify on Linux and a kqueue
+/// vnode filter on macOS (`SocketReadiness`).
 async fn wait_for_hello(
     path: &Path,
     id: uuid::Uuid,
-    watch: &Registration<Inotify>,
+    watch: &SocketReadiness,
     launcher: &mut tokio::process::Child,
     detached: bool,
 ) -> io::Result<Session> {
@@ -1494,22 +1805,14 @@ async fn wait_for_hello(
         // Retry only after directory readiness; healthy handshakes are async.
         // There is no periodic connect loop while startup is pending. Once the
         // socket exists, `connect` bounds the shim's Hello by `HANDSHAKE`.
-        match connect(path.to_path_buf(), id.into_bytes()).await {
+        let refused = match connect(path.to_path_buf(), id.into_bytes()).await {
             Ok(session) => return Ok(session),
-            Err(error)
-                if error.kind() == io::ErrorKind::NotFound
-                    || error.kind() == io::ErrorKind::ConnectionRefused => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => true,
             Err(error) => return Err(error),
-        }
+        };
         tokio::select! {
-            readiness = watch.readable() => {
-                let mut readiness = readiness?;
-                if let Ok(result) =
-                    readiness.try_io(|fd| fd.read_events().map_err(io::Error::from))
-                {
-                    result?;
-                }
-            }
+            readiness = watch.changed(refused) => readiness?,
             status = launcher.wait(), if launcher_running => {
                 let status = status?;
                 // A detaching shim's first process exits once the session process is forked; that is progress.
@@ -1525,57 +1828,12 @@ async fn wait_for_hello(
     }
 }
 
-/// PTY session launch is unavailable while the Darwin session shim is compiled out.
-/// # Errors
-/// Always reports unsupported because macOS sessions are outside Mesh slice 1.
-#[allow(clippy::too_many_arguments)]
-#[cfg(target_os = "macos")]
-async fn launch_configured(
-    exe: &Path,
-    state: &Path,
-    manager: Manager,
-    uid: u32,
-    cols: u16,
-    rows: u16,
-    login: Option<&Path>,
-    login_cgroup: Option<&Path>,
-    login_worker_pid: Option<i32>,
-    login_worker_parent: Option<i32>,
-    login_worker_proc: Option<&std::fs::File>,
-    readiness: bool,
-    person: Option<uuid::Uuid>,
-    retain_output: bool,
-    program: &[String],
-) -> io::Result<Session> {
-    let _ = (
-        exe,
-        state,
-        manager,
-        uid,
-        cols,
-        rows,
-        login,
-        login_cgroup,
-        login_worker_pid,
-        login_worker_parent,
-        login_worker_proc,
-        readiness,
-        person,
-        retain_output,
-        program,
-    );
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "PTY sessions are unavailable on macOS in this slice.",
-    ))
-}
-
 #[cfg(all(test, target_os = "linux"))]
 #[path = "../tests/unit/sessions.rs"]
 mod tests;
 
 /// The startup pipe carries only bounded literal arguments; no shell or secret argv.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn command_input(program: &[String], readiness: bool) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     for argument in program {

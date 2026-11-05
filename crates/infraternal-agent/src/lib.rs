@@ -2,14 +2,14 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
 pub mod cli;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod daemon;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use control as daemon;
 #[path = "daemon_portable.rs"]
 pub mod control;
 mod daemon_writer;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle;
 mod login_auth;
 mod login_binary;
@@ -20,7 +20,7 @@ mod native_dispatch;
 pub mod plugin_control;
 pub mod plugins;
 // Shim census exists only on the local terminal platform; portable control has no PTYs.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_exits;
 pub mod relay;
 #[cfg(feature = "remote")]
@@ -38,6 +38,8 @@ pub use infraternal_plugin_remote::remote_quic;
 pub use infraternal_plugin_remote::remote_renewal;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_tls;
+// Session automation authenticates callers by walking /proc ancestry; it has
+// no macOS process-tree check yet, so it stays Linux-only (#328).
 #[cfg(target_os = "linux")]
 pub mod automation;
 pub mod sessions;

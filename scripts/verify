@@ -58,12 +58,14 @@ verify_latency() {
 
     report_environment auth-browser
     "${script_dir}/verify-auth-browser" || failed=1
+    # `set -e` does not apply inside a subshell on the left of `||`, so the steps are
+    # chained: a failed install or typecheck must fail the row, not only the browser run.
     (
-        cd -- "$repo_dir/apps/tracer"
-        bun install --frozen-lockfile
-        bun run check
-        report_environment tracer-browser
-        TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test
+        cd -- "$repo_dir/apps/tracer" &&
+            bun install --frozen-lockfile &&
+            bun run check &&
+            report_environment tracer-browser &&
+            TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test
     ) || failed=1
     report_environment finish
     return "$failed"
@@ -79,12 +81,14 @@ verify_integration() {
         scripts/static-cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl || return 1
         export INFRATERNAL_BIN="$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal"
     fi
+    # Chained for the same reason as verify_latency: the caller may test this function's
+    # status, which turns `set -e` off inside it.
     (
-        cd -- "$repo_dir/apps/tracer"
-        bun install --frozen-lockfile
-        bun run check
-        bun run build
-        bun x playwright test -c playwright.real.config.ts
+        cd -- "$repo_dir/apps/tracer" &&
+            bun install --frozen-lockfile &&
+            bun run check &&
+            bun run build &&
+            bun x playwright test -c playwright.real.config.ts
     )
 }
 

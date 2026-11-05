@@ -247,8 +247,10 @@ async fn run_inner(
             }
             #[cfg(target_os = "linux")]
             let state = trace_attempt("state-path", crate::sessions::state_path(state.clone()))?;
+            // macOS shims rendezvous under the same private runtime (#328);
+            // create and check it before the plugin service starts.
             #[cfg(not(target_os = "linux"))]
-            let state = trace_attempt("state-path", crate::control::runtime_state(state))?;
+            let state = trace_attempt("state-path", crate::sessions::state(state))?;
             let plugins = ensure_service(
                 service,
                 &state,

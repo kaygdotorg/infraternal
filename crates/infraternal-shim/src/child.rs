@@ -101,7 +101,8 @@ impl OwnedChild {
         }
     }
 
-    #[cfg(any(test, feature = "host-login"))]
+    // Only host-login code and the Linux fixtures read the raw id.
+    #[cfg(any(all(test, target_os = "linux"), feature = "host-login"))]
     pub(crate) fn id(&self) -> u32 {
         match self {
             Self::Local(child) => child.id(),
@@ -111,6 +112,8 @@ impl OwnedChild {
     }
 
     /// A numeric process id is safe to signal only for a locally owned child.
+    // Without host-login workers (macOS) every child is local.
+    #[cfg_attr(not(feature = "host-login"), allow(clippy::unnecessary_wraps))]
     pub(crate) fn local_pid(&self) -> Option<u32> {
         match self {
             Self::Local(child) => Some(child.id()),

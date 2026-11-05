@@ -627,9 +627,41 @@ fn disallowed_signal_only_disconnects_peer() {
     session.finish(peer, seq);
 }
 
+/// Hang guard for a shim that should exit on its own. It only detects a hang;
+/// the reap tests assert what happened when the shim exited, never how fast.
+const REAP_HANG_BOUND: Duration = Duration::from_secs(60);
+
+/// Kill the session's shell, wait for the shim process to exit, and check that
+/// it exited cleanly and removed its rendezvous socket first.
+fn kill_shell_and_await_reap(session: &mut Session) {
+    let children = fs::read_to_string(format!(
+        "/proc/{}/task/{}/children",
+        session.pid, session.pid
+    ))
+    .unwrap();
+    let shell: i32 = children.split_whitespace().next().unwrap().parse().unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(shell),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    let child = session.child.as_mut().unwrap();
+    let deadline = Instant::now() + REAP_HANG_BOUND;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "shim outlived its dead shell");
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert!(status.success(), "shim exit: {status}");
+    assert!(!session.path().exists(), "dead shim socket retained");
+    session.pid = 0;
+}
+
 /// A dead detached shell cannot retain its shim process or rendezvous socket.
 #[test]
-fn detached_shell_exit_reaps_shim_within_one_second() {
+fn detached_shell_exit_reaps_shim() {
     let mut session = Session::new(8192, false);
     let mut peer = session.attach(0);
     let mut seq = 0;
@@ -639,30 +671,40 @@ fn detached_shell_exit_reaps_shim_within_one_second() {
     );
     until(&mut peer, &mut seq, b"READY_REAP\r\n");
     drop(peer);
-    let children = fs::read_to_string(format!(
-        "/proc/{}/task/{}/children",
-        session.pid, session.pid
-    ))
-    .unwrap();
-    let shell: i32 = children.split_whitespace().next().unwrap().parse().unwrap();
-    let start = Instant::now();
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(shell),
-        nix::sys::signal::Signal::SIGKILL,
-    )
-    .unwrap();
-    while session.path().exists() {
-        assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "dead shim socket retained"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
-    session.pid = 0;
+    kill_shell_and_await_reap(&mut session);
 }
 
-/// A descendant holding the PTY slave cannot retain a dead shell's shim.
+/// True while `pid` is a live process (not missing, not a zombie) whose
+/// command is `comm`, so a recycled PID never counts.
+fn running_as(pid: i32, comm: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.split_once(" (")
+            .and_then(|(_, rest)| rest.rsplit_once(") "))
+            .is_some_and(|(name, tail)| name == comm && !tail.starts_with('Z'))
+    })
+}
+
+/// Stops the test's background `sleep` on every exit path, including a panic
+/// in the middle of the test, and only while that PID is still the sleeper.
+struct Sleeper(i32);
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        if running_as(self.0, "sleep") {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.0),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
+/// A descendant holding the PTY slave cannot retain a dead shell's shim. The
+/// descendant would hold it for 600 s, far past the reap hang guard, so a shim
+/// that waited for it fails instead of passing slowly. The descendant must be
+/// alive when the shell dies, so the case is really exercised. At shim exit,
+/// the product's rule decides its fate: a non-root shim with host login
+/// (`plugin-agent` builds) adopts the terminal's jobs and retires them before
+/// it records the end; otherwise the descendant outlives the shim.
 #[test]
 fn detached_shell_exit_reaps_even_with_a_live_background_descendant() {
     let mut session = Session::new(8192, false);
@@ -670,31 +712,34 @@ fn detached_shell_exit_reaps_even_with_a_live_background_descendant() {
     let mut seq = 0;
     send(
         &mut peer,
-        Frame::Input(b"(trap '' HUP; exec sleep 5) & printf 'READY_%s\\n' REAP\n".to_vec()),
+        Frame::Input(b"(trap '' HUP; exec sleep 600) & printf 'READY_%s_PID\\n' $!\n".to_vec()),
     );
-    until(&mut peer, &mut seq, b"READY_REAP\r\n");
+    let output = until(&mut peer, &mut seq, b"_PID\r\n");
+    let output = String::from_utf8_lossy(&output);
+    let descendant: i32 = output
+        .rsplit_once("READY_")
+        .and_then(|(_, tail)| tail.split_once("_PID"))
+        .and_then(|(pid, _)| pid.parse().ok())
+        .expect("background descendant PID");
+    let _sleeper = Sleeper(descendant);
     drop(peer);
-    let children = fs::read_to_string(format!(
-        "/proc/{}/task/{}/children",
-        session.pid, session.pid
-    ))
-    .unwrap();
-    let shell: i32 = children.split_whitespace().next().unwrap().parse().unwrap();
-    let start = Instant::now();
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(shell),
-        nix::sys::signal::Signal::SIGKILL,
-    )
-    .unwrap();
-    while session.path().exists() {
+    // `$!` is printed right after the fork; wait for the subshell's exec of
+    // `sleep`, so the descendant is provably live when the shell dies.
+    let deadline = Instant::now() + REAP_HANG_BOUND;
+    while !running_as(descendant, "sleep") {
         assert!(
-            start.elapsed() < Duration::from_secs(1),
-            "dead shim socket retained"
+            Instant::now() < deadline,
+            "the PTY-holding descendant never started sleeping"
         );
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(session.child.as_mut().unwrap().wait().unwrap().success());
-    session.pid = 0;
+    kill_shell_and_await_reap(&mut session);
+    let adopts = cfg!(feature = "plugin-agent") && !nix::unistd::Uid::effective().is_root();
+    assert_eq!(
+        running_as(descendant, "sleep"),
+        !adopts,
+        "descendant after shim exit (shim adopts and retires jobs: {adopts})"
+    );
 }
 
 /// Ownership-only peers retain exited shells without consuming a data cursor.
