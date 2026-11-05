@@ -184,6 +184,15 @@ fn same_account(session: &Session, uid: u32, names: &operations::Names) -> bool 
         }))
 }
 
+/// What the request deadline in [`execute`] hands on.
+enum Step {
+    /// A verb that finished inside the deadline.
+    Done(Reply),
+    /// A `new` request that passed every check; its launch runs after the
+    /// deadline, under the launch's own progress bound.
+    Launch(Vec<Session>, operations::Names),
+}
+
 pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes: &[u8]) -> Reply {
     let Ok(input) = serde_json::from_slice::<Value>(bytes) else {
         return Reply::error(
@@ -196,25 +205,43 @@ pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes:
         return reply;
     }
     let mut pending = None;
+    // The deadline bounds loading, discovery and the caller checks, which can
+    // stall on unresponsive shims. It does not bound a `new` launch: starting
+    // a process through the init manager took 3.5-5.1 s on loaded hosts, and
+    // launch already fails on progress, not a short clock (`LAUNCH`, #324).
+    // A launch cut here was reported unreachable while it was still starting,
+    // and could leave the session running without its name (#355).
     let result = tokio::time::timeout(Duration::from_secs(4), async {
         let names = operations::load(state)?;
         let mut live = sessions::discover(state).await?;
         live.retain(|session| same_account(session, uid, &names));
         if !live.iter().any(|s| belongs(pid, uid, s.pid)) {
-            return Ok(Reply::error(3, "Run this command from your saved infraternal session.", "Open a terminal in the app on this machine and account, then run the command there."));
+            return Ok(Step::Done(Reply::error(3, "Run this command from your saved infraternal session.", "Open a terminal in the app on this machine and account, then run the command there.")));
         }
         let machine = input.get("machine").and_then(Value::as_str)
             .or_else(|| input.get("target").and_then(Value::as_str).and_then(|s| s.split_once(':').map(|(m, _)| m)));
         let hostname = nix::unistd::gethostname()?.to_string_lossy().into_owned();
         if machine.is_some_and(|m| m != "local" && m != hostname) {
-            return Ok(Reply::error(3, "Cross-machine session automation is not allowed yet.", "Run on the target machine in your saved session; remote control requires an access rule and approval."));
+            return Ok(Step::Done(Reply::error(3, "Cross-machine session automation is not allowed yet.", "Run on the target machine in your saved session; remote control requires an access rule and approval.")));
         }
-        operations::run(state, uid, verb, &input, live, names, &mut pending).await
+        if verb == "new" {
+            return Ok(Step::Launch(live, names));
+        }
+        operations::run(state, uid, verb, &input, live, names, &mut pending)
+            .await
+            .map(Step::Done)
     }).await;
+    let result = match result {
+        Ok(Ok(Step::Launch(live, names))) => {
+            Ok(operations::create(state, uid, &input, &live, names, &mut pending).await)
+        }
+        Ok(Ok(Step::Done(reply))) => Ok(Ok(reply)),
+        Ok(Err(error)) => Ok(Err(error)),
+        Err(elapsed) => Err(elapsed),
+    };
     // A created session's name is made durable off the reactor and outside the
     // deadline: success still means the name is saved, and a disk busy with
-    // writeback delays only this reply, never other terminals (#334). The
-    // deadline keeps bounding discovery and launch, which can stall on shims.
+    // writeback delays only this reply, never other terminals (#334).
     let published = match pending {
         Some(publication) => publication
             .await
