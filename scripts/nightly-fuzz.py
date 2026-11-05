@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -62,6 +63,21 @@ def api_post(api, route, token, payload, content_type='application/json'):
         data=payload, headers={'Authorization': 'token ' + token, 'Content-Type': content_type})
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
+
+
+def written_inputs(log_text, artifacts):
+    """Artifacts libFuzzer reports writing this run, by its `Test unit written to` line.
+
+    libFuzzer names an artifact after the SHA-1 of its bytes, so re-finding a
+    known input rewrites the same file and a before/after name diff sees
+    nothing new (review 79752 P3-1). The log line is printed on every write.
+    """
+    found = []
+    for match in re.finditer(r'Test unit written to (\S+)', log_text):
+        path = Path(match[1])
+        if path.parent == artifacts and path.is_file() and path not in found:
+            found.append(path)
+    return found
 
 
 def issue_marker(name):
@@ -211,11 +227,10 @@ def main():
         command = [rustup, 'run', 'nightly', 'cargo', 'fuzz', 'run', '--fuzz-dir', 'fuzz', *features, name, str(corpus), '--',
                    f'-max_total_time={budget}', '-timeout=10', '-rss_limit_mb=2048', '-max_len=1048580', f'-artifact_prefix={artifacts}/']
         started = time.monotonic()
-        before = {path.name for path in artifacts.iterdir()}
         with (state / f'{name}.log').open('w') as log:
             result = subprocess.run(command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT)
         crashes = sorted(path for path in artifacts.iterdir() if path.is_file())
-        found = [path for path in crashes if path.name not in before]
+        found = written_inputs((state / f'{name}.log').read_text(errors='replace'), artifacts.resolve())
         unreported = 0
         for crash in crashes:
             # A reporting failure must not cost the remaining targets their

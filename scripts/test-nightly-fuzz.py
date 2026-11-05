@@ -183,12 +183,31 @@ class NightlyFuzz(unittest.TestCase):
         self.report(self.crash('two', b'two'))
         self.assertEqual(self.fake.creates(), 1)
 
+    def test_refound_input_is_a_finding(self):
+        """A known input found again rewrites the same SHA-1-named file; it is still a finding (79752 P3-1)."""
+        artifacts = self.state / 'artifacts'
+        artifacts.mkdir()
+        known = artifacts / 'crash-2ca3ce7494fb298a60da37b58c1be73bc15a8b94'
+        known.write_bytes(b'0X.A-1')
+        log = ("==1== ERROR: libFuzzer: deadly signal\n"
+               f"artifact_prefix='{artifacts}/'; Test unit written to {known}\nBase64: MFguQS0x\n")
+        self.assertEqual(fuzz.written_inputs(log, artifacts), [known])
+
+    def test_build_failure_is_not_a_finding(self):
+        """A failed run that wrote no unit has no findings, so it counts as broken."""
+        artifacts = self.state / 'artifacts'
+        artifacts.mkdir()
+        (artifacts / 'crash-old').write_bytes(b'old')
+        log = 'error: target `mesh_node_json` requires the features: `mesh-node`\n'
+        self.assertEqual(fuzz.written_inputs(log, artifacts), [])
+
     def test_report_errors_are_caught_types(self):
         """HTTP and network failures are OSError subclasses, so the loop's catch covers them."""
         import urllib.error
         self.assertTrue(issubclass(urllib.error.HTTPError, OSError))
         self.assertTrue(issubclass(urllib.error.URLError, OSError))
         self.assertTrue(issubclass(TimeoutError, OSError))
+
 
 
 if __name__ == '__main__':
