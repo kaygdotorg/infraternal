@@ -187,9 +187,11 @@ Decisions in slice 1:
 
 - **Who acts as the person (D235 Q2a, D344).** Only the local account the
   machine was added with: the rootless execution account, or the user of a
-  rootful machine's add-host address. Other accounts, root and the server's
-  own host get no person identity in slice 1. Owner question on #221: did
-  D344 mean any ordinary account on a machine the person added?
+  rootful machine's add-host address (narrowed by D347). Other accounts and
+  root get no person identity.
+- **The server's own host never acts as a person (owner, #221).** The server
+  is not a place to work from: infraternal is heading towards an untrusted
+  server, with the canvas running entirely on the client.
 - **Push, not ask (owner question Q2 on #221).** The server pushes a
   sequence-numbered snapshot (CA key, valid certificate digests, each
   person's login grant for that host); the target checks network access
