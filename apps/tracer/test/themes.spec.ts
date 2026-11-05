@@ -1,15 +1,16 @@
 /**
  * Settings › Appearance › Themes (issue #323, D322, D338, D341, D329), against the production build of the product canvas.
  *
- * What is checked: the strip (Solid, Tinted, Frosted and the add card; Tinted selected for a new person), that choosing a theme changes
- * the page and is saved on the device and on the account, that the light and dark circles of a Colour choose the version and do not move
- * on a press, that the add card copies the selected theme, that the Windows heading sits over Tint, Blur and Grain, that grain lies on the
- * windows and not on the canvas behind them, that every colour scheme of D329 is in the list, that a font is fetched only when chosen, and
- * that the left edges and centre lines line up within 0.5 px (the owner's alignment rule). `THEMES_SHOTS=<dir>` also writes the review
- * captures at 1440x900, 393x852 and 375x667, dark and light.
+ * What is checked: the strip (Solid, Tinted, Frosted and the add card; Tinted selected for a new person), that the light and dark circles of a Colour choose the
+ * version and do not move on a press, that the add card copies the selected theme, that the Windows heading sits over Tint, Blur and Grain, that grain lies on the
+ * windows and not on the canvas behind them, that every colour scheme of D329 is in the list, that a font is fetched only when chosen, and that the left edges and
+ * centre lines line up within 0.5 px (the owner's alignment rule). Against the product canvas and the real layout store: the look is the account's, saved in the
+ * canvas document (a theme chosen on one device is the look on another, a font picked in the palette reaches the document, a damaged first-paint cache is mended, and
+ * `?look=` is a preview that saves nothing). `THEMES_SHOTS=<dir>` also writes the review captures at 1440x900, 393x852 and 375x667, dark and light.
  */
 import { mkdirSync } from "node:fs";
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Browser, type Page } from "playwright/test";
+import { paletteOpen } from "./settings-palette";
 
 const SHOTS = process.env.THEMES_SHOTS;
 const WINDOW = '[data-window-id="s-appearance-themes"]';
@@ -28,7 +29,6 @@ const look = (page: Page) => page.evaluate(() => {
   const r = document.documentElement;
   return { id: r.dataset.look, tint: r.style.getPropertyValue("--look-tint"), blur: r.style.getPropertyValue("--look-blur"), scheme: r.dataset.scheme, theme: r.dataset.theme, grain: r.hasAttribute("data-look-grain"), font: r.dataset.font };
 });
-const account = (page: Page) => page.evaluate(() => fetch("/__mock/account/appearance").then((r) => r.json()) as Promise<{ themes: null | { selected: string; themes: Array<{ id: string; name: string; tint: number; blur: number; grain: number; colors: string; font: string }> } }>);
 
 test.describe("the Themes window", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -42,52 +42,6 @@ test.describe("the Themes window", () => {
     await expect(page.locator(`${WINDOW} .ui-theme-add`)).toBeVisible();
     await expect(page.locator(`${WINDOW} .ui-theme[data-id="tinted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true");
     expect(await look(page)).toMatchObject({ id: "tinted", tint: "0.75", blur: "6px", scheme: "dark", theme: "mocha", grain: false });
-  });
-
-  test("choosing a theme changes the page, and is kept on the device and on the account across a reload", async ({ page }) => {
-    await open(page);
-    await page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`).click();
-    await expect.poll(() => look(page)).toMatchObject({ id: "frosted", tint: "0.5", blur: "12px" });
-    // The account is written a moment after the last change.
-    await expect.poll(async () => (await account(page)).themes?.selected, { timeout: 5000 }).toBe("frosted");
-    await page.reload();
-    await expect(page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
-    expect(await look(page)).toMatchObject({ id: "frosted", tint: "0.5", blur: "12px" });
-    // Another device with nothing saved gets the account's choice.
-    await page.evaluate(() => localStorage.removeItem("tracer.themes"));
-    await page.reload();
-    await expect(page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
-  });
-
-  test("a damaged saved copy never breaks the page: the numbers are mended", async ({ page }) => {
-    await page.addInitScript(() => localStorage.setItem("tracer.themes", JSON.stringify({ v: 1, selected: "tinted", basics: { colors: "mocha", font: "maple-mono-nf", uiSize: 100 }, themes: [{ id: "tinted", tint: 900, blur: -4, grain: "lots" }] })));
-    await open(page);
-    expect(await look(page)).toMatchObject({ id: "tinted", tint: "1", blur: "0px" });
-    await expect(page.locator(`${WINDOW} .ui-theme`)).toHaveCount(3);
-  });
-
-  test("?look= previews a theme for one page load: it reads and saves nothing, even after edits, and the next load is the person's own", async ({ page }) => {
-    // The person's own saved look first: Frosted on the device and on the account.
-    await open(page);
-    await page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`).click();
-    await expect.poll(async () => (await account(page)).themes?.selected, { timeout: 5000 }).toBe("frosted");
-    const saved = await page.evaluate(() => localStorage.getItem("tracer.themes"));
-    // A link that asks for Solid: that page shows Solid, ignores the account's choice, and an edit made on it is not saved anywhere.
-    await page.goto("/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&look=solid&at=appearance.themes");
-    await expect(page.locator(`${WINDOW} .ui-theme[data-id="solid"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
-    await page.waitForTimeout(1000);
-    expect(await look(page)).toMatchObject({ id: "solid", tint: "1", blur: "0px" });
-    const tint = page.locator(`${WINDOW} input[aria-label="Tint"]`);
-    await tint.scrollIntoViewIfNeeded();
-    await tint.fill("30");
-    await page.locator(`${WINDOW} .ui-theme[data-id="tinted"] .ui-theme-pick`).click();
-    await page.waitForTimeout(1500);
-    expect(await page.evaluate(() => localStorage.getItem("tracer.themes")), "the device copy is exactly what it was").toBe(saved);
-    expect((await account(page)).themes?.selected, "the account still has the person's own choice").toBe("frosted");
-    // The next load, without the parameter, is the person's own look; an id that is not a theme is ignored.
-    await page.goto("/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&look=nonsense&at=appearance.themes");
-    await expect(page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
-    expect(await look(page)).toMatchObject({ id: "frosted", tint: "0.5" });
   });
 
   test("the plus card makes a copy of the selected theme, selects it and lets its name change", async ({ page }) => {
@@ -104,7 +58,6 @@ test.describe("the Themes window", () => {
     // A built-in theme's name is not editable: its row is closed.
     await page.locator(`${WINDOW} .ui-theme[data-id="solid"] .ui-theme-pick`).click();
     await expect(page.locator(`${WINDOW} .cl-theme-name`)).not.toHaveAttribute("data-open", "");
-    await expect.poll(async () => (await account(page)).themes?.themes.map((t) => t.name), { timeout: 5000 }).toEqual(["Solid", "Tinted", "Frosted", "Night"]);
   });
 
   test("the light and dark circles of a Colour choose the version, and a press does not move the circle", async ({ page }) => {
@@ -199,18 +152,6 @@ test.describe("the Themes window", () => {
     expect(fetched, "only the chosen family").not.toContain("victor-mono");
   });
 
-  test("a font picked in ⌘K is a change to the selected theme, so it survives a reload and goes to the account", async ({ page }) => {
-    await open(page);
-    await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("Hack");
-    await page.locator('#palette-results .result[data-action="font:hack"]').click();
-    await expect.poll(async () => (await look(page)).font, { timeout: 15_000 }).toBe("hack");
-    await expect.poll(async () => (await account(page)).themes?.themes.find((t) => t.id === "tinted")?.font, { timeout: 5000 }).toBe("hack");
-    await page.reload();
-    await expect(page.locator(`${WINDOW} .ui-theme[data-id="tinted"]`)).toBeVisible({ timeout: 25_000 });
-    await expect.poll(async () => (await look(page)).font, { timeout: 15_000 }).toBe("hack");
-  });
-
   test("the Themes are in ⌘K, and the card and window transparency rows are gone", async ({ page }) => {
     await open(page);
     await page.keyboard.press("Control+Shift+K");
@@ -247,6 +188,108 @@ test.describe("the Themes window", () => {
     for (const [label, dot] of edges.centres) near(label!, dot!, `a Colour name and its circle share a centre line (${edges.debug})`);
     for (const x of edges.titles) near(x, edges.titles[0]!, "section headings share a left edge");
     near(edges.names[0]!, edges.titles[0]!, "Colour names start at the headings' edge");
+  });
+});
+
+// ---- in the product: the look is the account's, in the canvas document (D322, D178, D180) ----------------------------------------------------------------
+// Against the real layout store (`layout=server`) and the test double's server, which applies the same edits as the real one: a look chosen on one device is the
+// look of the account on every other; the browser keeps only a first-paint cache of the selected theme.
+const PRODUCT = "/?mock=1&proto=product&layout=server&theme=mocha&bg=none";
+interface DocLookLike { selected: string; themes: Array<{ id: string; name: string; tint: number; blur: number; font: string }> }
+const baseURL = (): string => `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`;
+/** The look the account's document holds right now, as the test double has it (null: none yet). */
+const accountLook = (page: Page): Promise<DocLookLike | null> => page.evaluate(() => fetch("/__mock/layout").then((r) => r.json()).then((d: { document: { look?: unknown } }) => (d.document.look ?? null) as never));
+
+async function openProduct(page: Page, query = "", reset = true): Promise<void> {
+  if (reset) {
+    expect((await page.context().request.post("/__mock/reset")).ok()).toBe(true);
+    expect((await page.context().request.post("/__mock/open-terminal")).ok()).toBe(true);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${PRODUCT}${query}`);
+  await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(1, { timeout: 30_000 });
+}
+async function openThemes(page: Page): Promise<void> {
+  await paletteOpen(page, "Appearance › Themes", "appearance.themes");
+  await expect(page.locator(`${WINDOW} .ui-theme-strip`)).toBeVisible({ timeout: 25_000 });
+}
+
+test.describe("the look is the account's, saved in the canvas document", () => {
+  test("an account with no look yet gets this page's, once; a new person is on Tinted", async ({ page }) => {
+    await openProduct(page);
+    await expect.poll(() => accountLook(page), { timeout: 10_000 }).toMatchObject({ selected: "tinted" });
+    expect((await accountLook(page))!.themes.map((t) => t.id)).toEqual(["solid", "tinted", "frosted"]);
+    expect(await look(page)).toMatchObject({ id: "tinted", tint: "0.75", blur: "6px" });
+  });
+
+  test("a theme chosen on one device is the look on another, and survives a reload", async ({ page, browser }: { page: Page; browser: Browser }) => {
+    await openProduct(page);
+    await openThemes(page);
+    await page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`).click();
+    await expect.poll(() => look(page)).toMatchObject({ id: "frosted", tint: "0.5", blur: "12px" });
+    // The edit goes to the document a moment after the last change.
+    await expect.poll(async () => (await accountLook(page))?.selected, { timeout: 8000 }).toBe("frosted");
+    // Another device: a browser with nothing of ours (no first-paint cache), signed in to the same account, shows the same look.
+    const other = await browser.newContext({ baseURL: baseURL(), viewport: { width: 1440, height: 900 } });
+    const second = await other.newPage();
+    await openProduct(second, "", false);
+    await expect.poll(async () => (await look(second)).id, { timeout: 15_000 }).toBe("frosted");
+    expect(await look(second)).toMatchObject({ tint: "0.5", blur: "12px" });
+    await other.close();
+    // Reload on this device: the same look from the document.
+    await page.reload();
+    await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(1, { timeout: 30_000 });
+    await expect.poll(async () => (await look(page)).id, { timeout: 15_000 }).toBe("frosted");
+  });
+
+  test("the plus card's theme and its name reach the account's document", async ({ page }) => {
+    await openProduct(page);
+    await openThemes(page);
+    await page.locator(`${WINDOW} .ui-theme-add`).click();
+    await page.locator(`${WINDOW} .cl-theme-name-input`).fill("Night");
+    await expect.poll(async () => (await accountLook(page))?.themes.map((t) => t.name), { timeout: 8000 }).toEqual(["Solid", "Tinted", "Frosted", "Night"]);
+  });
+
+  test("a damaged first-paint cache never breaks the page: the numbers are mended", async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem("tracer.look", JSON.stringify({ v: 1, selected: "tinted", basics: { colors: "mocha", font: "maple-mono-nf", uiSize: 100 }, themes: [{ id: "tinted", tint: 900, blur: -4, grain: "lots" }] })));
+    await openProduct(page);
+    expect(await look(page)).toMatchObject({ id: "tinted", tint: "1", blur: "0px" });
+  });
+
+  test("a font picked in ⌘K is a change to the selected theme, so it reaches the document and survives a reload", async ({ page }) => {
+    await openProduct(page);
+    await page.keyboard.press("Control+Shift+K");
+    await page.keyboard.type("Hack");
+    await page.locator('#palette-results .result[data-action="font:hack"]').click();
+    await expect.poll(async () => (await look(page)).font, { timeout: 15_000 }).toBe("hack");
+    await expect.poll(async () => (await accountLook(page))?.themes.find((t) => t.id === "tinted")?.font, { timeout: 8000 }).toBe("hack");
+    await page.reload();
+    await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(1, { timeout: 30_000 });
+    await expect.poll(async () => (await look(page)).font, { timeout: 15_000 }).toBe("hack");
+  });
+
+  test("?look= previews a theme for one page load: it saves nothing, even after edits, and the next load is the account's own", async ({ page }) => {
+    await openProduct(page);
+    await openThemes(page);
+    await page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`).click();
+    await expect.poll(async () => (await accountLook(page))?.selected, { timeout: 8000 }).toBe("frosted");
+    const cache = await page.evaluate(() => localStorage.getItem("tracer.look"));
+    // A link that asks for Solid: that page shows Solid, ignores the account's choice, and an edit made on it is saved nowhere.
+    await openProduct(page, "&look=solid", false);
+    await expect.poll(async () => (await look(page)).id).toBe("solid");
+    expect(await look(page)).toMatchObject({ tint: "1", blur: "0px" });
+    await openThemes(page);
+    const tint = page.locator(`${WINDOW} input[aria-label="Tint"]`);
+    await tint.scrollIntoViewIfNeeded();
+    await tint.fill("30");
+    await page.locator(`${WINDOW} .ui-theme[data-id="tinted"] .ui-theme-pick`).click();
+    await page.waitForTimeout(2000);
+    expect(await page.evaluate(() => localStorage.getItem("tracer.look")), "the first-paint cache is exactly what it was").toBe(cache);
+    expect((await accountLook(page))?.selected, "the account still has the person's own choice").toBe("frosted");
+    // The next load, without the parameter, is the account's look; an id that is not a theme is ignored.
+    await openProduct(page, "&look=nonsense", false);
+    await expect.poll(async () => (await look(page)).id, { timeout: 15_000 }).toBe("frosted");
+    expect(await look(page)).toMatchObject({ tint: "0.5" });
   });
 });
 
