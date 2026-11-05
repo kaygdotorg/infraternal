@@ -314,7 +314,7 @@ impl Node {
         Self::restore_requesting(path, requested, source)
     }
 
-    /// Restore with an engine chosen in code. It replaces the environment override, also at `up`.
+    /// Restore with an engine chosen in code, in place of `INFRATERNAL_MESH_ENGINE`.
     /// # Errors
     /// The same as [`Node::restore`].
     pub fn restore_with_engine(path: &std::path::Path, engine: EngineKind) -> io::Result<Self> {
@@ -780,12 +780,8 @@ impl Node {
         if let Some(identity) = &self.identity {
             return Ok(identity.clone());
         }
-        if self.engine_source != EngineSource::Code
-            && let Some(engine) = EngineKind::from_environment()?
-        {
-            self.engine_kind = engine;
-            self.engine_source = EngineSource::Environment;
-        }
+        // The engine was settled when this node was made: by `Node::restore`, the infraternal
+        // agent's path, which alone reads `INFRATERNAL_MESH_ENGINE`, or by code (#260 J220 P3).
         self.firewall.adopt()?;
         let (key, public_key) = self.local_key()?;
         if let Some(store) = &self.store {
