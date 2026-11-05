@@ -346,7 +346,6 @@ impl MeshSshPlugin {
     }
 
     /// One push to one node. Returns when the next renewal is due.
-    #[allow(clippy::too_many_lines)]
     async fn push(&self, channel: &dyn NodeChannel, issue: bool) -> Result<Duration, ()> {
         let host_text = channel.id().to_owned();
         let host = host_ref(&host_text)?;
