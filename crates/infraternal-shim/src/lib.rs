@@ -177,6 +177,7 @@ pub fn prepare_proxy_child(
     _working_directory: &std::fs::File,
     _descriptors: &[(std::os::fd::RawFd, std::os::fd::RawFd)],
     _identity: Option<(u32, u32)>,
+    _cgroup_procs: Option<&std::fs::File>,
 ) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
