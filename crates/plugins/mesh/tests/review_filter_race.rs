@@ -91,6 +91,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) {
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
+                access_ssh: None,
             },
         )]),
         merged: BTreeMap::new(),

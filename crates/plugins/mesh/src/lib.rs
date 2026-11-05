@@ -1,10 +1,5 @@
 //! Houses the Mesh coordinator and Linux node component behind removable plugin features [198,201].
 
-// Linux takes GotaTun from our fork under its own dependency name (see Cargo.toml); this keeps
-// one `gotatun` path for the engine code.
-#[cfg(all(feature = "agent", target_os = "linux"))]
-extern crate gotatun_fork as gotatun;
-
 #[cfg(feature = "server")]
 mod diagnostics;
 
