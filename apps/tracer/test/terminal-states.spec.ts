@@ -74,10 +74,26 @@ async function openFromPalette(page: Page, host: string): Promise<Locator> {
 
 /** The strip's parts share one centre line and the strip stays inside its window (±0.5 px). */
 async function expectAligned(win: Locator, strip: Locator): Promise<void> {
+  // A window that was just opened is still flying in under the camera: measure once both boxes have stopped moving.
+  let last = "";
+  await expect.poll(async () => {
+    const now = JSON.stringify([await win.boundingBox(), await strip.boundingBox()]);
+    const still = now === last;
+    last = now;
+    return still;
+  }, { intervals: [100, 100, 200], timeout: 10_000 }).toBe(true);
   const frame = (await win.boundingBox())!;
   const box = (await strip.boundingBox())!;
   expect(box.x, "the strip starts inside its window").toBeGreaterThanOrEqual(frame.x - 0.5);
   expect(box.x + box.width, "the strip ends inside its window").toBeLessThanOrEqual(frame.x + frame.width + 0.5);
+  // Nothing is clipped: every part sits inside the strip, and the sentence shows whole.
+  for (const part of await strip.locator(".ui-mark, .cl-sx-strip-text, .cl-sx-again, .cl-sx-dismiss").all()) {
+    const b = (await part.boundingBox())!;
+    expect(b.x, "a part starts inside the strip").toBeGreaterThanOrEqual(box.x - 0.5);
+    expect(b.x + b.width, "a part ends inside the strip").toBeLessThanOrEqual(box.x + box.width + 0.5);
+  }
+  const text = strip.locator(".cl-sx-strip-text");
+  expect(await text.evaluate((node) => node.scrollWidth <= node.clientWidth + 1 && node.scrollHeight <= node.clientHeight + 1), "the sentence is not clipped").toBe(true);
   const centres: number[] = [];
   for (const part of await strip.locator(".ui-mark, .cl-sx-again, .cl-sx-dismiss").all()) {
     const b = (await part.boundingBox())!;
