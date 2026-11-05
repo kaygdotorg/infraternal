@@ -127,6 +127,58 @@ pub(crate) fn view(value: &Value) -> bool {
             _ => false,
         }
 }
+/// How many themes one account's look may hold. An intent carries the whole list, and an intent is at most `MAX_INPUT` bytes.
+pub(crate) const MAX_THEMES: usize = 16;
+fn whole(value: &Value, key: &str, low: f64, high: f64) -> bool {
+    numeric(value, key, low, high) && value.get(key).and_then(Value::as_f64).is_some_and(|v| v.fract() == 0.0)
+}
+fn hex(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|s| s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit()))
+}
+/// One theme of the account's look: ids and numbers within their ranges. Which font, Colour or background an id names is the client's to know;
+/// the server only bounds what it stores (text of at most 200 characters, percentages 0 to 100, UI size 50 to 150, hex colours).
+fn theme(value: &Value) -> bool {
+    shape(
+        value,
+        &["id", "name", "tint", "blur", "grain", "font", "colors", "uiSize", "background", "customSolid", "custom"],
+    ) && ["id", "name", "font", "colors", "background"]
+        .iter()
+        .all(|key| string(value, key).is_some())
+        && ["tint", "blur", "grain"].iter().all(|key| whole(value, key, 0.0, 100.0))
+        && whole(value, "uiSize", 50.0, 150.0)
+        && value.get("customSolid").is_some_and(hex)
+        && value.get("custom").is_some_and(|custom| {
+            shape(custom, &["stops", "angle"])
+                && whole(custom, "angle", 0.0, 360.0)
+                && custom
+                    .get("stops")
+                    .and_then(Value::as_array)
+                    .is_some_and(|stops| (2..=4).contains(&stops.len()) && stops.iter().all(hex))
+        })
+}
+/// The account's look (D322): the list of themes, which one is selected, and the starting Colour, font and size the built-in themes were made from.
+/// It lives in the canvas document so every device of the account shows the same look; only the camera stays per device (D178).
+pub(crate) fn look(value: &Value) -> bool {
+    shape(value, &["v", "selected", "basics", "themes"])
+        && value.get("v").and_then(Value::as_u64) == Some(1)
+        && string(value, "selected").is_some()
+        && value.get("basics").is_some_and(|basics| {
+            shape(basics, &["colors", "font", "uiSize"])
+                && string(basics, "colors").is_some()
+                && string(basics, "font").is_some()
+                && whole(basics, "uiSize", 50.0, 150.0)
+        })
+        && value.get("themes").and_then(Value::as_array).is_some_and(|themes| {
+            themes.len() <= MAX_THEMES
+                && themes.iter().all(theme)
+                && themes
+                    .iter()
+                    .enumerate()
+                    .all(|(at, t)| !themes[..at].iter().any(|seen| seen.get("id") == t.get("id")))
+        })
+}
 pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
     doc.get("views")
         .and_then(Value::as_array)
@@ -175,7 +227,8 @@ impl Document {
     #[must_use]
     pub fn valid(&self) -> bool {
         let doc = &self.0;
-        if !shape(doc, &["format", "version", "revision", "views"])
+        if !shape(doc, &["format", "version", "revision", "views", "look"])
+            || doc.get("look").is_some_and(|value| !look(value))
             || string(doc, "format") != Some("infraternal.canvas")
             || doc.get("version").and_then(Value::as_u64) != Some(1)
             || !doc
