@@ -200,6 +200,8 @@ fn ordinary_flood_child() {
 async fn failed_marker_stays_denied_and_retries_after_caller_leaves() {
     let root = crate::durable_tests::directory();
     let person = uuid::Uuid::new_v4();
+    synchronize_at(&root, person).unwrap();
+    permitted(&root, person).unwrap();
     drop(
         acquire(&root, &format!("{}.person", person.simple()))
             .await
@@ -255,11 +257,18 @@ async fn failed_marker_stays_denied_and_retries_after_caller_leaves() {
 async fn security_flood_coalesces_without_forgetting_cancelled_intent() {
     let root = crate::durable_tests::directory();
     drop(acquire(&root, "fixture").await.unwrap());
+    // Start with positive authority so denial assertions exercise the retained
+    // overflow latch, rather than the independent fresh-process default.
+    let people: Vec<_> = (0..1024).map(|_| uuid::Uuid::new_v4()).collect();
+    let unrelated = uuid::Uuid::new_v4();
+    for person in people.iter().copied().chain(std::iter::once(unrelated)) {
+        synchronize_at(&root, person).unwrap();
+        permitted(&root, person).unwrap();
+    }
     let host_marker = root.join("infraternal-login-locks/host.revoked");
     let target = root.join("untouched");
     std::fs::write(&target, b"fixture").unwrap();
     std::os::unix::fs::symlink(&target, &host_marker).unwrap();
-    let people: Vec<_> = (0..1024).map(|_| uuid::Uuid::new_v4()).collect();
     let mut calls: Vec<_> = people
         .iter()
         .map(|person| Box::pin(revoke_at(&root, Manager::Detached, *person, false)))
@@ -276,7 +285,7 @@ async fn security_flood_coalesces_without_forgetting_cancelled_intent() {
             .all(|person| permitted(&root, *person).is_err())
     );
     assert!(
-        permitted(&root, uuid::Uuid::new_v4()).is_err(),
+        permitted(&root, unrelated).is_err(),
         "overflow must fail closed for the host"
     );
     drop(calls);
@@ -289,7 +298,7 @@ async fn security_flood_coalesces_without_forgetting_cancelled_intent() {
     .await
     .expect("failed host marker starved individual security saves");
     std::fs::remove_file(&host_marker).unwrap();
-    assert!(permitted(&root, uuid::Uuid::new_v4()).is_err());
+    assert!(permitted(&root, unrelated).is_err());
     tokio::time::timeout(DEADLOCK_GUARD, async {
         while revocations::retained(&root) != 0 {
             tokio::task::yield_now().await;
@@ -300,7 +309,7 @@ async fn security_flood_coalesces_without_forgetting_cancelled_intent() {
     assert!(host_marker.is_file());
     assert_eq!(std::fs::read(&target).unwrap(), b"fixture");
     assert!(restore_at(&root, people[0]).await.is_err());
-    assert!(permitted(&root, uuid::Uuid::new_v4()).is_err());
+    assert!(permitted(&root, unrelated).is_err());
     eprintln!(
         "security_flood=1024 retained_intents_peak={retained} retained_after_durability=0 host_denied=true"
     );
