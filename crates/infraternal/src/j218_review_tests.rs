@@ -48,7 +48,7 @@ fn j218_installed_server_alias_is_detected() {
     );
 }
 
-/// Process arguments retain boundaries; installed commands without manager resolution refuse.
+/// Process arguments retain boundaries; unresolved units need a whole CLI name or path component.
 #[test]
 fn j218_alias_commands_respect_word_boundaries() {
     assert_eq!(
@@ -62,7 +62,7 @@ fn j218_alias_commands_respect_word_boundaries() {
         ),
         ("/opt/infra ssh host server", true),
         ("/opt/unrelated server --data /srv/private", false),
-        ("/opt/infra-other server", true),
+        ("/opt/infra-other server", false),
     ] {
         let fixture = Fixture::new();
         let units = fixture.0.join("etc/systemd/system");
