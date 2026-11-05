@@ -978,8 +978,9 @@ impl Node {
         if self.engine_kind != EngineKind::Kernel {
             return Err(io::ErrorKind::Unsupported.into());
         }
-        let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        if self.identity.is_none() || self.store.is_none() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
         if sequence == 0
             || operation_id.len() != 36
             || !operation_id.bytes().enumerate().all(|(index, byte)| {
@@ -993,6 +994,26 @@ impl Node {
             return Err(io::ErrorKind::InvalidInput.into());
         }
         let link = self.rotation_link()?;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let identity = self.identity.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+        // A strictly higher sequence from the authenticated coordinator proves the open operation
+        // ended there (J262): it was abandoned, for example after a probe that could not show
+        // support or a binary downgrade, while this journal stayed open. Settle the journal on the
+        // key the link holds, then prepare the new operation on top of it.
+        if let Some(existing) = store.rotation_secret()?
+            && !existing.completed
+            && existing.operation_id != operation_id
+            && sequence > existing.sequence
+        {
+            Self::settle_superseded_rotation(
+                store,
+                identity,
+                &mut self.kernel_owner,
+                &link,
+                &existing,
+            )?;
+        }
+        let identity = &*identity;
         if let Some(existing) = store.rotation_secret()? {
             let (_, existing_public) = Key::from_private(&existing.candidate)?;
             if existing.completed {
@@ -1029,6 +1050,58 @@ impl Node {
         };
         store.save_rotation_secret(&state)?;
         Ok(candidate_public)
+    }
+
+    /// Settle an open journal whose operation the coordinator has ended, by the key the link holds.
+    ///
+    /// The journal also records which key this node holds: a restart takes the kernel key from it
+    /// (`rotation_key`), so it is rewritten, never deleted (J262).
+    /// - The link holds the candidate (commit was requested and the key was sent): finish the
+    ///   local commit steps a stop may have left (marker, recorded key, identity), then complete
+    ///   the journal, which erases the predecessor. The candidate is now our key.
+    /// - The link still holds the predecessor (commit never requested, or stopped before the key
+    ///   was sent): the candidate never went live. Record the predecessor as the completed key and
+    ///   erase the candidate.
+    /// - Anything else is not a state this node produced, and is refused.
+    fn settle_superseded_rotation(
+        store: &crate::node_state::Store,
+        identity: &mut Identity,
+        kernel_owner: &mut KernelProof,
+        link: &crate::wireguard::ActiveLink,
+        existing: &crate::node_state::RotationSecret,
+    ) -> io::Result<()> {
+        let current = crate::wireguard::identity_at(link.ifindex)?.0;
+        let (_, previous_public) = Key::from_private(&existing.previous)?;
+        let (_, candidate_public) = Key::from_private(&existing.candidate)?;
+        if existing.commit_requested && current == candidate_public {
+            match link.owner {
+                Some(owner) if owner == previous_public => {
+                    Device::remark(link.ifindex, previous_public, candidate_public)?;
+                }
+                Some(owner) if owner == candidate_public => {}
+                _ => return Err(io::ErrorKind::InvalidData.into()),
+            }
+            store.record_interface(&candidate_public)?;
+            *kernel_owner = KernelProof::single(candidate_public);
+            identity.public_key = candidate_public;
+            return store.complete_rotation_secret(&existing.operation_id, existing.sequence);
+        }
+        if current != previous_public
+            || link.owner != Some(previous_public)
+            || identity.public_key != previous_public
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        store.save_rotation_secret(&crate::node_state::RotationSecret {
+            operation_id: existing.operation_id.clone(),
+            sequence: existing.sequence,
+            previous: [0; 32],
+            candidate: existing.previous,
+            commit_requested: true,
+            completed: true,
+        })?;
+        *kernel_owner = KernelProof::single(previous_public);
+        Ok(())
     }
 
     /// Switch our proven kernel link to the prepared candidate; retry is safe after an abrupt stop.
