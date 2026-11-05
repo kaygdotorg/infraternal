@@ -10,8 +10,7 @@
  * read and applied synchronously, then the account's copy is fetched; if the account has a different list it replaces this device's
  * (the account is the shared one), and if the account has none, this device's list is sent up.
  *
- * A person who has never chosen starts on Tinted (D322), built from the Colour, font and size the product already shows them. `?look=` picks a theme for
- * one page load without saving it (tests and screenshots).
+ * A person who has never chosen starts on Tinted (D322), built from the Colour, font and size the product already shows them. A test page can preview a theme (see `startThemes`).
  */
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { readUiSize } from "../../../../../packages/ui/src/ui-scale";
@@ -32,24 +31,27 @@ export const themeStore = (): ThemeStore | undefined => shared;
 /**
  * Starts the Themes of this page. Returns the way out (it stops following the store and removes the palette rows).
  * Calling it again while one is running stops the first.
+ *
+ * `preview` is a theme id a test or a screenshot asks for (`?look=`, read by the caller and only on the test double). The page then shows that theme
+ * and is a **preview**: it reads nothing from the account and writes nothing to the device or the account, however it is edited afterwards, so the saved
+ * look of the person is never touched by it. An id that is not a theme is ignored and the page starts normally.
  */
-export function startThemes(core: CoreScreen): () => void {
+export function startThemes(core: CoreScreen, preview?: string): () => void {
   stopRunning?.();
   const now = core.appearance();
   const store = createThemeStore({ colors: now.theme, font: now.font, uiSize: readUiSize() }, readDevice());
   shared = store;
-  // `?look=<theme id>` starts on that theme and never saves it, the way `?theme=`, `?font=` and `?bg=` pick a look for a test or a screenshot. It is taken before the
-  // store is followed, so choosing it writes nothing; an id that is not a theme is ignored.
-  const forced = new URLSearchParams(location.search).get("look");
-  if (forced) store.select(forced);
+  const previewing = preview !== undefined && store.themes().some((theme) => theme.id === preview);
+  if (previewing) store.select(preview);
   // True while this module is changing the page itself, so the change events it causes are not mistaken for the person's own picks.
   let applying = false;
   const show = (): void => { applying = true; try { applyLook(core, store.selected()); } finally { applying = false; } };
   show();
 
   let deviceTimer = 0, accountTimer = 0, fromAccount = false;
-  const flushDevice = (): void => { deviceTimer = 0; writeDevice(store.snapshot()); };
-  const flushAccount = (): void => { accountTimer = 0; writeAccount(store.snapshot()); };
+  // A preview never saves: both writes are no-ops, so nothing the page does can reach the person's saved look.
+  const flushDevice = (): void => { deviceTimer = 0; if (!previewing) writeDevice(store.snapshot()); };
+  const flushAccount = (): void => { accountTimer = 0; if (!previewing) writeAccount(store.snapshot()); };
   const off = store.onChange(() => {
     show();
     window.clearTimeout(deviceTimer);
@@ -61,8 +63,8 @@ export function startThemes(core: CoreScreen): () => void {
   });
 
   // The account's copy: the shared one. If it differs, it replaces this device's; if it has nothing, this device's is sent up.
-  let live = true;
-  void readAccount().then((account) => {
+  let live = !previewing;
+  if (!previewing) void readAccount().then((account) => {
     if (!live) return;
     if (account === undefined) { if (readDevice() !== undefined) flushAccount(); return; }
     if (JSON.stringify(account) === JSON.stringify(store.snapshot())) return;

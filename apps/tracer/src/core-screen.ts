@@ -1670,6 +1670,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     },
   };
   // The person's Themes (D322): the page shows the selected one from now on. Only the product's screens have Settings windows to edit them in.
-  const stopThemes = options.settingsView ? startThemes(api) : undefined;
+  // `?look=<theme id>` previews a theme for this page load only (tests and screenshots, like `?theme=`): honoured on the test double alone, so a link sent to a person of
+  // a real server cannot change their look, and a preview never saves (see `startThemes`).
+  const stopThemes = options.settingsView ? startThemes(api, options.mockMode ? new URLSearchParams(location.search).get("look") ?? undefined : undefined) : undefined;
   return api;
 }

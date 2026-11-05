@@ -66,13 +66,28 @@ test.describe("the Themes window", () => {
     await expect(page.locator(`${WINDOW} .ui-theme`)).toHaveCount(3);
   });
 
-  test("?look= starts on that theme for one page load and saves nothing", async ({ page }) => {
-    await page.goto("/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&look=frosted&at=appearance.themes");
-    await expect(page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
-    expect(await look(page)).toMatchObject({ id: "frosted", tint: "0.5", blur: "12px" });
+  test("?look= previews a theme for one page load: it reads and saves nothing, even after edits, and the next load is the person's own", async ({ page }) => {
+    // The person's own saved look first: Frosted on the device and on the account.
+    await open(page);
+    await page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`).click();
+    await expect.poll(async () => (await account(page)).themes?.selected, { timeout: 5000 }).toBe("frosted");
+    const saved = await page.evaluate(() => localStorage.getItem("tracer.themes"));
+    // A link that asks for Solid: that page shows Solid, ignores the account's choice, and an edit made on it is not saved anywhere.
+    await page.goto("/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&look=solid&at=appearance.themes");
+    await expect(page.locator(`${WINDOW} .ui-theme[data-id="solid"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
+    await page.waitForTimeout(1000);
+    expect(await look(page)).toMatchObject({ id: "solid", tint: "1", blur: "0px" });
+    const tint = page.locator(`${WINDOW} input[aria-label="Tint"]`);
+    await tint.scrollIntoViewIfNeeded();
+    await tint.fill("30");
+    await page.locator(`${WINDOW} .ui-theme[data-id="tinted"] .ui-theme-pick`).click();
     await page.waitForTimeout(1500);
-    expect(await page.evaluate(() => localStorage.getItem("tracer.themes")), "nothing was saved on the device").toBeNull();
-    expect((await account(page)).themes, "nor on the account").toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("tracer.themes")), "the device copy is exactly what it was").toBe(saved);
+    expect((await account(page)).themes?.selected, "the account still has the person's own choice").toBe("frosted");
+    // The next load, without the parameter, is the person's own look; an id that is not a theme is ignored.
+    await page.goto("/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&look=nonsense&at=appearance.themes");
+    await expect(page.locator(`${WINDOW} .ui-theme[data-id="frosted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true", { timeout: 25_000 });
+    expect(await look(page)).toMatchObject({ id: "frosted", tint: "0.5" });
   });
 
   test("the plus card makes a copy of the selected theme, selects it and lets its name change", async ({ page }) => {
