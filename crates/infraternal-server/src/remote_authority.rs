@@ -55,6 +55,59 @@ impl EnrollmentStore {
         })
     }
 
+    /// Admit a revoked host only to deliver its retained cleanup, never new work.
+    /// The certificate must still be exact, valid and individually unrevoked.
+    pub(crate) async fn admit_cleanup(
+        &self,
+        fingerprint: &[u8; 32],
+        now: i64,
+    ) -> Result<(HostAuthority, Uuid), EnrollmentError> {
+        let row: Option<(Vec<u8>, String, i64, i64, String)> = sqlx::query_as(
+            "SELECT h.id,h.mode,h.execution_uid,c.not_after,q.person_id FROM remote_hosts h \
+             JOIN remote_certificates c ON c.host_id=h.id \
+             JOIN remote_login_cleanup q ON q.host_id=h.id \
+             WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
+             AND c.revoked_at IS NULL AND h.revoked_at IS NOT NULL AND q.confirmed=0",
+        )
+        .bind(fingerprint.as_slice())
+        .bind(now)
+        .bind(now)
+        .fetch_optional(&self.0)
+        .await?;
+        let (host, mode, uid, not_after, person) = row.ok_or(EnrollmentError::Denied)?;
+        let host = Uuid::from_slice(&host).map_err(|_| EnrollmentError::Denied)?;
+        let person = Uuid::parse_str(&person).map_err(|_| EnrollmentError::Denied)?;
+        let execution_uid = u32::try_from(uid).map_err(|_| EnrollmentError::Denied)?;
+        let mode = match mode.as_str() {
+            "rootless" if execution_uid != 0 => Mode::Rootless,
+            "rootful" if execution_uid == 0 => Mode::Rootful,
+            _ => return Err(EnrollmentError::Denied),
+        };
+        Ok((
+            HostAuthority {
+                host,
+                mode,
+                execution_uid,
+                not_after,
+            },
+            person,
+        ))
+    }
+
+    /// Record only a durable daemon acknowledgement; failed/lost replies stay pending.
+    pub(crate) async fn confirm_login_cleanup(
+        &self,
+        host: Uuid,
+        person: Uuid,
+    ) -> Result<(), EnrollmentError> {
+        sqlx::query("UPDATE remote_login_cleanup SET confirmed=1 WHERE host_id=? AND person_id=?")
+            .bind(host.as_bytes().as_slice())
+            .bind(person.to_string())
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
     /// Persist a renewed certificate only for the live predecessor's same host key.
     /// # Errors
     /// Refuses expired/revoked predecessors, changed keys, invalid validity or storage failure.
@@ -151,27 +204,14 @@ impl EnrollmentStore {
     /// Process exit also retires its transports; no detached polling worker exists.
     pub(crate) async fn commit_revocation(
         &self,
-        mut transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
+        transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
         host: Uuid,
     ) -> Result<(), EnrollmentError> {
         let store = self.clone();
         tokio::spawn(async move {
-            // Person selection comes from the already-authorized host row,
-            // never request JSON. Legacy non-UUID fixtures have no PAM context.
-            let owner: Option<String> = sqlx::query_scalar(
-                "SELECT owner_id FROM remote_hosts WHERE id=? AND revoked_at IS NOT NULL",
-            )
-            .bind(host.as_bytes().as_slice())
-            .fetch_optional(&mut *transaction)
-            .await?;
-            if let Some(person) = owner.and_then(|owner| Uuid::parse_str(&owner).ok()) {
-                let confirmed = store.1.revoke_login(host, person).await;
-                if !confirmed {
-                    tracing::warn!(
-                        "host login cleanup unconfirmed; authority retirement continues"
-                    );
-                }
-            }
+            // The retirement trigger already prepared the durable cleanup
+            // outbox in this authorized transaction. Deliver nothing to the
+            // daemon before that intent commits; reconnect replay owns delivery.
             // The authorized writer transaction is prepared. Cut and drain
             // frame writes before COMMIT; keeping the signal alive fences a new
             // registration until the durable tombstone is visible. Storage

@@ -377,7 +377,8 @@ fn spawn_revocation(
     })
 }
 
-// Account resolution, login fencing and shell creation form one ordered admission path.
+/// Apply trusted server authority, resolve the account and fence shell creation.
+/// A positive login snapshot never clears a pending or persisted revocation.
 #[allow(clippy::too_many_lines)]
 async fn open_requested(
     exe: &std::path::Path,
@@ -417,6 +418,10 @@ async fn open_requested(
                 false,
             )
         };
+        // This trusted server request is the positive authority resync for
+        // this person after startup. It never clears a pending/durable refusal;
+        // a revoked remote host cannot obtain such a request from the server.
+        crate::logins::synchronize(state, person)?;
         let endpoint = crate::logins::ensure(exe, state, manager, person, &user).await?;
         json.account = Some(user.name);
         json.fallback = Some(fallback);

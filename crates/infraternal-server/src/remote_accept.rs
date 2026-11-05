@@ -66,6 +66,8 @@ fn remember(known: &Mutex<HashSet<IpAddr>>, address: IpAddr) {
         known.insert(address);
     }
 }
+/// Accept bounded authenticated QUIC links, including refusal-only reconnects
+/// whose server-owned cleanup obligation is still unconfirmed.
 pub(crate) async fn quic(
     quic: quinn::Endpoint,
     hosts: RemoteHosts,
@@ -100,7 +102,7 @@ pub(crate) async fn quic(
             );
             let Ok(Ok(authority)) = tokio::time::timeout(
                 Duration::from_secs(5),
-                AuthorityGuard::admit(store, fingerprint),
+                AuthorityGuard::admit_transport(store, fingerprint),
             )
             .await
             else {
@@ -144,6 +146,8 @@ pub(crate) async fn quic(
         });
     }
 }
+/// Accept bounded TLS links with normal authority or cleanup-only admission;
+/// retired hosts never regain ordinary host routing through this listener.
 pub(crate) async fn tcp(
     tcp: TcpListener,
     tls: Arc<openssl::ssl::SslAcceptor>,
@@ -223,7 +227,7 @@ pub(crate) async fn tcp(
             probe::record(probe::Kind::TlsHandshake, diagnostic_peer, 0);
             let Ok(Ok(authority)) = tokio::time::timeout(
                 Duration::from_secs(5),
-                AuthorityGuard::admit(store, connection.peer_fingerprint),
+                AuthorityGuard::admit_transport(store, connection.peer_fingerprint),
             )
             .await
             else {

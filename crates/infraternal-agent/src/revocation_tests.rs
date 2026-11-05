@@ -38,6 +38,76 @@ fn ordinary_flood_cannot_refuse_or_delay_denial() {
     ordinary_flood_child();
 }
 
+/// A pending in-memory refusal must still be present after the daemon restarts.
+/// The child holds the reserved lane until denial is visible but no marker exists,
+/// then exits abruptly; the parent checks only the shared on-disk state.
+#[test]
+fn denied_intent_survives_restart_before_marker_write() {
+    const CHILD: &str = "INFRATERNAL_REVOCATION_RESTART_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("INFRATERNAL_REVOCATION_RESTART_ROOT").unwrap(),
+        );
+        let person =
+            uuid::Uuid::parse_str(&std::env::var("INFRATERNAL_REVOCATION_RESTART_PERSON").unwrap())
+                .unwrap();
+        let marker = root
+            .join("infraternal-login-locks")
+            .join(format!("{}.revoked", person.simple()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(2)
+            .build()
+            .unwrap();
+        let _reserved = runtime.block_on(crate::durable_io::security()).unwrap();
+        runtime.block_on(async {
+            let state = root.clone();
+            tokio::spawn(async move {
+                let _ = revoke_at(&state, Manager::Detached, person, false).await;
+            });
+            while !revocations::denied(&root, person) {
+                tokio::task::yield_now().await;
+            }
+            assert!(permitted(&root, person).is_err());
+            assert!(
+                !marker.exists(),
+                "the held lane must precede marker creation"
+            );
+        });
+        std::process::exit(0);
+    }
+
+    let root = crate::durable_tests::directory();
+    let person = uuid::Uuid::new_v4();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "logins::revocation_tests::denied_intent_survives_restart_before_marker_write",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .env("INFRATERNAL_REVOCATION_RESTART_ROOT", &root)
+        .env("INFRATERNAL_REVOCATION_RESTART_PERSON", person.to_string())
+        .output()
+        .unwrap();
+    let child_succeeded = result.status.success();
+    let child_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let access_allowed_after_restart = permitted(&root, person).is_ok();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        child_succeeded,
+        "abrupt-stop fixture failed: {child_output}"
+    );
+    assert!(
+        !access_allowed_after_restart,
+        "restart lost the accepted in-memory denial before it became durable"
+    );
+}
+
 /// Keep ordinary admission occupied until all three security saves are durable.
 fn ordinary_flood_child() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -71,6 +141,9 @@ fn ordinary_flood_child() {
             assert!(save.as_mut().poll(&mut context).is_pending());
         }
         let people: Vec<_> = (0..3).map(|_| uuid::Uuid::new_v4()).collect();
+        for person in &people { synchronize_at(&root, *person).unwrap(); }
+        let unrelated = uuid::Uuid::new_v4();
+        synchronize_at(&root, unrelated).unwrap();
         let mut revokes: Vec<_> = people
             .iter()
             .map(|person| Box::pin(revoke_at(&root, Manager::Detached, *person, false)))
@@ -83,7 +156,7 @@ fn ordinary_flood_child() {
             .iter()
             .map(|person| permitted(&root, *person).is_err())
             .collect();
-        let unrelated_allowed = permitted(&root, uuid::Uuid::new_v4()).is_ok();
+        let unrelated_allowed = permitted(&root, unrelated).is_ok();
         // Release disk workers, but keep every ordinary admission and its fence.
         for release in releases {
             release.send(()).unwrap();
@@ -232,4 +305,120 @@ async fn security_flood_coalesces_without_forgetting_cancelled_intent() {
         "security_flood=1024 retained_intents_peak={retained} retained_after_durability=0 host_denied=true"
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A daemon stop removes transient grants. Removing only a validated host latch
+/// still cannot restore a person; the server must explicitly restore that person.
+#[test]
+fn stopped_host_latch_recovery_requires_validated_removal_and_explicit_restore() {
+    use std::os::unix::fs::MetadataExt as _;
+    const CHILD: &str = "INFRATERNAL_HOST_RECOVERY_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for person in [uuid::Uuid::from_u128(1), uuid::Uuid::from_u128(2)] {
+                revoke_at(&root, Manager::Detached, person, false)
+                    .await
+                    .unwrap();
+            }
+        });
+        save_refusal(&root, "host.revoked").unwrap();
+        return;
+    }
+    let root = crate::durable_tests::directory();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "logins::revocation_tests::stopped_host_latch_recovery_requires_validated_removal_and_explicit_restore"])
+        .env(CHILD, &root).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    // The subprocess has exited: there is no retained retry owner to recreate
+    // the latch during maintenance. Validate the inode before unlinking it.
+    let marker = root.join("infraternal-login-locks/host.revoked");
+    let person = uuid::Uuid::from_u128(1);
+    let other = uuid::Uuid::from_u128(2);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        assert!(restore_at(&root, person).await.is_err());
+        let meta = std::fs::symlink_metadata(&marker).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.uid(), Uid::effective().as_raw());
+        assert_eq!(meta.mode() & 0o777, 0o600);
+        assert_eq!(meta.len(), 0);
+        assert_eq!(meta.nlink(), 1);
+        // Exercise the exact operator snippet, including refusal of a link.
+        std::fs::remove_file(&marker).unwrap();
+        let untouched = root.join("untouched");
+        std::fs::write(&untouched, b"keep").unwrap();
+        std::os::unix::fs::symlink(&untouched, &marker).unwrap();
+        assert!(!run_recovery_snippet(&root).status.success());
+        assert_eq!(std::fs::read(&untouched).unwrap(), b"keep");
+        std::fs::remove_file(&marker).unwrap();
+        save_refusal(&root, "host.revoked").unwrap();
+        let recovery = run_recovery_snippet(&root);
+        assert!(
+            recovery.status.success(),
+            "{}",
+            String::from_utf8_lossy(&recovery.stderr)
+        );
+        assert!(!marker.exists());
+        assert!(permitted(&root, person).is_err());
+        assert!(
+            synchronize_at(&root, person).is_err(),
+            "sync must never clear a person refusal"
+        );
+        restore_at(&root, person).await.unwrap();
+        permitted(&root, person).unwrap();
+        assert!(permitted(&root, other).is_err());
+        assert!(synchronize_at(&root, other).is_err());
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Fresh processes need an affirmative server snapshot; neither missing markers
+/// nor a snapshot for a different person can grant access.
+#[test]
+fn fresh_login_access_requires_explicit_server_authority() {
+    let root = crate::durable_tests::directory();
+    let person = uuid::Uuid::new_v4();
+    assert!(permitted(&root, person).is_err());
+    synchronize_at(&root, person).unwrap();
+    permitted(&root, person).unwrap();
+    assert!(permitted(&root, uuid::Uuid::new_v4()).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Run the published maintenance procedure against this stopped fixture's registry.
+/// Extracting its literal fenced snippet prevents the test and runbook drifting.
+fn run_recovery_snippet(root: &Path) -> std::process::Output {
+    let runbook = include_str!("../../../docs/operations/host-login-lockdown-recovery.md");
+    let code = runbook
+        .split("```python\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let code = code
+        .lines()
+        .map(|line| line.strip_prefix("   ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace(
+            "\"/run/infraternal-login-locks\"",
+            &format!("{:?}", root.join("infraternal-login-locks")),
+        );
+    std::process::Command::new("python3")
+        .args(["-c", &code])
+        .output()
+        .unwrap()
 }

@@ -84,6 +84,8 @@ async fn upgrade(State(api): State<Api>, ws: WebSocketUpgrade, request: Request)
         })
 }
 
+/// Authenticate the host proof and keep cleanup connections bounded through
+/// their complete durable receipt; ordinary links transfer into the host map.
 async fn admit(
     mut socket: WebSocket,
     api: Api,
@@ -132,14 +134,18 @@ async fn admit(
         "protocol-greeting",
         crate::remote_link::RemoteLink::websocket(socket).await,
     )?;
-    drop(source);
-    drop(permit);
-    trace_test_phase(
+    // Ordinary links transfer into the bounded host map. A cleanup-only link
+    // never enters that map, so retain its source/global permits through cleanup
+    // to prevent repeated authenticated reconnects growing detached actors.
+    let cleanup_permits = authority.cleanup_person().map(|_| (source, permit));
+    let result = trace_test_phase(
         "host-admission",
         api.hosts
             .admit_observed(authority, link, Some(address))
             .await,
-    )
+    );
+    drop(cleanup_permits);
+    result
 }
 
 async fn send_text<T: serde::Serialize>(socket: &mut WebSocket, message: &T) -> io::Result<()> {
@@ -182,6 +188,8 @@ fn verify_signature(certificate: &X509, host_id: Uuid, nonce: &[u8], signature: 
     })
 }
 
+/// Verify the exact certificate's challenge proof and admit either live authority
+/// or a delivery capability for its server-retained refusal, never both.
 async fn authenticate(
     store: EnrollmentStore,
     proof: &AgentLinkProof,
@@ -209,9 +217,12 @@ async fn authenticate(
         .as_ref()
         .try_into()
         .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
-    let authority = tokio::time::timeout(HANDSHAKE, AuthorityGuard::admit(store, fingerprint))
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let authority = tokio::time::timeout(
+        HANDSHAKE,
+        AuthorityGuard::admit_transport(store, fingerprint),
+    )
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
     if authority.identity.host != proof.host_id {
         return Err(io::ErrorKind::PermissionDenied.into());
     }

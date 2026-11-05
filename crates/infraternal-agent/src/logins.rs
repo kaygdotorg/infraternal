@@ -468,8 +468,52 @@ fn host_refused(root: &Path) -> io::Result<bool> {
     }
 }
 
-/// Deny retained revocation intent before consulting the durable authority markers.
+/// Positive authority is deliberately process-local: a restarted daemon begins
+/// closed until the trusted server resends an authorized login request. Disk
+/// marker absence alone is never authority. Bound retained grants across roots.
+static AUTHORIZED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(PathBuf, uuid::Uuid)>>,
+> = std::sync::LazyLock::new(std::sync::Mutex::default);
+
+/// Apply the trusted server's current positive authority without clearing refusals.
+/// Call only for a server-authorized open/prepare or an explicit durable restore.
+/// No grant survives process exit, so an unconfirmed revocation cannot be lost
+/// into implicit permission when the daemon restarts before saving its marker.
+pub(crate) fn synchronize(state: &Path, person: uuid::Uuid) -> io::Result<()> {
+    synchronize_at(runtime_root(state), person)
+}
+
+/// Publish a bounded grant only when neither pending nor persisted refusal exists.
+pub(crate) fn synchronize_at(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    not_refused(root, person)?;
+    let mut grants = AUTHORIZED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (root.to_owned(), person);
+    if grants.len() >= 10_000 && !grants.contains(&key) {
+        return Err(io::ErrorKind::WouldBlock.into());
+    }
+    grants.insert(key);
+    Ok(())
+}
+
+/// Require a current server grant as well as the absence of every refusal.
 fn permitted(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    if !AUTHORIZED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&(root.to_owned(), person))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "host login authority has not been synchronized with the server",
+        ));
+    }
+    not_refused(root, person)
+}
+
+/// Deny retained revocation intent before consulting the durable authority markers.
+fn not_refused(root: &Path, person: uuid::Uuid) -> io::Result<()> {
     if revocations::denied(root, person) || host_refused(root)? {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -509,13 +553,15 @@ async fn restore_at(root: &Path, person: uuid::Uuid) -> io::Result<()> {
     let admission = crate::durable_io::admit()?;
     let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
     let root = root.to_owned();
+    let restored = root.clone();
     admission
         .run(move || {
             let _person = person_guard;
             restore_marker(&root, person)
         })
         .await?
-        .0
+        .0?;
+    synchronize_at(&restored, person)
 }
 
 /// Remove only a validated marker, then make that removal durable before restoring access.
@@ -1328,6 +1374,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A current server grant cannot bypass a later durable person refusal.
     #[test]
     fn revoke_latches_every_account_and_survives_a_new_open_check() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1341,6 +1388,7 @@ mod tests {
             ));
             std::fs::create_dir_all(&root).unwrap();
             let person = uuid::Uuid::new_v4();
+            synchronize_at(&root, person).unwrap();
             permitted(&root, person).unwrap();
             revoke_at(&root, Manager::Detached, person, false)
                 .await
@@ -1349,7 +1397,9 @@ mod tests {
                 permitted(&root, person).unwrap_err().kind(),
                 io::ErrorKind::PermissionDenied
             );
-            assert!(permitted(&root, uuid::Uuid::new_v4()).is_ok());
+            let unrelated = uuid::Uuid::new_v4();
+            synchronize_at(&root, unrelated).unwrap();
+            assert!(permitted(&root, unrelated).is_ok());
             // A repeat is idempotent and reads the same persisted tombstone.
             revoke_at(&root, Manager::Detached, person, false)
                 .await
@@ -1400,6 +1450,8 @@ mod tests {
     /// only for root (`pam_rootok`), so on such a host every rootless terminal
     /// is refused. The fixture `su` reproduces that refusal without making a
     /// real authentication attempt on the review host.
+    /// Supply the trusted server grant before calling login admission directly,
+    /// matching the daemon's authority synchronization before an ordinary open.
     #[test]
     fn rootless_self_account_login_does_not_depend_on_su_authentication() {
         const FIXTURE: &str = "INFRATERNAL_SHADOW_ROOTLESS_FIXTURE";
@@ -1470,11 +1522,13 @@ mod tests {
             assert!(!fallback_used);
             // Default resolution, as the daemon does without --state.
             let state = crate::sessions::state(None).unwrap();
+            let person = uuid::Uuid::new_v4();
+            synchronize(&state, person).unwrap();
             let result = ensure(
                 &std::env::current_exe().unwrap(),
                 &state,
                 Manager::Detached,
-                uuid::Uuid::new_v4(),
+                person,
                 &user,
             )
             .await;

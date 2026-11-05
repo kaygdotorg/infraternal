@@ -17,6 +17,44 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// Cleanup-only connections never enter the bounded host map. Give them their
+/// own fixed concurrency and no waiting queue, below the sixteen reserved host
+/// handshakes so a revoked-host flood cannot consume all normal reconnect slots.
+static LOGIN_CLEANUPS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
+/// Deliver one server-retained refusal without publishing a host or normal actor.
+/// Busy admission and failed/lost replies leave the durable obligation untouched.
+async fn deliver_login_cleanup(
+    authority: AuthorityGuard,
+    link: RemoteLink,
+    person: Uuid,
+) -> io::Result<()> {
+    let _cleanup = LOGIN_CLEANUPS
+        .try_acquire()
+        .map_err(|_| io::ErrorKind::WouldBlock)?;
+    // This transport never enters inventory, plugin routing or the host
+    // actor map. The handshake limits bound simultaneous cleanup jobs.
+    // A lost acknowledgement leaves the durable outbox for next reconnect.
+    let store = authority.store();
+    let host = authority.identity.host;
+    let (actor, accepts) = EmbeddedAgent::remote(authority.identity.execution_uid);
+    accepts
+        .try_send(link.authorize(authority))
+        .map_err(|_| io::ErrorKind::WouldBlock)?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        crate::remote_guard::durable_cleanup(actor.downgrade(), person),
+    )
+    .await;
+    if matches!(result, Ok(true)) {
+        store
+            .confirm_login_cleanup(host, person)
+            .await
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
 /// Trusted server transport identity and public issuers, supplied independently of the CA lock.
 pub struct RemoteService {
     /// Cold signer and private copy store for the shipping administrator adapter.
@@ -326,12 +364,17 @@ impl RemoteHosts {
     /// Admit a link and update its source only when this transport exposes one.
     /// SSH pipes have no observed socket IP; preserve an existing value or use
     /// the unspecified address until the enrolled network link is admitted.
+    /// Cleanup-only admission owns a bounded private actor and never publishes
+    /// host availability, plugins, sessions or positive login authority.
     pub(crate) async fn admit_observed(
         &self,
         authority: AuthorityGuard,
         mut link: RemoteLink,
         observed_ip: Option<std::net::IpAddr>,
     ) -> io::Result<()> {
+        if let Some(person) = authority.cleanup_person() {
+            return deliver_login_cleanup(authority, link, person).await;
+        }
         if link.primed() {
             return self.admit_primed(authority, link).await;
         }

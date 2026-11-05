@@ -1,6 +1,7 @@
-//! Real mTLS confirms person cleanup precedes host-channel retirement after SQL authority.
+//! Real mTLS proves durable cleanup replay cannot restore retired host authority.
 use super::*;
 
+/// A real enrolled TLS host and the durable server store used to retire it.
 struct LoginHost {
     store: EnrollmentStore,
     pool: sqlx::SqlitePool,
@@ -9,10 +10,14 @@ struct LoginHost {
     listeners: RemoteListeners,
     observed: tokio::sync::oneshot::Receiver<serde_json::Value>,
     peer: tokio::task::JoinHandle<()>,
+    /// Exact enrolled credentials reused to prove cleanup-only reconnect admission.
+    config: openssl::ssl::SslConnector,
 }
+/// Enroll a real TLS fixture whose initial control channel accepts no grants.
 async fn login_host(reply: Option<bool>) -> LoginHost {
     login_host_action(reply, "terminal.login.revoke").await
 }
+/// Start an enrolled peer and retain its exact TLS identity for reconnect proof.
 async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -> LoginHost {
     let (server, host_identity, root, _) = identities();
     let (store, pool, host, _) = admitted_store(&host_identity, &root).await;
@@ -41,8 +46,9 @@ async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -
     let address = listeners.local_addr().unwrap();
     let config = remote_tls::client_config(&host_identity, &[root]).unwrap();
     let (seen, observed) = tokio::sync::oneshot::channel();
+    let peer_config = config.clone();
     let peer = tokio::spawn(async move {
-        let connection = remote_tls::dial(address, "localhost", &config)
+        let connection = remote_tls::dial(address, "localhost", &peer_config)
             .await
             .unwrap();
         let mut receive = Receive::default();
@@ -104,11 +110,13 @@ async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -
         listeners,
         observed,
         peer,
+        config,
     }
 }
 
+/// Persist retirement and its cleanup together, then confirm only a durable reconnect reply.
 #[tokio::test]
-async fn authorized_host_revocation_sends_person_cleanup_before_retirement() {
+async fn authorized_host_revocation_retains_cleanup_after_authority_retirement() {
     let mut fixture = login_host(Some(true)).await;
     assert!(
         fixture
@@ -124,17 +132,19 @@ async fn authorized_host_revocation_sends_person_cleanup_before_retirement() {
         ),
         "foreign owner caused host cleanup"
     );
-    let started = std::time::Instant::now();
     fixture
         .store
         .revoke(&fixture.person.to_string(), fixture.host, now().unwrap())
         .await
         .unwrap();
-    let input = fixture
-        .observed
-        .await
-        .expect("host retired without requesting person login cleanup");
-    assert_eq!(input, serde_json::json!({"person":fixture.person}));
+    let pending: (String, bool) =
+        sqlx::query_as("SELECT person_id,confirmed FROM remote_login_cleanup WHERE host_id=?")
+            .bind(fixture.host.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(pending, (fixture.person.to_string(), false));
+    reconnect_cleanup(&fixture, Some(true)).await;
     let denied: bool =
         sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
             .bind(fixture.host.as_bytes().as_slice())
@@ -143,30 +153,27 @@ async fn authorized_host_revocation_sends_person_cleanup_before_retirement() {
             .unwrap();
     assert!(denied);
     fixture.peer.await.unwrap();
-    println!(
-        "login_revocation peer_reply=true authority_cut_ms={:.3}",
-        started.elapsed().as_secs_f64() * 1000.0
-    );
+    eprintln!("login_cleanup pending_after_retirement=true durable_reconnect_confirmed=true");
 }
 
+/// An offline cleanup remains unconfirmed while server authority retires durably.
 #[tokio::test]
 async fn unconfirmed_person_cleanup_does_not_block_host_authority_cut() {
     let fixture = login_host(None).await;
-    let started = std::time::Instant::now();
     fixture
         .store
         .revoke(&fixture.person.to_string(), fixture.host, now().unwrap())
         .await
         .unwrap();
-    let input = fixture
-        .observed
-        .await
-        .expect("cleanup was not attempted on a live host");
-    assert_eq!(input, serde_json::json!({"person":fixture.person}));
-    assert!(
-        started.elapsed() < Duration::from_millis(300),
-        "unconfirmed login cleanup delayed authority retirement"
-    );
+    // Authority retirement closes the old transport; cleanup is delivered on
+    // the next authenticated cleanup-only connection from the retained outbox.
+    let confirmed: bool =
+        sqlx::query_scalar("SELECT confirmed FROM remote_login_cleanup WHERE host_id=?")
+            .bind(fixture.host.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert!(!confirmed, "a finite timeout must not confirm durability");
     assert!(
         fixture
             .listeners
@@ -176,10 +183,7 @@ async fn unconfirmed_person_cleanup_does_not_block_host_authority_cut() {
             .is_none()
     );
     fixture.peer.await.unwrap();
-    println!(
-        "login_revocation confirmed=false authority_cut_ms={:.3}",
-        started.elapsed().as_secs_f64() * 1000.0
-    );
+    eprintln!("login_cleanup confirmed=false authority_retired=true");
 }
 
 /// Preferred host overrides reach an admitted remote actor before any terminal opens.
@@ -227,4 +231,132 @@ async fn connected_remote_host_prepares_its_persons_preferred_account() {
     assert_eq!(input["account"], "deploy");
     preparation.await.unwrap();
     fixture.peer.abort();
+}
+
+/// Reconnect a tombstoned host using its real enrolled mTLS identity. The only
+/// admitted request must be the persisted person's cleanup, never a new login.
+async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
+    let connection = remote_tls::dial(
+        fixture.listeners.local_addr().unwrap(),
+        "localhost",
+        &fixture.config,
+    )
+    .await
+    .unwrap();
+    let mut receive = Receive::default();
+    Transmit::default()
+        .send(
+            &connection.channel,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: remote_quic::REMOTE_WRITER_BINDING,
+                client_info: "cleanup-reconnect-fixture",
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive.next(&connection.channel).await.unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    for _ in 0..if durable == Some(false) { 3 } else { 1 } {
+        let request = receive.next(&connection.channel).await.unwrap();
+        let Frame::Call {
+            call_id,
+            action_id,
+            input_json,
+        } = request.frame
+        else {
+            panic!("cleanup request missing")
+        };
+        assert_eq!(action_id, "terminal.login.revoke");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(input_json).unwrap(),
+            serde_json::json!({"person": fixture.person})
+        );
+        let Some(durable) = durable else {
+            // Dropping the socket after receipt models a lost acknowledgement.
+            return;
+        };
+        let json = serde_json::json!({"revoked": durable}).to_string();
+        Transmit::default()
+            .send(
+                &connection.channel,
+                0,
+                &Frame::Result {
+                    call_id,
+                    ok: true,
+                    json: json.as_bytes(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    // Completion closes the private cleanup actor and never publishes it.
+    assert!(receive.next(&connection.channel).await.is_err());
+}
+
+/// Unconfirmed cleanup survives a server store restart and a refused reply;
+/// only a later durable acknowledgement retires it, without restoring authority.
+#[tokio::test]
+async fn unconfirmed_cleanup_replays_after_restart_without_granting_remote_access() {
+    let fixture = login_host(None).await;
+    fixture
+        .store
+        .revoke(&fixture.person.to_string(), fixture.host, now().unwrap())
+        .await
+        .unwrap();
+    let restarted = EnrollmentStore::new(fixture.pool.clone());
+    let fingerprint: Vec<u8> =
+        sqlx::query_scalar("SELECT fingerprint FROM remote_certificates WHERE host_id=?")
+            .bind(fixture.host.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    let fingerprint: [u8; 32] = fingerprint.try_into().unwrap();
+    assert!(
+        AuthorityGuard::admit(restarted.clone(), fingerprint)
+            .await
+            .is_err()
+    );
+    let cleanup = AuthorityGuard::admit_transport(restarted.clone(), fingerprint)
+        .await
+        .unwrap();
+    assert_eq!(cleanup.cleanup_person(), Some(fixture.person));
+    assert!(cleanup.admit_operation().await.is_err());
+    reconnect_cleanup(&fixture, None).await;
+    reconnect_cleanup(&fixture, Some(false)).await;
+    let confirmed: bool =
+        sqlx::query_scalar("SELECT confirmed FROM remote_login_cleanup WHERE host_id=?")
+            .bind(fixture.host.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert!(
+        !confirmed,
+        "a refused reply discarded the server's durable intent"
+    );
+    reconnect_cleanup(&fixture, Some(true)).await;
+    let confirmed: bool =
+        sqlx::query_scalar("SELECT confirmed FROM remote_login_cleanup WHERE host_id=?")
+            .bind(fixture.host.as_bytes().as_slice())
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert!(confirmed);
+    assert!(
+        AuthorityGuard::admit_transport(restarted, fingerprint)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .listeners
+            .diagnostic_hosts
+            .actor(fixture.host)
+            .await
+            .is_none()
+    );
+    fixture.peer.await.unwrap();
 }

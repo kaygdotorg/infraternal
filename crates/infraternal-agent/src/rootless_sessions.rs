@@ -523,6 +523,7 @@ mod durable_tests {
                     root.join("infraternal-login-locks"),
                     std::os::unix::fs::PermissionsExt::from_mode(0o700),
                 )?;
+                crate::logins::synchronize_at(&root, person)?;
                 let guard = crate::logins::rootless_launch_guard(&root, person).await?;
                 reserve(&root, person, uuid::Uuid::new_v4(), guard).await
             }
