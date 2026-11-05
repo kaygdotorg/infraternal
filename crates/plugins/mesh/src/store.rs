@@ -211,8 +211,6 @@ fn rank(source: &str) -> u8 {
 }
 /// The label no remote machine may be called automatically: viewers read it as the server.
 const SERVER_LABEL: &str = "server";
-/// What a node is called while no name is known.
-const UNNAMED: &str = "unnamed";
 /// A node's current name, as naming sees it.
 struct Named {
     id: i64,
@@ -267,14 +265,15 @@ fn free_name(nodes: &[Named], base: &str, except: i64, skip: bool, taken: &str) 
     }
     suffixed.into_iter().find(|name| available(name))
 }
-/// Finds a free reserved label, extending beyond the short common suffix range when inventory is large.
-fn unnamed_name(nodes: &[Named], except: i64, taken: &str) -> String {
-    if let Some(name) = free_name(nodes, UNNAMED, except, false, taken) {
+/// Finds a free name from `base` (a fallback such as `linux-0a1b2c`, D339), extending beyond the short common
+/// suffix range when inventory is large. The same rule as [`free_name`], so a node keeps its suffix across attaches.
+fn fallback_name(nodes: &[Named], base: &str, except: i64, taken: &str) -> String {
+    if let Some(name) = free_name(nodes, base, except, false, taken) {
         return name;
     }
     let mut suffix = 10_u64;
     loop {
-        let name = format!("{UNNAMED}-{suffix}");
+        let name = format!("{base}-{suffix}");
         if name != taken
             && !nodes
                 .iter()
@@ -286,13 +285,11 @@ fn unnamed_name(nodes: &[Named], except: i64, taken: &str) -> String {
     }
 }
 /// Moves `holder` off `name`, which a stronger claim takes: to the first free suffix of the holder's own claim
-/// (`web-2` claimed `web` goes to `web-3`, not `web-2-2`), else to an available unnamed label.
-/// Its claim and source stay. A fixed fallback alone can conflict and expose a hidden hostname to a global
-/// manager, so exhaustion must keep searching rather than turn into a different rename result (#236).
+/// (`web-2` claimed `web` goes to `web-3`, not `web-2-2`), else past `-9` (`web-10` …).
+/// Its claim and source stay. Exhaustion must keep searching rather than turn into a different rename result (#236).
 fn move_aside(nodes: &[Named], holder: &Named, name: &str) -> Renamed {
     let base = holder.claim.as_deref().unwrap_or(&holder.name);
-    let to = free_name(nodes, base, holder.id, false, name)
-        .unwrap_or_else(|| unnamed_name(nodes, holder.id, name));
+    let to = fallback_name(nodes, base, holder.id, name);
     Renamed {
         id: holder.id,
         from: holder.name.clone(),
@@ -309,7 +306,8 @@ fn move_aside(nodes: &[Named], holder: &Named, name: &str) -> Renamed {
 /// node, the newcomer, gets the suffix (`minipc01-2` … `-9`). A node that already holds a free suffix of its claim
 /// keeps it rather than shuffling to a lower one, so restarts in any order rename nothing. A reported hostname
 /// also yields to every other host's record name, enrolled or not, so a machine cannot pose as one the owner
-/// named. With no name, a new node is `unnamed`.
+/// named. With no name, a node gets `fallback` (D339: `<os>-<first 6 characters of the id>`), suffixed on a
+/// collision; it keeps that name, suffix included, until a real one is known.
 /// `None` keeps the current name.
 fn naming(
     nodes: &[Named],
@@ -318,19 +316,24 @@ fn naming(
     current: Option<&str>,
     wanted: Option<(String, &'static str)>,
     records: &[String],
+    fallback: &str,
 ) -> Option<Naming> {
     let free = |base: &str, except: i64, skip: bool, taken: &str| {
         free_name(nodes, base, except, skip, taken)
     };
     let Some((wanted, source)) = wanted else {
-        let stale_placeholder = current.is_some_and(|name| name == format!("mesh-{host}"));
+        // Two older placeholder schemes are replaced: `mesh-<host>` (before names were known) and the
+        // `unnamed` / `unnamed-<n>` labels this rule supersedes.
+        let stale_placeholder = current
+            .is_some_and(|name| name == format!("mesh-{host}") || is_legacy_unnamed_label(name));
         if current.is_some() && !stale_placeholder {
             return None;
         }
         let name = if host == SERVER_LABEL {
             SERVER_LABEL.to_owned()
         } else {
-            unnamed_name(nodes, id, "")
+            // A node already at a free suffix of the fallback keeps it (see `free_name`), so restarts rename nothing.
+            fallback_name(nodes, fallback, id, "")
         };
         if current == Some(name.as_str()) {
             return None;
@@ -363,11 +366,21 @@ fn naming(
             claim: Some(claim),
         }),
         (None, Some(current)) if current == format!("mesh-{host}") => {
-            naming(nodes, id, host, Some(current), None, records)
+            naming(nodes, id, host, Some(current), None, records, fallback)
         }
         (Some(_), _) | (None, Some(_)) => None,
-        (None, None) => naming(nodes, id, host, None, None, records),
+        (None, None) => naming(nodes, id, host, None, None, records, fallback),
     }
+}
+
+/// The `unnamed` / `unnamed-<n>` labels older versions stored for nodes without a name (migration 0029). Only used
+/// to recognise them for replacement: a person may now pick such a name, which then has source `hand` and is never
+/// touched, and a machine may report it as its hostname.
+fn is_legacy_unnamed_label(name: &str) -> bool {
+    name == "unnamed"
+        || name.strip_prefix("unnamed-").is_some_and(|rest| {
+            !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+        })
 }
 /// What names a node of `host`, and who gives it, with the names the owner gave every other host.
 ///
@@ -378,18 +391,21 @@ async fn wanted_name(
     host: &str,
     server: bool,
     reported: Option<&str>,
-) -> Result<(Option<(String, &'static str)>, Vec<String>), &'static str> {
+) -> Result<WantedName, &'static str> {
     let own = host.replace('-', "").to_ascii_lowercase();
     let mut recorded = None;
+    let mut os = None;
     let mut records = Vec::new();
-    for row in sqlx::query("SELECT lower(hex(host_id)) AS host,address FROM remote_host_bootstrap")
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|_| "Mesh storage unavailable.")?
+    for row in
+        sqlx::query("SELECT lower(hex(host_id)) AS host,address,os FROM remote_host_bootstrap")
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?
     {
         let name = machine_name(&row.get::<String, _>("address"));
         if row.get::<String, _>("host") == own {
             recorded = name;
+            os = row.get::<Option<String>, _>("os");
         } else {
             records.extend(name);
         }
@@ -419,8 +435,12 @@ async fn wanted_name(
                     .map(|name| (name, "reported"))
             })
     };
-    Ok((wanted, records))
+    let fallback = infraternal_plugin_api::host_name::fallback_machine_name(os.as_deref(), &own);
+    Ok((wanted, records, fallback))
 }
+/// What `wanted_name` decides: the name to ask for and who gives it, the names the owner gave other hosts, and the
+/// fallback name for a node that gets none (D339).
+type WantedName = (Option<(String, &'static str)>, Vec<String>, String);
 /// Frees `name` for `actor`'s choice on node `id` (`None` while enrolling a new one). A person outranks every
 /// automatic name (migration 0026), so a node holding `name` by record, report, placeholder or the server's own
 /// hostname moves aside to a suffix of its own claim, audited under `actor` as an automatic rename with the
@@ -1262,7 +1282,7 @@ impl Store {
     /// the name its pill shows); `reported`, the hostname the machine's infraternal agent reports, only for a host
     /// the record cannot name. A collision suffixes the weaker claim (`minipc01-2`), so a machine can never take
     /// the server's name, `server`, or a name the owner gave another host. Each automatic rename is audited.
-    /// Without any name a node is `unnamed` until one is known.
+    /// Without any name a node gets `<os>-<first 6 characters of its id>` (D339) until one is known.
     /// # Errors
     /// Returns fixed public errors, not database input or authentication data.
     pub async fn attach_named(
@@ -1361,7 +1381,7 @@ impl Store {
         if removed {
             return Err("Mesh membership was removed; authorized enrollment is required.");
         }
-        let (wanted, records) = wanted_name(&mut tx, host, server, reported).await?;
+        let (wanted, records, fallback) = wanted_name(&mut tx, host, server, reported).await?;
         let nodes = named_nodes(&mut tx)
             .await
             .map_err(|_| "Mesh storage unavailable.")?;
@@ -1376,7 +1396,8 @@ impl Store {
             // A person's name is final. Any automatic name is re-claimed on each attach, so a squatter yields
             // once the owner's machine (or the server) comes along, and a placeholder heals.
             if row.get::<String, _>("name_source") != "hand"
-                && let Some(naming) = naming(&nodes, id, host, Some(&name), wanted, &records)
+                && let Some(naming) =
+                    naming(&nodes, id, host, Some(&name), wanted, &records, &fallback)
             {
                 renamed = naming.moved;
                 renamed.push(Renamed {
@@ -1414,7 +1435,7 @@ impl Store {
         } else {
             let high:i64 = sqlx::query_scalar("UPDATE mesh_state SET node_id_high_water=node_id_high_water+1 WHERE singleton=1 AND node_id_high_water<9223372036854775807 RETURNING node_id_high_water").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
             // A new node always gets a name; only the nodes it moves aside are renames.
-            let naming = naming(&nodes, high, host, None, wanted, &records)
+            let naming = naming(&nodes, high, host, None, wanted, &records, &fallback)
                 .ok_or("Mesh identity invalid.")?;
             renamed = naming.moved;
             rename(&mut tx, &renamed).await?;
@@ -1456,11 +1477,19 @@ impl Store {
         }
         let id: i64 = row.get("id");
         let current: String = row.get("name");
-        let (wanted, records) = wanted_name(&mut tx, host, false, None).await?;
+        let (wanted, records, fallback) = wanted_name(&mut tx, host, false, None).await?;
         let nodes = named_nodes(&mut tx)
             .await
             .map_err(|_| "Mesh storage unavailable.")?;
-        let Some(naming) = naming(&nodes, id, host, Some(&current), wanted, &records) else {
+        let Some(naming) = naming(
+            &nodes,
+            id,
+            host,
+            Some(&current),
+            wanted,
+            &records,
+            &fallback,
+        ) else {
             tx.rollback()
                 .await
                 .map_err(|_| "Mesh storage unavailable.")?;
@@ -2041,7 +2070,7 @@ mod naming_tests {
             "0X0A454505",
             "root@010.1",
             "10.69.69.5.",
-            "root@unnamed-3",
+            "root@localhost",
         ] {
             assert_eq!(machine_name(source), None, "{source}");
         }

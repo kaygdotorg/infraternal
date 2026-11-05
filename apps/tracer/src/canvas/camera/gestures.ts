@@ -31,8 +31,8 @@ export function installGestures(cx: Ctx): void {
    * canvas and `closest` finds nothing: that swipe used to be lost (TASTE: every swipe moves). The column's box is found
    * from its geometry instead.
    */
-  const columnAt = (e: WheelEvent): HTMLElement | undefined =>
-    (e.target as Element).closest<HTMLElement>(".cl-col") ?? columnEls(views.get(state.currentView)!.colsEl).find((col) => { const r = columnRect(col); return e.clientX >= r.left && e.clientX <= r.right; });
+  const columnAt = (target: Element | null, x: number): HTMLElement | undefined =>
+    target?.closest<HTMLElement>(".cl-col") ?? columnEls(views.get(state.currentView)!.colsEl).find((col) => { const r = columnRect(col); return x >= r.left && x <= r.right; });
   const wheelG = { t: 0, x: 0, y: 0, fired: 0, axis: "", m: 0, fell: false, s: 0 };
   const snapWheel = (e: WheelEvent): void => {
     e.preventDefault();
@@ -66,7 +66,7 @@ export function installGestures(cx: Ctx): void {
         cx.nav.goStop(c, state.snapIdx + dir);
       }
     } else {
-      const colEl = columnAt(e);
+      const colEl = columnAt(e.target as Element, e.clientX);
       if (colEl) stepWindow(colEl, dir);
     }
   };
@@ -81,7 +81,7 @@ export function installGestures(cx: Ctx): void {
     if (!state.canvasLock || cx.inputLock.state || e.touches.length !== 2) return;
     const c = centroid(e);
     camera.takeOver();
-    two = { x: c.x, y: c.y, cx0: cam.cx, idx0: state.snapIdx, axis: "", stepped: false, col: (document.elementFromPoint(c.x, c.y) as Element | null)?.closest<HTMLElement>(".cl-col") ?? null, samples: [{ x: c.x, t: e.timeStamp }] };
+    two = { x: c.x, y: c.y, cx0: cam.cx, idx0: state.snapIdx, axis: "", stepped: false, col: columnAt(document.elementFromPoint(c.x, c.y), c.x) ?? null, samples: [{ x: c.x, t: e.timeStamp }] };
   }, { passive: true, capture: true, signal });
   viewport.addEventListener("touchmove", (e) => {
     if (!two || e.touches.length !== 2) return;
@@ -206,14 +206,28 @@ export function installGestures(cx: Ctx): void {
   };
   const canvasWheel = (e: WheelEvent): void => {
     if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
-    if (free) free.wheel(e); else e.preventDefault(); // the free-canvas code is fetched when the lock first turns off
+    if (free) { free.wheel(e); return; }
+    // The free-canvas code is fetched when the lock first turns off and may still be on its way (a slow link, a busy machine). A wheel that lands
+    // in that gap is kept, not dropped, and played in order once the code arrives, so Ctrl+wheel right after the toggle still zooms.
+    e.preventDefault();
+    if (waiting.length < MAX_WAITING_WHEELS) waiting.push(e);
   };
+  /** Wheel events that arrived while the free-canvas code was loading; `loadFree` plays them when it lands. */
+  const waiting: WheelEvent[] = [];
+  /** A generous bound: a person's wheel in the load gap is a handful of events; this only stops a runaway stream from piling up. */
+  const MAX_WAITING_WHEELS = 64;
   // Panning, pinching and zooming a free canvas are not part of the first interaction: the canvas starts locked to windows
   // (D177), and everything below is fetched the first time the lock turns off (D188). A person cannot reach the free
   // canvas without that toggle, so the code is there before the first free gesture.
   let free: { wheel(e: WheelEvent): void } | undefined;
   const loadFree = (): void => {
-    if (!free) void onDemand(() => import("./gestures-free.on-demand")).then((m) => { if (!signal.aborted) free ??= m.installFreeGestures(cx); });
+    if (!free) void onDemand(() => import("./gestures-free.on-demand")).then((m) => {
+      if (signal.aborted) return;
+      free ??= m.installFreeGestures(cx);
+      // Play the wheel events that came in while loading, unless the lock came back on meanwhile (then they belong to no free canvas).
+      const held = waiting.splice(0);
+      if (!state.canvasLock) for (const e of held) free.wheel(e);
+    });
   };
   if (!state.canvasLock) loadFree();
   signal.addEventListener("abort", cx.nav.onLockChange(() => { if (!state.canvasLock) loadFree(); }), { once: true });

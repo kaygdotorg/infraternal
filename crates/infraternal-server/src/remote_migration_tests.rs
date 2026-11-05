@@ -254,7 +254,7 @@ async fn machine_join_migration_preserves_nine_hundred_second_invitations_and_al
 }
 
 #[tokio::test]
-async fn old_uuid_mesh_placeholders_upgrade_to_audited_unnamed_labels() {
+async fn old_uuid_mesh_placeholders_upgrade_to_audited_fallback_names() {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -285,23 +285,28 @@ async fn old_uuid_mesh_placeholders_upgrade_to_audited_unnamed_labels() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(name, "unnamed-1");
+    // 0029 labels it `unnamed-1`; 0049 (D339) replaces that with `<os>-<first 6 id characters>`.
+    assert_eq!(name, "host-000000");
     assert_eq!(source, "placeholder");
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(revision, 1);
-    let detail: String = sqlx::query_scalar(
-        "SELECT detail_json FROM mesh_audit WHERE action='mesh.node.name' AND resource='1'",
+    assert_eq!(revision, 2);
+    let details: Vec<String> = sqlx::query_scalar(
+        "SELECT detail_json FROM mesh_audit WHERE action='mesh.node.name' AND resource='1' ORDER BY revision",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
-    assert_eq!(detail["name"], "unnamed-1");
-    assert_eq!(detail["previous"], format!("mesh-{host}"));
-    assert!(detail["automatic"].as_bool().unwrap_or(false));
+    assert_eq!(details.len(), 2);
+    let first: serde_json::Value = serde_json::from_str(&details[0]).unwrap();
+    assert_eq!(first["name"], "unnamed-1");
+    assert_eq!(first["previous"], format!("mesh-{host}"));
+    let last: serde_json::Value = serde_json::from_str(&details[1]).unwrap();
+    assert_eq!(last["name"], "host-000000");
+    assert_eq!(last["previous"], "unnamed-1");
+    assert!(last["automatic"].as_bool().unwrap_or(false));
 }
 
 #[tokio::test]
@@ -372,7 +377,7 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
         .fetch_one(&production)
         .await
         .unwrap();
-    assert_eq!(name, "unnamed-42");
+    assert_eq!(name, "host-000000");
     let hostname: Option<String> =
         sqlx::query_scalar("SELECT hostname FROM remote_hosts WHERE id=?")
             .bind(host.as_bytes().as_slice())
@@ -388,7 +393,7 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
         "ok"
     );
     println!(
-        "RELEASE7_MIGRATION before=28 applied={} last_version={} preserved_checksums=28 canvas_revision=7 receipt_count=0 placeholder=unnamed-42 integrity=ok",
+        "RELEASE7_MIGRATION before=28 applied={} last_version={} preserved_checksums=28 canvas_revision=7 receipt_count=0 placeholder=host-000000 integrity=ok",
         after.len(),
         after
             .last()
@@ -453,23 +458,29 @@ async fn hostname_migration_allocates_around_retained_names() {
     assert_eq!(
         names,
         [
-            (42, "unnamed-42-3".to_owned(), "placeholder".to_owned()),
+            (42, "host-000000".to_owned(), "placeholder".to_owned()),
             (43, "UnNaMeD-42".to_owned(), "hand".to_owned()),
             (44, "unnamed-42-1".to_owned(), "reported".to_owned()),
             (45, "unnamed-42-2".to_owned(), "record".to_owned()),
-            (46, "unnamed-46".to_owned(), "placeholder".to_owned()),
+            // Same first six id characters as node 42: ranked by node id, the later one takes `-2`.
+            (46, "host-000000-2".to_owned(), "placeholder".to_owned()),
         ]
     );
     let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(revision, 10);
+    assert_eq!(revision, 11);
     let audit: Vec<(String, String)> = sqlx::query_as(
-        "SELECT resource,detail_json FROM mesh_audit WHERE action='mesh.node.name' ORDER BY resource",
+        "SELECT resource,detail_json FROM mesh_audit WHERE action='mesh.node.name' ORDER BY resource,revision",
     ).fetch_all(&pool).await.unwrap();
-    assert_eq!(audit.len(), 2);
-    for ((resource, detail), expected) in audit.into_iter().zip(["unnamed-42-3", "unnamed-46"]) {
+    // Each placeholder is audited twice: once for 0029's label, once for 0049's fallback.
+    assert_eq!(audit.len(), 4);
+    for ((resource, detail), expected) in
+        audit
+            .into_iter()
+            .zip(["unnamed-42-3", "host-000000", "unnamed-46", "host-000000-2"])
+    {
         let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
         assert_eq!(detail["name"], expected);
         assert_eq!(detail["node_id"].as_i64().unwrap().to_string(), resource);
@@ -481,4 +492,82 @@ async fn hostname_migration_allocates_around_retained_names() {
             .await
             .unwrap();
     assert_eq!(temporary_tables, 0);
+    let leftover: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sqlite_temp_master WHERE name='_fallback_labels'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(leftover, 0);
+}
+
+/// D339 migration rules: the os word comes from the reported OS, a name a person picked is never touched, and
+/// a real hostname that happens to look like the old placeholder stays.
+#[tokio::test]
+async fn fallback_migration_keeps_hand_names_and_uses_the_reported_os() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let mut deployed = sqlx::migrate!("./migrations");
+    deployed
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version <= 38);
+    deployed.run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('owner','Owner',1,'fixture','owner','Owner')")
+        .execute(&pool).await.unwrap();
+    let mac = uuid::Uuid::parse_str("abcdef01-0000-0000-0000-000000000000").unwrap();
+    let linux = uuid::Uuid::parse_str("123456ff-0000-0000-0000-000000000000").unwrap();
+    for (host, os) in [(mac, "macOS 26.5"), (linux, "Debian GNU/Linux")] {
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'owner','rootless',1000,100)")
+            .bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO remote_host_bootstrap(host_id,address,os) VALUES (?,'root@192.0.2.10',?)",
+        )
+        .bind(host.as_bytes().as_slice())
+        .bind(os)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let hand = uuid::Uuid::from_u128(7);
+    for (id, name, source, host) in [
+        (1_i64, "unnamed", "placeholder", mac),
+        (2, "unnamed-2", "placeholder", linux),
+        (3, "unnamed-3", "hand", hand),
+        (4, "unnamed-9", "reported", hand),
+        (5, "nas", "reported", hand),
+    ] {
+        sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,dataplane_host,name_source) VALUES (?,?,?,?,?)")
+            .bind(id).bind(name).bind([u8::try_from(id).unwrap(); 32].as_slice())
+            .bind(format!("{host}-{id}")).bind(source).execute(&pool).await.unwrap();
+    }
+    // The dataplane host of a real node is the plain UUID; give the two placeholders theirs.
+    for (id, host) in [(1_i64, mac), (2, linux)] {
+        sqlx::query("UPDATE mesh_nodes SET dataplane_host=? WHERE id=?")
+            .bind(host.to_string())
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+
+    let names: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id,name,name_source FROM mesh_nodes ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        names,
+        [
+            (1, "macos-abcdef".to_owned(), "placeholder".to_owned()),
+            (2, "linux-123456".to_owned(), "placeholder".to_owned()),
+            (3, "unnamed-3".to_owned(), "hand".to_owned()),
+            (4, "unnamed-9".to_owned(), "reported".to_owned()),
+            (5, "nas".to_owned(), "reported".to_owned()),
+        ]
+    );
 }

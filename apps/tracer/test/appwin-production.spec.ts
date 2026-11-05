@@ -15,13 +15,13 @@ async function open(page: Page) {
   await page.goto("/?proto=product&fresh=1&bg=none");
   await expect(page.locator(".ui-window").first()).toBeVisible();
   await page.keyboard.press(paletteShortcut);
-  await expect(page.getByRole("option", { name: /Settings: Hosts/ })).toBeVisible({ timeout: 25_000 });
+  await expect(page.getByRole("option", { name: /Terminal › Hosts/ })).toBeVisible({ timeout: 25_000 });
   await page.keyboard.press("Escape");
 }
 async function enable(page: Page) {
   await requireFixtureH264(page);
   await page.keyboard.press(paletteShortcut);
-  await page.getByRole("option", { name: /Settings: Hosts/ }).click();
+  await page.getByRole("option", { name: /Terminal › Hosts/ }).click();
   const toggle = page.getByRole("switch", { name: /Stream app windows/ });
   await expect(toggle).not.toBeChecked();
   await toggle.click();
@@ -95,7 +95,7 @@ test("turning the production setting off retires existing windows and source ses
   await open(page);
   await enable(page);
   await page.keyboard.press(paletteShortcut);
-  await page.getByRole("option", { name: /Settings: Hosts/ }).click();
+  await page.getByRole("option", { name: /Terminal › Hosts/ }).click();
   await page.getByRole("switch", { name: /Stream app windows/ }).click();
   expect(await page.evaluate(() => localStorage.getItem("infraternal.app-windows"))).toBe("0");
   await expect(page.locator('.ui-window[data-kind="app"], .ui-window[data-kind="screen"]')).toHaveCount(0);

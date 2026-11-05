@@ -5,6 +5,10 @@ use std::{fmt::Write as _, fs, io, path::Path};
 #[path = "compact_sql.rs"]
 mod compact_sql;
 
+/// Embed migrations in numeric version order, preserving each original source checksum.
+/// Numbered and UTC timestamp versions both fit `i64`; `SQLx` applies every missing
+/// version even below the latest applied version. Keep `DEFAULT`'s strict missing-file
+/// and checksum validation: out-of-order application needs no relaxed settings [D347].
 // Match the pinned source filter exactly; uppercase extensions are not migrations.
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
@@ -26,7 +30,7 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
     }
     files.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let mut generated = String::from(
-        "// Static executable SQL; checksums identify the immutable original migration sources.\n\
+        "/// Static executable SQL; checksums identify the immutable original migration sources.\n\
          pub(super) static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate::Migrator {\n\
          migrations: std::borrow::Cow::Borrowed(&[\n",
     );

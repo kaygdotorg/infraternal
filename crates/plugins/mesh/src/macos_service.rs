@@ -168,8 +168,12 @@ fn trusted_binary_metadata(uid: u32, mode: u32, regular_file: bool) -> bool {
     uid == 0 && regular_file && mode & 0o022 == 0
 }
 
+/// Enable the trusted system service and add the short CLI name beside its image.
 fn install(executable: &Path) -> io::Result<()> {
     require_root()?;
+    if !infraternal_plugin_api::cli_alias::install(executable, 0)? {
+        eprintln!("infraternal: skipped infra; an existing path belongs to another command.");
+    }
     ensure_root_directory(DATA_DIRECTORY, true)?;
     ensure_root_directory(STATE_DIRECTORY, true)?;
     ensure_plist_directory()?;

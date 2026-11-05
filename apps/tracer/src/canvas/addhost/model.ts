@@ -55,6 +55,27 @@ export function failureLine(failure: FailureDetail | undefined): string {
   }
 }
 
+/**
+ * What confirming a stuck-install replacement does to its open terminals; empty when the server
+ * did not say. A Replace hands them to the new infraternal agent; a Re-enroll (another server,
+ * `enrolled_with` set) ends them (#305, D13, D337).
+ */
+function sessionsLine(lock: NonNullable<FailureDetail["setup_lock"]>): string {
+  if (lock.sessions === undefined) return "";
+  if (lock.sessions === 0) return "No terminal sessions are open on it.";
+  const fate = lock.enrolled_with === undefined ? "will carry over" : "will end";
+  return lock.sessions === 1 ? `1 open terminal session ${fate}.` : `${lock.sessions} open terminal sessions ${fate}.`;
+}
+
+/** Turn the validated host lease coordinates into the message shown in the flow. */
+function setupLockLine(lock: NonNullable<FailureDetail["setup_lock"]>, active: boolean): string {
+  const process = lock.pid === undefined ? "an unidentified process" : `process ${lock.pid}`;
+  const owner = lock.attempt ? `setup attempt ${lock.attempt} (${process})` : process;
+  return active
+    ? `${owner[0]?.toUpperCase()}${owner.slice(1)} on ${lock.machine} has held the setup lock since ${lock.since}.`
+    : `The failed install on ${lock.machine} was last held by ${owner} since ${lock.since}.`;
+}
+
 export interface StageView { id: StageId; label: string; state: StageState; detail: string }
 
 const NETWORK_NAMES: Record<NetworkProvider, string> = { netbird: "NetBird", tailscale: "Tailscale", twingate: "Twingate", other: "your network" };
@@ -101,7 +122,7 @@ export function stagesOf(view: TargetView): StageView[] {
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "none";
 
 /**
  * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
@@ -164,17 +185,61 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       fix: "none",
       tone: "danger",
     };
-    case "stale_previous_attempt": return {
-      title: "This host has leftovers from an earlier setup",
-      happened: "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
-      next: "",
-      fix: "start-fresh",
-      tone: "info",
-    };
+    case "stale_previous_attempt":
+      if (failure.setup_lock?.active === false) {
+        const lock = failure.setup_lock;
+        // #305: an earlier add-host set the install aside and could not put it back.
+        if (lock.set_aside) return {
+          title: `${name}'s infraternal agent was set aside`,
+          happened: "An earlier add-host set it aside and could not put it back. Nothing was deleted.",
+          next: "Put it back as it was found, then add the host again to continue.",
+          fix: "replace-stuck-install",
+          tone: "info",
+        };
+        // D337: running with open terminals, it may be in use by its server. The host
+        // cannot see the connection, so it is refused until ownership can be proven.
+        if (lock.in_use) {
+          const server = lock.enrolled_with || "the server that enrolled it";
+          const open = lock.sessions === 1 ? "1 open terminal" : `${lock.sessions ?? 0} open terminals`;
+          return {
+            title: `${name} is in use by another server`,
+            happened: `Its infraternal agent is running with ${open} and may still be connected to ${server}.`,
+            next: `Prove you own ${server} to take it over. That isn't available yet.`,
+            fix: "none",
+            tone: "info",
+          };
+        }
+        // D335: another server enrolled this machine; it can join this one as a new host.
+        // An unnamed server: the identity could not be read, so nothing shows another server enrolled it.
+        // A live agent may be connected to its server right now; joining here disconnects it (#305).
+        if (lock.enrolled_with !== undefined) return {
+          title: lock.enrolled_with ? `${name} is enrolled with another server` : `${name} has an install this server did not enroll`,
+          happened: lock.live
+            ? `Its infraternal agent is running and may be connected to ${lock.enrolled_with || "the server that enrolled it"} now. Joining it here disconnects it from that server; remove it there afterwards. It joins this server as a new host with a new key, and its old infraternal agent and key are deleted once it has joined.`
+            : `${lock.enrolled_with ? `It belongs to ${lock.enrolled_with}. ` : ""}Join it to this server as a new host with a new key. Its old infraternal agent is stopped, and deleted with its key once the machine has joined.`,
+          next: sessionsLine(lock),
+          fix: "replace-stuck-install",
+          tone: "info",
+        };
+        return {
+          title: "A stuck infraternal agent was found on " + name,
+          happened: setupLockLine(lock, false),
+          next: sessionsLine(lock),
+          fix: "replace-stuck-install",
+          tone: "info",
+        };
+      }
+      return {
+        title: "This host has leftovers from an earlier setup",
+        happened: "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
+        next: "",
+        fix: "start-fresh",
+        tone: "info",
+      };
     case "setup_running": return {
-      title: "Setup is already running on this host",
-      happened: "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
-      next: "",
+      title: failure.setup_lock ? "Setup is running on " + failure.setup_lock.machine : "Setup is already running on this host",
+      happened: failure.setup_lock ? setupLockLine(failure.setup_lock, true) : failure.message,
+      next: failure.setup_lock ? "Wait for it to finish, then try again. A setup that stopped releases the lock within 3 minutes." : "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
       fix: "retry",
       tone: "info",
     };

@@ -126,8 +126,8 @@ for (const viewport of VIEWPORTS) {
       for (let cycle = 0; cycle < 5; cycle++) {
         await openSettings(page);
         // Move between Settings sections while the terminal is parked, then return to its Console window.
-        await clickPaletteAction(page, "Settings: Shortcuts", "canvas:settings:shortcuts");
-        await clickPaletteAction(page, "Settings: About", "canvas:settings:about");
+        await clickPaletteAction(page, "Terminal › Typing", "canvas:settings:terminal.typing");
+        await clickPaletteAction(page, "About › Version", "canvas:settings:about.version");
         await clickPaletteAction(page, "Go to Console", "canvas:view:console");
         await expect.poll(() => productProbe(page).then((probe) => probe.currentView), { timeout: 10_000 }).toBe("console");
         await assertNoNewInputOrScreen(page, request, baselineInput, baselineScreen);

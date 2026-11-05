@@ -34,17 +34,30 @@ export function createTree(cx: Ctx): TreeModule {
     loadingLeaves = true;
     void onDemand(() => import("./session-tree.on-demand")).then((m) => { leavesOf = m.consoleLeaves; loadingLeaves = false; render(); }, () => { loadingLeaves = false; });
   };
+  // Settings as rows of windows (#304): Settings › Mesh › Keys. Every component is a leaf; the groups of the component the
+  // focused window is in sit under it (a leaf for the window itself), so the list stays short and the nesting is the one the
+  // top breadcrumb names. A component's leaf opens its first window.
+  const outline = cx.adapters.settings.outline;
+  const settingsLeaves = (c: { wins: ReadonlyMap<string, unknown> }): BranchSection["leaves"] => {
+    const active = state.activeWin?.model.id;
+    return outline!.rows().filter((row) => row.groups.some((g) => c.wins.has(g.windowId))).flatMap((row) => [
+      { id: `st:${row.id}`, label: row.title, glyph: "▣", meta: String(row.groups.length) },
+      ...(row.groups.some((g) => g.windowId === active) ? row.groups.map((g) => ({ id: g.windowId, label: g.title, glyph: "·", depth: 1 as const })) : []),
+    ]);
+  };
   const viewSections = (): BranchSection[] => [...views.values()].map((c) => {
     const graph = c.view.layout === "graph";
+    const rows = outline !== undefined && c.view.id === "settings";
     return {
       id: `view:${c.view.id}`,
       label: c.view.name,
-      meta: graph ? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts` : `${c.wins.size}`,
-      open: c.view.id !== "settings" && c.view.id !== "docs",
+      meta: graph ? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts` : rows ? `${outline!.rows().length}` : `${c.wins.size}`,
+      open: c.view.id === "docs" ? false : c.view.id !== "settings" || (rows && state.currentView === "settings"),
       // A big graph lists no nodes: a thousand rows would be the cost of the sidebar, and its cards are not all in the
       // DOM. The section still flies to the view, where the clusters are.
       leaves: graph
         ? (isFreeView(c.view) ? [] : c.view.nodes).map((n) => ({ id: `n-${n.id}`, label: n.label, glyph: n.kind === "tag" ? "#" : "◦", ...(n.kind === "host" && c.view.id === "mesh" ? { renamable: true } : {}) }))
+        : rows ? settingsLeaves(c)
         : [...c.wins.values()].map((w) => ({ id: w.model.id, label: w.model.kind === "terminal" || w.model.kind === "app" || w.model.kind === "screen" ? `${w.model.host}${w.model.session ? ` · ${w.model.session}` : ""}` : w.model.kind === "settings" || w.model.kind === "docs" ? w.model.host : (w.model.session ?? w.model.kind), glyph: w.model.kind === "terminal" ? "›_" : w.model.kind === "app" || w.model.kind === "screen" ? "▢" : "▤" })),
     };
   });
@@ -95,7 +108,9 @@ export function createTree(cx: Ctx): TreeModule {
       if (editing) return;
       stale = false;
       loadRows();
-      treeMenu = core.setHostTree(sections(), current(), (id) => {
+      treeMenu = core.setHostTree(sections(), current(), (picked) => {
+        // A component leaf of Settings (#304) opens the first window of its row; a group leaf is the window's own id.
+        const id = picked.startsWith("st:") ? outline?.rows().find((row) => `st:${row.id}` === picked)?.groups[0]?.windowId ?? picked : picked;
         if (id.startsWith("s:")) {
           const [host, sid] = id.slice(2).split("/");
           if (host && sid) cx.win.openSession(host, sid);

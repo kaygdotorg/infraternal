@@ -129,12 +129,34 @@ async fn prefixed_control_keeps_coalesced_suffix_and_suppresses_only_its_greetin
     server.close(0u32.into(), b"");
     client.close(0u32.into(), b"");
 }
+/// Detects a hang only. These fixtures start a whole supervisor, whose startup
+/// before the first dial has no bound on a loaded host, so no assertion below
+/// may depend on how much of this bound a passing run uses (#334).
+const HANG: Duration = Duration::from_secs(30);
+
+/// Destination connection ID of a QUIC long-header datagram. A client keeps
+/// it for every Initial retransmission of one attempt until the server replies.
+fn initial_connection_id(datagram: &[u8]) -> Option<&[u8]> {
+    let (&first, rest) = datagram.split_first()?;
+    if first & 0x80 == 0 {
+        return None;
+    }
+    let length = usize::from(*rest.get(4)?);
+    rest.get(5..5 + length)
+}
+
+/// A silent UDP path must not put QUIC's handshake timeout in front of TCP.
+/// The proof is ordering, not a stopwatch: TCP connects while the same QUIC
+/// attempt is still retransmitting, so TCP was dialled during that attempt
+/// rather than after it gave up.
 #[tokio::test]
 async fn unavailable_udp_does_not_add_seconds_before_tcp_admission() {
     let ca = root();
     let server_identity = leaf(&ca, true);
     let client_identity = leaf(&ca, false);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // The bound UDP socket never answers: QUIC stays pending until its own
+    // timeout, exactly as on a black-holed path.
+    let (listener, silent) = reserve_transport_pair().await;
     let address = listener.local_addr().unwrap();
     let tls =
         remote_tls::server_config(&server_identity, std::slice::from_ref(&ca.certificate)).unwrap();
@@ -151,22 +173,54 @@ async fn unavailable_udp_does_not_add_seconds_before_tcp_admission() {
     };
     let state = StateDirectory::new();
     let state_path = state.0.clone();
+    let spawned = tokio::time::Instant::now();
     let supervisor = tokio::spawn(async move { run(&identity, Some(state_path)).await });
-    let started = tokio::time::Instant::now();
-    let admitted = tokio::time::timeout(Duration::from_secs(2), async {
-        let (socket, _) = listener.accept().await.unwrap();
+    let admitted = tokio::time::timeout(HANG, async {
+        let mut datagram = vec![0; 65535];
+        let mut attempt = None;
+        let mut first_initial = None;
+        // Biased: consume queued datagrams before the listener, so an Initial
+        // sent before TCP connected is never counted as evidence after it.
+        let (socket, _) = loop {
+            tokio::select! {
+                biased;
+                received = silent.recv_from(&mut datagram) => {
+                    let (count, _) = received.unwrap();
+                    if attempt.is_none() {
+                        attempt = initial_connection_id(&datagram[..count]).map(<[u8]>::to_vec);
+                        first_initial = Some(tokio::time::Instant::now());
+                    }
+                }
+                accepted = listener.accept() => break accepted.unwrap(),
+            }
+        };
+        // Diagnostics only; neither number is asserted.
+        if let Some(started) = first_initial {
+            println!(
+                "spawn_to_first_initial_us={} quic_to_tcp_connect_us={}",
+                (started - spawned).as_micros(),
+                started.elapsed().as_micros()
+            );
+        }
+        // TCP before any Initial cannot have waited for QUIC. Otherwise the
+        // attempt must still be alive: TLS stays unanswered until then, so the
+        // client cannot have dropped QUIC for a won TCP race either.
+        if let Some(attempt) = attempt {
+            loop {
+                let (count, _) = silent.recv_from(&mut datagram).await.unwrap();
+                if initial_connection_id(&datagram[..count]) == Some(&attempt[..]) {
+                    break;
+                }
+            }
+        }
         remote_tls::accept(socket, &tls).await.unwrap()
     })
     .await;
     supervisor.abort();
     let _ = supervisor.await;
-    println!(
-        "fallback_local_admission_us={}",
-        started.elapsed().as_micros()
-    );
     assert!(
         admitted.is_ok(),
-        "UDP unavailability delayed TCP establishment by seconds"
+        "TCP was dialled only after the silent QUIC attempt gave up"
     );
 }
 
@@ -184,8 +238,7 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
     .unwrap();
     let (tcp, socket) = reserve_transport_pair().await;
     let socket = std::sync::Arc::new(socket);
-    let (proxy_address, proxy) =
-        crate::transport_diagnostics::udp_proxy_on(socket, server.local_addr().unwrap());
+    let proxy_address = socket.local_addr().unwrap();
     let identity = RemoteIdentity {
         host_id: uuid::Uuid::new_v4(),
         identity: client_identity,
@@ -200,23 +253,33 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
     let state = StateDirectory::new();
     let state_path = state.0.clone();
     let supervisor = tokio::spawn(async move { run(&identity, Some(state_path)).await });
-    let (mut fallback, _) = tokio::time::timeout(Duration::from_secs(2), tcp.accept())
+    // QUIC Initials queue unanswered in the reserved socket until TCP has
+    // dialled and sent its ClientHello. Only then does the proxy forward them,
+    // so QUIC wins over an unfinished TLS dial by construction rather than by
+    // racing the client's grace timer against a loaded scheduler.
+    let (mut fallback, _) = tokio::time::timeout(HANG, tcp.accept())
         .await
         .unwrap()
         .unwrap();
     let mut hello = [0; 4096];
     assert!(fallback.read(&mut hello).await.unwrap() > 0);
-    let connection = tokio::time::timeout(Duration::from_secs(2), async {
+    let (_, proxy) =
+        crate::transport_diagnostics::udp_proxy_on(socket, server.local_addr().unwrap());
+    let connection = tokio::time::timeout(HANG, async {
         server.accept().await.unwrap().await.unwrap()
     })
     .await
     .unwrap();
     // Accepting control proves QUIC won. Withhold the server Hello so dispatch
     // stays live while the losing TCP socket must already have been dropped.
-    let control = tokio::time::timeout(Duration::from_secs(2), connection.accept_bi())
+    let control = tokio::time::timeout(HANG, connection.accept_bi())
         .await
         .unwrap()
         .unwrap();
+    // The client closes the losing socket before it opens control, and control
+    // then crosses the proxy's delay, so EOF is already queued here. The window
+    // stays well below the 5 s Hello timeout that would end dispatch (and drop
+    // a retained socket) anyway, or a leak could pass unnoticed.
     let eof = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if fallback.read(&mut hello).await.unwrap() == 0 {
@@ -648,7 +711,9 @@ async fn server_path_capability_is_advertised_on_native_and_fallback_transports(
         let state = StateDirectory::new();
         let path = state.0.clone();
         let supervisor = tokio::spawn(async move { run(&identity, Some(path)).await });
-        let caps = tokio::time::timeout(Duration::from_secs(3), async {
+        // Capabilities only: supervisor latency belongs to the ignored
+        // supervisor_300ms diagnostic, measured on a quiet machine.
+        let caps = tokio::time::timeout(HANG, async {
             if native {
                 let connection = server.accept().await.unwrap().await.unwrap();
                 let (send, receive) = connection.accept_bi().await.unwrap();
