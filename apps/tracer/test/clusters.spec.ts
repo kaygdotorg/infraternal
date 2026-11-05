@@ -179,6 +179,22 @@ test("canvas lock off frees pan and zoom in place; the overview is its own actio
   await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 4000 }).toBeLessThan(0.5);
 });
 
+test("a Ctrl+wheel that lands while the free-canvas code is still loading is kept and zooms once it arrives", async ({ page }) => {
+  await open(page, 3);
+  const cam0 = await probe(page, (p) => p.camera());
+  // Every script requested from now on takes 1.5 s, so the free-canvas gestures (fetched when the lock turns off, D188) are still on their way
+  // when the wheel turns.
+  await page.route("**/*.js", async (route) => { await new Promise((done) => setTimeout(done, 1500)); await route.continue().catch(() => undefined); });
+  await page.keyboard.press("Control+Shift+G");
+  await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).on, { timeout: 5000 }).toBe(false);
+  await page.mouse.move(720, 450);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, 240);
+  await page.keyboard.up("Control");
+  // The gestures arrive about 1.5 s later and the held wheel is played then: the camera zooms out, it does not stay where it was.
+  await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 8000 }).toBeLessThan(cam0.z);
+});
+
 test("the dots sit on the gradient: the gradient shows everywhere, the dot layers are plain tiles with no cover or mask", async ({ page }) => {
   await open(page, 3);
   const info = await page.evaluate(() => {
@@ -1119,9 +1135,9 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    // TASTE "Phone window headers carry two actions": on a touch device the header holds "?" (read about this window, #304) and Close; the splits and the
-    // session manager are in the canvas row while a terminal is focused, and in ⌘K.
-    expect(pd.buttons).toEqual(["docs", "close"]);
+    // On a touch device a terminal's header holds Close alone: "?" (read about this window, #304) is not there, because with it the group folded into a "…"
+    // whose 44 px target overlapped its neighbours (J211). "?" stays in ⌘K; the splits and the session manager are in the canvas row while a terminal is focused.
+    expect(pd.buttons).toEqual(["close"]);
     // Header pills are one size (TASTE): on touch both are 36 px visible; the 44 px target is invisible padding (checked below).
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(1);
     expect(pd.aH).toBeLessThanOrEqual(38);
