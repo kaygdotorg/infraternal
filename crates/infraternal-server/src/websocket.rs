@@ -530,7 +530,6 @@ pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
 }
 
 // Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.
-#[allow(clippy::too_many_lines)]
 async fn run_socket(
     socket: WebSocket,
     state: Arc<WebSocketState>,
@@ -1387,7 +1386,6 @@ pub(crate) async fn terminal_sessions_snapshot(
     Ok(event)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn handle_terminal_output<K>(
     state: &WebSocketState,
     user_id: &str,
@@ -1643,7 +1641,6 @@ fn link_notice(output: &TerminalOutput, link_doubt_notices: bool) -> Option<(&'s
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handshake<S, K>(
     source: &mut S,
     sink: &mut K,
@@ -1942,8 +1939,6 @@ fn token_hash(token: &[u8; 32]) -> [u8; 32] {
 }
 
 // Each browser frame is validated here and routed without allocating a second terminal payload.
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
 async fn handle_client_frame<K>(
     wire: Bytes,
     state: &WebSocketState,

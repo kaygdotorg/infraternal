@@ -350,7 +350,6 @@ async fn machine_invitation_redeems_with_the_approved_public_key() {
 
 #[tokio::test]
 // This test keeps approval, replay, and key-binding assertions in one real HTTP lifecycle.
-#[allow(clippy::too_many_lines)]
 async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() {
     let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
     let auth = Auth::new(

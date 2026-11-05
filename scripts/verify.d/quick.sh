@@ -50,6 +50,9 @@ verify_quick() {
 
     # Whole-repo and cheap, so it always runs, whatever changed.
     rust_run_gate "doc coverage ratchet" verify_doc_coverage
+    rust_run_gate "shape lints off (D351)" python3 scripts/test-shape-lints.py
+    rust_run_gate "doc comments on diff" verify_diff_docs
+    rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 
     if ((whole)); then

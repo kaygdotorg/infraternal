@@ -23,7 +23,6 @@ fn command(program: &str, args: &[&str]) {
     );
 }
 // Keep the retained address, recovery fence and packet observation in one scenario.
-#[allow(clippy::too_many_lines)]
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
     node.up().unwrap();
@@ -141,39 +140,99 @@ fn check(backend: Backend) {
     );
 }
 
+/// A private, mode-0700 state directory removed when the test ends.
+struct RotationState(std::path::PathBuf);
+impl RotationState {
+    /// Create a fresh directory named for this process and the current time.
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "infraternal-mesh-rotation-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Self(path)
+    }
+}
+impl Drop for RotationState {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The live link's index and owner marker, and the public key its private key derives.
+fn kernel_link_identity() -> (
+    u32,
+    Option<crate::policy::model::PublicKey>,
+    crate::policy::model::PublicKey,
+) {
+    let link = Device::active_link().unwrap().expect("a live mesh link");
+    assert_eq!(link.engine, EngineKind::Kernel);
+    let private = Device::private_key_at(link.ifindex).unwrap();
+    let (_, public) = Key::from_private(&private[..]).unwrap();
+    (link.ifindex, link.owner, public)
+}
+
+/// A kernel rotation sends the candidate to our own link by its index, moves the owner marker
+/// with it and records it; the link keeps its index throughout (#285).
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn kernel_rotation_sends_the_candidate_to_our_index_and_moves_the_marker() {
+    let state = RotationState::new();
+    let operation = "00000000-0000-4000-8000-000000000003";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let previous = node.up().unwrap();
+    assert!(previous.key_rotation, "kernel WireGuard offers rotation");
+    let (index, owner, key) = kernel_link_identity();
+    assert_eq!(
+        (owner, key),
+        (Some(previous.public_key), previous.public_key)
+    );
+
+    let candidate = node.prepare_rotation(operation, 1).unwrap();
+    assert_ne!(candidate, previous.public_key);
+    assert_eq!(
+        kernel_link_identity(),
+        (index, Some(previous.public_key), previous.public_key),
+        "preparing changes nothing on the link"
+    );
+
+    let committed = node.commit_rotation(operation, 1).unwrap();
+    assert_eq!(committed.public_key, candidate);
+    assert_eq!(
+        kernel_link_identity(),
+        (index, Some(candidate), candidate),
+        "the candidate key and marker are on our link, at the same index"
+    );
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    assert_eq!(store.recorded_interface().unwrap(), Some(candidate));
+    assert_eq!(
+        node.commit_rotation(operation, 1).unwrap().public_key,
+        candidate,
+        "a repeated commit changes nothing"
+    );
+    node.finish_rotation(operation, 1).unwrap();
+    assert!(Node::plan_retirement(&state.0).unwrap().interface);
+    node.down().unwrap();
+}
+
 /// After a rotation, a restarted node still adopts its interface as its own.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn rotated_interface_remains_owned_after_process_restart() {
-    use std::{
-        fs,
-        os::unix::fs::PermissionsExt,
-        path::PathBuf,
-        time::{Instant, SystemTime, UNIX_EPOCH},
-    };
+    use std::time::Instant;
 
-    struct StateDirectory(PathBuf);
-    impl Drop for StateDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "infraternal-mesh-rotation-{}-{nonce}",
-        std::process::id()
-    ));
-    fs::create_dir(&path).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-    let _cleanup = StateDirectory(path.clone());
-
+    let state = RotationState::new();
+    let path = state.0.clone();
     let operation = "00000000-0000-4000-8000-000000000002";
-    let mut node = Node::restore(&path).unwrap();
+    let mut node = Node::restore_with_engine(&path, EngineKind::Kernel).unwrap();
     let previous = node.up().unwrap();
+    let (index, _, _) = kernel_link_identity();
     let candidate = node.prepare_rotation(operation, 1).unwrap();
     assert_ne!(previous.public_key, candidate);
     assert!(
@@ -189,7 +248,12 @@ fn rotated_interface_remains_owned_after_process_restart() {
     store.save_rotation_secret(&rotation).unwrap();
     let (candidate_key, candidate_public) = Key::from_private(&rotation.candidate).unwrap();
     assert_eq!(candidate_public, candidate);
-    Device::configure(&candidate_key, previous.port).unwrap();
+    Device::configure(index, previous.public_key, &candidate_key, previous.port).unwrap();
+    assert_eq!(
+        kernel_link_identity(),
+        (index, Some(previous.public_key), candidate),
+        "the crash left the candidate key under the predecessor's marker"
+    );
     assert!(
         Node::plan_retirement(&path).unwrap().interface,
         "the candidate key is owned after kernel acceptance even before the marker update"
@@ -199,7 +263,7 @@ fn rotated_interface_remains_owned_after_process_restart() {
     drop(node);
 
     let started = Instant::now();
-    let mut restored = Node::restore(&path).unwrap();
+    let mut restored = Node::restore_with_engine(&path, EngineKind::Kernel).unwrap();
     let identity = restored.up().unwrap();
     let recovery_us = started.elapsed().as_micros();
     assert_eq!(identity.public_key, candidate);
@@ -207,8 +271,43 @@ fn rotated_interface_remains_owned_after_process_restart() {
         Node::plan_retirement(&path).unwrap().interface,
         "the rotated kernel interface must remain provably owned after restart"
     );
+    // The retried commit finishes what the crash interrupted: the marker, then the record.
+    restored.commit_rotation(operation, 1).unwrap();
+    assert_eq!(kernel_link_identity(), (index, Some(candidate), candidate));
     println!("METRIC mesh_rotation_restart_recovery_us={recovery_us}");
     restored.down().unwrap();
+}
+
+/// `GotaTun` cannot rotate yet: it says so, and every rotation step refuses without touching the
+/// device or the state (D166, D352; #285).
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_reports_no_rotation_support_and_refuses_every_step() {
+    let state = RotationState::new();
+    let operation = "00000000-0000-4000-8000-000000000004";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let identity = node.up().unwrap();
+    assert!(
+        !identity.key_rotation,
+        "GotaTun must not offer key rotation"
+    );
+    for result in [
+        node.prepare_rotation(operation, 1).map(|_| ()),
+        node.commit_rotation(operation, 1).map(|_| ()),
+        node.finish_rotation(operation, 1),
+    ] {
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+    }
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    assert!(
+        store.rotation_secret().unwrap().is_none(),
+        "no rotation journal is written"
+    );
+    assert_eq!(
+        store.recorded_interface().unwrap(),
+        Some(identity.public_key)
+    );
+    node.down().unwrap();
 }
 
 #[test]

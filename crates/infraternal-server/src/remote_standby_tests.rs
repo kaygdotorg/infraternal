@@ -316,7 +316,7 @@ async fn bounded_retired_native_counts(endpoint: &quinn::Endpoint) {
     );
 }
 
-#[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)] // Independent fixture fault switches, not production policy.
+#[allow(clippy::fn_params_excessive_bools)] // Independent fixture fault switches, not production policy.
 async fn primed_fixture(
     close_primary: bool,
     blocked_primary: bool,

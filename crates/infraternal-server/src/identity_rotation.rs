@@ -432,7 +432,6 @@ impl Service {
     }
 
     /// These writes form one idempotent authority transition and must commit together.
-    #[allow(clippy::too_many_lines)]
     async fn persist_issued(&self, issued: IssuedCertificate<'_>) -> io::Result<Vec<u8>> {
         let IssuedCertificate {
             host,
@@ -870,7 +869,6 @@ mod tests {
     };
 
     /// One flow checks restart, throttled redelivery, and exact-certificate idempotency together.
-    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn candidate_delivery_is_throttled_after_predecessor_reconnect() {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;

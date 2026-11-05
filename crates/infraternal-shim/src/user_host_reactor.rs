@@ -606,7 +606,6 @@ fn retire_failed(index: usize, slots: &mut [Option<Session>], registry: &mut Reg
 /// starved by output. A session that fails or panics is retired alone; the
 /// function then returns an error once the others finish. `accounting` is an
 /// optional diagnostics file that is closed on its first write error.
-#[allow(clippy::too_many_lines)]
 pub(super) fn run(
     sessions: Vec<Session>,
     signals: &SignalFd,

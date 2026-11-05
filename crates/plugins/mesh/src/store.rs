@@ -659,7 +659,6 @@ impl Store {
     /// Read and reconcile one node's persisted schedule and overlap clock.
     /// A reboot restarts the minimum overlap instead of allowing wall time to retire a key early.
     // Keep schedule repair, phase validation, and commit in one writer transaction.
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn rotation_schedule(
         &self,
         node: NodeId,
@@ -1658,7 +1657,6 @@ impl Store {
             .await
     }
     // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
-    #[allow(clippy::too_many_lines)]
     async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await

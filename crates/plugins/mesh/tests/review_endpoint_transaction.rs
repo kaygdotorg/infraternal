@@ -6,7 +6,7 @@ use infraternal_plugin_mesh::{
     configuration,
     dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
     netlink::{Socket, attribute, attributes},
-    node::Node,
+    node::{EngineKind, Node},
     policy::{
         model::{Addresses, NodeId, PublicKey},
         rules::TrafficPolicy,
@@ -52,7 +52,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
     let directory = target.join(format!("review-endpoint-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut node = Node::restore(&directory).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     node.up().unwrap();
     let (_, key) = Key::generate().unwrap();
     let initial: SocketAddr = "192.0.2.1:51820".parse().unwrap();

@@ -485,7 +485,6 @@ async fn candidate(
 }
 
 /// Drive one QUIC link: move it between paths in place until its session ends.
-#[allow(clippy::too_many_lines)]
 async fn steer(
     link: &Link,
     identity: &RemoteIdentity,
@@ -795,7 +794,6 @@ async fn available(
 }
 
 // Keep pinned-session retirement and reconnect accounting in the same owning scope.
-#[allow(clippy::too_many_lines)]
 pub(super) async fn run(
     identity: &RemoteIdentity,
     state: PathBuf,
@@ -817,7 +815,6 @@ pub(super) async fn run(
 
 // One supervisor loop owns path selection, proof and the optional failure
 // observer; splitting it would pass the same retained link state around.
-#[allow(clippy::too_many_lines)]
 pub(super) async fn run_observed(
     identity: &RemoteIdentity,
     state: PathBuf,

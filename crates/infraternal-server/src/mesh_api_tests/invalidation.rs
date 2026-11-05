@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the complete scoped-view reproduction together.
 async fn review_membership_change_notifies_other_visible_tag() {
     let fixture = Fixture::new().await;
     let service = &fixture.service;
@@ -75,7 +74,6 @@ async fn review_membership_change_notifies_other_visible_tag() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Follow the same viewer through membership and cascading tag edits.
 async fn filtered_view_invalidations_follow_every_affected_host_tag() {
     let fixture = Fixture::new().await;
     let service = &fixture.service;

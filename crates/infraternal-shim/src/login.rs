@@ -99,7 +99,6 @@ pub fn worker(endpoint: &Path, grace: Duration) -> io::Result<()> {
 /// and owns every descendant started within it through terminal retirement.
 /// # Errors
 /// Returns worker startup or descriptor errors.
-#[allow(clippy::too_many_lines)]
 pub fn worker_as_controller(endpoint: &Path, grace: Duration, controller: u32) -> io::Result<()> {
     worker_configured(endpoint, grace, controller, false)
 }
@@ -114,7 +113,6 @@ pub fn worker_announced(endpoint: &Path, grace: Duration, controller: u32) -> io
 
 /// Shared body of the worker entry points; `announce` selects whether to report
 /// readiness on the launch pipe.
-#[allow(clippy::too_many_lines)]
 fn worker_configured(
     endpoint: &Path,
     grace: Duration,
@@ -435,7 +433,6 @@ pub fn proxy_at_pid(
 /// Keep a fallback worker attached to its authenticated original host login utility.
 /// # Errors
 /// Refuses worker death/replacement or kernel reparenting before terminal transfer.
-#[allow(clippy::too_many_arguments)]
 pub fn proxy_at_parent(
     endpoint: &Path,
     uid: u32,

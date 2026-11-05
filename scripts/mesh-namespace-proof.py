@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real kernel direct-path Mesh proof in two isolated network namespaces [167,169], #129.
+"""Real GotaTun direct-path Mesh proof in two isolated network namespaces [167,169], #129.
 
 Run with unshare -Urn and an absolute kernel_node fixture path, in the high
 CPUWeight scope. Nothing touches the host's interfaces or firewall. Public
@@ -11,7 +11,10 @@ import os
 import socket
 import statistics
 import subprocess
+import sys
 import time
+
+os.environ["INFRATERNAL_MESH_ENGINE"] = "gotatun"
 
 
 def run(*args):
@@ -163,7 +166,27 @@ def main():
                     applies.append(request(proc, part))
             else:
                 applies.append(request(proc, chunk))
-        run("ping", "-n", "-c", "1", "-W", "5", "10.254.0.2")
+        try:
+            run("ping", "-n", "-c", "1", "-W", "5", "10.254.0.2")
+        except subprocess.CalledProcessError as error:
+            def capture(label, command):
+                try:
+                    return command()
+                except Exception as diagnostic_error:
+                    return f"{label}: {diagnostic_error}"
+
+            diagnostic = {
+                "ping_stdout": error.stdout,
+                "ping_stderr": error.stderr,
+                "left_route": capture("left route", lambda: run("ip", "route", "get", "10.254.0.2")),
+                "right_route": capture("right route", lambda: namespace(child.pid, "ip", "route", "get", "10.254.0.1")),
+                "left_tun": capture("left TUN", lambda: run("ip", "-s", "addr", "show", "dev", "infraternal0")),
+                "right_tun": capture("right TUN", lambda: namespace(child.pid, "ip", "-s", "addr", "show", "dev", "infraternal0")),
+            }
+            for label, proc in (("left_stats", left), ("right_stats", right)):
+                diagnostic[label] = capture(label, lambda proc=proc: request(proc, "stats"))
+            print(json.dumps(diagnostic, sort_keys=True), file=sys.stderr, flush=True)
+            raise
         join_us = (time.monotonic_ns() - started) // 1000
         mesh_ping = ping("10.254.0.2")
         mesh_ipv6_ping = ping(addresses[1]["ipv6"])
@@ -227,7 +250,8 @@ def main():
         time.sleep(idle_seconds)
         idle_ticks = [ticks(proc) - count for proc, count in zip((left, right), before)]
         rss = [int(open(f"/proc/{proc.pid}/statm").read().split()[1]) * os.sysconf("SC_PAGE_SIZE") for proc in (left, right)]
-        report = {"machine": socket.gethostname(), "load": open("/proc/loadavg").read().strip(), "rootless_userns": True, "real_kernel": True, "pairs": 1, "direct_pairs": 1, "needs_later_paths": 0, "underlay_ping": underlay_ping, "mesh_ping": mesh_ping, "mesh_ipv6_ping": mesh_ipv6_ping, "deny_new_tcp": denied_tcp, "retired_stream_refused": retired_stream_refused, "permitted_port_and_other_port_refusal": permitted_port, "underlay_mbps": underlay_mbps, "mesh_mbps": mesh_mbps, "join_to_first_packet_us": join_us, "apply": applies, "deny_new_ping": denied, "fixture_idle_ticks_2s": idle_ticks, "fixture_rss_bytes": rss, "fixture_rss_at_1000_nodes_bytes": sum(rss) * 500}
+        assert all(identity.get("engine") == "gotatun" for identity in identities), identities
+        report = {"machine": socket.gethostname(), "load": open("/proc/loadavg").read().strip(), "rootless_userns": True, "engine": "gotatun", "pairs": 1, "direct_pairs": 1, "needs_later_paths": 0, "underlay_ping": underlay_ping, "mesh_ping": mesh_ping, "mesh_ipv6_ping": mesh_ipv6_ping, "deny_new_tcp": denied_tcp, "retired_stream_refused": retired_stream_refused, "permitted_port_and_other_port_refusal": permitted_port, "underlay_mbps": underlay_mbps, "mesh_mbps": mesh_mbps, "join_to_first_packet_us": join_us, "apply": applies, "deny_new_ping": denied, "fixture_idle_ticks_2s": idle_ticks, "fixture_rss_bytes": rss, "fixture_rss_at_1000_nodes_bytes": sum(rss) * 500}
         if args.binary:
             report["peer_count_per_node"] = args.extra_members + 1
             report["additional_public_members"] = args.extra_members

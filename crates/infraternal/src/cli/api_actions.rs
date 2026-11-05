@@ -49,7 +49,7 @@ impl ActionFailure {
 }
 
 /// Run one hosted action with the key selected through the existing private credential store.
-#[allow(clippy::too_many_lines)] // Keep key selection, scope enforcement and result emission in one entry path.
+// Keep key selection, scope enforcement and result emission in one entry path.
 pub fn run(
     action: &infraternal_plugin_api::ActionDefinition,
     matches: &ArgMatches,
@@ -423,7 +423,7 @@ async fn add_host(
     Ok(result)
 }
 
-#[allow(clippy::too_many_lines)] // Keep progress, captured failure detail and stream closure handling in one loop.
+// Keep progress, captured failure detail and stream closure handling in one loop.
 async fn add_host_stream(
     command: &str,
     server: &Url,

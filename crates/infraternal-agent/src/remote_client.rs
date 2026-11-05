@@ -478,7 +478,6 @@ struct ProvedControl {
     receive: Receive,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,

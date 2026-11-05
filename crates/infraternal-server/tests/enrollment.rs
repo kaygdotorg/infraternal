@@ -87,7 +87,6 @@ async fn issue_bound(store: &EnrollmentStore, host: Uuid, mode: Mode, now: i64) 
 
 #[tokio::test]
 // One sequential capability lifecycle keeps each failed admission tied to the same invitation.
-#[allow(clippy::too_many_lines)]
 async fn invitation_is_hashed_replaced_and_bound_to_owner_host_mode_and_exact_expiry() {
     let db = Database::new().await;
     let store = db.store();

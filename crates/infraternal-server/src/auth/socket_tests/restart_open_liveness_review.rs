@@ -88,7 +88,6 @@ async fn responsive_backend(
 }
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn responsive_socket_survives_a_held_terminal_open_with_an_existing_attachment() {
     let _guard = SERIAL.lock().await;
     // Freeze deadlines during real SQLite/socket I/O, using the shared #118 fixture.

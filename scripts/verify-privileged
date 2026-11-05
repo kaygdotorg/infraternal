@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Run the namespace-requiring tests of the areas a change touches (D351, #344).
+
+What it is for: install, proxy, mesh and shim code has paths that only run with
+privileges inside a network: WireGuard and TUN links, nftables rules, routes,
+DNS on a mesh address, cgroup containment. Ordinary test runs never reach them,
+so those tests are `#[ignore]`d with a reason such as "Run in a disposable
+user/network namespace". When a change touches one of those four areas (path
+globs below, against the merge base), this script runs that area's tests.
+
+What the sandbox contains, and what it does not:
+- Only the *test runs* (and the `--list` call that discovers them) are
+  sandboxed. Building is not: build scripts and proc macros of the branch run
+  as the plain calling user, exactly as in the ordinary `test` row, which also
+  runs every non-ignored test as that user. For a hostile branch the real
+  boundary is the shared build account, not this sandbox.
+- Nothing runs as host root, and there is no sudo.
+- Each test binary runs in two nested user namespaces. The outer one builds
+  the mounts: the host filesystem bind-mounted read-only (recursively) and
+  `pivot_root`ed with the old root detached; size-capped tmpfs at /tmp, /run,
+  /var/tmp and /dev/shm; a minimal /dev with a private devpts; a tmpfs over
+  the nix daemon socket. The inner one (new user, net, mount and PID
+  namespaces, `--kill-child`) runs the test. Mounts are locked against nested
+  namespaces, so the test's uid 0 (the caller's uid outside) cannot undo them.
+  The network namespace has only loopback.
+- Each run has a hang timeout, dies with the runner (parent-death signal plus
+  `--kill-child`), and runs in a memory-capped systemd user scope when the
+  user manager is reachable.
+- Before any test, `self_check` runs planted escapes in the same sandbox and
+  the row fails unless every one fails. The probe class for undoing mounts
+  comes from review 79752 (#344), whose manual breakout of the earlier
+  single-level layout is the evidence that these probes are live. Any change
+  to the sandbox layout needs a fresh manual escape review before merge.
+
+Which tests run: every `#[ignore]`d test in the area's packages whose reason
+asks for root or a disposable namespace (`PRIVILEGED_REASON`), each alone in
+its own sandbox. Reasons that need something else (the perf VM, Docker, a
+release binary, an sshd or Pebble fixture) are left out by `OTHER_NEEDS`, so
+the selection follows the code instead of a list that goes stale.
+
+Not covered: code paths that only behave differently as *real* host root
+(rootful proxy supervision, installing for other accounts, host-login as
+root). A user namespace cannot exercise them without giving the branch real
+root, which this row refuses to do; they are listed in `NOT_COVERED` and in
+docs/PROCESS.md §11. Browser and passkey flows run against the test server.
+
+How to use it: `scripts/verify fast` runs it as the `privileged integration`
+row; by hand, `scripts/verify-privileged`. It needs Linux with unprivileged
+user namespaces and runs inside the flake dev shell (for `nft`, `ip`, cargo).
+"""
+import argparse
+import ctypes
+import fnmatch
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import tempfile
+import uuid
+
+# A test that runs longer than this is treated as hung and killed (with its
+# whole namespace). It only catches hangs; it is not a speed assertion.
+TEST_TIMEOUT_SECONDS = int(os.environ.get('VERIFY_PRIVILEGED_TEST_TIMEOUT', '900'))
+# Memory ceiling for one sandbox (tmpfs pages included), applied through a
+# systemd user scope when the user manager is reachable from this runner.
+SANDBOX_MEMORY_MAX = os.environ.get('VERIFY_PRIVILEGED_MEMORY_MAX', '4G')
+
+# Path globs that put a change in an area. fnmatch's `*` already crosses
+# directories; `**` only reads clearer.
+GLOBS = {
+    'install': ('crates/infraternal/src/install*', 'crates/infraternal/src/up*', 'crates/infraternal/src/main.rs',
+                'crates/plugins/ssh/**', 'crates/plugins/remote/src/*install*',
+                'crates/plugins/remote/src/setup*', 'crates/plugins/remote/src/bootstrap*'),
+    'proxy': ('crates/plugins/proxy/**',),
+    'mesh': ('crates/plugins/mesh/**', 'crates/infraternal-mesh/**', 'crates/infraternal-server/src/*mesh*'),
+    'shim': ('crates/infraternal-shim/**', 'crates/infraternal-agent/src/rootless*',
+             'crates/infraternal-agent/src/login*', 'crates/infraternal/src/shim*'),
+}
+
+# The packages each area scans for namespace tests: (package, directory,
+# features). Empty features mean "as the workspace build compiles it";
+# otherwise the package is built on its own with exactly these.
+PACKAGES = {
+    'install': (('infraternal', 'crates/infraternal', ''),
+                ('infraternal-plugin-ssh', 'crates/plugins/ssh', ''),
+                ('infraternal-plugin-remote', 'crates/plugins/remote', '')),
+    'proxy': (('infraternal-plugin-proxy', 'crates/plugins/proxy', ''),),
+    'mesh': (('infraternal-plugin-mesh', 'crates/plugins/mesh', 'agent,server,relay,test-support'),),
+    'shim': (('infraternal-shim', 'crates/infraternal-shim', ''),
+             ('infraternal', 'crates/infraternal', '')),
+}
+
+# Targets that need a feature their package's shared set leaves off. The DNS
+# resolver is default-off (`mesh-dns-spike`), and turning it on for every mesh
+# test changes `Config`'s fields under fixtures that are not written for it.
+TARGET_FEATURES = {
+    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns-spike',
+}
+
+# Root-only behaviour this row deliberately does not exercise, and why. Kept
+# here so the gap is visible in the code that decides what runs.
+NOT_COVERED = {
+    'proxy': 'rootful Traefik supervision and installation (rootful() is false for uid 0 in a user namespace)',
+    'install': 'installing for other accounts and system paths (needs real uids and host directories)',
+    'shim': 'host-login and PTY ownership as real root (needs real setuid/setgid over host accounts)',
+}
+
+# An ignore reason that asks for privileges or a disposable namespace...
+PRIVILEGED_REASON = re.compile(r'namespace|as root|CAP_NET_ADMIN|unshare', re.I)
+# ...unless it also needs something this row does not provide.
+OTHER_NEEDS = re.compile(r'perf VM|CPUWeight|MESH_REVIEW_PROBE|release binary|static release|Docker|Pebble|sshd|research/', re.I)
+IGNORED_TEST = re.compile(r'#\[ignore\s*=\s*"([^"]*)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)')
+
+# The sandbox is built in two user namespaces. The OUTER one (where this
+# script runs) makes the mounts; the INNER one (`unshare ... --kill-child`,
+# started at the end) is where the test runs. Mounts a namespace makes are
+# only locked against the namespaces nested inside it, so the outer namespace
+# must own them and the test must live one level down, or the test's own uid 0
+# could remount / read-write, unmount /run and reach the host user bus
+# (review 79752 P1). `--kill-child` ties the inner PID 1 to this process, so a
+# killed runner leaves nothing behind.
+#
+# Tmpfs sizes are capped so one test cannot fill the shared `claude` memory
+# slice (79752 P3-2). A minimal /dev replaces the host's devtmpfs/devpts, and
+# tmpfs covers every pathname socket dir outside /run and /tmp (the nix daemon
+# socket), so neither stays reachable (79752 P2-1).
+#
+# Arguments: scratch dir, target dir, run cwd, then the test command.
+SANDBOX_SETUP = r'''set -eu
+export PATH="$PATH:/usr/sbin:/sbin"
+scratch=$1 target=$2 runcwd=$3; shift 3
+new=$scratch/root
+mount --make-rprivate /
+mount --rbind / "$new"
+# Recursively read-only: every host mount under the new root, not just the top.
+mount -o remount,bind,ro=recursive "$new"
+mount -t proc proc "$new/proc"
+# The minimal /dev is mounted before /dev/shm, or it would cover it.
+{
+    # A minimal /dev: no host devpts (other jobs' terminals) and no leaked
+    # device nodes. A private devpts gives tests their own ptys; /dev/net/tun stays.
+    mount -t tmpfs -o mode=755,size=8m tmpfs "$new/dev"
+    for node in null zero full random urandom tty; do
+        : > "$new/dev/$node"; mount --bind "/dev/$node" "$new/dev/$node"
+    done
+    mkdir -p "$new/dev/pts" "$new/dev/shm" "$new/dev/net"
+    mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$new/dev/pts"
+    ln -s pts/ptmx "$new/dev/ptmx"
+    ln -s /proc/self/fd "$new/dev/fd"
+    ln -s /proc/self/fd/0 "$new/dev/stdin"; ln -s /proc/self/fd/1 "$new/dev/stdout"; ln -s /proc/self/fd/2 "$new/dev/stderr"
+    if [ -e /dev/net/tun ]; then : > "$new/dev/net/tun"; mount --bind /dev/net/tun "$new/dev/net/tun"; fi
+    # Cover pathname sockets a read-only mount would still allow connect() to.
+    if [ -d "$new/nix/var/nix/daemon-socket" ]; then
+        mount -t tmpfs -o mode=755,size=1m tmpfs "$new/nix/var/nix/daemon-socket"
+    fi
+}
+# Sized tmpfs: one sandbox cannot fill the shared memory slice (79752 P3-2).
+mount -t tmpfs -o mode=1777,size=512m,nr_inodes=1m tmpfs "$new/tmp"
+mount -t tmpfs -o mode=1777,size=256m tmpfs "$new/dev/shm"
+# Fresh /run and /var/tmp: tests may add named netns under /run/netns.
+mount -t tmpfs -o mode=755,size=64m tmpfs "$new/run"
+mount -t tmpfs -o mode=1777,size=256m tmpfs "$new/var/tmp"
+# Build outputs read through `ut`, a tmpfs dir whose `debug` links to the
+# read-only target: tests can make scratch dirs there and still find examples.
+mkdir -p "$new/tmp/ut"
+ln -s "$target/debug" "$new/tmp/ut/debug"
+cd "$new"
+pivot_root . .
+# Detach the old root entirely: nothing writable from the host stays reachable.
+umount -l .
+cd "$runcwd"
+# Enter the inner namespace. It inherits (and the kernel locks) these mounts,
+# so the test's uid 0 cannot undo them. --kill-child kills the inner PID 1 if
+# this process dies. bash is PID 1 inside, reaping orphaned test children.
+exec unshare --user --map-root-user --net --mount --pid --fork --kill-child --mount-proc \
+    bash -c 'ip link set lo up; "$@" </dev/null' inner "$@"
+'''
+
+
+def areas(paths):
+    """Return the areas whose globs match any changed path.
+
+    Shared build inputs (workspace manifest, lockfile, toolchain, cargo config)
+    and this script itself select every area, because they can change any
+    area's behaviour.
+    """
+    shared = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify-privileged')
+    if any(path in shared or path.startswith('.cargo/') for path in paths):
+        return set(GLOBS)
+    return {area for area, patterns in GLOBS.items()
+            if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)}
+
+
+def target_of(relative, src_target):
+    """Map a source file inside a package to the cargo test target holding it.
+
+    `src_target` is where `src/` unit tests live: 'lib', or 'bin:<name>' for a
+    binary-only package.
+    """
+    parts = Path(relative).parts
+    if parts[0] == 'tests' and len(parts) >= 2:
+        return 'test:' + Path(parts[1]).stem
+    if parts[0] == 'src':
+        return src_target
+    return None
+
+
+def privileged_ignored(root, package, directory):
+    """Find `#[ignore]`d test functions in one package that ask for a namespace.
+
+    Returns {target: {function name: ignore reason}}. The scan is textual on
+    purpose: it only needs the attribute and the function name that follows.
+    """
+    found = {}
+    src_target = 'lib' if (root / directory / 'src/lib.rs').exists() else 'bin:' + package
+    for path in sorted((root / directory).rglob('*.rs')):
+        target = target_of(path.relative_to(root / directory), src_target)
+        if not target:
+            continue
+        for match in IGNORED_TEST.finditer(path.read_text()):
+            reason, name = match.groups()
+            if PRIVILEGED_REASON.search(reason) and not OTHER_NEEDS.search(reason):
+                found.setdefault(target, {})[name] = reason
+    return found
+
+
+def cargo_selector(target):
+    """Turn a target key ('lib', 'bin:x', 'test:y') into cargo's target flags."""
+    if target == 'lib':
+        return ['--lib']
+    kind, name = target.split(':', 1)
+    return ['--' + kind, name]
+
+
+def builds(selected):
+    """The `cargo test --no-run` invocations for the selected areas, in order.
+
+    Each entry is (cargo arguments, what it provides): None for the workspace
+    build, a package name, or a (package, target) pair. Later entries replace
+    earlier executables for what they provide.
+    """
+    result = [(['--workspace'], None)]
+    for area in sorted(selected):
+        for package, _, features in PACKAGES[area]:
+            entry = (['-p', package, '--features', features, '--tests', '--examples'], package)
+            # --examples builds fixtures such as mesh's kernel_node that its
+            # namespace tests execute.
+            if features and entry not in result:
+                result.append(entry)
+    packages = {package for area in selected for package, _, _ in PACKAGES[area]}
+    for (package, target), features in sorted(TARGET_FEATURES.items()):
+        if package in packages:
+            result.append((['-p', package, '--features', features, *cargo_selector(target)], (package, target)))
+    return result
+
+
+def target_key(artifact):
+    """Name a compiled test target the way this script does: 'lib', 'bin:x' or 'test:y'."""
+    kinds = artifact['target']['kind']
+    if 'bin' in kinds:
+        return 'bin:' + artifact['target']['name']
+    if 'test' in kinds:
+        return 'test:' + artifact['target']['name']
+    return 'lib'
+
+
+def executables(root, selected):
+    """Build the test binaries as the caller and map (package directory, target) to each."""
+    found = {}
+    directories = {package: directory for area in selected for package, directory, _ in PACKAGES[area]}
+    for cargo_args, provides in builds(selected):
+        output = subprocess.run(['cargo', 'test', '--locked', *cargo_args, '--no-run', '--message-format=json'],
+                                cwd=root, stdout=subprocess.PIPE, text=True, check=True).stdout
+        if '--examples' in cargo_args:
+            # `cargo test --no-run` leaves examples only under hashed names;
+            # tests run them as target/debug/examples/<name> (mesh kernel_node).
+            plain = [arg for arg in cargo_args if arg != '--tests']
+            subprocess.run(['cargo', 'build', '--locked', *plain], cwd=root, check=True)
+        for line in output.splitlines():
+            artifact = json.loads(line) if line.startswith('{') else {}
+            if artifact.get('reason') != 'compiler-artifact' or not artifact.get('executable') \
+                    or not artifact.get('profile', {}).get('test'):
+                continue
+            manifest = Path(artifact['manifest_path']).parent
+            if not manifest.is_relative_to(root):
+                continue
+            directory = str(manifest.relative_to(root))
+            key = (directory, target_key(artifact))
+            if isinstance(provides, str) and directory != directories[provides]:
+                continue
+            if isinstance(provides, tuple) and key != (directories[provides[0]], provides[1]):
+                continue
+            found[key] = artifact['executable']
+    return found
+
+
+def sandboxed(command, environment, cwd, scratch, target):
+    """The argv that runs `command` in the two-level sandbox described above.
+
+    `environment` is passed explicitly (`env -i`), so nothing else from the
+    caller's environment leaks in. CARGO_TARGET_DIR points at the tmpfs view.
+    """
+    environment = dict(environment, CARGO_TARGET_DIR='/tmp/ut', TMPDIR='/tmp')
+    pairs = [f'{key}={value}' for key, value in sorted(environment.items())
+             if '\n' not in value and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)]
+    return ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--fork', '--kill-child',
+            '--mount-proc', 'env', '-i', *pairs, 'bash', '-c', SANDBOX_SETUP, 'privileged-sandbox',
+            str(scratch), str(target), str(cwd), *command]
+
+
+def memory_scope():
+    """The prefix that puts one sandbox in its own memory-capped user scope, or [].
+
+    The scope is created from outside the sandbox (the sandbox itself cannot
+    reach the user bus). Without a reachable user manager the tmpfs sizes are
+    the only cap, and the row says so.
+    """
+    probe = subprocess.run(['systemd-run', '--user', '--scope', '--quiet', '--collect', 'true'],
+                           capture_output=True)
+    if probe.returncode:
+        return []
+    return ['systemd-run', '--user', '--scope', '--quiet', '--collect',
+            '-p', f'MemoryMax={SANDBOX_MEMORY_MAX}', '-p', 'MemorySwapMax=0', '--']
+
+
+def _die_with_parent():
+    """In the child, before exec: get SIGKILLed when the runner dies.
+
+    Together with `--kill-child` this means killing the runner, even with
+    SIGKILL, kills every process in the sandbox (79752 P2-2).
+    """
+    PR_SET_PDEATHSIG = 1
+    ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+
+
+def run_sandboxed(command, environment, cwd, scratch, target, scope, capture=False, timeout=None):
+    """Run one command in the sandbox with a hang timeout; returns CompletedProcess.
+
+    On timeout the sandbox's outer `unshare` is SIGKILLed, and `--kill-child`
+    takes the whole namespace with it. Returncode 124 marks a timeout.
+    A new session means no controlling terminal, so /dev/tty opens nothing.
+    """
+    timeout = TEST_TIMEOUT_SECONDS if timeout is None else timeout
+    argv = scope + sandboxed(command, environment, cwd, scratch, target)
+    process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, start_new_session=True,
+                               preexec_fn=_die_with_parent, text=True,
+                               stdout=subprocess.PIPE if capture else None,
+                               stderr=subprocess.PIPE if capture else None)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        print(f'privileged integration: killed after {timeout} s (hang guard)', flush=True)
+        return subprocess.CompletedProcess(argv, 124, stdout, stderr)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+# Each probe must FAIL inside the sandbox; the label says what it would prove.
+# The mount probes are the ones review 79752 defeated: the inner user namespace
+# locks the mounts so uid 0 can no longer undo them.
+ESCAPES = {
+    'write in the home directory': 'touch "$HOME_DIR/.privileged-escape"',
+    'write in the checkout': 'touch "$CHECKOUT/.privileged-escape"',
+    'write in the build target': 'touch "$TARGET_DIR/.privileged-escape"',
+    'write /etc': 'touch /etc/.privileged-escape',
+    'superblock remount rw /': 'mount -o remount,rw /',
+    'bind remount rw /': 'mount -o remount,bind,rw / && touch "$HOME_DIR/.privileged-escape-bindrw"',
+    'unmount /run': 'umount /run',
+    'lazily unmount /tmp': 'umount -l /tmp',
+    'reach the host user bus': 'test -S "$HOST_USER_BUS"',
+    'reach the nix daemon socket': 'nix --extra-experimental-features nix-command store info --store daemon',
+    'write a host pty': 'printf . > /dev/pts/0',
+    'reach the host network': 'timeout 3 bash -c "exec 3<>/dev/tcp/$OUTSIDE_ADDRESS/22"',
+    'have a route off loopback': 'ip route show table main | grep -q . || ip -6 route show table main | grep -v "^fe80" | grep -q .',
+    'reach the internet': 'timeout 3 bash -c "exec 3<>/dev/tcp/1.1.1.1/53"',
+    # Nested namespaces map uid 0 onto the parent's uid 0, which is itself the
+    # caller; what must never appear is a map wider than one uid.
+    'map more than one uid': 'test "$(awk \'{print $3}\' /proc/self/uid_map)" != 1',
+}
+
+
+def self_check(scratch, target, checkout, scope):
+    """Plant escapes inside the sandbox; return the ones that wrongly succeeded.
+
+    Also proves persistence is impossible: a file written to /tmp inside must
+    not exist anywhere outside afterwards. An empty list means contained.
+    """
+    marker = f'privileged-persist-{uuid.uuid4().hex}'
+    outside = subprocess.run(['ip', '-4', 'route', 'get', '1.1.1.1'], capture_output=True, text=True).stdout
+    address = re.search(r'\bsrc (\S+)', outside)
+    probes = ['set +e']
+    for label, probe in ESCAPES.items():
+        probes.append(f'if ( {probe} ) >/dev/null 2>&1; then echo "ESCAPED: {label}"; else echo "contained: {label}"; fi')
+    probes.append(f'touch /tmp/{marker} && echo "contained: wrote only to the sandbox tmpfs"')
+    environment = {'HOME_DIR': str(Path.home()), 'CHECKOUT': str(checkout), 'TARGET_DIR': str(target),
+                   'OUTSIDE_ADDRESS': address[1] if address else '1.1.1.1', 'PATH': os.environ['PATH'],
+                   'HOST_USER_BUS': os.environ.get('DBUS_SESSION_BUS_ADDRESS', f'/run/user/{os.getuid()}/bus').removeprefix('unix:path=')}
+    result = run_sandboxed(['bash', '-c', '\n'.join(probes)], environment, '/', scratch, target, scope, capture=True)
+    print(result.stdout, end='', flush=True)
+    escaped = [line for line in result.stdout.splitlines() if line.startswith('ESCAPED')]
+    expected = len(ESCAPES) + 1
+    if result.returncode or sum(1 for line in result.stdout.splitlines() if line.startswith('contained')) != expected:
+        escaped.append(f'sandbox did not start cleanly (exit {result.returncode}): {result.stderr.strip()[-400:]}')
+    for path in (Path('/tmp') / marker, Path(tempfile.gettempdir()) / marker, scratch / 'root' / 'tmp' / marker,
+                 Path.home() / '.privileged-escape-bindrw'):
+        if path.exists():
+            escaped.append(f'ESCAPED: {path} persisted outside the sandbox')
+    return escaped
+
+
+def listing_command(path, test_args):
+    """A small bash wrapper that makes /tmp/st and runs the given cargo-test argv."""
+    return ['bash', '-c', 'mkdir -p /tmp/st && exec "$@"', 'run', path, *test_args]
+
+
+def plan(root, selected, binaries, base, scratch, target, scope):
+    """List the runs, discovering tests with a sandboxed `--list`, plus missing targets.
+
+    The `--list` call runs branch code (the test binary), so it runs in the
+    same sandbox as the tests, not unsandboxed as plain claude (79752 P2-3).
+    """
+    directories = {package: directory for area in selected for package, directory, _ in PACKAGES[area]}
+    runs, missing = [], []
+    for package, directory in sorted(directories.items()):
+        for target_key, names in sorted(privileged_ignored(root, package, directory).items()):
+            path = binaries.get((directory, target_key))
+            if not path:
+                missing.append(f'{package} {target_key}')
+                continue
+            environment = dict(base, CARGO_MANIFEST_DIR=str(root / directory))
+            result = run_sandboxed(listing_command(path, ['--list', '--ignored']),
+                                   environment, root / directory, scratch, target, scope, capture=True)
+            if result.returncode:
+                missing.append(f'{package} {target_key} (--list failed: {result.stderr.strip()[-200:]})')
+                continue
+            full = [line[:-len(': test')] for line in result.stdout.splitlines() if line.endswith(': test')]
+            for test in sorted(t for t in full if t.rsplit('::', 1)[-1] in names):
+                # Each test runs alone in a fresh sandbox: several say so, and
+                # it keeps one test's leftovers from reaching another.
+                runs.append((f'{package} {target_key} {test}', directory, path, ['--ignored', '--exact', test]))
+    return runs, missing
+
+
+def run(root, selected, target):
+    """Build as the caller, prove containment, then run each selected test. Returns failures."""
+    if os.geteuid() == 0:
+        # As real root the user namespace's uid 0 would be host root.
+        return ['refusing to run as real root: run the row as the unprivileged build user']
+    binaries = executables(root, selected)
+    scope = memory_scope()
+    if not scope:
+        print('privileged integration: no user manager; tmpfs sizes are the only memory cap', flush=True)
+    scratch = Path(tempfile.mkdtemp(prefix='privileged-', dir=Path.home() / '.cache'))
+    try:
+        (scratch / 'root').mkdir()
+        escaped = self_check(scratch, target, root, scope)
+        if escaped:
+            return ['sandbox containment: ' + line for line in escaped]
+        print('privileged integration: sandbox contained every planted escape', flush=True)
+        # PYTHONPATH: some namespace tests load scripts/ helpers that import
+        # their siblings. The parent netns lets the DNS test prove it left it.
+        base = {'PATH': os.environ['PATH'], 'HOME': '/tmp', 'LANG': 'C.UTF-8', 'PYTHONPATH': str(root / 'scripts'),
+                'INFRATERNAL_TEST_STATE_ROOT': '/tmp/st',
+                'INFRATERNAL_DNS_TEST_PARENT_NETNS': os.readlink('/proc/self/ns/net')}
+        runs, missing = plan(root, selected, binaries, base, scratch, target, scope)
+        failed = [f'{name}: no test binary was built' for name in missing]
+        print(f'privileged integration: {len(runs)} runs for areas={",".join(sorted(selected))}', flush=True)
+        for index, (label, directory, path, test_args) in enumerate(runs, 1):
+            print(f'=== [{index}/{len(runs)}] {label}', flush=True)
+            environment = dict(base, CARGO_MANIFEST_DIR=str(root / directory))
+            command = listing_command(path, [*test_args, '--test-threads=1', '--nocapture'])
+            result = run_sandboxed(command, environment, root / directory, scratch, target, scope)
+            verdict = 'TIMEOUT' if result.returncode == 124 else ('PASS' if result.returncode == 0 else 'FAIL')
+            print(f'=== [{index}/{len(runs)}] {label}: {verdict}', flush=True)
+            if result.returncode:
+                failed.append(f'{label} ({verdict.lower()})')
+        return failed
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def main():
+    """Pick areas from the diff against the merge base, then build and run their namespace tests."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--base', default=os.environ.get('VERIFY_QUICK_BASE', 'origin/dev'))
+    parser.add_argument('--self-check', action='store_true', help='only prove the sandbox contains planted escapes')
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    target = Path(os.environ.get('CARGO_TARGET_DIR', str(root / 'target'))).resolve()
+    if args.self_check:
+        target.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix='privileged-', dir=Path.home() / '.cache'))
+        try:
+            (scratch / 'root').mkdir()
+            escaped = self_check(scratch, target, root)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        raise SystemExit('\n'.join(escaped) if escaped else 0)
+    base = subprocess.check_output(['git', 'merge-base', 'HEAD', args.base], cwd=root, text=True).strip()
+    paths = subprocess.check_output(['git', 'diff', '--name-only', '-z', base], cwd=root).decode().split('\0')
+    paths += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z'], cwd=root).decode().split('\0')
+    selected = areas([path for path in paths if path])
+    if not selected:
+        print('privileged integration: SKIP (no install, proxy, mesh or shim changes)')
+        return
+    print(f'privileged integration: areas={",".join(sorted(selected))}', flush=True)
+    for area in sorted(selected & set(NOT_COVERED)):
+        print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
+    failed = run(root, selected, target)
+    if failed:
+        raise SystemExit('privileged integration: FAIL\n  ' + '\n  '.join(failed))
+    print('privileged integration: PASS', flush=True)
+
+
+if __name__ == '__main__':
+    main()

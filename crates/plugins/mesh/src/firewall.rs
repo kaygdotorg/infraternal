@@ -381,7 +381,6 @@ pub fn render(config: &Config, replace: bool) -> String {
     )
 }
 // Keep the complete owned inet transaction visible as one atomic batch.
-#[allow(clippy::too_many_lines)]
 fn render_with_aliases(
     config: &Config,
     replace: bool,

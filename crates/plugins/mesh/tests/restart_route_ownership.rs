@@ -4,7 +4,7 @@
 
 use infraternal_plugin_mesh::{
     dataplane::{Chunk, DefaultPolicy, Peer},
-    node::Node,
+    node::{EngineKind, Node},
     policy::model::{Addresses, NodeId},
     wireguard::{Device, Key},
 };
@@ -17,7 +17,7 @@ fn orphan_route_retirement_preserves_foreign_routes() {
     let directory = target.join(format!("review-routes-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut node = Node::restore(&directory).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     node.up().unwrap();
     node.chunk(Chunk {
         access_updates: Vec::new(),
@@ -66,7 +66,7 @@ fn orphan_route_retirement_preserves_foreign_routes() {
     install_foreign_routes();
     Device::retain_routes(&[]).unwrap();
     drop(node);
-    let mut restored = Node::restore(&directory).unwrap();
+    let mut restored = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     assert!(restored.config().unwrap().peers.is_empty());
     assert!(!Device::counters().unwrap().contains_key(&key));
     let mut counts = Vec::new();

@@ -57,7 +57,6 @@ async fn read_hostname(channel: &dyn NodeChannel) -> Option<String> {
 /// One event-driven worker belongs to the generic plugin lifecycle; disabling
 /// aborts and joins it. A disconnect never deletes durable mesh membership.
 // Keep acknowledged-version recovery and source invalidation in one event loop.
-#[allow(clippy::too_many_lines)]
 pub async fn run(
     store: Store,
     service: MeshService,

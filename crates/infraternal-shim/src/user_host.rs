@@ -498,7 +498,6 @@ impl Session {
     /// The caller must retain writable interest or guarantee queued local service.
     /// Settle without deferral after that service, including an empty read;
     /// explicit state and input-only links are immediate.
-    #[allow(clippy::too_many_lines)]
     fn housekeeping_coalesced(&mut self, coalesce_ack: bool) -> io::Result<bool> {
         #[cfg(feature = "host-diagnostics")]
         crate::host_trace::context(self.config.session, self.pty.master.as_raw_fd());
@@ -721,7 +720,6 @@ impl Session {
     /// One scheduling turn: handles the readiness flags from the listener, PTY
     /// master and each viewer. `read_pty` lets it read up to `BULK_READ_BYTES` of
     /// output; otherwise it reads none.
-    #[allow(clippy::too_many_lines)]
     fn step(
         &mut self,
         listener: PollFlags,
@@ -737,7 +735,6 @@ impl Session {
         )
     }
     /// Like `step`, but with an explicit `read_budget` in bytes.
-    #[allow(clippy::too_many_lines)]
     fn step_budget(
         &mut self,
         listener: PollFlags,
@@ -985,7 +982,6 @@ fn pool_full_error(error: &io::Error) -> bool {
 /// Rejects foreign UIDs, duplicate IDs, invalid geometry, threaded startup and
 /// other startup failures. Pool-full opens use the existing stderr error path;
 /// already admitted sessions keep running when later opens are refused.
-#[allow(clippy::too_many_lines)]
 pub fn run_host(configs: Vec<Config>) -> io::Result<()> {
     run_host_accounted(configs, None)
 }
@@ -994,7 +990,6 @@ pub fn run_host(configs: Vec<Config>) -> io::Result<()> {
 /// No timer or content capture is installed; the caller owns the private file.
 /// # Errors
 /// Requires the same single-threaded process boundary and batch validation as `run_host`.
-#[allow(clippy::too_many_lines)]
 pub fn run_host_accounted(
     mut configs: Vec<Config>,
     accounting: Option<std::fs::File>,
