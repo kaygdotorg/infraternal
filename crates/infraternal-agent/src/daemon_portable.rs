@@ -1,6 +1,6 @@
 //! Dispatches compiled node control on platforms without the existing Linux shim runtime; native providers reuse the common writer [D198,D232].
 pub use crate::daemon_writer::approximate_snapshots_total;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) use crate::daemon_writer::hello_capabilities;
 use crate::{
     channel::Channel,
@@ -38,7 +38,7 @@ type RenewalIdentity = ();
 /// Preserve enrolled UID admission and owned node state across connection loss.
 /// # Errors
 /// Refuses a UID mismatch, invalid Hello, malformed frames and bounded overload.
-#[cfg(all(feature = "remote", not(target_os = "linux")))]
+#[cfg(all(feature = "remote", not(any(target_os = "linux", target_os = "macos"))))]
 pub(crate) async fn run_authenticated_with_plugins(
     channel: &impl Channel,
     _: PathBuf,
@@ -54,9 +54,9 @@ pub(crate) async fn run_authenticated_with_plugins(
     let _retire = Retire(channel);
     dispatch(channel, registry, true, renewal, wire_caps).await
 }
-#[cfg(all(feature = "remote", not(target_os = "linux")))]
+#[cfg(all(feature = "remote", not(any(target_os = "linux", target_os = "macos"))))]
 struct Retire<'a, C: Channel>(&'a C);
-#[cfg(all(feature = "remote", not(target_os = "linux")))]
+#[cfg(all(feature = "remote", not(any(target_os = "linux", target_os = "macos"))))]
 impl<C: Channel> Drop for Retire<'_, C> {
     fn drop(&mut self) {
         self.0.retire();
@@ -157,7 +157,7 @@ async fn dispatch(
 
 // Native classification consumed AttachTerm while preserving its decoder;
 // unsupported platforms still return the established missing-session answer.
-#[cfg(all(feature = "remote", not(target_os = "linux")))]
+#[cfg(all(feature = "remote", not(any(target_os = "linux", target_os = "macos"))))]
 pub(crate) async fn run_bound_terminal_opened(
     channel: &impl Channel,
     state: Option<PathBuf>,
@@ -168,7 +168,7 @@ pub(crate) async fn run_bound_terminal_opened(
 }
 
 /// Native nodes require an explicit private runtime; no terminal state is created.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn runtime_state(path: Option<PathBuf>) -> io::Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let path = path.ok_or(io::ErrorKind::InvalidInput)?;
@@ -186,14 +186,14 @@ pub(crate) fn runtime_state(path: Option<PathBuf>) -> io::Result<PathBuf> {
     }
     Ok(path)
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn runtime_state(path: Option<PathBuf>) -> io::Result<PathBuf> {
     crate::sessions::state(path)
 }
 
 #[cfg(all(
     feature = "remote",
-    not(target_os = "linux"),
+    not(any(target_os = "linux", target_os = "macos")),
     any(test, feature = "native-streams")
 ))]
 pub(crate) async fn run_bound_terminal_opened_mode(
@@ -209,7 +209,7 @@ pub(crate) async fn run_bound_terminal_opened_mode(
 /// Native nodes have no shim runtime; negotiated terminal intents return the same missing-session answer.
 /// # Errors
 /// Returns transport failure while writing the terminal close.
-#[cfg(all(feature = "remote", not(target_os = "linux")))]
+#[cfg(all(feature = "remote", not(any(target_os = "linux", target_os = "macos"))))]
 pub async fn run_negotiated_bound_terminal(
     channel: &impl Channel,
     state: Option<PathBuf>,

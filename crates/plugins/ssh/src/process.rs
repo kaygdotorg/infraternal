@@ -6,10 +6,7 @@ use crate::{
     transport::{Input, PayloadInput, TransferChoice},
 };
 use nix::{
-    sys::{
-        signal::{Signal, killpg},
-        wait::{Id, WaitPidFlag, WaitStatus, waitid},
-    },
+    sys::signal::{Signal, killpg},
     unistd::Pid,
 };
 use std::{os::unix::process::CommandExt, process::Stdio, time::Duration};
@@ -183,25 +180,15 @@ async fn execute_inner(
 /// SIGCHLD is shared and can describe another owned helper.
 async fn observe_exit(pid: Pid, exits: &mut ExitEvents) -> Result<(), Failure> {
     loop {
-        let status = exit_status(pid)
+        let exited = crate::child_exit::exited(pid)
             .map_err(|_| Failure::install("The SSH helper exit could not be observed."))?;
-        if status != WaitStatus::StillAlive {
+        if exited {
             return Ok(());
         }
         if exits.recv().await.is_none() {
             return Err(Failure::install(
                 "The SSH helper exit could not be observed.",
             ));
-        }
-    }
-}
-
-fn exit_status(pid: Pid) -> nix::Result<WaitStatus> {
-    let flags = WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG;
-    loop {
-        match waitid(Id::Pid(pid), flags) {
-            Err(nix::errno::Errno::EINTR) => {}
-            result => return result,
         }
     }
 }

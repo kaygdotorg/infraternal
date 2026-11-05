@@ -1,14 +1,14 @@
 //! Shares bounded control-first output and deferred effect ordering across supported node platforms [D198,D232].
 use crate::{channel::Channel, transport::Transmit};
 use infraternal_protocol::Frame;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use infraternal_shim::frame::Frame as Shim;
 use std::{
     io,
     sync::atomic::{AtomicU64, Ordering},
 };
 use tokio::sync::mpsc;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use tokio::sync::oneshot;
 
 /// The pre-sent QUIC greeting and daemon greeting must serialize identically:
@@ -45,15 +45,15 @@ pub fn approximate_snapshots_total() -> u64 {
     APPROXIMATE_SNAPSHOTS.load(Ordering::Relaxed)
 }
 pub(crate) enum Message {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Shim(u32, Shim),
     Result(u32, u32, bool, Vec<u8>),
     Deferred(u32, u32, infraternal_plugin_api::ActionReply),
     Event(u32, Vec<u8>),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Exited(u32, Vec<u8>, oneshot::Sender<()>),
     Pong(u32, u64, u64),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Close(u32, &'static str),
     /// The session's shim is gone: a final stream close, never retried (wire §4).
     Ended(u32),
@@ -141,7 +141,7 @@ pub(crate) async fn writer(
         message = messages.recv() => message,
     } {
         match message {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Message::Shim(stream, frame) => {
                 let wire = match &frame {
                     Shim::Output(seq, bytes) => Frame::Output {
@@ -183,7 +183,7 @@ pub(crate) async fn writer(
                 deferred_reply(&mut tx, socket, stream, call_id, reply).await?;
             }
             Message::Event(stream, json) => write_event(&mut tx, socket, stream, &json).await?,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Message::Exited(stream, json, delivered) => {
                 write_event(&mut tx, socket, stream, &json).await?;
                 let _ = delivered.send(());
@@ -203,7 +203,7 @@ pub(crate) async fn writer(
                 )
                 .await?;
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Message::Close(stream, reason) => {
                 tx.send(socket, stream, &Frame::Close { code: 1, reason })
                     .await?;

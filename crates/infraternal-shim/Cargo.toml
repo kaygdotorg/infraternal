@@ -46,6 +46,11 @@ ca-handoff = ["dep:openssl"]
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
 bench-ghostty = ["bench-vt", "dep:libghostty-vt"]
 
+# The macOS session pump watches SIGCHLD through a kqueue (session.rs), so the
+# shim needs nix's kqueue API there even when built on its own (#328).
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { workspace = true, features = ["event"] }
+
 [dependencies.libghostty-vt]
 workspace = true
 optional = true

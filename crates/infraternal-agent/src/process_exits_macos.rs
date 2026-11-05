@@ -40,19 +40,13 @@ fn event(pid: u32, flags: EvFlags, token: isize) -> KEvent {
     )
 }
 /// A zero timeout: kqueue calls return immediately and never block the reactor.
-fn zero_timeout() -> nix::libc::timespec {
-    nix::libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    }
-}
 /// Removes the exit filter for `pid`. A filter that is already gone (`ENOENT`
 /// or `ESRCH`) counts as success.
 fn delete(queue: &Kqueue, pid: u32) -> io::Result<()> {
-    match queue.kevent(
+    match infraternal_shim::readiness::kevent_now(
+        queue,
         &[event(pid, EvFlags::EV_DELETE, 0)],
         &mut [],
-        Some(zero_timeout()),
     ) {
         Ok(_) | Err(Errno::ENOENT | Errno::ESRCH) => Ok(()),
         Err(error) => Err(error.into()),
@@ -98,14 +92,14 @@ impl ProcessExits {
             .token
             .checked_add(1)
             .ok_or_else(|| io::Error::other("exit registration tokens exhausted"))?;
-        match queue.get_ref().kevent(
+        match infraternal_shim::readiness::kevent_now(
+            queue.get_ref(),
             &[event(
                 pid,
                 EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
                 self.token,
             )],
             &mut [],
-            Some(zero_timeout()),
         ) {
             Ok(_) => {
                 self.shims.insert(
@@ -163,15 +157,21 @@ impl ProcessExits {
         };
         loop {
             let mut ready = queue.readable().await?;
-            if let Ok(result) = ready.try_io(|fd| {
+            match ready.try_io(|fd| {
                 let mut events = [event(0, EvFlags::empty(), 0); 32];
-                let count = fd.kevent(&[], &mut events, Some(zero_timeout()))?;
+                let count = infraternal_shim::readiness::kevent_now(fd, &[], &mut events)?;
                 if count == 0 {
                     return Err(io::ErrorKind::WouldBlock.into());
                 }
                 Ok(self.matching_ids(&events[..count]))
             }) {
-                return result;
+                // Signals outlasted the bounded retries: yield to the runtime
+                // and retry with readiness kept, never spin or fail (#328).
+                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                    tokio::task::yield_now().await;
+                }
+                Ok(result) => return result,
+                Err(_would_block) => {}
             }
         }
     }

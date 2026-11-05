@@ -51,7 +51,14 @@ os.execv({systemctl!r}, [{systemctl!r}, *sys.argv[1:]])
         probe_listener.bind(str(probe_socket))
         probe_listener.listen(1)
         probe_listener.settimeout(20)
-        with patch.dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH']):
+        # The probe stays held until this oracle releases it, across the debug
+        # daemon's startup. Production kills a probe after 2 s, which a loaded
+        # build host can exceed before Pong. The debug-only budget below lifts
+        # that bound for this held probe; ordering is still proven by Pong, the
+        # probe connection and the release byte, never by elapsed time (#355).
+        with patch.dict(os.environ,
+                        PATH=str(commands) + os.pathsep + os.environ['PATH'],
+                        INFRATERNAL_TEST_MANAGER_PROBE_BUDGET_MS='60000'):
             startup_started = time.perf_counter()
             client = Binary(args.binary.resolve(), root)
         startup_ms = (time.perf_counter() - startup_started) * 1000
