@@ -215,6 +215,10 @@ for (const viewport of VIEWPORTS) {
         await expect(strip).toHaveCount(0);
         await expect(strip.locator(".cl-sx-strip-text")).toHaveText(/^Can't reach .+\. It keeps trying in the background\.$/, { timeout: 25_000 });
         expect(await strip.getByRole("button", { name: "Try again" }).locator("path").first().getAttribute("d"), "one retry icon").toBe(RETRY_ARC);
+        // Still trying, so not a failure: a turning mark, a connecting window, and no caret blinking behind the notice.
+        await expect(strip.locator(".ui-mark")).toHaveAttribute("data-mark", "busy");
+        await expect(win).toHaveAttribute("data-status", "connecting");
+        await expect(win.locator(".terminal-host")).toHaveCSS("visibility", "hidden");
         await expectAligned(win, strip);
         await shot(page, "cannot-reach");
         // The host starts answering; asking again attaches the window in place.

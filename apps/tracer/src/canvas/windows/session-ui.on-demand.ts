@@ -143,7 +143,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     // Connected again: the "can't reach" notice no longer applies.
     if (rec.binding?.connected !== false) unreachables.delete(rec);
     const unreachable = unreachables.get(rec);
-    paintLink(rec, exited, refusal ? refusal.message : unreachable);
+    // Only a refusal reads offline. A window that is still trying keeps its connecting (or reconnecting) indicator and status.
+    paintLink(rec, exited, refusal?.message);
     let strip = body.querySelector<HTMLElement>(".cl-sx-strip");
     const view: StripView | undefined = exited && s ? stripOf(rec, s)
       : refusal && !s ? refusedStrip(rec, refusal.message, refusal.action)
@@ -160,7 +161,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         strip.dataset.result = view.result;
         strip.setAttribute("aria-label", view.label);
         const mark = el("span", "ui-mark");
-        mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : "fail";
+        // Waiting is a neutral turning arc; only a real refusal or failure is a red cross.
+        mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : view.result === "unreachable" ? "busy" : "fail";
         const text = el("span", "cl-sx-strip-text", view.text);
         const nodes: HTMLElement[] = [mark, text];
         if (view.action) {

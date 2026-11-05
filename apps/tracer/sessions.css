@@ -96,9 +96,10 @@
 .ui-window-body:has(.cl-sx-strip) .cl-preview { padding-bottom: 4.5rem; }
 /* On a phone the pill sits at the start edge, clear of the corner the mock badge keeps. */
 @media (pointer: coarse) { .cl-sx-strip { left: 0.75rem; right: auto; margin-inline: 0; } }
+/* A window that cannot be reached hides its screen too: a stale picture with a blinking caret under a notice would say it is live. */
 /* An ended session (#158) has no screen left to read: the empty terminal is hidden (no cursor that invites typing),
    and the pill sits in the middle of the window, on every device. */
-.ui-window-body:has(.cl-sx-strip:is([data-result="ended"], [data-result="refused"])) .terminal-host { visibility: hidden; }
+.ui-window-body:has(.cl-sx-strip:is([data-result="ended"], [data-result="refused"], [data-result="unreachable"])) .terminal-host { visibility: hidden; }
 .cl-sx-strip:is([data-result="ended"], [data-result="refused"], [data-result="unreachable"]) { inset: 0; margin: auto; animation: cl-sx-strip-in 200ms var(--ease-out, ease-out); }
 /* A refusal, or a host that cannot be reached, explains itself in a sentence or two, so it wraps; the buttons stay on the last
    line's side. The unreachable window keeps its last screen visible behind the strip: only a refusal has none to show. */
