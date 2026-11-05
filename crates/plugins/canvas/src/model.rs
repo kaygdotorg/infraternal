@@ -130,23 +130,41 @@ pub(crate) fn view(value: &Value) -> bool {
 /// How many themes one account's look may hold. An intent carries the whole list, and an intent is at most `MAX_INPUT` bytes.
 pub(crate) const MAX_THEMES: usize = 16;
 fn whole(value: &Value, key: &str, low: f64, high: f64) -> bool {
-    numeric(value, key, low, high) && value.get(key).and_then(Value::as_f64).is_some_and(|v| v.fract() == 0.0)
+    numeric(value, key, low, high)
+        && value
+            .get(key)
+            .and_then(Value::as_f64)
+            .is_some_and(|v| v.fract() == 0.0)
 }
 fn hex(value: &Value) -> bool {
-    value
-        .as_str()
-        .is_some_and(|s| s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit()))
+    value.as_str().is_some_and(|s| {
+        s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
+    })
 }
 /// One theme of the account's look: ids and numbers within their ranges. Which font, Colour or background an id names is the client's to know;
 /// the server only bounds what it stores (text of at most 200 characters, percentages 0 to 100, UI size 50 to 150, hex colours).
 fn theme(value: &Value) -> bool {
     shape(
         value,
-        &["id", "name", "tint", "blur", "grain", "font", "colors", "uiSize", "background", "customSolid", "custom"],
+        &[
+            "id",
+            "name",
+            "tint",
+            "blur",
+            "grain",
+            "font",
+            "colors",
+            "uiSize",
+            "background",
+            "customSolid",
+            "custom",
+        ],
     ) && ["id", "name", "font", "colors", "background"]
         .iter()
         .all(|key| string(value, key).is_some())
-        && ["tint", "blur", "grain"].iter().all(|key| whole(value, key, 0.0, 100.0))
+        && ["tint", "blur", "grain"]
+            .iter()
+            .all(|key| whole(value, key, 0.0, 100.0))
         && whole(value, "uiSize", 50.0, 150.0)
         && value.get("customSolid").is_some_and(hex)
         && value.get("custom").is_some_and(|custom| {
@@ -170,14 +188,18 @@ pub(crate) fn look(value: &Value) -> bool {
                 && string(basics, "font").is_some()
                 && whole(basics, "uiSize", 50.0, 150.0)
         })
-        && value.get("themes").and_then(Value::as_array).is_some_and(|themes| {
-            themes.len() <= MAX_THEMES
-                && themes.iter().all(theme)
-                && themes
-                    .iter()
-                    .enumerate()
-                    .all(|(at, t)| !themes[..at].iter().any(|seen| seen.get("id") == t.get("id")))
-        })
+        && value
+            .get("themes")
+            .and_then(Value::as_array)
+            .is_some_and(|themes| {
+                themes.len() <= MAX_THEMES
+                    && themes.iter().all(theme)
+                    && themes.iter().enumerate().all(|(at, t)| {
+                        !themes[..at]
+                            .iter()
+                            .any(|seen| seen.get("id") == t.get("id"))
+                    })
+            })
 }
 pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
     doc.get("views")

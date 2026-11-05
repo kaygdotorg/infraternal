@@ -30,6 +30,8 @@ struct IntentRule {
     fields: &'static [&'static str],
     strings: &'static [&'static str],
 }
+// One table row per intent in a single match is the point (each intent has one authoritative list of keys); a new intent is a new row, not a new function.
+#[allow(clippy::too_many_lines)]
 fn intent_rule(kind: &str) -> Option<IntentRule> {
     // Keep shape and value checks in one kind dispatch so each intent has one
     // authoritative list of accepted and required keys.
@@ -719,7 +721,10 @@ mod tests {
     #[test]
     fn the_accounts_look_is_set_whole_validated_and_part_of_the_document() {
         let mut doc = document();
-        assert!(doc.0.get("look").is_none(), "a document without a look is still valid");
+        assert!(
+            doc.0.get("look").is_none(),
+            "a document without a look is still valid"
+        );
         let intent = json!({"type":"look.set","look":look()});
         assert!(valid_intent(&intent));
         reduce(&mut doc, &intent, &[]).unwrap();
@@ -751,13 +756,23 @@ mod tests {
             bad(&|v| v["basics"]["uiSize"] = json!(900)),
             bad(&|v| v["themes"][0]["customSolid"] = json!("red")),
             bad(&|v| v["themes"][0]["custom"]["stops"] = json!(["#ffffff"])),
-            bad(&|v| v["themes"][0]["custom"]["stops"] = json!(["#ffffff","#000000","#111111","#222222","#333333"])),
+            bad(&|v| {
+                v["themes"][0]["custom"]["stops"] =
+                    json!(["#ffffff", "#000000", "#111111", "#222222", "#333333"])
+            }),
             bad(&|v| v["themes"][0]["custom"]["angle"] = json!(361)),
             bad(&|v| v["themes"][0]["name"] = json!("x".repeat(201))),
             bad(&|v| v["themes"][0]["extra"] = json!(1)),
             bad(&|v| v["themes"][1]["id"] = json!("solid")),
             bad(&|v| v["v"] = json!(2)),
-            bad(&|v| { let t = v["themes"][0].clone(); for n in 0..16 { let mut c = t.clone(); c["id"] = json!(format!("n{n}")); v["themes"].as_array_mut().unwrap().push(c); } }),
+            bad(&|v| {
+                let t = v["themes"][0].clone();
+                for n in 0..16 {
+                    let mut c = t.clone();
+                    c["id"] = json!(format!("n{n}"));
+                    v["themes"].as_array_mut().unwrap().push(c);
+                }
+            }),
             json!({"type":"look.set"}),
             json!({"type":"look.set","look":look(),"extra":1}),
         ];
@@ -786,6 +801,10 @@ mod tests {
         }
         let intent = json!({"type":"look.set","look":value});
         assert!(valid_intent(&intent));
-        assert!(intent.to_string().len() < crate::model::MAX_INPUT, "{} bytes", intent.to_string().len());
+        assert!(
+            intent.to_string().len() < crate::model::MAX_INPUT,
+            "{} bytes",
+            intent.to_string().len()
+        );
     }
 }
