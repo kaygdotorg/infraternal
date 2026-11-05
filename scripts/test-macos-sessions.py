@@ -384,10 +384,15 @@ def main():
                 leaked = [path for path in holders(holder) if path.endswith('/root-only')]
                 assert not leaked, ('the planted root descriptor is held', holder, leaked)
         print('PASS: no shell or shim holds the planted root descriptor; no planted variable reached a shell')
+        def environment_of(pid):
+            return subprocess.run(['/bin/ps', '-E', '-ww', '-o', 'command=', '-p', str(pid)],
+                                  capture_output=True, text=True, check=True).stdout
+        # Positive control: the same read must see the agent's planted marker,
+        # or a clean result from the shims below would prove nothing.
+        assert ' J146_PLANTED=leaked' in environment_of(agent.child.pid), 'ps -E shows no environment'
         for session in (gui, plain):
             shim = shim_pid(state, session)
-            environment = subprocess.run(['/bin/ps', '-E', '-ww', '-o', 'command=', '-p', str(shim)],
-                                         capture_output=True, text=True, check=True).stdout
+            environment = environment_of(shim)
             leaked = [name for name in [*PLANTED_ENV, 'PATH'] if f' {name}=' in environment]
             assert not leaked, ('planted variables reached a root shim', shim, leaked)
         print('PASS: the root shims run with the allow-listed environment only (no planted variable, no PATH)')
