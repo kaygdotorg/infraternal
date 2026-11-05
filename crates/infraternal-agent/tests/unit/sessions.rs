@@ -514,6 +514,9 @@ async fn unanswered_manager_probe_is_not_remembered() {
 }
 
 thread_local! {
+    /// Makes every reap of an owned launcher stall for its whole bound, like a launcher stuck in
+    /// uninterruptible sleep that SIGKILL cannot yet remove.
+    pub(super) static REAP_STALLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Makes the shutdown cleanup thread fail to start on this thread, so a test can prove the launcher is
     /// still stopped when the OS refuses a thread.
     pub(super) static FAIL_CLEANUP_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1327,5 +1330,57 @@ async fn the_shutdown_cleanup_ends_within_its_budget_whatever_the_shim_does() {
         spent <= super::SHUTDOWN_CLEANUP + std::time::Duration::from_millis(250),
         "the shutdown cleanup spent {spent:?} against a {:?} budget",
         super::SHUTDOWN_CLEANUP
+    );
+}
+
+/// J230 P3-1: the final kill-and-reap of the owned launcher counts against the same single deadline. A
+/// launcher whose reap stalls (uninterruptible sleep) must not add a second bound after the deadline. The
+/// lifeline stays held by the test, so no proof ever arrives and every wait runs to its bound; the paused
+/// clock then shows the cleanup ended at its budget, not at twice it.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_stalled_reap_of_the_launcher_stays_inside_the_single_deadline() {
+    let directory = Directory::new();
+    let state = state(Some(directory.0.clone())).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let child = launcher("sleep", &["300"]);
+    let pid = i32::try_from(child.id().unwrap()).unwrap();
+    let (read, _write_end_held_by_the_test) = nix::unistd::pipe().unwrap();
+    let mut parts = super::Parts {
+        child,
+        state: state.clone(),
+        path: state.join(format!("sessions/{}.sock", id.simple())),
+        id,
+        manager: super::Manager::Detached,
+        name: id.simple().to_string(),
+        detached: true,
+        record: None,
+        lifeline: Some(read),
+    };
+    REAP_STALLS.with(|stalls| stalls.set(true));
+    let started = tokio::time::Instant::now();
+    super::cleanup(&mut parts, super::SHUTDOWN).await;
+    let spent = started.elapsed();
+    REAP_STALLS.with(|stalls| stalls.set(false));
+    for _ in 0..200 {
+        if !alive(pid) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let left = alive(pid);
+    if left {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    assert!(
+        spent <= super::SHUTDOWN_CLEANUP + std::time::Duration::from_millis(250),
+        "the cleanup spent {spent:?} against a {:?} budget",
+        super::SHUTDOWN_CLEANUP
+    );
+    assert!(
+        !left,
+        "the launcher was not sent its kill past the deadline"
     );
 }

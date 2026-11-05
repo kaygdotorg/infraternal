@@ -1573,15 +1573,22 @@ async fn abandon_launch(mut job: Abandoned) {
 /// Without proof the rendezvous and the person record are left alone: a live terminal keeps its discovery
 /// and its revocation attribution. A detached shim's socket is never unlinked here. The launcher this
 /// launch owns is stopped and reaped either way, because killing it cannot touch the shim, and the whole
-/// cleanup, every inner wait included, ends within `budget.total`.
+/// cleanup, every inner wait and the final stop of the owned launcher included, ends within `budget.total`.
 #[cfg(target_os = "linux")]
 async fn cleanup(parts: &mut Parts, budget: Budget) {
-    let proven = timeout(budget.total, stop_launch(parts, budget.retry))
-        .await
-        .unwrap_or(false);
-    // Whatever the outcome or a timeout left behind: the owned launcher does not outlive its cleanup.
+    // Everything, the final stop of the owned launcher included, sits under the one deadline.
+    let proven = timeout(budget.total, async {
+        let proven = stop_launch(parts, budget.retry).await;
+        // Whatever the outcome, the owned launcher does not outlive its cleanup.
+        let _ = parts.child.start_kill();
+        let _ = reaped(&mut parts.child, HANDSHAKE).await;
+        proven
+    })
+    .await
+    .unwrap_or(false);
+    // Past the deadline only a signal can still be sent: waiting would spend time the budget no longer
+    // has. The signal is not a wait, and a killed launcher is reaped when its handle drops.
     let _ = parts.child.start_kill();
-    let _ = reaped(&mut parts.child, HANDSHAKE.min(budget.total)).await;
     if proven && let Some(record) = parts.record.take() {
         let _ = fs::remove_file(record);
     }
@@ -1699,6 +1706,12 @@ async fn lifeline_eof(descriptor: &std::os::fd::OwnedFd) {
 /// reaper of whichever runtime spawned it, which may already be gone at shutdown.
 #[cfg(target_os = "linux")]
 async fn reaped(child: &mut tokio::process::Child, bound: Duration) -> bool {
+    // A test can make the reap stall for its whole bound, as a launcher stuck in uninterruptible sleep would.
+    #[cfg(test)]
+    if tests::REAP_STALLS.with(std::cell::Cell::get) {
+        tokio::time::sleep(bound).await;
+        return false;
+    }
     let deadline = tokio::time::Instant::now() + bound;
     loop {
         match child.try_wait() {
