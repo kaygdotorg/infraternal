@@ -117,7 +117,7 @@ fn tun_link() -> Option<(u32, Option<String>, Option<String>)> {
 /// An unrestricted TUN of ours, persisted by a build before #260 J213 P1, is never reattached:
 /// the agent deletes it and starts a fresh TUN restricted to its own user and group.
 #[test]
-#[ignore = "Run as real root inside a disposable network namespace."]
+#[ignore = "Run in a disposable user/network namespace."]
 fn an_old_unrestricted_tun_of_ours_is_replaced_by_a_restricted_one() {
     let state = private_state("gotatun-old-tun");
     let result = (|| {
