@@ -1565,7 +1565,8 @@ async fn abandon_launch(mut job: Abandoned) {
 /// - Otherwise only the shim's own authenticated exit counts (`close_detached`).
 ///
 /// Without proof the rendezvous and the person record are left alone: a live terminal keeps its discovery
-/// and its revocation attribution. A detached shim's socket is never unlinked here. The launcher this
+/// and its revocation attribution. A detached shim's socket is unlinked only on lifeline proof, once no
+/// process of the launch is left to own it (`prove_detached_dead`). The launcher this
 /// launch owns is stopped and reaped either way, because killing it cannot touch the shim, and the whole
 /// cleanup, every inner wait and the final stop of the owned launcher included, ends within `budget.total`.
 #[cfg(target_os = "linux")]
