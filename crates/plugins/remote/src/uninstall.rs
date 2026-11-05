@@ -29,6 +29,8 @@ struct Layout {
     unit: PathBuf,
     wanted: PathBuf,
     user: bool,
+    /// The account this installation runs as; selects its user service manager.
+    uid: u32,
 }
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -94,6 +96,7 @@ fn layout(context: &Context, home: &Path, uid: u32) -> io::Result<Layout> {
         unit,
         wanted,
         user,
+        uid,
     })
 }
 pub(crate) fn public_file(path: &Path, uid: u32, max: u64) -> io::Result<String> {
@@ -495,6 +498,23 @@ async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
         }
     }
 }
+/// The runtime directory `systemctl --user` needs to reach this account's
+/// service manager, when the caller's session did not provide one.
+///
+/// A login without a systemd user session (an SSH server that does not run
+/// `pam_systemd`, `su`, a cron job) has no `XDG_RUNTIME_DIR`, and `systemctl
+/// --user` then fails even though the account's manager runs (linger keeps it
+/// up for the installed service). The by-hand uninstall Remove hands out was
+/// refused there with a bare "permission denied" (#305 F-C). Only the
+/// account's own `/run/user/<uid>`, a real directory it owns, is used.
+fn user_manager_runtime(uid: u32, current: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if current.is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+    let runtime = PathBuf::from(format!("/run/user/{uid}"));
+    let metadata = std::fs::symlink_metadata(&runtime).ok()?;
+    (metadata.is_dir() && metadata.uid() == uid).then_some(runtime)
+}
 async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
     // Unit tests build complete fixture installations under the build
     // account; they must never reach that account's real service manager.
@@ -505,6 +525,11 @@ async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
     infraternal_shim::prepare_child(command.as_std_mut());
     if paths.user {
         command.arg("--user");
+        if let Some(runtime) =
+            user_manager_runtime(paths.uid, std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+        {
+            command.env("XDG_RUNTIME_DIR", runtime);
+        }
     }
     let status = command
         .args(args)
@@ -514,7 +539,12 @@ async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
         .status()
         .await?;
     if !status.success() {
-        return Err(denied());
+        // Say what failed: "permission denied" read as a refusal of ownership.
+        return Err(io::Error::other(format!(
+            "the service manager refused `systemctl{} {}`",
+            if paths.user { " --user" } else { "" },
+            args.join(" ")
+        )));
     }
     Ok(())
 }
@@ -632,6 +662,28 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #305 F-C: the by-hand uninstall must reach the account's user manager from a
+    /// login with no systemd user session (no `XDG_RUNTIME_DIR`), using only that
+    /// account's own runtime directory, and must keep a session's own value.
+    #[test]
+    fn a_login_without_a_user_session_still_reaches_its_own_service_manager() {
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let own = PathBuf::from(format!("/run/user/{uid}"));
+        if std::fs::symlink_metadata(&own).is_ok_and(|m| m.is_dir() && m.uid() == uid) {
+            assert_eq!(user_manager_runtime(uid, None), Some(own.clone()));
+            assert_eq!(
+                user_manager_runtime(uid, Some(std::ffi::OsStr::new(""))),
+                Some(own)
+            );
+        }
+        assert_eq!(
+            user_manager_runtime(uid, Some(std::ffi::OsStr::new("/run/user/elsewhere"))),
+            None
+        );
+        // Never another account's directory.
+        assert_eq!(user_manager_runtime(uid.wrapping_add(7919), None), None);
+    }
     /// A complete rootless bootstrap layout under a private fixture home.
     fn installation(name: &str, locked: bool) -> Option<(PathBuf, Context, u32)> {
         use std::os::unix::fs::{PermissionsExt, symlink};
