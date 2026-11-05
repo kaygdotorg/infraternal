@@ -1321,6 +1321,25 @@ pub async fn compiled(pool: &sqlx::SqlitePool) -> Result<PluginRuntime, PluginEr
     )
     .await
 }
+/// The control-plane ports for the mesh compiler: the remote listener's
+/// bound port, TCP and UDP, read each time a snapshot is taken.
+#[cfg(all(feature = "mesh", feature = "remote"))]
+fn control_plane(
+    hosts: crate::remote_runtime::RemoteHosts,
+) -> infraternal_plugin_mesh::store::ControlPlane {
+    use infraternal_plugin_mesh::policy::rules::{Port, Protocol, TrafficPolicy};
+    Arc::new(move || {
+        hosts.listener_port().map_or(TrafficPolicy::None, |number| {
+            TrafficPolicy::Ports(
+                [Protocol::Tcp, Protocol::Udp]
+                    .into_iter()
+                    .map(|protocol| Port { protocol, number })
+                    .collect(),
+            )
+        })
+    })
+}
+
 pub(crate) async fn compiled_with_hosts(
     pool: &sqlx::SqlitePool,
     public_origin: Option<&str>,
@@ -1333,6 +1352,12 @@ pub(crate) async fn compiled_with_hosts(
     ));
     #[cfg(all(feature = "mesh", feature = "remote"))]
     let mesh_service = mesh_plugin.service();
+    // The server's own node admits every member only to the infraternal
+    // control plane; everything else there follows Access (D352, J236 P2-1).
+    #[cfg(all(feature = "mesh", feature = "remote"))]
+    mesh_service
+        .dataplane()
+        .set_control_plane(control_plane(hosts.clone()));
     let plugins: Vec<Arc<dyn Plugin>> = vec![
         #[cfg(feature = "ssh")]
         Arc::new(crate::preferred_accounts::AccountsPlugin::new(pool.clone())),

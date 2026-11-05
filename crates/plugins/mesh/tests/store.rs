@@ -432,3 +432,37 @@ async fn closing_the_default_previews_ssh_lost_toward_the_server() {
         .unwrap();
     assert_eq!(page["loses_ssh_to_server"], serde_json::json!([]));
 }
+
+/// The server hands the store its control-plane listener (J236 P2-1): under a
+/// closed default the server's node admits a peer to exactly those ports,
+/// and before the listener is known, to nothing beyond Access.
+#[tokio::test]
+async fn the_server_node_admits_peers_to_the_control_plane_the_server_sets() {
+    use infraternal_plugin_mesh::policy::rules::{Port, Protocol, TrafficPolicy};
+    let pool = pool().await;
+    let store = Store::new(pool.clone());
+    let (server, _) = store.attach("server", key(1), None, true).await.unwrap();
+    let (peer, _) = store.attach("peer", key(2), None, false).await.unwrap();
+    sqlx::query("UPDATE mesh_dataplane SET default_policy='deny' WHERE singleton=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unknown = store.config(server).await.unwrap();
+    assert_eq!(unknown.peers[&peer].inbound, TrafficPolicy::None);
+    let control = TrafficPolicy::Ports(
+        [Protocol::Tcp, Protocol::Udp]
+            .into_iter()
+            .map(|protocol| Port {
+                protocol,
+                number: 47_176,
+            })
+            .collect(),
+    );
+    let expected = control.clone();
+    // Set on a clone: every clone shares it.
+    store
+        .clone()
+        .set_control_plane(std::sync::Arc::new(move || control.clone()));
+    let known = store.config(server).await.unwrap();
+    assert_eq!(known.peers[&peer].inbound, expected);
+}

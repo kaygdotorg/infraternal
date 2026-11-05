@@ -604,7 +604,6 @@ fn only_the_server_node_carries_an_ssh_answer_and_a_missing_one_refuses() {
     for default in [DefaultPolicy::Allow, DefaultPolicy::Deny] {
         let server = configuration::compile(&coord, NodeId(1), default, &BTreeMap::new()).unwrap();
         for peer in server.peers.values() {
-            assert_eq!(peer.inbound, TrafficPolicy::All, "control plane stays open");
             assert!(peer.access_ssh.is_some());
         }
         let mut legacy = server.clone();
@@ -686,13 +685,6 @@ fn ssh_toward_the_server_follows_explicit_arrows_and_the_default() {
             server.peers[&NodeId(3)].access_ssh,
             Some(default == DefaultPolicy::Allow)
         );
-        // The control plane is untouched either way.
-        assert!(
-            server
-                .peers
-                .values()
-                .all(|peer| peer.inbound == TrafficPolicy::All)
-        );
         let node = configuration::compile(&coord, NodeId(3), default, &BTreeMap::new()).unwrap();
         assert_eq!(node.peers[&NodeId(1)].outbound, TrafficPolicy::All);
     }
@@ -709,4 +701,63 @@ fn ssh_toward_the_server_follows_explicit_arrows_and_the_default() {
     let server =
         configuration::compile(&coord, NodeId(1), DefaultPolicy::Deny, &BTreeMap::new()).unwrap();
     assert_eq!(server.peers[&NodeId(3)].access_ssh, Some(true));
+}
+
+/// D352 / J236 P2-1 (#221): on the server's own node the kernel admits every
+/// peer only to the infraternal control-plane ports; SSH and every other
+/// service on the server's host follow Access (an explicit arrow, or the
+/// default), the same as on any node.
+#[test]
+fn the_server_node_admits_the_control_plane_and_otherwise_follows_access() {
+    let tcp = |number| Port {
+        protocol: Protocol::Tcp,
+        number,
+    };
+    let control = TrafficPolicy::Ports(BTreeSet::from([
+        tcp(47_176),
+        Port {
+            protocol: Protocol::Udp,
+            number: 47_176,
+        },
+    ]));
+    let mut coord = coordinator();
+    coord
+        .add_arrow(Arrow {
+            id: RuleId(1),
+            from: Endpoint::Node(NodeId(2)),
+            to: Endpoint::Node(NodeId(1)),
+            both_ways: false,
+            ports: TrafficPolicy::Ports(BTreeSet::from([tcp(443)])),
+        })
+        .unwrap();
+    let mut with_arrow = control.clone();
+    with_arrow.union(&TrafficPolicy::Ports(BTreeSet::from([tcp(443)])));
+    for default in [DefaultPolicy::Allow, DefaultPolicy::Deny] {
+        let server = configuration::compile_with_control_plane(
+            &coord,
+            NodeId(1),
+            default,
+            &BTreeMap::new(),
+            &control,
+        )
+        .unwrap();
+        // The control plane is always open; nothing else is implied.
+        for peer in server.peers.values() {
+            assert!(peer.inbound.allows(tcp(47_176)));
+        }
+        // An explicit arrow narrows even an open default.
+        assert_eq!(server.peers[&NodeId(2)].inbound, with_arrow);
+        assert!(!server.peers[&NodeId(2)].inbound.allows(tcp(22)));
+        // Without an arrow the default decides.
+        if default == DefaultPolicy::Allow {
+            assert_eq!(server.peers[&NodeId(3)].inbound, TrafficPolicy::All);
+        } else {
+            assert_eq!(server.peers[&NodeId(3)].inbound, control);
+            assert!(!server.peers[&NodeId(3)].inbound.allows(tcp(22)));
+        }
+        // Other nodes compile as before: the server is still always reachable
+        // from them (its own inbound decides what is admitted).
+        let node = configuration::compile(&coord, NodeId(3), default, &BTreeMap::new()).unwrap();
+        assert_eq!(node.peers[&NodeId(1)].outbound, TrafficPolicy::All);
+    }
 }

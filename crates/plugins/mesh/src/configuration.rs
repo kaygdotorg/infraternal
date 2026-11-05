@@ -22,8 +22,38 @@ pub fn compile_with_dns_suffix(
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
     default_dns_suffix: &str,
+    control_plane: &TrafficPolicy,
 ) -> Result<Config, MeshError> {
-    compile_inner(coordinator, node, default, endpoints, default_dns_suffix)
+    compile_inner(
+        coordinator,
+        node,
+        default,
+        endpoints,
+        default_dns_suffix,
+        control_plane,
+    )
+}
+
+/// [`compile`] for a server whose infraternal control plane listens on
+/// `control_plane`: on the server's own node every peer is admitted to those
+/// ports, and to everything else only as Access allows (D352, #221).
+/// # Errors
+/// Returns unknown membership or invalid persisted address allocation.
+pub fn compile_with_control_plane(
+    coordinator: &Coordinator,
+    node: NodeId,
+    default: DefaultPolicy,
+    endpoints: &BTreeMap<NodeId, SocketAddr>,
+    control_plane: &TrafficPolicy,
+) -> Result<Config, MeshError> {
+    compile_inner(
+        coordinator,
+        node,
+        default,
+        endpoints,
+        "internal",
+        control_plane,
+    )
 }
 
 /// Compile one node at a time: open defaults need n(n−1) peer entries deployment-wide,
@@ -36,7 +66,14 @@ pub fn compile(
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
 ) -> Result<Config, MeshError> {
-    compile_inner(coordinator, node, default, endpoints, "internal")
+    compile_inner(
+        coordinator,
+        node,
+        default,
+        endpoints,
+        "internal",
+        &TrafficPolicy::None,
+    )
 }
 
 /// An explicit grant when there is one, else the default (`fallback`).
@@ -49,22 +86,27 @@ fn granted_or(granted: Option<&TrafficPolicy>, fallback: &TrafficPolicy) -> Traf
 
 /// The server's node's inbound from `other`, and mesh SSH's answer for it.
 ///
-/// The server admits every member for the control plane (D164, D215), so the
-/// installed inbound is "all". Mesh SSH there follows Access like anywhere
-/// else (owner, #221): the explicit arrows toward the server decide, or the
-/// default (`fallback`) when there are none, the same rule as other nodes.
+/// Every member reaches the server's infraternal control plane (D164, D215):
+/// exactly the `control_plane` ports the server listens on. SSH and every
+/// other service on the server's host follow Access like on any node (D352,
+/// J236 P2-1, #221): the explicit arrows toward the server decide, or the
+/// default (`fallback`) when there are none. The kernel enforces the union,
+/// so this holds whether or not mesh SSH is serving there.
 fn server_inbound(
     coordinator: &Coordinator,
     server: NodeId,
     other: NodeId,
     fallback: &TrafficPolicy,
+    control_plane: &TrafficPolicy,
 ) -> (TrafficPolicy, Option<bool>) {
     let ssh = crate::policy::rules::Port {
         protocol: crate::policy::rules::Protocol::Tcp,
         number: 22,
     };
     let access = granted_or(Some(&coordinator.granted(other, server)), fallback);
-    (TrafficPolicy::All, Some(access.allows(ssh)))
+    let mut inbound = control_plane.clone();
+    inbound.union(&access);
+    (inbound, Some(access.allows(ssh)))
 }
 
 fn compile_inner(
@@ -73,6 +115,7 @@ fn compile_inner(
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
     default_dns_suffix: &str,
+    control_plane: &TrafficPolicy,
 ) -> Result<Config, MeshError> {
     let checkpoint = coordinator.checkpoint();
     let local = checkpoint
@@ -122,7 +165,7 @@ fn compile_inner(
             granted_or(granted.map(|peer| &peer.outbound), &fallback)
         };
         let (inbound, access_ssh) = if node == checkpoint.server {
-            server_inbound(coordinator, node, other, &fallback)
+            server_inbound(coordinator, node, other, &fallback, control_plane)
         } else {
             (
                 granted_or(granted.map(|peer| &peer.inbound), &fallback),

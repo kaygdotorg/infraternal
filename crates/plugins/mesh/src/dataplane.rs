@@ -53,9 +53,9 @@ pub struct PeerPolicy {
     pub outbound: TrafficPolicy,
     /// Whether the Access policy lets this peer start TCP/22 toward this
     /// node, sent only where `inbound` is wider than the policy: on the
-    /// server's own node, which admits every member so infraternal agents
-    /// always reach the server (D215). Mesh SSH enforces Access itself and
-    /// reads this instead (D235 "two checks", #221); see
+    /// server's own node, whose inbound adds the infraternal control-plane
+    /// ports for every member (D215, D352). Mesh SSH enforces Access itself
+    /// and reads this (D235 "two checks", #221); see
     /// [`Config::admits_ssh`]. Absent everywhere else, so strict parsers in
     /// older infraternal agents never see it (only the server's embedded
     /// infraternal agent, the same binary, receives a server-node snapshot).

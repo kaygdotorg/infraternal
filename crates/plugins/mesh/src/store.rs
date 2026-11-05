@@ -45,6 +45,8 @@ struct Loaded {
 pub(crate) struct Snapshot {
     loaded: Loaded,
     default_dns_suffix: String,
+    /// The server's infraternal control-plane ports when this snapshot was taken.
+    control_plane: TrafficPolicy,
 }
 impl Snapshot {
     pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
@@ -61,6 +63,7 @@ impl Snapshot {
             default,
             endpoints,
             &self.default_dns_suffix,
+            &self.control_plane,
         );
         let mut config = compiled.map_err(|error| match error {
             MeshError::UnknownNode => MeshApiError::NotFound,
@@ -439,7 +442,16 @@ pub struct Store {
     config_diagnostics: StorageDiagnostics,
     preview_diagnostics: StorageDiagnostics,
     default_dns_suffix: String,
+    /// Where the server's infraternal control plane listens; shared by every
+    /// clone, set once by the server ([`Self::set_control_plane`]).
+    control_plane: std::sync::Arc<std::sync::OnceLock<ControlPlane>>,
 }
+
+/// The ports every member may reach on the server's own node: the server's
+/// infraternal control-plane listeners (D215). Read again for each snapshot,
+/// because a fresh server starts its listener only after its CA is set up.
+pub type ControlPlane = std::sync::Arc<dyn Fn() -> TrafficPolicy + Send + Sync>;
+
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
@@ -461,7 +473,15 @@ impl Store {
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
             preview_diagnostics: StorageDiagnostics::new("mesh.default.preview"),
             default_dns_suffix,
+            control_plane: std::sync::Arc::default(),
         }
+    }
+
+    /// Tell every clone of this store where the server's control plane
+    /// listens. Only the first call takes effect. Until it is set, the
+    /// server's node admits peers only as Access allows (D352, #221).
+    pub fn set_control_plane(&self, control_plane: ControlPlane) {
+        let _ = self.control_plane.set(control_plane);
     }
     /// Attach an authenticated host using its approved inventory binding, never a public key as authority.
     /// # Errors
@@ -683,6 +703,10 @@ impl Store {
         self.load().await.map(|loaded| Snapshot {
             loaded,
             default_dns_suffix: self.default_dns_suffix.clone(),
+            control_plane: self
+                .control_plane
+                .get()
+                .map_or(TrafficPolicy::None, |control_plane| control_plane()),
         })
     }
     /// Page directed reach losses at one revision without allocating the pair matrix.
