@@ -108,6 +108,15 @@ class PrivilegedAreas(unittest.TestCase):
         self.assertIn('bad|FAIL (3)', out)
         self.assertLess(out.index('failed=0'), out.index('failed=1'))
 
+    def test_tun_changes_require_the_real_root_proof(self):
+        """TUN code paths, and only those, trigger the real-root proof notice."""
+        for path in ('crates/infraternal-linux-tun/src/lib.rs', 'crates/plugins/mesh/src/gotatun_tun.rs',
+                     'crates/plugins/mesh/tests/gotatun_tun_owner.rs'):
+            self.assertTrue(p.needs_tun_proof([path]), path)
+        for path in ('crates/plugins/mesh/src/node.rs', 'docs/PROCESS.md'):
+            self.assertFalse(p.needs_tun_proof([path]), path)
+        self.assertTrue((Path(__file__).resolve().parent / 'tun-real-root-proof').exists())
+
     def test_gaps_are_named(self):
         """Real-root behaviour the row cannot reach is stated, not silently skipped."""
         self.assertTrue(all(p.NOT_COVERED.get(area) for area in ('proxy', 'install', 'shim')))

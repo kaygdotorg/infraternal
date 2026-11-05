@@ -649,11 +649,18 @@ checks that proof.
 
 Individual tests on `NOT_COVERED_TESTS` today:
 - `infraternal-plugin-mesh` `gotatun_tun_owner::an_unprivileged_user_cannot_attach_the_persisted_tun`:
-  it drops to uid 65534, but the sandbox maps exactly one uid, so
-  `setresuid` fails with EINVAL before the check. Mapping a second uid would
-  need a setuid-root `newuidmap` on the build VMs (not installed) and a new
-  sandbox layout, which needs a fresh manual escape review; it is the
-  owner's call.
+  it drops a child to uid 65534, and the sandbox maps exactly one uid, so the
+  kernel's refusal of a *different* uid can't be shown there. The row runs its
+  counterpart `a_fresh_persisted_tun_is_restricted_to_the_agent` instead: a
+  fresh persisted TUN is owned by the agent's own uid and gid (`ip -d link`)
+  and is reattached after a restart, which is the part our code controls
+  (#260, J213 P1). When TUN code changes (`TUN_PATHS`), the row prints
+  `REAL-ROOT PROOF REQUIRED`, and the job runs `scripts/tun-real-root-proof
+  <commit>` from `code` and records the output on its issue. That script
+  builds the test as `claude`; root only runs that one prebuilt binary in a
+  throwaway network namespace. The gate itself never runs as root, and no
+  `newuidmap` is installed: a setuid-root helper on the shared VMs and a
+  second mapped uid would weaken the sandbox (J266, 80581).
 
 **Where it runs:** any Linux build VM that allows unprivileged user
 namespaces, inside the flake dev shell (for `ip`, `nft`, cargo). compute01

@@ -68,6 +68,12 @@ TEST_TIMEOUT_SECONDS = int(os.environ.get('VERIFY_PRIVILEGED_TEST_TIMEOUT', '900
 # systemd user scope when the user manager is reachable from this runner.
 SANDBOX_MEMORY_MAX = os.environ.get('VERIFY_PRIVILEGED_MEMORY_MAX', '4G')
 
+# Paths whose change needs the real-root TUN proof (the one TUN check the
+# one-uid sandbox cannot make). The row prints the requirement; the job runs
+# scripts/tun-real-root-proof and records it (#344, 80581).
+TUN_PATHS = ('crates/infraternal-linux-tun/**', 'crates/plugins/mesh/src/gotatun_tun*',
+             'crates/plugins/mesh/tests/gotatun_tun_owner.rs')
+
 # Exit status for "nothing to run": rust_run_gate prints SKIP for it.
 SKIP_EXIT = 77
 
@@ -121,7 +127,9 @@ NOT_COVERED_TESTS = {
     # Mapping a second uid needs a setuid-root newuidmap on the build VMs.
     ('infraternal-plugin-mesh', 'test:gotatun_tun_owner',
      'an_unprivileged_user_cannot_attach_the_persisted_tun'):
-        'needs a second real uid (setresuid 65534); the sandbox maps one uid',
+        'needs a second real uid (child as nobody); the sandbox maps one uid. Its in-sandbox '
+        'counterpart a_fresh_persisted_tun_is_restricted_to_the_agent runs here; the refusal itself '
+        'is proven as real root by scripts/tun-real-root-proof when TUN code changes',
 }
 
 
@@ -222,6 +230,11 @@ def areas(paths, dependency_dirs=None):
         if any(path.startswith(directory.rstrip('/') + '/') for path in paths for directory in directories):
             selected.add(area)
     return selected
+
+
+def needs_tun_proof(paths):
+    """True when a changed path is TUN code, whose kernel-side owner check only real root can show."""
+    return any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in TUN_PATHS)
 
 
 def workspace_graph(root):
@@ -621,6 +634,9 @@ def main():
         # 77 is the gate's "skipped" code, so the summary reads SKIP, not PASS.
         raise SystemExit(SKIP_EXIT)
     print(f'privileged integration: areas={",".join(sorted(selected))}', flush=True)
+    if needs_tun_proof(paths):
+        print('privileged integration: REAL-ROOT PROOF REQUIRED: TUN code changed; run '
+              '`scripts/tun-real-root-proof <commit>` from code and record it on the issue', flush=True)
     for area in sorted(selected & set(NOT_COVERED)):
         print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
     areas_packages = {package for area in selected for package, _, _ in PACKAGES[area]}

@@ -49,9 +49,12 @@ fn attach_child() {
 }
 
 /// The test binary must be readable and executable by `nobody`; run it from a world-readable
-/// directory, as real root (an unmapped uid cannot be entered from a user namespace).
+/// directory, as real root (an unmapped uid cannot be entered from a user namespace). The
+/// privileged sandbox maps a single uid, so this one runs only as a real-root proof:
+/// `scripts/tun-real-root-proof` (docs/PROCESS.md §11). The in-sandbox
+/// `a_fresh_persisted_tun_is_restricted_to_the_agent` covers our side of the guarantee.
 #[test]
-#[ignore = "Run as real root inside a disposable network namespace; spawns a child as nobody."]
+#[ignore = "Needs a second real uid (child as nobody): run as real host root in a disposable network namespace."]
 fn an_unprivileged_user_cannot_attach_the_persisted_tun() {
     let state = private_state("gotatun-tun-owner");
     let result = (|| {
@@ -112,6 +115,69 @@ fn tun_link() -> Option<(u32, Option<String>, Option<String>)> {
         words.next().map(str::to_owned)
     };
     Some((index, after("user"), after("group")))
+}
+
+/// True when `ip` printed `shown` for the numeric id `id`: as the number, or as the name that
+/// `name_of` resolves the id to.
+fn is_id(shown: Option<&str>, id: u32, name_of: impl Fn(u32) -> Option<String>) -> bool {
+    shown.is_some_and(|shown| shown == id.to_string() || name_of(id).as_deref() == Some(shown))
+}
+
+/// The user name of `uid`, if the account database knows it.
+fn user_name(uid: u32) -> Option<String> {
+    nix::unistd::User::from_uid(uid.into())
+        .ok()
+        .flatten()
+        .map(|user| user.name)
+}
+
+/// The group name of `gid`, if the group database knows it.
+fn group_name(gid: u32) -> Option<String> {
+    nix::unistd::Group::from_gid(gid.into())
+        .ok()
+        .flatten()
+        .map(|group| group.name)
+}
+
+/// A TUN the agent creates fresh and persists is owned by the agent's own user and group, and
+/// the agent reattaches the same TUN after a restart (#260, J213 P1). This is our half of the
+/// guarantee that no other local user can attach it; the kernel's refusal of a different uid
+/// is shown by the real-root proof above. Runs in the one-uid privileged sandbox (J266, 80581).
+#[test]
+#[ignore = "Run in a disposable user/network namespace."]
+fn a_fresh_persisted_tun_is_restricted_to_the_agent() {
+    let state = private_state("gotatun-fresh-tun");
+    let result = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
+        node.up()?;
+        // Stopping the agent closes its queue; the TUN stays (D332).
+        drop(node);
+        let persisted = tun_link();
+        let mut restarted = Node::restore_with_engine(&state, EngineKind::GotaTun)?;
+        restarted.up()?;
+        let reattached = tun_link();
+        restarted.down()?;
+        Ok::<_, std::io::Error>((persisted, reattached))
+    })();
+    let _ = Command::new("ip").args(["link", "del", INTERFACE]).status();
+    fs::remove_dir_all(&state).unwrap();
+    let (persisted, reattached) = result.unwrap();
+    let Some((index, user, group)) = persisted else {
+        panic!("the agent left no persisted TUN after stopping");
+    };
+    let uid = nix::unistd::geteuid().as_raw();
+    let gid = nix::unistd::getegid().as_raw();
+    assert!(
+        is_id(user.as_deref(), uid, user_name) && is_id(group.as_deref(), gid, group_name),
+        "the persisted TUN is not restricted to the agent (uid {uid}, gid {gid}): user {user:?}, group {group:?}"
+    );
+    let Some((again, _, _)) = reattached else {
+        panic!("the TUN vanished across the restart");
+    };
+    assert_eq!(
+        again, index,
+        "the agent did not reattach its own persisted TUN"
+    );
 }
 
 /// An unrestricted TUN of ours, persisted by a build before #260 J213 P1, is never reattached:

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Real-root proof that an unprivileged user cannot attach the agent's persisted TUN (#260, D351).
+#
+# Why this exists: the test drops a child to uid 65534 (nobody). The privileged
+# sandbox maps a single uid, so the kernel's refusal of a *different* uid can't
+# be shown there (#344, 80581); the gate runs the in-sandbox counterpart
+# `a_fresh_persisted_tun_is_restricted_to_the_agent` instead. When a change
+# touches TUN code, the privileged row prints that this proof is required, and
+# the job runs it and records the output on its issue (BRIEF: root-only paths
+# run as root).
+#
+# How it stays narrow: the test binary is built as `claude` (no build step or
+# repository script runs as root). Root only copies that one prebuilt binary to
+# a fresh world-readable directory (nobody must be able to exec it) and runs
+# one test in a throwaway network, mount and PID namespace, then deletes the
+# copy. Running a branch's test as real root is still trusting that test: run
+# this only for a commit under review, as the BRIEF's real-root proof.
+#
+# Usage, from `code` (which can ssh to root@compute01):
+#   scripts/tun-real-root-proof <commit>
+set -euo pipefail
+commit=${1:?usage: tun-real-root-proof <commit>}
+[[ $commit =~ ^[0-9a-f]{7,40}$ ]] || { echo "commit must be a hex id" >&2; exit 2; }
+host=infraternal-dev-01-compute01
+test=an_unprivileged_user_cannot_attach_the_persisted_tun
+
+# 1. Build the test binary as claude, in a throwaway worktree, through a build slot.
+binary=$(ssh "claude@$host" bash -s -- "$commit" <<'BUILD'
+set -euo pipefail
+commit=$1 tree=$HOME/worktrees/tun-real-root-proof
+git -C ~/infraternal fetch -q origin "$commit" 2>/dev/null || git -C ~/infraternal fetch -q origin
+rm -rf "$tree"; git -C ~/infraternal worktree add -q --detach "$tree" "$commit" >&2
+cd "$tree"
+export CARGO_TARGET_DIR=$tree/target CARGO_BUILD_JOBS=4
+~/infraternal-ops/build-slot nice -n10 nix develop -c cargo test --locked -p infraternal-plugin-mesh \
+    --features agent,server,relay,test-support --test gotatun_tun_owner --no-run --message-format=json \
+    > "$tree/build.json" 2> "$tree/build.log" || { tail -20 "$tree/build.log" >&2; exit 1; }
+python3 -c 'import json,sys
+for line in open(sys.argv[1]):
+    m = json.loads(line) if line.startswith("{") else {}
+    if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "gotatun_tun_owner":
+        print(m["executable"])' "$tree/build.json"
+BUILD
+)
+[[ -n $binary ]] || { echo "no test binary was built" >&2; exit 1; }
+echo "built $binary at $commit"
+
+# 2. As root: copy only that binary, run the one test in fresh namespaces, clean up.
+status=0
+ssh "root@$host" bash -s -- "$binary" "$test" <<'RUN' || status=$?
+set -euo pipefail
+binary=$1 test=$2
+dir=$(mktemp -d /tmp/tun-proof.XXXXXX); trap 'rm -rf "$dir"' EXIT
+chmod 755 "$dir"; install -m 755 "$binary" "$dir/gotatun_tun_owner"
+cd "$dir"
+echo "running as $(id -un) (uid $(id -u)) in a fresh network namespace"
+timeout 300 unshare --net --mount --pid --fork --kill-child --mount-proc \
+    bash -c 'ip link set lo up; "$@"' proof \
+    "$dir/gotatun_tun_owner" --ignored --exact "$test" --nocapture --test-threads=1
+RUN
+
+echo "TUN_REAL_ROOT_PROOF_EXIT=$status commit=$commit"
+# 3. Remove the claude-side worktree and target.
+ssh "claude@$host" 'rm -rf ~/worktrees/tun-real-root-proof; git -C ~/infraternal worktree prune'
+exit $status
