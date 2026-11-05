@@ -27,6 +27,7 @@ pub mod datagrams;
 pub mod path;
 pub mod routing;
 pub mod server_path;
+pub mod stop_hook;
 #[cfg(feature = "socket-host")]
 pub mod storage;
 pub mod streams;

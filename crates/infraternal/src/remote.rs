@@ -945,7 +945,15 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         data: data.to_owned(),
         stored,
     });
-    remote_client::run_with_installation(&identity, state, publisher, installation.as_ref()).await
+    // Components' host state goes when the service ends, by return or SIGTERM
+    // (#221). Boxed once per service lifetime: the loop's future is large.
+    infraternal_agent::shutdown::run_then_stop(Box::pin(remote_client::run_with_installation(
+        &identity,
+        state,
+        publisher,
+        installation.as_ref(),
+    )))
+    .await
 }
 
 /// The existing installation is the publication boundary; no new key is generated.

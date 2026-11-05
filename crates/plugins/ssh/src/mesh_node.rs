@@ -186,9 +186,26 @@ pub struct MeshSshNode {
     shared: Arc<Shared>,
     mesh: watch::Sender<Option<MeshView>>,
     desired: watch::Sender<Desired>,
+    lifecycle: Arc<Lifecycle>,
     supervisor: Option<JoinHandle<()>>,
     socket: Option<JoinHandle<()>>,
     runtime: Option<Runtime>,
+}
+
+/// How the infraternal agent's shutdown reaches the supervisor (#221).
+///
+/// The registry that owns the component lives for the whole process and is
+/// never dropped on exit, so `Drop` cannot be the stop path. Instead the
+/// agent runs the [`MeshSshNode::stop_hook`] while it shuts down.
+/// Invariants: once `stop` is set the supervisor never binds again, and
+/// `idle` is true exactly when no supervisor holds a port, so a stop that
+/// sees `idle` knows every owned rule is gone. The node and its supervisor
+/// each hold an `Arc`; the agent holds only a `Weak`.
+struct Lifecycle {
+    /// Set once by the stop hook; never cleared.
+    stop: watch::Sender<bool>,
+    /// True while no supervisor runs or after it released every port.
+    idle: watch::Sender<bool>,
 }
 
 /// The component's own single-threaded runtime on a dedicated thread.
@@ -277,10 +294,25 @@ impl MeshSshNode {
                 enabled: false,
                 certificate: None,
             }),
+            lifecycle: Arc::new(Lifecycle {
+                stop: watch::Sender::new(false),
+                idle: watch::Sender::new(true),
+            }),
             supervisor: None,
             socket: None,
             runtime: None,
         })
+    }
+
+    /// The hook the infraternal agent runs when it shuts down: stop every
+    /// listener (owned redirect rules first, then the socket, as
+    /// `MeshPort::stop` orders them), refuse any later bind, and finish once
+    /// no port is held. The agent bounds the wait; the hook never blocks a
+    /// thread.
+    #[must_use]
+    pub fn stop_hook(&self) -> infraternal_plugin_api::stop_hook::StopHook {
+        let lifecycle: Arc<dyn infraternal_plugin_api::stop_hook::Stop> = self.lifecycle.clone();
+        Arc::downgrade(&lifecycle)
     }
 
     /// The observer the mesh plugin calls with each accepted configuration.
@@ -327,12 +359,16 @@ impl MeshSshNode {
                 certificate,
             });
         }
-        if self.supervisor.is_none() {
+        if self.supervisor.is_none() && !*self.lifecycle.stop.borrow() {
             let runtime = self.handle()?;
+            // Busy before the task exists, so a stopper never sees "idle"
+            // while a supervisor could still bind.
+            self.lifecycle.idle.send_replace(false);
             self.supervisor = Some(runtime.spawn(supervise(
                 Arc::clone(&self.shared),
                 self.mesh.subscribe(),
                 self.desired.subscribe(),
+                Arc::clone(&self.lifecycle),
             )));
         }
         installed.map_err(|_| PluginError::Rejected)?;
@@ -678,10 +714,18 @@ async fn supervise(
     shared: Arc<Shared>,
     mut mesh: watch::Receiver<Option<MeshView>>,
     mut desired: watch::Receiver<Desired>,
+    lifecycle: Arc<Lifecycle>,
 ) {
+    // Declared first so it drops last: an aborted supervisor (the node was
+    // dropped) still reports idle, after `running` released every port.
+    let _idle = IdleOnDrop(Arc::clone(&lifecycle));
     let mut running: Vec<(MeshPort, JoinHandle<()>)> = Vec::new();
     let mut current: Option<ListenerKey> = None;
+    let mut stopping = lifecycle.stop.subscribe();
     loop {
+        if *stopping.borrow_and_update() {
+            break;
+        }
         let view = mesh.borrow_and_update().clone();
         let want = desired.borrow_and_update().clone();
         shared.authority.set_mesh(view.clone()).await;
@@ -714,9 +758,29 @@ async fn supervise(
         tokio::select! {
             changed = mesh.changed() => if changed.is_err() { break },
             changed = desired.changed() => if changed.is_err() { break },
+            _ = stopping.changed() => {}
         }
     }
     stop(&mut running).await;
+}
+
+/// Reports the supervisor idle when it ends, however it ends.
+struct IdleOnDrop(Arc<Lifecycle>);
+impl Drop for IdleOnDrop {
+    fn drop(&mut self) {
+        self.0.idle.send_replace(true);
+    }
+}
+
+impl infraternal_plugin_api::stop_hook::Stop for Lifecycle {
+    /// Refuse later binds, then wait until the supervisor released its ports.
+    fn stop(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.stop.send_replace(true);
+            let mut idle = self.idle.subscribe();
+            let _ = idle.wait_for(|idle| *idle).await;
+        })
+    }
 }
 
 /// Bind one mesh address on TCP/22 (exact bind or owned redirect).

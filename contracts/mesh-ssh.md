@@ -129,6 +129,15 @@ visible and retryable. Restart recovery handles retained rules before new
 sessions are admitted. Abrupt process exit is not proof that rules were
 removed.
 
+Stop is driven by the infraternal agent, not by `Drop`: the registry that owns
+the component lives for the whole process. The component hands the agent a
+stop hook (`infraternal_plugin_api::stop_hook`), and the agent runs it when its
+work returns or when it receives SIGTERM (`systemctl stop`, or the server
+stopping its embedded infraternal agent), within 1.5 s, then re-raises SIGTERM
+(`infraternal_agent::shutdown`). After the hook starts, the component never
+binds again. SIGKILL and a hook that overruns its bound still rely on restart
+recovery.
+
 ## Recovery provenance and gates
 
 The transport source is immutable commit `68caff92a3acefd801739895a48eece699971348`,

@@ -103,9 +103,11 @@ fn mesh_ssh_service(state: &std::path::Path) -> Option<infraternal_agent::plugin
     )
     .ok()?;
     let observer = node.mesh_observer();
+    let stop = node.stop_hook();
     Some(infraternal_agent::plugins::MeshService {
         plugin: Box::new(node),
         observer,
+        stop,
     })
 }
 

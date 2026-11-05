@@ -164,3 +164,116 @@ fn the_socket_directory_is_traversable_and_closed() {
         std::fs::remove_dir_all(path).unwrap();
     }
 }
+
+/// Wait up to five seconds for `condition`.
+fn eventually(condition: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    condition()
+}
+
+/// Stopping the infraternal agent removes the owned redirect before the
+/// listener goes, so mesh :22 reaches the host's sshd again (contract
+/// "Stop removes owned rules before releasing the listener"). Measured on
+/// dev-02 (#221): before the stop hook, `systemctl stop` left both tables
+/// and mesh :22 led to a closed port. A stopped component never binds again.
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn stopping_the_agent_removes_the_redirect_and_mesh_22_reaches_sshd() {
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    for args in [
+        ["link", "set", "lo", "up"].as_slice(),
+        ["address", "add", "10.254.0.4/32", "dev", "lo"].as_slice(),
+    ] {
+        assert!(
+            std::process::Command::new("/usr/bin/ip")
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let address: IpAddr = "10.254.0.4".parse().unwrap();
+    // The host's sshd holds the wildcard, so the component must redirect.
+    let sshd = TcpListener::bind("0.0.0.0:22").unwrap();
+    let ca = PrivateKey::random(&mut russh::keys::key::safe_rng(), Algorithm::Ed25519).unwrap();
+    let ca_public = ca.public_key().key_data().ed25519().unwrap().0;
+    let sign = |body: &[u8]| {
+        use russh::keys::signature::Signer as _;
+        let signature: russh::keys::ssh_key::Signature = ca.try_sign(body).ok()?;
+        signature.as_bytes().try_into().ok()
+    };
+    let mut node = MeshSshNode::new(std::env::temp_dir(), |_| None).unwrap();
+    let host_key = node.shared.host_key.public_key().clone();
+    let principals = ["db-04".to_owned()];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let certificate = crate::mesh_issue::host_certificate(
+        ca_public,
+        &sign,
+        &crate::mesh_issue::HostRequest {
+            subject: &host_key,
+            principals: &principals,
+            now,
+            lifetime: 3600,
+        },
+    )
+    .unwrap();
+    let view = MeshView {
+        node: 9,
+        addresses: vec![address],
+        interface: "infraternal0".into(),
+        peers: std::collections::BTreeMap::new(),
+    };
+    let observe = node.mesh_observer();
+    observe(Some(view.clone()));
+    let configure = |node: &mut MeshSshNode, sequence: u64| {
+        let input = json!({
+            "enabled": true,
+            "snapshot": {"sequence": sequence, "node": 9, "ca": ca_public.to_vec(), "certificates": [], "grants": {}},
+            "host_certificate": certificate.to_openssh().unwrap(),
+        });
+        node.call(
+            "mesh-ssh-node.configure",
+            &serde_json::to_vec(&input).unwrap(),
+        )
+    };
+    configure(&mut node, 1).unwrap();
+    assert!(
+        eventually(|| crate::mesh_port::presence(address).unwrap_or(false)),
+        "the redirect was never installed"
+    );
+
+    let hook = node.stop_hook().upgrade().expect("a live component's hook");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(3), hook.stop()).await })
+        .expect("the stop hook finished within its bound");
+    // Rules are gone by the time the hook returns, not eventually.
+    assert!(!crate::mesh_port::presence(address).unwrap());
+    let client = TcpStream::connect_timeout(&SocketAddr::new(address, 22), Duration::from_secs(1))
+        .expect("mesh :22 reaches the host's sshd");
+    let (_, peer) = sshd.accept().unwrap();
+    assert_eq!(peer, client.local_addr().unwrap());
+
+    // Later configuration (a push racing the shutdown) never binds again.
+    let _ = configure(&mut node, 2);
+    observe(Some(view));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!crate::mesh_port::presence(address).unwrap());
+    // The hook never keeps a finished component alive.
+    let weak = node.stop_hook();
+    drop(hook);
+    drop(node);
+    assert!(eventually(|| weak.upgrade().is_none()));
+}

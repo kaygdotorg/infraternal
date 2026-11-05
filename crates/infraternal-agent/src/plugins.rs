@@ -119,6 +119,7 @@ pub(crate) fn registry_at(
     let mesh_plugin = observe_mesh(mesh_plugin, mesh_observer);
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     if let Some(service) = mesh_service {
+        remember_stop_hook(service.stop);
         registry.register(service.plugin)?;
     }
     #[cfg(feature = "proxy")]
@@ -227,6 +228,8 @@ pub type MeshObserver =
 pub struct MeshService {
     pub plugin: Box<dyn infraternal_plugin_api::AgentPlugin>,
     pub observer: MeshObserver,
+    /// Removes the service's host state when the agent ends ([`crate::shutdown`]).
+    pub stop: infraternal_plugin_api::stop_hook::StopHook,
 }
 
 /// Builds the service for an infraternal agent's state directory.
@@ -235,6 +238,42 @@ pub type MeshServiceFactory = fn(&std::path::Path) -> Option<MeshService>;
 
 #[cfg(all(feature = "mesh", target_os = "linux"))]
 static MESH_SERVICE: std::sync::OnceLock<MeshServiceFactory> = std::sync::OnceLock::new();
+
+/// Every stop hook handed out in this process. Hooks are weak, so a finished
+/// component's entry is dead and is pruned whenever another is added; the
+/// list never grows past the components that are still alive.
+static STOP_HOOKS: std::sync::Mutex<Vec<infraternal_plugin_api::stop_hook::StopHook>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Keep `hook` for [`stop_components`].
+pub fn remember_stop_hook(hook: infraternal_plugin_api::stop_hook::StopHook) {
+    if let Ok(mut hooks) = STOP_HOOKS.lock() {
+        hooks.retain(|hook| hook.strong_count() > 0);
+        hooks.push(hook);
+    }
+}
+
+/// Run the stop hook of every live component, one after another, for at
+/// most `bound` in total; see [`crate::shutdown`]. Each hook runs once:
+/// the list is emptied first.
+pub async fn stop_components(bound: std::time::Duration) {
+    let hooks: Vec<_> = STOP_HOOKS
+        .lock()
+        .map(|mut hooks| std::mem::take(&mut *hooks))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    if hooks.is_empty() {
+        return;
+    }
+    let _ = tokio::time::timeout(bound, async {
+        for hook in &hooks {
+            hook.stop().await;
+        }
+    })
+    .await;
+}
 
 /// Install the mesh service factory. Only the first call takes effect.
 #[cfg(all(feature = "mesh", target_os = "linux"))]

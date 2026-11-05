@@ -197,7 +197,7 @@ fn transaction(script: &str) -> io::Result<()> {
 /// comment is exactly the marker. A table with the same name but another (or no)
 /// comment is foreign and gives `AlreadyExists`, so we never delete or adopt it.
 /// A failing or unparsable `nft` listing is an error, not "absent".
-fn presence(address: IpAddr) -> io::Result<bool> {
+pub(crate) fn presence(address: IpAddr) -> io::Result<bool> {
     let output = Command::new(NFT)
         .args(["-j", "list", "tables"])
         .stderr(Stdio::null())
