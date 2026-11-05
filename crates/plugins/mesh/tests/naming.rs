@@ -248,3 +248,195 @@ async fn a_person_takes_an_automatic_name_and_the_machine_moves_aside() {
         Err(MeshApiError::Conflict)
     );
 }
+
+async fn node_names(pool: &SqlitePool) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT name,name_source FROM mesh_nodes ORDER BY id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// D339: the reported hostname is the name; two machines with the same hostname get a short suffix, and each keeps
+/// its own across restarts whatever order they reconnect in.
+#[tokio::test]
+async fn the_reported_hostname_is_the_name_and_a_collision_suffix_is_stable() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    add_host(&pool, B, "root@10.69.69.6").await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    for (host, key) in [(A, 10), (B, 11)] {
+        store
+            .attach_named(host, PublicKey([key; 32]), None, false, Some("RaspberryPi"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        names(&service, "owner").await,
+        ["raspberrypi", "raspberrypi-2"]
+    );
+    let audited = audits_len(&pool).await;
+    // Restarts in the opposite order rename nothing.
+    for (host, key) in [(B, 11), (A, 10), (B, 11), (A, 10)] {
+        store
+            .attach_named(host, PublicKey([key; 32]), None, false, Some("raspberrypi"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        names(&service, "owner").await,
+        ["raspberrypi", "raspberrypi-2"]
+    );
+    assert_eq!(audits_len(&pool).await, audited);
+}
+
+/// D339: an empty name or `localhost` falls back to `<os>-<first 6 characters of the id>`; the OS word is the
+/// machine's reported OS; a second machine with the same six characters takes `-2`, and keeps it.
+#[tokio::test]
+async fn an_empty_or_localhost_name_falls_back_to_os_and_id() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    add_host(&pool, B, "root@10.69.69.6").await;
+    sqlx::query("UPDATE remote_host_bootstrap SET os='macOS 26.5' WHERE host_id=?")
+        .bind(uuid::Uuid::parse_str(A).unwrap().as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, Some("localhost"))
+        .await
+        .unwrap();
+    store
+        .attach_named(B, PublicKey([11; 32]), None, false, Some(""))
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&service, "owner").await,
+        ["macos-000000", "host-000000"]
+    );
+    // Two unknown-OS machines whose ids share the first six characters.
+    let c = "00000000-0000-4000-8000-00000000000c";
+    add_host(&pool, c, "root@10.69.69.7").await;
+    store
+        .attach_named(c, PublicKey([12; 32]), None, false, Some("localhost"))
+        .await
+        .unwrap();
+    assert_eq!(
+        names(&service, "owner").await,
+        ["macos-000000", "host-000000", "host-000000-2"]
+    );
+    for (host, key) in [(c, 12), (B, 11), (c, 12)] {
+        store
+            .attach_named(host, PublicKey([key; 32]), None, false, None)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        names(&service, "owner").await,
+        ["macos-000000", "host-000000", "host-000000-2"]
+    );
+    assert!(
+        node_names(&pool)
+            .await
+            .iter()
+            .all(|(_, source)| source == "placeholder")
+    );
+}
+
+/// D339: a machine gets its real name (and with it its DNS name, which only `reported`/`record` names have) as
+/// soon as it reports one, and a later empty report never takes it back to the fallback.
+#[tokio::test]
+async fn a_machine_leaves_its_fallback_as_soon_as_it_has_a_real_name() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        node_names(&pool).await,
+        [("host-000000".to_owned(), "placeholder".to_owned())]
+    );
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, Some("minipc01"))
+        .await
+        .unwrap();
+    assert_eq!(
+        node_names(&pool).await,
+        [("minipc01".to_owned(), "reported".to_owned())]
+    );
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, Some("localhost"))
+        .await
+        .unwrap();
+    assert_eq!(
+        node_names(&pool).await,
+        [("minipc01".to_owned(), "reported".to_owned())]
+    );
+}
+
+/// D339: a name a person picked always wins, including one that looks like the old placeholder, and a machine's
+/// report never replaces it.
+#[tokio::test]
+async fn a_hand_picked_name_always_wins() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    let (a, _) = store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    assert_eq!(rename(&service, a.0, "unnamed-3").await, Ok(()));
+    for reported in [Some("minipc01"), Some("localhost"), None] {
+        store
+            .attach_named(A, PublicKey([10; 32]), None, false, reported)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        node_names(&pool).await,
+        [("unnamed-3".to_owned(), "hand".to_owned())]
+    );
+}
+
+/// D339: a stored `unnamed` / `unnamed-<n>` label that a database still carries is replaced at the machine's next
+/// attach, and a hostname that really is `unnamed` is kept like any other.
+#[tokio::test]
+async fn legacy_unnamed_labels_are_replaced_and_a_real_unnamed_hostname_is_kept() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@10.69.69.5").await;
+    add_host(&pool, B, "root@10.69.69.6").await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    for (host, key) in [(A, 10), (B, 11)] {
+        store
+            .attach_named(host, PublicKey([key; 32]), None, false, None)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE mesh_nodes SET name='unnamed-7' WHERE dataplane_host=?")
+        .bind(A)
+        .execute(&pool)
+        .await
+        .unwrap();
+    store
+        .attach_named(A, PublicKey([10; 32]), None, false, None)
+        .await
+        .unwrap();
+    store
+        .attach_named(B, PublicKey([11; 32]), None, false, Some("unnamed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        node_names(&pool).await,
+        [
+            ("host-000000".to_owned(), "placeholder".to_owned()),
+            ("unnamed".to_owned(), "reported".to_owned())
+        ]
+    );
+}

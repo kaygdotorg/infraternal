@@ -1,6 +1,7 @@
 //! Owns the single Traefik child, drains it after the final exposure, and redacts its log stream [#281].
 
 use crate::{
+    cgroup::{Leaf, ProxyCgroups},
     config::{ListenerPorts, PublishedService, StaticConfig},
     identity,
     ingress::PublicGateState,
@@ -453,6 +454,7 @@ pub type ProxyLog = dyn Fn(String) + Send + Sync + 'static;
 /// Owns one Traefik child and its bounded, credential-sanitized output readers.
 pub struct TraefikChild {
     child: Child,
+    leaf: Option<Leaf>,
     readers: Vec<JoinHandle<()>>,
     logger: Option<JoinHandle<()>>,
 }
@@ -471,7 +473,7 @@ impl TraefikChild {
         provider_files: &[(&str, &Path)],
         log: Arc<ProxyLog>,
     ) -> io::Result<Self> {
-        Self::spawn_holding(executable, config, provider_files, None, log)
+        Self::spawn_holding(executable, config, provider_files, None, None, log)
     }
 
     /// Start the child with a duplicate of the supervisor's child lock.
@@ -480,13 +482,18 @@ impl TraefikChild {
     /// long as any child lives, even one orphaned by an agent crash. A later agent uses that to
     /// find and stop the orphan before it binds the same listeners.
     ///
+    /// With `cgroups`, the child starts inside a fresh leaf of its own, and [`TraefikChild::stop`]
+    /// kills the whole leaf, so nothing the child forks outlives it.
+    ///
     /// # Errors
-    /// Returns the same errors as [`TraefikChild::spawn`], or a failed descriptor duplication.
+    /// Returns the same errors as [`TraefikChild::spawn`], a failed descriptor duplication, or
+    /// a leaf that can't be created or joined (the child never runs uncontained by accident).
     pub fn spawn_holding(
         executable: &Path,
         config: &Path,
         provider_files: &[(&str, &Path)],
         child_lock: Option<std::os::fd::BorrowedFd<'_>>,
+        cgroups: Option<&ProxyCgroups>,
         log: Arc<ProxyLog>,
     ) -> io::Result<Self> {
         let rootful = identity::rootful();
@@ -506,7 +513,16 @@ impl TraefikChild {
                 &mut next_child_fd,
             )?;
         }
-        let (mut child, secrets) = spawn_proxy_command(prepared, rootful)?;
+        let leaf = cgroups.map(ProxyCgroups::create_leaf).transpose()?;
+        let (mut child, secrets) = match spawn_proxy_command(prepared, rootful, leaf.as_ref()) {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                if let Some(leaf) = &leaf {
+                    let _ = leaf.remove();
+                }
+                return Err(error);
+            }
+        };
         let stdout = child
             .stdout
             .take()
@@ -528,6 +544,7 @@ impl TraefikChild {
         ];
         Ok(Self {
             child,
+            leaf,
             readers,
             logger: Some(logger),
         })
@@ -547,16 +564,37 @@ impl TraefikChild {
         self.child.try_wait()
     }
 
-    /// Stop and reap the owned child, then finish its bounded log readers.
+    /// The child's cgroup leaf, when it runs in one.
+    #[must_use]
+    pub fn cgroup(&self) -> Option<&Path> {
+        self.leaf.as_ref().map(Leaf::path)
+    }
+
+    /// Stop and reap the owned child and everything it started, then finish its log readers.
+    ///
+    /// In a leaf, `cgroup.kill` reaches every member at once, including processes that left
+    /// the child's process group or session. The direct child is still reaped here, and the
+    /// leaf is removed once the kernel reports it empty.
     ///
     /// # Errors
-    /// Returns operating-system errors while stopping or reaping the child.
+    /// Returns operating-system errors while stopping or reaping the child, or a leaf that
+    /// would not empty.
     pub fn stop(&mut self) -> io::Result<()> {
+        if let Some(leaf) = &self.leaf {
+            // Best effort here; `remove` below kills again and reports a leaf that won't empty.
+            let _ = leaf.kill();
+        }
+        // Always signal the direct child as well. Rootless, a compromised child can move itself
+        // out of its leaf, and `cgroup.kill` then misses it; without this the wait below would
+        // block forever (#281, J172 P2-1). std still holds the unreaped child, so its PID can't
+        // have been reused. It can exit between try_wait and kill; wait is the authoritative reap.
         if !self.child.try_wait().is_ok_and(|status| status.is_some()) {
-            // The child can exit between try_wait and kill; wait below is the authoritative reap.
             let _ = self.child.kill();
         }
         let _ = self.child.wait()?;
+        if let Some(leaf) = self.leaf.take() {
+            leaf.remove()?;
+        }
         for reader in self.readers.drain(..) {
             let _ = reader.join();
         }
@@ -804,6 +842,7 @@ fn prepare_provider_files(
 fn spawn_proxy_command(
     prepared: PreparedChildFiles,
     rootful: bool,
+    leaf: Option<&Leaf>,
 ) -> io::Result<(Child, Arc<Vec<Zeroizing<String>>>)> {
     let PreparedChildFiles {
         executable_fd,
@@ -844,6 +883,7 @@ fn spawn_proxy_command(
         &working_directory,
         &inherited_descriptors,
         child_identity,
+        leaf.map(Leaf::procs),
     )?;
     let child = command.spawn()?;
     drop(inherited_files);
@@ -1034,6 +1074,7 @@ enum SupervisorCommand {
 pub struct TraefikSupervisor {
     sender: mpsc::SyncSender<SupervisorCommand>,
     worker: Option<JoinHandle<()>>,
+    containment: crate::cgroup::Containment,
     _lock: Flock<File>,
     // Declared after the worker, so it is released only after the worker has stopped its child.
     _child_lock: Arc<Flock<File>>,
@@ -1055,7 +1096,36 @@ impl TraefikSupervisor {
             ));
         }
         let lock = acquire_supervisor_lock(&settings.lock_directory)?;
-        // Holding the owner lock proves no other agent is live, so a holder of the child lock
+        // Holding the owner lock proves no other agent is live, so any leaf of ours that still
+        // exists belongs to a crashed agent: kill it whole, forks included, before the first
+        // child could race it for the listeners [#281, D336]. Without delegation no new leaf is
+        // made, but leaves an earlier, contained run left (a unit that lost Delegate=yes) are
+        // still ours to kill; that needs no delegation (#281, J172 P3-4). The lock-holder reaper
+        // below is the second line, and the only one for a child that never had a leaf.
+        let detected = ProxyCgroups::detect(&settings.lock_directory);
+        let fallback_reaper = detected
+            .is_err()
+            .then(|| ProxyCgroups::for_reaping(&settings.lock_directory))
+            .flatten();
+        if let Some(reaper) = detected.as_ref().ok().or(fallback_reaper.as_ref()) {
+            let stopped = reaper.adopt_orphans()?;
+            if stopped > 0 {
+                (*log)(format!(
+                    "stopped {stopped} proxy cgroup(s) left by an earlier infraternal agent"
+                ));
+            }
+        }
+        let (cgroups, containment) = match detected {
+            Ok(cgroups) => (
+                Some(Arc::new(cgroups)),
+                crate::cgroup::Containment::contained(),
+            ),
+            Err(reason) => (None, crate::cgroup::Containment::Fallback(reason)),
+        };
+        if let crate::cgroup::Containment::Fallback(_) = &containment {
+            (*log)(format!("proxy containment {}", containment.describe()));
+        }
+        // A holder of the child lock
         // that runs our Traefik as the child identity is an orphan from a crashed agent. Stop it
         // before it can keep our listeners.
         let orphan = OrphanIdentity {
@@ -1067,10 +1137,13 @@ impl TraefikSupervisor {
         let (sender, receiver) = mpsc::sync_channel(4);
         let worker = thread::Builder::new()
             .name("proxy-supervisor".to_owned())
-            .spawn(move || run_supervisor(&settings, &log, &receiver, &worker_child_lock))?;
+            .spawn(move || {
+                run_supervisor(&settings, &log, &receiver, &worker_child_lock, cgroups);
+            })?;
         Ok(Self {
             sender,
             worker: Some(worker),
+            containment,
             _lock: lock,
             _child_lock: child_lock,
         })
@@ -1088,6 +1161,12 @@ impl TraefikSupervisor {
         received
             .recv()
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "proxy supervisor stopped"))?
+    }
+
+    /// How this supervisor's children are contained.
+    #[must_use]
+    pub const fn containment(&self) -> &crate::cgroup::Containment {
+        &self.containment
     }
 
     /// Observe whether its Traefik child is live and passes the private health ping.
@@ -1134,6 +1213,7 @@ struct SupervisorRuntime {
     child: Option<TraefikChild>,
     listener_ports: Option<ListenerPorts>,
     child_lock: Option<Arc<Flock<File>>>,
+    cgroups: Option<Arc<ProxyCgroups>>,
 }
 
 fn run_supervisor(
@@ -1141,9 +1221,11 @@ fn run_supervisor(
     log: &Arc<ProxyLog>,
     receiver: &mpsc::Receiver<SupervisorCommand>,
     child_lock: &Arc<Flock<File>>,
+    cgroups: Option<Arc<ProxyCgroups>>,
 ) {
     let mut runtime = SupervisorRuntime {
         child_lock: Some(Arc::clone(child_lock)),
+        cgroups,
         ..SupervisorRuntime::default()
     };
     loop {
@@ -1250,6 +1332,7 @@ fn start_runtime_child(
         settings,
         &mut runtime.services,
         runtime.child_lock.as_deref(),
+        runtime.cgroups.as_deref(),
         Arc::clone(log),
     ) {
         Ok(started) => started,
@@ -1342,6 +1425,7 @@ fn start_managed_child(
     settings: &SupervisorSettings,
     services: &mut [PublishedService],
     child_lock: Option<&Flock<File>>,
+    cgroups: Option<&ProxyCgroups>,
     log: Arc<ProxyLog>,
 ) -> io::Result<(TraefikChild, ListenerPorts)> {
     let mut config = settings.static_config.clone();
@@ -1385,6 +1469,7 @@ fn start_managed_child(
             .map(|(name, path)| (name.as_str(), path.as_path()))
             .collect::<Vec<_>>(),
         child_lock.map(|lock| lock.as_fd()),
+        cgroups,
         log,
     )?;
     let deadline = Instant::now() + settings.startup_timeout;
