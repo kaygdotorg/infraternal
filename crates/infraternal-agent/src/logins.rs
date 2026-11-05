@@ -459,7 +459,23 @@ fn runtime_root(state: &Path) -> &Path {
     }
 }
 
+/// Every host refusal object, including an unsafe or dangling link, fails closed.
+fn host_refused(root: &Path) -> io::Result<bool> {
+    match std::fs::symlink_metadata(root.join("infraternal-login-locks/host.revoked")) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+        Ok(_) => Ok(true),
+    }
+}
+
+/// Deny retained revocation intent before consulting the durable authority markers.
 fn permitted(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    if revocations::denied(root, person) || host_refused(root)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "host login revocation is pending or host access is denied",
+        ));
+    }
     let marker = root
         .join("infraternal-login-locks")
         .join(format!("{}.revoked", person.simple()));
@@ -475,7 +491,8 @@ fn permitted(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 
 /// Restore access only at the trusted server's explicit authority transition.
 /// # Errors
-/// Refuses unsafe marker or registry objects; ordinary opens never restore access.
+/// Refuses unsafe marker or registry objects, pending revocations and host-wide
+/// security overload refusal; ordinary opens never restore access.
 /// Returns `WouldBlock` when the durable queue is full, before opening a fence.
 pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
     restore_at(runtime_root(state), person).await
@@ -483,6 +500,12 @@ pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
 
 /// Admit restoration before opening its fence and retain it through an executing sync.
 async fn restore_at(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    if revocations::denied(root, person) || host_refused(root)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "host login revocation must finish before restoration",
+        ));
+    }
     let admission = crate::durable_io::admit()?;
     let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
     let root = root.to_owned();
@@ -526,7 +549,8 @@ fn restore_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// Login access restoration is a separate authority operation and is not implied by reconnect.
 /// # Errors
 /// Refuses unsafe registry paths or workers, and reports host cleanup failures.
-/// Returns `WouldBlock` before changing authority when the durable queue is full.
+/// Denies access in memory before waiting for disk. Errors reach the caller while
+/// a bounded owner retries independently of caller lifetime and ordinary saves.
 pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::Result<()> {
     revoke_at(
         runtime_root(state),
@@ -544,11 +568,21 @@ async fn revoke_at(
     person: uuid::Uuid,
     rootless: bool,
 ) -> io::Result<()> {
-    let admission = crate::durable_io::admit()?;
+    revocations::submit(root, manager, person, rootless).await
+}
+
+/// Try one reserved revocation; its owner retains denial and retries any failure.
+async fn revoke_once(
+    root: &Path,
+    manager: Manager,
+    person: uuid::Uuid,
+    rootless: bool,
+) -> io::Result<()> {
+    let admission = crate::durable_io::security().await?;
     let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
     let state = root.to_owned();
-    // A worker takes the fence before touching the marker. Cancellation may
-    // discard an unstarted job, but cannot overtake a write already begun.
+    // The bounded revocation owner outlives callers and retains this fence
+    // through marker durability, including after a caller has received an error.
     let (person_guard, admission) = admission
         .run(move || {
             revoke_marker(&state, person)?;
@@ -587,12 +621,17 @@ async fn revoke_at(
 
 /// Validate and durably publish a person's refusal before any shell is stopped.
 fn revoke_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
+    save_refusal(root, &format!("{}.revoked", person.simple()))
+}
+
+/// Publish a validated refusal inode and sync both it and its registry.
+fn save_refusal(root: &Path, name: &str) -> io::Result<()> {
     use std::{
         fs::OpenOptions,
         os::unix::fs::{MetadataExt, OpenOptionsExt},
     };
     let registry = root.join("infraternal-login-locks");
-    let marker = registry.join(format!("{}.revoked", person.simple()));
+    let marker = registry.join(name);
     let file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -617,6 +656,44 @@ fn revoke_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
     std::fs::File::open(&registry)?.sync_all()?;
     Ok(())
 }
+
+/// Security-only overload denies the whole host rather than forgetting a person.
+/// Persist that refusal first, then retire every login represented in the private
+/// registry. Recovery requires an administrator to remove the validated host
+/// refusal while the daemon is stopped; an individual restore cannot bypass it.
+async fn revoke_host_once(root: &Path, manager: Manager, rootless: bool) -> io::Result<()> {
+    let admission = crate::durable_io::security().await?;
+    let guard = acquire(root, "host-revocation").await?;
+    let state = root.to_owned();
+    let (saved, admission) = admission
+        .run(move || {
+            let _guard = guard;
+            save_refusal(&state, "host.revoked")
+        })
+        .await?;
+    saved?;
+    // Per-person cleanup reserves the same security lane; never nest its permit.
+    drop(admission);
+    let mut failure = None;
+    for entry in std::fs::read_dir(root.join("infraternal-login-locks"))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(person) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".person.lock"))
+            .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        else {
+            continue;
+        };
+        if let Err(error) = revoke_once(root, manager, person, rootless).await {
+            failure = Some(error);
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+#[path = "revocations.rs"]
+mod revocations;
 
 async fn request_stop(
     endpoint: &Path,
@@ -1164,6 +1241,7 @@ mod tests {
         });
     }
 
+    /// A held person fence delays disk work but cannot delay in-memory denial.
     #[test]
     fn revoke_waits_for_person_lock_and_refuses_linked_tombstones() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1180,15 +1258,17 @@ mod tests {
             let lock = acquire(&root, &format!("{}.person", person.simple()))
                 .await
                 .unwrap();
-            let path = root.clone();
-            let task =
-                tokio::spawn(
-                    async move { revoke_at(&path, Manager::Detached, person, false).await },
-                );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            assert!(permitted(&root, person).is_ok());
+            let mut task = Box::pin(revoke_at(&root, Manager::Detached, person, false));
+            assert!(
+                std::future::Future::poll(
+                    task.as_mut(),
+                    &mut std::task::Context::from_waker(std::task::Waker::noop()),
+                )
+                .is_pending()
+            );
+            assert!(permitted(&root, person).is_err());
             drop(lock);
-            task.await.unwrap().unwrap();
+            task.await.unwrap();
             assert!(permitted(&root, person).is_err());
             let target = root.join("fixture");
             std::fs::write(&target, b"fixture").unwrap();
@@ -1595,3 +1675,7 @@ mod durable_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "revocation_tests.rs"]
+mod revocation_tests;
