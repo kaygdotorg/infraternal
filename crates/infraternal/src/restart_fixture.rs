@@ -53,22 +53,11 @@ impl Signed {
         std::fs::write(parent.join("fixture.trust"), &trust).unwrap();
         Self { path, trust }
     }
-    /// Makes a fixture out of the running test executable. If it exceeds the largest image
-    /// the restart code accepts, debug info is stripped from the copy first.
+    /// Makes a fixture out of the running test executable, using the cached
+    /// stripped copy so the image stays small (see [`stripped_test_image`]).
     pub fn image(path: PathBuf) -> Self {
-        crate::test_executable::copy(&std::env::current_exe().unwrap(), &path, 0o700);
-        // `strip` rewrites the copy in its own single-threaded process.
-        if std::fs::metadata(&path).unwrap().len() > crate::restart_image::MAX_IMAGE {
-            assert!(
-                std::process::Command::new("strip")
-                    .arg("--strip-debug")
-                    .arg(&path)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
-        }
-        let bytes = std::fs::read(&path).unwrap();
+        let source = stripped_test_image(&std::env::current_exe().unwrap());
+        let bytes = std::fs::read(source).unwrap();
         Self::new(path, &bytes)
     }
     /// Reopens a fixture made earlier: reads the trust file beside `path` instead of signing again.
@@ -97,6 +86,81 @@ impl Signed {
         })
     }
 }
+/// Returns a cached, fully stripped copy of the test executable `source`.
+///
+/// Debug test images are about 500 MB. Restart code copies the running image
+/// into memory on every open and recovery, and on a busy gate disk that copy
+/// alone outlasted the 60 s hang bounds (#355). Restart children and signed
+/// fixtures therefore run from this copy (about 60 MB). It is made once per
+/// build of the test executable and shared; each test still signs its own
+/// private copy. A `source` that already is a stripped image is returned as is.
+pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if source
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".all-stripped"))
+    {
+        return source.to_owned();
+    }
+    let target_root = crate::restart_binary::fixture::scratch_root();
+    let cache = target_root.join("restart-test-images");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Include source identity so a rebuilt test executable cannot reuse stale fixture bytes.
+    let source_metadata = std::fs::metadata(source).unwrap();
+    let modified = source_metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let mut image_name = source
+        .file_name()
+        .expect("test image has a name")
+        .to_os_string();
+    image_name.push(format!(
+        ".{}-{modified}.all-stripped",
+        source_metadata.len()
+    ));
+    let image = cache.join(&image_name);
+    if !image.exists() {
+        let mut staging_name = image_name;
+        staging_name.push(format!(".{}", uuid::Uuid::new_v4().simple()));
+        let staging = cache.join(staging_name);
+        crate::test_executable::copy(source, &staging, 0o700);
+        strip_all(&staging);
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+        match std::fs::hard_link(&staging, &image) {
+            Ok(()) => std::fs::remove_file(&staging).unwrap(),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(&staging).unwrap();
+            }
+            Err(error) => panic!("could not retain the stripped test image: {error}"),
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&image).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.mode() & 0o777, 0o700);
+    image
+}
+
+/// Removes all symbols and debug sections from the image at `path`, in place.
+/// `strip` runs as its own single-threaded process, which owns every writer.
+pub(crate) fn strip_all(path: &Path) {
+    let output = std::process::Command::new("strip")
+        .arg("--strip-all")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "strip {} failed: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Lowercase hexadecimal text of `bytes`, as the manifest format writes digests.
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
