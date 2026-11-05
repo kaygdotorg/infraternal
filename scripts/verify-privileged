@@ -108,6 +108,12 @@ NOT_COVERED = {
     'shim': 'host-login and PTY ownership as real root (needs real setuid/setgid over host accounts)',
 }
 
+# Individual namespace tests this row cannot run, each with its reason. They
+# are skipped, printed by name, and must still exist: an entry whose test is
+# gone fails the row, so the list only shrinks.
+NOT_COVERED_TESTS = {}
+
+
 # An ignore reason that asks for privileges or a disposable namespace...
 PRIVILEGED_REASON = re.compile(r'namespace|as root|CAP_NET_ADMIN|unshare', re.I)
 # ...unless it also needs something this row does not provide.
@@ -275,13 +281,29 @@ def target_key(artifact):
     return 'other:' + name
 
 
+def rendered_errors(output):
+    """The human-readable text of every compiler error in cargo's JSON message stream."""
+    text = []
+    for line in output.splitlines():
+        message = json.loads(line) if line.startswith('{') else {}
+        if message.get('reason') == 'compiler-message' and message['message'].get('level') == 'error':
+            text.append(message['message'].get('rendered') or message['message'].get('message', ''))
+    return ''.join(text)
+
+
 def executables(root, selected):
     """Build the test binaries as the caller and map (package directory, target) to each."""
     found = {}
     directories = {package: directory for area in selected for package, directory, _ in PACKAGES[area]}
     for cargo_args, provides in builds(selected):
-        output = subprocess.run(['cargo', 'test', '--locked', *cargo_args, '--no-run', '--message-format=json'],
-                                cwd=root, stdout=subprocess.PIPE, text=True, check=True).stdout
+        result = subprocess.run(['cargo', 'test', '--locked', *cargo_args, '--no-run', '--message-format=json'],
+                                cwd=root, stdout=subprocess.PIPE, text=True)
+        output = result.stdout
+        if result.returncode:
+            # JSON output hides the compiler's own text; show it, or a broken
+            # build reads as an unexplained traceback.
+            print(rendered_errors(output), end='', flush=True)
+            raise SystemExit(f'privileged integration: FAIL\n  build failed: cargo test {" ".join(cargo_args)}')
         if '--examples' in cargo_args:
             # `cargo test --no-run` leaves examples only under hashed names;
             # tests run them as target/debug/examples/<name> (mesh kernel_node).
@@ -450,10 +472,26 @@ def plan(root, selected, binaries, base, scratch, target, scope):
                 missing.append(f'{package} {target_key} (--list failed: {result.stderr.strip()[-200:]})')
                 continue
             full = [line[:-len(': test')] for line in result.stdout.splitlines() if line.endswith(': test')]
-            for test in sorted(t for t in full if t.rsplit('::', 1)[-1] in names):
-                # Each test runs alone in a fresh sandbox: several say so, and
-                # it keeps one test's leftovers from reaching another.
-                runs.append((f'{package} {target_key} {test}', directory, path, ['--ignored', '--exact', test]))
+            listed = {}
+            for test in full:
+                listed.setdefault(test.rsplit('::', 1)[-1], []).append(test)
+            for name in sorted(names):
+                if (package, target_key, name) in NOT_COVERED_TESTS:
+                    continue
+                if name not in listed:
+                    # Selected from the source but absent from the binary: a
+                    # cfg/feature gap or a stale build. Never drop it silently.
+                    missing.append(f'{package} {target_key} {name} (selected but not in the test binary)')
+                    continue
+                for test in sorted(listed[name]):
+                    # Each test runs alone in a fresh sandbox: several say so,
+                    # and it keeps one test's leftovers from reaching another.
+                    runs.append((f'{package} {target_key} {test}', directory, path, ['--ignored', '--exact', test]))
+    for package, target_key, name in sorted(NOT_COVERED_TESTS):
+        directory = directories.get(package)
+        if directory and name not in privileged_ignored(root, package, directory).get(target_key, {}):
+            # The list only shrinks: an entry that no longer matches a test fails.
+            missing.append(f'{package} {target_key} {name} (listed in NOT_COVERED_TESTS but no longer a candidate)')
     return runs, missing
 
 
@@ -479,7 +517,7 @@ def run(root, selected, target):
                 'INFRATERNAL_TEST_STATE_ROOT': '/tmp/st',
                 'INFRATERNAL_DNS_TEST_PARENT_NETNS': os.readlink('/proc/self/ns/net')}
         runs, missing = plan(root, selected, binaries, base, scratch, target, scope)
-        failed = [f'{name}: no test binary was built' for name in missing]
+        failed = [name if '(' in name else f'{name}: no test binary was built' for name in missing]
         print(f'privileged integration: {len(runs)} runs for areas={",".join(sorted(selected))}', flush=True)
         for index, (label, directory, path, test_args) in enumerate(runs, 1):
             print(f'=== [{index}/{len(runs)}] {label}', flush=True)
@@ -522,6 +560,10 @@ def main():
     print(f'privileged integration: areas={",".join(sorted(selected))}', flush=True)
     for area in sorted(selected & set(NOT_COVERED)):
         print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
+    areas_packages = {package for area in selected for package, _, _ in PACKAGES[area]}
+    for (package, target_key, name), reason in sorted(NOT_COVERED_TESTS.items()):
+        if package in areas_packages:
+            print(f'privileged integration: not covered ({package} {target_key} {name}): {reason}', flush=True)
     failed = run(root, selected, target)
     if failed:
         raise SystemExit('privileged integration: FAIL\n  ' + '\n  '.join(failed))

@@ -141,6 +141,19 @@ class Builds(unittest.TestCase):
             found = p.executables(root, {'mesh'})
         self.assertEqual(found[('crates/plugins/mesh', 'lib')], '/w/lib')
 
+    def test_build_failure_shows_the_compiler_error(self):
+        """A failed test build prints rustc's rendered error and fails the row by name, not as a traceback."""
+        error = json.dumps({'reason': 'compiler-message', 'message': {'level': 'error',
+                            'rendered': 'error[E0063]: missing field `access_ssh`\n'}})
+        warning = json.dumps({'reason': 'compiler-message', 'message': {'level': 'warning', 'rendered': 'unused\n'}})
+        self.assertEqual(p.rendered_errors('\n'.join([warning, error, 'not json'])),
+                         'error[E0063]: missing field `access_ssh`\n')
+        broken = subprocess.CompletedProcess([], 101, error, '')
+        with mock.patch.object(p.subprocess, 'run', return_value=broken), \
+                self.assertRaises(SystemExit) as stop:
+            p.executables(Path('/clone'), {'mesh'})
+        self.assertIn('build failed: cargo test --workspace', str(stop.exception))
+
     def test_executable_mapping(self):
         """Later builds replace only what they provide; non-test artifacts are ignored."""
         root = Path('/clone')
@@ -258,11 +271,63 @@ class Lifecycle(unittest.TestCase):
         binaries = {('crates/plugins/mesh', 'test:kernel'): '/b/kernel'}
         with mock.patch.object(p, 'run_sandboxed', side_effect=fake), \
                 mock.patch.object(p, 'privileged_ignored', return_value={'test:kernel': {'up': 'namespace'}}), \
-                mock.patch.object(p.subprocess, 'run', side_effect=AssertionError('unsandboxed run')):
+                mock.patch.object(p.subprocess, 'run', side_effect=AssertionError('unsandboxed run')), \
+                mock.patch.object(p, 'NOT_COVERED_TESTS', {}):
             runs, missing = p.plan(Path('/clone'), {'mesh'}, binaries, {}, Path('/s'), Path('/t'), [])
         self.assertEqual(missing, [])
         self.assertIn('--list', calls[0])
         self.assertEqual([run[0] for run in runs], ['infraternal-plugin-mesh test:kernel kernel::up'])
+
+    def plan_with(self, listing, candidates, not_covered=None):
+        """Run plan() against one fake binary listing and a fake candidate scan."""
+        def fake(command, *_args, **_kwargs):
+            """Answer `--list` with the given libtest listing."""
+            return subprocess.CompletedProcess(command, 0, listing, '')
+
+        binaries = {('crates/plugins/mesh', target): '/b/' + target for target in candidates}
+        with mock.patch.object(p, 'run_sandboxed', side_effect=fake), \
+                mock.patch.object(p, 'privileged_ignored', return_value=candidates), \
+                mock.patch.object(p, 'NOT_COVERED_TESTS', not_covered or {}):
+            return p.plan(Path('/clone'), {'mesh'}, binaries, {}, Path('/s'), Path('/t'), [])
+
+    def test_unlisted_candidate_fails_by_name(self):
+        """A selected test the binary does not list fails the row by name (#285, 80225)."""
+        runs, missing = self.plan_with('node::other: test\n', {'lib': {'nft_restart_fences': 'namespace'}})
+        self.assertEqual(runs, [])
+        self.assertEqual(missing, ['infraternal-plugin-mesh lib nft_restart_fences (selected but not in the test binary)'])
+
+    def test_every_listed_candidate_runs(self):
+        """Candidates the binary lists all become runs, with nothing reported missing."""
+        runs, missing = self.plan_with('node::rotation_tests::a: test\nnode::b: test\nnode::c: test\n',
+                                       {'lib': {'a': 'namespace', 'b': 'namespace'}})
+        self.assertEqual(missing, [])
+        self.assertEqual(sorted(run[0] for run in runs), ['infraternal-plugin-mesh lib node::b',
+                                                          'infraternal-plugin-mesh lib node::rotation_tests::a'])
+
+    def test_not_covered_test_is_skipped_not_missing(self):
+        """A test on the explicit not-covered list is neither run nor reported missing."""
+        entry = ('infraternal-plugin-mesh', 'test:gotatun_tun_owner', 'second_uid')
+        runs, missing = self.plan_with('second_uid: test\nother: test\n',
+                                       {'test:gotatun_tun_owner': {'second_uid': 'namespace', 'other': 'namespace'}},
+                                       {entry: 'needs a second uid'})
+        self.assertEqual(missing, [])
+        self.assertEqual([run[0] for run in runs], ['infraternal-plugin-mesh test:gotatun_tun_owner other'])
+
+    def test_stale_not_covered_entry_fails(self):
+        """An entry whose test no longer exists fails the row, so the list only shrinks."""
+        entry = ('infraternal-plugin-mesh', 'test:gone', 'removed_test')
+        runs, missing = self.plan_with('', {}, {entry: 'reason'})
+        self.assertEqual(missing, ['infraternal-plugin-mesh test:gone removed_test '
+                                   '(listed in NOT_COVERED_TESTS but no longer a candidate)'])
+
+    def test_real_not_covered_entries_name_real_tests(self):
+        """Each real NOT_COVERED_TESTS entry is a current candidate with a written reason."""
+        root = Path(__file__).resolve().parents[1]
+        directories = {package: directory for area in p.PACKAGES.values() for package, directory, _ in area}
+        for (package, target, name), reason in p.NOT_COVERED_TESTS.items():
+            self.assertTrue(reason)
+            self.assertIn(name, p.privileged_ignored(root, package, directories[package]).get(target, {}),
+                          f'{package} {target} {name}')
 
     def test_fails_closed_when_the_sandbox_cannot_start(self):
         """A sandbox that exits early or prints nothing counts as an escape, never as contained."""

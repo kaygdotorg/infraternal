@@ -592,6 +592,12 @@ fixture stay out. Binaries come from the `test` row's own `cargo test
 --workspace --no-run` build; mesh, and its default-off DNS test, are built
 again with the features their namespace tests need.
 
+**No silent skips:** every selected candidate either runs, is on the explicit
+`NOT_COVERED_TESTS` list, or fails the row by name ("selected but not in the
+test binary"). This catches a binary mix-up (an example once replaced the
+mesh lib test binary, #285) or a cfg/feature gap. An entry on the list whose
+test no longer exists also fails the row, so the list only shrinks.
+
 **What is contained, exactly:** only the test runs. Building the test
 binaries is not sandboxed: the branch's build scripts and proc macros run as
 the plain calling user, as in the ordinary `test` row, which also runs every
