@@ -1015,6 +1015,18 @@ impl Store {
         {
             return Err(MeshApiError::Conflict);
         }
+        // D166/D352: recheck the all-node gate inside this immediate transaction, which serializes against
+        // enrollment. A node that cannot rotate may have joined since preparation began; publish nothing then.
+        // The operation stays in preparation and resumes once every node supports rotation again.
+        let unsupported: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE key_rotation_supported=0)",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?;
+        if unsupported {
+            return Err(MeshApiError::Conflict);
+        }
         let revision: i64 = sqlx::query_scalar(
             "UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision",
         )

@@ -109,6 +109,9 @@ pub(crate) async fn drive(
     };
 
     match record.phase {
+        // A node without rotation support joined after preparation began (D166, D352): keep the prepared
+        // candidate and wait for a mesh change. The store refuses to publish the overlap meanwhile.
+        RotationPhase::Preparing if !schedule.all_nodes_supported => None,
         RotationPhase::Preparing => {
             Some(run_preparation(store, service, channel, node, &record, &clock).await)
         }

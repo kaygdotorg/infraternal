@@ -1041,6 +1041,119 @@ mod tests {
             .unwrap();
     }
 
+    /// An unsupported node enrolled during preparation must keep the candidate unpublished.
+    #[tokio::test]
+    async fn overlap_is_refused_if_an_unsupported_node_joins_during_preparation() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (rotating, _) = store
+            .attach_named_with_capability(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rotating_id = i64::try_from(rotating.0).unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET last_rotation=0,schedule_boot_id='test-boot',schedule_monotonic=0,schedule_period_secs=604800 WHERE node_id=?",
+        )
+        .bind(rotating_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let operation = store
+            .begin_rotation(rotating, "test-boot", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let unsupported_host = "00000000-0000-4000-8000-000000000002";
+        sqlx::query(
+            "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)",
+        )
+        .bind(
+            uuid::Uuid::parse_str(unsupported_host)
+                .unwrap()
+                .as_bytes()
+                .as_slice(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        service
+            .execute(
+                "owner",
+                "mesh.node.enroll",
+                &serde_json::to_vec(&serde_json::json!({
+                    "name":"unsupported-during-rotation",
+                    "public_key":PublicKey([4; 32]),
+                    "host_id":unsupported_host
+                }))
+                .unwrap(),
+                1_800_000_000,
+            )
+            .await
+            .unwrap();
+
+        let supported: bool = sqlx::query_scalar(
+            "SELECT key_rotation_supported FROM mesh_nodes WHERE dataplane_host=?",
+        )
+        .bind(unsupported_host)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !supported,
+            "a newly enrolled node has no negotiated capability"
+        );
+        let overlap = store
+            .start_rotation_overlap(
+                rotating,
+                &operation.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await;
+        assert!(
+            overlap.is_err(),
+            "D166 requires deferring overlap when an unsupported node joins"
+        );
+        // Deferred, not abandoned: the node keeps its prepared candidate for this same operation.
+        let (phase, operation_id, candidate): (Option<String>, Option<String>, Option<Vec<u8>>) =
+            sqlx::query_as(
+                "SELECT rotation_phase,operation_id,candidate_public_key FROM mesh_node_key_rotation WHERE node_id=?",
+            )
+            .bind(rotating_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(phase.as_deref(), Some("preparing"));
+        assert_eq!(
+            operation_id.as_deref(),
+            Some(operation.operation_id.as_str())
+        );
+        assert_eq!(candidate, None, "no candidate key is published");
+        let schedule = store
+            .rotation_schedule(rotating, 100, "test-boot", 1, 1_000_000_000)
+            .await
+            .unwrap();
+        assert!(
+            !schedule.all_nodes_supported,
+            "the rotation driver sees the gate closed and waits instead of retrying"
+        );
+    }
+
     /// A coordinator restart in the overlap phase still publishes the previous key to peers.
     #[tokio::test]
     async fn coordinator_restart_restores_the_previous_key_during_overlap() {
