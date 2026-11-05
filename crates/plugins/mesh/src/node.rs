@@ -802,6 +802,9 @@ impl Node {
                     hook();
                 }
                 if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                    // Delete exactly the link this call created: `down` proves links by the
+                    // shared name, which may no longer lead to ours (#260 J242).
+                    let _ = Device::delete_ifindex(created);
                     let _ = self.down();
                     return Err(error);
                 }
