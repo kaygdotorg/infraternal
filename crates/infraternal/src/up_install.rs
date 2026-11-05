@@ -31,111 +31,30 @@ fn existing(path: &Path) -> io::Result<Option<fs::Metadata>> {
     }
 }
 
-/// Read the command of an infraternal process without interpreting later remote command arguments.
-fn process_command(arguments: &[u8]) -> Option<&[u8]> {
-    host_command(arguments.split(|byte| *byte == 0))
-}
-
-/// Recognize both CLI spellings in process argv and parsed systemd commands (D349).
-fn host_command<'a>(mut arguments: impl Iterator<Item = &'a [u8]>) -> Option<&'a [u8]> {
-    let image = arguments.next()?;
-    let name = image.rsplit(|byte| *byte == b'/').next()?;
-    if name != b"infra" && !name.starts_with(b"infraternal") {
-        return None;
-    }
-    // JSON output is the only root-level option that can precede a running command.
-    arguments.find(|argument| *argument != b"--json")
-}
-
-/// Refuse a running server or infraternal agent, including ones using custom state paths.
-fn running_install() -> io::Result<()> {
-    for process in fs::read_dir("/proc")? {
-        let process = process?;
-        if !process
-            .file_name()
-            .as_encoded_bytes()
-            .iter()
-            .all(u8::is_ascii_digit)
-        {
-            continue;
-        }
-        // Processes may exit while inspected. Read argv only in memory; never print it.
-        let Ok(arguments) = fs::read(process.path().join("cmdline")) else {
-            continue;
-        };
-        match process_command(&arguments) {
-            Some(b"server") => {
-                return Err(refused(
-                    "An infraternal server is running on this host. Use its embedded infraternal agent; run infraternal up on a different host.",
-                ));
-            }
-            Some(b"agent") => {
-                return Err(refused(
-                    "An infraternal agent is already running on this host. Manage the existing service instead of running infraternal up.",
-                ));
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Find installed services even when they use a custom unit name or data directory.
-fn installed_services(root: &Path) -> io::Result<()> {
-    for directory in [
-        "etc/systemd/system",
-        "run/systemd/system",
-        "usr/lib/systemd/system",
-        "lib/systemd/system",
-    ] {
-        let entries = match fs::read_dir(root.join(directory)) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        for entry in entries {
-            let entry = entry?;
-            if entry.file_name() == SERVICE_NAME {
-                return Err(refused(
-                    "An infraternal agent service is already installed. Manage that service instead of running infraternal up.",
-                ));
-            }
-            if entry
-                .path()
-                .extension()
-                .is_none_or(|extension| extension != "service")
-            {
-                continue;
-            }
-            // Unrelated private units need not be readable by the invoking user.
-            // Root repeats this inspection before making any installation writes.
-            let Ok(unit) = fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            if unit
-                .lines()
-                .filter_map(|line| line.trim().strip_prefix("ExecStart="))
-                .filter_map(infraternal_status::exec_words)
-                .any(|words| {
-                    host_command(words.iter().map(String::as_bytes)) == Some(b"server".as_slice())
-                })
-            {
-                return Err(refused(
-                    "An infraternal server service is installed on this host. Use its embedded infraternal agent; run infraternal up on a different host.",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
+/// Kernel and manager inspection stays separate from filesystem installation writes.
+#[path = "up_inspect.rs"]
+mod inspect;
 
 /// Check every installation destination and its ancestry before the first write.
 /// Existing empty bases must already be 0711: this command never repairs their modes.
 pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<()> {
-    if root == Path::new("/") {
-        running_install()?;
+    let systemctl = if root == Path::new("/") {
+        super::trusted_tool(&super::SYSTEMCTL_CANDIDATES, super::Failure::NoSystemd)
+            .map_err(|_| refused("Could not resolve the service manager. Restore systemctl before retrying infraternal up."))?
+    } else {
+        root.join("systemctl")
+    };
+    preflight_with_manager(root, owner, &systemctl)
+}
+
+/// Use the same trusted manager for read-only inspection and later activation.
+fn preflight_with_manager(root: &Path, owner: u32, systemctl: &Path) -> io::Result<()> {
+    // The early user check cannot read other users' executable descriptors. Only
+    // the privileged repeat can authorize writes, and it inspects the whole host.
+    if root == Path::new("/") && nix::unistd::geteuid().is_root() {
+        inspect::running_install()?;
     }
-    installed_services(root)?;
+    inspect::installed_services(root, systemctl)?;
     let base = root.join("var/lib/infraternal");
     if let Some(metadata) = existing(&base)? {
         check_directory(&metadata, owner)?;
@@ -218,7 +137,7 @@ pub(super) struct Install {
 impl Install {
     /// Repeat read-only preflight, then create the private enrollment layout under rollback.
     pub(super) fn begin(root: &Path, owner: u32, systemctl: &Path) -> io::Result<Self> {
-        preflight(root, owner)?;
+        preflight_with_manager(root, owner, systemctl)?;
         let mut install = Self {
             root: root.to_owned(),
             owner,
@@ -479,18 +398,21 @@ mod tests {
     #[test]
     fn global_json_does_not_hide_a_running_install() {
         assert_eq!(
-            super::process_command(b"/opt/infraternal\0--json\0server\0"),
+            super::inspect::command(b"/opt/infraternal\0--json\0server\0"),
             Some(b"server".as_slice())
         );
         assert_eq!(
-            super::process_command(b"infraternal\0--json\0agent\0run\0"),
+            super::inspect::command(b"infraternal\0--json\0agent\0run\0"),
             Some(b"agent".as_slice())
         );
         assert_eq!(
-            super::process_command(b"infraternal\0ssh\0host\0server\0"),
+            super::inspect::command(b"infraternal\0ssh\0host\0server\0"),
             Some(b"ssh".as_slice())
         );
-        assert_eq!(super::process_command(b"other\0server\0"), None);
+        assert_eq!(
+            super::inspect::command(b"harmless\0--json\0server\0"),
+            Some(b"server".as_slice())
+        );
     }
 }
 

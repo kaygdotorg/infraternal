@@ -26,7 +26,7 @@ impl Drop for Fixture {
 #[test]
 fn j218_running_server_alias_is_detected() {
     assert_eq!(
-        process_command(b"/usr/local/bin/infra\0server\0--data\0/srv/custom\0"),
+        inspect::command(b"/usr/local/bin/infra\0server\0--data\0/srv/custom\0"),
         Some(b"server".as_slice())
     );
 }
@@ -48,11 +48,11 @@ fn j218_installed_server_alias_is_detected() {
     );
 }
 
-/// Quoted custom paths and JSON output still identify the host command, never SSH arguments.
+/// Process arguments retain boundaries; installed commands without manager resolution refuse.
 #[test]
 fn j218_alias_commands_respect_word_boundaries() {
     assert_eq!(
-        process_command(b"/opt/custom path/infra\0--json\0server\0--data=/srv/private\0"),
+        inspect::command(b"/opt/custom path/infra\0--json\0server\0--data=/srv/private\0"),
         Some(b"server".as_slice())
     );
     for (command, server) in [
@@ -60,9 +60,9 @@ fn j218_alias_commands_respect_word_boundaries() {
             "\"/opt/custom path/infra\" --json server --data /srv/private",
             true,
         ),
-        ("/opt/infra ssh host server", false),
-        ("/opt/unrelated server --data /srv/private", false),
-        ("/opt/infra-other server", false),
+        ("/opt/infra ssh host server", true),
+        ("/opt/unrelated server --data /srv/private", true),
+        ("/opt/infra-other server", true),
     ] {
         let fixture = Fixture::new();
         let units = fixture.0.join("etc/systemd/system");
@@ -203,8 +203,15 @@ fn j218_rollback_preserves_preexisting_unit_alias() {
     let log = fixture.0.join("offline-disable.log");
     fs::write(&log, b"").unwrap();
     // Offline disable exercises real unit-file removal without touching the host manager.
-    fs::write(&systemctl, format!("#!/bin/sh\nif [ \"$1\" = disable ]; then\n  /usr/bin/systemctl --root='{}' disable infraternal-agent.service > '{}' 2>&1\n  exit $?\nfi\n[ \"$1\" != is-active ]\n", fixture.0.display(), log.display())).unwrap();
-    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_executable::write(
+        &systemctl,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = show ]; then printf 'LoadState=loaded\\nExecStart={{ path=/usr/bin/true ; argv[]=true ; }}\\n'; exit 0; fi\nif [ \"$1\" = disable ]; then\n  /usr/bin/systemctl --root='{}' disable infraternal-agent.service > '{}' 2>&1\n  exit $?\nfi\n[ \"$1\" != is-active ]\n",
+            fixture.0.display(),
+            log.display()
+        ),
+        0o755,
+    );
     assert!(
         Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &systemctl)
             .unwrap()
@@ -273,8 +280,15 @@ fn j218_sigterm_rolls_back_published_install() {
     }
     fs::write(fixture.0.join("source"), b"fixture executable").unwrap();
     let systemctl = fixture.0.join("systemctl");
-    fs::write(&systemctl, format!("#!/bin/sh\nif [ \"$1\" = is-active ]; then\n  printf 'ready\\n' > '{}'\n  read -r hold < '{}'\n  printf 'active\\n'\nfi\n", ready.display(), hold.display())).unwrap();
-    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::test_executable::write(
+        &systemctl,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = is-active ]; then\n  printf 'ready\\n' > '{}'\n  read -r hold < '{}'\n  printf 'active\\n'\nfi\n",
+            ready.display(),
+            hold.display()
+        ),
+        0o755,
+    );
     let mut child = Child(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -318,4 +332,112 @@ fn j218_sigterm_rolls_back_published_install() {
         "SIGTERM stranded the installed unit"
     );
     preflight(&fixture.0, nix::unistd::geteuid().as_raw()).unwrap();
+}
+
+/// Valid manager syntax must not hide an installed server with custom storage.
+#[test]
+fn j226_systemd_command_forms_refuse_server() {
+    for command in [
+        r"@/opt/infraternal harmless server --data /srv/private",
+        r"/opt/infra \x73erver --data /srv/private",
+        r"/opt/infra ${MODE} --data /srv/private",
+        "infra server --data /srv/private",
+        "-infra server --data /srv/private",
+        "/opt/infra \\\n server --data /srv/private",
+    ] {
+        let fixture = Fixture::new();
+        let units = fixture.0.join("etc/systemd/system");
+        fs::create_dir_all(&units).unwrap();
+        fs::write(
+            units.join("control.service"),
+            format!("[Service]\nEnvironment=MODE=server\nExecStart={command}\n"),
+        )
+        .unwrap();
+        let refused = preflight(&fixture.0, nix::unistd::geteuid().as_raw()).is_err();
+        println!("J226 command={command:?} refused={refused}");
+        assert!(refused, "systemd command form bypassed read-only refusal");
+    }
+    // The kernel establishes executable identity before arguments are interpreted.
+    assert_eq!(
+        inspect::command(b"harmless\0server\0--data\0/srv/private\0"),
+        Some(b"server".as_slice())
+    );
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("etc/systemd/system")).unwrap();
+    fs::write(
+        fixture.0.join("etc/systemd/system/control.service"),
+        "[Service]\nExecStart=@/opt/infraternal harmless server --data /srv/private\n",
+    )
+    .unwrap();
+    assert!(
+        preflight(&fixture.0, nix::unistd::geteuid().as_raw()).is_err(),
+        "valid @ unit bypassed preflight"
+    );
+}
+
+/// The actual offline enable operation must preserve our tracked link, which rollback removes.
+#[test]
+fn j226_offline_enable_leaves_no_owned_link() {
+    let fixture = Fixture::new();
+    let units = fixture.0.join("etc/systemd/system");
+    fs::create_dir_all(&units).unwrap();
+    let alias = units.join("control.service");
+    std::os::unix::fs::symlink("infraternal-agent.service", &alias).unwrap();
+    let before = fs::symlink_metadata(&alias).unwrap();
+    fs::write(fixture.0.join("source"), b"fixture executable").unwrap();
+    let systemctl = fixture.0.join("systemctl");
+    let log = fixture.0.join("enable.log");
+    crate::test_executable::write(
+        &systemctl,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = show ]; then printf 'LoadState=loaded\\nExecStart={{ path=/usr/bin/true ; argv[]=true ; }}\\n'; exit 0; fi\nif [ \"$1\" = enable ]; then\n stat -c '%d:%i' '{0}/etc/systemd/system/multi-user.target.wants/infraternal-agent.service' >> '{1}'\n /usr/bin/systemctl --root='{0}' enable infraternal-agent.service >> '{1}' 2>&1 || exit $?\n stat -c '%d:%i' '{0}/etc/systemd/system/multi-user.target.wants/infraternal-agent.service' >> '{1}'\nfi\n[ \"$1\" != is-active ]\n",
+            fixture.0.display(),
+            log.display()
+        ),
+        0o755,
+    );
+    assert!(
+        Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &systemctl)
+            .unwrap()
+            .activate(&fixture.0.join("source"))
+            .is_err()
+    );
+    println!("J226 offline enable: {}", fs::read_to_string(log).unwrap());
+    assert!(
+        fs::symlink_metadata(units.join("multi-user.target.wants/infraternal-agent.service"))
+            .is_err()
+    );
+    let after = fs::symlink_metadata(alias).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+}
+
+/// A concurrent replacement is outside rollback ownership, even at the enablement pathname.
+#[test]
+fn j226_replaced_enablement_inode_survives() {
+    let fixture = Fixture::new();
+    let enabled = fixture
+        .0
+        .join("etc/systemd/system/multi-user.target.wants/infraternal-agent.service");
+    let replacement = fixture.0.join("replacement");
+    std::os::unix::fs::symlink("administrator.service", &replacement).unwrap();
+    let before = fs::symlink_metadata(&replacement).unwrap();
+    fs::write(fixture.0.join("source"), b"fixture executable").unwrap();
+    let systemctl = fixture.0.join("systemctl");
+    crate::test_executable::write(
+        &systemctl,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = is-active ]; then\n mv '{}' '{}'\n exit 1\nfi\n",
+            replacement.display(),
+            enabled.display()
+        ),
+        0o755,
+    );
+    assert!(
+        Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &systemctl)
+            .unwrap()
+            .activate(&fixture.0.join("source"))
+            .is_err()
+    );
+    let after = fs::symlink_metadata(&enabled).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
 }
