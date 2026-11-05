@@ -144,7 +144,6 @@ for (const viewport of VIEWPORTS) {
 
       test("a refused login is a state with Add host, and the palette still lists the hosts", async ({ page }) => {
         test.setTimeout(90_000);
-        const started = Date.now();
         const state = await boot(page, "no_login");
         const win = page.locator(".ui-window[data-kind='terminal']").first();
         const strip = win.locator(".cl-sx-strip");
@@ -157,7 +156,6 @@ for (const viewport of VIEWPORTS) {
         await shot(page, "refused-login");
         // The palette learned the hosts although no terminal has painted: the console shows a refusal, not a prompt.
         await expect.poll(() => state.listed.length, { timeout: 8_000 }).toBeGreaterThan(0);
-        expect(state.listed[0]! - started, "the list was read before the 10 s 'can't reach' state").toBeLessThan(10_000);
         await page.keyboard.press("Control+Shift+K");
         await page.locator("#palette-input").fill("Open shell on offline-host");
         await expect(page.locator("#palette-results [role=option]").filter({ hasText: "Open shell on offline-host" })).toHaveCount(1);
@@ -213,6 +211,10 @@ for (const viewport of VIEWPORTS) {
         const strip = win.locator(".cl-sx-strip");
         // While it waits it is plainly connecting; only after the wait does it say it cannot reach the host.
         await expect(strip).toHaveCount(0);
+        // The console never answers, so no terminal settles: the host list must already have been read on its own, before the
+        // window gave up waiting (an order, not a time).
+        await expect.poll(() => state.listed.length, { timeout: 8_000 }).toBeGreaterThan(0);
+        expect(await strip.count(), "the list was read while the window was still only connecting").toBe(0);
         await expect(strip.locator(".cl-sx-strip-text")).toHaveText(/^Can't reach .+\. It keeps trying in the background\.$/, { timeout: 25_000 });
         expect(await strip.getByRole("button", { name: "Try again" }).locator("path").first().getAttribute("d"), "one retry icon").toBe(RETRY_ARC);
         // Still trying, so not a failure: a turning mark, a connecting window, and no caret blinking behind the notice.
