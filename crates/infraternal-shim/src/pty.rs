@@ -49,7 +49,9 @@ pub(super) fn inherit_login_process(
     )))
 }
 
-#[cfg(feature = "host-login")]
+/// Let `command`'s child inherit `file` at the returned descriptor number (at least 8, so it can never
+/// shadow the standard handles or Command's private exec-error pipe). The parent's copy stays close-on-exec.
+#[cfg(any(feature = "host-login", target_os = "linux", target_os = "macos"))]
 pub(crate) fn inherit_descriptor(
     command: &mut Command,
     file: &dyn std::os::fd::AsFd,
@@ -71,6 +73,35 @@ pub(crate) fn inherit_descriptor(
         });
     }
     Ok(descriptor)
+}
+
+/// Keep the launch lifeline for this process's whole life, and out of every program it starts.
+/// Fails closed: the descriptor must be an open pipe, because a shim without its lifeline would
+/// let the agent mistake a live terminal for a dead one.
+pub(crate) fn hold_lifeline(descriptor: i32) -> io::Result<()> {
+    if descriptor < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lifeline descriptor is a standard handle",
+        ));
+    }
+    // SAFETY: fstat only reads the kernel's record of an integer; a closed or invalid
+    // descriptor is an error, and the zeroed buffer is written entirely on success.
+    let mut status: nix::libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { nix::libc::fstat(descriptor, &raw mut status) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if status.st_mode & nix::libc::S_IFMT != nix::libc::S_IFIFO {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lifeline descriptor is not a pipe",
+        ));
+    }
+    // SAFETY: F_SETFD with an integer flag on a descriptor just checked as open.
+    if unsafe { nix::libc::fcntl(descriptor, nix::libc::F_SETFD, nix::libc::FD_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "host-login")]
@@ -2577,4 +2608,56 @@ fn session_command(shell: &Path, readiness: bool, program: &[std::ffi::OsString]
         command.args(&program[1..]);
     }
     command
+}
+
+#[cfg(test)]
+mod lifeline_tests {
+    //! The shim's own handling of its launch lifeline, apart from what its shell spawn also does (#324).
+    use super::*;
+    use nix::fcntl::FdFlag;
+
+    /// Whether `descriptor` is close-on-exec, read straight from the kernel.
+    fn close_on_exec(descriptor: &impl std::os::fd::AsFd) -> bool {
+        fcntl(descriptor, FcntlArg::F_GETFD)
+            .map(FdFlag::from_bits_truncate)
+            .unwrap()
+            .contains(FdFlag::FD_CLOEXEC)
+    }
+
+    /// `hold_lifeline` itself marks the pipe close-on-exec. The shell spawn also masks inherited
+    /// descriptors, so only a direct check shows this step: remove it and nothing else would fail.
+    #[test]
+    fn holding_the_lifeline_marks_it_close_on_exec() {
+        let (_read, write) = nix::unistd::pipe().unwrap();
+        fcntl(&write, FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+        assert!(
+            !close_on_exec(&write),
+            "the fixture must start without close-on-exec"
+        );
+        hold_lifeline(write.as_raw_fd()).unwrap();
+        assert!(
+            close_on_exec(&write),
+            "the held lifeline can still be inherited by an exec"
+        );
+    }
+
+    /// Anything but an open pipe above the standard handles is refused: a shim must never run without it.
+    #[test]
+    fn a_descriptor_that_is_not_an_open_pipe_is_refused() {
+        let file = File::open("/dev/null").unwrap();
+        for descriptor in [0, 1, 2] {
+            assert_eq!(
+                hold_lifeline(descriptor).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "standard handle {descriptor}"
+            );
+        }
+        assert_eq!(
+            hold_lifeline(file.as_raw_fd()).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+            "a regular file"
+        );
+        // A number no test opens: beyond any descriptor limit this suite uses.
+        assert!(hold_lifeline(1_000_000).is_err(), "a closed descriptor");
+    }
 }

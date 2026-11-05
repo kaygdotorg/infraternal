@@ -1501,6 +1501,7 @@ fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, Ex
     }
 }
 
+/// Run the hidden `__shim` command: decode its options and start the shim.
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
@@ -1527,6 +1528,15 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             readiness: matches.get_flag("readiness"),
             command_stdin: matches.get_flag("command_stdin"),
             retain_output: matches.get_flag("retain_output"),
+            // Refuse a number that is not a descriptor, rather than dropping it: a shim must never
+            // start without the lifeline its launcher asked it to hold (contracts/shim.md §2).
+            lifeline_fd: matches
+                .get_one::<i64>("lifeline_fd")
+                .map(|descriptor| {
+                    i32::try_from(*descriptor)
+                        .map_err(|_| "--lifeline-fd is out of range".to_owned())
+                })
+                .transpose()?,
         })
     })() {
         Ok(options) => options,

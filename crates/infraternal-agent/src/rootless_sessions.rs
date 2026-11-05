@@ -22,8 +22,10 @@ use std::{
 pub(crate) struct Reservation(Option<PathBuf>);
 #[cfg(target_os = "linux")]
 impl Reservation {
-    pub(crate) fn spawned(&mut self) {
-        self.0 = None;
+    /// The shim has started: the record must now survive this reservation. Returns its path so a
+    /// launch that later fails can retire it once the terminal is proven stopped.
+    pub(crate) fn spawned(&mut self) -> Option<PathBuf> {
+        self.0.take()
     }
 }
 #[cfg(target_os = "linux")]
