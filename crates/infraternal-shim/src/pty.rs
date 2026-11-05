@@ -1,4 +1,4 @@
-//! Audited Linux and macOS PTY and process boundary; all unsafe code is confined here [13][40].
+//! Audited Linux and macOS PTY, process and filesystem boundary; all unsafe code is confined here [13][40].
 //!
 //! On macOS the PTY child only becomes the session leader here; its privilege
 //! drop and D335 placement happen after exec in `session_shell` (#328).
@@ -141,9 +141,38 @@ pub(super) fn protect_login_process_at(path: &std::path::Path) -> io::Result<()>
     Ok(())
 }
 
+/// Own the terminal master and its supervised child for one interactive session.
 pub struct Pty {
     pub master: File,
     pub child: crate::child::OwnedChild,
+}
+
+/// Publish a staged directory without replacing even an empty destination.
+///
+/// Call the kernel directly: nix's wrapper is GNU-only, and the bundled musl
+/// library lacks a renameat2 symbol. Ordinary rename would silently replace a
+/// concurrently created path.
+#[cfg(all(feature = "session-image", target_os = "linux"))]
+pub(crate) fn publish_install_directory(staging: &Path, destination: &Path) -> io::Result<()> {
+    let staging = CString::new(staging.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    // SAFETY: both owned C strings remain live and terminated for this synchronous
+    // call. The kernel retains no pointers and enforces exclusive publication.
+    let result = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_renameat2,
+            nix::libc::AT_FDCWD,
+            staging.as_ptr(),
+            nix::libc::AT_FDCWD,
+            destination.as_ptr(),
+            nix::libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// Replacing a startup file must not silently discard ACLs or other security metadata.
