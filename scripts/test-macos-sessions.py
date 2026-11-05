@@ -193,7 +193,28 @@ class Agent(Binary):
     def remember(self):
         Agent.cursors[str(self.id)] = (self.out, self.entered, self.acked)
 
+    def settle(self, quiet=0.5):
+        """Let output for a detached session drain off stream 1 before it is reused.
+
+        Every session in this proof shares mux stream 1. Output the shim had
+        already sent can still arrive after `detach`'s Pong fence, and would
+        otherwise land in the next session's cursor bookkeeping.
+        """
+        timeout = self.sock.gettimeout()
+        self.sock.settimeout(quiet)
+        try:
+            while True:
+                try:
+                    stream, kind, body = self.read()
+                except (socket.timeout, TimeoutError):
+                    return
+                if stream == 0 and kind == 0x33:
+                    self.process(frame=(stream, kind, body))
+        finally:
+            self.sock.settimeout(timeout)
+
     def switch(self, session):
+        self.settle()
         out, entered, acked = Agent.cursors[str(session)]
         self.id = uuid.UUID(str(session))
         self.out, self.entered, self.acked = out, entered, acked
