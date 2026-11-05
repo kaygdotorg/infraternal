@@ -1,7 +1,7 @@
 //! Builds the validated action registry from built-in and enabled component plugins.
 
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget,
+    ActionContract, ActionDefinition, ActionEffect, ActionPermission, ActionRegistry, ActionTarget,
     CliDryRun as DryRun, CliHandler, JsonSchema, PluginDefinition, RegistryError,
 };
 
@@ -143,6 +143,8 @@ fn cli_plugin() -> PluginDefinition {
         ],
     );
     let mut plugin = plugin;
+    #[cfg(all(feature = "remote", feature = "plugin-server"))]
+    plugin.actions.extend(hosted_server_actions());
     #[cfg(all(feature = "remote", target_os = "linux"))]
     {
         plugin.actions.push(up_action());
@@ -210,10 +212,19 @@ fn sign_in_action() -> ActionDefinition {
             "Wait for approval; the resulting credential is saved in your private config folder.",
         ],
         JsonSchema::object(
-            [(
-                "server".to_owned(),
-                JsonSchema::string("HTTPS origin of the server."),
-            )],
+            [
+                (
+                    "server".to_owned(),
+                    JsonSchema::string("HTTPS origin of the server."),
+                ),
+                (
+                    "scope".to_owned(),
+                    JsonSchema::array(
+                        JsonSchema::string("Additional API-key scope."),
+                        "Additional access to request; read-only scopes are always included.",
+                    ),
+                ),
+            ],
             ["server".to_owned()],
         ),
         JsonSchema::command_result_with(data),
@@ -257,7 +268,7 @@ fn status_action() -> ActionDefinition {
         ],
         ["role".to_owned(), "components".to_owned()],
     );
-    ActionDefinition::new(
+    let mut action = ActionDefinition::new(
         ["status"],
         "Show what infraternal runs on this machine.",
         "Use this to see which infraternal services run here and whether any is down. It exits 5 when an installed service is not running.",
@@ -275,7 +286,132 @@ fn status_action() -> ActionDefinition {
         ),
     )
     .with_cli_handler(CliHandler::Status)
-    .with_example("status", "Show what runs on this machine.")
+    .with_example("status", "Show what runs on this machine.");
+    action.hosted = Some(infraternal_plugin_api::CORE_API_ACTIONS[0]);
+    action
+}
+
+/// Register hosted command adapters against the descriptors used by the browser dispatcher.
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
+fn hosted_server_actions() -> Vec<ActionDefinition> {
+    vec![
+        hosted_action(
+            infraternal_plugin_remote::inventory::LIST,
+            &["hosts", "list"],
+            JsonSchema::object(
+                [(
+                    "after".to_owned(),
+                    JsonSchema::string("Continue after this host ID."),
+                )],
+                [],
+            ),
+        ),
+        hosted_action(
+            infraternal_plugin_ssh::manifest::START,
+            &["hosts", "add"],
+            JsonSchema::object(
+                [
+                    (
+                        "address".to_owned(),
+                        JsonSchema::string("SSH address as user@host[:port]."),
+                    ),
+                    (
+                        "root".to_owned(),
+                        JsonSchema::boolean(
+                            "Install the infraternal agent as root; this is explicit consent.",
+                        ),
+                    ),
+                ],
+                ["address".to_owned()],
+            ),
+        )
+        .with_cli_positionals(["address"]),
+        hosted_action(
+            infraternal_plugin_remote::REMOVE,
+            &["hosts", "remove"],
+            JsonSchema::object(
+                [
+                    (
+                        "host_id".to_owned(),
+                        JsonSchema::string("ID of the host to remove."),
+                    ),
+                    (
+                        "dry_run".to_owned(),
+                        JsonSchema::boolean("Show what would be removed and change nothing."),
+                    ),
+                    (
+                        "yes".to_owned(),
+                        JsonSchema::boolean(
+                            "Remove after showing the dry run, without asking. For scripts that already reviewed it.",
+                        ),
+                    ),
+                ],
+                ["host_id".to_owned()],
+            ),
+        )
+        .with_cli_positionals(["host_id"]),
+        hosted_action(
+            infraternal_plugin_api::CORE_API_ACTIONS[1],
+            &["sessions", "list"],
+            JsonSchema::empty_object(),
+        ),
+    ]
+}
+
+/// Carry the original action metadata into the CLI tree; only syntax and transport are adapted.
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
+fn hosted_action(
+    definition: infraternal_plugin_api::ActionDef,
+    command: &[&str],
+    inputs: JsonSchema,
+) -> ActionDefinition {
+    let target = match definition.target {
+        infraternal_plugin_api::Target::Global | infraternal_plugin_api::Target::Node => {
+            ActionTarget::Global
+        }
+        infraternal_plugin_api::Target::Host => ActionTarget::Host,
+        infraternal_plugin_api::Target::Session => ActionTarget::Session,
+    };
+    let effect = match definition.effect {
+        infraternal_plugin_api::Effect::Read => ActionEffect::Read,
+        infraternal_plugin_api::Effect::Write => ActionEffect::Write,
+        infraternal_plugin_api::Effect::Destructive => ActionEffect::Destructive,
+    };
+    let dry_run = match definition.dry_run {
+        infraternal_plugin_api::DryRun::Unsupported => DryRun::Unsupported,
+        infraternal_plugin_api::DryRun::Supported => DryRun::Supported,
+        infraternal_plugin_api::DryRun::Required => DryRun::Required,
+    };
+    let permission = match definition.permission {
+        infraternal_plugin_api::Permission::One(permission) => permission,
+        infraternal_plugin_api::Permission::Any(permissions) => {
+            permissions.first().copied().unwrap_or("")
+        }
+    };
+    let mut output = JsonSchema::empty_object();
+    output.additional_properties = Some(true);
+    let mut action = ActionDefinition::new(
+        command.iter().copied(),
+        definition.summary,
+        "Use this command to perform the registered action on a signed-in server.",
+        definition.instructions.iter().copied(),
+        inputs,
+        JsonSchema::command_result_with(output),
+        ActionContract::new(target, effect, permission, dry_run),
+    )
+    .with_cli_handler(CliHandler::HostedAction);
+    if let infraternal_plugin_api::Permission::Any(permissions) = definition.permission {
+        action.contract.permission = ActionPermission::Any {
+            any: permissions
+                .iter()
+                .map(|permission| (*permission).to_owned())
+                .collect(),
+        };
+    }
+    action.safety.destructive = effect == ActionEffect::Destructive;
+    action.safety.dry_run_first = dry_run == DryRun::Required;
+    action.hosted = Some(definition);
+    action
 }
 
 fn up_action() -> ActionDefinition {

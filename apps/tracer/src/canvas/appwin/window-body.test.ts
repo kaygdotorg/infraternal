@@ -30,8 +30,6 @@ function pending(admit = false, afterSend?: (input: VideoInput, count: number) =
   let control: ControlState = { kind: "requesting" };
   let requests = 0;
   let finishRequest: ((ok: boolean) => void) | undefined;
-  const label = { textContent: "" };
-  const badge = { dataset: {}, hasAttribute: () => false, setAttribute() {}, removeAttribute() {}, querySelector: () => label };
   const stream = {
     get controlState() { return control; },
     sendInput(input: VideoInput) {
@@ -50,11 +48,12 @@ function pending(admit = false, afterSend?: (input: VideoInput, count: number) =
     },
   };
   // Exercise the existing binding's actual input/control methods. Its renderer
-  // needs only an already mounted badge; no stream or desktop is created here.
+  // needs no mounted DOM; no stream or desktop is created here.
   const binding = Object.assign(Object.create(prototype), {
     stream, queued: [], disposed: false, activeNow: true, justActivated: false,
     lastState: { kind: "live" }, o: { machine: "fixture" },
-    root: { querySelector: (selector: string) => selector === ".aw-control" ? badge : undefined },
+    // The pill's mark is DOM work these input tests do not exercise.
+    paintPillMark() {},
   }) as PendingBinding;
   return { binding, sent, order, resize() { order.push("size"); }, requests: () => requests, state(next: ControlState) {
     control = next;

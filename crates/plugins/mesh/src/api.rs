@@ -1636,7 +1636,7 @@ impl MeshService {
                 token_hash,
                 actor,
                 now,
-                infraternal_plugin_api::FRESH_SECONDS,
+                infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
             )
             .await
             .map_err(|error| map_sql_error(error))?

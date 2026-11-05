@@ -8,14 +8,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 /// every newer migration is named by UTC timestamp, and versions strictly ascend.
 /// Reserved numbers that have not merged yet are allowed to be absent.
 fn release_history(migrations: &sqlx::migrate::Migrator) -> Vec<i64> {
-    let versions: Vec<i64> = migrations
-        .iter()
-        .map(|migration| migration.version)
-        .collect();
-    assert!(
-        versions.windows(2).all(|pair| pair[0] < pair[1]),
-        "migration versions ascend without duplicates"
-    );
+    // Sorted, duplicate-free and containing #303's migrations; then the D347 shape below.
+    let versions = migration_versions(migrations);
     assert!(
         (1..=40).all(|version| versions.contains(&version)),
         "numbered history 0001-0040 is complete"
@@ -117,10 +111,46 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
     );
 }
 
+/// The versions in the embedded migration set, checked rather than pinned.
+///
+/// Parallel branches add migrations: timestamp-named ones since D347, plus the reserved numbered
+/// ones that merge late. A pinned list breaks on every such merge. What matters, and what this
+/// checks, is that the set is sorted and has no duplicate version, and that the #303 migrations
+/// (identified by name, not number) are in it.
+fn migration_versions(migrations: &sqlx::migrate::Migrator) -> Vec<i64> {
+    let versions: Vec<i64> = migrations
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    let mut sorted = versions.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        versions, sorted,
+        "migrations apply once each, in version order"
+    );
+    for description in [
+        "api action audit",
+        "api key approved lifetime",
+        "session action tap",
+        "api read audit",
+        "pre d333 key end",
+        "session tap action",
+    ] {
+        assert!(
+            migrations
+                .iter()
+                .any(|migration| migration.description == description),
+            "the #303 migration `{description}` is in the set"
+        );
+    }
+    versions
+}
+
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let expected = release_history(&migrations);
+    let versions = release_history(&migrations);
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -153,9 +183,10 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
     assert_eq!(
         (version, applied),
         (
-            *expected.last().unwrap(),
-            i64::try_from(expected.len()).unwrap()
-        )
+            *versions.last().unwrap(),
+            i64::try_from(versions.len()).unwrap()
+        ),
+        "every migration in the set applied exactly once"
     );
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
@@ -181,7 +212,7 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_all(&fresh)
             .await
             .unwrap();
-    assert_eq!(fresh_versions, expected);
+    assert_eq!(fresh_versions, versions);
     for pool in [&production, &fresh] {
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM terminal_startup_hints")
@@ -353,13 +384,16 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
             .fetch_all(&production)
             .await
             .unwrap();
+    // Every migration in the set applied once, in version order, and the deployed history
+    // (its first 28 rows, with their checksums) is unchanged.
+    assert_eq!(
+        after
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        migration_versions(&migrations)
+    );
     assert_eq!(&after[..28], before.as_slice());
-    let applied_versions: Vec<i64> = after.iter().map(|(version, _)| *version).collect();
-    let expected_versions: Vec<i64> = migrations
-        .iter()
-        .map(|migration| migration.version)
-        .collect();
-    assert_eq!(applied_versions, expected_versions);
     let canvas: (i64, String, i64) = sqlx::query_as(
         "SELECT revision,document,initialized FROM canvas_heads WHERE account='owner'",
     )

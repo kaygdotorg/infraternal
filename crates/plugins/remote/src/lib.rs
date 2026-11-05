@@ -39,16 +39,17 @@ pub mod remote_tls;
 #[cfg(feature = "native-streams")]
 pub mod wire_datagrams;
 
-/// Remove one enrolled host under a purpose-bound fresh owner passkey proof.
+/// Remove one enrolled host: in the browser with its own passkey assertion, or with a
+/// `hosts:write` API key inside its scope and no further tap (D333). Always dry-run first.
 pub const REMOVE: ActionDef = ActionDef {
     id: "remote.host.remove",
     summary: "Remove a host and uninstall its infraternal agent.",
     instructions: &[
-        "Find the host's ID in the app and the address of your server.",
-        "Run the command to see what will happen: the host loses access and its SSH trust is forgotten.",
-        "Confirm the removal with your owner passkey, then run the command again with --finish.",
-        "By default the infraternal agent is uninstalled from the host; add --retain to keep it.",
-        "If the host cannot be reached, its access is still removed and the command says what is left on it.",
+        "Select the host using its ID from the server inventory.",
+        "Run it with dry_run first to see what will be removed, then again to remove it.",
+        "A key with hosts:write removes the host without a further passkey tap; every call is audited.",
+        "By default the infraternal agent, its service, and its data are removed from the host.",
+        "If the host cannot be reached, its server access is still revoked and remaining cleanup is reported.",
     ],
     input: SchemaRef("remote.host.remove"),
     output: SchemaRef("remote.host.removed"),
@@ -57,6 +58,8 @@ pub const REMOVE: ActionDef = ActionDef {
     permission: Permission::One("remote.manage"),
     dry_run: DryRun::Required,
     opens: None,
+    api_scope: Some("hosts:write"),
+    fresh_passkey: false,
 };
 /// Internal node handoff; only an authenticated server can request its exact installation.
 pub const UNINSTALL: ActionDef = ActionDef {
@@ -73,6 +76,8 @@ pub const UNINSTALL: ActionDef = ActionDef {
     permission: Permission::One("remote.manage"),
     dry_run: DryRun::Required,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod runtime_lock;
@@ -105,6 +110,8 @@ pub const JOIN: ActionDef = ActionDef {
     permission: Permission::One("remote.host.join"),
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 /// Reconnect a node with its existing private identity.
 pub const RUN: ActionDef = ActionDef {
@@ -121,6 +128,8 @@ pub const RUN: ActionDef = ActionDef {
     permission: Permission::One("remote.host.run"),
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 /// Activate a capability only on an already configured server.
 pub const SERVE: ActionDef = ActionDef {
@@ -139,6 +148,8 @@ pub const SERVE: ActionDef = ActionDef {
     permission: Permission::One("server.configure"),
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub mod cli;
 #[cfg(feature = "server")]
@@ -152,6 +163,8 @@ pub const BOOTSTRAP_CA: ActionDef = ActionDef {
     target: Target::Global,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: true,
     output: SchemaRef("remote.response"),
     permission: Permission::One("remote.manage"),
     effect: Effect::Write,
@@ -172,6 +185,8 @@ pub const CA_ADMINISTRATORS: ActionDef = ActionDef {
     target: Target::Global,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
     output: SchemaRef("remote.response"),
     permission: Permission::One("remote.manage"),
     effect: Effect::Write,

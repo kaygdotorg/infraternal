@@ -9,7 +9,7 @@
  * frame" never turns a live window into a stalled one. Only what the connection and the machine report moves a window
  * out of `live`: the socket dropping, the stream ending, a refusal, a missing permission.
  *
- * Control is a second, small axis (`ControlState`) shown quietly over a live picture, not a state of its own.
+ * Control is a second, small axis (`ControlState`) shown quietly as an icon in the pill (D342), not a state of its own.
  *
  * Pure functions: unit-tested in `status.test.ts`.
  */
@@ -54,8 +54,13 @@ export interface StateView {
   keepPicture: boolean;
   /** A centred card over the window, when the state needs the whole window to speak. */
   card?: { mark: "spinner" | "alert" | "lock" | "window" | "unsupported" | "offline"; title: string; hint?: string; action?: { label: string; id: "retry" | "close" } };
-  /** A small strip over a live picture. */
-  strip?: { mark: "paused" | "offline" | "alert"; text: string };
+  /**
+   * The picture is only a memory of the stream, so it is drawn dimmed. The state itself is told by the pill (the dot's
+   * motion, or `mark`), never by text laid over the picture (TASTE: status is an icon with motion, not a text box).
+   */
+  dim?: boolean;
+  /** A small icon in the pill, next to the dot, for a state the dot has no picture for. `tip` is its warm sentence. */
+  mark?: { glyph: "paused"; tip: string };
 }
 
 /** The sentence for a permission, in the words System Settings uses, with where to go. */
@@ -75,9 +80,10 @@ export function describe(state: StreamState, ctx: { machine: string; app: string
     case "live":
       return { dot: "live", keepPicture: true };
     case "paused":
-      return { dot: "live", keepPicture: true, strip: { mark: "paused", text: "Paused" } };
+      return { dot: "live", keepPicture: true, dim: true, mark: { glyph: "paused", tip: `Paused. ${subject === "the screen" ? "The screen" : subject} is not drawn while this window is out of sight.` } };
     case "reconnecting":
-      return { dot: "connecting", keepPicture: true, strip: { mark: "offline", text: "Reconnecting" } };
+      // The dot turns (a connecting arc) and the picture dims; the pill's own tooltip says the link is resuming.
+      return { dot: "connecting", keepPicture: true, dim: true };
     case "closed":
       return { dot: "offline", keepPicture: false, card: { mark: "window", title: ctx.screen ? "The screen is not available" : `${ctx.app} was closed`, hint: ctx.screen ? `${ctx.machine} stopped sharing it.` : `The window is gone from ${ctx.machine}.`, action: { label: "Close window", id: "close" } } };
     case "permission":
@@ -89,7 +95,7 @@ export function describe(state: StreamState, ctx: { machine: string; app: string
   }
 }
 
-/** The quiet line over a live picture about control, or nothing. */
+/** The words about control, or nothing: the pill's icon carries `mark`, its warm tooltip carries `text`. */
 export function controlLine(control: ControlState, machine: string): { text: string; mark: "controlled" | "view" | "paused" } | undefined {
   switch (control.kind) {
     case "none": return undefined;
