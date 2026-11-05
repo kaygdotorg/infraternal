@@ -28,9 +28,11 @@ async fn saturated_security_lane_never_locks_out_unrelated_people() {
         match call.as_mut().poll(&mut context) {
             std::task::Poll::Pending => accepted += 1,
             std::task::Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::WouldBlock => {
-                busy += 1
+                busy += 1;
             }
-            other => panic!("unexpected security admission: {other:?}"),
+            other @ std::task::Poll::Ready(_) => {
+                panic!("unexpected security admission: {other:?}");
+            }
         }
     }
     let retained = revocations::retained(&root);
