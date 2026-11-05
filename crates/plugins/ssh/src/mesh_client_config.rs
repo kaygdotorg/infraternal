@@ -1,10 +1,12 @@
 //! Writes the one `ssh_config.d` file and known-hosts line that let plain `ssh` use mesh SSH [D235 Q2], #221.
 //!
-//! The block applies only to mesh names (`*.<suffix>`) and mesh addresses,
-//! so every other host keeps the person's own SSH configuration. Inside it:
+//! The block applies only to the exact mesh names (`<name>.<suffix>` for each
+//! peer, rewritten on every push) and mesh addresses, so every other host
+//! keeps the person's own SSH configuration, even under the same domain as
+//! the suffix (J236 P3-1). Inside it:
 //! - `IdentityAgent` points at the infraternal key socket ([`crate::mesh_keys`]);
 //! - `UserKnownHostsFile` holds one `@cert-authority` line for the mesh CA,
-//!   so mesh hosts are trusted through their host certificates with no
+//!   scoped to the same exact names, so mesh hosts are trusted through their host certificates with no
 //!   prompt, and `StrictHostKeyChecking yes` refuses any host without one.
 //!
 //! Mesh names need no DNS: each peer gets a `Host <name>.<suffix>` block
@@ -31,17 +33,28 @@ use std::{fmt::Write as _, net::Ipv4Addr, path::Path};
 /// with uninstall, which removes exactly this file.
 pub use infraternal_plugin_api::mesh_ssh_files::CONFIG_PATH;
 
-/// The patterns that match mesh hosts: the name suffix and, when the range
-/// falls on octet boundaries, an address glob (OpenSSH patterns have no CIDR).
-fn patterns(suffix: &str, network: Ipv4Addr, prefix: u8) -> Option<Vec<String>> {
+/// The patterns that match mesh hosts: each peer's exact `<name>.<suffix>`
+/// and, when the range falls on octet boundaries, an address glob (OpenSSH
+/// patterns have no CIDR). Never `*.<suffix>`: the suffix comes from the
+/// server's public origin and can be a whole real domain (J236 P3-1).
+/// `None` for an unsafe suffix or name, or when nothing would match.
+fn patterns(
+    suffix: &str,
+    network: Ipv4Addr,
+    prefix: u8,
+    hosts: &[MeshHost],
+) -> Option<Vec<String>> {
     let suffix_ok = !suffix.is_empty()
         && suffix.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
         });
-    if !suffix_ok || prefix > 32 {
+    if !suffix_ok || prefix > 32 || hosts.iter().any(|host| !valid_label(&host.name)) {
         return None;
     }
-    let mut patterns = vec![format!("*.{suffix}")];
+    let mut patterns: Vec<String> = hosts
+        .iter()
+        .map(|host| format!("{}.{suffix}", host.name))
+        .collect();
     if prefix.is_multiple_of(8) && (8..=24).contains(&prefix) {
         let octets = network.octets();
         let fixed = usize::from(prefix / 8);
@@ -53,7 +66,7 @@ fn patterns(suffix: &str, network: Ipv4Addr, prefix: u8) -> Option<Vec<String>> 
         glob.push_str(".*");
         patterns.push(glob);
     }
-    Some(patterns)
+    (!patterns.is_empty()).then_some(patterns)
 }
 
 /// An absolute path quoted for `ssh_config`, or `None` if it could break out of the quotes.
@@ -110,7 +123,7 @@ pub fn client_config_with_hosts(
     known_hosts: &Path,
     hosts: &[MeshHost],
 ) -> Option<String> {
-    let patterns = patterns(suffix, network, prefix)?.join(",");
+    let patterns = patterns(suffix, network, prefix, hosts)?.join(",");
     let socket = quoted_path(socket)?;
     let known_hosts = quoted_path(known_hosts)?;
     let mut file = String::new();
@@ -126,9 +139,6 @@ pub fn client_config_with_hosts(
     )
     .ok()?;
     for host in hosts {
-        if !valid_label(&host.name) {
-            return None;
-        }
         let name = format!("{}.{suffix}", host.name);
         writeln!(file, "Host {name}").ok()?;
         writeln!(file, "    HostName {}", host.address).ok()?;
@@ -143,11 +153,18 @@ pub fn client_config_with_hosts(
     Some(file)
 }
 
-/// The known-hosts file: one `@cert-authority` line for the mesh CA.
+/// The known-hosts file: one `@cert-authority` line trusting the mesh CA for
+/// exactly the mesh hosts (`hosts`) and the mesh address range.
 #[must_use]
-pub fn known_hosts(suffix: &str, network: Ipv4Addr, prefix: u8, ca: [u8; 32]) -> Option<String> {
+pub fn known_hosts(
+    suffix: &str,
+    network: Ipv4Addr,
+    prefix: u8,
+    ca: [u8; 32],
+    hosts: &[MeshHost],
+) -> Option<String> {
     use russh::keys::ssh_key::public::{Ed25519PublicKey, KeyData, PublicKey};
-    let patterns = patterns(suffix, network, prefix)?.join(",");
+    let patterns = patterns(suffix, network, prefix, hosts)?.join(",");
     let key = PublicKey::from(KeyData::Ed25519(Ed25519PublicKey(ca)))
         .to_openssh()
         .ok()?;

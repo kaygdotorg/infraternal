@@ -7,14 +7,18 @@ const SOCKET: &str = "/run/infraternal/mesh-ssh-agent.sock";
 /// A known-hosts path written into the block.
 const KNOWN: &str = "/var/lib/infraternal/mesh-ssh/known_hosts";
 
-/// Config.
+/// The file for one mesh peer, `db-01` at 10.254.0.9.
 fn config() -> String {
-    client_config(
+    client_config_with_hosts(
         "internal",
         Ipv4Addr::new(10, 254, 0, 0),
         16,
         Path::new(SOCKET),
         Path::new(KNOWN),
+        &[MeshHost {
+            name: "db-01".into(),
+            address: Ipv4Addr::new(10, 254, 0, 9),
+        }],
     )
     .unwrap()
 }
@@ -23,24 +27,32 @@ fn config() -> String {
 #[test]
 fn block_is_scoped_to_mesh_names_and_addresses() {
     let file = config();
-    assert!(file.contains("Match originalhost \"*.internal,10.254.*\"\n"));
+    assert!(file.contains("Match originalhost \"db-01.internal,10.254.*\"\n"));
     assert!(file.contains(&format!("    IdentityAgent \"{SOCKET}\"\n")));
     assert!(file.contains("    StrictHostKeyChecking yes\n"));
     assert!(!file.contains("ForwardAgent yes"));
 }
 
-/// Ranges off octet boundaries match names only.
+/// Ranges off octet boundaries match names only; with no names there is
+/// nothing to scope the block to, so it is refused.
 #[test]
 fn ranges_off_octet_boundaries_match_names_only() {
-    let file = client_config(
+    let net = Ipv4Addr::new(100, 64, 0, 0);
+    let hosts = [MeshHost {
+        name: "db-01".into(),
+        address: Ipv4Addr::new(100, 64, 0, 9),
+    }];
+    let file = client_config_with_hosts(
         "internal",
-        Ipv4Addr::new(100, 64, 0, 0),
+        net,
         10,
         Path::new(SOCKET),
         Path::new(KNOWN),
+        &hosts,
     )
     .unwrap();
-    assert!(file.contains("Match originalhost \"*.internal\"\n"));
+    assert!(file.contains("Match originalhost \"db-01.internal\"\n"));
+    assert!(client_config("internal", net, 10, Path::new(SOCKET), Path::new(KNOWN)).is_none());
 }
 
 /// Values that could escape are refused.
@@ -61,8 +73,19 @@ fn values_that_could_escape_are_refused() {
 /// Known hosts trusts only the ca for mesh patterns.
 #[test]
 fn known_hosts_trusts_only_the_ca_for_mesh_patterns() {
-    let line = known_hosts("internal", Ipv4Addr::new(10, 254, 0, 0), 16, [7; 32]).unwrap();
-    assert!(line.starts_with("@cert-authority *.internal,10.254.* ssh-ed25519 "));
+    let hosts = [MeshHost {
+        name: "db-01".into(),
+        address: Ipv4Addr::new(10, 254, 0, 9),
+    }];
+    let line = known_hosts(
+        "internal",
+        Ipv4Addr::new(10, 254, 0, 0),
+        16,
+        [7; 32],
+        &hosts,
+    )
+    .unwrap();
+    assert!(line.starts_with("@cert-authority db-01.internal,10.254.* ssh-ed25519 "));
     assert_eq!(line.lines().count(), 1);
 }
 
@@ -100,7 +123,12 @@ fn stock_ssh_applies_the_block_only_to_mesh_hosts() {
         );
         assert!(settings.contains("stricthostkeychecking true"), "{mesh}");
     }
-    for other in ["github.com", "10.69.69.89", "internal.example.com"] {
+    for other in [
+        "github.com",
+        "10.69.69.89",
+        "internal.example.com",
+        "web.internal",
+    ] {
         assert!(
             !resolved(other).contains(SOCKET),
             "{other} must keep the person's own agent"
@@ -176,4 +204,35 @@ fn mesh_names_map_to_mesh_addresses_without_dns() {
         "{settings}"
     );
     std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// J236 P3-1 (#221): the suffix comes from the server's public origin, so it
+/// can be a whole real domain. The CA trust line and the ssh overrides name
+/// exact mesh hosts (and the mesh address range), never `*.<suffix>`, so
+/// `ssh www.example.com` keeps the person's own agent and known hosts, and
+/// the mesh CA is never trusted for a real host.
+#[test]
+fn trust_and_overrides_name_exact_mesh_hosts_never_the_whole_domain() {
+    let hosts = [MeshHost {
+        name: "db-01".into(),
+        address: Ipv4Addr::new(10, 254, 0, 9),
+    }];
+    let net = Ipv4Addr::new(10, 254, 0, 0);
+    let file = client_config_with_hosts(
+        "example.com",
+        net,
+        16,
+        Path::new(SOCKET),
+        Path::new(KNOWN),
+        &hosts,
+    )
+    .unwrap();
+    assert!(
+        file.contains("Match originalhost \"db-01.example.com,10.254.*\"\n"),
+        "{file}"
+    );
+    assert!(!file.contains("*.example.com"), "{file}");
+    let known = known_hosts("example.com", net, 16, [7; 32], &hosts).unwrap();
+    assert!(known.starts_with("@cert-authority db-01.example.com,10.254.* ssh-ed25519 "));
+    assert!(!known.contains("*.example.com"));
 }

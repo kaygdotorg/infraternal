@@ -524,8 +524,9 @@ impl MeshSshNode {
             &input.hosts,
         )
         .ok_or(PluginError::Rejected)?;
-        let known = crate::mesh_client_config::known_hosts(&suffix, network, prefix, ca)
-            .ok_or(PluginError::Rejected)?;
+        let known =
+            crate::mesh_client_config::known_hosts(&suffix, network, prefix, ca, &input.hosts)
+                .ok_or(PluginError::Rejected)?;
         write_client_files(&known_hosts, &known, &config_path, &config)
             .map_err(|_| PluginError::Rejected)?;
         *self
