@@ -27,26 +27,50 @@ pub struct Endpoint {
 impl Endpoint {
     /// Creates `desktop.sock` (mode 0600) inside `runtime` and listens on it.
     ///
+    /// The name `desktop.sock` only ever appears already private and already
+    /// listening. Clients refuse a socket with group or other permission bits,
+    /// and `bind` creates the file with the umask's mode, so the socket is made
+    /// under a short temporary name first: bound, set to 0600, listening. It is
+    /// then published with `link`, which never replaces an existing file, and the
+    /// temporary name is removed (#363).
+    ///
     /// # Errors
     /// Refuses symlinks, foreign/permissive runtime directories and occupied paths.
     pub fn bind(runtime: &Path) -> io::Result<Self> {
         validate_runtime(runtime)?;
         let path = runtime.join("desktop.sock");
-        let listener = UnixListener::bind(&path)?;
-        let metadata = fs::symlink_metadata(&path)?;
-        let endpoint = Self {
+        let staging = runtime.join(staging_name());
+        // A leftover name can only come from a dead process that had this PID.
+        match fs::remove_file(&staging) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        let listener = UnixListener::bind(&staging)?;
+        let published = fs::set_permissions(&staging, fs::Permissions::from_mode(0o600))
+            .and_then(|()| fs::symlink_metadata(&staging))
+            .and_then(|metadata| fs::hard_link(&staging, &path).map(|()| metadata));
+        let removed = fs::remove_file(&staging);
+        let metadata = published?;
+        removed?;
+        Ok(Self {
             listener,
             path,
             identity: (metadata.dev(), metadata.ino()),
-        };
-        fs::set_permissions(&endpoint.path, fs::Permissions::from_mode(0o600))?;
-        Ok(endpoint)
+        })
     }
     /// Path of the socket file.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// A temporary socket name, unique within this process and among live
+/// processes, no longer than `desktop.sock` so it fits wherever that name fits.
+fn staging_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(".d{:x}.{:x}", std::process::id(), next & 0xff)
 }
 
 /// Checks that `runtime` is a directory (not a symlink) owned by the current
@@ -146,6 +170,45 @@ mod tests {
         drop(endpoint);
         assert!(!dir.join("desktop.sock").exists());
         fs::remove_dir(dir).unwrap();
+    }
+
+    /// `desktop.sock` appears already private: its mode never changes after
+    /// the name exists, so no client can find it with group or other bits
+    /// (#363). A directory watch reports a chmod of a named entry as
+    /// `IN_ATTRIB` with that name, synchronously, so the check needs no timing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_name_appears_already_private() {
+        use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+        let dir = nix::unistd::mkdtemp("/tmp/desktop-publish-XXXXXX").unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let watch = Inotify::init(InitFlags::IN_NONBLOCK | InitFlags::IN_CLOEXEC).unwrap();
+        watch
+            .add_watch(&dir, AddWatchFlags::IN_CREATE | AddWatchFlags::IN_ATTRIB)
+            .unwrap();
+        let endpoint = Endpoint::bind(&dir).unwrap();
+        let events = watch.read_events().unwrap();
+        let named = |flag: AddWatchFlags| {
+            events.iter().any(|event| {
+                event.mask.contains(flag)
+                    && event.name.as_deref() == Some(std::ffi::OsStr::new("desktop.sock"))
+            })
+        };
+        let (created, changed) = (
+            named(AddWatchFlags::IN_CREATE),
+            named(AddWatchFlags::IN_ATTRIB),
+        );
+        let mode = fs::metadata(endpoint.path()).unwrap().mode() & 0o777;
+        let leftovers = fs::read_dir(&dir).unwrap().count();
+        drop(endpoint);
+        fs::remove_dir(dir).unwrap();
+        assert!(created, "desktop.sock was never created: {events:?}");
+        assert!(
+            !changed,
+            "desktop.sock changed mode after it appeared: {events:?}"
+        );
+        assert_eq!(mode, 0o600);
+        assert_eq!(leftovers, 1, "the temporary socket name was left behind");
     }
 
     #[test]
