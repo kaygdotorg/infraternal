@@ -1,8 +1,8 @@
 //! Reads kernel executable identities and manager-resolved services before host installation (#338).
 //!
 //! Unit-file text is not a command: prefixes, environment substitution and escapes
-//! belong to systemd. We ask its manager for the executable and conservatively
-//! refuse commands whose resolved identity cannot be inspected unambiguously.
+//! belong to systemd. We ask its manager for executable identities, skip inert
+//! stock units, and refuse identified CLI images or unresolved references to them.
 use super::{SERVICE_NAME, refused};
 use std::{
     collections::BTreeSet,
@@ -13,14 +13,16 @@ use std::{
     process::{Command, Stdio},
 };
 
-/// Recognize supported executable names and renamed links to this exact running image.
-fn install_image(path: &Path, metadata: &fs::Metadata, current: &fs::Metadata) -> bool {
+/// Recognize the two CLI spellings and the named binaries distributed with an installation.
+fn image_name(path: &Path) -> bool {
     let name = path.file_name().unwrap_or_default().as_encoded_bytes();
     let name = name.strip_suffix(b" (deleted)").unwrap_or(name);
-    name == b"infra"
-        || name.starts_with(b"infraternal")
-        || name.starts_with(b"memfd:infraternal")
-        || (metadata.dev(), metadata.ino()) == (current.dev(), current.ino())
+    name == b"infra" || name.starts_with(b"infraternal") || name.starts_with(b"memfd:infraternal")
+}
+
+/// Recognize supported executable names and renamed links to this exact running image.
+fn install_image(path: &Path, metadata: &fs::Metadata, current: &fs::Metadata) -> bool {
+    image_name(path) || (metadata.dev(), metadata.ino()) == (current.dev(), current.ino())
 }
 
 /// Refuse a running server or infraternal agent using its kernel image, never its chosen argv[0].
@@ -173,62 +175,196 @@ fn manager_units(systemctl: &Path, units: &mut BTreeSet<OsString>) -> io::Result
     Ok(())
 }
 
-/// Inspect only the manager's resolved path field; its human-readable argv is deliberately unused.
-///
-/// Accept a narrow, unambiguous serialization of absolute executable paths. Other
-/// output is a refusal, not a second implementation of unit-file syntax. Any service
-/// invoking this CLI is refused because argv[0] overrides make the formatted argv
-/// unsuitable for proving that an installed command cannot launch a server.
-fn resolved_service(unit: &OsStr, output: &str) -> io::Result<()> {
-    let mut states = output
+/// Identify a reference without interpreting unit-file command syntax or printing its contents.
+fn mentions_install(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("infra")
+}
+
+/// Report an installed command without exposing its arguments or environment values.
+fn installed(unit: &OsStr) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "Service {} invokes infraternal. Use its existing server or infraternal agent; inspect that service before retrying infraternal up on a fresh host.",
+            unit.to_string_lossy()
+        ),
+    )
+}
+
+/// Decode systemctl's quoted property-list serialization, not systemd unit-file command syntax.
+/// Unknown serialization cannot prove executable identity and is left unresolved.
+fn property_words(value: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = Vec::new();
+    let mut quoted = false;
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'"' => quoted = !quoted,
+            b'\\' => word.push(match bytes.next()? {
+                b'x' => u8::from_str_radix(
+                    std::str::from_utf8(&[bytes.next()?, bytes.next()?]).ok()?,
+                    16,
+                )
+                .ok()?,
+                b'a' => 7,
+                b'b' => 8,
+                b'f' => 12,
+                b'v' => 11,
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'\\' => b'\\',
+                b'"' => b'"',
+                _ => return None,
+            }),
+            byte if byte.is_ascii_whitespace() && !quoted => {
+                if !word.is_empty() {
+                    words.push(String::from_utf8(std::mem::take(&mut word)).ok()?);
+                }
+            }
+            byte => word.push(byte),
+        }
+    }
+    if quoted {
+        return None;
+    }
+    if !word.is_empty() {
+        words.push(String::from_utf8(word).ok()?);
+    }
+    Some(words)
+}
+
+/// Prefer the unit's PATH, then `ExecSearchPath`, then the manager build's default search path.
+fn search_path(output: &str, default: &str) -> Option<String> {
+    let environment = output
         .lines()
-        .filter_map(|line| line.strip_prefix("LoadState="));
-    let state = states.next().ok_or_else(|| unresolved(unit))?;
-    if states.next().is_some() {
-        return Err(unresolved(unit));
+        .find_map(|line| line.strip_prefix("Environment="))
+        .unwrap_or_default();
+    if let Some(path) = property_words(environment)?
+        .iter()
+        .rev()
+        .find_map(|word| word.strip_prefix("PATH=").map(str::to_owned))
+    {
+        return Some(path);
     }
+    Some(
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecSearchPath="))
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default)
+            .to_owned(),
+    )
+}
+
+/// Resolve a manager path or bare executable name using only absolute search directories.
+fn executable_path(program: &str, search: &str) -> Option<std::path::PathBuf> {
+    let program = Path::new(program);
+    if program.is_absolute() {
+        return Some(program.to_owned());
+    }
+    if program.components().count() != 1 {
+        return None;
+    }
+    std::env::split_paths(search)
+        .filter(|path| path.is_absolute())
+        .map(|path| path.join(program))
+        .find(|path| {
+            fs::metadata(path)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+        })
+}
+
+/// Read the default compiled into systemd once per scan, with the documented standard path as fallback.
+fn default_search_path() -> String {
+    let candidates = ["/usr/bin/systemd-path", "/bin/systemd-path"];
+    if let Ok(tool) = super::super::trusted_tool(&candidates, super::super::Failure::NoSystemd)
+        && let Ok(value) = manager(&tool, &[OsStr::new("search-binaries-default")])
+        && !value.trim().is_empty()
+    {
+        return value.trim().to_owned();
+    }
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned()
+}
+
+/// Ignore inert stock units and classify executable identity rather than every resolution failure.
+/// Only unresolved commands mentioning infraternal refuse; missing unrelated programs do not.
+fn resolved_service(unit: &OsStr, output: &str, default: &str) -> io::Result<()> {
+    let relevant = mentions_install(&unit.to_string_lossy()) || mentions_install(output);
+    let state = output
+        .lines()
+        .find_map(|line| line.strip_prefix("LoadState="));
     match state {
-        "loaded" => {}
-        _ => return Err(unresolved(unit)),
+        Some("masked" | "not-found") => return Ok(()),
+        Some("loaded") => {}
+        _ => {
+            return if relevant {
+                Err(unresolved(unit))
+            } else {
+                Ok(())
+            };
+        }
     }
+    // Absolute executables do not depend on PATH or unrelated environment serialization.
+    let search = search_path(output, default).unwrap_or_default();
     let commands = output
         .lines()
         .find_map(|line| line.strip_prefix("ExecStart="))
-        .ok_or_else(|| unresolved(unit))?;
+        .unwrap_or_default();
     let current = fs::metadata("/proc/self/exe")?;
-    let mut count = 0;
     for record in commands.split("{ path=").skip(1) {
-        let path = record
-            .split_once(" ; ")
-            .map(|(path, _)| path)
-            .ok_or_else(|| unresolved(unit))?;
-        if !path.starts_with('/')
-            || !path
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"/._+-:@".contains(&byte))
-        {
-            return Err(unresolved(unit));
+        let Some((program, _)) = record.split_once(" ; ") else {
+            if relevant {
+                return Err(unresolved(unit));
+            }
+            continue;
+        };
+        if image_name(Path::new(program)) {
+            return Err(installed(unit));
         }
-        let path = Path::new(path);
-        let metadata = fs::metadata(path).map_err(|_| unresolved(unit))?;
-        if !metadata.is_file() {
-            return Err(unresolved(unit));
+        let Some(path) = executable_path(program, &search) else {
+            if relevant {
+                return Err(unresolved(unit));
+            }
+            continue;
+        };
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ if relevant => return Err(unresolved(unit)),
+            _ => continue,
+        };
+        if install_image(&path, &metadata, &current) {
+            return Err(installed(unit));
         }
-        if install_image(path, &metadata, &current) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "Service {} invokes infraternal. Use its existing server or infraternal agent; inspect that service before retrying infraternal up on a fresh host.",
-                    unit.to_string_lossy()
-                ),
-            ));
-        }
-        count += 1;
     }
-    if count == 0 {
+    if !commands.is_empty() && !commands.contains("{ path=") && relevant {
         return Err(unresolved(unit));
     }
     Ok(())
+}
+
+/// Inspect only an unresolved unit's text for identity hints; never parse commands from it.
+fn unit_mentions_install(root: &Path, unit: &OsStr) -> bool {
+    if mentions_install(&unit.to_string_lossy()) {
+        return true;
+    }
+    [
+        "etc/systemd/system",
+        "run/systemd/system",
+        "usr/lib/systemd/system",
+        "lib/systemd/system",
+    ]
+    .iter()
+    .any(|directory| {
+        use std::io::Read as _;
+        let Ok(file) = fs::File::open(root.join(directory).join(unit)) else {
+            return false;
+        };
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024).read_to_end(&mut bytes).is_ok()
+            && mentions_install(&String::from_utf8_lossy(&bytes))
+    })
 }
 
 /// Resolve installed services through the manager, including custom unit and data paths.
@@ -271,7 +407,11 @@ pub(super) fn installed_services(
     if root == Path::new("/") {
         manager_units(systemctl, &mut units)?;
     }
+    let default_search = default_search_path();
     for unit in units {
+        if unit.as_encoded_bytes().ends_with(b"@.service") {
+            continue;
+        }
         if unit == SERVICE_NAME && recovery.owns(&root.join("etc/systemd/system").join(&unit)) {
             continue;
         }
@@ -287,12 +427,17 @@ pub(super) fn installed_services(
                 OsStr::new("--no-pager"),
                 OsStr::new("--property=LoadState"),
                 OsStr::new("--property=ExecStart"),
+                OsStr::new("--property=Environment"),
+                OsStr::new("--property=ExecSearchPath"),
                 OsStr::new("--"),
                 &unit,
             ],
-        )
-        .map_err(|_| unresolved(&unit))?;
-        resolved_service(&unit, &output)?;
+        );
+        match output {
+            Ok(output) => resolved_service(&unit, &output, &default_search)?,
+            Err(_) if unit_mentions_install(root, &unit) => return Err(unresolved(&unit)),
+            Err(_) => {}
+        }
     }
     Ok(())
 }
@@ -301,6 +446,15 @@ pub(super) fn installed_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercise manager classification with the standard executable search directories.
+    fn resolved_service(unit: &OsStr, output: &str) -> io::Result<()> {
+        super::resolved_service(
+            unit,
+            output,
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+    }
 
     /// A private proc-shaped directory exercises actual executable descriptors and inode comparison.
     #[test]
@@ -339,7 +493,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    /// Manager path identity catches renamed executables and refuses missing or ambiguous commands.
+    /// Manager identity catches renamed links without mistaking unrelated argument text for an executable.
     #[test]
     fn manager_resolves_executable_without_trusting_argv() {
         let unit = OsStr::new("custom.service");
@@ -365,7 +519,123 @@ mod tests {
             "LoadState=loaded\nExecStart=\n",
             "LoadState=loaded\nExecStart={ path=/opt/missing ; argv[]=server ; }\n",
         ] {
-            assert!(resolved_service(unit, value).is_err());
+            resolved_service(unit, value).unwrap();
         }
+    }
+    /// Ordinary manager states and unrelated missing programs cannot block a fresh host.
+    #[test]
+    fn stock_service_states_and_search_names_are_accepted() {
+        for value in [
+            "LoadState=masked\n",
+            "LoadState=not-found\n",
+            "LoadState=loaded\nExecStart=\n",
+            "LoadState=loaded\nExecStart={ path=true ; argv[]=true ; }\n",
+            "LoadState=loaded\nExecStart={ path=unrelated-missing-command ; argv[]=unrelated-missing-command ; }\n",
+        ] {
+            assert!(
+                resolved_service(OsStr::new("stock.service"), value).is_ok(),
+                "stock command refused: {value}"
+            );
+        }
+    }
+
+    /// Remove only units created by this real-manager probe and refresh their manager state.
+    struct UserUnits {
+        /// Unique unit files under the current user's manager runtime directory.
+        paths: Vec<std::path::PathBuf>,
+    }
+    impl Drop for UserUnits {
+        /// Cleanup also runs when a manager assertion fails.
+        fn drop(&mut self) {
+            for path in &self.paths {
+                let _ = fs::remove_file(path);
+            }
+            let _ = Command::new("/usr/bin/systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+        }
+    }
+
+    /// Real systemd output must accept stock states and search bare commands without false refusal.
+    #[test]
+    #[ignore = "requires a live systemd user manager; run explicitly as its ordinary user"]
+    fn real_user_manager_accepts_stock_and_bare_commands() {
+        let runtime =
+            std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("user runtime"));
+        let units = runtime.join("systemd/user");
+        fs::create_dir_all(&units).unwrap();
+        let prefix = format!("j198-{}", uuid::Uuid::new_v4());
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let visible = fixture.0.join("etc/systemd/system");
+        fs::create_dir_all(&visible).unwrap();
+        let mut guard = UserUnits { paths: Vec::new() };
+        for (suffix, contents) in [
+            ("bare.service", "[Service]\nType=oneshot\nExecStart=true\n"),
+            (
+                "empty.service",
+                "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStartPre=/usr/bin/true\n",
+            ),
+            ("template@.service", "[Service]\nExecStart=/usr/bin/true\n"),
+        ] {
+            let name = format!("{prefix}-{suffix}");
+            let path = units.join(&name);
+            fs::write(&path, contents).unwrap();
+            guard.paths.push(path.clone());
+            std::os::unix::fs::symlink(&path, visible.join(name)).unwrap();
+        }
+        let masked = units.join(format!("{prefix}-masked.service"));
+        std::os::unix::fs::symlink("/dev/null", &masked).unwrap();
+        guard.paths.push(masked.clone());
+        std::os::unix::fs::symlink(&masked, visible.join(masked.file_name().unwrap())).unwrap();
+        fs::write(
+            visible.join(format!("{prefix}-not-found.service")),
+            b"[Unit]\n",
+        )
+        .unwrap();
+        assert!(
+            Command::new("/usr/bin/systemctl")
+                .args(["--user", "daemon-reload"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let manager = fixture.0.join("systemctl");
+        crate::test_executable::write(
+            &manager,
+            format!(
+                "#!/bin/sh\nexport XDG_RUNTIME_DIR='{}'\nexport DBUS_SESSION_BUS_ADDRESS='unix:path={}/bus'\nexec /usr/bin/systemctl --user \"$@\"\n",
+                runtime.display(),
+                runtime.display()
+            ),
+            0o700,
+        );
+        let result = installed_services(
+            &fixture.0,
+            &manager,
+            &super::super::journal::Snapshot::default(),
+        );
+        println!("real user manager stock commands: {result:?}");
+        assert!(
+            result.is_ok(),
+            "normal user manager commands refused: {result:?}"
+        );
+    }
+
+    /// A unit's explicit PATH must take precedence over the manager's unrelated program of the same name.
+    #[test]
+    fn unit_environment_path_exposes_an_inode_alias() {
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let directory = fixture.0.join("private binaries");
+        fs::create_dir(&directory).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), directory.join("python3"))
+            .unwrap();
+        let value = format!(
+            "LoadState=loaded\nEnvironment=\"PATH={}\"\nExecStart={{ path=python3 ; argv[]=python3 server ; }}\n",
+            directory.display()
+        );
+        assert!(
+            resolved_service(OsStr::new("custom.service"), &value).is_err(),
+            "unit PATH was ignored"
+        );
     }
 }

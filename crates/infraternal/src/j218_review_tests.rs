@@ -61,7 +61,7 @@ fn j218_alias_commands_respect_word_boundaries() {
             true,
         ),
         ("/opt/infra ssh host server", true),
-        ("/opt/unrelated server --data /srv/private", true),
+        ("/opt/unrelated server --data /srv/private", false),
         ("/opt/infra-other server", true),
     ] {
         let fixture = Fixture::new();
@@ -569,6 +569,7 @@ fn j226_sigkill_retry_recovers_published_install() {
             std::time::Instant::now() < deadline,
             "activation fixture did not become ready"
         );
+        // sleep: wait for the activation helper to publish readiness, with an independent hang bound.
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let identity = fixture.0.join("var/lib/infraternal/agent/identity.json");
@@ -741,5 +742,23 @@ fn j226_failed_stop_keeps_recovery_authority() {
     assert_eq!(
         fs::read(fixture.0.join(".infraternal-up.journal")).unwrap(),
         Vec::<u8>::new()
+    );
+}
+
+/// J245: the privileged repeat of preflight runs against the real host's manager.
+/// A host with no infraternal service must not be refused because of stock units
+/// (templates, masked or not-found entries, bare command names).
+#[test]
+#[ignore = "needs a real host service manager; invoke explicitly on compute01"]
+fn j245_real_host_manager_accepts_stock_units() {
+    let result = inspect::installed_services(
+        Path::new("/"),
+        Path::new("/usr/bin/systemctl"),
+        &journal::Snapshot::default(),
+    );
+    println!("J245 real-host installed_services: {result:?}");
+    assert!(
+        result.is_ok(),
+        "stock units refused a fresh host: {result:?}"
     );
 }
