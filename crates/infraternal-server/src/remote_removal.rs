@@ -208,7 +208,8 @@ impl Removal {
     }
     #[allow(clippy::too_many_lines)] // Keep authority recheck, revocation, audit and cleanup inside one transaction.
 
-    /// Persist verified denial and wait for its durable host receipt before retirement.
+    /// Persist verified denial and return pending instead of retaining admission
+    /// until an offline host returns. Only its durable receipt completes retirement.
     async fn publish(
         &self,
         entry: Pending,
@@ -295,8 +296,9 @@ impl Removal {
         .execute(&mut *tx)
         .await?;
         if let Some(audit_id) = audit_id {
-            sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result='removed' WHERE id=? AND state='pending'")
+            sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result=? WHERE id=? AND state='pending'")
                 .bind(live)
+                .bind(if Uuid::parse_str(&entry.user).is_ok() { "revoked, cleanup pending" } else { "removed" })
                 .bind(audit_id)
                 .execute(&mut *tx)
                 .await?;
@@ -325,20 +327,27 @@ impl Removal {
         }
         #[cfg(not(feature = "ssh"))]
         let _ = (&self.trust, lookup);
-        self.store
-            .commit_revocation(tx, entry.host, live)
+        let pending = self
+            .store
+            .commit_revocation_intent(tx, entry.host, live)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         let installation = installed_by_setup.then(|| entry.host.simple().to_string());
-        let (message, manual) = outcome(
+        let (mut message, manual) = outcome(
             cleanup,
             &mode,
             display_name(&name),
             &left,
             installation.as_deref(),
         );
+        if pending {
+            message = format!(
+                "{}: revoked, cleanup pending. Its infraternal agent must reconnect to confirm durable revocation.",
+                display_name(&name)
+            );
+        }
         Ok(
-            json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual}),
+            json!({"host_id":entry.host,"state":if pending { "pending" } else { "removed" },"host_cleanup":cleanup,"message":message,"manual":manual}),
         )
     }
 }

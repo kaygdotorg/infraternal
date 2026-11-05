@@ -49,7 +49,11 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         Ok(value) => {
             let (state, message, next) = if finish {
                 (
-                    CommandState::Ready,
+                    if value["state"] == "pending" {
+                        CommandState::Pending
+                    } else {
+                        CommandState::Ready
+                    },
                     value["message"]
                         .as_str()
                         .unwrap_or("The host was removed.")

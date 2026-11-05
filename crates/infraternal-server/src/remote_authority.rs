@@ -210,15 +210,33 @@ impl EnrollmentStore {
         self.commit_revocation(transaction, host, now).await
     }
 
-    /// Commit the authorized denial intent before delivery, then backpressure
-    /// the caller until a durable host receipt finalizes retirement. Cancellation
-    /// abandons only the waiter; restart recovers the committed outbox row.
+    /// Preserve the synchronous revocation contract for callers that require a
+    /// durable host receipt. Only this request's watch is retained while offline.
     pub(crate) async fn commit_revocation(
+        &self,
+        transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
+        host: Uuid,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if self
+            .commit_revocation_intent(transaction, host, now)
+            .await?
+        {
+            self.wait_login_cleanup(host).await?;
+            self.1.tombstoned(host);
+        }
+        Ok(())
+    }
+
+    /// Commit and publish denial without waiting for an offline host. Removal
+    /// admission ends here: the durable outbox owns delivery, not a task or slot.
+    /// Returns true when a host receipt is required before retirement completes.
+    pub(crate) async fn commit_revocation_intent(
         &self,
         mut transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
         host: Uuid,
         now: i64,
-    ) -> Result<(), EnrollmentError> {
+    ) -> Result<bool, EnrollmentError> {
         let owner: Option<String> =
             sqlx::query_scalar("SELECT owner_id FROM remote_hosts WHERE id=?")
                 .bind(host.as_bytes().as_slice())
@@ -267,12 +285,7 @@ impl EnrollmentStore {
         .map_err(|_| {
             EnrollmentError::Storage(sqlx::Error::Protocol("revocation finalizer failed".into()))
         })??;
-        if person.is_some() {
-            self.wait_login_cleanup(host).await?;
-            // Repeated requests may cut an already confirmed host again.
-            self.1.tombstoned(host);
-        }
-        Ok(())
+        Ok(person.is_some())
     }
 
     /// Subscribe before reading so a concurrent durable receipt cannot be lost.

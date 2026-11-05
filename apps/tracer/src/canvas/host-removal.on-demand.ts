@@ -8,17 +8,20 @@ import { isCanonicalUuid } from "../identifiers";
 interface RemovalStart { review: string; action: { host_id: string; host: string; uninstall: boolean } }
 /** `manual` carries the command that removes a leftover install, when the host could not uninstall itself. */
 interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null }
+/** Send a bounded removal step with the browser session and same-origin checks. */
 async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`/remote/hosts/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error("The host could not be removed. Sign in again, then try again.");
   return await response.json() as T;
 }
+/** Confirm a host removal and keep pending cleanup visible until server delivery. */
 export async function createHostRemoval(core: CoreScreen, removed: (id: string) => void) {
   let label: string | undefined;
   try { const action = await post<{ id: string; label: string }>("actions", {}); if (action.id === "remote.host.remove" && typeof action.label === "string") label = action.label; } catch { /* The optional remote component or owner authority is unavailable. */ }
   let busy = false;
   return {
     label: () => label,
+    /** Review and persist denial; pending acceptance leaves the host in inventory. */
     remove(id: string, name: string, anchor: HTMLElement): void {
       if (!label || !isCanonicalUuid(id) || busy) return;
       mountConfirmTip(anchor, { label: `${label}: ${name}`, title: `Remove ${name}?`, effect: "Revoke its access, forget its SSH key and uninstall the infraternal agent.", named: true, confirmLabel: label, cancelLabel: "Keep host", onConfirm: () => {
@@ -28,7 +31,11 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
           // The dry run must name the host the person confirmed; its review removes exactly that one.
           if (start.action.host_id !== id || start.action.uninstall !== true || typeof start.review !== "string") throw new Error("Host confirmation changed. Try again.");
           const result = await post<Result>("remove/finish", { host_id: id, review: start.review });
-          if (result.state !== "removed" || result.host_id !== id) throw new Error("Host removal could not be confirmed.");
+          if (!["removed", "pending"].includes(result.state) || result.host_id !== id) throw new Error("Host removal could not be confirmed.");
+          if (result.state === "pending") {
+            core.toast.show({ message: result.message, duration: 5000 });
+            return;
+          }
           removed(id);
           const manual = result.manual;
           if (typeof manual === "string" && manual) {

@@ -34,40 +34,12 @@ async fn live(f: &Fixture, host: Uuid) -> bool {
         .unwrap()
 }
 
-/// Supply a durable receipt only after observing the committed cleanup obligation.
-async fn receipt(store: &crate::enrollment::EnrollmentStore, f: &Fixture, host: Uuid) {
-    loop {
-        let pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND confirmed=0)",
-        )
-        .bind(host.as_bytes().as_slice())
-        .fetch_one(&f.auth.pool)
-        .await
-        .unwrap();
-        if pending {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    store
-        .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
-        .await
-        .unwrap();
-}
-
-/// Offline removal completes only after its durable host receipt.
+/// Offline removal records denial and reports pending; a durable receipt retires it.
 #[tokio::test]
 async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
     let f = fixture().await;
     let host = owned_host(&f).await;
-    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
-    let service = crate::remote_removal::Removal::new(
-        f.auth.clone(),
-        f.auth.pool.clone(),
-        store.clone(),
-        crate::remote_runtime::RemoteHosts::default(),
-        PathBuf::new(),
-    );
+    let service = removal(&f);
     let start = service.start(&f.session, host, true, NOW).await.unwrap();
     // The dry run says what will happen and changes nothing.
     assert_eq!(start["action"]["host_id"], json!(host));
@@ -83,17 +55,16 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
             .is_err(),
         "a review is bound to its host"
     );
-    let (result, ()) = tokio::join!(
-        service.finish_host(&f.session, host, review, NOW),
-        receipt(&store, &f, host)
-    );
-    let result = result.unwrap();
+    let result = service
+        .finish_host(&f.session, host, review, NOW)
+        .await
+        .unwrap();
     assert_eq!(result["host_cleanup"], "unreachable");
     // #235: an uninstall that did not happen is said plainly, by name, with the
     // commands that remove the leftover rootful install on the machine itself.
     let message = result["message"].as_str().unwrap();
-    assert_eq!(result["state"], "removed");
-    assert!(message.contains("was removed here, but infraternal is still installed on it"));
+    assert_eq!(result["state"], "pending");
+    assert!(message.contains("revoked, cleanup pending"));
     // The commands run the installed binary's own ownership-checked uninstall
     // for exactly this host; they delete nothing by name.
     assert_eq!(
@@ -110,6 +81,14 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
             .is_err(),
         "a review is single use"
     );
+    assert!(
+        live(&f, host).await,
+        "pending denial is not a durable receipt"
+    );
+    crate::enrollment::EnrollmentStore::new(f.auth.pool.clone())
+        .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
+        .await
+        .unwrap();
     assert!(!live(&f, host).await);
     let coordinates: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap")
         .fetch_one(&f.auth.pool)
@@ -135,29 +114,28 @@ async fn browser_removal_runs_inside_the_admin_window_without_its_own_passkey() 
     // Late in the window, with no new tap: the dry run and the removal both run.
     let f = fixture().await;
     let host = owned_host(&f).await;
-    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
-    let service = crate::remote_removal::Removal::new(
-        f.auth.clone(),
-        f.auth.pool.clone(),
-        store.clone(),
-        crate::remote_runtime::RemoteHosts::default(),
-        PathBuf::new(),
-    );
+    let service = removal(&f);
     let start = service
         .start(&f.session, host, true, NOW + window - 60)
         .await
         .unwrap();
-    let (result, ()) = tokio::join!(
-        service.finish_host(
+    service
+        .finish_host(
             &f.session,
             host,
             str_field(&start, "review"),
-            NOW + window - 1
-        ),
-        receipt(&store, &f, host)
-    );
-    result.expect("inside the admin window a reviewed removal needs no passkey");
-    assert!(!live(&f, host).await);
+            NOW + window - 1,
+        )
+        .await
+        .expect("inside the admin window a reviewed removal needs no passkey");
+    assert!(live(&f, host).await);
+    let pending: bool =
+        sqlx::query_scalar("SELECT confirmed=0 FROM remote_login_cleanup WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert!(pending);
 
     // After the window, the dry run is refused.
     let host = owned_host(&f).await;
@@ -252,11 +230,10 @@ async fn a_hosts_write_key_dry_runs_then_removes_without_a_tap() {
     let audit_id: i64 = sqlx::query_scalar("INSERT INTO api_action_audit(key_id,person_id,action_id,target_id,state,occurred_at) VALUES(?,?,'remote.host.remove',?,'pending',?) RETURNING id")
         .bind(&key_hash).bind(&f.user).bind(host.to_string()).bind(now)
         .fetch_one(&f.auth.pool).await.unwrap();
-    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
     let service = crate::remote_removal::Removal::new(
         f.auth.clone(),
         f.auth.pool.clone(),
-        store.clone(),
+        crate::enrollment::EnrollmentStore::new(f.auth.pool.clone()),
         crate::remote_runtime::RemoteHosts::default(),
         PathBuf::new(),
     );
@@ -277,12 +254,16 @@ async fn a_hosts_write_key_dry_runs_then_removes_without_a_tap() {
         "a dry run changes nothing"
     );
 
-    let (result, ()) = tokio::join!(
-        service.remove_with_key(&key_hash, &f.user, host, audit_id, now),
-        receipt(&store, &f, host)
-    );
-    let result = result.unwrap();
-    assert_eq!(result["state"], "removed");
+    let result = service
+        .remove_with_key(&key_hash, &f.user, host, audit_id, now)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "pending");
+    assert!(!revoked(f.auth.pool.clone()).await);
+    crate::enrollment::EnrollmentStore::new(f.auth.pool.clone())
+        .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
+        .await
+        .unwrap();
     assert!(revoked(f.auth.pool.clone()).await);
     let audit: (String, Option<String>) =
         sqlx::query_as("SELECT state,result FROM api_action_audit WHERE id=?")
@@ -290,7 +271,13 @@ async fn a_hosts_write_key_dry_runs_then_removes_without_a_tap() {
             .fetch_one(&f.auth.pool)
             .await
             .unwrap();
-    assert_eq!(audit, ("complete".to_owned(), Some("removed".to_owned())));
+    assert_eq!(
+        audit,
+        (
+            "complete".to_owned(),
+            Some("revoked, cleanup pending".to_owned())
+        )
+    );
     assert!(
         service
             .remove_with_key(&key_hash, &f.user, host, audit_id, now)
@@ -359,4 +346,50 @@ async fn key_removal_refuses_revoked_keys_foreign_hosts_and_missing_scope() {
         .await
         .unwrap();
     assert!(still);
+}
+
+/// Eight offline hosts must not retain admission after their durable denial rows
+/// commit. Observe those commits, then require the ninth request to be recorded.
+#[tokio::test]
+async fn offline_removals_do_not_block_other_revocations() {
+    let f = fixture().await;
+    let service = removal(&f);
+    let mut requests = Vec::new();
+    for index in 0..9 {
+        let host = owned_host(&f).await;
+        let start = service.start(&f.session, host, false, NOW).await.unwrap();
+        let review = str_field(&start, "review").to_owned();
+        let service = service.clone();
+        let session = f.session.clone();
+        let mut request =
+            tokio::spawn(async move { service.finish_host(&session, host, &review, NOW).await });
+        tokio::select! {
+            biased;
+            result = &mut request => {
+                let result = result.unwrap().expect("offline removal must record denial");
+                assert_eq!(result["state"], "pending");
+            }
+            () = async {
+                loop {
+                    let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND confirmed=0)")
+                        .bind(host.as_bytes().as_slice()).fetch_one(&f.auth.pool).await.unwrap();
+                    if pending { break; }
+                    tokio::task::yield_now().await;
+                }
+            } => { requests.push(request); }
+        }
+        let committed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND confirmed=0)",
+        )
+        .bind(host.as_bytes().as_slice())
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+        assert!(committed, "removal {index} was not recorded");
+    }
+    for request in requests {
+        let result = request.await.unwrap().unwrap();
+        assert_eq!(result["state"], "pending");
+    }
+    eprintln!("J196 offline removal flood: nine distinct denials committed, cleanup pending");
 }
