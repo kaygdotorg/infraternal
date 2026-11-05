@@ -703,6 +703,7 @@ impl<C: Channel> Drop for RetireChannel<'_, C> {
     }
 }
 
+/// Serve one channel: dispatch its frames and write their replies until either side ends it.
 async fn run_channel<const SESSION_ONLY: bool>(
     socket: &impl Channel,
     state: PathBuf,
@@ -1111,6 +1112,7 @@ pub async fn run_negotiated_bound_terminal(
     .await
 }
 
+/// Serve a channel bound to one terminal session, as a remote terminal attach uses.
 #[cfg(feature = "remote")]
 async fn run_bound_terminal_mode(
     channel: &impl Channel,

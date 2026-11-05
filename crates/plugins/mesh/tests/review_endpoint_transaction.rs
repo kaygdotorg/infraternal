@@ -45,6 +45,7 @@ fn endpoint(key: PublicKey) -> SocketAddr {
     panic!("public peer endpoint absent");
 }
 
+/// A refused endpoint save keeps the kernel's endpoint.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
 fn refused_endpoint_persistence_preserves_kernel_endpoint() {

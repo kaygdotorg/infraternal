@@ -114,6 +114,7 @@ fn concurrent_workers_serialize_revision_check_and_publication() {
     }
 }
 
+/// Persisting an accepted snapshot with 1000 peers stays within budget.
 #[test]
 #[ignore = "Run release on the locked performance VM; public-state persistence at 1000 peers."]
 fn accepted_snapshot_persistence_at_1000_peers() {

@@ -14,6 +14,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
 };
 
+/// A configuration with one peer for access update tests.
 fn config() -> Config {
     Config {
         local_key: Some(PublicKey([1; 32])),

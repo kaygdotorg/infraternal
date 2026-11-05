@@ -10,6 +10,7 @@ use infraternal_plugin_mesh::{
 };
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Command};
 
+/// A restart retires host routes of peers that are gone.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
 fn restart_retires_orphan_peer_host_routes() {

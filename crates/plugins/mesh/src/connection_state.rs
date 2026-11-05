@@ -218,6 +218,7 @@ pub fn retire(
     })
 }
 
+/// Connection-state checks for proxied flows and their routes.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -271,6 +272,7 @@ mod tests {
         assert!(!permits(&TrafficPolicy::None, tuple));
     }
 
+    /// A peer granted a port keeps its proxied flows while it is a proxy source.
     #[test]
     fn a_port_granted_peer_keeps_its_proxied_flows_while_it_is_a_proxy_source() {
         let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];
@@ -322,6 +324,7 @@ mod tests {
         assert!(!proxied(&peer, tuple, &MeshProxyIngress::default()));
     }
 
+    /// Losing any proxied route retires that source's flows to the pair.
     #[test]
     fn losing_any_proxied_route_retires_that_sources_flows_to_the_pair() {
         let selected = infraternal_mesh::proxy_ports::MIXED_LISTENER_PAIRS[1];

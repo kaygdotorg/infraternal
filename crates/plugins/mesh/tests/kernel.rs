@@ -11,6 +11,7 @@ use std::{
     process::Command,
     time::Instant,
 };
+/// Retiring 1000 peers at once keeps the node's identity and the remaining routes.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
@@ -59,6 +60,7 @@ fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
     );
 }
+/// A real kernel device accepts a configuration applied in chunks.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn real_kernel_chunked_peers() {
@@ -172,6 +174,7 @@ fn policy_table_route_conflict_is_refused() {
     Device::delete().unwrap();
 }
 
+/// Retired host routes can be replayed.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn retired_host_routes_can_be_replayed() {

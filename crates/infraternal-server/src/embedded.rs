@@ -710,6 +710,7 @@ impl EmbeddedAgent {
     }
 }
 
+/// A request to the embedded agent actor, answered on its own reply channel.
 enum Command {
     #[cfg(all(feature = "remote", feature = "ssh"))]
     InstalledRoute(oneshot::Sender<bool>),
@@ -1911,7 +1912,7 @@ fn retain_owned_input(
     Some(true)
 }
 
-// The command variants mutate one shared route table in one bounded actor turn.
+/// The command variants mutate one shared route table in one bounded actor turn.
 async fn process_command(
     command: Command,
     connection: &mut AgentConnection,

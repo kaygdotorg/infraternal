@@ -132,6 +132,7 @@ fn restart_preserves_unrecorded_direct_host_routes() {
         "restart claimed routes outside its peer inventory"
     );
 }
+/// A refused inventory save during recovery retires no kernel peer or route.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
 fn refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes() {

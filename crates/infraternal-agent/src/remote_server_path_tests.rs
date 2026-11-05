@@ -594,6 +594,7 @@ fn certificate_fingerprint(certificate: &openssl::x509::X509) -> [u8; 32] {
         .unwrap()
 }
 
+/// Run the server-path supervisor for `identity` on a background task.
 fn supervise(
     identity: RemoteIdentity,
     registry: &crate::plugin_control::Registry,

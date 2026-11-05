@@ -955,6 +955,7 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
     Ok((secret, PublicKey(*public.as_bytes())))
 }
 
+/// `GotaTun` engine selection and peer conversion checks.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1112,6 +1113,7 @@ mod tests {
         stopped.recv().expect("stop reply");
     }
 
+    /// A configuration with one peer at `endpoint`.
     fn one_peer_config(endpoint: Option<SocketAddr>) -> Config {
         Config {
             local_key: Some(PublicKey([1; 32])),

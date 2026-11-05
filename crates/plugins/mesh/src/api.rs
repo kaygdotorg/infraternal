@@ -530,6 +530,7 @@ impl MeshService {
         )
     }
 
+    /// Build the service around an already opened store, with a fresh change broadcast.
     fn with_store(pool: SqlitePool, store: crate::store::Store) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
         Self {
@@ -739,7 +740,7 @@ impl MeshService {
             .await
     }
 
-    // Keep one parsed dispatch inside the entry point's diagnostic scope.
+    /// Keep one parsed dispatch inside the entry point's diagnostic scope.
     async fn execute_request(
         &self,
         actor: &str,

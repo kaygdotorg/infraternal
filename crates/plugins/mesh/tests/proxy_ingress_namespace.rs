@@ -65,6 +65,7 @@ fn tcp(numbers: &[u16]) -> TrafficPolicy {
     )
 }
 
+/// A test peer `id` with the given inbound policy.
 fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
     (
         NodeId(u64::from(id)),

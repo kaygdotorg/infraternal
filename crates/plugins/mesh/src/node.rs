@@ -365,9 +365,9 @@ impl Node {
         Self::restore_requesting(path, Some(engine), EngineSource::Code)
     }
 
-    // Only the machine's explicit choice selects the engine (D346). The recorded engine says
-    // which link this node created, for the ownership proofs; a node that recorded kernel
-    // because it was the default before D346 never chose it.
+    /// Only the machine's explicit choice selects the engine (D346). The recorded engine says
+    /// which link this node created, for the ownership proofs; a node that recorded kernel
+    /// because it was the default before D346 never chose it.
     fn restore_requesting(
         path: &std::path::Path,
         requested_engine: Option<EngineKind>,
@@ -1475,7 +1475,7 @@ impl Node {
             .apply_with_aliases(fence, &aliases, connections)?;
         Ok(())
     }
-    // Keep the apply/fence/rollback transaction and its failure ordering visible together.
+    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
     fn apply(&mut self, config: Config) -> io::Result<()> {
         #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
         let dns_records = crate::dns::Records::from_config(&config)?;
@@ -1911,6 +1911,7 @@ impl Retirement {
         Ok(self.left)
     }
 }
+/// Node lifecycle, retirement and rotation checks that need no kernel.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1960,6 +1961,7 @@ mod tests {
         );
     }
 
+    /// A staged snapshot cannot change the server's identity.
     #[test]
     fn server_identity_cannot_change_inside_a_staged_snapshot() {
         use crate::policy::model::{Addresses, NodeId, PublicKey};

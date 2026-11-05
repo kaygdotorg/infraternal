@@ -18,6 +18,7 @@ struct Preview {
     #[serde(default)]
     cursor: Option<crate::api::MeshCursor>,
 }
+/// Request body for changing the default policy, checked against the revision the person saw.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Set {
@@ -409,9 +410,11 @@ async fn set_default(
     Ok(json!({"default_policy":default_policy,"revision":next}))
 }
 
+/// Mesh settings parsing checks.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Settings requests are bounded and strict before they reach storage.
     #[test]
     fn settings_objects_are_bounded_and_strict_before_storage() {
         for action in [

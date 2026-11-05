@@ -271,6 +271,7 @@ pub async fn run(service: MeshService, channel: Arc<dyn NodeChannel>) {
     }
 }
 
+/// Presence tracking checks.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -298,6 +299,7 @@ mod tests {
         tracker
     }
 
+    /// A recent handshake on a direct path counts as online.
     #[test]
     fn a_recent_handshake_is_online_on_a_direct_path() {
         let mut rows = Vec::new();
@@ -408,6 +410,7 @@ mod tests {
         assert!(tracker.live(None, after_expiry).is_empty());
     }
 
+    /// A reading expires once the node stops answering.
     #[test]
     fn a_reading_expires_when_the_node_stops_answering() {
         let mut tracker = tracked(vec![row(3, NOW - 10, 100, 0)]);
@@ -508,6 +511,7 @@ mod tests {
         }
     }
 
+    /// The server and a peer passing traffic count as online.
     #[tokio::test]
     async fn the_server_and_a_peer_passing_traffic_are_online() {
         let node = ServerNode {
@@ -523,6 +527,7 @@ mod tests {
         );
     }
 
+    /// A mesh that is off shows nobody online.
     #[tokio::test]
     async fn a_mesh_that_is_off_shows_nobody_online() {
         let node = ServerNode {
@@ -535,6 +540,7 @@ mod tests {
         assert!(tracker.live(Some(NodeId(1)), NOW).is_empty());
     }
 
+    /// An unreadable node counts as no reading.
     #[tokio::test]
     async fn an_unreadable_node_is_no_reading() {
         let node = ServerNode {

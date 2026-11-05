@@ -816,6 +816,7 @@ impl infraternal_plugin_api::streams::WireProvider for CapabilityProbe {
         Box::pin(async { Err(()) })
     }
 }
+/// A cancelled connection withdraws the registry capabilities it retained.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn cancelled_connection_withdraws_retained_registry_capabilities() {

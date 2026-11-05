@@ -198,6 +198,7 @@ enum Command {
     Stats,
 }
 
+/// Run one fixture node: read its configuration, start the mesh and follow commands from stdin.
 async fn node() {
     let mut input = lines();
     let config: NodeConfig = serde_json::from_str(&input.recv().await.unwrap()).unwrap();

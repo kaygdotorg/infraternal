@@ -54,6 +54,7 @@ pub use infraternal_plugin_mesh::api as mesh_api;
 mod api_actions;
 #[cfg(feature = "remote")]
 pub mod enrollment;
+/// Server-scheduled host identity key rotation (#285).
 #[cfg(feature = "remote")]
 mod identity_rotation;
 #[cfg(all(test, feature = "mesh"))]

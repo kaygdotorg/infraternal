@@ -41,6 +41,7 @@ where
     }
 }
 
+/// Mesh plugin discovery, disable and restart keep the control socket working.
 #[tokio::test(start_paused = true)]
 async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     let _guard = SERIAL.lock().await;
@@ -569,6 +570,7 @@ async fn mesh_coordinator_requires_an_existing_server_role() {
         "feature construction must not initialize another server"
     );
 }
+/// The Mesh actions that need confirmation are exactly the frozen destructive set.
 #[test]
 fn mesh_destructive_metadata_matches_frozen_confirmation_requirements() {
     let mut destructive: Vec<_> = infraternal_plugin_mesh::descriptor::ACTIONS

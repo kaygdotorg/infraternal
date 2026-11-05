@@ -32,6 +32,7 @@ impl Default for State {
         }
     }
 }
+/// This node's durable local state: the public snapshot, routes, interface key, engine, private key and rotation journal.
 pub struct Store {
     path: PathBuf,
     route_path: PathBuf,

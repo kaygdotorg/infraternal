@@ -15,6 +15,7 @@ use infraternal_plugin_mesh::{
 };
 use std::{collections::BTreeMap, process::Command};
 
+/// Bring up a node with a policy snapshot, with or without the fallback policy.
 fn install(fallback: bool) -> (Node, Config) {
     assert!(
         Command::new("ip")

@@ -85,6 +85,7 @@ pub const ACTIONS: &[ActionDef] = &[
         ],
     ),
 ];
+/// The control actions an infraternal agent registers for its Mesh node.
 const CONTROL_ACTIONS: &[ActionDef] = &[
     action(
         "mesh.identity",
@@ -468,6 +469,7 @@ fn rotation_response(node: &mut Node, request: Request) -> Result<serde_json::Va
         _ => return Err(PluginError::Rejected),
     })
 }
+/// The identity reply, offering each optional capability only when both the node and the requester support it.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
     requested_compact_access: bool,
@@ -727,13 +729,14 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
     }
 }
 
+/// Node action checks that need a Linux kernel or network namespace.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
-    // Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
+    /// Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
     fn applied_server_route_and_observed_link_survive_only_explicit_component_up() {
         use crate::{
             dataplane::{DefaultPolicy, Peer, PeerPolicy},
@@ -851,6 +854,7 @@ mod tests {
         plugin.call("mesh.down", b"{}").expect("cleanup");
     }
 
+    /// `mesh.peers` reads its counters from the `GotaTun` engine when that is the selected engine.
     #[test]
     #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
     fn mesh_peers_action_reads_counters_from_the_selected_gotatun_engine() {
@@ -1074,8 +1078,10 @@ mod tests {
     }
 }
 
+/// The identity reply keeps its legacy shape unless a capability is requested.
 #[cfg(all(test, target_os = "linux"))]
 mod identity_upgrade_tests {
+    /// An ordinary identity request gets the reply older coordinators read.
     #[test]
     fn ordinary_identity_reply_retains_the_legacy_shape() {
         let identity = crate::dataplane::Identity {
@@ -1119,6 +1125,7 @@ mod identity_upgrade_tests {
 mod peer_page_tests {
     #![allow(clippy::expect_used)]
     use super::{Counters, Cursor, peer_page};
+    /// A configuration with `peers` peers, for paging tests.
     fn peer_config(peers: u64) -> crate::dataplane::Config {
         use crate::{
             dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},

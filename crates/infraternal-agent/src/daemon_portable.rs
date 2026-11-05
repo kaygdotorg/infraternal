@@ -81,6 +81,7 @@ pub async fn run_bound_terminal(channel: &impl Channel, _: Option<PathBuf>) -> i
     writer(channel, rx, None, false, false, false, 0).await
 }
 
+/// Dispatch the portable daemon's frames to the plugin registry and reply on `channel`.
 async fn dispatch(
     channel: &impl Channel,
     registry: crate::plugin_control::Registry,

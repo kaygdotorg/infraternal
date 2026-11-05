@@ -793,7 +793,7 @@ async fn available(
     }
 }
 
-// Keep pinned-session retirement and reconnect accounting in the same owning scope.
+/// Keep pinned-session retirement and reconnect accounting in the same owning scope.
 pub(super) async fn run(
     identity: &RemoteIdentity,
     state: PathBuf,
