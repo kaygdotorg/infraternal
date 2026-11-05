@@ -197,6 +197,26 @@ enum Step {
 /// latency budget. A loaded host may answer slowly and still succeeds.
 const EXCHANGE_HANG: Duration = Duration::from_secs(30);
 
+/// Runs one `infraternal sessions` request for a local caller and returns its
+/// reply envelope. This is the infraternal agent's side of the CLI's
+/// `sessions list/new/send/read/close`.
+///
+/// - `state` is the infraternal agent's state directory (session sockets and
+///   saved names live under it).
+/// - `uid` and `pid` are the caller's kernel-authenticated user and process.
+/// - `verb` is the subcommand; `bytes` is its JSON input, validated against
+///   the verb's schema before anything touches the filesystem.
+///
+/// Authority: the caller must run inside one of its own saved sessions on this
+/// machine. Its process tree must descend from a live session shim of the same
+/// account (code 3 otherwise), and a target on another machine is refused
+/// (code 3). Only sessions of the caller's account are visible.
+///
+/// Bounds: discovery bounds each shim's Hello by `HANDSHAKE`; `new` launches
+/// under the launch's own progress rule; other verbs' shim exchange is
+/// bounded by the hang-only `EXCHANGE_HANG`, whose expiry replies code 5. A
+/// successful `new` replies only after its saved name is durable; a failed
+/// name save closes the new session and replies code 1.
 pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes: &[u8]) -> Reply {
     let Ok(input) = serde_json::from_slice::<Value>(bytes) else {
         return Reply::error(
