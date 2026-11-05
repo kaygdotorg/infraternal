@@ -18,6 +18,11 @@ def main():
     assert os.geteuid() != 0
     root = fixture_state('ready')
     root.mkdir(mode=0o700, parents=True)
+    # The shim ends a readiness probe 10 s after it starts. This oracle holds
+    # its probe across a launch and a revoke, which a loaded build host can
+    # stretch past that. Debug shims read this private lifetime override;
+    # ordering is still proven by the revoke reply and the probe's own output.
+    (root / 'test-readiness-lifetime-ms').write_text('60000')
     os.environ['INFRATERNAL_TEST_RTT'] = '0'
     client = None
     person = uuid.uuid4()
