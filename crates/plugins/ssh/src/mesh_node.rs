@@ -761,7 +761,13 @@ async fn supervise(
             _ = stopping.changed() => {}
         }
     }
-    stop(&mut running).await;
+    // The final release runs on this thread, not the blocking pool: the
+    // runtime may be shutting down around a pool task, and idle must not be
+    // reported before the rules are gone (measured on compute01, #221).
+    for (mut port, task) in running.drain(..) {
+        task.abort();
+        let _ = port.stop();
+    }
 }
 
 /// Reports the supervisor idle when it ends, however it ends.
