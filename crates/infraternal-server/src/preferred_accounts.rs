@@ -57,8 +57,11 @@ fn host_key(host: Option<uuid::Uuid>) -> Vec<u8> {
 ///    agent runs as that account and can open no other, so any other default
 ///    fails the host's login check on every add (#305 F-A);
 /// 3. the explicit global choice;
-/// 4. the SSH account the host was added with;
-/// 5. the infraternal username, when nothing else is known.
+/// 4. the infraternal username.
+///
+/// A rootful host keeps the infraternal username as its default even when it was
+/// added as `root@…`: its infraternal agent can open any account, and the owner
+/// does not want to land in root by default (D336).
 async fn read(
     tx: &mut Transaction<'_, Sqlite>,
     person: &str,
@@ -87,9 +90,8 @@ async fn read(
     let global_account = explicit_global.clone().unwrap_or(username.clone());
     let account = host_account
         .clone()
-        .or_else(|| added_as.clone().filter(|_| rootless))
+        .or_else(|| added_as.filter(|_| rootless))
         .or(explicit_global)
-        .or(added_as)
         .unwrap_or(username);
     Ok(Preference {
         account,

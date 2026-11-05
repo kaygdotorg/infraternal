@@ -302,9 +302,9 @@ async fn a_rootless_host_with_no_preference_logs_in_as_the_account_it_was_added_
             .unwrap(),
         "kayg"
     );
-    // A rootful host honours the explicit global choice; without one it also
-    // defaults to the account it was added with.
-    let rootful = added_host(&pool, "alice", "rootful", "admin@db.example:2222").await;
+    // A rootful host honours the explicit global choice; without one it keeps the
+    // infraternal username, even when it was added as root (D336).
+    let rootful = added_host(&pool, "alice", "rootful", "root@db.example:2222").await;
     assert_eq!(
         resolve(&pool, "alice", "alice-token", Some(rootful))
             .await
@@ -316,7 +316,8 @@ async fn a_rootless_host_with_no_preference_logs_in_as_the_account_it_was_added_
         resolve(&pool, "alice", "alice-token", Some(rootful))
             .await
             .unwrap(),
-        "admin"
+        "K Gopal Krishna",
+        "a rootful host must not default to the account it was added with"
     );
     // An explicit per-host choice always wins; with no host at all the infraternal
     // username stays the fallback.
