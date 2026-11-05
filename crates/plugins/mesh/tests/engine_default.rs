@@ -9,6 +9,7 @@ use infraternal_plugin_mesh::{
 };
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
+/// A fresh, private (0700) state directory named for this test and process.
 fn private_state(name: &str) -> std::path::PathBuf {
     let state = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&state);
@@ -17,6 +18,7 @@ fn private_state(name: &str) -> std::path::PathBuf {
     state
 }
 
+/// Delete `infraternal0` in this namespace, whatever holds the name; a missing link is fine.
 fn remove_link() {
     let _ = Command::new("ip").args(["link", "del", INTERFACE]).status();
 }
@@ -32,6 +34,7 @@ fn running_engine() -> Option<&'static str> {
     }
 }
 
+/// Fail fast unless the machine-level engine choice is unset, which these tests rely on.
 fn no_choice_in_environment() {
     assert!(
         std::env::var_os("INFRATERNAL_MESH_ENGINE").is_none(),
@@ -39,6 +42,7 @@ fn no_choice_in_environment() {
     );
 }
 
+/// D346: a node with no engine choice runs `GotaTun`.
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
 fn a_new_node_runs_gotatun_by_default() {
@@ -56,6 +60,7 @@ fn a_new_node_runs_gotatun_by_default() {
     assert_eq!(result.unwrap(), Some("gotatun"));
 }
 
+/// D346: an explicit kernel choice holds across a restart and keeps the same key.
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
 fn kernel_stays_an_explicit_opt_out_across_restarts() {
@@ -100,6 +105,7 @@ fn a_node_that_never_chose_moves_to_gotatun_and_keeps_its_key() {
     assert_eq!(result.unwrap(), (Some("gotatun"), true));
 }
 
+/// Set in the child process of the code-choice precedence test.
 const PIN_CHILD: &str = "INFRATERNAL_ENGINE_PIN_CHILD";
 
 /// Child half, run with `INFRATERNAL_MESH_ENGINE=gotatun`: restore with kernel chosen in code.
@@ -153,6 +159,7 @@ fn an_engine_chosen_in_code_wins_over_the_environment() {
     );
 }
 
+/// Set in the child process of the environment-scope test.
 const DEFAULT_PATH_CHILD: &str = "INFRATERNAL_ENGINE_DEFAULT_PATH_CHILD";
 
 /// Child half, run with `INFRATERNAL_MESH_ENGINE=kernel`: bring up a node that was not restored.

@@ -15,10 +15,12 @@ use std::{
     process::Command,
 };
 
+/// Set in the child process that tries to attach as `nobody`.
 const CHILD: &str = "INFRATERNAL_TUN_OWNER_CHILD";
 /// The conventional unprivileged user and group.
 const NOBODY: u32 = 65534;
 
+/// A fresh, private (0700) state directory named for this test and process.
 fn private_state(name: &str) -> std::path::PathBuf {
     let state = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&state);
@@ -82,6 +84,7 @@ fn an_unprivileged_user_cannot_attach_the_persisted_tun() {
     );
 }
 
+/// Run `ip` with `args` and require success.
 fn ip(args: &[&str]) {
     let status = Command::new("ip").args(args).status().unwrap();
     assert!(status.success(), "ip {args:?}");

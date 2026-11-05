@@ -14,9 +14,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// The owner marker of the racing installation, distinct from the key our tests create with.
 const FOREIGN_ALIAS: &str =
     "infraternal.mesh.v2:2222222222222222222222222222222222222222222222222222222222222222";
 
+/// Run `ip` with `args`; true when it succeeded.
 fn ip(args: &[&str]) -> bool {
     Command::new("ip").args(args).status().unwrap().success()
 }
