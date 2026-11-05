@@ -621,6 +621,76 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
     assert!(!logs.contains("seed") && !logs.contains("key_bytes") && !logs.contains("key_length"));
 }
 
+/// C source of the closed-stdin probe: it exits 0 only when its standard input
+/// is `/dev/null`, observed before any language runtime could repair it.
+const STDIN_PROBE_SOURCE: &str = r#"/* Tests null stdin at the actual exec boundary, before runtime repair [217], #154. */
+#include <sys/stat.h>
+#include <unistd.h>
+int main(void) {
+    struct stat input, expected;
+    return fstat(STDIN_FILENO, &input) != 0 || stat("/dev/null", &expected) != 0
+        || input.st_dev != expected.st_dev || input.st_ino != expected.st_ino;
+}
+"#;
+
+/// Returns the compiled, stripped closed-stdin probe, built once per test
+/// process and cached beside the stripped test image.
+///
+/// The test used to run `cc` and `strip` in each of its two stages. On a busy
+/// gate disk a single compile of these ten lines took more than 60 s (#355).
+/// The cache key is a hash of the source, so editing the probe rebuilds it.
+/// Each stage still signs its own private copy of these bytes.
+fn stdin_probe_image() -> PathBuf {
+    static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let cache = crate::restart_binary::fixture::scratch_root().join("restart-test-images");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&cache)
+        .unwrap();
+    let digest = openssl::sha::sha256(STDIN_PROBE_SOURCE.as_bytes());
+    let key = u64::from_be_bytes(digest[..8].try_into().unwrap());
+    let image = cache.join(format!("stdin-probe-{key:016x}"));
+    let _building = BUILDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if image.exists() {
+        return image;
+    }
+    let work = cache.join(format!(".stdin-probe-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&work)
+        .unwrap();
+    let source = work.join("stdin-probe.c");
+    let built = work.join("stdin-probe");
+    std::fs::write(&source, STDIN_PROBE_SOURCE).unwrap();
+    let compiled = std::process::Command::new("cc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&built)
+        .env("TMPDIR", &work)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let compiled = bounded_output(compiled, HANG_BOUND, "native stdin probe compiler");
+    assert!(
+        compiled.status.success(),
+        "native stdin probe compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    strip_all(&built);
+    // The inherited shared umask may make compiler output group-writable.
+    std::fs::set_permissions(&built, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Publish by hard link so no reader ever sees a partial image.
+    std::fs::hard_link(&built, &image).unwrap();
+    std::fs::remove_dir_all(&work).unwrap();
+    image
+}
+
 #[test]
 fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
     const NAME: &str =
@@ -643,46 +713,17 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
         );
     }
     let mut failures = Vec::new();
-    // Each wait below has its own hang guard. One budget shared across both
-    // stages (two compiles, strips and child runs) was a wall-clock bound on
-    // the whole test, and a busy disk exhausted it before the second child
-    // could start (#355).
+    // Each child run has its own hang guard. One budget shared across both
+    // stages was a wall-clock bound on the whole test, and a busy disk
+    // exhausted it before the second child could start (#355). The probe is
+    // compiled once per test process (`stdin_probe_image`).
     for stage in ["before", "after"] {
         let directory = Directory::new();
         let target = directory.0.join("cold-exec-successor");
         // A native probe observes inherited descriptors before the Rust runtime
         // can repair closed standard input and mask the exec boundary failure.
-        let source = directory.0.join("stdin-probe.c");
-        std::fs::write(&source, r#"/* Tests null stdin at the actual exec boundary, before runtime repair [217], #154. */
-#include <sys/stat.h>
-#include <unistd.h>
-int main(void) {
-    struct stat input, expected;
-    return fstat(STDIN_FILENO, &input) != 0 || stat("/dev/null", &expected) != 0
-        || input.st_dev != expected.st_dev || input.st_ino != expected.st_ino;
-}
-"#).unwrap();
-        let compiled = std::process::Command::new("cc")
-            .arg(&source)
-            .arg("-o")
-            .arg(&target)
-            .env("TMPDIR", &directory.0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let compiled = bounded_output(compiled, HANG_BOUND, "native stdin probe compiler");
-        assert!(
-            compiled.status.success(),
-            "native stdin probe compile failed: {}",
-            String::from_utf8_lossy(&compiled.stderr)
-        );
-        strip_all(&target);
-        // The inherited shared umask may make compiler output group-writable.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _signed = Signed::new(target.clone(), &std::fs::read(&target).unwrap());
+        let probe = std::fs::read(stdin_probe_image()).unwrap();
+        let _signed = Signed::new(target.clone(), &probe);
         let child =
             std::process::Command::new(stripped_test_image(&std::env::current_exe().unwrap()))
                 .args(["--exact", NAME, "--nocapture"])
