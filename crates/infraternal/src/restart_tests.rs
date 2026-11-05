@@ -643,7 +643,10 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
         );
     }
     let mut failures = Vec::new();
-    let deadline = std::time::Instant::now() + HANG_BOUND;
+    // Each wait below has its own hang guard. One budget shared across both
+    // stages (two compiles, strips and child runs) was a wall-clock bound on
+    // the whole test, and a busy disk exhausted it before the second child
+    // could start (#355).
     for stage in ["before", "after"] {
         let directory = Directory::new();
         let target = directory.0.join("cold-exec-successor");
@@ -670,11 +673,7 @@ int main(void) {
             .process_group(0)
             .spawn()
             .unwrap();
-        let compiled = bounded_output(
-            compiled,
-            deadline.saturating_duration_since(std::time::Instant::now()),
-            "native stdin probe compiler",
-        );
+        let compiled = bounded_output(compiled, HANG_BOUND, "native stdin probe compiler");
         assert!(
             compiled.status.success(),
             "native stdin probe compile failed: {}",
@@ -695,11 +694,7 @@ int main(void) {
                 .process_group(0)
                 .spawn()
                 .unwrap();
-        let output = bounded_output(
-            child,
-            deadline.saturating_duration_since(std::time::Instant::now()),
-            NAME,
-        );
+        let output = bounded_output(child, HANG_BOUND, NAME);
         if !output.status.success() {
             failures.push(format!(
                 "stage={stage}\n{}\n{}",
