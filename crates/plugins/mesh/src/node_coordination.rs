@@ -1175,8 +1175,8 @@ mod tests {
         let server = store.node_for_host("server").await.unwrap();
         let pool = service.pool_for_tests();
         let operation_id = "00000000-0000-4000-8000-000000000001";
-        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
-            .bind(i64::try_from(node.0).unwrap())
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
             .execute(&pool)
             .await
             .unwrap();
@@ -1230,8 +1230,8 @@ mod tests {
             .unwrap();
         let pool = service.pool_for_tests();
         let operation_id = "00000000-0000-4000-8000-000000000004";
-        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
-            .bind(i64::try_from(node.0).unwrap())
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
             .execute(&pool)
             .await
             .unwrap();
@@ -1284,8 +1284,8 @@ mod tests {
             .await
             .unwrap();
         let operation_id = "00000000-0000-4000-8000-000000000003";
-        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
-            .bind(i64::try_from(node.0).unwrap())
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
             .execute(&service.pool_for_tests())
             .await
             .unwrap();
@@ -1352,8 +1352,8 @@ mod tests {
             .unwrap();
         let pool = service.pool_for_tests();
         let operation_id = "00000000-0000-4000-8000-000000000002";
-        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
-            .bind(i64::try_from(node.0).unwrap())
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
             .execute(&pool)
             .await
             .unwrap();
@@ -1501,8 +1501,8 @@ mod tests {
         let server = store.node_for_host("server").await.unwrap();
         let pool = service.pool_for_tests();
         let operation_id = uuid::Uuid::new_v4().to_string();
-        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1 WHERE id=?")
-            .bind(i64::try_from(rotating.0).unwrap())
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
             .execute(&pool)
             .await
             .unwrap();
