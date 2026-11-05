@@ -735,8 +735,13 @@ fn j226_recovery_preserves_replaced_enrollment_inode() {
 }
 
 /// A failed stop retains durable ownership, and a later healthy manager can recover it.
+/// Keep both attempts in a private test process: sibling test forks must not
+/// inherit the UUID-rooted journal's lock and outlive the first transaction.
 #[test]
 fn j226_failed_stop_keeps_recovery_authority() {
+    if isolated_enrollment_proof("j226_failed_stop_keeps_recovery_authority") {
+        return;
+    }
     let fixture = Fixture::new();
     let manager = fixture.0.join("systemctl");
     crate::test_executable::write(
