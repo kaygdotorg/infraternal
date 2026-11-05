@@ -162,6 +162,15 @@ impl Coordinator {
         if to == self.server {
             return TrafficPolicy::All;
         }
+        self.granted(from, to)
+    }
+    /// What explicit arrows grant `from` toward `to`: the union of their
+    /// ports, `None` when no arrow matches. Unlike the installed policy this
+    /// ignores the server's control-plane exemption (D164), so services on the
+    /// server's own host can follow Access like on any other node (mesh SSH,
+    /// owner decision on #221).
+    #[must_use]
+    pub fn granted(&self, from: NodeId, to: NodeId) -> TrafficPolicy {
         let mut policy = TrafficPolicy::None;
         if let Some(grants) = self.grants.get(&(from, to)) {
             for id in grants {

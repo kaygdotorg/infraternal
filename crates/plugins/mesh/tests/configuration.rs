@@ -655,3 +655,58 @@ fn a_changed_ssh_answer_is_sent_even_when_inbound_and_outbound_are_unchanged() {
         "the peer with the changed answer is sent whole"
     );
 }
+
+/// Access decides mesh SSH toward the server's own host like toward any
+/// other node (owner, #221 Q-A (b)): the implicit reach to the server covers
+/// only the infraternal control plane. An explicit arrow decides when one
+/// exists; otherwise the default does.
+#[test]
+fn ssh_toward_the_server_follows_explicit_arrows_and_the_default() {
+    let mut coord = coordinator();
+    let port = |number| Port {
+        protocol: Protocol::Tcp,
+        number,
+    };
+    coord
+        .add_arrow(Arrow {
+            id: RuleId(1),
+            from: Endpoint::Node(NodeId(2)),
+            to: Endpoint::Node(NodeId(1)),
+            both_ways: false,
+            ports: TrafficPolicy::Ports(BTreeSet::from([port(443)])),
+        })
+        .unwrap();
+    for default in [DefaultPolicy::Allow, DefaultPolicy::Deny] {
+        let server = configuration::compile(&coord, NodeId(1), default, &BTreeMap::new()).unwrap();
+        // A 443-only arrow narrows SSH away even under an open default.
+        assert_eq!(server.peers[&NodeId(2)].access_ssh, Some(false));
+        assert!(!server.admits_ssh(&server.peers[&NodeId(2)]));
+        // No arrow: the default decides.
+        assert_eq!(
+            server.peers[&NodeId(3)].access_ssh,
+            Some(default == DefaultPolicy::Allow)
+        );
+        // The control plane is untouched either way.
+        assert!(
+            server
+                .peers
+                .values()
+                .all(|peer| peer.inbound == TrafficPolicy::All)
+        );
+        let node = configuration::compile(&coord, NodeId(3), default, &BTreeMap::new()).unwrap();
+        assert_eq!(node.peers[&NodeId(1)].outbound, TrafficPolicy::All);
+    }
+    // An explicit SSH arrow allows it under a closed default.
+    coord
+        .add_arrow(Arrow {
+            id: RuleId(2),
+            from: Endpoint::Node(NodeId(3)),
+            to: Endpoint::Node(NodeId(1)),
+            both_ways: false,
+            ports: TrafficPolicy::Ports(BTreeSet::from([port(22)])),
+        })
+        .unwrap();
+    let server =
+        configuration::compile(&coord, NodeId(1), DefaultPolicy::Deny, &BTreeMap::new()).unwrap();
+    assert_eq!(server.peers[&NodeId(3)].access_ssh, Some(true));
+}

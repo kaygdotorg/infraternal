@@ -39,6 +39,34 @@ pub fn compile(
     compile_inner(coordinator, node, default, endpoints, "internal")
 }
 
+/// An explicit grant when there is one, else the default (`fallback`).
+fn granted_or(granted: Option<&TrafficPolicy>, fallback: &TrafficPolicy) -> TrafficPolicy {
+    granted
+        .filter(|policy| **policy != TrafficPolicy::None)
+        .unwrap_or(fallback)
+        .clone()
+}
+
+/// The server's node's inbound from `other`, and mesh SSH's answer for it.
+///
+/// The server admits every member for the control plane (D164, D215), so the
+/// installed inbound is "all". Mesh SSH there follows Access like anywhere
+/// else (owner, #221): the explicit arrows toward the server decide, or the
+/// default (`fallback`) when there are none, the same rule as other nodes.
+fn server_inbound(
+    coordinator: &Coordinator,
+    server: NodeId,
+    other: NodeId,
+    fallback: &TrafficPolicy,
+) -> (TrafficPolicy, Option<bool>) {
+    let ssh = crate::policy::rules::Port {
+        protocol: crate::policy::rules::Protocol::Tcp,
+        number: 22,
+    };
+    let access = granted_or(Some(&coordinator.granted(other, server)), fallback);
+    (TrafficPolicy::All, Some(access.allows(ssh)))
+}
+
 fn compile_inner(
     coordinator: &Coordinator,
     node: NodeId,
@@ -91,23 +119,15 @@ fn compile_inner(
         let outbound = if other == checkpoint.server {
             TrafficPolicy::All
         } else {
-            granted
-                .filter(|peer| peer.outbound != TrafficPolicy::None)
-                .map_or_else(|| fallback.clone(), |peer| peer.outbound.clone())
+            granted_or(granted.map(|peer| &peer.outbound), &fallback)
         };
-        let policy_inbound = granted
-            .filter(|peer| peer.inbound != TrafficPolicy::None)
-            .map_or_else(|| fallback.clone(), |peer| peer.inbound.clone());
-        // The server's node admits every member for the control plane (D215);
-        // what Access really grants toward it still travels for mesh SSH (#221).
         let (inbound, access_ssh) = if node == checkpoint.server {
-            let ssh = crate::policy::rules::Port {
-                protocol: crate::policy::rules::Protocol::Tcp,
-                number: 22,
-            };
-            (TrafficPolicy::All, Some(policy_inbound.allows(ssh)))
+            server_inbound(coordinator, node, other, &fallback)
         } else {
-            (policy_inbound, None)
+            (
+                granted_or(granted.map(|peer| &peer.inbound), &fallback),
+                None,
+            )
         };
         #[cfg(feature = "mesh-dns-spike")]
         if outbound != TrafficPolicy::None {
