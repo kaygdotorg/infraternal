@@ -150,16 +150,39 @@ pub fn duplicate_inherited(fd: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 }
 
-/// Run one non-blocking `kevent` call (zero timeout), retrying when a signal
-/// interrupts it.
+/// How many times [`retry_interrupted`] repeats a call a signal interrupted.
+pub const INTERRUPT_RETRIES: usize = 8;
+
+/// Run `call`, repeating it while a signal interrupts it (`EINTR`), at most
+/// [`INTERRUPT_RETRIES`] times. After that the `EINTR` is returned, so a
+/// caller in an event loop goes back to its loop (and its cancellation
+/// points) instead of spinning here under a storm of signals (#328).
+/// # Errors
+/// Returns the call's error, or `EINTR` once the retries are used up.
+pub fn retry_interrupted<T>(mut call: impl FnMut() -> nix::Result<T>) -> nix::Result<T> {
+    for _ in 0..INTERRUPT_RETRIES {
+        match call() {
+            Err(nix::errno::Errno::EINTR) => {}
+            result => return result,
+        }
+    }
+    Err(nix::errno::Errno::EINTR)
+}
+
+/// Run one non-blocking `kevent` call (zero timeout), repeating it a bounded
+/// number of times when a signal interrupts it.
 ///
 /// macOS never restarts `kevent` after a signal handler runs, whatever the
 /// handler's `SA_RESTART` flag, and the infraternal agent's runtime handles
 /// SIGCHLD while it waits for a launching shim (#324). An `EINTR` from a
-/// kqueue drain must not end the agent (#328). Repeating a registration is
-/// idempotent; callers already accept `ENOENT` when deleting a filter twice.
+/// kqueue drain must not end the agent (#328). Callers that wait in an event
+/// loop treat a final `EINTR` (`io::ErrorKind::Interrupted`) as "try again":
+/// they yield to the runtime and retry without clearing readiness. Repeating
+/// a registration is idempotent; callers already accept `ENOENT` when
+/// deleting a filter twice.
 /// # Errors
-/// Returns every other `kevent` error unchanged.
+/// Returns every other `kevent` error unchanged, and `EINTR` when the
+/// interruptions outlast the retries.
 #[cfg(target_os = "macos")]
 pub fn kevent_now(
     queue: &nix::sys::event::Kqueue,
@@ -170,10 +193,50 @@ pub fn kevent_now(
         tv_sec: 0,
         tv_nsec: 0,
     };
-    loop {
-        match queue.kevent(changes, events, Some(now)) {
-            Err(nix::errno::Errno::EINTR) => {}
-            result => return result,
-        }
+    retry_interrupted(|| queue.kevent(changes, &mut *events, Some(now)))
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    //! Interrupted calls are retried a bounded number of times (#328, J215 P2).
+    use super::*;
+
+    /// A call interrupted forever must give up with `EINTR` after the bound,
+    /// not spin: run it on a thread and require an answer in time.
+    #[test]
+    fn a_permanently_interrupted_call_gives_up() {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut calls = 0;
+            let outcome = retry_interrupted(|| -> nix::Result<()> {
+                calls += 1;
+                Err(nix::errno::Errno::EINTR)
+            });
+            let _ = done.send((outcome, calls));
+        });
+        let (outcome, calls) = result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the retry loop never returned");
+        assert_eq!(outcome, Err(nix::errno::Errno::EINTR));
+        assert_eq!(calls, INTERRUPT_RETRIES);
+    }
+
+    /// A transient interruption is absorbed; other errors pass straight out.
+    #[test]
+    fn transient_interruptions_are_retried_and_other_errors_returned() {
+        let mut calls = 0;
+        let outcome = retry_interrupted(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(nix::errno::Errno::EINTR)
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(outcome, Ok(3));
+        assert_eq!(
+            retry_interrupted(|| -> nix::Result<()> { Err(nix::errno::Errno::EBADF) }),
+            Err(nix::errno::Errno::EBADF)
+        );
     }
 }

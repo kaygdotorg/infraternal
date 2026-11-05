@@ -157,7 +157,7 @@ impl ProcessExits {
         };
         loop {
             let mut ready = queue.readable().await?;
-            if let Ok(result) = ready.try_io(|fd| {
+            match ready.try_io(|fd| {
                 let mut events = [event(0, EvFlags::empty(), 0); 32];
                 let count = infraternal_shim::readiness::kevent_now(fd, &[], &mut events)?;
                 if count == 0 {
@@ -165,7 +165,13 @@ impl ProcessExits {
                 }
                 Ok(self.matching_ids(&events[..count]))
             }) {
-                return result;
+                // Signals outlasted the bounded retries: yield to the runtime
+                // and retry with readiness kept, never spin or fail (#328).
+                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                    tokio::task::yield_now().await;
+                }
+                Ok(result) => return result,
+                Err(_would_block) => {}
             }
         }
     }

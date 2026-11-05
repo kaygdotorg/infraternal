@@ -638,7 +638,7 @@ impl DirectoryEvents {
         use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent};
         loop {
             let mut ready = self.queue.readable().await?;
-            if let Ok(result) = ready.try_io(|queue| {
+            match ready.try_io(|queue| {
                 let mut events = [KEvent::new(
                     0,
                     EventFilter::EVFILT_VNODE,
@@ -652,7 +652,13 @@ impl DirectoryEvents {
                     _ => Ok(()),
                 }
             }) {
-                return result;
+                // Signals outlasted the bounded retries: yield to the runtime
+                // and retry with readiness kept, never spin or fail (#328).
+                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
+                    tokio::task::yield_now().await;
+                }
+                Ok(result) => return result,
+                Err(_would_block) => {}
             }
         }
     }
