@@ -90,6 +90,45 @@ fn fallback_never_claims_an_os_the_machine_did_not_report() {
     }
 }
 
+/// #353: every nightly fuzz input broke idempotence, `machine_name(name) == Some(name)` for any name it returns.
+///
+/// Two causes: a bare `0x` counted as a hex number (the C resolver rejects it, so `0x` is a valid name), and a
+/// first label spelled as a hex number (`0x40`) passed the digits-only label check although it is an address on
+/// its own. The inputs are the exact fuzz bytes from the issue.
+#[test]
+fn fuzz_inputs_from_353_are_idempotent() {
+    for (input, expected) in [
+        (&b"0X.A-1"[..], Some("0x")),
+        (b"0X40.2.\x12", None),
+        (b"0X.\x0001N.\x12", Some("0x")),
+        (b"0X22222.\x1222222222222222222222222222222", None),
+    ] {
+        let source = std::str::from_utf8(input).expect("fuzz inputs are UTF-8");
+        let name = machine_name(source);
+        assert_eq!(name.as_deref(), expected, "{source:?}");
+        if let Some(name) = name {
+            assert_eq!(
+                machine_name(&name).as_deref(),
+                Some(name.as_str()),
+                "{source:?}"
+            );
+        }
+    }
+}
+
+/// A label that is a number in any spelling is an address, not a name; `0x` without digits is not a number.
+#[test]
+fn numeric_first_labels_give_no_name_but_a_bare_hex_prefix_does() {
+    for source in ["0x40.lan", "root@0X7f.example", "017.host", "0x0"] {
+        assert_eq!(machine_name(source), None, "{source}");
+    }
+    for source in ["0x", "0X", "root@0x.lan", "0x.1"] {
+        assert_eq!(machine_name(source).as_deref(), Some("0x"), "{source}");
+    }
+    // Not hex, so still names.
+    assert_eq!(machine_name("0x1g.lan").as_deref(), Some("0x1g"));
+}
+
 #[test]
 fn odd_and_overlong_hostnames_give_no_name() {
     let too_long = "n".repeat(200);

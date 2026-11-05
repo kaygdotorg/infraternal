@@ -4,7 +4,8 @@
 ///
 /// Takes the first DNS label, lowercased. Anything address-like gives nothing, so a numeric address never becomes
 /// a name and the caller can use another source: IPv4 in any spelling (shortened `10.69.69`, hex `0x0a.0x45`,
-/// octal), IPv6 in any spelling (bracketed, with a zone `%eth0` or `%25eth0`), and labels made only of digits.
+/// octal), IPv6 in any spelling (bracketed, with a zone `%eth0` or `%25eth0`), and first labels spelled as a
+/// number (`10`, `017`, `0x40`). Any name it returns gives itself back when passed in again.
 /// Invalid host labels and `localhost` also give nothing (D339: those fall back to [`fallback_machine_name`]).
 #[must_use]
 pub fn machine_name(source: &str) -> Option<String> {
@@ -21,7 +22,9 @@ pub fn machine_name(source: &str) -> Option<String> {
         return None;
     }
     let label = host.split('.').next()?.to_ascii_lowercase();
-    if label.bytes().all(|byte| byte.is_ascii_digit())
+    // A label spelled as a number (`10`, `017`, `0x40`) is an address on its own, so returning it would break
+    // the invariant that a returned name maps to itself (#353): `machine_name(name) == Some(name)`.
+    if is_ipv4_spelling(&label)
         || label.is_empty()
         || label.len() > 63
         || !label
@@ -73,10 +76,13 @@ fn os_family(os: Option<&str>) -> &'static str {
 
 /// Whether `host` is an IPv4 address in any spelling the C resolver accepts: one to four dot-separated numbers,
 /// each decimal, octal (leading `0`) or hex, so `10.69.69`, `0x0a454505` and `0x7f.1` are addresses too.
+///
+/// A hex number needs at least one digit after `0x`: glibc's `inet_aton` rejects a bare `0x` (#353), so `0x` is
+/// a host name, not an address.
 fn is_ipv4_spelling(host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host);
     let number = |part: &str| match part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
-        Some(hex) => hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        Some(hex) => !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
         None => !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()),
     };
     !host.is_empty() && host.split('.').count() <= 4 && host.split('.').all(number)
