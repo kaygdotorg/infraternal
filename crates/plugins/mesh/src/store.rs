@@ -386,6 +386,30 @@ fn is_legacy_unnamed_label(name: &str) -> bool {
             !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
         })
 }
+/// Abandon a node's open rotation because it reattached without rotation support (J252 P2, D166, D352).
+///
+/// A node that restarts on an engine that cannot rotate (kernel to `GotaTun`, D346), loses its journal or runs an
+/// older binary keeps only one key. Keeping the rotation open would refuse that node forever, since only its own
+/// commit can close it, and the overlap could later publish a candidate it no longer holds. The caller runs
+/// this inside the attach transaction that records the lost support and the key the node presents, and bumps
+/// the revision, so peers drop the abandoned candidate or predecessor in the same view. The sequence moves on,
+/// so a step still in flight for the abandoned operation matches nothing.
+async fn abandon_rotation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    node_id: i64,
+) -> Result<(), &'static str> {
+    sqlx::query(
+        "UPDATE mesh_node_key_rotation SET candidate_public_key=NULL,previous_public_key=NULL,rotation_phase=NULL,\
+         rotation_started_at=NULL,rotation_boot_id=NULL,rotation_monotonic=NULL,operation_id=NULL,rotation_revision=NULL,\
+         local_committed=0,sequence=sequence+1 WHERE node_id=? AND rotation_phase IS NOT NULL",
+    )
+    .bind(node_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "Mesh storage unavailable.")?;
+    Ok(())
+}
+
 /// What names a node of `host`, and who gives it, with the names the owner gave every other host.
 ///
 /// The server is named after its own hostname; a remote machine after the name the owner typed when adding it,
@@ -1341,12 +1365,11 @@ impl Store {
         let phase: Option<String> = row
             .try_get("rotation_phase")
             .map_err(|_| "Mesh storage unavailable.")?;
-        let Some(phase) = phase else {
+        // Without support the caller abandons any open rotation in this same transaction (J252 P2), so the
+        // node attaches as one that is not rotating: with the key it presents.
+        let Some(phase) = phase.filter(|_| rotation_supported) else {
             return Ok(presented.0.to_vec());
         };
-        if !rotation_supported {
-            return Err("Mesh key rotation is in progress.");
-        }
         let candidate: Option<Vec<u8>> = row
             .try_get("candidate_public_key")
             .map_err(|_| "Mesh storage unavailable.")?;
@@ -1420,6 +1443,14 @@ impl Store {
         let mut renamed = Vec::new();
         let id = if let Some(row) = existing {
             let public_key = Self::attached_public_key(&row, key, key_rotation_supported)?;
+            let abandoned = !key_rotation_supported
+                && row
+                    .try_get::<Option<String>, _>("rotation_phase")
+                    .map_err(|_| "Mesh storage unavailable.")?
+                    .is_some();
+            if abandoned {
+                abandon_rotation(&mut tx, row.get("id")).await?;
+            }
             // Temporary discovery absence is not an endpoint removal [166].
             // Keep the last known direct coordinate until an observed replacement arrives.
             let endpoint = endpoint.or_else(|| row.get::<Option<String>, _>("endpoint"));
@@ -1442,6 +1473,7 @@ impl Store {
             }
             rename(&mut tx, &renamed).await?;
             if renamed.is_empty()
+                && !abandoned
                 && row.get::<Option<String>, _>("dataplane_host").as_deref() == Some(host)
                 && row.get::<Vec<u8>, _>("public_key") == public_key
                 && row.get::<Option<String>, _>("endpoint").as_deref() == endpoint.as_deref()
