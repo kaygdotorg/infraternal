@@ -143,6 +143,7 @@ async fn component_off_interrupts_a_stalled_host_key_confirmation_lookup() {
     confirmation_interrupt(true).await;
 }
 
+#[cfg(feature = "remote")]
 #[tokio::test]
 async fn scoped_api_key_can_open_the_bootstrap_action_stream_without_a_cookie_or_origin() {
     let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
@@ -175,6 +176,7 @@ async fn scoped_api_key_can_open_the_bootstrap_action_stream_without_a_cookie_or
     drop(auth);
 }
 
+#[cfg(feature = "remote")]
 #[tokio::test]
 async fn each_bootstrap_action_message_uses_the_shared_api_key_rate_limit() {
     let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
