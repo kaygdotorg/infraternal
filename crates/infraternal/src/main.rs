@@ -197,6 +197,7 @@ fn dispatch_selected_action(
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
 
+#[allow(clippy::too_many_lines)] // Keep feature-gated command handlers beside their registry mappings.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -209,7 +210,17 @@ fn dispatch_action(
         }
         CliHandler::MeshService => run_mesh_service(action, matches, json_output),
         CliHandler::Unavailable => run_unavailable(action, json_output),
-        CliHandler::Status => run_status(registry, json_output),
+        CliHandler::Status => run_status(registry, matches, json_output),
+        CliHandler::HostedAction => {
+            #[cfg(feature = "remote")]
+            {
+                cli::api_actions::run(action, matches, json_output)
+            }
+            #[cfg(not(feature = "remote"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::Skill => run_skill(registry, matches, json_output),
         CliHandler::SignIn => run_sign_in(action, matches, json_output),
         CliHandler::Up | CliHandler::UpSystem => dispatch_up_action(action, matches, json_output),
@@ -513,7 +524,11 @@ fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bo
                 Exit::Usage,
             );
         };
-        sign_in::run(server, json_output)
+        let scopes = matches
+            .get_many::<String>("scope")
+            .map(|values| values.map(String::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        sign_in::run(server, &scopes, json_output)
     }
     #[cfg(not(feature = "remote"))]
     {
@@ -696,7 +711,16 @@ fn status_result(
     (result, down)
 }
 
-fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
+fn run_status(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {
+    #[cfg(feature = "remote")]
+    if (matches.get_one::<String>("server_override").is_some()
+        || sign_in::has_stored_api_credentials())
+        && let Some(action) = registry
+            .find(&["status"])
+            .map(|registered| registered.action)
+    {
+        return cli::api_actions::run(action, matches, json_output);
+    }
     let (result, down) = status_result(registry, "status");
     finish_status(result, down, json_output)
 }
@@ -2470,7 +2494,8 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             };
             return host_remove::run(
                 matches
-                    .get_one::<String>("server")
+                    .get_one::<String>("server_override")
+                    .or_else(|| matches.get_one::<String>("server"))
                     .map_or("", String::as_str),
                 host,
                 matches.get_flag("finish"),

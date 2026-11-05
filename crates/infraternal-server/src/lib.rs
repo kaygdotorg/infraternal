@@ -51,6 +51,8 @@ pub mod release_verify;
 #[cfg(feature = "mesh")]
 pub use infraternal_plugin_mesh::api as mesh_api;
 #[cfg(feature = "remote")]
+mod api_actions;
+#[cfg(feature = "remote")]
 pub mod enrollment;
 #[cfg(all(test, feature = "mesh"))]
 mod mesh_api_tests;

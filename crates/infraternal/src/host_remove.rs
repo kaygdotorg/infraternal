@@ -1,4 +1,6 @@
-//! Adapts the remote plugin's removal action to private-stdin HTTPS requests and organized CLI results [16][168][202], #87.
+//! Adapts the remote plugin's removal action to private-stdin HTTPS requests and organized CLI
+//! results [16][168][202], #87. The start is the dry run; the finish sends its review, inside the
+//! session's admin window (D339).
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -13,11 +15,9 @@ use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 struct Input {
     session: String,
     #[serde(default)]
-    ceremony: Option<String>,
-    #[serde(default)]
-    proof: Option<Value>,
+    review: Option<String>,
 }
-/// Session cookies and passkey assertions enter only through bounded private stdin.
+/// Session cookies and reviews enter only through bounded private stdin.
 pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine: bool) -> ExitCode {
     let operation = || -> io::Result<Value> {
         let mut bytes = Vec::new();
@@ -27,7 +27,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         }
         let input: Input = serde_json::from_slice(&bytes).map_err(|_| denied())?;
         let body = if finish {
-            json!({"host_id":host,"ceremony":input.ceremony.ok_or_else(denied)?,"proof":input.proof.ok_or_else(denied)?})
+            json!({"host_id":host,"review":input.review.ok_or_else(denied)?})
         } else {
             json!({"host_id":host,"uninstall":!retain})
         };
@@ -44,7 +44,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         })
     };
     match operation() {
-        // The challenge or the result of the hosted action travels in `data`; the
+        // The review or the result of the hosted action travels in `data`; the
         // sentence says which step the person is on.
         Ok(value) => {
             let (state, message, next) = if finish {
@@ -59,11 +59,11 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             } else {
                 (
                     CommandState::Pending,
-                    "Removing this host needs your owner passkey.".to_owned(),
-                    "Confirm with your owner passkey, then pass the session, ceremony and proof on standard input with --finish.",
+                    "Review what removing this host does.".to_owned(),
+                    "To remove it, pass the session and the review on standard input with --finish within two minutes.",
                 )
             };
-            // The challenge is for scripts; a person at a terminal needs the sentence, not the material.
+            // The review is for scripts; a person at a terminal needs the sentence, not the capability.
             let data = if machine { value } else { json!({}) };
             let mut result = CommandResult::new("remove-host", state, message, data);
             if !next.is_empty() {
@@ -75,10 +75,17 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             machine,
             infraternal_plugin_remote::REMOVE.id,
             "Host removal was refused.",
-            "Use a live owner session and a fresh removal passkey proof on standard input.",
+            "Use an owner session signed in within 15 minutes, and a review from its dry run on standard input.",
             Exit::NotAllowed,
         ),
     }
+}
+/// The TLS client for the removal routes: the connector `sign-in` and the hosted actions use,
+/// so all of them trust the host's public CA bundle even when the linked OpenSSL's default paths
+/// hold no roots (a vendored build names its build prefix). TLS 1.3, peer and hostname
+/// verification, HTTP/1.1 ALPN.
+fn removal_tls_connector() -> io::Result<openssl::ssl::SslConnector> {
+    crate::remote::outbound_tls_connector(None).map_err(|_| denied())
 }
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -96,11 +103,7 @@ async fn request(server: &str, cookie: &str, finish: bool, body: Value) -> io::R
         return Err(denied());
     }
     let name = url.host_str().ok_or_else(denied)?;
-    let mut tls = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())
-        .map_err(|_| denied())?;
-    tls.set_default_verify_paths().map_err(|_| denied())?;
-    let ssl = tls
-        .build()
+    let ssl = removal_tls_connector()?
         .configure()
         .map_err(|_| denied())?
         .into_ssl(name)
@@ -154,5 +157,61 @@ struct Connection(tokio::task::JoinHandle<()>);
 impl Drop for Connection {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Found on the test server (#303, J94f): `remove-host` refused every step, its dry run
+    /// included, while the same session's browser dry run succeeded. With `SSL_CERT_FILE` set to
+    /// the system bundle the same binary removed the host. A vendored OpenSSL's default paths
+    /// name its build prefix and hold no roots on the host; J94e fixed the same defect for the
+    /// hosted actions (`2f0f4a007`). The child run points OpenSSL's defaults at nothing, so
+    /// only explicitly loaded roots count.
+    #[test]
+    fn removal_trusts_the_host_ca_bundle() {
+        let bundles = [
+            "/etc/ssl/certs/ca-certificates.crt",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+            "/etc/ssl/ca-bundle.pem",
+        ];
+        if !bundles
+            .iter()
+            .any(|bundle| std::path::Path::new(bundle).is_file())
+        {
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "host_remove::tests::removal_trust_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(
+                "SSL_CERT_FILE",
+                "/nonexistent/infraternal-no-default-roots.pem",
+            )
+            .env("SSL_CERT_DIR", "/nonexistent/infraternal-no-default-roots")
+            .output()
+            .expect("run the trust probe");
+        let output = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && output.contains("1 passed"),
+            "host removal has no trust roots without OpenSSL's defaults:\n{output}"
+        );
+    }
+
+    /// Run only by `removal_trusts_the_host_ca_bundle`, with OpenSSL's defaults unset.
+    #[test]
+    #[ignore = "child of removal_trusts_the_host_ca_bundle"]
+    fn removal_trust_probe() {
+        let ssl = super::removal_tls_connector()
+            .expect("removal TLS connector")
+            .configure()
+            .expect("TLS configuration")
+            .into_ssl("ssh.kayg.org")
+            .expect("TLS session");
+        assert!(!ssl.ssl_context().cert_store().all_certificates().is_empty());
     }
 }

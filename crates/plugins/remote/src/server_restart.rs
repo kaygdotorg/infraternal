@@ -21,4 +21,6 @@ pub const RESTART: ActionDef = ActionDef {
     permission: Permission::One("server.configure"),
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
