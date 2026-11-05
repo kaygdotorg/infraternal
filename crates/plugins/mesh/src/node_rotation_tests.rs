@@ -278,6 +278,137 @@ fn rotated_interface_remains_owned_after_process_restart() {
     restored.down().unwrap();
 }
 
+/// J262: after the coordinator abandons an operation this node only prepared (a probe that could not show
+/// support), a strictly higher sequence settles the open journal on the live key and prepares the new operation,
+/// on the live node and after a restart. A lower or equal sequence is still refused.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn a_higher_sequence_settles_a_prepared_journal_the_coordinator_abandoned() {
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000011";
+    let second = "00000000-0000-4000-8000-000000000012";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let live = node.up().unwrap().public_key;
+    let abandoned = node.prepare_rotation(first, 1).unwrap();
+    let (index, _, _) = kernel_link_identity();
+    assert_eq!(
+        node.prepare_rotation(second, 1)
+            .map(|_| ())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock,
+        "a sequence that does not move past the open operation proves nothing"
+    );
+
+    // The coordinator abandoned `first` (sequence + 1) and began `second` (sequence + 1 again).
+    let fresh = node.prepare_rotation(second, 3).unwrap();
+    assert_ne!(fresh, abandoned);
+    assert_ne!(fresh, live);
+    assert_eq!(
+        kernel_link_identity(),
+        (index, Some(live), live),
+        "settling the abandoned candidate changes nothing on the link"
+    );
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let journal = store.rotation_secret().unwrap().unwrap();
+    assert_eq!(
+        (journal.operation_id.as_str(), journal.sequence),
+        (second, 3)
+    );
+    assert_eq!(Key::from_private(&journal.previous).unwrap().1, live);
+    drop(journal);
+    drop(store);
+    drop(node);
+
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    assert_eq!(restored.up().unwrap().public_key, live);
+    assert_eq!(
+        restored.prepare_rotation(second, 3).unwrap(),
+        fresh,
+        "a retried prepare after a restart returns the same candidate"
+    );
+    let committed = restored.commit_rotation(second, 3).unwrap();
+    assert_eq!(committed.public_key, fresh);
+    assert_eq!(kernel_link_identity(), (index, Some(fresh), fresh));
+    restored.down().unwrap();
+}
+
+/// J262, downgrade and upgrade back: the node committed its candidate, then ran a binary without rotation
+/// support, so the coordinator abandoned the operation while the journal stayed open. On the upgraded binary a
+/// higher sequence completes the old journal on the candidate the link holds and rotates from it.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn a_committed_journal_left_open_by_a_downgrade_is_completed_by_a_higher_sequence() {
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000021";
+    let second = "00000000-0000-4000-8000-000000000022";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let original = node.up().unwrap().public_key;
+    let committed = node.prepare_rotation(first, 1).unwrap();
+    node.commit_rotation(first, 1).unwrap();
+    let (index, _, _) = kernel_link_identity();
+    // The older binary never finishes the operation; the upgraded one restarts on the open journal.
+    drop(node);
+
+    let mut upgraded = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    assert_eq!(upgraded.up().unwrap().public_key, committed);
+    let next = upgraded.prepare_rotation(second, 3).unwrap();
+    assert!(next != committed && next != original);
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let journal = store.rotation_secret().unwrap().unwrap();
+    assert_eq!(
+        Key::from_private(&journal.previous).unwrap().1,
+        committed,
+        "the new operation rotates from the key the link holds"
+    );
+    assert_eq!(store.recorded_interface().unwrap(), Some(committed));
+    drop(journal);
+    drop(store);
+    upgraded.commit_rotation(second, 3).unwrap();
+    assert_eq!(kernel_link_identity(), (index, Some(next), next));
+    upgraded.down().unwrap();
+}
+
+/// J262 with a stop inside the abandoned commit: the candidate key reached the link but the marker still names
+/// the predecessor. Settling finishes the marker on our index before the new operation starts.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn settling_an_abandoned_commit_moves_the_marker_the_stop_left_behind() {
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000031";
+    let second = "00000000-0000-4000-8000-000000000032";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let previous = node.up().unwrap();
+    let candidate = node.prepare_rotation(first, 1).unwrap();
+    let (index, _, _) = kernel_link_identity();
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let mut rotation = store.rotation_secret().unwrap().unwrap();
+    rotation.commit_requested = true;
+    store.save_rotation_secret(&rotation).unwrap();
+    let (candidate_key, _) = Key::from_private(&rotation.candidate).unwrap();
+    Device::configure(index, previous.public_key, &candidate_key, previous.port).unwrap();
+    drop(rotation);
+    drop(store);
+    drop(node);
+    assert_eq!(
+        kernel_link_identity(),
+        (index, Some(previous.public_key), candidate)
+    );
+
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    assert_eq!(restored.up().unwrap().public_key, candidate);
+    let next = restored.prepare_rotation(second, 3).unwrap();
+    assert_ne!(next, candidate);
+    assert_eq!(
+        kernel_link_identity(),
+        (index, Some(candidate), candidate),
+        "the marker follows the key the link holds"
+    );
+    restored.commit_rotation(second, 3).unwrap();
+    assert_eq!(kernel_link_identity(), (index, Some(next), next));
+    restored.down().unwrap();
+}
+
 /// `GotaTun` cannot rotate yet: it says so, and every rotation step refuses without touching the
 /// device or the state (D166, D352; #285).
 #[test]
