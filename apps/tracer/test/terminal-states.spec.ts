@@ -77,6 +77,9 @@ async function openFromPalette(page: Page, host: string): Promise<Locator> {
   return page.locator(".ui-window[data-kind='terminal']").last();
 }
 
+/** The retry arc: "Try again" wears it on every strip, and a plus is only for adding. */
+const RETRY_ARC = "M5 12a7 7 0 1 1 2.1 5";
+
 /** The strip's parts share one centre line and the strip stays inside its window (±0.5 px). */
 async function expectAligned(win: Locator, strip: Locator): Promise<void> {
   // A window that was just opened is still flying in under the camera: measure once both boxes have stopped moving.
@@ -180,6 +183,7 @@ for (const viewport of VIEWPORTS) {
         const offlineStrip = offline.locator(".cl-sx-strip");
         await expect(offlineStrip.locator(".cl-sx-strip-text")).toHaveText("offline-host is offline or cannot reach this server. Check its network, then try again.");
         await expect(offlineStrip.getByRole("button", { name: "Try again" })).toBeVisible();
+        expect(await offlineStrip.getByRole("button", { name: "Try again" }).locator("path").first().getAttribute("d"), "one retry icon").toBe(RETRY_ARC);
         await expectAligned(offline, offlineStrip);
         await shot(page, "offline");
         // Neither window spins: both read offline, not connecting.
@@ -210,6 +214,7 @@ for (const viewport of VIEWPORTS) {
         // While it waits it is plainly connecting; only after the wait does it say it cannot reach the host.
         await expect(strip).toHaveCount(0);
         await expect(strip.locator(".cl-sx-strip-text")).toHaveText(/^Can't reach .+\. It keeps trying in the background\.$/, { timeout: 25_000 });
+        expect(await strip.getByRole("button", { name: "Try again" }).locator("path").first().getAttribute("d"), "one retry icon").toBe(RETRY_ARC);
         await expectAligned(win, strip);
         await shot(page, "cannot-reach");
         // The host starts answering; asking again attaches the window in place.

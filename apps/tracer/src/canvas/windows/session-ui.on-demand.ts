@@ -120,7 +120,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
   const refusedStrip = (rec: WinRec, message: string, action: RefusalAction): StripView => ({
     signature: `refused:${action}:${message}`, result: "refused", label: message, text: message,
     // One action at most: asking again, or a host that can do what this one cannot. "none" leaves only closing the window.
-    ...(action === "retry" ? { action: { label: "Try again", icon: ICON.plus, run: () => newShell(rec) } }
+    ...(action === "retry" ? { action: { label: "Try again", icon: SESSION_ICON.again, run: () => newShell(rec) } }
       : action === "add-host" && cx.adapters.addHost ? { action: { label: "Add host", icon: ICON.plus, run: () => cx.adapters.addHost?.() } }
       // A host short of memory asks the person to close sessions: the strip opens that host's list, as the toast's button did.
       : action === "sessions" ? { action: { label: "Sessions", icon: SESSION_ICON.sessions, run: () => cx.sessionUi?.toggleManager(rec, rec.card.root.querySelector<HTMLElement>('[data-action="sessions"]'), "pointer") } } : {}),
