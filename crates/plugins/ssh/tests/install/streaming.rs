@@ -2,10 +2,6 @@
 use super::*;
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "The real pipeline fixture keeps its two bounded observers together."
-)]
 async fn decoded_image_and_hash_advance_before_the_transfer_tail_is_released() {
     let f = Fixture::new();
     executable(

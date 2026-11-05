@@ -646,7 +646,6 @@ fn stopped_and_failed_services_keep_distinct_headlines_and_diagnostics() {
 /// The module's role/state table is checked for both standalone roles and all
 /// 49 server/companion combinations, including absent and masked server files.
 #[test]
-#[allow(clippy::too_many_lines)] // Keep the complete documented contract in one table.
 fn configured_role_state_table_controls_headline_and_exit() {
     use Activity::{Active, Failed, Inactive, Restarting, Unknown};
     let activities = [

@@ -6,85 +6,13 @@ mod deleted_path_review;
 
 use super::*;
 use crate::restart_binary::fixture::{
-    ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed,
+    ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all, stripped_test_image,
 };
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
 /// Copy one executable into a private fixture path without inheriting a writable mode.
 fn copy_private_image(source: &Path, target: &Path) {
     crate::test_executable::copy(source, target, 0o700);
-}
-
-/// Remove non-executable sections under the same child cleanup and hang bound as exec tests.
-fn strip_image(image: &Path) {
-    let child = std::process::Command::new("strip")
-        .arg("--strip-all")
-        .arg(image)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .unwrap();
-    let output = bounded_output(child, HANG_BOUND, "strip test image");
-    assert!(
-        output.status.success(),
-        "strip test image failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Cache a compact executable for self-exec and signed private replacement fixtures.
-pub(super) fn stripped_test_image(source: &Path) -> PathBuf {
-    if source
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().ends_with(".all-stripped"))
-    {
-        return source.to_owned();
-    }
-    let target_root = crate::restart_binary::fixture::scratch_root();
-    let cache = target_root.join("restart-test-images");
-    std::fs::create_dir_all(&cache).unwrap();
-    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // Include source identity so a rebuilt test executable cannot reuse stale fixture bytes.
-    let source_metadata = std::fs::metadata(source).unwrap();
-    let modified = source_metadata
-        .modified()
-        .unwrap()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut image_name = source
-        .file_name()
-        .expect("test image has a name")
-        .to_os_string();
-    image_name.push(format!(
-        ".{}-{modified}.all-stripped",
-        source_metadata.len()
-    ));
-    let image = cache.join(&image_name);
-    if !image.exists() {
-        let mut staging_name = image_name;
-        staging_name.push(format!(".{}", uuid::Uuid::new_v4().simple()));
-        let staging = cache.join(staging_name);
-        copy_private_image(source, &staging);
-        strip_image(&staging);
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
-        match std::fs::hard_link(&staging, &image) {
-            Ok(()) => std::fs::remove_file(&staging).unwrap(),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::fs::remove_file(&staging).unwrap();
-            }
-            Err(error) => panic!("could not retain the stripped test image: {error}"),
-        }
-    }
-    let metadata = std::fs::symlink_metadata(&image).unwrap();
-    assert!(metadata.is_file());
-    assert_eq!(metadata.mode() & 0o777, 0o700);
-    assert!(
-        metadata.len() <= crate::restart_image::MAX_IMAGE,
-        "stripped fixture exceeds replacement admission bound"
-    );
-    image
 }
 
 /// Run snapshot-dependent assertions in a compact image, keeping production admission unchanged.
@@ -679,7 +607,85 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
     assert!(!logs.contains("seed") && !logs.contains("key_bytes") && !logs.contains("key_length"));
 }
 
-/// Exercise closed stdin and recovery with a compact running image and native successor.
+/// C source of the closed-stdin probe: it exits 0 only when its standard input
+/// is `/dev/null`, observed before any language runtime could repair it.
+const STDIN_PROBE_SOURCE: &str = r#"/* Tests null stdin at the actual exec boundary, before runtime repair [217], #154. */
+#include <sys/stat.h>
+#include <unistd.h>
+int main(void) {
+    struct stat input, expected;
+    return fstat(STDIN_FILENO, &input) != 0 || stat("/dev/null", &expected) != 0
+        || input.st_dev != expected.st_dev || input.st_ino != expected.st_ino;
+}
+"#;
+
+/// Returns the compiled, stripped closed-stdin probe, built once per test
+/// process and cached beside the stripped test image.
+///
+/// The test used to run `cc` and `strip` in each of its two stages. On a busy
+/// gate disk a single compile of these ten lines took more than 60 s (#355).
+/// The cache key is a hash of the source, so editing the probe rebuilds it.
+/// Each stage still signs its own private copy of these bytes.
+fn stdin_probe_image() -> PathBuf {
+    static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let cache = crate::restart_binary::fixture::scratch_root().join("restart-test-images");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&cache)
+        .unwrap();
+    let digest = openssl::sha::sha256(STDIN_PROBE_SOURCE.as_bytes());
+    let key = u64::from_be_bytes(digest[..8].try_into().unwrap());
+    let image = cache.join(format!("stdin-probe-{key:016x}"));
+    let _building = BUILDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if image.exists() {
+        return image;
+    }
+    let work = cache.join(format!(".stdin-probe-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&work)
+        .unwrap();
+    let source = work.join("stdin-probe.c");
+    let built = work.join("stdin-probe");
+    std::fs::write(&source, STDIN_PROBE_SOURCE).unwrap();
+    let compiled = std::process::Command::new("cc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&built)
+        .env("TMPDIR", &work)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let compiled = bounded_output(compiled, HANG_BOUND, "native stdin probe compiler");
+    assert!(
+        compiled.status.success(),
+        "native stdin probe compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    strip_all(&built);
+    // The inherited shared umask may make compiler output group-writable.
+    std::fs::set_permissions(&built, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Publish by hard link so no reader ever sees a partial image. The mutex
+    // covers this process only: another cold test process sharing this cache
+    // can publish first. `link` never replaces, so an existing name is a
+    // complete probe built from the same source; reuse it. The private work
+    // directory is removed on every path, including a failed link.
+    let published = std::fs::hard_link(&built, &image);
+    std::fs::remove_dir_all(&work).unwrap();
+    match published {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("could not publish the stdin probe: {error}"),
+    }
+    image
+}
+
 #[test]
 fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
     const NAME: &str =
@@ -702,47 +708,17 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
         );
     }
     let mut failures = Vec::new();
-    let deadline = std::time::Instant::now() + HANG_BOUND;
+    // Each child run has its own hang guard. One budget shared across both
+    // stages was a wall-clock bound on the whole test, and a busy disk
+    // exhausted it before the second child could start (#355). The probe is
+    // compiled once per test process (`stdin_probe_image`).
     for stage in ["before", "after"] {
         let directory = Directory::new();
         let target = directory.0.join("cold-exec-successor");
         // A native probe observes inherited descriptors before the Rust runtime
         // can repair closed standard input and mask the exec boundary failure.
-        let source = directory.0.join("stdin-probe.c");
-        std::fs::write(&source, r#"/* Tests null stdin at the actual exec boundary, before runtime repair [217], #154. */
-#include <sys/stat.h>
-#include <unistd.h>
-int main(void) {
-    struct stat input, expected;
-    return fstat(STDIN_FILENO, &input) != 0 || stat("/dev/null", &expected) != 0
-        || input.st_dev != expected.st_dev || input.st_ino != expected.st_ino;
-}
-"#).unwrap();
-        let compiled = std::process::Command::new("cc")
-            .arg(&source)
-            .arg("-o")
-            .arg(&target)
-            .env("TMPDIR", &directory.0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let compiled = bounded_output(
-            compiled,
-            deadline.saturating_duration_since(std::time::Instant::now()),
-            "native stdin probe compiler",
-        );
-        assert!(
-            compiled.status.success(),
-            "native stdin probe compile failed: {}",
-            String::from_utf8_lossy(&compiled.stderr)
-        );
-        strip_image(&target);
-        // The inherited shared umask may make compiler output group-writable.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _signed = Signed::new(target.clone(), &std::fs::read(&target).unwrap());
+        let probe = std::fs::read(stdin_probe_image()).unwrap();
+        let _signed = Signed::new(target.clone(), &probe);
         let child =
             std::process::Command::new(stripped_test_image(&std::env::current_exe().unwrap()))
                 .args(["--exact", NAME, "--nocapture"])
@@ -754,11 +730,7 @@ int main(void) {
                 .process_group(0)
                 .spawn()
                 .unwrap();
-        let output = bounded_output(
-            child,
-            deadline.saturating_duration_since(std::time::Instant::now()),
-            NAME,
-        );
+        let output = bounded_output(child, HANG_BOUND, NAME);
         if !output.status.success() {
             failures.push(format!(
                 "stage={stage}\n{}\n{}",

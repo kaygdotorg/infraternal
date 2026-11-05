@@ -9,6 +9,8 @@ const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[
         target: infraternal_plugin_api::Target::Global,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: "host.facts.read",
         summary: "Read host facts",
         input: infraternal_plugin_api::SchemaRef("{}"),
@@ -21,6 +23,8 @@ const HOST_FACTS_ACTIONS: &[infraternal_plugin_api::ActionDef] = &[
         target: infraternal_plugin_api::Target::Global,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: "host.facts.configure",
         summary: "Configure host facts",
         input: infraternal_plugin_api::SchemaRef("{}"),
@@ -446,7 +450,6 @@ async fn incomplete_rfc_message_still_loses_authority_on_revocation() {
 }
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)] // Keep full-capacity and cross-account events in one real fixture.
 async fn recovery_subscription_updates_every_signed_in_socket() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -549,7 +552,6 @@ async fn recovery_subscription_updates_every_signed_in_socket() {
 
 #[cfg(feature = "mesh")]
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)] // Keep one real socket's handshake, snapshot, edits, and invalidations ordered.
 async fn mesh_calls_and_subscriptions_deliver_scoped_live_inventory() {
     let _guard = SERIAL.lock().await;
     // Inventory ordering does not test a deadline. Hold runtime time across

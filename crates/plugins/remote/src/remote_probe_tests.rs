@@ -562,7 +562,6 @@ impl AsyncUdpSocket for CopyFirstSocket {
 /// Eight authenticated application exchanges are causal completion barriers;
 /// the outer timeout only diagnoses a stuck fixture, never a healthy result.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn copy_first_real_mesh_originals_do_not_strand_the_authenticated_mesh_guard() {
     copy_first_guard(false, None).await;
 }
@@ -583,7 +582,6 @@ async fn copy_first_ack_only_requested_ack_delay_five_ms_comparison() {
     copy_first_guard(true, Some(Duration::from_millis(5))).await;
 }
 
-#[allow(clippy::too_many_lines)]
 async fn copy_first_guard(ack_only: bool, requested_ack_delay: Option<Duration>) {
     use crate::remote_bindings::Bindings;
     let ca = root();

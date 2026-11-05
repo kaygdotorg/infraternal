@@ -76,6 +76,8 @@ pub struct Authority {
     /// Nonsecret batch identity lets backends retire only their own attempt authority.
     pub batch: uuid::Uuid,
     session: Option<Secret>,
+    /// API-key actions retain only the key hash and recheck its narrow scope at use time.
+    api_key_hash: Option<String>,
 }
 impl Authority {
     /// The opaque live cookie is available only to trusted backend implementations.
@@ -83,6 +85,27 @@ impl Authority {
     pub fn session(&self) -> Option<&Secret> {
         self.session.as_ref()
     }
+
+    /// The one-way API-key id used to recheck `hosts:write` for an action stream.
+    #[must_use]
+    pub fn api_key_hash(&self) -> Option<&str> {
+        self.api_key_hash.as_deref()
+    }
+}
+
+/// Accept only canonical unpadded base64url SHA-256 lookup ids from the server auth store.
+fn valid_api_key_hash(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 43
+        && bytes[..42]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        // A 32-byte digest leaves two zero pad bits in the final base64 sextet.
+        && matches!(
+            bytes[42],
+            b'A' | b'E' | b'I' | b'M' | b'Q' | b'U' | b'Y' | b'c' | b'g' | b'k' | b'o' | b's'
+                | b'w' | b'0' | b'4' | b'8'
+        )
 }
 
 /// #78 owns enrollment, CA state, authenticated online status, facts and terminal routing.
@@ -342,6 +365,7 @@ impl Bootstrap {
             owner,
             batch: saved.batch,
             session: Some(session),
+            api_key_hash: None,
         };
         let runner = self.clone();
         crate::tasks::spawn(async move {
@@ -576,6 +600,7 @@ impl Bootstrap {
                 owner,
                 batch: uuid::Uuid::new_v4(),
                 session: None,
+                api_key_hash: None,
             },
             targets,
             credential,
@@ -603,9 +628,36 @@ impl Bootstrap {
                 owner,
                 batch: uuid::Uuid::new_v4(),
                 session: Some(session),
+                api_key_hash: None,
             },
             targets,
             credential,
+            Vec::new(),
+        )
+    }
+
+    /// Start the same host-setup handler under a scope-checked API-key identity.
+    /// The bearer value never enters the SSH plugin; only its one-way id is retained.
+    /// # Errors
+    /// Refuses malformed key ids and the ordinary bounded batch admission errors.
+    pub fn start_api_key(
+        &self,
+        owner: String,
+        key_hash: String,
+        targets: Vec<Target>,
+    ) -> Result<Batch, Failure> {
+        if !valid_api_key_hash(&key_hash) {
+            return Err(Failure::unsupported("The bootstrap key is unavailable."));
+        }
+        self.start_authority(
+            Authority {
+                owner,
+                batch: uuid::Uuid::new_v4(),
+                session: None,
+                api_key_hash: Some(key_hash),
+            },
+            targets,
+            None,
             Vec::new(),
         )
     }
@@ -631,6 +683,7 @@ impl Bootstrap {
                 owner,
                 batch: uuid::Uuid::new_v4(),
                 session: Some(session),
+                api_key_hash: None,
             },
             targets,
             credential,
@@ -766,10 +819,6 @@ impl Bootstrap {
         Ok(())
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep failure recording, session cleanup, rollback and final state ordered in one attempt."
-    )]
     async fn attempt(
         &self,
         batch: Arc<BatchInner>,
@@ -979,7 +1028,6 @@ impl Bootstrap {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     // Transient bytes remain in this future and its lazy provider, never batch state.
     async fn resolve_attempt(
         &self,
@@ -1016,7 +1064,6 @@ impl Bootstrap {
 
     /// Resolve the first trusted image before any installation writes. A full
     /// fallback is retained so an older release does not repeat its acquisition.
-    #[allow(clippy::too_many_arguments)]
     async fn payload(
         &self,
         batch: &BatchInner,
@@ -1131,10 +1178,6 @@ impl Bootstrap {
 
     /// Enroll one host, publish its CLI, report setup warnings, and prove readiness.
     /// All changes stay bound to this attempt's transaction for cancellation recovery.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
-    )]
     fn run<'a>(
         &'a self,
         batch: &'a BatchInner,
@@ -1899,7 +1942,6 @@ impl Bootstrap {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn await_start_fresh(
         &self,
         batch: &BatchInner,
@@ -1924,7 +1966,6 @@ impl Bootstrap {
     /// leaves the stop and the new enrollment only seconds (#305 P2-1).
     /// Nor does it hold an add-host slot: eight unanswered confirmations would
     /// otherwise block every add-host on the server for the whole wait (#305 P3-2).
-    #[allow(clippy::too_many_arguments)]
     async fn confirm_start_fresh(
         &self,
         batch: &BatchInner,
@@ -1999,7 +2040,6 @@ impl Bootstrap {
     }
 
     /// Run the confirmed action on the host.
-    #[allow(clippy::too_many_arguments)]
     async fn act_start_fresh(
         &self,
         batch: &BatchInner,
@@ -2271,7 +2311,6 @@ fn emit(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_with_leftovers(
     batch: &BatchInner,
     target: &Target,

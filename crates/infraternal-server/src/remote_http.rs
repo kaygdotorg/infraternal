@@ -97,7 +97,29 @@ impl InvitationIssuer {
         address: &str,
         lookup: Option<&str>,
     ) -> Result<JoinInvitation, StatusCode> {
-        issue_invitation(self.0.clone(), cookie, request, Some((address, lookup))).await
+        issue_invitation(
+            self.0.clone(),
+            IssueAuthority::Session(cookie),
+            request,
+            Some((address, lookup)),
+        )
+        .await
+    }
+    /// Issue under an already scoped CLI action; the key is rechecked in the write transaction.
+    pub(crate) async fn issue_bootstrap_api_key(
+        &self,
+        key_hash: &str,
+        request: InvitationRequest,
+        address: &str,
+        lookup: Option<&str>,
+    ) -> Result<JoinInvitation, StatusCode> {
+        issue_invitation(
+            self.0.clone(),
+            IssueAuthority::ApiKey(key_hash),
+            request,
+            Some((address, lookup)),
+        )
+        .await
     }
     /// Same authority path as initial issue, retaining existing destination metadata.
     pub(crate) async fn reissue(
@@ -105,7 +127,27 @@ impl InvitationIssuer {
         cookie: &str,
         request: InvitationRequest,
     ) -> Result<JoinInvitation, StatusCode> {
-        issue_invitation(self.0.clone(), cookie, request, None).await
+        issue_invitation(
+            self.0.clone(),
+            IssueAuthority::Session(cookie),
+            request,
+            None,
+        )
+        .await
+    }
+    /// Reissue an invitation during the same scoped CLI add-host action.
+    pub(crate) async fn reissue_api_key(
+        &self,
+        key_hash: &str,
+        request: InvitationRequest,
+    ) -> Result<JoinInvitation, StatusCode> {
+        issue_invitation(
+            self.0.clone(),
+            IssueAuthority::ApiKey(key_hash),
+            request,
+            None,
+        )
+        .await
     }
     /// Issue the existing one-machine invitation for an owner-approved device-code request.
     pub(crate) async fn issue_approved_machine_join(
@@ -131,6 +173,12 @@ impl InvitationIssuer {
 #[serde(deny_unknown_fields)]
 struct RevocationRequest {
     host_id: Uuid,
+}
+
+#[derive(Clone, Copy)]
+enum IssueAuthority<'a> {
+    Session(&'a str),
+    ApiKey(&'a str),
 }
 
 /// Build enrollment routes around the migrated runtime database and a D168 signer.
@@ -288,12 +336,15 @@ async fn invite(
     }
     let cookie =
         crate::auth::session_cookie_from_headers(&headers).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    issue_invitation(api, cookie, request, None).await.map(Json)
+    issue_invitation(api, IssueAuthority::Session(cookie), request, None)
+        .await
+        .map(Json)
 }
 
+// Keep session/key checks, host creation, and invitation issuance in one write transaction.
 async fn issue_invitation(
     api: Api,
-    cookie: &str,
+    authority: IssueAuthority<'_>,
     request: InvitationRequest,
     destination: Option<(&str, Option<&str>)>,
 ) -> Result<JoinInvitation, StatusCode> {
@@ -301,36 +352,79 @@ async fn issue_invitation(
         return Err(StatusCode::BAD_REQUEST);
     }
     let now = now()?;
-    let session_hash = crate::auth::hash(cookie);
-    let session = api
-        .auth
-        .session(cookie, now)
-        .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    // Current core policy permits host enrollment to the owner. CA unlock remains
-    // a separate administrator/passkey policy; this check never unlocks a signer.
+    // A browser session is read on its own pool connection before the transaction opens:
+    // holding a writer (or the only connection) here would starve that lookup. The host
+    // INSERT below rechecks the same session inside the transaction, as before.
+    let session = match authority {
+        IssueAuthority::Session(cookie) => Some((
+            api.auth
+                .session(cookie, now)
+                .await
+                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .user_id,
+            crate::auth::hash(cookie),
+        )),
+        IssueAuthority::ApiKey(_) => None,
+    };
+    // Drop rolls back every unpublished write on error or cancellation. The
+    // invitation is assembled before commit, so certificate conversion cannot
+    // strand a new host record either. A key's check may renew it, so that path
+    // takes the writer up front and keeps it through host creation.
+    let mut transaction = if session.is_some() {
+        api.pool.begin().await
+    } else {
+        api.pool.begin_with("BEGIN IMMEDIATE").await
+    }
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let (person_id, session_hash) = match (authority, session) {
+        (_, Some((person_id, session_hash))) => (person_id, Some(session_hash)),
+        (IssueAuthority::Session(_), None) => return Err(StatusCode::UNAUTHORIZED),
+        (IssueAuthority::ApiKey(key_hash), None) => {
+            // J90 owns key expiry, scope and sliding renewal. This writer transaction
+            // stays held through host creation and invitation issuance. The authorizer reads
+            // its own clock after this transaction holds the writer: `now` was read before the
+            // wait, and a key that expired during it must be tombstoned, not renewed.
+            let person_id = api
+                .auth
+                .api_authorize_key_hash_tx(&mut transaction, key_hash, "hosts:write", None)
+                .await
+                .map_err(|_| StatusCode::FORBIDDEN)?;
+            let Some(person_id) = person_id else {
+                // A refusal commits: expiry tombstones and the key clock must persist
+                // (the authorizer's contract). Nothing else was written yet.
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                return Err(StatusCode::FORBIDDEN);
+            };
+            (person_id, None)
+        }
+    };
+    // Host provisioning belongs to the owner; this does not unlock the separate D168 signer.
     let owner: bool = sqlx::query_scalar("SELECT owner=1 FROM users WHERE id=?")
-        .bind(&session.user_id)
-        .fetch_one(&api.pool)
+        .bind(&person_id)
+        .fetch_optional(&mut *transaction)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .unwrap_or(false);
     if !owner || (request.mode == Mode::Rootless) == (request.execution_uid == 0) {
         return Err(StatusCode::FORBIDDEN);
     }
-    // Drop rolls back every unpublished write on error or cancellation. The
-    // invitation is assembled before commit, so certificate conversion cannot
-    // strand a new host record either.
-    let mut transaction = api
-        .pool
-        .begin()
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     // An existing id must have exactly the same authority: collisions cannot move a host.
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) SELECT ?,?,?,?,? FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>unixepoch() AND u.owner=1 ON CONFLICT(id) DO NOTHING")
-        .bind(request.host_id.as_bytes().as_slice()).bind(&session.user_id).bind(request.mode.as_str())
-        .bind(i64::from(request.execution_uid)).bind(now).bind(&session_hash).bind(&session.user_id).execute(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let insert = if let Some(session_hash) = &session_hash {
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) SELECT ?,?,?,?,? FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>unixepoch() AND u.owner=1 ON CONFLICT(id) DO NOTHING")
+            .bind(request.host_id.as_bytes().as_slice()).bind(&person_id).bind(request.mode.as_str())
+            .bind(i64::from(request.execution_uid)).bind(now).bind(session_hash).bind(&person_id).execute(&mut *transaction).await
+    } else {
+        // The API key was authorized with scope and expiry in this same immediate transaction.
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) SELECT ?,?,?,?,? FROM users WHERE id=? AND owner=1 ON CONFLICT(id) DO NOTHING")
+            .bind(request.host_id.as_bytes().as_slice()).bind(&person_id).bind(request.mode.as_str())
+            .bind(i64::from(request.execution_uid)).bind(now).bind(&person_id).execute(&mut *transaction).await
+    };
+    insert.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let uid: Option<i64> = sqlx::query_scalar("SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? AND revoked_at IS NULL")
-        .bind(request.host_id.as_bytes().as_slice()).bind(&session.user_id).bind(request.mode.as_str())
+        .bind(request.host_id.as_bytes().as_slice()).bind(&person_id).bind(request.mode.as_str())
         .fetch_optional(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if uid != Some(i64::from(request.execution_uid)) {
         return Err(StatusCode::FORBIDDEN);
@@ -338,12 +432,14 @@ async fn issue_invitation(
     let token = api
         .store
         .issue_authorized_in(
-            &session.user_id,
+            &person_id,
             request.host_id,
             request.mode,
             now,
             IssueConstraints {
-                session_hash: Some(&session_hash),
+                // For API keys, liveness and hosts:write were checked above
+                // in this same writer transaction through J90's authorization path.
+                session_hash: session_hash.as_deref(),
                 expected_key_digest: request.expected_key_digest.as_ref(),
             },
             &mut transaction,
@@ -354,7 +450,7 @@ async fn issue_invitation(
         // The preceding host INSERT owns SQLite's writer slot. Repeat the
         // destination check here for independently constructed adapters too.
         let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
-            .bind(&session.user_id).bind(address).bind(lookup).bind(lookup)
+            .bind(&person_id).bind(address).bind(lookup).bind(lookup)
             .fetch_one(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         if occupied {
             return Err(StatusCode::CONFLICT);

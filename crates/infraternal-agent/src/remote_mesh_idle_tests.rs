@@ -47,7 +47,6 @@ fn usage() -> (u64, u64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Release-only perf VM measurement under the shared benchmark lock."]
 // Keep setup, sampling and teardown together so driver lifetimes match the measured cohort.
-#[allow(clippy::too_many_lines)]
 async fn mesh_idle_timer_cost_at_one_thousand_connections() {
     let ca = root();
     let system_unit = |name| {

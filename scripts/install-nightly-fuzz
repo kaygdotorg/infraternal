@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Install the D351 nightly fuzz run on dev-02 under its own system user.
+
+Why a separate user: every branch gated on dev-02 runs as `claude`, so a
+token readable by `claude` is readable by any branch (review 79752 P2-3). The
+fuzz run therefore lives in the `infraternal-fuzz` system account: its home
+(`/var/lib/infraternal-fuzz`, mode 0700) holds the Forgejo token, the
+checkout, the toolchain, the corpora and the build target. `claude` cannot
+read any of it, and the account has no sudo and no login shell.
+
+What runs as what at night:
+- systemd starts `infraternal-fuzz.service` (a system unit) as root;
+- its only process as root is the fixed, root-owned
+  `/usr/local/libexec/infraternal-fuzz-service`, installed from
+  `scripts/nightly-fuzz-service`. It holds one shared build slot as `claude`
+  (through `runuser`, so `claude`'s build-slot script never runs as root),
+  then drops to `infraternal-fuzz` with `setpriv` and runs the checkout's
+  `scripts/nightly-fuzz.py`;
+- the fuzz build and the fuzzing itself run as `infraternal-fuzz`.
+
+What it fuzzes: the checkout at `--ref`, cloned from the public repository.
+Updating the ref is an explicit reinstall, so the token is only exposed to
+reviewed code.
+
+Usage, as root (on dev-02 that is `sudo` from the meshtest account):
+    install-nightly-fuzz --ref <commit> --token-from <file> \
+        [--migrate-from /home/claude]
+`--token-from` is moved into place and then removed; it is never printed.
+`--migrate-from` copies an existing toolchain, corpora and report records
+from that home, so known inputs are not filed again.
+"""
+import argparse
+import os
+from pathlib import Path
+import pwd
+import shutil
+import socket
+import subprocess
+
+USER = 'infraternal-fuzz'
+HOME = Path('/var/lib/infraternal-fuzz')
+SERVICE_HELPER = Path('/usr/local/libexec/infraternal-fuzz-service')
+UNITS = Path('/etc/systemd/system')
+REPOSITORY = 'https://git.kayg.org/kayg/infraternal.git'
+# The parts of an old per-user install worth keeping, relative to its home.
+MIGRATE = ('.local/share/infraternal-fuzz', '.local/state/infraternal-fuzz')
+
+
+def service_unit():
+    """The system service: a root-owned fixed helper, nothing else as root."""
+    return f'''# Nightly parser fuzzing and failing-input reports, D351 (#344).
+[Unit]
+Description=infraternal nightly parser fuzzing
+After=network-online.target nix-daemon.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart={SERVICE_HELPER}
+# Covers the night's build-slot queue, the build and the 1 h fuzzing budget.
+TimeoutStartSec=6h
+KillMode=control-group
+Nice=10
+UMask=0077
+'''
+
+
+def timer_unit():
+    """The system timer: 02:00 in the owner's timezone, independent of the VM's."""
+    return '''# Run at night in the owner's timezone, independent of VM timezone.
+[Unit]
+Description=infraternal nightly parser fuzz timer
+[Timer]
+OnCalendar=*-*-* 02:00:00 Asia/Kolkata
+RandomizedDelaySec=15m
+Persistent=true
+Unit=infraternal-fuzz.service
+[Install]
+WantedBy=timers.target
+'''
+
+
+def run(*command, **kwargs):
+    """Run one install step, failing the install on any error."""
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def as_user(*command, cwd=None):
+    """Run a step as the fuzz account, with a clean environment."""
+    return run('setpriv', f'--reuid={USER}', f'--regid={USER}', '--init-groups', '--reset-env', '--',
+               'env', f'HOME={HOME}', 'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin',
+               *command, cwd=cwd)
+
+
+def ensure_user():
+    """Create the system account and its private home if missing."""
+    try:
+        pwd.getpwnam(USER)
+    except KeyError:
+        run('useradd', '--system', '--home-dir', str(HOME), '--create-home', '--shell', '/usr/sbin/nologin',
+            '--comment', 'infraternal nightly fuzzing (D351)', USER)
+    entry = pwd.getpwnam(USER)
+    HOME.mkdir(parents=True, exist_ok=True)
+    os.chown(HOME, entry.pw_uid, entry.pw_gid)
+    HOME.chmod(0o700)
+    return entry
+
+
+def install_token(source, entry):
+    """Move the token into the fuzz home (0600), then remove the source copy."""
+    destination = HOME / 'forgejo-token'
+    data = Path(source).read_bytes()
+    if not data.strip():
+        raise SystemExit('token source is empty')
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, 'wb') as handle:
+        handle.write(data)
+    os.chown(destination, entry.pw_uid, entry.pw_gid)
+    destination.chmod(0o600)
+    Path(source).unlink()
+
+
+def migrate(old_home, entry):
+    """Copy the old toolchain, corpora and report records, then hand them to the fuzz account."""
+    for relative in MIGRATE:
+        source, destination = Path(old_home) / relative, HOME / relative
+        if source.exists() and not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, destination, symlinks=True)
+    run('chown', '-R', f'{entry.pw_uid}:{entry.pw_gid}', str(HOME))
+
+
+def checkout(ref):
+    """Clone the public repository into the fuzz home and pin it to `ref`."""
+    target = HOME / 'checkout'
+    if not (target / '.git').exists():
+        as_user('git', 'clone', '--quiet', REPOSITORY, str(target))
+    as_user('git', '-C', str(target), 'fetch', '--quiet', 'origin', ref)
+    as_user('git', '-C', str(target), 'checkout', '--quiet', '--detach', ref)
+    return target
+
+
+def main():
+    """Create the account, move the token, pin the checkout, install and enable the timer."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--ref', required=True, help='commit to fuzz (a reviewed head)')
+    parser.add_argument('--token-from', type=Path, help='token file to move into place (removed afterwards)')
+    parser.add_argument('--migrate-from', type=Path, help='old per-user home to copy toolchain and state from')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit('run as root (dev-02: sudo from the meshtest account)')
+    if socket.gethostname() != 'infraternal-dev-02-std':
+        raise SystemExit('install the nightly fuzz run on dev-02')
+    entry = ensure_user()
+    if args.migrate_from:
+        migrate(args.migrate_from, entry)
+    if args.token_from:
+        install_token(args.token_from, entry)
+    if not (HOME / 'forgejo-token').is_file():
+        raise SystemExit('no token: pass --token-from once')
+    source = checkout(args.ref)
+    SERVICE_HELPER.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / 'scripts/nightly-fuzz-service', SERVICE_HELPER)
+    os.chown(SERVICE_HELPER, 0, 0)
+    SERVICE_HELPER.chmod(0o755)
+    (UNITS / 'infraternal-fuzz.service').write_text(service_unit())
+    (UNITS / 'infraternal-fuzz.timer').write_text(timer_unit())
+    run('systemd-analyze', 'verify', str(UNITS / 'infraternal-fuzz.service'), str(UNITS / 'infraternal-fuzz.timer'))
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', 'infraternal-fuzz.timer')
+    run('systemctl', 'list-timers', 'infraternal-fuzz.timer', '--no-pager')
+
+
+if __name__ == '__main__':
+    main()

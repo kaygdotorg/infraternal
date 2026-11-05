@@ -28,6 +28,8 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
         target: infraternal_plugin_api::Target::Global,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: "plugins.list",
         summary: "List compiled features",
         instructions: &[
@@ -43,6 +45,8 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
         target: infraternal_plugin_api::Target::Global,
         dry_run: infraternal_plugin_api::DryRun::Required,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: "plugins.set_enabled",
         summary: "Switch a server feature",
         instructions: &[
@@ -275,7 +279,7 @@ impl PluginRuntime {
                     host.token_hash(),
                     host.user_id(),
                     now,
-                    infraternal_plugin_api::FRESH_SECONDS,
+                    infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
                 )
                 .await
                 .map_err(|_| PluginError::Storage)?
@@ -289,6 +293,25 @@ impl PluginRuntime {
     #[must_use]
     pub fn list(&self) -> Value {
         json!({"actions":CONTROL_ACTIONS,"plugins": self.inner.entries.iter().map(|entry| json!({"descriptor":({let mut descriptor=serde_json::to_value(entry.plugin.descriptor()).unwrap_or(Value::Null); descriptor["settings"]=entry.plugin.descriptor().settings.and_then(|schema| serde_json::from_str(schema.0).ok()).unwrap_or(Value::Null); descriptor}),"enabled":entry.enabled.load(Ordering::Acquire)})).collect::<Vec<_>>()})
+    }
+    /// Every declared server-plugin action, for whole-catalogue invariant tests.
+    #[cfg(test)]
+    pub(crate) fn actions(&self) -> impl Iterator<Item = &ActionDef> {
+        self.inner
+            .entries
+            .iter()
+            .flat_map(|entry| entry.plugin.descriptor().actions)
+    }
+    /// One declared server-plugin action, whether or not its plugin is on. Dispatch still
+    /// refuses disabled plugins with their own `unavailable` reply.
+    #[must_use]
+    pub(crate) fn action(&self, action_id: &str) -> Option<ActionDef> {
+        self.inner
+            .entries
+            .iter()
+            .flat_map(|entry| entry.plugin.descriptor().actions)
+            .find(|action| action.id == action_id)
+            .copied()
     }
     /// Stop and join every worker before returning disabled. Enabling remains lazy.
     ///
@@ -1022,7 +1045,6 @@ impl SocketPlugins {
         });
         Some(self.entries.len() - 1)
     }
-    #[allow(clippy::too_many_lines)]
     fn control(&mut self) -> Option<&mpsc::Sender<Bytes>> {
         if self.controller.is_none() {
             let (tx, mut rx) = mpsc::channel::<Bytes>(4);
@@ -1072,7 +1094,6 @@ impl SocketPlugins {
         self.controller.as_ref().map(|controller| &controller.0)
     }
     /// Route only declared actions/topics, retaining bounded independent queues.
-    #[allow(clippy::too_many_lines)]
     pub fn dispatch(&mut self, wire: &Bytes, encode: &mut Vec<u8>) -> Dispatch {
         let Ok(decoded) = decode_muxed_frame(wire) else {
             return Dispatch::Unhandled;

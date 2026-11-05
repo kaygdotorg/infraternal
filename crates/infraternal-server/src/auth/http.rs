@@ -70,6 +70,8 @@ struct Setup {
 #[serde(deny_unknown_fields)]
 struct User {
     user_id: Option<String>,
+    /// The one per-action change this tap is for (`action_tap`, D336). Absent: a plain sign-in.
+    action: Option<super::TapAction>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,6 +128,10 @@ struct DeviceStart {
     kind: Option<String>,
     #[serde(default)]
     scopes: Option<Vec<String>>,
+    /// Requested key lifetime in seconds for a sign-in; the server default applies when
+    /// absent (D333). A machine join issues no key and must not send it.
+    #[serde(default)]
+    lifetime_seconds: Option<i64>,
     #[serde(default)]
     request: Option<super::devices::JoinMachineRequest>,
 }
@@ -277,7 +283,6 @@ pub(super) fn current_time(auth: &Auth) -> super::Result<i64> {
 }
 
 // Keep typed action dispatch together so capability and response rules can be reviewed in one place.
-#[allow(clippy::too_many_lines)]
 async fn execute(
     auth: &Auth,
     #[cfg(feature = "remote")] invitation_issuer: Option<&crate::remote_http::InvitationIssuer>,
@@ -408,11 +413,12 @@ async fn execute(
         }
         "device-start" => {
             let b: DeviceStart = body(value)?;
-            match (b.kind.as_deref(), b.scopes, b.request) {
-                (None | Some("sign_in"), Some(scopes), None) => {
-                    auth.device_start(&b.device, scopes, source, now).await?
+            match (b.kind.as_deref(), b.scopes, b.request, b.lifetime_seconds) {
+                (None | Some("sign_in"), Some(scopes), None, lifetime) => {
+                    auth.device_start_for(&b.device, scopes, lifetime, source, now)
+                        .await?
                 }
-                (Some("join_machine"), None, Some(request)) => {
+                (Some("join_machine"), None, Some(request), None) => {
                     auth.device_join_start(&b.device, request, source, now)
                         .await?
                 }
@@ -517,14 +523,18 @@ async fn login_start(
     now: i64,
 ) -> super::Result<Value> {
     let b: User = body(value)?;
+    let action = b.action.as_ref();
     match b.user_id {
         Some(user) => {
             if auth.session(cookie(headers)?, now).await?.user_id != user {
                 return Err(Error::Denied);
             }
-            auth.login_start(&user, now).await
+            auth.login_start_for(&user, action, now).await
         }
-        None => auth.discoverable_login_start_from(now, Some(source)).await,
+        None => {
+            auth.discoverable_login_start_from(now, Some(source), action)
+                .await
+        }
     }
 }
 

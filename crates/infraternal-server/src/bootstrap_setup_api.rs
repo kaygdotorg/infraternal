@@ -54,7 +54,11 @@ pub(super) async fn upgrade(
         token,
         activity,
         permit,
-        super::SocketMode::Setup,
+        super::UpgradeContext {
+            mode: super::SocketMode::Setup,
+            #[cfg(feature = "remote")]
+            api_key: None,
+        },
     )
 }
 
@@ -143,6 +147,7 @@ pub(super) async fn run(
                     &serde_json::json!({"resync":true,"host_id":host_id,"window_id":window_id}),
                 )
                 .ok(),
+                None,
             )
             .await?;
         }
@@ -160,6 +165,7 @@ pub(super) async fn run(
                 token,
                 &mut revocation,
                 serde_json::to_string(&serde_json::json!({"setup":event})).ok(),
+                None,
             )
             .await?;
             after = sequence;
@@ -181,7 +187,7 @@ pub(super) async fn run(
                     Request::Retry {host_id: requested} if requested == host_id => {
                         let result = api.runner.retry_setup(owner.clone(), Secret::new(token.as_bytes().to_vec()), host_id);
                         let reply = match result { Ok(()) => serde_json::json!({"retry":host_id}), Err(failure) => serde_json::json!({"error":failure.message}) };
-                        send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&reply).ok()).await?;
+                        send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&reply).ok(), None).await?;
                     },
                     _ => return Err(SocketFailure::Closed),
                 }

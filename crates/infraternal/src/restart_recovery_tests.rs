@@ -127,7 +127,6 @@ fn material() -> (CaMaterial, X509) {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[allow(clippy::too_many_lines)]
 /// Verify real execution and late recovery using compact images, private state, and owned children.
 fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
     use std::os::unix::{ffi::OsStrExt, process::CommandExt};
@@ -227,7 +226,7 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         let address = reservation.local_addr().unwrap();
         drop(reservation);
         let mut child = crate::restart_binary::fixture::ChildGuard::new(
-            std::process::Command::new(super::tests::stripped_test_image(
+            std::process::Command::new(crate::restart_binary::fixture::stripped_test_image(
                 &std::env::current_exe().unwrap(),
             ))
             .args(["--exact", NAME, "--nocapture"])

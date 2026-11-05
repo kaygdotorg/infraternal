@@ -309,30 +309,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "aws-lc-rs"
-version = "1.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53"
-dependencies = [
- "aws-lc-sys",
- "untrusted 0.7.1",
- "zeroize",
-]
-
-[[package]]
-name = "aws-lc-sys"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52"
-dependencies = [
- "cc",
- "cmake",
- "dunce",
- "fs_extra",
- "pkg-config",
-]
-
-[[package]]
 name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -747,15 +723,6 @@ name = "clap_lex"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
-
-[[package]]
-name = "cmake"
-version = "0.1.58"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "cmov"
@@ -1195,12 +1162,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
-name = "dunce"
-version = "1.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
-
-[[package]]
 name = "duplicate"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1463,12 +1424,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs_extra"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1666,7 +1621,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e37c2134d46523ed5b3c4bbdb578225e2e7379d03aea65baef41584725b1991"
 dependencies = [
  "aead 0.5.2",
- "aws-lc-rs",
  "base64 0.22.1",
  "bitfield-struct",
  "blake2 0.10.6",
@@ -1687,6 +1641,45 @@ dependencies = [
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rand_core 0.6.4",
+ "ring",
+ "socket2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "typed-builder",
+ "windows-sys 0.61.2",
+ "x25519-dalek",
+ "zerocopy",
+]
+
+[[package]]
+name = "gotatun"
+version = "0.10.2"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=84b7bb28e385d57dfb80493e78202898fad24d1e#84b7bb28e385d57dfb80493e78202898fad24d1e"
+dependencies = [
+ "aead 0.5.2",
+ "base64 0.22.1",
+ "bitfield-struct",
+ "blake2 0.10.6",
+ "bytes",
+ "chacha20poly1305",
+ "constant_time_eq",
+ "duplicate",
+ "either",
+ "eyre",
+ "futures",
+ "hmac 0.12.1",
+ "ip_network",
+ "ip_network_table",
+ "ipnetwork",
+ "libc",
+ "nix 0.31.3",
+ "parking_lot",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
+ "rand_core 0.6.4",
+ "ring",
  "socket2",
  "thiserror 1.0.69",
  "tokio",
@@ -2119,6 +2112,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2146,6 +2140,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-openssl",
+ "tokio-tungstenite",
  "tracing",
  "url",
  "uuid",
@@ -2202,6 +2197,13 @@ dependencies = [
  "infraternal-shim",
  "libfuzzer-sys",
  "serde_json",
+]
+
+[[package]]
+name = "infraternal-linux-tun"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -2282,8 +2284,10 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
- "gotatun",
+ "gotatun 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "gotatun 0.10.2 (git+https://github.com/kaygdotorg/gotatun?rev=84b7bb28e385d57dfb80493e78202898fad24d1e)",
  "hickory-proto",
+ "infraternal-linux-tun",
  "infraternal-mesh",
  "infraternal-plugin-api",
  "infraternal-plugin-relay",
@@ -3751,7 +3755,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted 0.9.0",
+ "untrusted",
  "windows-sys 0.52.0",
 ]
 
@@ -3963,7 +3967,7 @@ checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
- "untrusted 0.9.0",
+ "untrusted",
 ]
 
 [[package]]
@@ -5128,12 +5132,6 @@ dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
 ]
-
-[[package]]
-name = "untrusted"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

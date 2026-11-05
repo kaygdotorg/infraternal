@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""Root entry point of the nightly fuzz system unit on dev-02 (D351, #344).
+
+Installed root-owned at /usr/local/libexec/infraternal-fuzz-service by
+`scripts/install-nightly-fuzz`; systemd runs it as root. It does two things
+and runs no repository code as root:
+
+1. holds one shared build slot. Slots belong to the `claude` build account,
+   so the slot is taken by `claude`'s own build-slot script started through
+   `runuser` (it runs as `claude`, never as root) and held until step 2 ends;
+2. drops to the `infraternal-fuzz` account with `setpriv` and runs the pinned
+   checkout's `scripts/nightly-fuzz.py` in the flake dev shell.
+
+Its exit status is the fuzz run's, so systemd reports a real failure as failed
+and a night that only found and filed inputs as success.
+"""
+import subprocess
+import sys
+
+USER = 'infraternal-fuzz'
+HOME = '/var/lib/infraternal-fuzz'
+BUILD_SLOT = '/home/claude/infraternal-ops/build-slot'
+READY = b'INFRATERNAL_FUZZ_SLOT_READY\n'
+
+
+def main():
+    """Take a slot as claude, run the fuzz pass as the fuzz account, release the slot."""
+    holder = subprocess.Popen(
+        ['runuser', '-u', 'claude', '--', BUILD_SLOT, '/usr/bin/python3', '-c',
+         f'import sys; sys.stdout.buffer.write({READY!r}); sys.stdout.flush(); sys.stdin.buffer.read(1)'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        if holder.stdout.readline() != READY:
+            print('nightly fuzz: could not take a build slot', file=sys.stderr)
+            return 1
+        environment = ['env', f'HOME={HOME}', 'LANG=C.UTF-8',
+                       f'CARGO_TARGET_DIR={HOME}/target',
+                       'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin']
+        command = ['setpriv', f'--reuid={USER}', f'--regid={USER}', '--init-groups', '--reset-env', '--',
+                   *environment, 'nix', 'develop', '-c', 'python3', 'scripts/nightly-fuzz.py',
+                   '--token-file', f'{HOME}/forgejo-token', '--budget-seconds', '3600']
+        return subprocess.run(command, cwd=f'{HOME}/checkout').returncode
+    finally:
+        try:
+            holder.stdin.write(b'x')
+            holder.stdin.close()
+        except BrokenPipeError:
+            pass
+        holder.wait()
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

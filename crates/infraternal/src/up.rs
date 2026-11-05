@@ -247,7 +247,6 @@ fn take_join_key(data: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
 }
 
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
     let server = match server_url(server_input) {
         Ok(server) => server,
@@ -364,7 +363,6 @@ pub(crate) fn run_helper(server_input: &str, _json_output: bool) -> ExitCode {
 }
 
 /// Validate private enrollment input and keep the local install under rollback until active.
-#[allow(clippy::too_many_lines)]
 fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     if nix::unistd::Uid::effective().as_raw() != 0 {
         return Err(Failure::Permission);

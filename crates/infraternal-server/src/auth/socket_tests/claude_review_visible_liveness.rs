@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn claude_review_watch_expires_host_made_visible_by_membership_edit() {
     let _guard = SERIAL.lock().await;
     let clock = FrozenSocketTime::new().await;

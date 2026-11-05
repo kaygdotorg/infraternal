@@ -3,10 +3,6 @@
 use super::*;
 use tokio::io::AsyncWriteExt;
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Keep diagnostic fixture inputs explicit without production state."
-)]
 pub(super) async fn run(
     f: &Fixture,
     auth: Auth,
@@ -29,7 +25,7 @@ pub(super) async fn run(
     .unwrap();
     runner.session_notifications(state.session_notifications());
     let app = http
-        .merge(crate::bootstrap_api::router(auth, runner.clone()))
+        .merge(crate::bootstrap_api::router(&auth, runner.clone()))
         .merge(crate::websocket::router(state))
         .fallback_service(crate::web_assets::router(dist));
     let server = tokio::spawn(

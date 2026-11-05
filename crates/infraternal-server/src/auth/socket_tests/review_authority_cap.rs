@@ -104,7 +104,6 @@ async fn retries_whose_select_waits_stay_within_the_authority_cap() {
 /// best-effort Close write is bounded; if that deadline expires, a TCP reset
 /// is still a terminal fail-closed outcome.
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep socket setup, all outcomes and cleanup together.
 async fn every_socket_in_a_full_place_storm_fails_closed_without_a_reply() {
     let _guard = SERIAL.lock().await;
     let (f, address, server) =

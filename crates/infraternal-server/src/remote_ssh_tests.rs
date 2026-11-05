@@ -267,10 +267,6 @@ async fn writer_frame(output: &mut tokio::sync::mpsc::Receiver<TerminalOutput>) 
     .unwrap()
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep admission, reattachment and retirement ordered in the real peer lifecycle."
-)]
 async fn replacement(refuse: bool, component_off: bool) {
     let root_dir = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
         ".cache/codex-scratch/addhost-instant/pipe-{}",

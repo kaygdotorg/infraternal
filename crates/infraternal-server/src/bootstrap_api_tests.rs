@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use infraternal_plugin_ssh::{
     bootstrap::{Authority, Backend, Resolved},
     install::{BinaryPaths, JoinMaterial},
@@ -36,11 +36,12 @@ impl Backend for Rejected {
     ) -> Operation<'a, Resolved> {
         Box::pin(async move {
             assert!(
-                authority.session().is_some(),
-                "browser batch lost its live session capability"
+                authority.session().is_some() || authority.api_key_hash().is_some(),
+                "bootstrap lost its browser or scoped-key identity"
             );
             self.0.fetch_add(1, Ordering::SeqCst);
-            Err(Failure::install(self.1))
+            Err(Failure::install(self.1)
+                .with_captured_setup_stderr(b"captured remote setup diagnostic"))
         })
     }
     fn invitation<'a>(
@@ -142,6 +143,275 @@ async fn component_off_interrupts_a_stalled_host_key_confirmation_lookup() {
     confirmation_interrupt(true).await;
 }
 
+#[tokio::test]
+async fn scoped_api_key_can_open_the_bootstrap_action_stream_without_a_cookie_or_origin() {
+    let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
+    let token = "fixture-bootstrap-api-key-never-print";
+    let now = now().unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'j94-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(crate::auth::hash(token))
+        .bind(owner)
+        .bind(now)
+        .bind(now + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut request = format!("ws://{address}/v1/bootstrap/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let connection = connect_async(request).await;
+    assert!(
+        connection.is_ok(),
+        "a live hosts:write key should authorize the cookie-free action stream"
+    );
+    if let Ok((mut socket, _)) = connection {
+        let _ = socket.close(None).await;
+    }
+    server.abort();
+    drop(auth);
+}
+
+#[tokio::test]
+async fn each_bootstrap_action_message_uses_the_shared_api_key_rate_limit() {
+    let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
+    let token = "fixture-bootstrap-rate-key-never-print";
+    let now = now().unwrap();
+    let token_hash = crate::auth::hash(token);
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'j94-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(&token_hash)
+        .bind(&owner)
+        .bind(now)
+        .bind(now + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut request = format!("ws://{address}/v1/bootstrap/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+
+    // The connection consumes one admission; each new action message must consume another.
+    for _ in 0..29 {
+        socket
+            .send(ClientMessage::Text("not json".into()))
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let event: serde_json::Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+        assert_eq!(event["error"], "invalid bootstrap request");
+    }
+
+    socket
+        .send(ClientMessage::Text("not json".into()))
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let event: serde_json::Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+    assert_eq!(event["error"], "rate_limited");
+
+    let row: (String, String, String, String) = sqlx::query_as(
+        "SELECT key_id,person_id,action_id,state FROM api_action_audit ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            token_hash,
+            owner,
+            "ssh.start".to_owned(),
+            "denied".to_owned()
+        )
+    );
+    assert!(!serde_json::to_string(&row).unwrap().contains(token));
+    let audit_count: i64 = sqlx::query_scalar("SELECT count(*) FROM api_action_audit")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(audit_count, 30, "every API-key action message is audited");
+    let _ = socket.close(None).await;
+    server.abort();
+    drop(auth);
+}
+
+/// J137 P3-7: only the owner can add hosts, so a non-owner key never holds one of the
+/// shared bootstrap sockets the owner's own add-host needs.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn a_non_owner_key_cannot_hold_a_bootstrap_socket() {
+    let (auth, _, _, _, address, server, pool, api) = fixture(false).await;
+    let token = "fixture-member-bootstrap-key-never-print";
+    let now = now().unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('member','member',0,'x','member','Member')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'member','j94-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(crate::auth::hash(token))
+        .bind(now)
+        .bind(now + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut request = format!("ws://{address}/v1/bootstrap/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    rejection(request, StatusCode::FORBIDDEN).await;
+    assert_eq!(api.sockets.available_permits(), 16);
+    server.abort();
+    drop(auth);
+}
+
+/// J137 P3-5: a key-driven add-host audits every target it names, and keeps a target id
+/// only when it is a valid host identifier.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn key_driven_add_host_audits_every_target() {
+    let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
+    let token = "fixture-bootstrap-targets-key-never-print";
+    let now = now().unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'j94-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(crate::auth::hash(token))
+        .bind(&owner)
+        .bind(now)
+        .bind(now + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut request = format!("ws://{address}/v1/bootstrap/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let start = serde_json::json!({"action":"start","targets":[
+        {"id":"first-host","address":{"kind":"manual","value":"user@one"}},
+        {"id":"second-host","address":{"kind":"manual","value":"user@two"}},
+        {"id":"bad id\u{202e}","address":{"kind":"manual","value":"user@three"}}
+    ]});
+    socket
+        .send(ClientMessage::Text(start.to_string().into()))
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), socket.next()).await;
+    let mut targets: Vec<Option<String>> = Vec::new();
+    for _ in 0..200 {
+        targets = sqlx::query_scalar(
+            "SELECT target_id FROM api_action_audit WHERE action_id='ssh.start' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        if targets.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        targets,
+        [
+            Some("first-host".to_owned()),
+            Some("second-host".to_owned()),
+            None
+        ]
+    );
+    let _ = socket.close(None).await;
+    server.abort();
+    drop(auth);
+}
+
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn captured_setup_stderr_is_exposed_only_on_key_driven_bootstrap_events() {
+    let (auth, owner, cookie, _, address, server, pool, _) = fixture(false).await;
+    let token = "fixture-bootstrap-stderr-key-never-print";
+    let now = now().unwrap();
+    sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'j94-cli','[\"hosts:write\"]',?,?,0)")
+        .bind(crate::auth::hash(token))
+        .bind(owner)
+        .bind(now)
+        .bind(now + 3600)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let start = serde_json::json!({"action":"start","targets":[{"id":"stderr-host","address":{"kind":"manual","value":"user@fixture"}}]});
+    let mut key_request = format!("ws://{address}/v1/bootstrap/ws")
+        .into_client_request()
+        .unwrap();
+    key_request
+        .headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut key_socket, _) = connect_async(key_request).await.unwrap();
+    key_socket
+        .send(ClientMessage::Text(start.to_string().into()))
+        .await
+        .unwrap();
+    let key_event = failed_event(&mut key_socket).await;
+    assert_eq!(
+        key_event["failure"]["captured_stderr"],
+        "captured remote setup diagnostic"
+    );
+
+    let (mut browser_socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    browser_socket
+        .send(ClientMessage::Text(start.to_string().into()))
+        .await
+        .unwrap();
+    let browser_event = failed_event(&mut browser_socket).await;
+    assert!(browser_event["failure"].get("captured_stderr").is_none());
+    assert!(
+        !browser_event
+            .to_string()
+            .contains("captured remote setup diagnostic")
+    );
+
+    let _ = key_socket.close(None).await;
+    let _ = browser_socket.close(None).await;
+    server.abort();
+    drop(auth);
+}
+
+async fn failed_event<S>(socket: &mut S) -> serde_json::Value
+where
+    S: Stream<Item = Result<ClientMessage, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let event: serde_json::Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+        if event["step"] == "failed" {
+            return event;
+        }
+    }
+}
+
 async fn confirmation_interrupt(component_off: bool) {
     let (auth, _, cookie, _, _, original_server, _, _) = fixture(false).await;
     original_server.abort();
@@ -153,6 +423,8 @@ async fn confirmation_interrupt(component_off: bool) {
     let challenge = uuid::Uuid::new_v4();
     let api = Arc::new(Api {
         auth: auth.clone(),
+        #[cfg(feature = "remote")]
+        action_guard: ActionGuard::new(auth.clone(), auth.pool().clone()),
         runner: Bootstrap::new(
             Arc::new(PublicChallenge(challenge)),
             backend.clone(),
@@ -239,6 +511,8 @@ async fn a_client_request_during_a_pending_confirmation_keeps_the_batch() {
     let challenge = uuid::Uuid::new_v4();
     let api = Arc::new(Api {
         auth: auth.clone(),
+        #[cfg(feature = "remote")]
+        action_guard: ActionGuard::new(auth.clone(), auth.pool().clone()),
         runner: Bootstrap::new(
             Arc::new(PublicChallenge(challenge)),
             backend.clone(),
@@ -391,6 +665,8 @@ async fn fixture(
     let address = listener.local_addr().unwrap();
     let api = Arc::new(Api {
         auth: auth.clone(),
+        #[cfg(feature = "remote")]
+        action_guard: ActionGuard::new(auth.clone(), auth.pool().clone()),
         runner,
         ssh_key: Arc::new(UnavailableSshKey),
         #[cfg(feature = "remote")]
@@ -648,7 +924,6 @@ async fn control_frames_do_not_cancel_bootstrap_or_starve_progress() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn settings_public_key_requires_exact_origin_and_live_unlocked_owner() {
     use crate::ssh_key::{PublicSshKey, SshKeyError, SshKeyMaterial, SshKeySource};
     use axum::{body::Body, http::Request};
@@ -668,7 +943,7 @@ async fn settings_public_key_requires_exact_origin_and_live_unlocked_owner() {
         }
     }
     let (auth, _, cookie, _, _, serving, pool, api) = fixture(false).await;
-    let app = router_with_ssh_key(auth.clone(), api.runner.clone(), Arc::new(PublicOnly));
+    let app = router_with_ssh_key(&auth, api.runner.clone(), Arc::new(PublicOnly));
     let request = |origin: &str, cookie: Option<&str>| {
         let mut builder = Request::builder()
             .uri("/v1/bootstrap/ssh-key")
@@ -724,7 +999,7 @@ async fn settings_public_key_requires_exact_origin_and_live_unlocked_owner() {
         app.clone().oneshot(browser_request).await.unwrap().status(),
         StatusCode::OK
     );
-    let unavailable = router(auth.clone(), api.runner.clone());
+    let unavailable = router(&auth, api.runner.clone());
     assert_eq!(
         unavailable
             .oneshot(request(ORIGIN, Some(&cookie)))
@@ -823,7 +1098,7 @@ async fn component_off_retires_idle_sockets_and_refuses_new_admission() {
     assert_eq!(api.sockets.available_permits(), 16);
     assert_eq!(api.runner.status().state, PluginState::Off);
     assert_eq!(api.runner.status().active_work, 0);
-    let response = router(auth.clone(), api.runner.clone())
+    let response = router(&auth, api.runner.clone())
         .oneshot(
             HttpRequest::builder()
                 .uri("/v1/bootstrap/ssh-key")
@@ -955,7 +1230,19 @@ async fn revoked_upgrade(
         .unwrap();
     let activity = api.runner.activity().unwrap();
     let permit = api.sockets.clone().acquire_owned().await.unwrap();
-    upgrade_admitted(ws, api, owner, token, activity, permit, mode)
+    upgrade_admitted(
+        ws,
+        api,
+        owner,
+        token,
+        activity,
+        permit,
+        super::UpgradeContext {
+            mode,
+            #[cfg(feature = "remote")]
+            api_key: None,
+        },
+    )
 }
 
 async fn revoked_before_subscription(mode: SocketMode) {

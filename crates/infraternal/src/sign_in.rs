@@ -5,14 +5,17 @@
 #[allow(dead_code)]
 pub(crate) fn invalid_api_key_diagnostic() -> (&'static str, crate::cli::output::Exit) {
     (
-        "Signed out: your key expired. Run `infraternal sign-in <server>`.",
+        "Signed out: your key expired or was revoked. Run `infraternal sign-in <server>`.",
         crate::cli::output::Exit::NotAllowed,
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Failure, StoredCredential, approval_link, server_url, store_credential};
+    use super::{
+        ApiCredentialError, Failure, SCOPES, StoredCredential, approval_link,
+        read_api_credential_from, server_url, store_credential,
+    };
     use serde_json::Value;
     use std::{
         fs,
@@ -26,6 +29,69 @@ mod tests {
     use zeroize::Zeroizing;
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn default_sign_in_scopes_are_read_only() {
+        assert_eq!(SCOPES, ["hosts:read", "sessions:read", "status:read"]);
+    }
+
+    /// J137 P3-6: a scope no action declares is not grantable; a later action that declared
+    /// it would otherwise become callable by keys already issued, without a new approval.
+    #[test]
+    fn scopes_without_an_action_are_refused() {
+        assert!(matches!(
+            super::requested_scopes(&["sessions:write"]),
+            Err(Failure::InvalidScope)
+        ));
+        assert!(super::requested_scopes(&["hosts:write"]).is_ok());
+    }
+
+    #[test]
+    fn stored_key_selection_requires_one_server_or_an_explicit_origin() {
+        let directory = TemporaryDirectory::new();
+        store_credential(
+            &directory.0,
+            StoredCredential {
+                server: "https://one.example.test".to_owned(),
+                device: "one".to_owned(),
+                scopes: vec!["hosts:read".to_owned()],
+                api_key: Zeroizing::new("first-key-never-report".to_owned()),
+            },
+        )
+        .expect("store first test credential");
+        store_credential(
+            &directory.0,
+            StoredCredential {
+                server: "https://two.example.test".to_owned(),
+                device: "two".to_owned(),
+                scopes: vec!["hosts:write".to_owned()],
+                api_key: Zeroizing::new("second-key-never-report".to_owned()),
+            },
+        )
+        .expect("store second test credential");
+
+        assert!(matches!(
+            read_api_credential_from(&directory.0, None),
+            Err(ApiCredentialError::Ambiguous)
+        ));
+        let selected = read_api_credential_from(&directory.0, Some("https://one.example.test/"))
+            .expect("select explicit server credential");
+        assert_eq!(selected.server, "https://one.example.test");
+        assert_eq!(selected.scopes, ["hosts:read"]);
+        assert_eq!(selected.api_key.as_str(), "first-key-never-report");
+    }
+
+    #[test]
+    fn missing_and_ambiguous_credential_errors_contain_no_key_material() {
+        let directory = TemporaryDirectory::new();
+        assert!(matches!(
+            read_api_credential_from(&directory.0, None),
+            Err(ApiCredentialError::Missing)
+        ));
+        let error = ApiCredentialError::Missing;
+        let rendered = format!("{error:?}");
+        assert!(!rendered.contains("key"));
+    }
 
     struct TemporaryDirectory(PathBuf);
 
@@ -227,7 +293,7 @@ mod tests {
         let (message, exit) = super::invalid_api_key_diagnostic();
         assert_eq!(
             message,
-            "Signed out: your key expired. Run `infraternal sign-in <server>`."
+            "Signed out: your key expired or was revoked. Run `infraternal sign-in <server>`."
         );
         assert_eq!(message.lines().count(), 1);
         assert_eq!(exit.code(), 3);
@@ -377,7 +443,8 @@ use zeroize::Zeroizing;
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit, print_progress};
 
-const SCOPES: [&str; 3] = ["hosts:read", "terminal:connect", "actions:dry-run"];
+const SCOPES: [&str; 3] = ["hosts:read", "sessions:read", "status:read"];
+const ADDITIONAL_SCOPES: [&str; 3] = ["hosts:write", "terminal:connect", "actions:dry-run"];
 const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_CREDENTIAL_FILE_BYTES: usize = 64 * 1024;
 const MAX_DEVICE_LIFETIME_SECONDS: u64 = 10 * 60;
@@ -402,10 +469,97 @@ struct CredentialFile {
     credentials: Vec<StoredCredential>,
 }
 
+/// Error classes for choosing one already-approved server credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApiCredentialError {
+    Missing,
+    Ambiguous,
+    InvalidServer,
+    UnsafeStorage,
+}
+
+/// Selected private credential; its key is zeroized and deliberately has no `Debug` output.
+pub(crate) struct ApiCredential {
+    pub(crate) server: String,
+    pub(crate) scopes: Vec<String>,
+    pub(crate) api_key: Zeroizing<String>,
+}
+
+/// Read one server key through the same locked, private file boundary used by sign-in.
+pub(crate) fn load_api_credential(
+    server: Option<&str>,
+) -> Result<ApiCredential, ApiCredentialError> {
+    let directory = credential_directory().map_err(|_| ApiCredentialError::UnsafeStorage)?;
+    read_api_credential_from(&directory, server)
+}
+
+/// Whether status should prefer the one configured server key to local node status.
+pub(crate) fn has_stored_api_credentials() -> bool {
+    match load_api_credential(None) {
+        Ok(_) | Err(ApiCredentialError::Ambiguous) => true,
+        Err(
+            ApiCredentialError::Missing
+            | ApiCredentialError::InvalidServer
+            | ApiCredentialError::UnsafeStorage,
+        ) => false,
+    }
+}
+
+fn read_api_credential_from(
+    directory: &Path,
+    server: Option<&str>,
+) -> Result<ApiCredential, ApiCredentialError> {
+    let locked =
+        lock_private_directory(directory).map_err(|_| ApiCredentialError::UnsafeStorage)?;
+    let file = read_credential_file(&locked).map_err(|_| ApiCredentialError::UnsafeStorage)?;
+    let selected = if let Some(server) = server {
+        let expected = server_url(server).map_err(|_| ApiCredentialError::InvalidServer)?;
+        let expected_origin = expected.origin().ascii_serialization();
+        file.credentials
+            .iter()
+            .rev()
+            .find(|credential| {
+                server_url(&credential.server).is_ok_and(|candidate| {
+                    candidate.origin().ascii_serialization() == expected_origin
+                })
+            })
+            .ok_or(ApiCredentialError::Missing)?
+    } else {
+        let mut origins = file
+            .credentials
+            .iter()
+            .filter_map(|credential| server_url(&credential.server).ok())
+            .map(|credential| credential.origin().ascii_serialization())
+            .collect::<Vec<_>>();
+        origins.sort_unstable();
+        origins.dedup();
+        match origins.as_slice() {
+            [] => return Err(ApiCredentialError::Missing),
+            [_] => file
+                .credentials
+                .iter()
+                .rev()
+                .find(|credential| {
+                    server_url(&credential.server).is_ok_and(|candidate| {
+                        candidate.origin().ascii_serialization() == origins[0]
+                    })
+                })
+                .ok_or(ApiCredentialError::Missing)?,
+            _ => return Err(ApiCredentialError::Ambiguous),
+        }
+    };
+    let parsed = server_url(&selected.server).map_err(|_| ApiCredentialError::UnsafeStorage)?;
+    Ok(ApiCredential {
+        server: parsed.origin().ascii_serialization(),
+        scopes: selected.scopes.clone(),
+        api_key: Zeroizing::new(selected.api_key.as_str().to_owned()),
+    })
+}
+
 #[derive(Serialize)]
 struct DeviceStartRequest<'a> {
     device: &'a str,
-    scopes: &'a [&'static str],
+    scopes: &'a [String],
 }
 
 #[derive(Deserialize)]
@@ -462,6 +616,7 @@ impl From<crate::remote::ClientFailure> for NetworkFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Failure {
     InvalidServer,
+    InvalidScope,
     Dns,
     Connect,
     Tls,
@@ -486,7 +641,11 @@ enum Redemption {
 }
 
 /// Starts one CLI device approval and saves the redeemed key only after private storage is ready.
-pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
+pub(crate) fn run(server_input: &str, requested: &[&str], json_output: bool) -> ExitCode {
+    let scopes = match requested_scopes(requested) {
+        Ok(scopes) => scopes,
+        Err(failure) => return fail(json_output, failure),
+    };
     let server = match server_url(server_input) {
         Ok(server) => server,
         Err(failure) => return fail(json_output, failure),
@@ -507,7 +666,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
     let origin = server.origin().ascii_serialization();
     match crate::block_on(
         &runtime,
-        run_flow(&server, &directory, &origin, &device, json_output),
+        run_flow(&server, &directory, &origin, &device, &scopes, json_output),
     ) {
         Ok(()) => emit(
             CommandResult::new(
@@ -517,7 +676,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
                 json!({
                     "server": origin,
                     "device": device,
-                    "scopes": SCOPES,
+                    "scopes": scopes,
                     "stored": true,
                 }),
             ),
@@ -533,9 +692,10 @@ async fn run_flow(
     directory: &Path,
     origin: &str,
     device: &str,
+    scopes: &[String],
     json_output: bool,
 ) -> Result<(), Failure> {
-    let approval = start_approval(server, device).await?;
+    let approval = start_approval(server, device, scopes).await?;
     let link = approval_link(server, &approval.user_code);
     let progress = CommandResult::new(
         "sign-in",
@@ -544,7 +704,7 @@ async fn run_flow(
         json!({
             "server": origin,
             "device": device,
-            "scopes": SCOPES,
+            "scopes": scopes,
             "user_code": approval.user_code,
             "verification_url": link,
             "expires_in_seconds": approval.lifetime.as_secs(),
@@ -553,7 +713,7 @@ async fn run_flow(
     .with_body(format!(
         "Open this link and approve with your passkey:\n{link}\n\nCode: {}\nDevice: {device}\nScopes: {}",
         approval.user_code,
-        SCOPES.join(", "),
+        scopes.join(", "),
     ))
     .with_next_step("Keep this command running while you review and approve the device.");
     // Progress does not mark the command's final result, so Ctrl-C can still emit D303's 130 result.
@@ -563,12 +723,28 @@ async fn run_flow(
     let credential = StoredCredential {
         server: origin.to_owned(),
         device: device.to_owned(),
-        scopes: SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
+        scopes: scopes.to_vec(),
         api_key,
     };
     store_credential(directory, credential)
         .map(|_| ())
         .map_err(|error| storage_failure(error.kind(), true))
+}
+
+fn requested_scopes(requested: &[&str]) -> Result<Vec<String>, Failure> {
+    let mut scopes = SCOPES
+        .iter()
+        .map(|scope| (*scope).to_owned())
+        .collect::<Vec<_>>();
+    for scope in requested {
+        if !ADDITIONAL_SCOPES.contains(scope) && !SCOPES.contains(scope) {
+            return Err(Failure::InvalidScope);
+        }
+        if !scopes.iter().any(|existing| existing == scope) {
+            scopes.push((*scope).to_owned());
+        }
+    }
+    Ok(scopes)
 }
 
 fn server_url(input: &str) -> Result<Url, Failure> {
@@ -884,13 +1060,14 @@ fn storage_failure(kind: io::ErrorKind, after_approval: bool) -> Failure {
     }
 }
 
-async fn start_approval(server: &Url, device: &str) -> Result<DeviceApproval, Failure> {
+async fn start_approval(
+    server: &Url,
+    device: &str,
+    scopes: &[String],
+) -> Result<DeviceApproval, Failure> {
     let encoded = Zeroizing::new(
-        serde_json::to_vec(&DeviceStartRequest {
-            device,
-            scopes: &SCOPES,
-        })
-        .map_err(|_| Failure::BadResponse)?,
+        serde_json::to_vec(&DeviceStartRequest { device, scopes })
+            .map_err(|_| Failure::BadResponse)?,
     );
     let response = post_json_with_timeout(server, "/auth/device-start", &encoded)
         .await
@@ -1031,7 +1208,7 @@ fn map_redemption_http_failure(status: StatusCode) -> Failure {
 
 fn exit_for_failure(failure: Failure) -> Exit {
     match failure {
-        Failure::InvalidServer => Exit::Usage,
+        Failure::InvalidServer | Failure::InvalidScope => Exit::Usage,
         Failure::Dns | Failure::Connect | Failure::Tls | Failure::ServerUnavailable => {
             Exit::Unreachable
         }
@@ -1054,6 +1231,11 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
             CommandState::Refused,
             "Use an HTTPS server origin, such as https://infra.example.org.",
             "Remove any path, credentials, query or fragment from the server address.",
+        ),
+        Failure::InvalidScope => (
+            CommandState::Refused,
+            "That API-key scope is not supported.",
+            "Choose a supported scope: hosts:write, terminal:connect or actions:dry-run.",
         ),
         Failure::Dns => (
             CommandState::Unknown,

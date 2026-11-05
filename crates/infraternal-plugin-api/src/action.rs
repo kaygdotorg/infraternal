@@ -381,6 +381,8 @@ pub enum CliHandler {
     Skill,
     /// Sign this CLI device into a server through fresh passkey approval.
     SignIn,
+    /// Adapt one shared hosted action to the API-key HTTP or bootstrap WebSocket transport.
+    HostedAction,
     /// Enroll this Linux machine and install its system service.
     Up,
     /// Run the elevated half of `up` without placing credentials in process arguments.

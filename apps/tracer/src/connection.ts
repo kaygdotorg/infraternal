@@ -24,6 +24,7 @@ import { CloseNotes, plainCloseReason } from "./close-reasons";
 import {
   WebSocketFrameDecoder,
   encodeMuxedFrameInto,
+  DESKTOP_VIDEO,
   type WireFrame,
 } from "../../../packages/protocol/src/codec";
 
@@ -132,8 +133,12 @@ export interface ConnectionConfig {
   desktop?: () => boolean;
 }
 
-/** Capability bit the server advertises (and a client echoes) for desktop video streams. */
-export const DESKTOP_VIDEO_CAP = 16n;
+/**
+ * Capability bit the server advertises (and a client echoes) for desktop video streams. It is the protocol package's
+ * `DESKTOP_VIDEO`, not a second copy: the Rust side defines the same bit (`desktop::CAPABILITY`, bit 4), and
+ * `desktop-capability.test.ts` holds the three together.
+ */
+export const DESKTOP_VIDEO_CAP = DESKTOP_VIDEO;
 
 interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 

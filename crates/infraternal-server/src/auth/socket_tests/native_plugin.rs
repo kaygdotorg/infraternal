@@ -136,7 +136,6 @@ impl infraternal_plugin_api::Plugin for ScopeProbe {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep ordinary failure, SQL refusal and fresh reconnect on one actual socket fixture.
 async fn native_authority_read_failure_retires_socket_instead_of_only_its_worker() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;

@@ -32,7 +32,6 @@ async fn review_r2_cancelled_refused_commit_never_publishes() {
     departed_commit(Departure::Drop, true).await;
 }
 
-#[allow(clippy::too_many_lines)] // Keep the reader lock, cancellation and durable outcome in one fixture.
 async fn departed_commit(departure: Departure, refuse: bool) {
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
         .join("review-r2-commit");

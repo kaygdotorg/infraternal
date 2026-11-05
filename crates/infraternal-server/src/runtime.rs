@@ -446,6 +446,7 @@ async fn remote_router(
         Option<RemoteListeners>,
         Option<crate::remote_http::InvitationIssuer>,
         crate::enrollment::EnrollmentStore,
+        crate::remote_removal::Removal,
     ),
     ServerError,
 > {
@@ -517,11 +518,12 @@ async fn remote_router(
         ca_api,
         remote_api
             .unwrap_or_else(crate::remote_http::unavailable_router)
-            .merge(crate::remote_removal_http::router(auth, removal)),
+            .merge(crate::remote_removal_http::router(auth, removal.clone())),
         hosts,
         listeners,
         issuer,
         enrollment_store,
+        removal,
     ))
 }
 
@@ -539,7 +541,6 @@ async fn build_router_with_key_setup(
 
 // Keep startup ordering visible: persisted switches load before node workers
 // attach, and admitted transports exist before their dependent server features.
-#[allow(clippy::too_many_lines)]
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
@@ -625,7 +626,7 @@ async fn build_router_core(
         EmbeddedAgent::spawn(executable)
     };
     #[cfg(feature = "remote")]
-    let (ca_api, remote_api, hosts, listeners, issuer, enrollment_store) = remote_router(
+    let (ca_api, remote_api, hosts, listeners, issuer, enrollment_store, removal) = remote_router(
         auth.clone(),
         pool.clone(),
         enrollment,
@@ -677,6 +678,15 @@ async fn build_router_core(
     let ws_state = ws_state.with_remote_hosts(hosts.clone());
     #[cfg(feature = "remote")]
     enrollment_store.bind_plugins(&ws_state.plugins);
+    #[cfg(feature = "remote")]
+    let action_guard = crate::api_actions::ActionGuard::new(auth.clone(), pool.clone());
+    #[cfg(feature = "remote")]
+    let action_api = crate::api_actions::router(
+        pool.clone(),
+        removal.clone(),
+        ws_state.clone(),
+        action_guard.clone(),
+    );
     #[cfg(feature = "ssh")]
     bootstrap.session_notifications(ws_state.session_notifications());
     #[cfg(not(feature = "remote"))]
@@ -716,16 +726,21 @@ async fn build_router_core(
         .merge(websocket::router(ws_state))
         .merge(ca_api);
     #[cfg(feature = "remote")]
-    let app = app.merge(remote_api);
+    let app = app.merge(remote_api).merge(action_api);
     #[cfg(feature = "ssh")]
     let warmup = Some(bootstrap.clone());
     #[cfg(not(feature = "ssh"))]
     let warmup = None;
-    #[cfg(feature = "ssh")]
-    let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
+    #[cfg(all(feature = "ssh", feature = "remote"))]
+    let app = app.merge(crate::bootstrap_api::router_with_ssh_key_and_action_guard(
         auth.clone(),
         bootstrap,
         ssh_key,
+        action_guard,
+    ));
+    #[cfg(all(feature = "ssh", not(feature = "remote")))]
+    let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
+        &auth, bootstrap, ssh_key,
     ));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
@@ -917,14 +932,20 @@ fn logging_color(terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
 }
 
 async fn health(State(pool): State<SqlitePool>) -> Response {
-    match sqlx::query("SELECT 1").execute(&pool).await {
-        Ok(_) => Json(json!({"status":"ok"})).into_response(),
-        Err(_) => (
+    if server_healthy(&pool).await {
+        Json(json!({"status":"ok"})).into_response()
+    } else {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status":"unavailable"})),
         )
-            .into_response(),
+            .into_response()
     }
+}
+
+/// Shared health predicate for `/healthz` and the signed API `server.status` action.
+pub(crate) async fn server_healthy(pool: &SqlitePool) -> bool {
+    sqlx::query("SELECT 1").execute(pool).await.is_ok()
 }
 
 /// Canonical client address from the listener and explicitly trusted proxy policy.
@@ -1338,6 +1359,465 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn production_router_mounts_the_bearer_action_endpoint() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/actions/remote.host.list")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("action request"),
+            )
+            .await
+            .expect("action response");
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    /// J137 P3-1: a well-formed bearer that is not a key learns nothing about the catalogue.
+    /// Unknown, non-key-callable and key-callable ids all get the same 403; only a caller
+    /// whose key authenticates can tell an unknown action (404) from an out-of-scope one.
+    #[tokio::test]
+    async fn an_unknown_bearer_cannot_probe_action_ids() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-probe-read-key-never-print";
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(&pool)
+            .await
+            .expect("owner");
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"status:read\"]',?,?,0)")
+            .bind(crate::auth::hash(token))
+            .bind(now)
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .expect("key");
+        let status = |bearer: &'static str, action: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/actions/{action}"))
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {bearer}"))
+                        .body(Body::from("{}"))
+                        .expect("action request"),
+                )
+                .await
+                .expect("action response")
+                .status()
+            }
+        };
+        for action in ["no.such.action", "server.status", "remote.ca.bootstrap"] {
+            assert_eq!(
+                status("not-a-key", action).await,
+                axum::http::StatusCode::FORBIDDEN,
+                "{action}"
+            );
+        }
+        assert_eq!(
+            status(token, "no.such.action").await,
+            axum::http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(token, "server.status").await,
+            axum::http::StatusCode::OK
+        );
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    /// POST one key action through the real router and return its status and JSON body.
+    #[cfg(feature = "remote")]
+    async fn post_key_action(
+        app: &axum::Router,
+        token: &str,
+        action: &str,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/actions/{action}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .expect("action request"),
+            )
+            .await
+            .expect("action response");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("action body");
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// An owner, `hosts:write` keys with the given names and one live host, in the real database.
+    #[cfg(feature = "remote")]
+    async fn removal_fixture(pool: &sqlx::SqlitePool, tokens: &[&str]) -> uuid::Uuid {
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(pool)
+            .await
+            .expect("owner");
+        for token in tokens {
+            sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"hosts:write\"]',?,?,0)")
+                .bind(crate::auth::hash(token))
+                .bind(now)
+                .bind(now + 3600)
+                .execute(pool)
+                .await
+                .expect("key");
+        }
+        let host = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)")
+            .bind(host.as_bytes().as_slice())
+            .execute(pool)
+            .await
+            .expect("host");
+        host
+    }
+
+    #[cfg(feature = "remote")]
+    async fn host_is_live(pool: &sqlx::SqlitePool, host: uuid::Uuid) -> bool {
+        sqlx::query_scalar("SELECT revoked_at IS NULL FROM remote_hosts WHERE id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(pool)
+            .await
+            .expect("host row")
+    }
+
+    /// J154 P2-2 / D28: "a destructive MCP action needs a dry run first". A key cannot remove
+    /// a host in one call: `dry_run: false` without the dry run's review token is refused.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn a_removal_without_a_review_token_is_refused_and_the_host_stays() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-one-call-removal-key-never-print";
+        let host = removal_fixture(&pool, &[token]).await;
+        let (status, _) = post_key_action(
+            &app,
+            token,
+            "remote.host.remove",
+            serde_json::json!({"host_id": host, "dry_run": false}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(host_is_live(&pool, host).await, "the host stays");
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    /// Found on the test server (#303, J94e): the dry run of a host the owner does not have
+    /// answered 403, which the CLI reads as a dead key ("Signed out"). The key is fine; the
+    /// host is missing, so the answer is 404.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn a_dry_run_of_an_unknown_host_is_not_found_not_a_dead_key() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-unknown-host-key-never-print";
+        removal_fixture(&pool, &[token]).await;
+        let (status, _) = post_key_action(
+            &app,
+            token,
+            "remote.host.remove",
+            serde_json::json!({"host_id": uuid::Uuid::new_v4(), "dry_run": true}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    /// D28 through the real router: the dry run's token removes the host once. Another key,
+    /// another host, a replay and a token on a dry run are refused, and refusals are audited.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    // One real-router sequence: each refusal, then the removal, then the audit.
+    async fn a_removal_needs_its_own_dry_run_token_once() {
+        use axum::http::StatusCode;
+        use serde_json::json;
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-reviewed-removal-key-never-print";
+        let other = "fixture-other-removal-key-never-print";
+        let host = removal_fixture(&pool, &[token, other]).await;
+        let remove = "remote.host.remove";
+        let dry_run = |bearer| {
+            post_key_action(
+                &app,
+                bearer,
+                remove,
+                json!({"host_id": host, "dry_run": true}),
+            )
+        };
+
+        let (status, review) = dry_run(token).await;
+        assert_eq!(status, StatusCode::OK, "{review}");
+        assert_eq!(review["dry_run"], true);
+        assert_eq!(review["review_expires_in"], 120);
+        let review_token = review["review_token"]
+            .as_str()
+            .expect("review token")
+            .to_owned();
+        assert!(host_is_live(&pool, host).await, "a dry run changes nothing");
+
+        let (status, refusal) = post_key_action(
+            &app,
+            other,
+            remove,
+            json!({"host_id": host, "dry_run": false, "review_token": review_token}),
+        )
+        .await;
+        assert_eq!(
+            (status, refusal["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("review_invalid"))
+        );
+        assert!(
+            host_is_live(&pool, host).await,
+            "another key's call spent the token, nothing else"
+        );
+
+        let (_, review) = dry_run(token).await;
+        let review_token = review["review_token"].as_str().unwrap().to_owned();
+        let (status, refusal) = post_key_action(
+            &app,
+            token,
+            remove,
+            json!({"host_id": uuid::Uuid::new_v4(), "dry_run": false, "review_token": review_token}),
+        )
+        .await;
+        assert_eq!(
+            (status, refusal["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("review_invalid"))
+        );
+
+        let (status, _) = post_key_action(
+            &app,
+            token,
+            remove,
+            json!({"host_id": host, "dry_run": true, "review_token": "x"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a dry run carries no token"
+        );
+
+        let (_, review) = dry_run(token).await;
+        let review_token = review["review_token"].as_str().unwrap().to_owned();
+        let real = json!({"host_id": host, "dry_run": false, "review_token": review_token});
+        let (status, removed) = post_key_action(&app, token, remove, real.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{removed}");
+        assert_eq!(removed["state"], "removed");
+        assert!(!host_is_live(&pool, host).await);
+        let (status, refusal) = post_key_action(&app, token, remove, real).await;
+        assert_eq!(
+            (status, refusal["error"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("review_invalid")),
+            "a replay"
+        );
+
+        let audit: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT state,result FROM api_action_audit WHERE action_id='remote.host.remove' AND key_id=? ORDER BY id",
+        )
+        .bind(crate::auth::hash(token))
+        .fetch_all(&pool)
+        .await
+        .expect("audit");
+        let audit: Vec<(&str, Option<&str>)> = audit
+            .iter()
+            .map(|(s, r)| (s.as_str(), r.as_deref()))
+            .collect();
+        assert_eq!(
+            audit,
+            [
+                ("complete", Some("dry_run")),
+                ("complete", Some("dry_run")),
+                ("denied", Some("review_invalid")),
+                ("failed", None),
+                ("complete", Some("dry_run")),
+                ("complete", Some("removed")),
+                ("denied", Some("review_invalid")),
+            ]
+        );
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    /// J154 P2-1: reads by key are one summary row per key, action and minute, never one audit
+    /// row per call.
+    #[tokio::test]
+    async fn key_reads_are_counted_per_minute_not_written_per_call() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-read-count-key-never-print";
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(&pool)
+            .await
+            .expect("owner");
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"status:read\"]',?,?,0)")
+            .bind(crate::auth::hash(token))
+            .bind(now)
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .expect("key");
+        for _ in 0..5 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/actions/server.status")
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from("{}"))
+                        .expect("action request"),
+                )
+                .await
+                .expect("action response");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+        let per_call: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_action_audit")
+            .fetch_one(&pool)
+            .await
+            .expect("audit rows");
+        assert_eq!(per_call, 0, "reads write no per-call row");
+        let (rows, calls, failed): (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*),SUM(calls),SUM(failed) FROM api_read_audit WHERE key_id=? AND action_id='server.status'",
+        )
+        .bind(crate::auth::hash(token))
+        .fetch_one(&pool)
+        .await
+        .expect("read summary");
+        // Five calls can straddle one minute boundary.
+        assert!(matches!(rows, 1 | 2), "{rows}");
+        assert_eq!((calls, failed), (5, 0));
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
+    /// Host inventory is a server-side socket plugin, not an infraternal agent descriptor; the
+    /// bearer route must find it in the same runtime the browser socket dispatches to.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn live_read_key_reaches_the_server_plugin_host_inventory() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("reopen real SQLite");
+        let token = "fixture-inventory-key-never-print";
+        let now = super::unix_seconds().expect("current time");
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('owner','owner',1,'x')")
+            .execute(&pool)
+            .await
+            .expect("owner");
+        sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,'owner','fixture-cli','[\"hosts:read\"]',?,?,0)")
+            .bind(crate::auth::hash(token))
+            .bind(now)
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .expect("key");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/actions/remote.host.list")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from("{}"))
+                    .expect("action request"),
+            )
+            .await
+            .expect("action response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("inventory body");
+        let inventory: serde_json::Value = serde_json::from_slice(&body).expect("inventory json");
+        assert!(inventory["hosts"].is_array(), "{inventory}");
+        pool.close().await;
         std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
     }
 

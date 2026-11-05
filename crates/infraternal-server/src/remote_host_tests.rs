@@ -228,7 +228,6 @@ async fn host_idle_canary(installation: &Installation) {
 }
 
 // Keep setup, round trips and cleanup in one sequential opt-in host transaction.
-#[allow(clippy::too_many_lines)]
 #[tokio::test]
 #[ignore = "authorised o1 proof requires pinned INFRATERNAL_O1_KNOWN_HOSTS and aarch64 INFRATERNAL_REMOTE_TEST_BINARY; exclusive 4701/7443"]
 async fn o1_rootless_join_terminal_and_cleanup() {

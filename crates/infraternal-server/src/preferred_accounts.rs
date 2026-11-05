@@ -29,6 +29,13 @@ async fn authorize(
     if !live {
         return Err(REFUSED);
     }
+    authorize_host(tx, person, host).await
+}
+async fn authorize_host(
+    tx: &mut Transaction<'_, Sqlite>,
+    person: &str,
+    host: Option<uuid::Uuid>,
+) -> Result<(), &'static str> {
     if let Some(host) = host {
         let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
             .bind(host.as_bytes().as_slice()).bind(person).fetch_one(&mut **tx).await.map_err(|_| REFUSED)?;
@@ -77,6 +84,22 @@ pub async fn resolve(
         .get(person, hash, Selection { host_id: host })
         .await
         .map(|preference| preference.account)
+}
+/// Resolve the same preference for an API-key add-host. The caller rechecks the key's
+/// `hosts:write` liveness around this read; host ownership is checked here as above.
+/// # Errors
+/// Refuses foreign/revoked hosts and unavailable storage.
+#[cfg(feature = "remote")]
+pub(crate) async fn resolve_for_key(
+    pool: &SqlitePool,
+    person: &str,
+    host: uuid::Uuid,
+) -> Result<String, &'static str> {
+    let mut tx = pool.begin().await.map_err(|_| REFUSED)?;
+    authorize_host(&mut tx, person, Some(host)).await?;
+    let preference = read(&mut tx, person, Some(host)).await?;
+    tx.commit().await.map_err(|_| REFUSED)?;
+    Ok(preference.account)
 }
 impl Backend for AccountsPlugin {
     fn get<'a>(

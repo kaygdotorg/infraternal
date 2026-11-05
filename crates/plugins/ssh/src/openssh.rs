@@ -423,10 +423,11 @@ impl SshSession for Session {
                 && error.exit_status.is_some()
                 && error.exit_status == result.exit_status
             {
-                return Err(error);
+                return Err(capture_setup_stderr(error, script, &result.stderr));
             }
             let mut failure = classify(&result.stderr, false, MeshEvidence::default());
             failure.exit_status = result.exit_status;
+            failure = capture_setup_stderr(failure, script, &result.stderr);
             if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n") {
                 failure.failed_step = crate::install::interrupted_setup_step(&result.stdout);
             } else if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n") {
@@ -435,6 +436,16 @@ impl SshSession for Session {
             Err(failure).map_err(|error: Failure| error.at_ssh_boundary(true))
         })
     }
+}
+
+/// Keep remote stderr only for the trusted setup script families sent by this adapter.
+fn capture_setup_stderr(mut failure: Failure, script: &str, stderr: &[u8]) -> Failure {
+    if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n")
+        || script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n")
+    {
+        failure = failure.with_captured_setup_stderr(stderr);
+    }
+    failure
 }
 
 impl Drop for Session {
@@ -503,6 +514,31 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
 mod tests {
     use super::*;
     use crate::model::InstallStep;
+
+    #[test]
+    fn only_trusted_setup_scripts_retain_bounded_child_stderr() {
+        let marker = b"private setup output";
+        let setup = capture_setup_stderr(
+            Failure::install("The remote bootstrap command failed."),
+            "# INFRATERNAL_SETUP_STEPS_V1\ncommand",
+            marker,
+        );
+        assert_eq!(setup.captured_setup_stderr(), Some(marker.as_slice()));
+
+        let ordinary = capture_setup_stderr(
+            Failure::install("The SSH command failed."),
+            "printf ordinary",
+            marker,
+        );
+        assert_eq!(ordinary.captured_setup_stderr(), None);
+
+        let oversized = capture_setup_stderr(
+            Failure::install("The remote bootstrap command failed."),
+            "# INFRATERNAL_TRANSFER_SETUP_V1\ncommand",
+            &[b'x'; 9 * 1024],
+        );
+        assert_eq!(oversized.captured_setup_stderr().unwrap().len(), 8 * 1024);
+    }
 
     #[test]
     fn join_keeps_only_authored_https_preflight_diagnostics() {

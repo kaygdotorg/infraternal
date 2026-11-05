@@ -45,7 +45,7 @@ fn late_recovery_from_path_invocation_keeps_install_target() {
     }
     let fixture = crate::restart_binary::fixture::Directory::new();
     let state = fixture.0.clone();
-    let child = Command::new(super::stripped_test_image(
+    let child = Command::new(crate::restart_binary::fixture::stripped_test_image(
         &std::env::current_exe().unwrap(),
     ))
     .arg0("infraternal")

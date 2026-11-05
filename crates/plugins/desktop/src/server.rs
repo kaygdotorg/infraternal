@@ -1363,7 +1363,6 @@ mod slow_action_tests {
     }
     /// Retiring an attachment must not consume the replacement stream identity.
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn retiring_viewer_does_not_remove_replacement_on_same_stream() {
         let server = DesktopServer::new(1);
         server.configure(true);
@@ -1503,7 +1502,6 @@ mod slow_action_tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn parameter_choice_is_socket_local_and_waits_for_repairing_keyframe() {
         use std::sync::atomic::AtomicUsize;
         let server = DesktopServer::new(1);
