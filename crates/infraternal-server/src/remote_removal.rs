@@ -131,6 +131,8 @@ impl Removal {
         .await
         .map_err(|_| crate::auth::Error::Denied)?
     }
+    /// Persist verified removal intent and wait for durable host refusal before
+    /// reporting removal. Cancelling the request cannot erase the intent.
     async fn publish(
         &self,
         entry: Pending,
@@ -210,13 +212,8 @@ impl Removal {
         }
         #[cfg(not(feature = "ssh"))]
         let _ = (&self.trust, lookup);
-        sqlx::query("UPDATE remote_hosts SET revoked_at=? WHERE id=?")
-            .bind(live)
-            .bind(entry.host.as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await?;
         self.store
-            .commit_revocation(tx, entry.host)
+            .commit_revocation(tx, entry.host, live)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         let installation = installed_by_setup.then(|| entry.host.simple().to_string());

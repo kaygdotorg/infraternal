@@ -32,7 +32,8 @@ impl EnrollmentStore {
             "SELECT h.id, h.mode, h.execution_uid, c.not_after FROM remote_hosts h \
              JOIN remote_certificates c ON c.host_id=h.id \
              WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
-             AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
+             AND c.revoked_at IS NULL AND h.revoked_at IS NULL \
+             AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
         )
         .bind(fingerprint.as_slice())
         .bind(now)
@@ -55,7 +56,7 @@ impl EnrollmentStore {
         })
     }
 
-    /// Admit a revoked host only to deliver its retained cleanup, never new work.
+    /// Admit a pending or retired host only for retained cleanup, never new work.
     /// The certificate must still be exact, valid and individually unrevoked.
     pub(crate) async fn admit_cleanup(
         &self,
@@ -67,7 +68,7 @@ impl EnrollmentStore {
              JOIN remote_certificates c ON c.host_id=h.id \
              JOIN remote_login_cleanup q ON q.host_id=h.id \
              WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
-             AND c.revoked_at IS NULL AND h.revoked_at IS NOT NULL AND q.confirmed=0",
+             AND c.revoked_at IS NULL AND q.confirmed=0",
         )
         .bind(fingerprint.as_slice())
         .bind(now)
@@ -94,17 +95,29 @@ impl EnrollmentStore {
         ))
     }
 
-    /// Record only a durable daemon acknowledgement; failed/lost replies stay pending.
+    /// Finalize retirement only on a durable daemon reply; lost replies stay pending.
     pub(crate) async fn confirm_login_cleanup(
         &self,
         host: Uuid,
         person: Uuid,
     ) -> Result<(), EnrollmentError> {
+        let mut transaction = self.0.begin().await?;
+        // Keep tombstoning and its trigger effects in the same transaction as
+        // the durable receipt. A foreign or duplicate receipt changes nothing.
+        sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,unixepoch()) WHERE id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.person_id=? AND q.confirmed=0)")
+            .bind(host.as_bytes().as_slice()).bind(person.to_string())
+            .execute(&mut *transaction).await?;
         sqlx::query("UPDATE remote_login_cleanup SET confirmed=1 WHERE host_id=? AND person_id=?")
             .bind(host.as_bytes().as_slice())
             .bind(person.to_string())
-            .execute(&self.0)
+            .execute(&mut *transaction)
             .await?;
+        sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NOT NULL)")
+            .bind(host.as_bytes().as_slice()).execute(&mut *transaction).await?;
+        transaction.commit().await?;
+        self.1.tombstoned(host);
+        self.publish_revoked_authority().await;
+        self.2.publish();
         Ok(())
     }
 
@@ -130,7 +143,8 @@ impl EnrollmentStore {
              SELECT ?, old.host_id, ?, ?, ?, ? FROM remote_certificates old \
              JOIN remote_hosts h ON h.id=old.host_id \
              WHERE old.fingerprint=? AND old.public_key=? AND old.not_before<=? AND old.not_after>? \
-             AND old.revoked_at IS NULL AND h.revoked_at IS NULL",
+             AND old.revoked_at IS NULL AND h.revoked_at IS NULL \
+             AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
         ).bind(certificate.fingerprint.as_slice()).bind(certificate.issuer_fingerprint.as_slice())
             .bind(certificate.public_key.as_slice()).bind(certificate.not_before).bind(certificate.not_after)
             .bind(predecessor.as_slice()).bind(certificate.public_key.as_slice()).bind(now).bind(now)
@@ -141,7 +155,7 @@ impl EnrollmentStore {
         Ok(())
     }
 
-    /// Quiesce retained transports before committing an owner-authorized host tombstone.
+    /// Persist owner-authorized denial, then wait for durable host acceptance.
     /// # Errors
     /// Refuses wrong owner, unknown host, invalid time and storage failure.
     pub async fn revoke(&self, owner: &str, host: Uuid, now: i64) -> Result<(), EnrollmentError> {
@@ -150,10 +164,9 @@ impl EnrollmentStore {
         }
         let mut transaction = self.0.begin().await?;
         let changed = sqlx::query(
-            "UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, ?) \
+            "UPDATE remote_hosts SET id=id \
              WHERE id=? AND owner_id=? AND created_at<=?",
         )
-        .bind(now)
         .bind(host.as_bytes().as_slice())
         .bind(owner)
         .bind(now)
@@ -163,10 +176,10 @@ impl EnrollmentStore {
         if changed != 1 {
             return Err(EnrollmentError::Denied);
         }
-        self.commit_revocation(transaction, host).await
+        self.commit_revocation(transaction, host, now).await
     }
 
-    /// HTTP authority is rechecked in the tombstone write, including logout or
+    /// HTTP authority is rechecked in the serialized intent write, including logout or
     /// role change racing a request. Cancellation follows authorization, before commit.
     pub(crate) async fn revoke_for_session(
         &self,
@@ -179,13 +192,12 @@ impl EnrollmentStore {
         }
         let mut transaction = self.0.begin().await?;
         let changed = sqlx::query(
-            "UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, ?) \
+            "UPDATE remote_hosts SET id=id \
              WHERE id=? AND created_at<=? AND EXISTS( \
              SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
              WHERE s.token_hash=? AND s.user_id=remote_hosts.owner_id \
              AND s.unlocked=1 AND s.expires>unixepoch() AND u.owner=1)",
         )
-        .bind(now)
         .bind(host.as_bytes().as_slice())
         .bind(now)
         .bind(session_hash)
@@ -195,57 +207,105 @@ impl EnrollmentStore {
         if changed != 1 {
             return Err(EnrollmentError::Denied);
         }
-        self.commit_revocation(transaction, host).await
+        self.commit_revocation(transaction, host, now).await
     }
 
-    /// An abandoned request rolls back until its authorized write is prepared.
-    /// Thereafter the owned task keeps commit and publication together, even if
-    /// a deadline cancels the caller while SQLite's worker is completing COMMIT.
-    /// Process exit also retires its transports; no detached polling worker exists.
+    /// Commit the authorized denial intent before delivery, then backpressure
+    /// the caller until a durable host receipt finalizes retirement. Cancellation
+    /// abandons only the waiter; restart recovers the committed outbox row.
     pub(crate) async fn commit_revocation(
         &self,
-        transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
+        mut transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
         host: Uuid,
+        now: i64,
     ) -> Result<(), EnrollmentError> {
+        let owner: Option<String> =
+            sqlx::query_scalar("SELECT owner_id FROM remote_hosts WHERE id=?")
+                .bind(host.as_bytes().as_slice())
+                .fetch_optional(&mut *transaction)
+                .await?;
+        // Only UUID principals can have daemon person logins. Legacy ledger
+        // identities have no login to revoke and retain direct retirement.
+        let person = owner
+            .as_deref()
+            .and_then(|owner| Uuid::parse_str(owner).ok());
+        if let Some(person) = person {
+            sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,?) ON CONFLICT(host_id) DO NOTHING")
+                .bind(host.as_bytes().as_slice()).bind(person.to_string())
+                .execute(&mut *transaction).await?;
+        } else {
+            sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at,?) WHERE id=?")
+                .bind(now)
+                .bind(host.as_bytes().as_slice())
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=?")
+                .bind(host.as_bytes().as_slice())
+                .execute(&mut *transaction)
+                .await?;
+        }
         let store = self.clone();
+        // Ownership is detached only through COMMIT/publication, never through
+        // an offline host wait. Request cancellation releases its watch promptly.
         tokio::spawn(async move {
-            // The retirement trigger already prepared the durable cleanup
-            // outbox in this authorized transaction. Deliver nothing to the
-            // daemon before that intent commits; reconnect replay owns delivery.
-            // The authorized writer transaction is prepared. Cut and drain
-            // frame writes before COMMIT; keeping the signal alive fences a new
-            // registration until the durable tombstone is visible. Storage
-            // failure conservatively retains cancellation, as before.
             let _fence = store.1.quiesce(host).await.map_err(|_| {
                 EnrollmentError::Storage(sqlx::Error::Protocol(
                     "revocation fence unavailable".into(),
                 ))
             })?;
-            let committed = transaction.commit().await;
-            if committed.is_ok() {
+            transaction.commit().await?;
+            if person.is_none() {
                 store.1.tombstoned(host);
-                store.2.publish();
             }
+            store.2.publish();
             #[cfg(test)]
             store.1.after_commit().await;
-            committed.map_err(EnrollmentError::Storage)?;
-            // The same transaction has retired plugin-owned membership. Notify
-            // after COMMIT so a worker can only compile the durable new revision.
-            let plugins = store
-                .1
-                .plugins
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .upgrade();
-            if let Some(plugins) = plugins {
-                plugins.authority_changed().await;
-            }
-            Ok(())
+            store.publish_revoked_authority().await;
+            Ok::<_, EnrollmentError>(())
         })
         .await
         .map_err(|_| {
             EnrollmentError::Storage(sqlx::Error::Protocol("revocation finalizer failed".into()))
-        })?
+        })??;
+        if person.is_some() {
+            self.wait_login_cleanup(host).await?;
+            // Repeated requests may cut an already confirmed host again.
+            self.1.tombstoned(host);
+        }
+        Ok(())
+    }
+
+    /// Subscribe before reading so a concurrent durable receipt cannot be lost.
+    /// No background waiter, polling timer or database connection is held idle.
+    async fn wait_login_cleanup(&self, host: Uuid) -> Result<(), EnrollmentError> {
+        let mut changed = self.2.subscribe();
+        loop {
+            let confirmed: bool =
+                sqlx::query_scalar("SELECT confirmed FROM remote_login_cleanup WHERE host_id=?")
+                    .bind(host.as_bytes().as_slice())
+                    .fetch_one(&self.0)
+                    .await?;
+            if confirmed {
+                return Ok(());
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| EnrollmentError::Denied)?;
+        }
+    }
+
+    /// Notify plugin readers after the denial or final retirement commits.
+    async fn publish_revoked_authority(&self) {
+        let plugins = self
+            .1
+            .plugins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade();
+        if let Some(plugins) = plugins {
+            plugins.authority_changed().await;
+        }
     }
 }
 

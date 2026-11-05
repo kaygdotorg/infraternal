@@ -1,7 +1,9 @@
 //! Real passkey and SQLite regression for host removal purpose binding and offline revocation (#87).
 use super::*;
+/// Verified removal stays pending offline and completes only on durable receipt;
+/// its purpose-bound passkey proof cannot be replayed afterward.
 #[tokio::test]
-async fn fresh_removal_revokes_offline_host_and_cannot_replay() {
+async fn fresh_removal_waits_for_durable_host_receipt_and_cannot_replay() {
     let mut f = fixture().await;
     let host = Uuid::new_v4();
     sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)").bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
@@ -10,10 +12,11 @@ async fn fresh_removal_revokes_offline_host_and_cannot_replay() {
         .execute(&f.auth.pool)
         .await
         .unwrap();
+    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
     let service = crate::remote_removal::Removal::new(
         f.auth.clone(),
         f.auth.pool.clone(),
-        crate::enrollment::EnrollmentStore::new(f.auth.pool.clone()),
+        store.clone(),
         crate::remote_runtime::RemoteHosts::default(),
         PathBuf::new(),
     );
@@ -39,10 +42,40 @@ async fn fresh_removal_revokes_offline_host_and_cannot_replay() {
             .await
             .is_err()
     );
-    let result = service
-        .finish(&f.session, id, proof.clone(), NOW)
+    let request_service = service.clone();
+    let session = f.session.clone();
+    let ceremony = id.to_owned();
+    let request_proof = proof.clone();
+    let request = tokio::spawn(async move {
+        request_service
+            .finish(&session, &ceremony, request_proof, NOW)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND confirmed=0)",
+            )
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+            if pending {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!request.is_finished(), "offline removal reported success");
+    // This ledger fixture supplies the trusted receipt directly. Real mTLS
+    // cleanup-only replay is covered by remote_login_revocation_tests.
+    store
+        .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
         .await
         .unwrap();
+    let result = request.await.unwrap().unwrap();
     assert_eq!(result["host_cleanup"], "unreachable");
     // #235: an uninstall that did not happen is said plainly, by name, with the
     // commands that remove the leftover rootful install on the machine itself.

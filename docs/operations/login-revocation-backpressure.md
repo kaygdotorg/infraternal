@@ -29,3 +29,17 @@ Normal traffic is denied as soon as a server revocation is pending. Completing
 retirement and acknowledging the revocation requires the durable host receipt;
 while the host is unavailable, the operation stays pending rather than reporting
 success after a finite retry budget.
+
+The server commits a `remote_login_cleanup` row while fencing normal admission.
+The row's unconfirmed state denies certificate admission, renewal and provisional
+SSH access even after a server restart. The host's final retirement tombstone is
+written only when a durable cleanup reply confirms that row. Cancelling an HTTP
+request releases its waiter but leaves this database obligation in place.
+
+Busy replies are retried cooperatively without a finite attempt budget. A lost
+connection or the private connection's lifetime limit leaves the row pending for
+the next authenticated reconnect. Cleanup connections carry only the named
+person's revocation and cannot be used as normal host connections. A fresh
+infraternal agent gets positive per-person authority only through trusted server
+requests after this admission check; an absent local refusal file cannot grant
+access on its own.

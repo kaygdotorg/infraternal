@@ -283,7 +283,7 @@ impl AuthorityGuard {
         host: Uuid,
         uid: u32,
     ) -> io::Result<Self> {
-        let row: Option<(String, i64)> = sqlx::query_as("SELECT mode,execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
+        let row: Option<(String, i64)> = sqlx::query_as("SELECT mode,execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0) AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
             .bind(host.as_bytes().as_slice()).bind(owner).fetch_optional(&store.0).await.map_err(|_| denied())?;
         let (mode, execution_uid) = row.ok_or_else(denied)?;
         if execution_uid != i64::from(uid) {
@@ -417,7 +417,7 @@ impl AuthorityGuard {
             .map_err(io::Error::other)?;
         let now = i64::try_from(now.as_secs()).map_err(io::Error::other)?;
         if let Some(owner) = &self.provisioning_owner {
-            let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND execution_uid=? AND revoked_at IS NULL)")
+            let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND execution_uid=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0))")
                 .bind(self.identity.host.as_bytes().as_slice()).bind(owner).bind(i64::from(self.identity.execution_uid))
                 .fetch_one(&self.store.0).await.map_err(|_| denied())?;
             return if live && self.permits() {
