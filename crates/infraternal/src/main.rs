@@ -649,7 +649,7 @@ fn status_result(
         .collect();
     let roots = infraternal_status::Roots::detect();
     let node = infraternal_status::probe_local(&roots, &ids);
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", feature = "plugin-server"))]
     let ca_status = infraternal_status::server_data_directory(&roots).map(|data| {
         crate::restart::query_ca_status(&data)
             .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable())
@@ -677,7 +677,7 @@ fn status_result(
         .filter(|c| c.state != "Not available yet")
         .map(|c| vec![c.name.clone(), c.state.clone(), c.detail.clone()])
         .collect();
-    #[cfg(feature = "remote")]
+    #[cfg(all(feature = "remote", feature = "plugin-server"))]
     if let Some(status) = ca_status {
         let (state, detail) = ca_status_display(&status);
         components.push(json!({"name":"CA", "state":state, "state_detail":detail}));
@@ -709,7 +709,7 @@ fn status_result(
 }
 
 /// The CA line `infraternal status` prints: lock state, root generation and expiry warning, or why it is unknown.
-#[cfg(feature = "remote")]
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
 fn ca_status_display(status: &infraternal_server::ca_status::CaStatus) -> (String, String) {
     if !status.available {
         return (
@@ -788,7 +788,7 @@ fn ca_status_display(status: &infraternal_server::ca_status::CaStatus) -> (Strin
 }
 
 /// How `infraternal status` renders CA lock and expiry.
-#[cfg(all(test, feature = "remote"))]
+#[cfg(all(test, feature = "remote", feature = "plugin-server"))]
 mod ca_status_tests {
     use super::ca_status_display;
     use infraternal_server::ca_status::{CaStatus, RootStatus};
