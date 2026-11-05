@@ -38,6 +38,8 @@ mod sign_in;
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
 mod ssh_internal;
+#[cfg(test)]
+mod test_executable;
 #[cfg(all(feature = "remote", target_os = "linux"))]
 mod up;
 
@@ -98,6 +100,12 @@ fn main() -> ExitCode {
 fn run_invocation() -> ExitCode {
     if harden_startup().is_err() {
         return ExitCode::FAILURE;
+    }
+    // The macOS PTY child's private entry runs before any runtime or thread
+    // exists: it drops privileges and execs the person's shell (D335, #328).
+    #[cfg(target_os = "macos")]
+    if let Some(result) = infraternal_shim::session_shell::run_if_requested() {
+        return result;
     }
     #[cfg(target_os = "linux")]
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
@@ -189,6 +197,7 @@ fn dispatch_selected_action(
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
 
+#[allow(clippy::too_many_lines)] // Keep feature-gated command handlers beside their registry mappings.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -201,7 +210,17 @@ fn dispatch_action(
         }
         CliHandler::MeshService => run_mesh_service(action, matches, json_output),
         CliHandler::Unavailable => run_unavailable(action, json_output),
-        CliHandler::Status => run_status(registry, json_output),
+        CliHandler::Status => run_status(registry, matches, json_output),
+        CliHandler::HostedAction => {
+            #[cfg(feature = "remote")]
+            {
+                cli::api_actions::run(action, matches, json_output)
+            }
+            #[cfg(not(feature = "remote"))]
+            {
+                run_unavailable(action, json_output)
+            }
+        }
         CliHandler::Skill => run_skill(registry, matches, json_output),
         CliHandler::SignIn => run_sign_in(action, matches, json_output),
         CliHandler::Up | CliHandler::UpSystem => dispatch_up_action(action, matches, json_output),
@@ -265,16 +284,16 @@ fn dispatch_action(
                 run_unavailable(action, json_output)
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         CliHandler::SessionShim => run_shim_command(matches),
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         CliHandler::SessionShim => run_unavailable(action, json_output),
         CliHandler::SshSession => {
-            #[cfg(all(feature = "ssh", feature = "remote"))]
+            #[cfg(all(feature = "ssh", feature = "remote", target_os = "linux"))]
             {
                 run_ssh_session(matches)
             }
-            #[cfg(not(all(feature = "ssh", feature = "remote")))]
+            #[cfg(not(all(feature = "ssh", feature = "remote", target_os = "linux")))]
             {
                 run_unavailable(action, json_output)
             }
@@ -505,7 +524,11 @@ fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bo
                 Exit::Usage,
             );
         };
-        sign_in::run(server, json_output)
+        let scopes = matches
+            .get_many::<String>("scope")
+            .map(|values| values.map(String::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        sign_in::run(server, &scopes, json_output)
     }
     #[cfg(not(feature = "remote"))]
     {
@@ -541,7 +564,7 @@ fn run_up_system(matches: &ArgMatches, json_output: bool) -> ExitCode {
     up::run_helper(server, json_output)
 }
 
-#[cfg(all(feature = "ssh", feature = "remote"))]
+#[cfg(all(feature = "ssh", feature = "remote", target_os = "linux"))]
 fn run_ssh_session(matches: &ArgMatches) -> ExitCode {
     let (Some(state), session) = (
         matches.get_one::<String>("state"),
@@ -688,7 +711,16 @@ fn status_result(
     (result, down)
 }
 
-fn run_status(registry: &ActionRegistry, json_output: bool) -> ExitCode {
+fn run_status(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {
+    #[cfg(feature = "remote")]
+    if (matches.get_one::<String>("server_override").is_some()
+        || sign_in::has_stored_api_credentials())
+        && let Some(action) = registry
+            .find(&["status"])
+            .map(|registered| registered.action)
+    {
+        return cli::api_actions::run(action, matches, json_output);
+    }
     let (result, down) = status_result(registry, "status");
     finish_status(result, down, json_output)
 }
@@ -1451,7 +1483,7 @@ fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, Ex
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     let options = match (|| {
         Ok::<_, String>(shim_cli::Options {
@@ -1492,7 +1524,7 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    #[cfg(feature = "plugin-agent")]
+    #[cfg(all(feature = "plugin-agent", target_os = "linux"))]
     if let Some(result) = run_login_shim_if_requested(matches, &options) {
         return result;
     }
@@ -1647,7 +1679,7 @@ fn run_login_command(
 }
 
 /// Parse schema-generated integer inputs into the shim's platform-specific types.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn shim_integer<T>(matches: &ArgMatches, name: &str, default: Option<T>) -> Result<T, String>
 where
     T: TryFrom<i64>,
@@ -2462,7 +2494,8 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             };
             return host_remove::run(
                 matches
-                    .get_one::<String>("server")
+                    .get_one::<String>("server_override")
+                    .or_else(|| matches.get_one::<String>("server"))
                     .map_or("", String::as_str),
                 host,
                 matches.get_flag("finish"),

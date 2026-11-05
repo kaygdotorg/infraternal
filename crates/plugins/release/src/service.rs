@@ -112,7 +112,7 @@ impl ReleaseService {
                         host.token_hash(),
                         host.user_id(),
                         now,
-                        infraternal_plugin_api::FRESH_SECONDS,
+                        infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
                     )
                     .await
                     .map_err(|_| "release unavailable")?

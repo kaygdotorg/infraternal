@@ -28,8 +28,25 @@ const fn action(
         permission: Permission::One("ssh.manage"),
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     }
 }
+
+/// Add-host: the one key-callable SSH action. Every adapter (browser socket, API-key
+/// stream, CLI) names it directly rather than by its position in the descriptor.
+pub const START: ActionDef = action(
+    "ssh.start",
+    "Set up selected hosts.",
+    &[
+        "Select the hosts and their setup mode.",
+        "Confirm the setup steps, then follow each host's progress.",
+    ],
+    "ssh.start",
+    "ssh.batch",
+    Effect::Write,
+)
+.with_api_access(Some("hosts:write"), false);
 
 /// Provisioning joins nodes to an existing server; component admission never initializes one.
 pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
@@ -46,17 +63,7 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     api: API_VERSION,
     // Provisioning streams use the component adapter's bounded event protocol.
     actions: &[
-        action(
-            "ssh.start",
-            "Set up selected hosts",
-            &[
-                "Select the hosts and their setup mode.",
-                "Confirm the setup steps, then follow each host's progress.",
-            ],
-            "ssh.start",
-            "ssh.batch",
-            Effect::Write,
-        ),
+        START,
         action(
             "ssh.start-fresh",
             "Start fresh",

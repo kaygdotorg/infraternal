@@ -186,13 +186,16 @@ rust_check_cli_plugin_compile_out() {
     fi
 
     printf 'disabled CLI plugin dependencies: absent from normal dependency graph\n'
-    cargo test --locked --package infraternal --bin infraternal --no-default-features
+    # Every run counts: a failure in an early run must fail the row, not be hidden by
+    # a later run that passes. All three still run, so one log shows every failure.
+    cargo test --locked --package infraternal --bin infraternal --no-default-features || failed=1
     # The hidden commands of unbuilt components are compiled out of default builds (D243);
     # the one-source tests for them (D16) run in the build that keeps them (D299 C5).
-    cargo test --locked --package infraternal --bin infraternal --features placeholders
+    cargo test --locked --package infraternal --bin infraternal --features placeholders || failed=1
     cargo test --locked --package infraternal-agent --package infraternal-mesh \
         --package infraternal-plugin-backup --package infraternal-plugin-relay \
-        --package infraternal-plugin-ssh --lib --features infraternal-plugin-api/placeholders cli
+        --package infraternal-plugin-ssh --lib --features infraternal-plugin-api/placeholders cli || failed=1
+    return "$failed"
 }
 
 # D244/#154 checks the shipping provider, never a GNU test executable or C probe.
@@ -237,6 +240,7 @@ rust_static_build_check() {
     done
 
     scripts/auth-toolchain || return $?
+    scripts/test-auth-toolchain-pin || return $?
     python3 scripts/test-musl-cc.py || return $?
     python3 scripts/test-native-metadata.py || return $?
     python3 scripts/test-rustc-paths.py || return $?

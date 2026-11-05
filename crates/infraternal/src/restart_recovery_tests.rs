@@ -179,16 +179,18 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", NAME, "--nocapture"])
-            .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
-            .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
-            .env("INFRATERNAL_RECOVERY_CASE", case)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = std::process::Command::new(
+            crate::restart_binary::fixture::stripped_test_image(&std::env::current_exe().unwrap()),
+        )
+        .args(["--exact", NAME, "--nocapture"])
+        .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
+        .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
+        .env("INFRATERNAL_RECOVERY_CASE", case)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
         let preparation_deadline = std::time::Instant::now() + Duration::from_secs(300);
         let mut recovery_deadline = None;
         while !directory.join("ready").exists() || !directory.join("recovered").exists() {

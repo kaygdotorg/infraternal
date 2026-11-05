@@ -1445,15 +1445,14 @@ mod tests {
         let calls = temporary.0.join("systemctl-calls");
         fs::write(&source, b"running version bytes").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(
+        crate::test_executable::write(
             &systemctl,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" != is-active ] || echo active\n",
                 calls.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
 
         install_system_service(
             &temporary.0,
@@ -1506,12 +1505,11 @@ mod tests {
         let systemctl = temporary.0.join("systemctl");
         fs::write(&source, b"binary").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(
+        crate::test_executable::write(
             &systemctl,
             "#!/bin/sh\n[ \"$1\" != is-active ] || echo active\n",
-        )
-        .unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         let base = temporary.0.join("var/lib/infraternal");
         fs::create_dir_all(temporary.0.join("var/lib")).unwrap();
         std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
@@ -1621,12 +1619,11 @@ mod tests {
         // J134 P3-4: the helper copies /proc/self/exe, not a path.
         let temporary = TemporaryDirectory::new();
         let systemctl = temporary.0.join("systemctl");
-        fs::write(
+        crate::test_executable::write(
             &systemctl,
             "#!/bin/sh\n[ \"$1\" != is-active ] || echo active\n",
-        )
-        .unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
 
         install_system_service(
             &temporary.0,
@@ -1652,8 +1649,7 @@ mod tests {
         let source = temporary.0.join("running-infraternal");
         let systemctl = temporary.0.join("systemctl");
         fs::write(&source, b"binary").unwrap();
-        fs::write(&systemctl, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::write(&systemctl, "#!/bin/sh\nexit 0\n", 0o755);
         let bin_dir = temporary.0.join("usr/local/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         fs::write(bin_dir.join("infraternal"), b"another command").unwrap();
@@ -1702,8 +1698,7 @@ mod tests {
     fn sudo_denial_has_a_local_permission_cause() {
         let temporary = TemporaryDirectory::new();
         let sudo = temporary.0.join("sudo");
-        fs::write(&sudo, "#!/bin/sh\nexit 1\n").unwrap();
-        fs::set_permissions(&sudo, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::write(&sudo, "#!/bin/sh\nexit 1\n", 0o755);
         let mut command = std::process::Command::new(sudo);
 
         let failure = invoke_sudo(&mut command, b"").unwrap_err();

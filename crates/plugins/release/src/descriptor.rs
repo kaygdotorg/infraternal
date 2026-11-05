@@ -20,6 +20,8 @@ pub const CHANNEL_GET: ActionDef = ActionDef {
     target: Target::Global,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const CHANNEL_SET: ActionDef = ActionDef {
     id: "release.channel.set",
@@ -39,6 +41,8 @@ pub const CHANNEL_SET: ActionDef = ActionDef {
     target: Target::Global,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const LATEST: ActionDef = ActionDef {
     id: "release.latest",
@@ -55,6 +59,8 @@ pub const LATEST: ActionDef = ActionDef {
     target: Target::Global,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "release",

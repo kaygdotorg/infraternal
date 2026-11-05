@@ -14,7 +14,7 @@ pub(crate) const PAYLOAD_ONLY: bool = cfg!(all(
         feature = "plugin-host-facts"
     ))
 ));
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use infraternal_shim::startup::Options;
 
 /// SSH entrypoints are dispatched first through their existing implementations.

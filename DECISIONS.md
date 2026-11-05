@@ -4064,3 +4064,48 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
          diff ("agreed");
        - the fuzz targets run nightly on dev-02, about 1 h, with crashes
          filed as issues ("agreed").
+
+352. **Overnight answers: revocations, mesh SSH, sessions CLI, Themes, Mac
+     parity (owner, 2026-11-05; #347, #221, #355, #323, #285, #260, #328):**
+     - **Revocation backpressure (#347; replaces J196's host-wide latch):**
+       the server does not treat access as retired until the infraternal
+       agent has durably accepted the revocation, and it waits when the
+       agent's reserved lane is full. Only the people affected are blocked,
+       and there is no host-wide lockout. The owner agreed ("correct") to:
+       "Only the affected people are blocked, the server stays the source
+       of truth, and there's no host-wide lockout to recover from."
+     - **SSH to the server's own host follows Access (#221; narrows D164
+       for D235):** the implicit reach toward the server covers only the
+       infraternal control plane. SSH and every other service on the
+       server's host follow Access like any other machine ("correct").
+     - **The server is not a place to work from (#221):** nobody on the
+       server's host may use the mesh SSH key socket. "if you remember, we
+       were heading towards an untrusted server where the canvas runs
+       entirely on the client. so yes the server is not a place to work
+       from."
+     - **`infraternal sessions` deadlines (#355; extends #324 and #334):**
+       there is no whole-request 4 s clock. Each shim exchange is bounded
+       by progress, so a stuck shim still fails fast ("this is correct").
+     - **Themes follow the account (#323; D178, D180):** the theme belongs
+       to the per-account canvas document and appears the same on every
+       device; only the camera is per device. "shouldn't this follow the
+       decentralised canvas rule such that the canvas appears the same on
+       all devices per account?" The blur cost is measured on a GPU Mac
+       before any default changes. The small Themes items (default font
+       weights, Catppuccin Frappé and Macchiato rows, Ayu without Mirage,
+       Gruvbox under MIT, J206's two TASTE edits) are accepted ("agreed").
+     - **macOS reaches parity with Linux (#285, #260):** a mesh that
+       includes a Mac rotates no WireGuard keys until Mac rotation ships,
+       as its own slice (D166 fail-safe kept). The owner said "agreed,
+       you're asking me mac questions that basically equate to get the mac
+       cli in feature parity to the linux cli :P". The Mac runs our
+       GotaTun fork once its current changes settle, measured on the Mac
+       VM first: "again, you're asking if mac should have feauter parity
+       and the answer is yes. moreso yes since we moved it to userspace".
+       Parity questions are not asked again.
+     - **Engine work deferred, not dropped (#260, J201):** io_uring,
+       AF_XDP, a second SIMD crypto library and a multi-queue TUN wait
+       until a profile shows the need: "agreed measure first but keep them
+       noted".
+     - **macOS "logged in" means a desktop login (#328, D335):** someone
+       logged in only over SSH gets the plain shell ("yes").
