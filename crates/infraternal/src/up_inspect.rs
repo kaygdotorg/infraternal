@@ -8,7 +8,7 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs, io,
-    os::unix::fs::MetadataExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
     process::{Command, Stdio},
 };
@@ -20,11 +20,91 @@ fn image_name(path: &Path) -> bool {
     name == b"infra" || name.starts_with(b"infraternal") || name.starts_with(b"memfd:infraternal")
 }
 
-/// Recognize supported executable names and renamed links to this exact running image.
-fn install_image(path: &Path, metadata: &fs::Metadata, current: &fs::Metadata) -> bool {
-    image_name(path)
-        || fs::canonicalize(path).is_ok_and(|canonical| image_name(&canonical))
-        || (metadata.dev(), metadata.ino()) == (current.dev(), current.ino())
+/// One pinned known build; hashes are lazy and reused across a host scan.
+struct KnownImage {
+    /// Keep the inode alive even if an upgrade replaces its pathname.
+    file: fs::File,
+    /// Size avoids hashing unrelated programs; device/inode is the cheap identity check.
+    metadata: fs::Metadata,
+    /// Hash only when a differently named file has the same byte length.
+    digest: Option<[u8; 32]>,
+}
+
+/// Compare against at most four locally known builds, without scanning arbitrary directories.
+/// A renamed foreign build with no known local reference cannot be identified this way.
+/// Dynamic shell commands and external scripts still need runtime process inspection.
+struct KnownImages(
+    /// Bounded set of pinned descriptors and their reusable identity hashes.
+    Vec<KnownImage>,
+);
+
+impl KnownImages {
+    /// Pin this executable and the usual installed copies once per inspection pass.
+    fn new() -> io::Result<Self> {
+        let mut images = Vec::new();
+        for path in [
+            "/proc/self/exe",
+            "/usr/local/bin/infraternal",
+            "/var/lib/infraternal/bin/infraternal",
+            "/usr/bin/infraternal",
+        ] {
+            let file = match fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NONBLOCK)
+                .open(path)
+            {
+                Ok(file) => file,
+                Err(error) if path == "/proc/self/exe" => return Err(error),
+                Err(_) => continue,
+            };
+            let metadata = file.metadata()?;
+            if metadata.is_file()
+                && !images.iter().any(|image: &KnownImage| {
+                    (image.metadata.dev(), image.metadata.ino()) == (metadata.dev(), metadata.ino())
+                })
+            {
+                images.push(KnownImage {
+                    file,
+                    metadata,
+                    digest: None,
+                });
+            }
+        }
+        Ok(Self(images))
+    }
+
+    /// Names and inodes are cheap; hash only size-matched unknown executable descriptors.
+    fn matches(&mut self, path: &Path, file: &mut fs::File) -> io::Result<bool> {
+        use std::io::{Seek, SeekFrom};
+        let metadata = file.metadata()?;
+        if image_name(path)
+            || fs::canonicalize(path).is_ok_and(|canonical| image_name(&canonical))
+            || self.0.iter().any(|image| {
+                (metadata.dev(), metadata.ino()) == (image.metadata.dev(), image.metadata.ino())
+            })
+        {
+            return Ok(true);
+        }
+        let mut digest = None;
+        for image in self
+            .0
+            .iter_mut()
+            .filter(|image| image.metadata.len() == metadata.len())
+        {
+            if image.digest.is_none() {
+                image.file.seek(SeekFrom::Start(0))?;
+                image.digest = Some(super::hash_stream(&mut image.file, None)?);
+            }
+            if digest.is_none() {
+                file.seek(SeekFrom::Start(0))?;
+                digest = Some(super::hash_stream(file, None)?);
+            }
+            if digest == image.digest {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// Refuse a running server or infraternal agent using its kernel image, never its chosen argv[0].
@@ -34,7 +114,7 @@ pub(super) fn running_install(recovery: &super::journal::Snapshot) -> io::Result
 
 /// Inspect a process namespace; a pinned executable plus a second stat detects exec races.
 fn processes(root: &Path, recovery: &super::journal::Snapshot) -> io::Result<()> {
-    let current = fs::metadata("/proc/self/exe")?;
+    let mut images = KnownImages::new()?;
     for process in fs::read_dir(root)? {
         let process = process?;
         if !process
@@ -46,7 +126,7 @@ fn processes(root: &Path, recovery: &super::journal::Snapshot) -> io::Result<()>
             continue;
         }
         let executable = process.path().join("exe");
-        let image = match fs::File::open(&executable) {
+        let mut image = match fs::File::open(&executable) {
             Ok(image) => image,
             // Exited processes and kernel threads have no executable to classify.
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -62,7 +142,7 @@ fn processes(root: &Path, recovery: &super::journal::Snapshot) -> io::Result<()>
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        if !install_image(&path, &metadata, &current) {
+        if !images.matches(&path, &mut image)? {
             continue;
         }
         let arguments = match fs::read(process.path().join("cmdline")) {
@@ -308,7 +388,12 @@ fn wrapper_mentions_install(program: &str, arguments: &str) -> bool {
 
 /// Ignore inert stock units and classify executable identity rather than every resolution failure.
 /// Only unresolved commands mentioning infraternal refuse; missing unrelated programs do not.
-fn resolved_service(unit: &OsStr, output: &str, default: &str) -> io::Result<()> {
+fn resolved_service(
+    unit: &OsStr,
+    output: &str,
+    default: &str,
+    images: &mut KnownImages,
+) -> io::Result<()> {
     let relevant = mentions_install(&unit.to_string_lossy()) || mentions_install(output);
     let state = output
         .lines()
@@ -340,7 +425,6 @@ fn resolved_service(unit: &OsStr, output: &str, default: &str) -> io::Result<()>
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let current = fs::metadata("/proc/self/exe")?;
     for record in commands.split("{ path=").skip(1) {
         let Some((program, arguments)) = record.split_once(" ; ") else {
             if relevant {
@@ -357,12 +441,16 @@ fn resolved_service(unit: &OsStr, output: &str, default: &str) -> io::Result<()>
             }
             continue;
         };
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => metadata,
+        let mut image = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(image) if image.metadata()?.is_file() => image,
             _ if relevant => return Err(unresolved(unit)),
             _ => continue,
         };
-        if install_image(&path, &metadata, &current) {
+        if images.matches(&path, &mut image)? {
             return Err(installed(unit));
         }
     }
@@ -436,6 +524,7 @@ pub(super) fn installed_services(
         manager_units(systemctl, &mut units)?;
     }
     let default_search = default_search_path();
+    let mut images = KnownImages::new()?;
     for unit in units {
         if unit.as_encoded_bytes().ends_with(b"@.service") {
             continue;
@@ -465,7 +554,7 @@ pub(super) fn installed_services(
             ],
         );
         match output {
-            Ok(output) => resolved_service(&unit, &output, &default_search)?,
+            Ok(output) => resolved_service(&unit, &output, &default_search, &mut images)?,
             Err(_) if unit_mentions_install(root, &unit) => return Err(unresolved(&unit)),
             Err(_) => {}
         }
@@ -484,6 +573,7 @@ mod tests {
             unit,
             output,
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            &mut KnownImages::new()?,
         )
     }
 
@@ -775,5 +865,35 @@ mod tests {
             );
             assert_eq!(result.is_err(), refuse, "manager form {index}: {result:?}");
         }
+    }
+    /// A byte-identical copy retains CLI identity even when its inode and name change.
+    #[test]
+    fn renamed_copy_of_known_build_is_detected() {
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let copy = fixture.0.join("control");
+        fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        let namespace = fixture.0.join("proc/123");
+        fs::create_dir_all(&namespace).unwrap();
+        std::os::unix::fs::symlink(&copy, namespace.join("exe")).unwrap();
+        fs::write(namespace.join("cmdline"), b"harmless\0server\0").unwrap();
+        assert!(
+            processes(
+                &fixture.0.join("proc"),
+                &super::super::journal::Snapshot::default()
+            )
+            .is_err(),
+            "renamed copy of running build was missed"
+        );
+        assert!(
+            resolved_service(
+                OsStr::new("custom.service"),
+                &format!(
+                    "LoadState=loaded\nExecStart={{ path={} ; argv[]=control server ; }}\n",
+                    copy.display()
+                )
+            )
+            .is_err(),
+            "renamed installed copy was missed"
+        );
     }
 }
