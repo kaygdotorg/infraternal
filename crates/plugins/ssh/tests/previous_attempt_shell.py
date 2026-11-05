@@ -325,10 +325,14 @@ mock_manager() {{
         try:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             result = self.run_shell(self.as_agent_unit(pids) + '\ninspect_previous')
-            self.assertEqual(result.returncode, 73)
         finally:
             os.close(held)
+        # A held journal is a running setup: reported as LOCKED ("setup running"),
+        # never offered as leftovers, and nothing is changed.
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertTrue(result.stdout.decode().startswith('INFRATERNAL_SETUP_LOCKED '), result.stdout)
         self.assertTrue(stage.exists())
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_an_interrupted_activation_still_refuses_a_process_outside_its_unit(self):
         # A terminal shim (or anything else) running from or holding the install.
