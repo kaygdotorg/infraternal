@@ -1119,9 +1119,9 @@ mod tests {
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 7,
             addresses: Addresses {
@@ -1148,7 +1148,7 @@ mod tests {
                     access_ssh: None,
                 },
             )]),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         }
     }

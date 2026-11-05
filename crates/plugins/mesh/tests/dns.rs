@@ -1,5 +1,5 @@
 //! Mesh-only DNS records, snapshot replacement and real UDP delivery [#266].
-#![cfg(all(feature = "agent", feature = "mesh-dns-spike", target_os = "linux"))]
+#![cfg(all(feature = "agent", feature = "mesh-dns", target_os = "linux"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use hickory_proto::{

@@ -102,11 +102,14 @@ PACKAGES = {
              ('infraternal', 'crates/infraternal', '')),
 }
 
+# The mesh namespace matrix isolates shared fixtures from package defaults;
+# DNS gets enabled only for its dedicated target below.
+PACKAGE_NO_DEFAULT_FEATURES = {'infraternal-plugin-mesh'}
+
 # Targets that need a feature their package's shared set leaves off. The DNS
-# resolver is default-off (`mesh-dns-spike`), and turning it on for every mesh
-# test changes `Config`'s fields under fixtures that are not written for it.
+# resolver has feature-specific config fields that other fixtures do not set.
 TARGET_FEATURES = {
-    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns-spike',
+    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns',
 }
 
 # Root-only behaviour this row deliberately does not exercise, and why. Kept
@@ -326,7 +329,11 @@ def builds(selected):
     result = [(['--workspace'], None)]
     for area in sorted(selected):
         for package, _, features in PACKAGES[area]:
-            entry = (['-p', package, '--features', features, '--tests', '--examples'], package)
+            arguments = ['-p', package]
+            if package in PACKAGE_NO_DEFAULT_FEATURES:
+                arguments.append('--no-default-features')
+            arguments.extend(['--features', features, '--tests', '--examples'])
+            entry = (arguments, package)
             # --examples builds fixtures such as mesh's kernel_node that its
             # namespace tests execute.
             if features and entry not in result:
@@ -334,7 +341,11 @@ def builds(selected):
     packages = {package for area in selected for package, _, _ in PACKAGES[area]}
     for (package, target), features in sorted(TARGET_FEATURES.items()):
         if package in packages:
-            result.append((['-p', package, '--features', features, *cargo_selector(target)], (package, target)))
+            arguments = ['-p', package]
+            if package in PACKAGE_NO_DEFAULT_FEATURES:
+                arguments.append('--no-default-features')
+            arguments.extend(['--features', features, *cargo_selector(target)])
+            result.append((arguments, (package, target)))
     return result
 
 

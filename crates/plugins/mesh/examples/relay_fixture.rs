@@ -275,16 +275,16 @@ async fn node() {
                     local_key: Some(public),
                     server: None,
                     node: NodeId(1),
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     name: None,
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     dns_suffix: infraternal_plugin_mesh::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
                     version: accepted.as_ref().map_or(1, |old| old.version + 1),
                     addresses: config.addresses,
                     default_policy: DefaultPolicy::Allow,
                     exposure: None,
                     peers: BTreeMap::default(),
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     peer_names: Default::default(),
                 };
                 let installed: Vec<Peer> = list

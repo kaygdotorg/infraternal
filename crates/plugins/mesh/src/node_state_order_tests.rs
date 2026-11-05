@@ -13,9 +13,9 @@ fn revision(version: u64) -> State {
             local_key: None,
             server: None,
             node: NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version,
             addresses: Addresses {
@@ -29,7 +29,7 @@ fn revision(version: u64) -> State {
             },
             exposure: None,
             peers: std::collections::BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         }),
         backend: None,

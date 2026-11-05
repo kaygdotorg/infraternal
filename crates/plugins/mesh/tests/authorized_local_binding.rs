@@ -44,9 +44,9 @@ fn check(backend: Backend) {
         local_key: None,
         server: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
@@ -56,7 +56,7 @@ fn check(backend: Backend) {
         default_policy: DefaultPolicy::Deny,
         exposure: None,
         peers: BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
     };
     for chunk in configuration::chunks(None, &old).unwrap() {

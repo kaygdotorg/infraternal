@@ -165,9 +165,9 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
         local_key: Some(local_key),
         server: Some(NodeId(1)),
         node: NodeId(2),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         from_version: None,
         version: 1,
@@ -193,9 +193,9 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
         )]),
         merged: BTreeMap::new(),
         removed: Vec::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         removed_peer_names: Vec::new(),
         access_updates: Vec::new(),
     };

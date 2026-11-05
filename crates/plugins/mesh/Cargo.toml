@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["server"]
+default = ["server", "mesh-dns"]
 server = ["dep:uuid", "dep:tracing", "dep:url", "dep:nix"]
 ee = []
 # Diagnostic stage logging is removable and never enabled by a shipping role.
@@ -26,8 +26,8 @@ agent = [
 relay = ["agent", "dep:socket2", "dep:infraternal-plugin-relay", "infraternal-plugin-relay/runtime", "infraternal-mesh/relay"]
 # In-memory relay credentials are used by isolated protocol and namespace fixtures.
 test-support = ["agent", "infraternal-plugin-relay?/test-support"]
-# Default-off resolver prototype until DNS integration is enabled [#266].
-mesh-dns-spike = ["agent", "server", "dep:hickory-proto", "dep:url"]
+# Hickory's wire types and DNS snapshot fields are shared by both mesh roles [D327, #266].
+mesh-dns = ["dep:hickory-proto", "dep:url"]
 
 [dependencies]
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }

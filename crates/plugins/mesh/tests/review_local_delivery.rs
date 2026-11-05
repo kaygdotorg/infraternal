@@ -25,9 +25,9 @@ fn check(firewall: Firewall) {
         local_key: None,
         server: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         from_version: None,
         version: 1,
@@ -42,9 +42,9 @@ fn check(firewall: Firewall) {
         upserted: BTreeMap::new(),
         merged: BTreeMap::new(),
         removed: Vec::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         removed_peer_names: Vec::new(),
     })
     .unwrap();

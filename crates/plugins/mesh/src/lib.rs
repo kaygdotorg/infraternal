@@ -68,7 +68,7 @@ pub mod gotatun_node;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
 
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 pub mod dns;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]

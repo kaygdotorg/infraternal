@@ -35,12 +35,12 @@ const UNKNOWN_SUPPORT_RETRY: std::time::Duration = std::time::Duration::from_sec
 ///
 /// Returns the identity and its rotation support as far as the replies prove it (J262).
 async fn read_identity(channel: &dyn NodeChannel) -> Option<(Identity, Option<bool>)> {
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let (probe, before_rotation) = (
         br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.as_slice(),
         br#"{"compact_access":true,"dns_names":true}"#.as_slice(),
     );
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     let (probe, before_rotation) = (
         br#"{"compact_access":true,"key_rotation":true}"#.as_slice(),
         br#"{"compact_access":true}"#.as_slice(),
@@ -143,7 +143,7 @@ pub async fn run(
     let mut refresh_identity = true;
     let mut current_identity: Option<Identity> = None;
     let mut compact_access = false;
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let mut dns_names = false;
     let mut ack_retry: Option<(infraternal_mesh::model::NodeId, u64)> = None;
     let mut presence_updates = service.subscribe_presence();
@@ -161,7 +161,7 @@ pub async fn run(
             let identity = read_identity(channel.as_ref()).await;
             if let Some((identity, key_rotation)) = identity {
                 compact_access = identity.compact_access;
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 {
                     dns_names = identity.dns_names;
                 }
@@ -261,13 +261,13 @@ pub async fn run(
             // do not change packet policy. Keep the node's acknowledged version
             // as the delta base, avoiding an unchanged snapshot/fsync per node.
             let changed = old.as_ref().is_none_or(|old| {
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 let names_changed = old.name != config.name || old.peer_names != config.peer_names;
-                #[cfg(not(feature = "mesh-dns-spike"))]
+                #[cfg(not(feature = "mesh-dns"))]
                 let names_changed = false;
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 let dns_suffix_changed = old.dns_suffix != config.dns_suffix;
-                #[cfg(not(feature = "mesh-dns-spike"))]
+                #[cfg(not(feature = "mesh-dns"))]
                 let dns_suffix_changed = false;
                 old.server != config.server
                     || old.node != config.node
@@ -312,7 +312,7 @@ pub async fn run(
                     if !channel.supports_server_paths() {
                         chunk.server = None;
                     }
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     if !dns_names {
                         // Only negotiated resolvers receive host labels or a custom DNS zone.
                         chunk.name = None;
@@ -617,7 +617,7 @@ mod tests {
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
                             compact_access: false,
-                            #[cfg(feature = "mesh-dns-spike")]
+                            #[cfg(feature = "mesh-dns")]
                             dns_names: false,
                             key_rotation,
                             public_key: if self.server {
@@ -661,7 +661,7 @@ mod tests {
                     );
                 }
                 let chunk: crate::dataplane::Chunk = serde_json::from_slice(&input).unwrap();
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 {
                     assert!(chunk.name.is_none());
                     assert!(chunk.peer_names.is_empty());
@@ -1494,7 +1494,7 @@ mod tests {
     fn identity_reply(key_rotation: bool) -> Vec<u8> {
         serde_json::to_vec(&Some(Identity {
             compact_access: false,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             key_rotation,
             public_key: PublicKey([2; 32]),

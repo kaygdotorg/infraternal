@@ -667,20 +667,20 @@ fn stage_chunk(
                 local_key: chunk.local_key,
                 server: chunk.server,
                 node: chunk.node,
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 name: chunk.name.clone(),
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 dns_suffix: chunk.dns_suffix.clone(),
                 version: chunk.version,
                 addresses: chunk.addresses,
                 default_policy: chunk.default_policy,
                 exposure: chunk.exposure.clone(),
                 peers: std::collections::BTreeMap::new(),
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 peer_names: std::collections::BTreeMap::new(),
             }
         };
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         let config = {
             let mut config = config;
             config.name.clone_from(&chunk.name);
@@ -697,13 +697,13 @@ fn stage_chunk(
         });
     }
     let staged = pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let names_changed = staged.config.name != chunk.name;
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let dns_suffix_changed = staged.config.dns_suffix != chunk.dns_suffix;
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     let names_changed = false;
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     let dns_suffix_changed = false;
     if staged.server != chunk.server
         || staged.next != chunk.index
@@ -730,7 +730,7 @@ fn stage_chunk(
     crate::access_updates::apply(&mut staged.config, &chunk.access_updates)?;
     for node in chunk.removed {
         staged.config.peers.remove(&node);
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         staged.config.peer_names.remove(&node);
     }
     staged.config.peers.extend(chunk.upserted);
@@ -749,7 +749,7 @@ fn stage_chunk(
         peer.inbound.union(&partial.inbound);
         peer.outbound.union(&partial.outbound);
     }
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     {
         for node in chunk.removed_peer_names {
             if !staged.config.peers.contains_key(&node)
@@ -1352,7 +1352,7 @@ impl Node {
             public_key,
             port: self.port,
             compact_access: true,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             // Key rotation is not implemented on macOS yet, so the coordinator rotates no node (#285).
             key_rotation: false,
@@ -1558,9 +1558,9 @@ mod tests {
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 3,
             addresses: Addresses {
@@ -1587,7 +1587,7 @@ mod tests {
                     access_ssh: None,
                 },
             )]),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         }
     }
@@ -1677,7 +1677,7 @@ mod tests {
             public_key: old.local_key.expect("bound key"),
             port: 51820,
             compact_access: true,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             key_rotation: false,
         };
@@ -1721,7 +1721,7 @@ mod tests {
             public_key: config.local_key.expect("bound key"),
             port: 51820,
             compact_access: true,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             key_rotation: false,
         };
@@ -1736,7 +1736,7 @@ mod tests {
         last.merged.clear();
         last.removed.clear();
         last.access_updates.clear();
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         {
             last.peer_names.clear();
             last.removed_peer_names.clear();

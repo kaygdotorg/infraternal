@@ -16,7 +16,7 @@ pub struct Identity {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub compact_access: bool,
     /// Resolver support is negotiated separately from compact access snapshots [#266].
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dns_names: bool,
     /// This node supports durable automatic key rotation actions.
@@ -96,11 +96,11 @@ pub struct Config {
     pub server: Option<NodeId>,
     pub node: NodeId,
     /// The coordinator's canonical single-label name for this node; absent on legacy snapshots.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Mesh DNS zone; default omission preserves receivers that have not negotiated DNS names.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(
         default = "default_dns_suffix",
         skip_serializing_if = "is_default_dns_suffix"
@@ -114,7 +114,7 @@ pub struct Config {
     pub exposure: Option<ExposureIdentity>,
     pub peers: BTreeMap<NodeId, PeerPolicy>,
     /// Names for peers in the same policy snapshot, keyed by their stable node identity.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_names: BTreeMap<NodeId, String>,
 }
@@ -164,11 +164,11 @@ pub struct Chunk {
     pub server: Option<NodeId>,
     pub node: NodeId,
     /// Repeated on every chunk so a rename commits with the complete accepted revision.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Repeated on every chunk so a zone change commits with the complete accepted revision.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(
         default = "default_dns_suffix",
         skip_serializing_if = "is_default_dns_suffix"
@@ -189,11 +189,11 @@ pub struct Chunk {
     pub merged: BTreeMap<NodeId, PeerPolicy>,
     pub removed: Vec<NodeId>,
     /// Name updates are staged with peer changes and published only on the final chunk.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub peer_names: BTreeMap<NodeId, String>,
     /// Access revocation removes a name without retiring its peer key or policy entry.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_peer_names: Vec<NodeId>,
     /// Negotiated, final access-only delta; snapshots retain ordinary peer chunks.
@@ -207,12 +207,12 @@ pub struct Chunk {
 
 pub(crate) const DEFAULT_DNS_SUFFIX: &str = "internal";
 
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn default_dns_suffix() -> String {
     DEFAULT_DNS_SUFFIX.to_owned()
 }
 
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 #[allow(clippy::ptr_arg)]
 fn is_default_dns_suffix(suffix: &String) -> bool {
     suffix == DEFAULT_DNS_SUFFIX

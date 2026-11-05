@@ -24,7 +24,7 @@ fn coordinator() -> Coordinator {
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn explicit_mesh_suffix_overrides_the_public_origin_default() {
     let node = |id| Node {
         id: NodeId(id),
@@ -197,7 +197,7 @@ fn compiled_chunks_identify_the_server_and_old_snapshots_have_no_proposal() {
 }
 
 #[test]
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn denied_peer_name_is_absent_and_dns_returns_nxdomain() {
     let coord = coordinator();
     let config =
@@ -222,7 +222,7 @@ fn denied_peer_name_is_absent_and_dns_returns_nxdomain() {
 }
 
 #[test]
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn one_way_node_grant_publishes_the_real_hostname_only_to_the_allowed_receiver() {
     let mut coord = coordinator();
     coord
@@ -272,7 +272,7 @@ fn one_way_node_grant_publishes_the_real_hostname_only_to_the_allowed_receiver()
 }
 
 #[test]
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn a_port_limited_grant_still_publishes_the_reachable_hostname() {
     let mut coord = coordinator();
     coord
@@ -312,7 +312,7 @@ fn a_port_limited_grant_still_publishes_the_reachable_hostname() {
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn one_way_tag_grant_publishes_names_only_to_tag_members_allowed_to_reach_them() {
     let mut coord = coordinator();
     coord
@@ -366,7 +366,7 @@ fn one_way_tag_grant_publishes_names_only_to_tag_members_allowed_to_reach_them()
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn tag_membership_alone_does_not_publish_peer_names() {
     let mut coord = coordinator();
     for node in [NodeId(2), NodeId(3)] {
@@ -383,7 +383,7 @@ fn tag_membership_alone_does_not_publish_peer_names() {
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn removing_a_node_from_a_granted_tag_removes_its_name_from_the_next_snapshot() {
     let mut coord = coordinator();
     coord
@@ -423,7 +423,7 @@ fn removing_a_node_from_a_granted_tag_removes_its_name_from_the_next_snapshot() 
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn default_allow_policy_also_publishes_reachable_peer_names() {
     let coord = coordinator();
 
@@ -438,7 +438,7 @@ fn default_allow_policy_also_publishes_reachable_peer_names() {
 }
 
 #[test]
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn configured_custom_suffix_is_used_for_peer_dns_answers() {
     let mut coord = coordinator();
     coord.set_suffix("mesh.kayg.org".to_owned()).unwrap();
@@ -462,7 +462,7 @@ fn configured_custom_suffix_is_used_for_peer_dns_answers() {
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn user_scoped_grants_remain_unexpressible_until_user_devices_are_in_the_policy_model() {
     let mut coord = coordinator();
     assert_eq!(
@@ -478,7 +478,7 @@ fn user_scoped_grants_remain_unexpressible_until_user_devices_are_in_the_policy_
 }
 
 #[test]
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn revoking_a_node_grant_removes_its_name_from_the_next_snapshot_and_chunk() {
     let mut coord = coordinator();
     let grant = Arrow {
@@ -526,7 +526,7 @@ fn revoking_a_node_grant_removes_its_name_from_the_next_snapshot_and_chunk() {
     assert_eq!(removed_names, [NodeId(3).0]);
 }
 
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn query(name: &str) -> Vec<u8> {
     let mut wire = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
     for label in name.split('.') {
@@ -538,7 +538,7 @@ fn query(name: &str) -> Vec<u8> {
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn name_renames_are_carried_by_the_existing_versioned_configuration_chunks() {
     let coord = coordinator();
     let old =
@@ -570,7 +570,7 @@ fn name_renames_are_carried_by_the_existing_versioned_configuration_chunks() {
 }
 
 #[test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 fn review_j68b_explicit_internal_suffix_overrides_origin() {
     let mut coord = coordinator();
     coord.set_suffix("temporary.example".to_owned()).unwrap();

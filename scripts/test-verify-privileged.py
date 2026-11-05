@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 from unittest import mock
 import uuid
@@ -193,11 +194,36 @@ class IgnoredSelection(unittest.TestCase):
         for target in ('test:kernel', 'test:proxy_ingress_namespace', 'test:review_retire_ownership'):
             self.assertIn(target, found)
 
-    def test_dns_spike_only_for_dns(self):
-        """The default-off resolver feature applies to the DNS target alone."""
+    def test_mesh_dns_is_default_and_explicit_in_the_privileged_matrix(self):
+        """Shipping enables mesh DNS; the namespace matrix enables it only for the DNS target."""
         shared = dict((name, f) for name, _, f in p.PACKAGES['mesh'])['infraternal-plugin-mesh']
-        self.assertNotIn('mesh-dns-spike', shared)
-        self.assertIn('mesh-dns-spike', p.TARGET_FEATURES[('infraternal-plugin-mesh', 'test:dns')])
+        manifest = tomllib.loads(Path(__file__).resolve().parents[1].joinpath(
+            'crates/plugins/mesh/Cargo.toml').read_text())
+        self.assertIn('mesh-dns', manifest['features']['default'])
+        self.assertNotIn('mesh-dns-spike', manifest['features'])
+        self.assertNotIn('mesh-dns', shared)
+        self.assertIn('mesh-dns', p.TARGET_FEATURES[('infraternal-plugin-mesh', 'test:dns')])
+
+    def test_mesh_dns_is_forwarded_to_both_shipping_roles(self):
+        """A rootless node and the coordinator both need DNS in their normal mesh build."""
+        root = Path(__file__).resolve().parents[1]
+        product = tomllib.loads(root.joinpath('crates/infraternal/Cargo.toml').read_text())
+        self.assertIn('plugin-mesh', product['features']['default'])
+        self.assertIn('infraternal-plugin-mesh/mesh-dns', product['features']['plugin-mesh'])
+        for manifest_path in ('crates/infraternal-agent/Cargo.toml',
+                              'crates/infraternal-server/Cargo.toml'):
+            manifest = tomllib.loads(root.joinpath(manifest_path).read_text())
+            self.assertIn('infraternal-plugin-mesh/mesh-dns', manifest['features']['mesh'], manifest_path)
+
+    def test_mesh_privileged_builds_disable_default_features(self):
+        """The shared namespace fixtures stay separate from DNS-specific Config fields."""
+        entries = p.builds({'mesh'})
+        shared = next(args for args, provides in entries if provides == 'infraternal-plugin-mesh')
+        dns = next(args for args, provides in entries
+                   if provides == ('infraternal-plugin-mesh', 'test:dns'))
+        self.assertIn('--no-default-features', shared)
+        self.assertIn('--no-default-features', dns)
+        self.assertIn('mesh-dns', dns[dns.index('--features') + 1])
 
 
 class RealRootProof(unittest.TestCase):

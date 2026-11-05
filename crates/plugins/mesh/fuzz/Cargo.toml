@@ -13,9 +13,9 @@ cargo-fuzz = true
 members = ["."]
 
 [features]
-default = ["mesh-dns-spike"]
+default = ["mesh-dns"]
 ee = []
-mesh-dns-spike = []
+mesh-dns = []
 
 [dependencies]
 libfuzzer-sys = "0.4"
