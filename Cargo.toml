@@ -5,6 +5,7 @@ exclude = ["vendor/russh", "vendor/russh-sftp"]
 members = [
     "fuzz",
     "crates/infraternal-mesh",
+    "crates/infraternal-linux-tun",
     "crates/infraternal",
     "crates/infraternal-protocol",
     "crates/infraternal-plugin-api",
@@ -98,6 +99,24 @@ opt-level = 3
 
 [profile.test.package.sha2]
 opt-level = 3
+
+# Debug and test builds keep only line tables for GotaTun, the mesh engine (#260). Its full
+# debug info pushed the debug `infraternal` test binary past the 512 MiB bound the restart
+# admission code allows for a running development image. Release builds carry no debug info.
+[profile.dev.package.gotatun]
+debug = "line-tables-only"
+
+[profile.test.package.gotatun]
+debug = "line-tables-only"
+
+# GotaTun's generic code is instantiated in the mesh plugin, whose debug info follows its own
+# profile, so the mesh plugin keeps line tables only as well. Without it the x86 debug test
+# binary stays above the bound (543,574,712 bytes against 536,870,912).
+[profile.dev.package.infraternal-plugin-mesh]
+debug = "line-tables-only"
+
+[profile.test.package.infraternal-plugin-mesh]
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3

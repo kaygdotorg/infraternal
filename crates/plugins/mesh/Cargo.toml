@@ -19,6 +19,9 @@ agent = [
     "dep:ipnetwork",
     "dep:security-framework",
     "dep:tracing",
+    "dep:gotatun-fork",
+    "dep:infraternal-linux-tun",
+    "tokio/rt-multi-thread",
 ]
 # Relayed pairs through the seam C shim and relay address observation [313].
 relay = ["agent", "dep:socket2", "dep:infraternal-plugin-relay", "infraternal-plugin-relay/runtime", "infraternal-mesh/relay"]
@@ -31,6 +34,7 @@ mesh-dns-spike = ["agent", "server", "dep:hickory-proto", "dep:url"]
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-protocol.workspace = true
 infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
+infraternal-linux-tun = { version = "0.1.0", path = "../../infraternal-linux-tun", optional = true }
 infraternal-plugin-relay = { version = "0.1.0", path = "../relay", optional = true }
 bytes.workspace = true
 futures-util.workspace = true
@@ -51,9 +55,22 @@ hickory-proto = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gotatun = { version = "0.10.2", features = ["device"], optional = true }
+# Ring here too, so the Mac node builds GotaTun without AWS-LC (D289).
+gotatun = { version = "0.10.2", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 security-framework = { version = "3.7.0", optional = true }
+
+# Linux nodes run GotaTun from our fork, pinned by commit (D163); the Mac node uses the release
+# (#265). One dependency name cannot have a different source per target, so the fork has its own
+# name here and the crate root restores the `gotatun` path for the Linux code.
+[target.'cfg(target_os = "linux")'.dependencies]
+# The ring backend: ring is the binary's one crypto library (D289); GotaTun defaults to AWS-LC.
+gotatun-fork = { package = "gotatun", version = "0.10.2", git = "https://github.com/kaygdotorg/gotatun", rev = "84b7bb28e385d57dfb80493e78202898fad24d1e", default-features = false, features = ["device", "ring"], optional = true }
+ipnetwork = { version = "0.21.1", optional = true }
+
+[dev-dependencies]
+# Namespace tests run each node on a thread that entered its own network namespace (D332).
+nix = { workspace = true, features = ["net", "sched"] }
 
 [lints]
 workspace = true
