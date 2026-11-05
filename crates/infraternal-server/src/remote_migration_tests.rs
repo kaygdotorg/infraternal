@@ -117,12 +117,29 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
     );
 }
 
-/// The embedded migration history is contiguous, and both a production database and a fresh one reach the latest
-/// version.
+/// The embedded migration history has its D347 shape with #285's migrations in place, and both a production database
+/// and a fresh one apply exactly that history.
 #[tokio::test]
 async fn release_migration_history_is_complete_for_production_and_fresh_schemas() {
     let migrations = sqlx::migrate!("./migrations");
     let expected = release_history(&migrations);
+    // #285's four migrations keep the D347 timestamps they were created with: Part B's
+    // Mesh and host key rotation first, then Part A's cookie order and certificate recovery.
+    let trust = [
+        20_261_105_020_355,
+        20_261_105_020_356,
+        20_261_105_020_605,
+        20_261_105_020_607,
+    ];
+    let present: Vec<i64> = expected
+        .iter()
+        .copied()
+        .filter(|version| trust.contains(version))
+        .collect();
+    assert_eq!(
+        present, trust,
+        "trust migrations are present, in creation order"
+    );
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
