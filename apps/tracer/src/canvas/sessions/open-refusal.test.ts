@@ -31,7 +31,7 @@ test("legacy refusals still work and malformed counters never reach the message"
 test("product copy names the host and counters and never renders untrusted server text", async () => {
   const { terminalRefusal } = await import("../../terminal-refusal");
   expect(terminalRefusal(new ActionRefused(undefined, "unavailable"), "code")).toEqual({
-    message: "The infraternal agent on code cannot reach the server. Check that outbound TCP 443 is allowed from code.", sessionList: false, action: "retry",
+    message: "code is offline or cannot reach this server. Check its network, then try again.", sessionList: false, action: "retry",
   });
   expect(terminalRefusal(await refusal({ reason: "host_memory_low", available_mib: 180, session_count: 212 }), "monitor01")).toEqual({
     message: "monitor01 is low on memory (180 MiB free, 212 sessions running). Close sessions you no longer need.", sessionList: true, action: "sessions",

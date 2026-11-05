@@ -99,6 +99,20 @@ async function expectAligned(win: Locator, strip: Locator): Promise<void> {
   }
   const text = strip.locator(".cl-sx-strip-text");
   expect(await text.evaluate((node) => node.scrollWidth <= node.clientWidth + 1 && node.scrollHeight <= node.clientHeight + 1), "the sentence is not clipped").toBe(true);
+  const textBox = (await text.boundingBox())!;
+  const again = strip.locator(".cl-sx-again");
+  const stacked = (await again.count()) > 0 && (await again.boundingBox())!.y >= textBox.y + textBox.height - 1;
+  if (stacked) {
+    // A narrow window: the sentence has most of the strip's width, and the action starts on the sentence's left edge.
+    expect(textBox.width, "the sentence gets the strip's width").toBeGreaterThan(box.width * 0.55);
+    expect(Math.abs((await again.boundingBox())!.x - textBox.x), "the action starts on the sentence's edge").toBeLessThanOrEqual(0.5);
+    const first = textBox.y + (await text.evaluate((node) => Number.parseFloat(getComputedStyle(node).lineHeight))) / 2;
+    for (const part of await strip.locator(".ui-mark, .cl-sx-dismiss").all()) {
+      const b = (await part.boundingBox())!;
+      expect(Math.abs(b.y + b.height / 2 - first), "mark and close sit on the first line's centre").toBeLessThanOrEqual(0.5);
+    }
+    return;
+  }
   const centres: number[] = [];
   for (const part of await strip.locator(".ui-mark, .cl-sx-again, .cl-sx-dismiss").all()) {
     const b = (await part.boundingBox())!;
@@ -164,7 +178,7 @@ for (const viewport of VIEWPORTS) {
         await shot(page, "denied");
         const offline = await openFromPalette(page, "offline-host");
         const offlineStrip = offline.locator(".cl-sx-strip");
-        await expect(offlineStrip.locator(".cl-sx-strip-text")).toHaveText("The infraternal agent on offline-host cannot reach the server. Check that outbound TCP 443 is allowed from offline-host.");
+        await expect(offlineStrip.locator(".cl-sx-strip-text")).toHaveText("offline-host is offline or cannot reach this server. Check its network, then try again.");
         await expect(offlineStrip.getByRole("button", { name: "Try again" })).toBeVisible();
         await expectAligned(offline, offlineStrip);
         await shot(page, "offline");

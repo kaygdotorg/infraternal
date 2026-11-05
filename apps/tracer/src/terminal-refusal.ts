@@ -38,12 +38,9 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
       case "denied": return { message: `You do not have access to ${hostName?.trim() || "this host"}. Ask an admin for access.`, sessionList: false, action: "none" };
       case "host_memory_unavailable": return { message: `${host} could not check its available memory. Try again.`, sessionList: false, action: "retry" };
       case "resource_unavailable": return { message: `${host} could not start a shell. Try again.`, sessionList: false, action: "retry" };
-      case "unavailable": {
-        const location = hostName?.trim();
-        const subject = location ? `The infraternal agent on ${location}` : "The infraternal agent on this host";
-        const fix = location ? `from ${location}` : "from that host";
-        return { message: `${subject} cannot reach the server. Check that outbound TCP 443 is allowed ${fix}.`, sessionList: false, action: "retry" };
-      }
+      // Offline, never enrolled, or cut off from the server all arrive as this one reason, so the sentence names the two
+      // things a person can check; the network detail for an expert belongs in the docs, not here.
+      case "unavailable": return { message: `${host} is offline or cannot reach this server. Check its network, then try again.`, sessionList: false, action: "retry" };
     }
   }
   return { message: "The server could not open this terminal. Try again.", sessionList: false, action: "retry" };
