@@ -50,13 +50,19 @@ fn remove_link() {
 /// A kernel link with the shared marker, as another installation (or a node of another server)
 /// leaves it: keyed with its own key, or not keyed yet because it stopped mid-startup.
 fn add_foreign_kernel_link(keyed: bool) -> Option<PublicKey> {
-    ip(&["link", "add", INTERFACE, "type", "wireguard"]);
-    ip(&["link", "set", INTERFACE, "alias", "infraternal.mesh.v1"]);
-    keyed.then(|| {
+    let foreign = keyed.then(|| {
+        // Key it as its own node would: create and configure through its own marker.
         let (key, public) = Key::generate().unwrap();
-        Device::configure(&key, 0).unwrap();
+        let index = Device::create(public).unwrap();
+        Device::configure(index, public, &key, 0).unwrap();
         public
-    })
+    });
+    if foreign.is_none() {
+        ip(&["link", "add", INTERFACE, "type", "wireguard"]);
+    }
+    // Then give it the older shared marker, as a node of an earlier release carries it.
+    ip(&["link", "set", INTERFACE, "alias", "infraternal.mesh.v1"]);
+    foreign
 }
 
 /// Bring our node up once so its directory records the kernel engine and its own key, then let

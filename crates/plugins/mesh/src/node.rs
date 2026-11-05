@@ -128,10 +128,11 @@ fn switch_engine(
     store: &crate::node_state::Store,
     link: crate::wireguard::ActiveLink,
     enabled: bool,
+    kernel_proof: Option<crate::policy::model::PublicKey>,
 ) -> io::Result<()> {
     if link.engine == EngineKind::Kernel {
         if enabled {
-            carry_kernel_key(store)?;
+            carry_kernel_key(store, link.ifindex, kernel_proof)?;
         }
         // Retire peers before the link deletion removes all routes, as `down` does.
         Client::new()?.clear_peers()?;
@@ -141,14 +142,22 @@ fn switch_engine(
 
 /// Copy the proven kernel link's private key into the key file, unless the file already holds it.
 /// A device without a key yet has no identity to carry, and the engine makes a new one.
-fn carry_kernel_key(store: &crate::node_state::Store) -> io::Result<()> {
-    let key = match Device::private_key() {
+///
+/// The key is read from the proven link by its index, never by the shared name, and must derive
+/// the key this node recorded, so a link substituted under the name cannot hand us its identity
+/// (#260 J220 P2).
+fn carry_kernel_key(
+    store: &crate::node_state::Store,
+    ifindex: u32,
+    recorded: Option<crate::policy::model::PublicKey>,
+) -> io::Result<()> {
+    let key = match Device::private_key_at(ifindex) {
         Ok(key) => key,
         Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(()),
         Err(error) => return Err(error),
     };
     let (_, public) = crate::gotatun_node::secret_from_bytes(&key[..])?;
-    if Device::identity()?.0 != public {
+    if Some(public) != recorded {
         return Err(io::ErrorKind::InvalidData.into());
     }
     if let Some(existing) = store.read_private_key()? {
@@ -327,10 +336,11 @@ impl Node {
         if let Some(link) = active_link.filter(|link| link.engine != engine_kind) {
             // A link of the other engine: ours moves to the selected engine, another node's is
             // left alone and keeps the name (D340).
-            let ours = proven_kernel_link(&link, kernel_owner_proof(&store, snapshot_key)?)
+            let kernel_proof = kernel_owner_proof(&store, snapshot_key)?;
+            let ours = proven_kernel_link(&link, kernel_proof)
                 || proven_gotatun_link(&link, gotatun_owner_proof(&store, snapshot_key)?);
             if ours {
-                switch_engine(&store, link, state.enabled)?;
+                switch_engine(&store, link, state.enabled, kernel_proof)?;
                 store.record_engine(engine_kind)?;
                 active_link = Device::active_link()?;
             }
@@ -392,7 +402,7 @@ impl Node {
             // A retained interface from an older daemon may have selected the
             // reserved port. Rebind its socket while preserving its private key.
             if port == 51820 {
-                port = Device::allocate_port()?;
+                port = Device::allocate_port(link.ifindex)?;
             }
             node.identity = Some(Identity {
                 public_key,
@@ -795,7 +805,7 @@ impl Node {
                 {
                     hook();
                 }
-                if let Err(error) = Device::configure(&key, 0) {
+                if let Err(error) = Device::configure(created, public_key, &key, 0) {
                     let _ = self.down();
                     return Err(error);
                 }

@@ -165,16 +165,20 @@ fn temporary_name() -> Vec<u8> {
     name
 }
 
-/// The index of the link named `name` (with its trailing NUL), from one route-netlink reply.
-fn index_of(socket: &mut Socket, name: &[u8]) -> io::Result<u32> {
-    let mut payload = vec![0; 16];
-    attribute(&mut payload, 3, name)?;
-    let reply = socket
-        .request(18, 4, &payload)?
-        .into_iter()
-        .next()
-        .ok_or(io::ErrorKind::NotFound)?;
-    netlink::u32_at(&reply, 4)
+/// An interface index for a new link, chosen by us so that a successful creation proves which
+/// link is ours without a second lookup (#260 J220 P2). It comes from the same mix as
+/// [`temporary_name`], kept within `1 << 20 ..= i32::MAX`, well above the kernel's own counter.
+/// A taken index only fails one attempt (`EBUSY`), and creation retries.
+fn chosen_index() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    let mixed = std::process::id().rotate_left(13).wrapping_mul(0x9e37_79b9)
+        ^ NEXT.fetch_add(0x6d2b_79f5, Ordering::Relaxed)
+        ^ nanos;
+    (1 << 20) + mixed % (0x7fff_ffff - (1 << 20))
 }
 
 /// No timer or background thread: the socket exists only during one operation.
@@ -183,21 +187,16 @@ impl Device {
     /// Create our interface, marked with `owner`, the public key the caller will configure, and
     /// return its index. An existing interface under the shared name is refused, never taken over.
     ///
-    /// The link is made under a temporary name only this call knows, then renamed to the shared
-    /// name and marked in one request addressed by its index. Another installation that creates
-    /// the shared name in between keeps its link: our rename fails, and cleanup deletes only the
-    /// index we created (#260 J213 P2, D340).
+    /// The link is created under a temporary name with an interface index we chose, so the
+    /// creation itself proves which link is ours. Every later step addresses that index, never a
+    /// name: the claim renames it to the shared name and sets the owner marker in one request,
+    /// and a failed claim deletes only that index. A link another process puts under either name
+    /// in between is never claimed or deleted (#260 J213 P2, J220 P2, D340).
     /// # Errors
     /// Returns kernel errors including insufficient privileges and a taken name (`AlreadyExists`).
     pub fn create(owner: PublicKey) -> io::Result<u32> {
-        let temporary = temporary_name();
-        let mut payload = vec![0; 16];
-        attribute(&mut payload, 3, &temporary)?;
-        let mut linkinfo = Vec::new();
-        attribute(&mut linkinfo, 1, b"wireguard\0")?;
-        attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
-        socket.request(16, 4 | 0x200 | 0x400, &payload)?;
+        let (temporary, ifindex) = Self::create_with_chosen_index(&mut socket)?;
         #[cfg(feature = "test-support")]
         if let Some(hook) = AFTER_LINK_CREATED
             .lock()
@@ -206,16 +205,8 @@ impl Device {
         {
             hook(std::str::from_utf8(&temporary[..temporary.len() - 1]).unwrap_or_default());
         }
-        let ifindex = match index_of(&mut socket, &temporary) {
-            Ok(ifindex) => ifindex,
-            Err(error) => {
-                // Only this call knows the temporary name, so it names only our link.
-                let mut payload = vec![0; 16];
-                attribute(&mut payload, 3, &temporary)?;
-                let _ = socket.request(17, 4, &payload);
-                return Err(error);
-            }
-        };
+        #[cfg(not(feature = "test-support"))]
+        let _ = temporary;
         // Creation does not run the generic alias setter, so the marker is set here, with the
         // name, before a later process may adopt the link; never leave an unmarked success. The
         // owner key lets a restart prove the link is ours before its key is set (D340).
@@ -232,6 +223,28 @@ impl Device {
             });
         }
         Ok(ifindex)
+    }
+    /// Create a `WireGuard` link under a fresh temporary name with an index we chose, retrying a
+    /// few times when that name or index is already taken. Returns the name and the index.
+    fn create_with_chosen_index(socket: &mut Socket) -> io::Result<(Vec<u8>, u32)> {
+        let mut last = io::Error::from(io::ErrorKind::AlreadyExists);
+        for _ in 0..8 {
+            let temporary = temporary_name();
+            let ifindex = chosen_index();
+            let mut payload = vec![0; 16];
+            payload[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+            attribute(&mut payload, 3, &temporary)?;
+            let mut linkinfo = Vec::new();
+            attribute(&mut linkinfo, 1, b"wireguard\0")?;
+            attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
+            match socket.request(16, 4 | 0x200 | 0x400, &payload) {
+                Ok(_) => return Ok((temporary, ifindex)),
+                // EBUSY: the index is taken; EEXIST: the temporary name is taken.
+                Err(error) if matches!(error.raw_os_error(), Some(16 | 17)) => last = error,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last)
     }
     /// Verify the ownership marker before adopting kernel state after a process restart.
     /// # Errors
@@ -354,39 +367,46 @@ impl Device {
         Socket::open(SockProtocol::NetlinkRoute)?.request(17, 4, &payload)?;
         Ok(())
     }
-    /// Install the local key and listen port. The secret lives only in zeroized netlink buffers.
+    /// Install the local key and listen port on the link at `ifindex`, which this node created
+    /// for `owner`. The secret lives only in zeroized netlink buffers.
+    ///
+    /// The device is addressed by index, never by the shared name, and the link at that index
+    /// must still carry `owner`'s marker right before the key is sent, so a link put under the
+    /// shared name after our claim never receives the key (#260 J220 P2).
     /// # Errors
-    /// Returns a kernel configuration error without key material.
-    pub fn configure(key: &Key, port: u16) -> io::Result<()> {
+    /// Returns a kernel configuration error without key material, or `InvalidData` when the
+    /// link at `ifindex` is not this owner's.
+    pub fn configure(ifindex: u32, owner: PublicKey, key: &Key, port: u16) -> io::Result<()> {
         // Reserve the coexistence port before entering the kernel, including
         // for explicit callers. Ephemeral allocation is checked after binding.
         if port == 51820 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let mut payload = Zeroizing::new(header());
+        verify_owner(ifindex, owner)?;
+        let mut payload = Zeroizing::new(header_at(ifindex));
         attribute(&mut payload, 3, &key.0)?;
         attribute(&mut payload, 6, &port.to_ne_bytes())?;
         // A zero listen port is bound only when the kernel device is running.
         // Activate before advertising the public endpoint to the coordinator.
         send(&payload)?;
-        activate(index()?)?;
-        if Self::identity()?.1 == 51820 {
-            Self::allocate_port()?;
+        activate(ifindex)?;
+        if identity_at(ifindex)?.1 == 51820 {
+            Self::allocate_port(ifindex)?;
         }
         Ok(())
     }
-    /// Allocate an unreserved kernel socket without replacing the retained key.
+    /// Allocate an unreserved kernel socket on the link at `ifindex` without replacing its key.
     /// # Errors
     /// Reports kernel errors or bounded allocation exhaustion.
-    pub fn allocate_port() -> io::Result<u16> {
-        let mut payload = header();
+    pub fn allocate_port(ifindex: u32) -> io::Result<u16> {
+        let mut payload = header_at(ifindex);
         attribute(&mut payload, 6, &0_u16.to_ne_bytes())?;
         for _ in 0..16 {
             // Port zero asks the kernel to allocate again. Never reserve a
             // userspace socket and release it into a bind race with WireGuard.
             send(&payload)?;
-            activate(index()?)?;
-            let port = Self::identity()?.1;
+            activate(ifindex)?;
+            let port = identity_at(ifindex)?.1;
             if port != 0 && port != 51820 {
                 return Ok(port);
             }
@@ -708,41 +728,17 @@ impl Device {
     /// # Errors
     /// Refuses unavailable or malformed device identity; secret fields never leave this method.
     pub fn identity() -> io::Result<(PublicKey, u16)> {
-        let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
-        let family = socket.family("wireguard")?;
-        let mut payload = header();
-        payload[0] = 0;
-        let mut key = None;
-        let mut port = None;
-        for reply in socket.request(family, 0x300, &payload)? {
-            for field in netlink::attributes(reply.get(4..).ok_or(io::ErrorKind::InvalidData)?)? {
-                match field.kind {
-                    4 if field.payload.len() == 32 => {
-                        key = Some(PublicKey(
-                            field.payload.try_into().map_err(io::Error::other)?,
-                        ));
-                    }
-                    6 if field.payload.len() == 2 => {
-                        port = Some(u16::from_ne_bytes([field.payload[0], field.payload[1]]));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok((
-            key.ok_or(io::ErrorKind::InvalidData)?,
-            port.ok_or(io::ErrorKind::InvalidData)?,
-        ))
+        identity_from(header())
     }
     /// Read the kernel device's private key, only to carry this node's identity to `GotaTun`
     /// when it leaves kernel `WireGuard` (D346). The caller must have proven the link is ours.
     /// Every reply buffer is zeroized on drop, and so is the returned key.
     /// # Errors
     /// Refuses a device without a key, or a malformed dump.
-    pub(crate) fn private_key() -> io::Result<Zeroizing<[u8; 32]>> {
+    pub(crate) fn private_key_at(ifindex: u32) -> io::Result<Zeroizing<[u8; 32]>> {
         let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
         let family = socket.family("wireguard")?;
-        let mut payload = header();
+        let mut payload = header_at(ifindex);
         payload[0] = 0;
         let mut key = Zeroizing::new([0; 32]);
         let mut found = false;
@@ -961,6 +957,91 @@ fn header() -> Vec<u8> {
     payload.resize(24, 0);
     payload
 }
+/// A `WireGuard` generic-netlink header that addresses the device by interface index
+/// (`WGDEVICE_A_IFINDEX`), not by name.
+fn header_at(ifindex: u32) -> Vec<u8> {
+    let mut payload = vec![1, 1, 0, 0];
+    payload.extend(8_u16.to_ne_bytes());
+    payload.extend(1_u16.to_ne_bytes());
+    payload.extend(ifindex.to_ne_bytes());
+    payload
+}
+
+/// The public key and listen port of the `WireGuard` device at `ifindex`.
+fn identity_at(ifindex: u32) -> io::Result<(PublicKey, u16)> {
+    identity_from(header_at(ifindex))
+}
+
+/// The public key and listen port from a device dump addressed by `header`. The kernel includes
+/// the private key in the dump, so every reply buffer is zeroized on drop.
+fn identity_from(mut payload: Vec<u8>) -> io::Result<(PublicKey, u16)> {
+    let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
+    let family = socket.family("wireguard")?;
+    payload[0] = 0;
+    let mut key = None;
+    let mut port = None;
+    for reply in socket.request(family, 0x300, &payload)? {
+        let reply = Zeroizing::new(reply);
+        for field in netlink::attributes(reply.get(4..).ok_or(io::ErrorKind::InvalidData)?)? {
+            match field.kind {
+                4 if field.payload.len() == 32 => {
+                    key = Some(PublicKey(
+                        field.payload.try_into().map_err(io::Error::other)?,
+                    ));
+                }
+                6 if field.payload.len() == 2 => {
+                    port = Some(u16::from_ne_bytes([field.payload[0], field.payload[1]]));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((
+        key.ok_or(io::ErrorKind::InvalidData)?,
+        port.ok_or(io::ErrorKind::InvalidData)?,
+    ))
+}
+
+/// Refuse unless the link at `ifindex` is a `WireGuard` link carrying `owner`'s marker.
+fn verify_owner(ifindex: u32, owner: PublicKey) -> io::Result<()> {
+    let mut payload = vec![0; 16];
+    payload[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+    let replies = match Socket::open(SockProtocol::NetlinkRoute)?.request(18, 4, &payload) {
+        Ok(replies) => replies,
+        Err(error) if error.raw_os_error() == Some(19) => {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Err(error) => return Err(error),
+    };
+    let reply = replies
+        .into_iter()
+        .next()
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let mut alias = None;
+    let mut kind = None;
+    for field in netlink::attributes(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)? {
+        match field.kind {
+            20 => alias = Some(field.payload.to_vec()),
+            18 => {
+                for info in netlink::attributes(field.payload)? {
+                    if info.kind == 1 {
+                        kind = Some(info.payload.to_vec());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if netlink::u32_at(&reply, 4)? == ifindex
+        && kind.as_deref() == Some(b"wireguard\0")
+        && alias.as_deref() == Some(owner_alias(KERNEL_OWNER_PREFIX, owner).as_slice())
+    {
+        Ok(())
+    } else {
+        Err(io::ErrorKind::InvalidData.into())
+    }
+}
+
 fn send(payload: &[u8]) -> io::Result<()> {
     let mut socket = Socket::open(SockProtocol::NetlinkGeneric)?;
     let family = socket.family("wireguard")?;
