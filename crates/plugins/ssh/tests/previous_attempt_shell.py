@@ -198,13 +198,143 @@ transaction={TRANSACTION}
         wants = self.unit.parent / 'default.target.wants/infraternal-agent.service'
         return wants.is_symlink(), self.manager_active.exists()
 
-    def recover(self, expected=None):
+    def recover(self, expected=None, prefix=''):
         if expected is None:
-            expected = self.run_shell('\ninspect_previous').stdout.decode().strip()
-        body = f'\nsetup_guard\nobserved=$(inspect_previous)\n[ "$observed" = "{expected}" ] || exit 75\nnot_live\n'
+            expected = self.run_shell(prefix + '\ninspect_previous').stdout.decode().strip()
+        body = prefix + f'\nsetup_guard\nobserved=$(inspect_previous)\n[ "$observed" = "{expected}" ] || exit 75\nnot_live\nstop_activated_agent\n'
         body += 'for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do [ ! -S "$entry" ] || rm -- "$entry"; done\n'
         body += CONSTANTS['FRESH_CLEANUP'] + CONSTANTS['ROLLBACK_TRANSACTION']
         return self.run_shell(body)
+
+    def make_activated_fresh_fixture(self):
+        """J257's field shape (#305): a fresh setup interrupted after activation.
+
+        The journal (kind fresh, activating plus the replacing-* markers) has no
+        live lease, the binary, state, unit and launcher are installed, and the
+        agent it started still runs from bin/live holding the runtime lifetime
+        lock. Returns (stage, agent processes); the agent is `flock` on the lock
+        running a copy of sleep as bin/live, so it holds what a real one holds.
+        """
+        if self.listener:
+            self.listener.close()
+            self.listener = None
+        self.receipt.unlink(missing_ok=True)
+        shutil.rmtree(self.base)
+        self.base.mkdir(mode=0o700)
+        self.identity = f'{self.base.stat().st_dev}:{self.base.stat().st_ino}'
+        self.owner.write_text(HOST + '\n')
+        self.owner.chmod(0o600)
+        stage = self.base / '.bootstrap-lock'
+        stage.mkdir(mode=0o700)
+        for name, value in [('transaction', TRANSACTION + '\n'), ('kind', 'fresh\n'), ('lease', '99999999 1\n')]:
+            (stage / name).write_text(value)
+            (stage / name).chmod(0o600)
+        for name in ('activating', 'creating-alias', 'replacing-binary', 'replacing-launcher',
+                     'replacing-state', 'replacing-unit', 'stopping'):
+            (stage / name).touch(mode=0o600)
+            (stage / name).chmod(0o600)
+        binary_dir = self.base / 'bin'
+        binary_dir.mkdir(mode=0o700)
+        live = binary_dir / 'live'
+        shutil.copyfile('/usr/bin/sleep', live)
+        live.chmod(0o700)
+        (binary_dir / 'current').symlink_to(live)
+        self.launcher.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.launcher.unlink(missing_ok=True)
+        self.launcher.symlink_to(binary_dir / 'current')
+        alias = self.launcher.parent / 'infra'
+        alias.unlink(missing_ok=True)
+        alias.symlink_to('infraternal')
+        self.unit.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.unit.write_text(
+            f'# infraternal bootstrap {HOST}\n[Unit]\n[Service]\n'
+            f'ExecStart="{binary_dir / "current"}" agent --data "{self.base / "state"}" '
+            f'--state "{self.base / "sessions"}" run\n[Install]\nWantedBy=default.target\n'
+        )
+        self.unit.chmod(0o600)
+        enabled = self.unit.parent / 'default.target.wants/infraternal-agent.service'
+        enabled.parent.mkdir(mode=0o700, exist_ok=True)
+        enabled.unlink(missing_ok=True)
+        enabled.symlink_to(self.unit)
+        state = self.base / 'state'
+        state.mkdir(mode=0o700)
+        (state / 'identity.json').write_text('{"endpoint":"127.0.0.1:7443"}\n')
+        (state / 'identity.json').chmod(0o600)
+        runtime = self.base / 'sessions'
+        (runtime / 'sessions').mkdir(parents=True, mode=0o700)
+        runtime.chmod(0o700)
+        lifetime = runtime / '.lifetime-lock'
+        lifetime.touch(mode=0o600)
+        lifetime.chmod(0o600)
+        self.manager_log.unlink(missing_ok=True)
+        self.manager_active.touch()
+        agent = subprocess.Popen(['flock', str(lifetime), str(live), '60'])
+        self.children.append(agent)
+        for _ in range(100):
+            children = Path(f'/proc/{agent.pid}/task/{agent.pid}/children')
+            pids = children.read_text().split() if children.exists() else []
+            if pids:
+                break
+            time.sleep(0.05)
+        self.assertTrue(pids, 'the stand-in agent did not start')
+        return stage, [str(agent.pid)] + pids
+
+    def as_agent_unit(self, pids):
+        """Shell prefix: these processes are the agent unit's, and stopping the
+        unit ends them, as systemd's cgroup and `stop` would."""
+        names = ' '.join(pids)
+        return f'''
+agent_unit_process() {{ case " {names} " in *" ${{1##*/}} "*) return 0;; esac; return 1; }}
+mock_manager() {{
+ printf '%s\\n' "$*" >> "$manager_log"
+ mock_wants="${{unit%/*}}/default.target.wants/infraternal-agent.service"
+ case "$1" in
+  is-enabled) [ -L "$mock_wants" ];;
+  is-active) [ -e "$manager_active" ];;
+  disable) rm -f "$mock_wants";;
+  stop) kill {names} 2>/dev/null || :; for p in {names}; do while [ -e /proc/$p/exe ] && [ "$(cat /proc/$p/stat 2>/dev/null | cut -d" " -f3)" != Z ]; do sleep 0.05; done; done; rm -f "$manager_active";;
+ esac
+}}
+'''
+
+    def test_an_interrupted_activation_whose_agent_is_its_only_holder_is_offered_and_cleaned(self):
+        # #305 (J257): before, every add exited 73 ("Setup is already running") forever.
+        stage, pids = self.make_activated_fresh_fixture()
+        prefix = self.as_agent_unit(pids)
+        inspected = self.run_shell(prefix + '\ninspect_previous')
+        self.assertEqual(inspected.returncode, 0, inspected.stdout.decode() + inspected.stderr.decode())
+        self.assertTrue(inspected.stdout.decode().startswith(f'INFRATERNAL_SETUP_STALE {HOST} {TRANSACTION} '), inspected.stdout)
+        self.assertEqual(self.mutating_calls(), [], 'inspection must not stop anything')
+        result = self.recover(prefix=prefix)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        self.assertFalse(self.base.exists(), 'leftovers remain')
+        self.assertFalse(self.unit.exists())
+        self.assertFalse(self.launcher.is_symlink())
+        self.assertFalse((self.launcher.parent / 'infra').is_symlink())
+        self.assertEqual(self.service_state(), (False, False))
+        self.assertIn('stop infraternal-agent.service', self.mutating_calls())
+
+    def test_an_interrupted_activation_still_refuses_while_its_setup_holds_the_journal(self):
+        import fcntl
+        stage, pids = self.make_activated_fresh_fixture()
+        held = os.open(stage, os.O_RDONLY)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_shell(self.as_agent_unit(pids) + '\ninspect_previous')
+            self.assertEqual(result.returncode, 73)
+        finally:
+            os.close(held)
+        self.assertTrue(stage.exists())
+
+    def test_an_interrupted_activation_still_refuses_a_process_outside_its_unit(self):
+        # A terminal shim (or anything else) running from or holding the install.
+        stage, pids = self.make_activated_fresh_fixture()
+        other = subprocess.Popen([str(self.base / 'bin/live'), '60'])
+        self.children.append(other)
+        result = self.run_shell(self.as_agent_unit(pids) + '\ninspect_previous')
+        self.assertEqual(result.returncode, 73, result.stdout.decode())
+        self.assertTrue(stage.exists())
+        self.assertEqual(self.mutating_calls(), [])
 
     def test_retired_owner_with_nonempty_root_is_refused(self):
         self.listener.close()

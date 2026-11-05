@@ -680,6 +680,16 @@ impl Backend for RemoteBackend {
             self.authorize(authority).await
         })
     }
+    fn leftover_connected<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+    ) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            Ok(self.hosts.actor(host).await.is_some())
+        })
+    }
     fn owns_failed_setup<'a>(
         &'a self,
         authority: &'a Authority,

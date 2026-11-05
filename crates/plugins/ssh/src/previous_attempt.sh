@@ -340,11 +340,26 @@ inspect_upgrade() {
 upgrade_liveness() {
  if $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1; then printf 'live\n'; else printf 'idle\n'; fi
 }
+# Refuse (73) while setup runs here: another command holds the journal, a shim
+# serves a terminal, or any process of this user holds a file under $base.
+#
+# One holder is not "setup running": the infraternal agent unit that a fresh
+# setup started before it was interrupted (journal kind fresh, still marked
+# activating). Its setup is gone (the journal lock above is free), it serves no
+# terminal (a shim would still be a holder), and its journal never committed,
+# so no server finished enrolling it; it can only retry its server link. Left
+# counted, every later add said "Setup is already running" forever and Start
+# fresh was never offered (#305, J257). Rollback stops and removes it by the
+# journal's own markers.
 not_live() {
+ not_live_scan=all
  if [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
   exec 8< "$base/.bootstrap-lock"
   flock -n 8 || exit 73
   exec 8<&-
+  if [ -f "$base/.bootstrap-lock/activating" ] && [ ! -L "$base/.bootstrap-lock/activating" ] && [ -f "$base/.bootstrap-lock/kind" ] && [ ! -L "$base/.bootstrap-lock/kind" ] && [ "$(cat "$base/.bootstrap-lock/kind")" = fresh ]; then
+   not_live_scan=unit
+  fi
  fi
  # Non-dumpable shims: the helper asks the kernel by owner+inode, never by name.
  for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
@@ -354,11 +369,34 @@ not_live() {
   "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions </dev/null || exit $?
   break
  done
+ scan_holders "$not_live_scan"
+}
+# Start fresh, after confirmation: stop the agent an interrupted activation left
+# running (see not_live), then require that nothing holds a file under $base any
+# more. Without one, this does nothing.
+stop_activated_agent() {
+ [ "${not_live_scan:-all}" = unit ] || return 0
+ $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
  scan_holders all
+ not_live_scan=all
+}
+# Whether this fresh journal was interrupted during activation and carries the
+# rollback marker $1 for what activation created (see not_live).
+activated_marker() {
+ [ "${not_live_scan:-all}" = unit ] && [ -f "$base/.bootstrap-lock/$1" ] && [ ! -L "$base/.bootstrap-lock/$1" ]
+}
+# Whether /proc entry $1 runs in the infraternal agent's own service unit.
+agent_unit_process() {
+ agent_unit=no
+ { while IFS= read -r scan_cgroup; do
+    case "$scan_cgroup" in */infraternal-agent.service|*/infraternal-agent.service/*) agent_unit=yes;; esac
+   done < "$1/cgroup"; } 2>/dev/null || :
+ [ "$agent_unit" = yes ]
 }
 # Refuse (73) while a process of this user runs from or holds a file under
 # $base. "service" skips the enrolled unit's own processes and the journaled
-# payload's shims, which a replacement is about to stop itself (#305).
+# payload's shims, which a replacement is about to stop itself (#305). "unit"
+# skips only the unit's own processes (see not_live).
 scan_holders() {
  scan_skip=$1
  if [ -e "$base" ] || [ -L "$base" ]; then
@@ -373,11 +411,9 @@ scan_holders() {
   [ -O "$process" ] || continue
   if [ "$scan_skip" = service ]; then
    [ ! "$base/.bootstrap-lock/payload" -ef "$process/exe" ] || continue
-   scan_unit=no
-   { while IFS= read -r scan_cgroup; do
-      case "$scan_cgroup" in */infraternal-agent.service|*/infraternal-agent.service/*) scan_unit=yes;; esac
-     done < "$process/cgroup"; } 2>/dev/null || :
-   [ "$scan_unit" = no ] || continue
+   ! agent_unit_process "$process" || continue
+  elif [ "$scan_skip" = unit ]; then
+   ! agent_unit_process "$process" || continue
   fi
   set -- "$@" "$process/exe" "$process/fd"
   [ "$#" -le 8192 ] || refuse size
@@ -550,7 +586,9 @@ inspect_previous() {
   return
  fi
  not_live
- validate_control_socket
+ # The interrupted activation's agent holds the runtime lifetime lock; not_live
+ # proved it is the only holder, so the socket is checked after it is stopped.
+ [ "$not_live_scan" = unit ] || validate_control_socket
  if [ -n "$receipt" ]; then
   validate_retired_stage "$previous_transaction" "$previous_host"
  elif [ -e "$base/.bootstrap-lock" ] || [ -L "$base/.bootstrap-lock" ]; then
@@ -599,8 +637,20 @@ inspect_previous() {
    bin)
     [ -d "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 700 ] || exit 71
     for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
-     [ ! -e "$child" ] && [ ! -L "$child" ] || exit 71
+     [ -e "$child" ] || [ -L "$child" ] || continue
+     # An interrupted activation of this fresh journal installed its binary;
+     # rollback removes exactly these two by the replacing-binary marker.
+     activated_marker replacing-binary || exit 71
+     case "${child##*/}" in
+      live) [ -f "$child" ] && [ ! -L "$child" ] && [ -O "$child" ] && [ "$(stat -c '%a' "$child")" = 700 ] || exit 71;;
+      current) [ -L "$child" ] && [ "$(readlink "$child")" = "$base/bin/live" ] || exit 71;;
+      *) exit 71;;
+     esac
     done;;
+   state)
+    # Its enrolment state, removed by rollback under the replacing-state marker.
+    activated_marker replacing-state || exit 71
+    private_tree "$entry";;
    *) exit 71;;
   esac
  done
@@ -613,7 +663,7 @@ inspect_previous() {
    [ "$entry" != "$base/sessions/sessions" ] || continue
    [ "$entry" != "$base/sessions/.lifetime-lock" ] || continue
    if [ "$entry" = "$base/sessions/plugins.sock" ]; then
-    validate_control_socket
+    [ "$not_live_scan" = unit ] || validate_control_socket
     sockets=$((sockets + 1))
     [ "$sockets" -le 1024 ] || refuse size
     continue

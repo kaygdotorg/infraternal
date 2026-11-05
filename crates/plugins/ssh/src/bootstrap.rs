@@ -227,6 +227,16 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+    /// Whether the infraternal agent of an earlier setup's journal (`host`) is
+    /// connected to this server now. Its leftovers are then in use, never offered
+    /// for cleanup (#305, J257). Backends without host links have none.
+    fn leftover_connected<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _host: uuid::Uuid,
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
     /// Bind nonsecret cleanup coordinates to the connection that actually authenticated.
     fn invitation_with_trust<'a>(
         &'a self,
@@ -1440,6 +1450,19 @@ impl Bootstrap {
                         }
                     }
                 } else {
+                    // An interrupted activation can leave its agent running. If it is
+                    // connected here, its setup is not abandoned (#305, J257).
+                    if self
+                        .backend
+                        .leftover_connected(&batch.authority, previous.host)
+                        .await?
+                    {
+                        let mut failure = Failure::install(
+                            "Setup is already running on this host. Wait for it to finish, then try again.",
+                        );
+                        failure.kind = crate::model::FailureKind::SetupRunning;
+                        return Err(failure);
+                    }
                     // Only this server's durable failed-host binding finishes the
                     // earlier setup without asking (#230).
                     let automatic = self
