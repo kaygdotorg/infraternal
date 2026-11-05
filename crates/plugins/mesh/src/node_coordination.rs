@@ -28,16 +28,69 @@ async fn update_listener(
 }
 /// Probe before advertising an extension. Strict older nodes reject the probe,
 /// then answer the ordinary request without enabling a new representation.
-async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
+///
+/// Returns the identity and its rotation support as far as the replies prove it (J262).
+async fn read_identity(channel: &dyn NodeChannel) -> Option<(Identity, Option<bool>)> {
     #[cfg(feature = "mesh-dns-spike")]
-    let probe = br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.to_vec();
+    let (probe, before_rotation) = (
+        br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.as_slice(),
+        br#"{"compact_access":true,"dns_names":true}"#.as_slice(),
+    );
     #[cfg(not(feature = "mesh-dns-spike"))]
-    let probe = br#"{"compact_access":true,"key_rotation":true}"#.to_vec();
-    let reply = match channel.call("mesh.identity", probe).await {
-        Ok(reply) => reply,
-        Err(_) => channel.call("mesh.identity", b"{}".to_vec()).await.ok()?,
-    };
-    serde_json::from_slice::<Option<Identity>>(&reply)
+    let (probe, before_rotation) = (
+        br#"{"compact_access":true,"key_rotation":true}"#.as_slice(),
+        br#"{"compact_access":true}"#.as_slice(),
+    );
+    probe_identity(
+        |input| channel.call("mesh.identity", input),
+        probe,
+        before_rotation,
+    )
+    .await
+}
+
+/// Classify a node's identity replies into its rotation support (J262).
+///
+/// - The full probe answers, first or on one immediate retry: the reply says whether the node rotates.
+/// - The full probe fails but the same request without `key_rotation` answers: the node deterministically rejects
+///   that field, so it is an older binary without rotation support (`Some(false)`), and the coordinator may
+///   abandon its open rotation.
+/// - Only the legacy `{}` request answers: the failures prove nothing about rotation, so support is unknown
+///   (`None`) unless the reply itself claims it. A transient failure must not abandon a rotation, since that is
+///   what left kernel nodes with an open journal (J262 P2); the node also settles such a journal itself.
+async fn probe_identity<F, R>(
+    call: F,
+    probe: &[u8],
+    before_rotation: &[u8],
+) -> Option<(Identity, Option<bool>)>
+where
+    F: Fn(Vec<u8>) -> R,
+    R: std::future::Future<Output = Result<Vec<u8>, &'static str>>,
+{
+    for _ in 0..2 {
+        if let Ok(reply) = call(probe.to_vec()).await {
+            return parse_identity(&reply).map(|identity| {
+                let supported = identity.key_rotation;
+                (identity, Some(supported))
+            });
+        }
+    }
+    if let Ok(reply) = call(before_rotation.to_vec()).await {
+        return parse_identity(&reply).map(|identity| {
+            let supported = identity.key_rotation;
+            (identity, Some(supported))
+        });
+    }
+    let reply = call(b"{}".to_vec()).await.ok()?;
+    parse_identity(&reply).map(|identity| {
+        let supported = identity.key_rotation.then_some(true);
+        (identity, supported)
+    })
+}
+
+/// Decode an identity reply, refusing an unset key or port.
+fn parse_identity(reply: &[u8]) -> Option<Identity> {
+    serde_json::from_slice::<Option<Identity>>(reply)
         .ok()
         .flatten()
         .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0)
@@ -85,7 +138,7 @@ pub async fn run(
         if refresh_identity || binding.is_none() {
             refresh_identity = false;
             let identity = read_identity(channel.as_ref()).await;
-            if let Some(identity) = identity {
+            if let Some((identity, key_rotation)) = identity {
                 compact_access = identity.compact_access;
                 #[cfg(feature = "mesh-dns-spike")]
                 {
@@ -116,13 +169,13 @@ pub async fn run(
                         return;
                     };
                     store
-                        .attach_named_with_capability(
+                        .attach_named_with_probed_capability(
                             channel.id(),
                             identity.public_key,
                             endpoint,
                             channel.is_server(),
                             reported.as_deref(),
-                            identity.key_rotation,
+                            key_rotation,
                         )
                         .await
                 };
@@ -1325,6 +1378,153 @@ mod tests {
                 .is_err(),
             "the abandoned operation cannot commit"
         );
+    }
+
+    /// J262: a probe that could not show the capability (only the legacy request answered) must not abandon an
+    /// open rotation. The attach keeps the old refusal, the rotation and its operation stay as they were, and
+    /// the next attach that proves support continues the same operation.
+    #[tokio::test]
+    async fn an_unknown_capability_never_abandons_an_open_rotation() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let predecessor = PublicKey([2; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, node_id, first) = rotating_node(&service, host, predecessor).await;
+        store
+            .start_rotation_overlap(
+                node,
+                &first.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let before = rotation_row(&service, node_id).await;
+
+        assert_eq!(
+            store
+                .attach_named_with_probed_capability(host, predecessor, endpoint, false, None, None)
+                .await,
+            Err("Mesh key rotation is in progress."),
+            "an unknown capability is refused while the rotation is open"
+        );
+        assert_eq!(
+            rotation_row(&service, node_id).await,
+            before,
+            "nothing was abandoned"
+        );
+        store
+            .attach_named_with_probed_capability(
+                host,
+                predecessor,
+                endpoint,
+                false,
+                None,
+                Some(true),
+            )
+            .await
+            .expect("the next probe that proves support attaches");
+        let (_, supported, phase, _, _, operation) = rotation_row(&service, node_id).await;
+        assert!(supported);
+        assert_eq!(phase.as_deref(), Some("overlap"));
+        assert_eq!(
+            operation.as_deref(),
+            Some(first.operation_id.as_str()),
+            "the same operation continues"
+        );
+    }
+
+    /// With no rotation open, an unknown capability attaches as unsupported, as a legacy attach always did.
+    #[tokio::test]
+    async fn an_unknown_capability_without_a_rotation_attaches_as_unsupported() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let (node, _) = store
+            .attach_named_with_probed_capability(host, PublicKey([2; 32]), None, false, None, None)
+            .await
+            .unwrap();
+        let (_, supported, phase, ..) =
+            rotation_row(&service, i64::try_from(node.0).unwrap()).await;
+        assert!(!supported);
+        assert_eq!(phase, None);
+    }
+
+    /// An identity reply for the probe tests, with the given rotation flag.
+    fn identity_reply(key_rotation: bool) -> Vec<u8> {
+        serde_json::to_vec(&Some(Identity {
+            compact_access: false,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation,
+            public_key: PublicKey([2; 32]),
+            port: 44000,
+        }))
+        .unwrap()
+    }
+
+    /// Run `probe_identity` against scripted replies (in call order) and return the classified support and the
+    /// requests made.
+    async fn classify(
+        replies: Vec<Result<Vec<u8>, &'static str>>,
+    ) -> (Option<Option<bool>>, Vec<Vec<u8>>) {
+        let replies = Mutex::new(replies.into_iter());
+        let requests = Mutex::new(Vec::new());
+        let result = probe_identity(
+            |input| {
+                requests.lock().unwrap().push(input);
+                let reply = replies.lock().unwrap().next().unwrap_or(Err("no reply"));
+                async move { reply }
+            },
+            b"FULL",
+            b"BEFORE",
+        )
+        .await
+        .map(|(_, supported)| supported);
+        (result, requests.into_inner().unwrap())
+    }
+
+    /// J262 (b): one transient probe failure is retried and the retry proves support.
+    #[tokio::test]
+    async fn a_transient_probe_failure_is_retried_before_any_fallback() {
+        let (supported, requests) = classify(vec![
+            Err("Node control timed out."),
+            Ok(identity_reply(true)),
+        ])
+        .await;
+        assert_eq!(supported, Some(Some(true)));
+        assert_eq!(requests, vec![b"FULL".to_vec(), b"FULL".to_vec()]);
+    }
+
+    /// An older binary rejects the full probe every time but answers the same request without `key_rotation`:
+    /// that proves no support.
+    #[tokio::test]
+    async fn an_older_binary_that_rejects_only_the_rotation_field_reports_no_support() {
+        let (supported, requests) = classify(vec![
+            Err("Node action refused."),
+            Err("Node action refused."),
+            Ok(identity_reply(false)),
+        ])
+        .await;
+        assert_eq!(supported, Some(Some(false)));
+        assert_eq!(requests.last().unwrap(), b"BEFORE");
+    }
+
+    /// When only the legacy request answers, the failures prove nothing about rotation: support is unknown.
+    #[tokio::test]
+    async fn only_a_legacy_answer_leaves_rotation_support_unknown() {
+        let (supported, requests) = classify(vec![
+            Err("Node control timed out."),
+            Err("Node control timed out."),
+            Err("Node control timed out."),
+            Ok(identity_reply(false)),
+        ])
+        .await;
+        assert_eq!(supported, Some(None));
+        assert_eq!(requests.last().unwrap(), b"{}");
     }
 
     /// A coordinator restart in the overlap phase still publishes the previous key to peers.

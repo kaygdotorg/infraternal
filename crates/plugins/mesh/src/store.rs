@@ -1407,6 +1407,34 @@ impl Store {
         reported: Option<&str>,
         key_rotation_supported: bool,
     ) -> Result<(NodeId, bool), &'static str> {
+        self.attach_named_with_probed_capability(
+            host,
+            key,
+            endpoint,
+            server,
+            reported,
+            Some(key_rotation_supported),
+        )
+        .await
+    }
+    /// Attach with the rotation capability as the identity probe established it: `Some` when the node answered
+    /// whether it rotates, `None` when only the legacy request answered and the probe could not tell (J262).
+    ///
+    /// Only a definite `Some(false)` abandons an open rotation (J252 P2). An unknown capability keeps the old
+    /// refusal while a rotation is open, so a transient probe failure costs one retried attach instead of an
+    /// abandoned rotation; with no rotation open it attaches as unsupported, which keeps the D166 gate closed.
+    /// # Errors
+    /// Returns fixed public errors, not database input or authentication data.
+    pub async fn attach_named_with_probed_capability(
+        &self,
+        host: &str,
+        key: PublicKey,
+        endpoint: Option<SocketAddr>,
+        server: bool,
+        reported: Option<&str>,
+        key_rotation: Option<bool>,
+    ) -> Result<(NodeId, bool), &'static str> {
+        let key_rotation_supported = key_rotation.unwrap_or(false);
         if server != (host == "server") {
             return Err("Mesh host identity invalid.");
         }
@@ -1442,12 +1470,15 @@ impl Store {
             .map_err(|_| "Mesh storage unavailable.")?;
         let mut renamed = Vec::new();
         let id = if let Some(row) = existing {
+            let rotating = row
+                .try_get::<Option<String>, _>("rotation_phase")
+                .map_err(|_| "Mesh storage unavailable.")?
+                .is_some();
+            if rotating && key_rotation.is_none() {
+                return Err("Mesh key rotation is in progress.");
+            }
             let public_key = Self::attached_public_key(&row, key, key_rotation_supported)?;
-            let abandoned = !key_rotation_supported
-                && row
-                    .try_get::<Option<String>, _>("rotation_phase")
-                    .map_err(|_| "Mesh storage unavailable.")?
-                    .is_some();
+            let abandoned = rotating && key_rotation == Some(false);
             if abandoned {
                 abandon_rotation(&mut tx, row.get("id")).await?;
             }
