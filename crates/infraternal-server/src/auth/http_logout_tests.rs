@@ -191,22 +191,28 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
         .await
         .unwrap();
     let live = "L".repeat(43);
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, 100, 1)")
-        .bind(hash(&live))
-        .bind(user)
-        .bind(NOW + SESSION)
-        .bind(NOW)
-        .execute(&pool)
-        .await
-        .unwrap();
-    // The live bearer, as the newest generation the browser selects, plus `extra` made-up older
-    // ones, each under its own generation name.
+    // A second real session of the same account, older, presented last: an early stop in the
+    // revoke loop would leave it live.
+    let older = "M".repeat(43);
+    for (token, sequence) in [(&live, 100_i64), (&older, 50_i64)] {
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, ?, 1)")
+            .bind(hash(token))
+            .bind(user)
+            .bind(NOW + SESSION)
+            .bind(NOW)
+            .bind(sequence)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // The live bearer, as the newest generation the browser selects, then `extra - 1` made-up
+    // bearers, then the older real one: `1 + extra` bearers in all.
     let headers = |extra: usize| {
         let mut cookies = vec![format!(
             "__Host-infraternal-session-100-{}={live}",
             NOW + SESSION
         )];
-        for index in 0..extra {
+        for index in 0..extra - 1 {
             cookies.push(format!(
                 "__Host-infraternal-session-{}-{}={:0>43}",
                 index + 1,
@@ -214,14 +220,19 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
                 index
             ));
         }
+        cookies.push(format!(
+            "__Host-infraternal-session-50-{}={older}",
+            NOW + SESSION
+        ));
         let mut headers = HeaderMap::new();
         headers.insert(header::ORIGIN, HeaderValue::from_static(ORIGIN));
         headers.insert(header::COOKIE, cookies.join("; ").parse().unwrap());
         headers
     };
     let live_rows = || async {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions WHERE token_hash=?")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions WHERE token_hash IN (?, ?)")
             .bind(hash(&live))
+            .bind(hash(&older))
             .fetch_one(&pool)
             .await
             .unwrap()
@@ -232,7 +243,7 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
         matches!(refused, Err(super::super::Error::Invalid)),
         "more bearers than the cap must be refused"
     );
-    assert_eq!(live_rows().await, 1, "a refused logout must delete nothing");
+    assert_eq!(live_rows().await, 2, "a refused logout must delete nothing");
 
     run(&auth, "logout", &headers(MAX_LOGOUT_SESSIONS - 1))
         .await
@@ -240,7 +251,7 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
     assert_eq!(
         live_rows().await,
         0,
-        "a logout at the cap revokes every bearer"
+        "a logout at the cap revokes every bearer, the last one included"
     );
 }
 
