@@ -595,6 +595,7 @@ async fn failed_launch_stops_the_process_it_started_and_no_other() {
         if !alive(pid) {
             break;
         }
+        // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     assert!(
@@ -643,8 +644,10 @@ fn detached_fixture(
             {
                 break name.trim().to_owned();
             }
+            // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         };
+        // sleep: the stand-in shim binds late on purpose (`bind_delay`), to exercise a late bind
         tokio::time::sleep(bind_delay).await;
         let id = uuid::Uuid::parse_str(&name).unwrap();
         let path = sessions.join(format!("{name}.sock"));
@@ -679,6 +682,7 @@ fn detached_fixture(
                 if retire {
                     let _ = fs::remove_file(&path);
                 } else {
+                    // sleep: a live shim has not retired; hold its connection open until the test ends
                     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
                 }
                 return;
@@ -843,6 +847,7 @@ async fn a_stopped_person_launch_retires_its_terminal_record() {
         if records() == 0 {
             break;
         }
+        // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     assert_eq!(
@@ -863,6 +868,7 @@ async fn cleanups_idle() {
         {
             return;
         }
+        // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("launch cleanups did not end");
@@ -927,6 +933,7 @@ fn launcher_left_running_after_shutdown(fail_thread: bool) -> bool {
         if !alive(pid) {
             break;
         }
+        // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     let left = alive(pid);
@@ -1077,6 +1084,7 @@ async fn file_appears(file: &std::path::Path) {
         if file.exists() {
             return;
         }
+        // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("{} never appeared", file.display());
@@ -1253,6 +1261,7 @@ async fn a_closed_lifeline_clears_the_dead_shims_socket_and_record() {
         {
             break;
         }
+        // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     cleanups_idle().await;
@@ -1289,6 +1298,7 @@ async fn the_shutdown_cleanup_ends_within_its_budget_whatever_the_shim_does() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     let shim = tokio::spawn(async move {
         let (mut peer, _) = listener.accept().await.unwrap();
+        // sleep: the stand-in shim answers its Hello 1.5 s late, on the paused clock
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         super::send(
             &mut peer,
@@ -1365,6 +1375,7 @@ async fn a_stalled_reap_of_the_launcher_stays_inside_the_single_deadline() {
         if !alive(pid) {
             break;
         }
+        // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     let left = alive(pid);

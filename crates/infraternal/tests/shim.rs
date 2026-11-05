@@ -43,6 +43,7 @@ impl Session {
     ) -> Self {
         Self::start_configured(ring, detach, units, retention_ms, false)
     }
+    /// Start a shim with every launch option except a lifeline.
     fn start_configured(
         ring: usize,
         detach: bool,
@@ -1549,6 +1550,7 @@ fn shim_exit_within(extra: &[&str], limit: Duration) -> Option<std::process::Out
         if Instant::now() >= deadline {
             break false;
         }
+        // sleep: poll interval; the loop ends when the shim exits and is bounded by `limit`
         thread::sleep(Duration::from_millis(20));
     };
     if !exited {

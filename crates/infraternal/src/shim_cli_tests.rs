@@ -25,6 +25,7 @@ fn arguments() -> Vec<OsString> {
     .map(OsString::from)
     .collect()
 }
+/// Every launcher shape decodes to the same options as the full CLI schema, lifeline included.
 #[test]
 fn spawned_shapes_reuse_full_shim_options_and_defaults() {
     for flags in [

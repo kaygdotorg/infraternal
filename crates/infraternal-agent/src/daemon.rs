@@ -328,6 +328,7 @@ mod refusal_tests {
 // Construct cold login futures only when requested. Keeping their creation
 // outside the dispatcher poll function avoids touching their much larger code
 // working set on every idle greeting/receive, without an eager heap allocation.
+/// Start one admitted `terminal.open` as its own task, so a slow launch never blocks the dispatcher.
 #[cold]
 #[inline(never)]
 fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) {
@@ -344,6 +345,7 @@ fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) 
     });
 }
 
+/// Revoke or restore one person's terminals on its own task, after the first login operation has chosen a manager.
 #[cold]
 #[inline(never)]
 fn spawn_revocation(

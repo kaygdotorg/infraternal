@@ -566,6 +566,7 @@ fn key_memory_check_action() -> ActionDefinition {
     .with_cli_handler(CliHandler::KeyMemoryCheck)
 }
 
+/// The hidden `__shim` action: the private invocation a launcher uses to start one session shim.
 fn session_shim_action() -> ActionDefinition {
     ActionDefinition::new(
         ["__shim"],

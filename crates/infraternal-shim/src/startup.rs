@@ -96,6 +96,7 @@ impl Options {
 /// Operator argument permutations and test overrides stay with the full CLI;
 /// the private release image must not link that unrelated command graph.
 impl Options {
+    /// Decode the exact private invocation the launcher emits, or `None` for any other shape.
     #[must_use]
     pub fn spawned(arguments: &[std::ffi::OsString]) -> Option<Self> {
         let [

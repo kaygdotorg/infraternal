@@ -1050,7 +1050,9 @@ pub(crate) async fn launch_rootless_person(
     .await
 }
 
-// Keep the ordered authentication/launch/handshake setup together.
+/// Launch one shim and return its first authenticated session. The ordered authentication, launch and
+/// handshake setup stays together; on Linux a failure or cancellation after the spawn hands the launch to
+/// its own cleanup (`Launch`).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn launch_configured(
     exe: &Path,
@@ -1474,6 +1476,7 @@ struct Cleanups {
     idle: tokio::sync::Notify,
 }
 
+/// The process-wide count of launch cleanups, so a stopping agent can wait for them.
 #[cfg(target_os = "linux")]
 static CLEANUPS: Cleanups = Cleanups {
     pending: std::sync::atomic::AtomicUsize::new(0),
@@ -1704,6 +1707,7 @@ async fn reaped(child: &mut tokio::process::Child, bound: Duration) -> bool {
     // A test can make the reap stall for its whole bound, as a launcher stuck in uninterruptible sleep would.
     #[cfg(test)]
     if tests::REAP_STALLS.with(std::cell::Cell::get) {
+        // sleep: the test hook simulates a reap that cannot finish; this sleep is its whole bound
         tokio::time::sleep(bound).await;
         return false;
     }

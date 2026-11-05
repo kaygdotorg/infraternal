@@ -1480,6 +1480,7 @@ fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, Ex
     }
 }
 
+/// Run the hidden `__shim` command: decode its options and start the shim.
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
