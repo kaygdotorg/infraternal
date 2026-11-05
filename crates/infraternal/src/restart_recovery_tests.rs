@@ -18,6 +18,8 @@ use openssl::{
 use std::sync::Arc;
 
 /// Restart fixtures must work from an oversized debug image without raising production's limit.
+/// Pad past the current running-image bound so both refusal and fixture recovery
+/// stay covered when development binaries require a different bound.
 /// Pad a staging inode and publish a separate executable: sibling tests may fork
 /// while the staging writer is open, so closing our descriptor alone cannot make it executable.
 #[cfg(target_os = "linux")]
@@ -38,7 +40,7 @@ fn oversized_debug_image_does_not_limit_restart_fixtures() {
         .write(true)
         .open(&image.path)
         .unwrap()
-        .set_len(512 * 1024 * 1024 + 1)
+        .set_len(crate::restart_binary::RUNNING_IMAGE_LIMIT + 1)
         .unwrap();
     let executable = directory.0.join("oversized-debug-image");
     crate::test_executable::copy(&image.path, &executable, 0o700);
