@@ -618,26 +618,23 @@ async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
 
 /// The agent fixture survives the writer's control-first order when it moves
 /// to another terminal (#347). The real writer sends Pong before the old
-/// terminal's already-queued output (`Output` at seq 385), then the new
-/// attachment's first output at seq 0. The fixture's detach fence returns at
-/// Pong, `select_terminal` resets the cursor, and the leftover frame must be
-/// dropped rather than read as the new terminal's output. Driven through the
-/// real `writer` and the real fixture code; no timing involved.
+/// terminal's already-queued frames: an old acknowledgement, then old output
+/// at seq 385 (J260's ordering, 80548). The new attachment's first output
+/// follows on the fixture's new stream. The detach fence returns at Pong; no
+/// old frame, acknowledgement or output, may be read as the new terminal's.
+/// Driven through the real `writer` and the real fixture code; no timing.
 #[tokio::test]
 async fn fixture_drops_output_left_over_from_the_previous_terminal() {
     let (bulk, bulk_rx) = mpsc::channel(4);
     let (control, control_rx) = mpsc::channel(2);
-    assert!(
-        bulk.try_send(Message::Shim(
-            1,
-            Shim::Output(385, b"old terminal".to_vec())
-        ))
-        .is_ok()
-    );
-    assert!(
-        bulk.try_send(Message::Shim(1, Shim::Output(0, b"new terminal".to_vec())))
-            .is_ok()
-    );
+    let queued = [
+        Message::Shim(1, Shim::InputAck(7)),
+        Message::Shim(1, Shim::Output(385, b"old terminal".to_vec())),
+        Message::Shim(3, Shim::Output(0, b"new terminal".to_vec())),
+    ];
+    for message in queued {
+        assert!(bulk.try_send(message).is_ok());
+    }
     assert!(control.try_send(Message::Pong(0, 1, 0)).is_ok());
     let (written, mut frames) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
@@ -652,7 +649,7 @@ async fn fixture_drops_output_left_over_from_the_previous_terminal() {
         .await
     });
     let mut wire = String::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let frame = frames.recv().await.unwrap();
         wire.extend(frame.iter().map(|byte| format!("{byte:02x}")));
     }
@@ -670,12 +667,16 @@ binary.fence_nonce = 0
 binary.out, binary.entered, binary.acked = 385, 0, 0
 binary.credit_available, binary.credit_pending, binary.credit_batch = 1048576, 0, 65536
 binary.data, binary.events, binary.snapshots, binary.inventory = bytearray(), [], [], None
+binary.stream, binary.retired = 1, set()
 binary.stale, binary.stale_credit = None, 0
 peer.sendall(bytes.fromhex(sys.argv[2]))
 binary.fence()
 assert binary.out == 385
 select_terminal(binary, str(uuid.uuid4()))
-binary.process()
+for _ in range(3):
+    if binary.out == 12:
+        break
+    binary.process()
 assert (binary.out, bytes(binary.data)) == (12, b"new terminal"), (binary.out, bytes(binary.data))
 "#;
     let result = std::process::Command::new("python3")
