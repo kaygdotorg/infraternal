@@ -180,11 +180,16 @@ impl RemoteBackend {
     ///   later add of the same host into "already added" with a terminal that never
     ///   opened. Adding the host again asks for a working install there, so the
     ///   record is retired, as a cancelled attempt is, and the search continues.
+    ///
+    /// With `retire` false nothing is changed: an abandoned record is only reported
+    /// as not added. The stuck-install check uses that, since it runs before the
+    /// person has confirmed anything (J247 P3); the add retires it later.
     async fn existing_host(
         &self,
         owner: &str,
         address: &str,
         lookup: Option<&str>,
+        retire: bool,
     ) -> Result<Option<Uuid>, Failure> {
         // Each pass retires at most one record; the bound only stops a storage
         // fault that keeps refusing the retirement from looping forever.
@@ -202,7 +207,9 @@ impl RemoteBackend {
                 return Ok(None);
             };
             let host = Uuid::from_slice(&host).map_err(|_| unavailable())?;
-            if !unfinished || self.hosts.online(host).await {
+            // Any connected infraternal agent keeps its host, even before it
+            // has reported its session inventory (J247 P3).
+            if !unfinished || self.hosts.actor(host).await.is_some() {
                 return Ok(Some(host));
             }
             let running = self
@@ -212,6 +219,9 @@ impl RemoteBackend {
                 .contains_key(&host);
             if running {
                 return Err(being_added());
+            }
+            if !retire {
+                return Ok(None);
             }
             self.retire_abandoned_setup(owner, host).await?;
         }
@@ -231,7 +241,11 @@ impl RemoteBackend {
             Ok(()) => {}
             // Another path consumed the intent first (a cancelled attempt's own
             // retirement, or a completion): the caller's next lookup decides.
-            Err(crate::enrollment::EnrollmentError::Denied) => return Ok(()),
+            Err(crate::enrollment::EnrollmentError::Denied) => {
+                // Release this cut as a committed revocation does (J247 P3).
+                store.1.tombstoned(host);
+                return Ok(());
+            }
             Err(_) => return Err(unavailable()),
         }
         tracing::info!(
@@ -246,11 +260,14 @@ impl RemoteBackend {
             .with_existing_host_id(host_id)
     }
     /// Find persisted duplicates before the installer needs the matching payload.
+    /// `retire` is passed to [`existing_host`](Self::existing_host): false only
+    /// where nothing has been confirmed yet.
     async fn ensure_not_already_added(
         &self,
         authority: &Authority,
         target: &Target,
         lookup: Option<&str>,
+        retire: bool,
     ) -> Result<(), Failure> {
         self.authorize(authority).await?;
         let infraternal_plugin_ssh::model::TargetAddress::Manual(address) = &target.address else {
@@ -262,7 +279,7 @@ impl RemoteBackend {
             ));
         }
         if let Some(host_id) = self
-            .existing_host(&authority.owner, address, lookup)
+            .existing_host(&authority.owner, address, lookup, retire)
             .await?
         {
             return Err(Self::already_added(host_id));
@@ -466,7 +483,7 @@ impl RemoteBackend {
         // check after reserving the destination so another server process
         // cannot add the same host between preflight and invitation issuance.
         if let Some(existing_host) = self
-            .existing_host(&authority.owner, address, lookup.as_deref())
+            .existing_host(&authority.owner, address, lookup.as_deref(), true)
             .await?
         {
             return Err(Self::already_added(existing_host));
@@ -677,7 +694,7 @@ impl Backend for RemoteBackend {
         lookup: Option<String>,
     ) -> Operation<'a, ()> {
         Box::pin(async move {
-            self.ensure_not_already_added(authority, target, lookup.as_deref())
+            self.ensure_not_already_added(authority, target, lookup.as_deref(), true)
                 .await
         })
     }
@@ -758,7 +775,8 @@ impl Backend for RemoteBackend {
                 // No server enrolled this host id here: another server did.
                 // The machine may join as a new host after confirmation (D335),
                 // but only if this server will accept it right now.
-                self.ensure_not_already_added(authority, request.target, lookup)
+                // Before any confirmation: report only, retire nothing (J247 P3).
+                self.ensure_not_already_added(authority, request.target, lookup, false)
                     .await?;
                 return Ok(StuckInstall::Reenroll);
             };
@@ -2226,6 +2244,25 @@ mod tests {
             .bind(f.prior.as_bytes().as_slice()).bind(f.prior.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
         assert!(revoked, "the unfinished host must no longer count as added");
         assert_eq!(intents, 0);
+    }
+
+    /// J247 P3: the stuck-install check runs before the person confirms anything, so
+    /// its lookup reports an abandoned setup as not added and changes nothing.
+    #[tokio::test]
+    async fn the_check_before_confirmation_never_retires_an_abandoned_setup() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        assert_eq!(
+            f.backend
+                .existing_host("owner", "user@fixture", None, false)
+                .await
+                .unwrap(),
+            None
+        );
+        let (revoked, intents): (bool, i64) = sqlx::query_as("SELECT (SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?), (SELECT count(*) FROM remote_bootstrap_retirement_intents WHERE host_id=?)")
+            .bind(f.prior.as_bytes().as_slice()).bind(f.prior.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert!(!revoked);
+        assert_eq!(intents, 1);
     }
 
     /// #305, J247 P2: a Replace of a host whose first setup never finished must mark
