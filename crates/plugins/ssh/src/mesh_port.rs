@@ -24,7 +24,8 @@ pub enum PortMode {
     Stopped,
     /// Listening on TCP/22 of the mesh address itself.
     Direct,
-    /// TCP/22 was taken, so we listen on a random port and redirect mesh TCP/22 to it.
+    /// TCP/22 was taken, so we listen on a privileged internal port and
+    /// redirect mesh TCP/22 to it.
     Redirect,
 }
 
@@ -55,18 +56,38 @@ impl MeshPort {
         let (listener, redirected) = match TcpListener::bind(SocketAddr::new(address, 22)) {
             Ok(listener) => (listener, false),
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                (TcpListener::bind(SocketAddr::new(address, 0))?, true)
+                (internal_listener(address)?, true)
             }
             Err(error) => return Err(error),
         };
         if redirected {
             transaction(&render(address, interface, listener.local_addr()?.port()))?;
+            // Never run with a partial install: a bare table would let mesh
+            // TCP/22 reach the host's own sshd. Remove it and refuse.
+            if let Err(error) = verify_installed(address) {
+                let _ = Self::recover(address);
+                return Err(error);
+            }
         }
         Ok(Self {
             listener: Some(listener),
             address,
             redirected,
         })
+    }
+
+    /// [`Self::bind`] for a component that is starting: a table our marker
+    /// owns for this address can only be left from a previous run of this
+    /// process's component (the caller holds no lease for it), so it is
+    /// recovered first, as the contract requires before admitting sessions.
+    /// A same-named table without our marker is still refused.
+    ///
+    /// # Errors
+    /// The same refusals as [`Self::bind`].
+    pub fn bind_after_restart(address: IpAddr, interface: &str) -> io::Result<Self> {
+        validate(address, interface)?;
+        Self::recover(address)?;
+        Self::bind(address, interface)
     }
 
     /// Whether the port is stopped, direct or redirected.
@@ -120,6 +141,56 @@ impl Drop for MeshPort {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+/// The internal ports a redirect may listen on, tried highest first.
+///
+/// Invariant (J236 P2-2, #221): only root can bind them. After an abrupt exit
+/// (SIGKILL, OOM) the owned table stays until restart recovery, and its guard
+/// admits any flow originally addressed to :22 whoever owns the internal
+/// port. An unprivileged port let any local account take mesh TCP/22 over
+/// in that window.
+const INTERNAL_PORTS: std::ops::RangeInclusive<u16> = 960..=1022;
+
+/// The kernel's lowest port an unprivileged account may bind. It is one value
+/// for both IPv4 and IPv6, despite its name.
+const UNPRIVILEGED_PORT_START: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+
+/// The internal ports usable for `euid` when unprivileged accounts may bind
+/// from `unprivileged_start` up.
+///
+/// # Errors
+/// `PermissionDenied` for a rootless infraternal agent (it cannot hold a port
+/// only root may take, so it never redirects), and for a host whose bound
+/// leaves no port in [`INTERNAL_PORTS`] reserved to root.
+pub(crate) fn internal_ports(
+    euid: u32,
+    unprivileged_start: u16,
+) -> io::Result<impl Iterator<Item = u16>> {
+    let mut ports = INTERNAL_PORTS
+        .rev()
+        .filter(move |port| *port < unprivileged_start)
+        .peekable();
+    if euid != 0 || ports.peek().is_none() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(ports)
+}
+
+/// Bind the redirect's internal listener on a free port only root can bind,
+/// reading the kernel's bound each time (a host may have lowered it).
+fn internal_listener(address: IpAddr) -> io::Result<TcpListener> {
+    let start = std::fs::read_to_string(UNPRIVILEGED_PORT_START)?
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    for port in internal_ports(nix::unistd::Uid::effective().as_raw(), start)? {
+        match TcpListener::bind(SocketAddr::new(address, port)) {
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+            bound => return bound,
+        }
+    }
+    Err(io::ErrorKind::AddrInUse.into())
 }
 
 /// Reject addresses that make no sense for a mesh listener (unspecified,
@@ -177,7 +248,7 @@ fn transaction(script: &str) -> io::Result<()> {
 /// comment is exactly the marker. A table with the same name but another (or no)
 /// comment is foreign and gives `AlreadyExists`, so we never delete or adopt it.
 /// A failing or unparsable `nft` listing is an error, not "absent".
-fn presence(address: IpAddr) -> io::Result<bool> {
+pub(crate) fn presence(address: IpAddr) -> io::Result<bool> {
     let output = Command::new(NFT)
         .args(["-j", "list", "tables"])
         .stderr(Stdio::null())
@@ -221,27 +292,88 @@ fn render(address: IpAddr, interface: &str, port: u16) -> String {
         IpAddr::V4(address) => format!("{address}:{port}"),
         IpAddr::V6(address) => format!("[{address}]:{port}"),
     };
-    let mut script = format!(
-        "create table inet {} {{\n comment \"{MARKER}\";\n",
-        table(address)
+    let table = table(address);
+    // One command per table, chain and rule, all in one atomic `nft -f`
+    // transaction. nftables 1.0.9 drops chains nested inside
+    // `create table X { … }` silently and still succeeds (#221 comment
+    // 78954). `create` keeps refusing an existing table, so we never adopt one.
+    let mut script = format!("create table inet {table} {{ comment \"{MARKER}\"; }}\n");
+    let _ = writeln!(
+        script,
+        "add chain inet {table} incoming {{ type nat hook prerouting priority dstnat; policy accept; }}"
     );
     let _ = writeln!(
         script,
-        " chain incoming {{ type nat hook prerouting priority dstnat; policy accept; iifname \"{interface}\" {family} daddr {address} tcp dport 22 dnat {family} to {destination}; }}"
+        "add rule inet {table} incoming iifname \"{interface}\" {family} daddr {address} tcp dport 22 dnat {family} to {destination}"
     );
     // DNAT back to the same address supports node-local traffic without moving
     // the listener onto loopback or intercepting ordinary host SSH destinations.
     let _ = writeln!(
         script,
-        " chain local {{ type nat hook output priority dstnat; policy accept; {family} daddr {address} tcp dport 22 dnat {family} to {destination}; }}"
+        "add chain inet {table} local {{ type nat hook output priority dstnat; policy accept; }}"
+    );
+    let _ = writeln!(
+        script,
+        "add rule inet {table} local {family} daddr {address} tcp dport 22 dnat {family} to {destination}"
     );
     // The internal port is not a second externally usable SSH service. Only a
     // conntracked flow originally addressed to this node's TCP/22 may reach it.
     let _ = writeln!(
         script,
-        " chain guard {{ type filter hook input priority -11; policy accept; {family} daddr {address} tcp dport {port} ct original {family} daddr {address} ct original proto-dst 22 return; {family} daddr {address} tcp dport {port} drop; }}\n}}"
+        "add chain inet {table} guard {{ type filter hook input priority -11; policy accept; }}"
+    );
+    let _ = writeln!(
+        script,
+        "add rule inet {table} guard {family} daddr {address} tcp dport {port} ct original {family} daddr {address} ct original proto-dst 22 return"
+    );
+    let _ = writeln!(
+        script,
+        "add rule inet {table} guard {family} daddr {address} tcp dport {port} drop"
     );
     script
+}
+
+/// Whether a listed table (`nft -j list table`) holds every chain and rule
+/// [`render`] installs: the three chains, with one rule each in `incoming`
+/// and `local` and two in `guard`. Anything less is a failed install.
+fn installed(listing: &serde_json::Value) -> bool {
+    let Some(items) = listing["nftables"].as_array() else {
+        return false;
+    };
+    let chains: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item["chain"]["name"].as_str())
+        .collect();
+    let rules = |chain: &str| {
+        items
+            .iter()
+            .filter(|item| item["rule"]["chain"].as_str() == Some(chain))
+            .count()
+    };
+    ["incoming", "local", "guard"]
+        .iter()
+        .all(|chain| chains.contains(chain))
+        && rules("incoming") == 1
+        && rules("local") == 1
+        && rules("guard") == 2
+}
+
+/// Read our table back after installing it.
+fn verify_installed(address: IpAddr) -> io::Result<()> {
+    let output = Command::new(NFT)
+        .args(["-j", "list", "table", "inet", &table(address)])
+        .stderr(Stdio::null())
+        .output()?;
+    let listing: serde_json::Value = if output.status.success() {
+        serde_json::from_slice(&output.stdout).map_err(io::Error::other)?
+    } else {
+        serde_json::Value::Null
+    };
+    if installed(&listing) {
+        Ok(())
+    } else {
+        Err(io::Error::other("redirect rules incomplete after install"))
+    }
 }
 
 #[cfg(test)]

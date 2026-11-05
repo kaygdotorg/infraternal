@@ -570,6 +570,18 @@ pub async fn cleanup(
     infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;
+    // A rootful agent may have written mesh SSH's client files (#221); they
+    // go with it. Only files infraternal wrote are removed.
+    let mut report = report;
+    if !paths.user
+        && infraternal_plugin_api::mesh_ssh_files::remove_client_files(Path::new("/")).is_err()
+    {
+        report.push(format!(
+            "Left {} and {}; remove them by hand.",
+            infraternal_plugin_api::mesh_ssh_files::CONFIG_PATH,
+            infraternal_plugin_api::mesh_ssh_files::KNOWN_HOSTS_PATH
+        ));
+    }
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
 }
 /// Take the lock every infraternal setup command takes first (an exclusive

@@ -114,6 +114,16 @@ impl Drop for Retirement {
     }
 }
 impl RemoteHosts {
+    /// The port the remote listener actually bound, once it runs. Every
+    /// infraternal agent reaches the server over the mesh on this port, TCP
+    /// (TLS) and UDP (QUIC), at the server's mesh address (`LeasedListener`).
+    /// `None` before the listener starts (a fresh server starts it after its
+    /// CA is set up).
+    pub(crate) fn listener_port(&self) -> Option<u16> {
+        let factory = self.3.lock().ok()?;
+        factory.as_ref().map(|factory| factory.address.port())
+    }
+
     #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
     pub(crate) async fn node(
         &self,
@@ -201,6 +211,10 @@ impl RemoteHosts {
                 crate::embedded::SessionInventoryState::Available(_)
             )
         })
+    }
+    /// The CA key source the enrollment issuer uses; mesh SSH signs with it too (#221).
+    pub(crate) fn ca_source(&self) -> Option<Arc<dyn crate::ca::CaKeySource>> {
+        self.1.clone()
     }
     pub(crate) async fn actor(&self, id: Uuid) -> Option<EmbeddedAgent> {
         self.0

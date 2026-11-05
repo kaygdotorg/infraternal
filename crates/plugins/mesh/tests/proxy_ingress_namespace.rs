@@ -82,6 +82,7 @@ fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
             },
             inbound,
             outbound: TrafficPolicy::None,
+            access_ssh: None,
         },
     )
 }

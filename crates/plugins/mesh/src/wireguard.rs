@@ -186,7 +186,7 @@ fn temporary_name() -> Vec<u8> {
 /// An interface index for a new link, chosen by us so that a successful creation proves which
 /// link is ours without a second lookup (#260 J220 P2). It comes from the same mix as
 /// [`temporary_name`], kept within `1 << 20 ..= i32::MAX`, well above the kernel's own counter.
-/// A taken index only fails one attempt (`EBUSY`), and creation retries.
+/// A taken index only fails one attempt (`EEXIST`), and creation retries.
 fn chosen_index() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -271,7 +271,8 @@ impl Device {
             attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
             match socket.request(16, 4 | 0x200 | 0x400, &payload) {
                 Ok(_) => return Ok((temporary, ifindex)),
-                // EBUSY: the index is taken; EEXIST: the temporary name is taken.
+                // EEXIST: the index or the temporary name is taken. EBUSY: a late recheck in
+                // device registration found the index taken.
                 Err(error) if matches!(error.raw_os_error(), Some(16 | 17)) => last = error,
                 Err(error) => return Err(error),
             }
@@ -785,6 +786,13 @@ impl Device {
     /// Refuses unavailable or malformed device identity; secret fields never leave this method.
     pub fn identity() -> io::Result<(PublicKey, u16)> {
         identity_from(header())
+    }
+    /// The public key and listen port of the `WireGuard` device at `ifindex`, for a link whose
+    /// index is already known, so the read is bound to that link rather than to the shared name.
+    /// # Errors
+    /// The same as [`Device::identity`].
+    pub(crate) fn identity_at(ifindex: u32) -> io::Result<(PublicKey, u16)> {
+        identity_at(ifindex)
     }
     /// Read the kernel device's private key, only to carry this node's identity to `GotaTun`
     /// when it leaves kernel `WireGuard` (D346). The caller must have proven the link is ours.

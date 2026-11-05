@@ -15,11 +15,19 @@ pub mod duplex;
 pub mod install;
 mod lifecycle;
 pub mod mesh_admission;
+pub mod mesh_authority;
 pub mod mesh_certificate;
+pub mod mesh_client_config;
 pub mod mesh_flow;
+pub mod mesh_issue;
+pub mod mesh_keys;
 pub mod mesh_login;
+#[cfg(all(feature = "session-bridge", target_os = "linux"))]
+pub mod mesh_node;
 #[cfg(target_os = "linux")]
 pub mod mesh_port;
+#[cfg(all(feature = "session-bridge", target_os = "linux"))]
+pub mod mesh_runtime;
 pub mod mesh_server;
 // The bridge runs inside the Linux session daemon, which macOS does not build (#320).
 #[cfg(all(feature = "session-bridge", target_os = "linux"))]

@@ -1,6 +1,6 @@
 //! Long-lived local PTY sessions with frozen v1 resume semantics [13][17].
 //!
-//! Unsafe code is confined to the audited PTY/process, parent-bound child, readiness and Ghostty FFI boundaries;
+//! Unsafe code is confined to the audited PTY/process, filesystem, parent-bound child, readiness and Ghostty FFI boundaries;
 //! data modules forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
@@ -73,6 +73,20 @@ pub fn prepare_child(command: &mut std::process::Command) {
     pty::prepare_child(command);
 }
 
+/// Publish a staged install directory without replacing a pre-existing path (#338).
+///
+/// The caller records the staging inode durably before calling this boundary.
+/// Success moves that same inode; even an empty occupied destination is preserved.
+/// # Errors
+/// Returns invalid path bytes or the kernel publication error, including `AlreadyExists`.
+#[cfg(all(feature = "session-image", target_os = "linux"))]
+pub fn publish_install_directory(
+    staging: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    pty::publish_install_directory(staging, destination)
+}
+
 /// Whether atomic replacement would drop extended attributes, including access-control lists.
 /// # Errors
 /// Returns the kernel metadata-query error. Callers refuse replacement when present.
@@ -115,6 +129,29 @@ pub fn protect_login_process() -> std::io::Result<()> {
 #[cfg(all(feature = "host-login", target_os = "linux"))]
 pub fn protect_login_process_at(path: &std::path::Path) -> std::io::Result<()> {
     pty::protect_login_process_at(path)
+}
+
+/// Admit the launch lifeline (the write end of a pipe) into the child by number, and return
+/// that number for `--lifeline-fd`. The parent keeps its own copy close-on-exec, so it never
+/// leaks to another child; drop the command after spawn, or this process holds the lifeline too.
+/// Register after `inherit_only_standard_descriptors`, which would otherwise close it.
+/// # Errors
+/// Returns descriptor duplication failures.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn inherit_lifeline(
+    command: &mut std::process::Command,
+    write_end: &dyn std::os::fd::AsFd,
+) -> std::io::Result<i32> {
+    pty::inherit_descriptor(command, write_end)
+}
+
+/// Hold the inherited lifeline for the life of this shim and mark it close-on-exec, so no program
+/// the shim starts, the user's shell included, ever holds it.
+/// # Errors
+/// Fails closed when the descriptor is absent, a standard handle or not a pipe.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn hold_lifeline(descriptor: i32) -> std::io::Result<()> {
+    pty::hold_lifeline(descriptor)
 }
 
 /// Let the child inherit only standard input, output and error: every other
@@ -231,6 +268,13 @@ pub fn stdout_columns() -> Option<u16> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
+}
+
+/// Restore SIGTERM's default action and re-raise it, after a process handled
+/// SIGTERM to finish its shutdown steps (#221).
+#[cfg(target_os = "linux")]
+pub fn terminate_by_default() -> ! {
+    pty::terminate_by_default()
 }
 
 /// Tell the SIGINT handler that the final JSON result is about to be written.

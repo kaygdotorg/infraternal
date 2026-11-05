@@ -1013,13 +1013,15 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let publisher = std::sync::Arc::new(IdentityPublisher {
         data: data.to_owned(),
     });
-    remote_client::run_with_identity_rotation(
+    // Components' host state goes when the service ends, by return or SIGTERM
+    // (#221). Boxed once per service lifetime: the loop's future is large.
+    infraternal_agent::shutdown::run_then_stop(Box::pin(remote_client::run_with_identity_rotation(
         &identity,
         state,
         publisher.clone(),
         publisher,
         installation.as_ref(),
-    )
+    )))
     .await
 }
 

@@ -151,7 +151,7 @@ fn proven_kernel_link(link: &crate::wireguard::ActiveLink, proof: &KernelProof) 
         && !proof.is_empty()
         && match link.owner {
             Some(owner) => proof.accepts(owner),
-            None => Device::identity().is_ok_and(|(key, _)| proof.accepts(key)),
+            None => Device::identity_at(link.ifindex).is_ok_and(|(key, _)| proof.accepts(key)),
         }
 }
 
@@ -417,7 +417,7 @@ impl Node {
         if let Some(link) = adopted_kernel {
             node.owned = true;
             node.kernel_owner = kernel_proof.clone();
-            let identity = Device::identity();
+            let identity = Device::identity_at(link.ifindex);
             // A process can stop after marking the interface but before setting
             // its key. With no saved configuration there are no retained mesh
             // sessions to preserve; remove that incomplete owned startup only,
@@ -873,11 +873,14 @@ impl Node {
                     hook();
                 }
                 if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                    // Delete exactly the link this call created: `down` proves links by the
+                    // shared name, which may no longer lead to ours (#260 J242).
+                    let _ = Device::delete_ifindex(created);
                     let _ = self.down();
                     return Err(error);
                 }
                 let prepared = (|| {
-                    let (device_key, port) = Device::identity()?;
+                    let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
@@ -2073,6 +2076,7 @@ mod tests {
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
+                            access_ssh: None,
                         },
                     )
                 })
