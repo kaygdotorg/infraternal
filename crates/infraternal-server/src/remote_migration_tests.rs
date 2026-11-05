@@ -1,7 +1,32 @@
 //! Proves deployed schema upgrades preserve remote identity and route data, and
-//! that the release migration chain stays contiguous through API key inactivity policy [9][19][64][133][311], #78, #243, #269.
+//! that the release migration chain keeps its D347 shape through API key inactivity policy [9][19][64][133][311], #78, #243, #269.
 
 use sqlx::sqlite::SqlitePoolOptions;
+
+/// Check the release history's D347 shape and return its versions in order: the numbered
+/// history 0001–0040 is complete, other numbered versions are only the reserved 0041–0049,
+/// every newer migration is named by UTC timestamp, and versions strictly ascend.
+/// Reserved numbers that have not merged yet are allowed to be absent.
+fn release_history(migrations: &sqlx::migrate::Migrator) -> Vec<i64> {
+    let versions: Vec<i64> = migrations
+        .iter()
+        .map(|migration| migration.version)
+        .collect();
+    assert!(
+        versions.windows(2).all(|pair| pair[0] < pair[1]),
+        "migration versions ascend without duplicates"
+    );
+    assert!(
+        (1..=40).all(|version| versions.contains(&version)),
+        "numbered history 0001-0040 is complete"
+    );
+    assert!(
+        versions.iter().all(|version| (1..=49).contains(version)
+            || (20_000_000_000_000..30_000_000_000_000).contains(version)),
+        "new migrations are named by UTC timestamp (D347)"
+    );
+    versions
+}
 
 #[tokio::test]
 async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
@@ -95,20 +120,7 @@ async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
 #[tokio::test]
 async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
     let migrations = sqlx::migrate!("./migrations");
-    let latest_version = migrations
-        .iter()
-        .last()
-        .map(|migration| migration.version)
-        .unwrap_or_default();
-    let expected: Vec<i64> = (1..=latest_version).collect();
-    let versions: Vec<i64> = migrations
-        .iter()
-        .map(|migration| migration.version)
-        .collect();
-    assert_eq!(
-        versions, expected,
-        "fresh releases apply every contiguous migration in order"
-    );
+    let expected = release_history(&migrations);
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -138,7 +150,13 @@ async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_ord
             .fetch_one(&production)
             .await
             .unwrap();
-    assert_eq!((version, applied), (latest_version, latest_version));
+    assert_eq!(
+        (version, applied),
+        (
+            *expected.last().unwrap(),
+            i64::try_from(expected.len()).unwrap()
+        )
+    );
     let mesh: (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT name, name_source, name_claim FROM mesh_nodes WHERE id=42")
             .fetch_one(&production)
