@@ -152,3 +152,50 @@ fn an_engine_chosen_in_code_wins_over_the_environment() {
         "the environment overrode the engine chosen in code (1 = GotaTun ran, 2 = error)"
     );
 }
+
+const DEFAULT_PATH_CHILD: &str = "INFRATERNAL_ENGINE_DEFAULT_PATH_CHILD";
+
+/// Child half, run with `INFRATERNAL_MESH_ENGINE=kernel`: bring up a node that was not restored.
+/// Exit 0 when `GotaTun` runs, 1 when kernel runs, 2 on an error.
+#[test]
+#[ignore = "Child-only fixture for the engine environment scope proof."]
+fn default_path_child() {
+    if std::env::var_os(DEFAULT_PATH_CHILD).is_none() {
+        return;
+    }
+    let engine = (|| {
+        let mut node = Node::default();
+        node.up()?;
+        let engine = running_engine();
+        node.down()?;
+        Ok::<_, std::io::Error>(engine)
+    })();
+    remove_link();
+    std::process::exit(match engine {
+        Ok(Some("gotatun")) => 0,
+        Ok(_) => 1,
+        Err(error) => {
+            eprintln!("default path child failed: {error}");
+            2
+        }
+    });
+}
+
+/// `INFRATERNAL_MESH_ENGINE` selects the engine only on the infraternal agent's restore path
+/// (#260 J220 P3): a node that was not restored, such as the plugin's default `mesh.up`, runs the
+/// default engine whatever the variable says.
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn the_environment_selects_only_on_the_restore_path() {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "default_path_child", "--nocapture"])
+        .env(DEFAULT_PATH_CHILD, "1")
+        .env("INFRATERNAL_MESH_ENGINE", "kernel")
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the environment selected the engine outside restore (1 = kernel ran, 2 = error)"
+    );
+}
