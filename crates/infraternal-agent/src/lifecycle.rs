@@ -2,15 +2,21 @@
 
 use crate::sessions::Session;
 use infraternal_plugin_api::admission::NodeContext;
-use std::{collections::HashMap, fs, io, path::PathBuf};
+#[cfg(target_os = "linux")]
+use std::fs;
+use std::{collections::HashMap, io, path::PathBuf};
 
 struct Live {
     path: PathBuf,
+    #[cfg(target_os = "linux")]
     process: PathBuf,
+    #[cfg(target_os = "macos")]
+    pid: u32,
     birth_ticks: u64,
 }
 
 impl Live {
+    #[cfg(target_os = "linux")]
     fn alive(&self) -> bool {
         // A proc inode can change on cache eviction. The kernel birth clock is
         // stable across that change; a new PID incarnation cannot borrow the
@@ -23,8 +29,19 @@ impl Live {
             && fs::symlink_metadata(self.process.join("exe"))
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
     }
+
+    // macOS identifies one PID lifetime by its kernel start time (microseconds,
+    // proc_pidinfo); zombies report no identity, as dead states do on Linux.
+    #[cfg(target_os = "macos")]
+    /// Whether this registered shim is still the same live process: its rendezvous exists and its PID still has the start time recorded at registration (macOS).
+    fn alive(&self) -> bool {
+        self.path.exists()
+            && infraternal_shim::process_start(self.pid)
+                .is_ok_and(|value| value == Some(self.birth_ticks))
+    }
 }
 
+#[cfg(target_os = "linux")]
 fn birth(process: &std::path::Path) -> io::Result<Option<u64>> {
     use std::io::Read;
     let mut record = Vec::with_capacity(512);
@@ -39,8 +56,13 @@ pub(crate) struct Registry(HashMap<[u8; 16], Live>, crate::process_exits::Proces
 
 impl Registry {
     pub(crate) fn insert(&mut self, session: &Session) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
         let process = PathBuf::from(format!("/proc/{}", session.pid));
-        let birth_ticks = match birth(&process) {
+        #[cfg(target_os = "linux")]
+        let identity = birth(&process);
+        #[cfg(target_os = "macos")]
+        let identity = infraternal_shim::process_start(session.pid);
+        let birth_ticks = match identity {
             Ok(Some(value)) => value,
             Ok(None) => return Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -48,7 +70,10 @@ impl Registry {
         };
         let live = Live {
             path: session.path.clone(),
+            #[cfg(target_os = "linux")]
             process,
+            #[cfg(target_os = "macos")]
+            pid: session.pid,
             birth_ticks,
         };
         // Authenticate lifetime across pidfd/kqueue registration: PID reuse
@@ -147,7 +172,8 @@ pub(crate) mod windows {
     }
 }
 
-#[cfg(all(test, feature = "plugin-host-facts"))]
+// These fixtures read /proc identities and executable links.
+#[cfg(all(test, feature = "plugin-host-facts", target_os = "linux"))]
 mod tests {
     //! Reference counts preserve background truth across multiple windows; stale process identities never count.
     use super::*;

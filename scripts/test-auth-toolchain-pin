@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# The pinned Zig cannot be swapped through INFRATERNAL_ZIG (#328 P3-2, D213).
+#
+# scripts/auth-toolchain trusts INFRATERNAL_ZIG only as the verified nix store
+# output of nix/zig.nix. A look-alike directory whose `zig version` prints the
+# pinned version must be refused, and nothing may be installed from it.
+set -euo pipefail
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+scratch="$(mktemp -d)"
+trap 'rm -rf -- "$scratch"' EXIT
+mkdir -p "$scratch/fake" "$scratch/target"
+printf '#!/bin/sh\necho 0.15.2\n' > "$scratch/fake/zig"
+chmod 755 "$scratch/fake/zig"
+if INFRATERNAL_ZIG="$scratch/fake" CARGO_TARGET_DIR="$scratch/target" \
+    "$root/scripts/auth-toolchain" 2> "$scratch/error"; then
+    printf 'FAIL: auth-toolchain accepted a look-alike INFRATERNAL_ZIG\n' >&2
+    exit 1
+fi
+if [[ -e "$scratch/target/auth-tools/zig" ]]; then
+    printf 'FAIL: a refused INFRATERNAL_ZIG was installed\n' >&2
+    exit 1
+fi
+grep -q 'nix store output' "$scratch/error" || {
+    printf 'FAIL: unexpected refusal: %s\n' "$(cat "$scratch/error")" >&2; exit 1; }
+printf 'PASS: a look-alike INFRATERNAL_ZIG is refused\n'

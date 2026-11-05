@@ -269,7 +269,11 @@ async fn capture(session: &mut Session, last: usize) -> io::Result<Reply> {
     }
 }
 
-async fn create(
+/// Create a named session: refuse a name already in use, launch the shell or
+/// `command`, and leave the name's durable publication in `pending`.
+/// [`super::execute`] calls this after its request deadline, because the
+/// launch has its own progress-based bound (#324, #355).
+pub(super) async fn create(
     state: &Path,
     uid: u32,
     input: &Value,

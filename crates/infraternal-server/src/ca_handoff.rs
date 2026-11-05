@@ -3,7 +3,9 @@
 use crate::ca::{CaError, CaKeySource, CaMaterial};
 use crate::ca_memory::MemoryCaSource;
 use infraternal_shim::locked_bytes::LockedBytes;
-use nix::sys::socket::{getsockopt, setsockopt, sockopt};
+#[cfg(target_os = "linux")]
+use nix::sys::socket::getsockopt;
+use nix::sys::socket::{setsockopt, sockopt};
 use openssl::{pkey::Id, x509::X509};
 use std::{io::Write, os::unix::net::UnixStream};
 use zeroize::Zeroizing;
@@ -20,7 +22,7 @@ const MAX_ISSUER: usize = 2048;
 pub fn prepare(source: &dyn CaKeySource) -> Result<UnixStream, CaError> {
     // A handoff must not create a plaintext signing seed in a crash dump or
     // expose its inherited descriptor through same-UID process inspection.
-    nix::sys::prctl::set_dumpable(false).map_err(|_| CaError)?;
+    deny_inspection()?;
     let material = source.load()?;
     let frame = encode(&material)?;
     let (mut sender, receiver) = UnixStream::pair().map_err(|_| CaError)?;
@@ -115,18 +117,39 @@ impl Received {
 /// Refuses invalid kernel peer credentials, frames or descriptor cleanup.
 pub fn receive_stdin() -> Result<Received, CaError> {
     let input = std::io::stdin();
-    let result = nix::sys::prctl::set_dumpable(false)
-        .map_err(|_| CaError)
-        .and_then(|()| receive(&input));
+    let result = deny_inspection().and_then(|()| receive(&input));
     clear_stdin(|| std::fs::File::open("/dev/null"), nix::unistd::dup2_stdin)?;
     result.map(|material| Received { material })
 }
 
+/// Keep signing material out of crash dumps and same-UID process inspection.
+#[cfg(target_os = "linux")]
+fn deny_inspection() -> Result<(), CaError> {
+    nix::sys::prctl::set_dumpable(false).map_err(|_| CaError)
+}
+/// Only Linux has a reviewed implementation; elsewhere the handoff refuses
+/// instead of moving a seed with weaker protection (#320, D244).
+#[cfg(not(target_os = "linux"))]
+fn deny_inspection() -> Result<(), CaError> {
+    Err(CaError)
+}
+
+/// Whether the socket's peer is this very process (same PID across exec).
+#[cfg(target_os = "linux")]
+fn peer_is_self(fd: &impl std::os::fd::AsFd) -> bool {
+    getsockopt(fd, sockopt::PeerCredentials).is_ok_and(|peer| {
+        peer.uid() == nix::unistd::Uid::effective().as_raw()
+            && peer.pid() == nix::unistd::Pid::this().as_raw()
+    })
+}
+/// Without kernel peer credentials of the same strength, refuse (#320).
+#[cfg(not(target_os = "linux"))]
+fn peer_is_self(_fd: &impl std::os::fd::AsFd) -> bool {
+    false
+}
+
 fn receive(fd: &impl std::os::fd::AsFd) -> Result<CaMaterial, CaError> {
-    let peer = getsockopt(fd, sockopt::PeerCredentials).map_err(|_| CaError)?;
-    if peer.uid() != nix::unistd::Uid::effective().as_raw()
-        || peer.pid() != nix::unistd::Pid::this().as_raw()
-    {
+    if !peer_is_self(fd) {
         return Err(CaError);
     }
     setsockopt(

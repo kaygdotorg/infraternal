@@ -366,3 +366,7 @@ the link cannot combine it with viewer, writer or other capability bits.
 `StopShell` (opcode `0x22`) asks the shim to stop and reap that shell, and
 `ShellStopped` (`0x23`) confirms reaping. The shim advertises this capability
 only for the host-login runtime, never for root or readiness sessions.
+
+### Readiness probe lifetime (test-only override, #355)
+
+A readiness probe ends 10 s after it starts. Debug builds only read an optional `<state>/test-readiness-lifetime-ms` (decimal milliseconds) to hold a probe longer for integration oracles; release builds never read it.
