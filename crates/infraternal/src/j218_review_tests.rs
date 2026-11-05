@@ -901,3 +901,114 @@ fn j245_sigkill_then_normal_user_retry_recovers() {
     drop(transaction);
     assert!(!fixture.0.join("var").exists());
 }
+
+/// Hold a forced fallback publication with its durable journal ready for abrupt termination.
+#[test]
+#[ignore = "child helper for the abrupt fallback-publication recovery proof"]
+fn j245_hold_fallback_transaction() {
+    let root = PathBuf::from(std::env::var_os("J218_ROOT").unwrap());
+    let mut transaction = Install::begin(
+        &root,
+        nix::unistd::geteuid().as_raw(),
+        Path::new("/bin/false"),
+    )
+    .unwrap();
+    let destination = root.join("usr");
+    let staging = transaction.temporary(&destination).unwrap();
+    fs::DirBuilder::new().mode(0o711).create(&staging).unwrap();
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o711)).unwrap();
+    let metadata = fs::symlink_metadata(&staging).unwrap();
+    transaction
+        .record(staging.clone(), &metadata, false)
+        .unwrap();
+    transaction
+        .record(destination.clone(), &metadata, false)
+        .unwrap();
+    transaction
+        .publish_directory(
+            &staging,
+            &destination,
+            Err(io::Error::from_raw_os_error(nix::libc::ENOSYS)),
+        )
+        .unwrap();
+    fs::write(
+        root.join("var/lib/infraternal/agent/identity.json"),
+        b"fallback enrollment",
+    )
+    .unwrap();
+    println!("\nJ245_FALLBACK_READY");
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+/// The next run must replay the fallback's new inode ownership after SIGKILL, not its revoked claim.
+#[test]
+fn j245_sigkill_recovers_fallback_publication() {
+    use std::os::unix::process::CommandExt as _;
+    if isolated_enrollment_proof("j245_sigkill_recovers_fallback_publication") {
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "up::install::j218_review::j245_hold_fallback_transaction",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("J218_ROOT", &fixture.0)
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(
+        std::io::BufReader::new(child.0.stdout.take().unwrap())
+            .lines()
+            .map_while(Result::ok)
+            .any(|line| line == "J245_FALLBACK_READY")
+    );
+    nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(i32::try_from(child.0.id()).unwrap()),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    assert!(!child.0.wait().unwrap().success());
+    let published = fixture.0.join("usr");
+    assert_eq!(fs::metadata(&published).unwrap().mode() & 0o777, 0o711);
+    let snapshot = journal::inspect(&fixture.0, nix::unistd::geteuid().as_raw()).unwrap();
+    assert_eq!(
+        snapshot
+            .created
+            .iter()
+            .filter(|entry| entry.path == published)
+            .count(),
+        1,
+        "revoked staging inode retained destination authority"
+    );
+    assert!(
+        snapshot.owns(&published),
+        "fallback publication lost durable ownership"
+    );
+    let retry = Install::begin(
+        &fixture.0,
+        nix::unistd::geteuid().as_raw(),
+        Path::new("/bin/false"),
+    )
+    .unwrap();
+    assert!(
+        !published.exists(),
+        "next-run rollback left fallback publication"
+    );
+    assert!(
+        !fixture
+            .0
+            .join("var/lib/infraternal/agent/identity.json")
+            .exists()
+    );
+    println!("fallback mode=0711; SIGKILL retry removed published inode and enrollment");
+    drop(retry);
+}

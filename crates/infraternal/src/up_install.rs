@@ -293,7 +293,11 @@ impl Install {
                 &metadata,
                 relative.ends_with("/agent") && final_entry,
             )?;
-            infraternal_shim::publish_install_directory(&staging, &current)?;
+            self.publish_directory(
+                &staging,
+                &current,
+                infraternal_shim::publish_install_directory(&staging, &current),
+            )?;
             fs::File::open(
                 current
                     .parent()
@@ -302,6 +306,47 @@ impl Install {
             .sync_all()?;
         }
         Ok(destination)
+    }
+
+    /// Fall back to exclusive mkdir when no-replace rename is unsupported.
+    /// Directories cannot be hard-linked. Revoke the unpublished staging inode's
+    /// destination claim before mkdir, then journal the new inode immediately.
+    /// A stop between mkdir and its record leaves an unproven path: retry refuses
+    /// it for manual inspection rather than guessing ownership or deleting it.
+    fn publish_directory(
+        &mut self,
+        staging: &Path,
+        destination: &Path,
+        publication: io::Result<()>,
+    ) -> io::Result<()> {
+        match publication {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(nix::libc::ENOSYS | nix::libc::EINVAL | nix::libc::EOPNOTSUPP)
+                ) => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(staging)?;
+        self.journal.unpublish(destination, &metadata)?;
+        self.created.retain(|entry| {
+            entry.path != destination || entry.identity != (metadata.dev(), metadata.ino())
+        });
+        self.journal.step()?;
+        fs::DirBuilder::new().mode(0o700).create(destination)?;
+        let published = fs::symlink_metadata(destination)?;
+        self.record(
+            destination.to_owned(),
+            &published,
+            destination == self.root.join("var/lib/infraternal/agent"),
+        )?;
+        fs::set_permissions(
+            destination,
+            fs::Permissions::from_mode(metadata.mode() & 0o7777),
+        )?;
+        fs::File::open(destination)?.sync_all()?;
+        fs::remove_dir(staging)
     }
 
     /// Stage in the first pre-existing ancestor on the destination filesystem.
@@ -555,6 +600,75 @@ impl Drop for Install {
 /// Process inspection accepts the global JSON flag and never mistakes an SSH command for a server.
 #[cfg(test)]
 mod tests {
+    use super::*;
+    /// Unsupported no-replace syscalls must preserve exclusive creation and durable rollback ownership.
+    #[test]
+    fn directory_publication_fallback_is_exclusive_and_owned() {
+        for unsupported in [nix::libc::ENOSYS, nix::libc::EINVAL, nix::libc::EOPNOTSUPP] {
+            let fixture = crate::restart_binary::fixture::Directory::new();
+            let owner = nix::unistd::geteuid().as_raw();
+            let mut install = Install::begin(&fixture.0, owner, Path::new("/bin/false")).unwrap();
+            let destination = fixture.0.join("usr");
+            let staging = install.temporary(&destination).unwrap();
+            fs::DirBuilder::new().mode(0o711).create(&staging).unwrap();
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o711)).unwrap();
+            let staged = fs::symlink_metadata(&staging).unwrap();
+            install.record(staging.clone(), &staged, false).unwrap();
+            install.record(destination.clone(), &staged, false).unwrap();
+            install
+                .publish_directory(
+                    &staging,
+                    &destination,
+                    Err(io::Error::from_raw_os_error(unsupported)),
+                )
+                .unwrap();
+            assert_eq!(fs::metadata(&destination).unwrap().mode() & 0o777, 0o711);
+            assert!(
+                journal::inspect(&fixture.0, owner).is_err(),
+                "live journal must remain locked"
+            );
+            assert!(install.created.iter().any(|entry| entry.path == destination
+                && entry.identity
+                    == (
+                        fs::metadata(&destination).unwrap().dev(),
+                        fs::metadata(&destination).unwrap().ino()
+                    )));
+            assert!(!staging.exists());
+            let foreign = fixture.0.join("etc");
+            fs::create_dir(&foreign).unwrap();
+            fs::write(foreign.join("keep"), b"earlier data").unwrap();
+            let before = fs::symlink_metadata(&foreign).unwrap();
+            let other_stage = install.temporary(&foreign).unwrap();
+            fs::create_dir(&other_stage).unwrap();
+            install
+                .record(
+                    other_stage.clone(),
+                    &fs::symlink_metadata(&other_stage).unwrap(),
+                    false,
+                )
+                .unwrap();
+            let error = install
+                .publish_directory(
+                    &other_stage,
+                    &foreign,
+                    Err(io::Error::from_raw_os_error(unsupported)),
+                )
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            drop(install);
+            assert!(
+                !destination.exists(),
+                "rollback left fallback-created directory"
+            );
+            let after = fs::symlink_metadata(&foreign).unwrap();
+            assert_eq!(
+                (before.dev(), before.ino(), before.mode()),
+                (after.dev(), after.ino(), after.mode())
+            );
+            assert_eq!(fs::read(foreign.join("keep")).unwrap(), b"earlier data");
+        }
+    }
+
     /// Global output selection can precede either long-running host mode.
     #[test]
     fn global_json_does_not_hide_a_running_install() {

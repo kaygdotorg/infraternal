@@ -39,6 +39,15 @@ enum Record {
         /// Newly created enrollment directories own their private descendants.
         enrollment: bool,
     },
+    /// Revoke a never-published staging inode's claim before a fallback creates a new inode.
+    Unpublished {
+        /// Relative destination whose prior claim is being revoked.
+        path: PathBuf,
+        /// Only this device/inode claim is removed; other entries remain intact.
+        device: u64,
+        /// Inode of the unpublished staging directory.
+        inode: u64,
+    },
     /// Service registration can require stopping our unit during recovery.
     Registered,
     /// A successful active check transfers ownership to the installed service.
@@ -196,6 +205,16 @@ fn snapshot(file: &mut File, root: &Path) -> io::Result<Snapshot> {
                     enrollment,
                 });
             }
+            Record::Unpublished {
+                path,
+                device,
+                inode,
+            } if begun && !state.committed && allowed(&path, false) => {
+                let path = root.join(path);
+                state
+                    .created
+                    .retain(|entry| entry.path != path || entry.identity != (device, inode));
+            }
             Record::Registered if begun && !state.committed => {
                 state.registered = true;
             }
@@ -332,6 +351,22 @@ impl Journal {
             device: metadata.dev(),
             inode: metadata.ino(),
             enrollment,
+        })
+    }
+
+    /// Sync revocation before exclusive mkdir can allocate a different destination inode.
+    pub(super) fn unpublish(&mut self, path: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+        let path = path
+            .strip_prefix(&self.root)
+            .map_err(|_| invalid())?
+            .to_owned();
+        if !allowed(&path, false) {
+            return Err(invalid());
+        }
+        self.append(&Record::Unpublished {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
         })
     }
 
