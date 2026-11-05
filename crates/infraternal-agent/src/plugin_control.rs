@@ -543,14 +543,25 @@ impl Service {
                     infraternal_plugin_remote::runtime_lock::validate(&guard, state)?;
                     guard
                 } else {
-                    std::sync::Arc::new(if let Some(context) = installation {
-                        infraternal_plugin_remote::runtime_lock::acquire_owned(
-                            state,
-                            &context.host,
-                        )?
-                    } else {
-                        infraternal_plugin_remote::runtime_lock::acquire(state)?
-                    })
+                    // Acquisition does blocking filesystem work and may wait
+                    // on the kernel's socket dump (hang-only bound). The remote
+                    // daemon runs a current-thread runtime, so it must not wait
+                    // on the event loop (#355, J260). If startup is cancelled
+                    // meanwhile, the blocking task still finishes and its lock
+                    // file is dropped with the unclaimed result: never leaked.
+                    let owned_state = state.to_owned();
+                    let host = installation.map(|context| context.host.clone());
+                    std::sync::Arc::new(
+                        tokio::task::spawn_blocking(move || match host {
+                            Some(host) => infraternal_plugin_remote::runtime_lock::acquire_owned(
+                                &owned_state,
+                                &host,
+                            ),
+                            None => infraternal_plugin_remote::runtime_lock::acquire(&owned_state),
+                        })
+                        .await
+                        .map_err(io::Error::other)??,
+                    )
                 };
                 crate::sessions::state(Some(state.to_owned()))?;
                 Some(guard)
@@ -1015,6 +1026,72 @@ impl TerminalControl {
 mod tests {
     //! Exercises worker isolation, public call bounds and reply-owned effects.
     use super::*;
+
+    /// Runtime-lock acquisition, including its blocking kernel socket dump,
+    /// runs off the event loop: while one acquisition is held, a
+    /// current-thread runtime (as the remote daemon uses) keeps running other
+    /// tasks (#355, J260). Acquiring on the loop itself would block the only
+    /// thread for the whole hold, and no tick could happen while it is held.
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    #[test]
+    fn held_runtime_lock_acquisition_leaves_the_event_loop_responsive() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let state = crate::test_state_root()
+            .join("rl")
+            .join(&uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let (release, held) = std::sync::mpsc::channel();
+        let active = Arc::new(AtomicBool::new(false));
+        *infraternal_plugin_remote::runtime_lock::ACQUIRE_HOLD
+            .lock()
+            .unwrap() = Some(infraternal_plugin_remote::runtime_lock::AcquireHold {
+            state: state.clone(),
+            release: held,
+            active: active.clone(),
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ticks_while_held = runtime.block_on(async {
+            let starting = tokio::spawn({
+                let state = state.clone();
+                async move {
+                    // Startup fails later on this bare state; only the wait matters.
+                    let _ = Service::start_inner(
+                        &state,
+                        crate::plugins::ExecutionMode::Remote,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+            });
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !active.load(Ordering::SeqCst) {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the held acquisition never ran while this loop could observe it"
+                );
+                tokio::task::yield_now().await;
+            }
+            let mut ticks = 0;
+            while ticks < 5 && active.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+                ticks += 1;
+            }
+            release.send(()).unwrap();
+            starting.await.unwrap();
+            ticks
+        });
+        assert_eq!(
+            ticks_while_held, 5,
+            "the event loop stalled during acquisition"
+        );
+    }
     use infraternal_plugin_api::{ActionDef, AgentPlugin, Effect, PluginDescriptor, SchemaRef};
     const READ: &[ActionDef] = &[ActionDef {
         id: "fixture.read",

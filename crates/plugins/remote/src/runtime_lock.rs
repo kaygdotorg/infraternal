@@ -117,9 +117,46 @@ pub fn acquire(state: &Path) -> io::Result<File> {
 pub fn acquire_owned(state: &Path, host: &str) -> io::Result<File> {
     acquire_bound(state, Some(host))
 }
+/// Test support: holds the next acquisition for one runtime state, on the
+/// thread doing it, until the paired sender sends or drops (or 10 s pass).
+/// `active` reads true while that acquisition is held. Async callers use this
+/// to prove the acquisition, including its blocking socket dump, runs off
+/// their event loop.
+#[cfg(feature = "test-support")]
+pub struct AcquireHold {
+    /// The state directory whose next acquisition is held.
+    pub state: std::path::PathBuf,
+    /// Released when the sender sends or is dropped.
+    pub release: std::sync::mpsc::Receiver<()>,
+    /// True while the acquisition is held.
+    pub active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The pending [`AcquireHold`], if any (test support).
+#[cfg(feature = "test-support")]
+pub static ACQUIRE_HOLD: std::sync::Mutex<Option<AcquireHold>> = std::sync::Mutex::new(None);
+
 #[cold]
 #[inline(never)]
 fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
+    #[cfg(feature = "test-support")]
+    {
+        let mut pending = ACQUIRE_HOLD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.as_ref().is_some_and(|hold| hold.state == state) {
+            let hold = pending.take().unwrap_or_else(|| unreachable!());
+            drop(pending);
+            hold.active.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Bounded, so a caller that blocks its own loop on this hold fails
+            // its test instead of hanging forever.
+            let _ = hold
+                .release
+                .recv_timeout(std::time::Duration::from_secs(10));
+            hold.active
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     // Cleanup holds the exclusive parent-directory setup guard. This shared
     // admission guard prevents starting between lock-file unlink and root retirement.
     let parent = File::open(state.parent().and_then(Path::parent).ok_or_else(refused)?)?;
