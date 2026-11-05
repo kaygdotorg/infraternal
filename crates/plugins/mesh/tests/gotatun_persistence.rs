@@ -144,6 +144,7 @@ fn cleanup(states: &[&PathBuf]) {
 /// Keep the topology, open flow and restart in one scenario so the assertions observe the same interfaces.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
+// One scenario: the topology, the open flow, the restart in the middle of it, and the checks.
 fn manual_route_and_open_tcp_flow_survive_an_agent_restart() {
     let (state_a, state_b) = (state("d332-node-a"), state("d332-node-b"));
     cleanup(&[]);
