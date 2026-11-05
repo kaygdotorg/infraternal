@@ -46,28 +46,31 @@ async fn fresh_removal_waits_for_durable_host_receipt_and_cannot_replay() {
     let session = f.session.clone();
     let ceremony = id.to_owned();
     let request_proof = proof.clone();
-    let request = tokio::spawn(async move {
+    let mut request = tokio::spawn(async move {
         request_service
             .finish(&session, &ceremony, request_proof, NOW)
             .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let pending: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND confirmed=0)",
-            )
-            .bind(host.as_bytes().as_slice())
-            .fetch_one(&f.auth.pool)
-            .await
-            .unwrap();
-            if pending {
-                break;
+    // Observe the committed obligation before supplying its receipt. Disk load
+    // may delay that commit; completing removal first is the forbidden event.
+    tokio::select! {
+        result = &mut request => panic!("offline removal completed before its durable receipt: {result:?}"),
+        () = async {
+            loop {
+                let pending: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND confirmed=0)",
+                )
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(&f.auth.pool)
+                .await
+                .unwrap();
+                if pending {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+        } => {}
+    }
     assert!(!request.is_finished(), "offline removal reported success");
     // This ledger fixture supplies the trusted receipt directly. Real mTLS
     // cleanup-only replay is covered by remote_login_revocation_tests.
