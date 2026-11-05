@@ -319,7 +319,6 @@ where
 ///
 /// A watch that is not allowed to see the change hears nothing. A watch whose
 /// permission check fails is sent an `error` and removed.
-#[allow(clippy::too_many_arguments)]
 async fn send_mesh_change<K>(
     state: &MeshPlugin,
     user_id: &str,
@@ -395,7 +394,6 @@ enum Resync<'a> {
 /// it is released: a viewer slow to drain its socket must not hold the permit
 /// that host configuration delivery also needs (#236). A watch whose snapshot
 /// fails gets an `error` and is removed.
-#[allow(clippy::too_many_arguments)]
 async fn send_mesh_resync<K>(
     state: &MeshPlugin,
     user_id: &str,
@@ -530,7 +528,6 @@ pub fn parse_subscription(input: &[u8]) -> Result<MeshFilter, MeshApiError> {
 /// answers with an `error` event that ends the watch. For a call, the result
 /// frame is only sent if the socket is still live afterwards, and destructive
 /// actions first require a fresh passkey confirmation.
-#[allow(clippy::too_many_lines)]
 async fn handle_mesh_frame<K>(
     wire: Bytes,
     state: &MeshPlugin,

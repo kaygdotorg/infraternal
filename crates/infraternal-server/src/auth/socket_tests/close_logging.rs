@@ -144,7 +144,6 @@ async fn rootless_attach_without_a_live_peer_logs_the_host_and_keeps_the_socket_
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the real agent socket exchange and structured assertions together.
 async fn agent_stream_loss_logs_its_safe_close_reason_and_reaches_the_browser() {
     let _serial = SERIAL.lock().await;
     let (capture, _subscriber) = Capture::start();
@@ -276,7 +275,6 @@ async fn agent_stream_loss_logs_its_safe_close_reason_and_reaches_the_browser() 
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the real browser close exchange and log assertions together.
 async fn browser_websocket_close_logs_its_code_and_safe_reason_for_attached_sessions() {
     let _serial = SERIAL.lock().await;
     let (capture, _subscriber) = Capture::start();
@@ -394,7 +392,6 @@ async fn browser_websocket_close_logs_its_code_and_safe_reason_for_attached_sess
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep resume setup, failed handshake, and retained-session assertions together.
 async fn failed_client_resume_attempt_logs_each_retained_session() {
     let _serial = SERIAL.lock().await;
     let (capture, _subscriber) = Capture::start();
@@ -589,7 +586,6 @@ async fn failed_client_resume_attempt_logs_each_retained_session() {
 /// Holding the test pool's one connection stalls every read; the socket must log the
 /// stall as `authority_unavailable` and never as an invalid protocol frame.
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the real agent socket exchange and structured assertions together.
 async fn authority_read_timeout_during_a_frame_logs_authority_unavailable() {
     let _serial = SERIAL.lock().await;
     let (capture, _subscriber) = Capture::start();
@@ -827,7 +823,6 @@ enum RevocationStall {
 
 /// Share the attached-terminal fixture so the only varying inputs are whose
 /// session is deleted and whether the store recovers within the authority wait.
-#[allow(clippy::too_many_lines)]
 async fn revocation_stall(stall: RevocationStall) {
     let _serial = SERIAL.lock().await;
     let clock = if matches!(stall, RevocationStall::Unavailable) {

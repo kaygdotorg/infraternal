@@ -498,7 +498,6 @@ async fn send_live(
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run(
     socket: &mut WebSocket,
     api: Arc<Api>,

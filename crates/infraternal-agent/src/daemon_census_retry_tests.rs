@@ -109,7 +109,6 @@ impl Drop for State {
 
 // Keep the full ordered fixture visible: no request is sent after retirement.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn full_control_lane_retries_retirement_census_on_capacity_without_requests() {
     let root = PathBuf::from(
         std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").unwrap_or_else(|| "../../target".into()),

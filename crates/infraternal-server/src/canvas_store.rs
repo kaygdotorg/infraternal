@@ -139,7 +139,6 @@ impl Store {
     }
     // Keep one storage state machine for edits and read repair. The caller holds
     // only this operation handle rather than another copy of the write futures.
-    #[allow(clippy::too_many_lines)]
     #[inline(never)]
     fn transact<'a>(
         &'a self,

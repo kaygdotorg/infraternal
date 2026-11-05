@@ -42,10 +42,6 @@ async fn observe(ssh: &TrustedOpenSsh, destination: &Destination) -> Failure {
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "Sequential real-engine oracle observes each public trust transition."
-)]
 #[ignore = "run through research/ssh-client/measure.py --negative-trust-oracle with its memory-held synthetic key"]
 async fn first_contact_needs_fresh_authority_and_never_replaces_existing_trust() {
     let fixture = PathBuf::from(std::env::var_os("INFRATERNAL_SSH_FIXTURE").unwrap());

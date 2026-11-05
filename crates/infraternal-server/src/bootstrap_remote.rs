@@ -1938,10 +1938,6 @@ mod tests {
         .expect("invitation was not committed within the test hang bound");
     }
     #[tokio::test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Keep every durable ownership dimension in one ledger fixture."
-    )]
     async fn automatic_cleanup_requires_the_exact_failed_server_host_binding() {
         let f = fixture(true).await;
         let target = Target {
@@ -2102,7 +2098,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn replacing_a_journaled_old_install_reissues_its_identity_without_a_duplicate_host() {
         let f = fixture(true).await;
         sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)")

@@ -28,6 +28,17 @@ verify_doc_coverage() {
     python3 scripts/test-doc-coverage.py && python3 scripts/doc-coverage --check
 }
 
+# Enforce D345 only on changed items; fixtures protect the shared lexer integration.
+verify_diff_docs() {
+    python3 scripts/test-diff-practices.py &&
+        python3 scripts/verify.d/diff-practices.py docs "${VERIFY_QUICK_BASE:-origin/dev}"
+}
+
+# Root-only paths complement browser/passkey coverage on the test server (D351).
+verify_privileged() {
+    python3 scripts/test-verify-privileged.py && scripts/verify-privileged
+}
+
 rust_print_summary() {
     local row
     local name
@@ -244,6 +255,7 @@ rust_static_build_check() {
     python3 scripts/test-musl-cc.py || return $?
     python3 scripts/test-native-metadata.py || return $?
     python3 scripts/test-rustc-paths.py || return $?
+    python3 scripts/test-path-remap-flags.py || return $?
     python3 scripts/release/production_trust_test.py || return $?
 
     for target in "${targets[@]}"; do
@@ -296,7 +308,13 @@ rust_verify_fast() {
     rust_run_gate "cargo-deny" cargo deny check
     rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
     rust_run_gate "doc coverage ratchet" verify_doc_coverage
+    rust_run_gate "shape lints off (D351)" python3 scripts/test-shape-lints.py
+    rust_run_gate "doc comments on diff" verify_diff_docs
+    rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
+        rust_run_gate "privileged integration" verify_privileged
+        rust_run_gate "probe release exclusion" python3 scripts/test-runtime-probe-gating.py
+        rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
         rust_run_gate "static builds" rust_static_build_check
     fi
     rust_print_summary

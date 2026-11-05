@@ -206,7 +206,6 @@ async fn account_deletion_retires_open_sockets_without_affecting_other_accounts(
 }
 
 /// Keep proof timers parked so only the lost account notification can stop this socket.
-#[allow(clippy::too_many_lines)] // Keep the review reproduction and its I/O fences together.
 async fn lost_account_source(recovery: bool) -> (Vec<u16>, bool) {
     let _serial = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;

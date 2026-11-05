@@ -14,6 +14,14 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 /// The descriptor number a lifelined test shim receives its lifeline on.
 const LIFELINE_FD: i32 = 9;
+/// Hang guard for this file's positive waits (#334 rule): the shared fixture's
+/// shim socket reads and writes, and polls for a socket to vanish, a shell to
+/// be reaped or a marker file to appear. Every such wait ends on its event;
+/// this bound only detects a hang. The former 5 s values failed up to 19 tests
+/// per run under load (#355). Tests that need a short quiet window, or that
+/// detect a stall, keep their own explicit timeouts.
+const HANG: Duration = Duration::from_secs(120);
+
 struct Session {
     state: PathBuf,
     id: String,
@@ -155,14 +163,15 @@ impl Session {
             .join("sessions")
             .join(format!("{}.sock", self.id))
     }
+    /// Connects to the session's shim, waiting for its socket to appear. The
+    /// returned peer's reads and writes are bounded only by [`HANG`].
     fn connect(&self) -> UnixStream {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + HANG;
         loop {
             match UnixStream::connect(self.path()) {
                 Ok(peer) => {
-                    peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                    peer.set_write_timeout(Some(Duration::from_secs(5)))
-                        .unwrap();
+                    peer.set_read_timeout(Some(HANG)).unwrap();
+                    peer.set_write_timeout(Some(HANG)).unwrap();
                     return peer;
                 }
                 Err(e) => {
@@ -199,7 +208,7 @@ impl Session {
             }
         }
         drop(peer);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + HANG;
         while self.path().exists() {
             assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(10));
@@ -802,7 +811,7 @@ fn exit_without_viewer(session: &Session) {
     // Keep the control connection until the shell disappears: write_all is not
     // proof the shim consumed the request, and control peers cannot retain exit.
     let children = format!("/proc/{}/task/{}/children", session.pid, session.pid);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG;
     while fs::read_to_string(&children).is_ok_and(|value| !value.trim().is_empty()) {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));
@@ -958,7 +967,7 @@ fn readiness_exit_waits_for_a_real_output_cursor() {
     // Wait for the actual child to be reaped while no output cursor exists.
     // An input-capable control peer cannot prove the fixed output was delivered.
     let children = format!("/proc/{}/task/{}/children", session.pid, session.pid);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG;
     while fs::read_to_string(&children).is_ok_and(|value| !value.trim().is_empty()) {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(5));
@@ -1244,7 +1253,7 @@ fn parked_shared_writer_does_not_stop_detached_pty_progress() {
         &mut parked,
         Frame::SequencedInput(setup.len() as u64, b"!".to_vec()),
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG;
     while !marker.exists() {
         assert!(
             Instant::now() < deadline,
@@ -1293,7 +1302,6 @@ enum QueueProbe {
     FreshShared,
 }
 
-#[allow(clippy::too_many_lines)]
 fn assert_shared_queue_pressure(writer: u32, replacements: usize, probe: QueueProbe) {
     let legacy_output = matches!(probe, QueueProbe::LegacyOutput);
     let session = Session::new(8192, false);
@@ -1396,7 +1404,7 @@ fn assert_shared_queue_pressure(writer: u32, replacements: usize, probe: QueuePr
     }
     assert_eq!(writer_state(&mut shared).1, sequence + 200_000);
     release_task.join().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG;
     while fs::read_to_string(&result)
         .ok()
         .is_none_or(|text| text.is_empty())

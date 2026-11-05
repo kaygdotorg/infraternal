@@ -4,7 +4,7 @@
 
 use infraternal_plugin_mesh::{
     dataplane::{Chunk, DefaultPolicy},
-    node::Node,
+    node::{EngineKind, Node},
     policy::model::{Addresses, NodeId},
 };
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Command};
@@ -16,7 +16,7 @@ fn restart_preserves_operator_gateway_host_route() {
     let directory = target.join(format!("review-route-scope-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut node = Node::restore(&directory).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     node.up().unwrap();
     node.chunk(Chunk {
         access_updates: Vec::new(),
@@ -69,7 +69,7 @@ fn restart_preserves_operator_gateway_host_route() {
     let before = route();
     assert_eq!(before.as_array().unwrap().len(), 1);
     drop(node);
-    let mut restored = Node::restore(&directory).unwrap();
+    let mut restored = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     let after = route();
     restored.down().unwrap();
     fs::remove_dir_all(directory).unwrap();

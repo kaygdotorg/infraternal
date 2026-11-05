@@ -219,7 +219,6 @@ fn start(index: usize) -> Start {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn ten_concurrent_streams_deliver_their_first_keyframe_through_the_server_relay() {
     // The job target path is longer than Linux's AF_UNIX limit once the source UUID is appended.
     let target = PathBuf::from("target");

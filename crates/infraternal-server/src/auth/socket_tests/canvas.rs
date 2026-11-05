@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn canvas_real_socket_commits_and_runtime_disable_preserve_control() {
     assert!(
         crate::compiled_plugins()

@@ -7,7 +7,6 @@ use infraternal_protocol::{
 use serde_json::{Value, json};
 use std::io::{self, BufRead};
 
-#[allow(clippy::too_many_lines)] // Exhaustive reference fields for the cross-codec oracle.
 fn fields(frame: &Frame<'_>) -> Value {
     match frame {
         Frame::Desktop(message) => {

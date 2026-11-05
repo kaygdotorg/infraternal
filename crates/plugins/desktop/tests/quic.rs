@@ -195,7 +195,6 @@ async fn cancelling_partial_video_write_seals_the_lane_before_another_frame() {
 /// or decoding. The in-memory CA and endpoints reuse the real mTLS fixture.
 #[tokio::test]
 #[ignore = "explicit scoped netem measurement, not an ordinary gate"]
-#[allow(clippy::too_many_lines)]
 async fn measured_loss_profile() {
     let mode = std::env::var("DESKTOP_MEASURE_MODE").unwrap();
     assert!(mode == "reliable" || mode == "datagram");
