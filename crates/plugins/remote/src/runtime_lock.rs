@@ -351,6 +351,9 @@ fn bound_sockets(files: &[(PathBuf, fs::Metadata)]) -> Option<Vec<u32>> {
     Some(sockets)
 }
 
+/// Hang guard, in seconds, for each datagram of the kernel's socket dump.
+const SOCK_DIAG_HANG_SECONDS: i64 = 30;
+
 /// Walk the kernel's socket dump. `found` sees the socket inode of each socket
 /// bound to one of `files` and returns true to stop early. The result says
 /// whether any socket matched.
@@ -368,10 +371,14 @@ fn dump_bound(
         SockProtocol::NetlinkSockDiag,
     )
     .ok()?;
+    // The kernel always answers a sock_diag dump; this bound only detects a
+    // hang. A 100 ms budget made a loaded host's dump "prove nothing", so a
+    // check refused (77) or kept state for a reason unrelated to the sockets
+    // it asked about (#355).
     setsockopt(
         &query,
         sockopt::ReceiveTimeout,
-        &nix::sys::time::TimeVal::new(0, 100_000),
+        &nix::sys::time::TimeVal::new(SOCK_DIAG_HANG_SECONDS, 0),
     )
     .ok()?;
     let devices = mount_devices(files);
