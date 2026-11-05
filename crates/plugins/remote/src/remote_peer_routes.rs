@@ -53,7 +53,7 @@ pub(super) struct Recent {
 }
 impl Recent {
     /// Read existing bounds and scheduling state without hot-path counters.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn history(&self) -> [usize; 4] {
         [
             self.datagrams.len(),
