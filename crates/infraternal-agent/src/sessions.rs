@@ -44,6 +44,27 @@ const HANDSHAKE: Duration = Duration::from_secs(2);
 #[cfg(target_os = "linux")]
 const LAUNCH: Duration = Duration::from_secs(30);
 
+/// How long manager detection may wait for `systemctl show-environment`.
+///
+/// Release builds always use [`HANDSHAKE`] (2 s). Debug builds let an
+/// integration oracle widen it with `INFRATERNAL_TEST_MANAGER_PROBE_BUDGET_MS`,
+/// because the lazy-manager oracle holds the probe on purpose until it has seen
+/// the daemon answer Hello and Pong. On a contended build host a debug daemon
+/// can take longer than 2 s to get there, and the deadline then killed the held
+/// probe before the oracle could check it (#355). This is the same seam as the
+/// status crate's `INFRATERNAL_TEST_MANAGER_QUERY_BUDGET_MS` (#334).
+#[cfg(target_os = "linux")]
+fn manager_probe_budget() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = std::env::var("INFRATERNAL_TEST_MANAGER_PROBE_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return Duration::from_millis(milliseconds);
+    }
+    HANDSHAKE
+}
+
 /// Init manager selected once for session work, never periodically re-probed.
 #[derive(Clone, Copy, Debug)]
 pub enum Manager {
@@ -78,7 +99,7 @@ impl Manager {
                 command.arg("--user");
             }
             let available = timeout(
-                HANDSHAKE,
+                manager_probe_budget(),
                 command
                     .arg("show-environment")
                     .stdin(Stdio::null())
