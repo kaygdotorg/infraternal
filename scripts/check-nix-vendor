@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Evaluate the release vendor derivation before expensive compilation (#368).
+# importCargoLock names directories by package/version, so distinct sources
+# with that same pair must be rejected even when derivation evaluation succeeds.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+python3 - <<'PY'
+"""Reject lockfile entries that collide in importCargoLock's vendor directory."""
+import tomllib
+from pathlib import Path
+
+packages = tomllib.loads(Path("Cargo.lock").read_text())["package"]
+seen = {}
+for package in packages:
+    if "source" not in package:
+        continue
+    key = (package["name"], package["version"])
+    if key in seen:
+        raise SystemExit(f"vendor collision: {key[0]}-{key[1]}: {seen[key]} and {package['source']}")
+    seen[key] = package["source"]
+print("Cargo vendor directory names: unique")
+PY
+# Native CI has no Nix installation; it still enforces collision-free names.
+# Nix build hosts also evaluate the derivation to catch missing Git hashes,
+# without building or fetching Cargo dependencies.
+if command -v nix >/dev/null; then
+    nix eval --raw .#packages.x86_64-linux.default.cargoDeps.drvPath
+    printf '\nNix Cargo vendoring: evaluated\n'
+else
+    printf 'SKIP Nix derivation evaluation: nix unavailable; vendor names checked\n'
+fi
