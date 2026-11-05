@@ -14,6 +14,7 @@
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import type { ViewId, WindowModel } from "../model/types";
+import type { RefusalAction } from "../../terminal-refusal";
 
 /**
  * What the window's connection indicator needs beyond "connected or not" (#212). Times are `performance.now()` values so
@@ -58,6 +59,11 @@ export interface SessionBinding {
    * The renderer stays; the new session's id arrives through `changed`, as for any new shell.
    */
   openNew?(): void;
+  /**
+   * Asks again in this same window, for the "Can't reach" strip's retry: a session it already has attaches afresh, and a window
+   * with none opens one. Unlike `openNew` it never drops the session the window shows.
+   */
+  retry?(): void;
   /** Whether a vertical wheel of this sign is the window's terminal's to take (D275): scrollback to move, or a program on the screen. Absent: no. */
   wheelUse?(deltaY: number): boolean | undefined;
   /** The window's box changed; the renderer refits to the new cell grid. */
@@ -80,7 +86,7 @@ export interface HostEntry {
 /** What the canvas asks of the sessions: bind a window to a session, make a model for a new shell, and list hosts. Implemented by the live service and by the mock. */
 export interface SessionService {
   /** Binds a terminal window's model to its session (opening one when the model names none). */
-  bind(model: WindowModel, env: { view: ViewId; /** Repaints readiness without persisting connection state in layouts. */ connectionChanged?(): void; /** Open the existing window-header session picker. */ showSessions?: (event?: MouseEvent) => void; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void; /** The host refused to open a shell here; true when the window shows the reason itself (no toast then). */ refused?(message: string): boolean }): SessionBinding;
+  bind(model: WindowModel, env: { view: ViewId; /** Repaints readiness without persisting connection state in layouts. */ connectionChanged?(): void; /** Open the existing window-header session picker. */ showSessions?: (event?: MouseEvent) => void; /** The model gained something worth saving (a session id). */ changed(): void; /** The shell exited after its final output painted. */ exited?(status: number): void; /** The host refused to open a shell here; true when the window shows the reason itself (no toast then). */ refused?(message: string, action?: RefusalAction): boolean; /** The window has been connecting too long (the message says so), or is connected again (undefined). */ unreachable?(message: string | undefined): void }): SessionBinding;
   /** A model for a new shell on `host` (a split, a sidebar open, the palette). The shell starts when it is bound. */
   open(host: string, options?: { container?: string; from?: WindowModel; /** An existing session of the host to show (the sidebar, the palette, the manager). */ session?: string }): WindowModel;
   /** Hosts the person can open shells on. */

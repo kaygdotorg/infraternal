@@ -38,6 +38,7 @@ import { byFrecency, type SessionRecord, type SessionState } from "../sessions/i
 import { isTerminal } from "../views/body";
 import { ICON, SESSION_ICON } from "../views/icons";
 import { paintLink } from "./link";
+import type { RefusalAction } from "../../terminal-refusal";
 
 /** What the on-demand half does; `session-hooks.ts` calls it once it has loaded. */
 export interface SessionUiPart {
@@ -45,8 +46,10 @@ export interface SessionUiPart {
   toggleManager(rec: WinRec, anchor: HTMLElement, source: PopoverSource): void;
   closeManager(): void;
   arrived(rec: WinRec): void;
-  /** The host refused the new shell this window just asked for: the strip says why. False when this window asked for none. */
-  refused(rec: WinRec, message: string): boolean;
+  /** The host refused this window's shell: the strip says why and offers the one action that helps. False when the window already has a session (the caller shows a toast). */
+  refused(rec: WinRec, message: string, action?: RefusalAction): boolean;
+  /** The window has been connecting too long (`message`), or connects again (undefined): its strip says so, with a retry. */
+  unreachable(rec: WinRec, message: string | undefined): void;
   /** Repaints an open manager (the inventory changed). */
   render(): void;
   dispose(): void;
@@ -83,15 +86,17 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
   /** What a window's strip says and does; the strip is one component whatever it reports (ended, exited, refused). */
   interface StripView {
     signature: string;
-    result: "ok" | "fail" | "ended" | "refused";
+    result: "ok" | "fail" | "ended" | "refused" | "unreachable";
     label: string;
     text: string;
     action?: { label: string; icon: string; run: () => void };
     dismiss: { label: string; run: () => void };
   }
-  /** Why the host would not start a shell in a window, in plain words, for the strip. */
-  const refusals = new WeakMap<WinRec, string>();
-  /** Windows that asked for a new shell and have not heard back: only they claim a refusal. */
+  /** Why the host would not start a shell in a window, in plain words, and the one action that helps, for the strip. */
+  const refusals = new WeakMap<WinRec, { message: string; action: RefusalAction }>();
+  /** Windows that have been connecting too long, with the sentence saying so. Cleared as soon as the window connects again. */
+  const unreachables = new WeakMap<WinRec, string>();
+  /** Windows that asked for a new shell and have not heard back: they claim a refusal even when they still show a session. */
   const asked = new WeakSet<WinRec>();
   const stripOf = (rec: WinRec, s: SessionRecord): StripView => {
     const gone = Boolean(s.gone);
@@ -110,9 +115,19 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       text: `Exited ${s.exit?.code ?? 0}`, action: { label: "Run again", icon: SESSION_ICON.again, run: () => inventory.runAgain(rec.model.host, s.id) }, dismiss,
     };
   };
-  const refusedStrip = (rec: WinRec, message: string): StripView => ({
-    signature: `refused:${message}`, result: "refused", label: message, text: message,
-    action: { label: "Try again", icon: ICON.plus, run: () => newShell(rec) }, dismiss: { label: "Close window", run: () => cx.win.close(rec) },
+  const closeStrip = (rec: WinRec): StripView["dismiss"] => ({ label: "Close window", run: () => cx.win.close(rec) });
+  const refusedStrip = (rec: WinRec, message: string, action: RefusalAction): StripView => ({
+    signature: `refused:${action}:${message}`, result: "refused", label: message, text: message,
+    // One action at most: asking again, or a host that can do what this one cannot. "none" leaves only closing the window.
+    ...(action === "retry" ? { action: { label: "Try again", icon: ICON.plus, run: () => newShell(rec) } }
+      : action === "add-host" && cx.adapters.addHost ? { action: { label: "Add host", icon: ICON.plus, run: () => cx.adapters.addHost?.() } } : {}),
+    dismiss: closeStrip(rec),
+  });
+  /** A window that stayed connecting too long: the same strip, with a retry that asks again without dropping its session. */
+  const unreachableStrip = (rec: WinRec, message: string): StripView => ({
+    signature: `unreachable:${message}`, result: "unreachable", label: message, text: message,
+    action: { label: "Try again", icon: SESSION_ICON.again, run: () => { unreachables.delete(rec); rec.binding?.retry?.(); paint(rec); } },
+    dismiss: closeStrip(rec),
   });
   const paint = (rec: WinRec): void => {
     if (!isTerminal(rec)) return;
@@ -122,9 +137,14 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     // The new shell has a session now (or the person moved on): a refusal no longer applies.
     if (rec.model.sessionId) refusals.delete(rec);
     const refusal = refusals.get(rec);
-    paintLink(rec, exited, refusals.has(rec) ? (refusal ?? "") : undefined);
+    // Connected again: the "can't reach" notice no longer applies.
+    if (rec.binding?.connected !== false) unreachables.delete(rec);
+    const unreachable = unreachables.get(rec);
+    paintLink(rec, exited, refusal ? refusal.message : unreachable);
     let strip = body.querySelector<HTMLElement>(".cl-sx-strip");
-    const view: StripView | undefined = exited && s ? stripOf(rec, s) : refusal && !s ? refusedStrip(rec, refusal) : undefined;
+    const view: StripView | undefined = exited && s ? stripOf(rec, s)
+      : refusal && !s ? refusedStrip(rec, refusal.message, refusal.action)
+      : unreachable ? unreachableStrip(rec, unreachable) : undefined;
     if (view) {
       if (!strip) {
         strip = el("div", "cl-sx-strip ui-pill");
@@ -239,7 +259,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
    * back with the reason; a window that cannot start one says so instead of doing nothing.
    */
   const newShell = (rec: WinRec): void => {
-    if (!rec.binding?.openNew) { refusals.set(rec, "This window cannot start a shell. Close it and open a new one."); paint(rec); return; }
+    if (!rec.binding?.openNew) { refusals.set(rec, { message: "This window cannot start a shell. Close it and open a new one.", action: "none" }); paint(rec); return; }
     const s = recordOf(rec);
     refusals.delete(rec);
     asked.add(rec);
@@ -249,11 +269,21 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     paint(rec);
     cx.store.changed();
   };
-  const refused = (rec: WinRec, message: string): boolean => {
-    if (!asked.delete(rec)) return false;
-    refusals.set(rec, message);
+  /**
+   * A window with no session has nothing else to show, so it claims its own refusal (a window's first open is a request too);
+   * one that still shows a session claims it only if it asked for the new shell itself.
+   */
+  const refused = (rec: WinRec, message: string, action: RefusalAction = "retry"): boolean => {
+    const requested = asked.delete(rec);
+    if (!requested && rec.model.sessionId) return false;
+    refusals.set(rec, { message, action });
+    unreachables.delete(rec);
     paint(rec);
     return true;
+  };
+  const unreachable = (rec: WinRec, message: string | undefined): void => {
+    if (message === undefined) unreachables.delete(rec); else unreachables.set(rec, message);
+    paint(rec);
   };
   // Enter on the focused window starts the new shell its strip offers (a button already takes Enter itself).
   window.addEventListener("keydown", (event) => {
@@ -261,9 +291,12 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     if (!rec || event.key !== "Enter" || event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
     if ((event.target as Element | null)?.closest?.("input, textarea, button, a, [contenteditable], [role='dialog'], .ui-overlay-surface")) return;
     const result = rec.card.body.querySelector<HTMLElement>(".cl-sx-strip")?.dataset.result;
-    if (result !== "ended" && result !== "refused") return;
+    if (result !== "ended" && result !== "refused" && result !== "unreachable") return;
+    // Enter does what the strip's one button does; a strip without a button (nothing helps) leaves Enter alone.
+    const again = rec.card.body.querySelector<HTMLButtonElement>(".cl-sx-strip .cl-sx-again");
+    if (!again) return;
     event.preventDefault();
-    newShell(rec);
+    again.click();
   }, { signal });
 
   // ---- the manager --------------------------------------------------------------------------------
@@ -559,6 +592,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     closeManager() { manager?.close("keyboard"); },
     arrived(rec) { slideLabel(rec); flash(rec); },
     refused,
+    unreachable,
     render() { manager?.render(); },
     dispose() { manager?.close("keyboard"); confirm?.close(false); },
   };
