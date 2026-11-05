@@ -80,7 +80,6 @@ impl ReleasePayload {
     async fn resolve_session(&self, arch: Architecture) -> Result<Option<PathBuf>, Failure> {
         self.resolve_artifact(arch, Artifact::Session).await
     }
-    #[allow(clippy::too_many_lines)] // Keep authenticated absence, bounded download and atomic publication ordered.
     async fn resolve_artifact(
         &self,
         arch: Architecture,
@@ -319,7 +318,7 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
 }
 impl ReleasePayload {
     // Conventional octal group/other permission masks make this audit explicit.
-    #[allow(clippy::verbose_bit_mask, clippy::too_many_lines)]
+    #[allow(clippy::verbose_bit_mask)]
     async fn verify_cached(
         &self,
         directory: &Path,

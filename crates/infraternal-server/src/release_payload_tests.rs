@@ -134,7 +134,6 @@ impl Release {
     fn with_sessions(version: &str) -> Self {
         Self::with_artifacts(1024, version, 0, true)
     }
-    #[allow(clippy::too_many_lines)] // Keep generated key, manifest, signature and bucket contents in one fixture.
     fn with_artifacts(size: usize, version: &str, extra: usize, sessions: bool) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;

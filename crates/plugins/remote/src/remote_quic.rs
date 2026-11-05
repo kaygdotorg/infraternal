@@ -724,7 +724,6 @@ mod tests {
     /// Exercise acknowledged idle traffic and a lost NAT path using the same
     /// production configuration helper at accelerated transport-only intervals.
     // Keep relay ownership and failure proof together so every socket retires at the fixture boundary.
-    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn acknowledged_idle_survives_and_replayed_packets_cannot_mask_failure() {
         use std::sync::{

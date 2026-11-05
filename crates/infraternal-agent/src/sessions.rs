@@ -874,7 +874,6 @@ pub async fn launch(
 /// Fixed private readiness command retains the enrolled account and normal scope.
 /// # Errors
 /// Returns the same validation and launch errors as `launch`.
-#[allow(clippy::too_many_arguments)]
 pub async fn launch_with_readiness(
     exe: &Path,
     state: &Path,
@@ -890,7 +889,6 @@ pub async fn launch_with_readiness(
 /// Launch a literal program through a bounded private stdin pipe, never a shell string or argv secret.
 /// # Errors
 /// Returns invalid program arguments, startup or shim handshake failures.
-#[allow(clippy::too_many_arguments)]
 pub async fn launch_with_command(
     exe: &Path,
     state: &Path,
@@ -925,7 +923,6 @@ pub async fn launch_with_command(
 /// Launch a shim whose shell belongs to an authenticated host login worker.
 /// # Errors
 /// Returns the same validation/launch errors as `launch`.
-#[allow(clippy::too_many_arguments)]
 pub async fn launch_with_login(
     exe: &Path,
     state: &Path,
@@ -960,7 +957,6 @@ pub async fn launch_with_login(
 }
 
 /// Launch an attributed shell, transferring its person fence to the durable reservation.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch_rootless_person(
     exe: &Path,
     state: &Path,
@@ -993,7 +989,6 @@ pub(crate) async fn launch_rootless_person(
 
 /// Keep authentication, durable ownership and launch readiness in one ordered path.
 /// A rootless reservation retains its person fence through readiness or failed-launch cleanup.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn launch_configured(
     exe: &Path,

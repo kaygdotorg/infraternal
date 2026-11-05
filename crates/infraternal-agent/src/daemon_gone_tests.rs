@@ -45,7 +45,6 @@ fn send(wire: &mut Vec<u8>, stream: u32, frame: &Frame<'_>) {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn a_vanished_session_gets_a_final_close_and_the_channel_stays_up() {
     // Leave room for sessions/<32 hex digits>.sock under a HOME-cache TMPDIR.
     // A 96-bit random fixture name preserves isolation without spending the

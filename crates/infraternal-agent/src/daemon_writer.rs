@@ -77,7 +77,6 @@ pub(crate) async fn deferred_reply(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn writer(
     socket: &impl Channel,
     mut messages: mpsc::Receiver<Message>,

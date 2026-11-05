@@ -924,7 +924,6 @@ async fn control_frames_do_not_cancel_bootstrap_or_starve_progress() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn settings_public_key_requires_exact_origin_and_live_unlocked_owner() {
     use crate::ssh_key::{PublicSshKey, SshKeyError, SshKeyMaterial, SshKeySource};
     use axum::{body::Body, http::Request};

@@ -18,7 +18,6 @@ impl Dimensions for Size {
         200
     }
 }
-#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let candidate = std::env::args().nth(1).unwrap_or_default();
     let fixture = std::env::args().nth(2);

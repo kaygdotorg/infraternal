@@ -136,7 +136,6 @@ pub fn name(person: uuid::Uuid, uid: u32) -> String {
 /// `None` keeps the inherited own-account login on a rootless host [D18].
 /// `state` is the infraternal agent's resolved state directory; see
 /// [`runtime_root`] for where person locks and revocation markers live.
-#[allow(clippy::too_many_lines)]
 pub async fn ensure(
     exe: &Path,
     state: &Path,

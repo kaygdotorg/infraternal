@@ -79,7 +79,6 @@ impl Limits {
     /// Over-long strings stop being forwarded but are not cancelled, so their bytes
     /// never turn into printable text or commands. A terminator, CAN/SUB, or a new
     /// ESC command still reaches the terminal.
-    #[allow(clippy::too_many_lines)]
     pub(super) fn byte(&mut self, byte: u8) -> Action {
         use Action::{Drop, Keep, Restart};
         use State::{

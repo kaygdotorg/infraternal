@@ -63,7 +63,6 @@ async fn browser_input_overload_retires_only_the_terminal_stream() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep the socket exchange and log assertions in one integration case.
 async fn browser_output_credit_refusal_logs_the_stream_reason() {
     let _serial = SERIAL.lock().await;
     let (capture, _subscriber) = Capture::start();
@@ -290,7 +289,6 @@ async fn browser_credit_case(overload: bool) {
 /// Pongs alone keep it past the startup ceiling. A hidden route gets no probe of any kind and is
 /// not retired by that silence; becoming visible again restarts native probing [#317, D300].
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn browser_route_probes_natively_while_visible_and_not_at_all_while_hidden() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;

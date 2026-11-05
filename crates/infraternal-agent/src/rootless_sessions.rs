@@ -80,7 +80,6 @@ pub(crate) async fn reserve(
 
 /// Carry one person's fence through durable reservation, spawn and readiness.
 #[cold]
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn launch(
     exe: &Path,
     state: &Path,

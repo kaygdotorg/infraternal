@@ -811,7 +811,7 @@ async fn recovery_session_delay_latency_at_capacity() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // One flow: sliding, tap freshness and key scoping.
+// One flow: sliding, tap freshness and key scoping.
 async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -1191,7 +1191,6 @@ async fn device_join_code_allows_only_five_inspection_attempts() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
@@ -1593,7 +1592,6 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
 
 /// Drives setup, passkey registration, both wire legs, and a dropped/resumed browser connection.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
     let _guard = SERIAL.lock().await;
     let data_dir = std::env::temp_dir().join(format!("infraternal-ws-{}", rand::random::<u64>()));
@@ -2229,7 +2227,6 @@ async fn wait_connection_inactive(pool: &sqlx::SqlitePool, id: &[u8; 16]) {
 }
 
 /// Test-only leg-B implementation: it returns one deterministic session and resumes a fixed PTY transcript.
-#[allow(clippy::too_many_lines)]
 async fn test_leg_b_agent(
     mut socket: UnixStream,
     input_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -2871,7 +2868,6 @@ async fn account_identity_migration_backfills_legacy_users() {
 /// Release-only scale evidence; no authenticator signing cost is included in server finish latency.
 #[tokio::test]
 #[ignore = "run --release --ignored --nocapture without concurrent builds"]
-#[allow(clippy::too_many_lines)]
 async fn discoverable_latency_at_pending_capacity() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;

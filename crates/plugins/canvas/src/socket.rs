@@ -91,7 +91,6 @@ impl Plugin for CanvasPlugin {
     fn descriptor(&self) -> &'static PluginDescriptor {
         &DESCRIPTOR
     }
-    #[allow(clippy::too_many_lines)]
     fn run(
         &self,
         host: Arc<dyn SocketHost>,

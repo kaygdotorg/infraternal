@@ -127,7 +127,6 @@ async fn attached(
 
 #[tokio::test]
 #[ignore = "real CLI/shim oracle; set INFRATERNAL_TEST_BINARY and run alone under CPUWeight10000"]
-#[allow(clippy::too_many_lines)]
 async fn real_pty_resumes_native_writer_after_25_connection_replacements() {
     let binary = std::env::var_os("INFRATERNAL_TEST_BINARY").expect("explicit built CLI path");
     let id = uuid::Uuid::new_v4();

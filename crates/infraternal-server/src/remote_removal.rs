@@ -206,7 +206,6 @@ impl Removal {
         .await
         .map_err(|_| crate::auth::Error::Denied)?
     }
-    #[allow(clippy::too_many_lines)] // Keep authority recheck, revocation, audit and cleanup inside one transaction.
 
     /// Persist verified denial and return pending instead of retaining admission
     /// until an offline host returns. Only its durable receipt completes retirement.

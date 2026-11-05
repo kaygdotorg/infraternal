@@ -83,7 +83,6 @@ async fn idle_busy_revocation_wake_sends_server_busy_close_code() {
 /// A shared wake at the per-person ceiling must preserve every live socket,
 /// even when several callers queue behind the four retained read places.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)] // Keep all sixteen sockets and the shared recovery fence together.
 async fn sixteen_woken_sockets_recover_application_authority_after_a_short_stall() {
     let _serial = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
