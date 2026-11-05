@@ -142,16 +142,20 @@ async function ready(driver, ms = 45_000) {
   throw new Error("the canvas did not mount");
 }
 
-async function prepare(driver, look, count) {
+async function prepare(driver, look, count, attempt = 1) {
   await driver.goto(`${BASE}/?mock=1&proto=clusters&scene=3&theme=mocha&bg=soft`);
   await ready(driver);
   const saved = LOOKS[look];
   // Seed this page's saved look and the test double's account copy, then reload so the page starts from them.
   await driver.run(`const saved = arguments[0]; fetch("/__mock/account/appearance", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ themes: saved }) }); if (saved) localStorage.setItem("tracer.themes", JSON.stringify(saved)); else localStorage.removeItem("tracer.themes"); return true;`, saved);
-  await sleep(500);
+  await sleep(1500);
   await driver.goto(`${BASE}/?mock=1&proto=clusters&scene=3&theme=mocha&bg=soft`);
   await ready(driver);
   await sleep(2000);
+  // The page must show the look this run is named for: seeding the account's copy is a request that may not have landed before the reload.
+  const want = { solid: ["solid", "0px"], tinted: ["tinted", "6px"], "tint only": ["tinted", "0px"] }[look];
+  const got = await driver.run(`return [document.documentElement.dataset.look, document.documentElement.style.getPropertyValue("--look-blur")];`);
+  if (got[0] !== want[0] || got[1] !== want[1]) { if (attempt >= 3) throw new Error(`the page shows ${got} instead of ${want}`); return prepare(driver, look, count, attempt + 1); }
   // More windows: new shells on the first host; fewer: close the extra ones with their own close button.
   for (let guard = 0; guard < 40; guard++) {
     const have = await driver.run(`return document.querySelectorAll('[data-window-id^="w-"]').length;`);
@@ -165,7 +169,7 @@ async function prepare(driver, look, count) {
   // Blur is paid by the windows on screen, so zoom out until all `count` of them are, but never to the level where the canvas draws windows as thumbnails
   // (`lod` "thumb"): that is not the cost of live windows. The run records the zoom it ended at and how many windows were on screen.
   let last = null;
-  for (const z of [null, 0.9, 0.8, 0.7, 0.65, 0.6, 0.55, 0.5]) {
+  for (const z of [null, 0.9, 0.8, 0.7, 0.65]) {
     if (z !== null) {
       await driver.run(`const c = window.__tracerClusters.camera(); window.__tracerClusters.setCamera(c.cx, c.cy, arguments[0]); return true;`, z);
       await sleep(1200);
