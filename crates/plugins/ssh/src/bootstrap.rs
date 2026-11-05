@@ -923,9 +923,20 @@ impl Bootstrap {
                 }
                 let mut rolled_back = true;
                 if let Some(installation) = resources.installation {
-                    let cleanup =
-                        tokio::time::timeout(Duration::from_secs(30), installation.rollback())
-                            .await;
+                    // A fresh install that committed before a later step failed
+                    // (its login check, completion) has no journal left to roll
+                    // back: remove it, or it keeps running for a host the server
+                    // revokes and blocks every retry (#305 F-B). A Replace or
+                    // Re-enroll keeps the enrolled host, so it is never removed.
+                    let cleanup = if installation.committed() && resources.set_aside.is_none() {
+                        tokio::time::timeout(
+                            Duration::from_secs(30),
+                            installation.uninstall_committed(),
+                        )
+                        .await
+                    } else {
+                        tokio::time::timeout(Duration::from_secs(30), installation.rollback()).await
+                    };
                     rolled_back = matches!(cleanup, Ok(Ok(())));
                     if !rolled_back {
                         if let Some(state) = lock(&batch.states).get_mut(&target.id) {
