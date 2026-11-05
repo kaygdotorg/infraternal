@@ -534,7 +534,7 @@ impl Node {
                     )
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    (None, None, None, None, None)
+                    (None, None, KernelProof::default(), None, None)
                 }
                 Err(error) => return Err(error),
             };
@@ -2029,6 +2029,7 @@ mod tests {
         assert!(!node.active());
         assert!(!node.enabled());
     }
+    /// A 1000-peer snapshot applied in chunks is accepted all at once, with every peer in the kernel.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN; use release for timing."]
     fn chunked_snapshot_is_atomic_and_applies_1000_kernel_peers() {
@@ -2065,6 +2066,8 @@ mod tests {
                         PeerPolicy {
                             peer: Peer {
                                 key,
+                                previous_key: None,
+                                previous_active: false,
                                 addresses: addresses(id),
                                 endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
                             },

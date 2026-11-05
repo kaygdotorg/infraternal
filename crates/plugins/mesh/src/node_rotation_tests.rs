@@ -171,7 +171,7 @@ fn kernel_link_identity() -> (
     Option<crate::policy::model::PublicKey>,
     crate::policy::model::PublicKey,
 ) {
-    let link = Device::active_link().unwrap().expect("a live mesh link");
+    let link = Device::active_link().unwrap().unwrap();
     assert_eq!(link.engine, EngineKind::Kernel);
     let private = Device::private_key_at(link.ifindex).unwrap();
     let (_, public) = Key::from_private(&private[..]).unwrap();
