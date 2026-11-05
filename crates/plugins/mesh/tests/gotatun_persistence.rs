@@ -107,6 +107,7 @@ fn snapshot(local: (u32, PublicKey), peer: (u32, PublicKey), endpoint: SocketAdd
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
+                access_ssh: None,
             },
         )]),
         merged: BTreeMap::new(),
