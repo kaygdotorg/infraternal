@@ -76,10 +76,9 @@ const SHUTDOWN: Budget = Budget {
 #[cfg(target_os = "linux")]
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(4);
 
-/// The hang bound for one launch. Tests shorten it per thread to reach the failure path.
-#[cfg(target_os = "linux")]
+/// The hang bound for one launch, on every platform. Linux tests shorten it per thread to reach the failure path.
 fn launch_bound() -> Duration {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     if let Some(bound) = tests::LAUNCH_BOUND.with(std::cell::Cell::get) {
         return bound;
     }
