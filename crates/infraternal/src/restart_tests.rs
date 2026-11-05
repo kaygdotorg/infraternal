@@ -685,9 +685,18 @@ fn stdin_probe_image() -> PathBuf {
     strip_all(&built);
     // The inherited shared umask may make compiler output group-writable.
     std::fs::set_permissions(&built, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // Publish by hard link so no reader ever sees a partial image.
-    std::fs::hard_link(&built, &image).unwrap();
+    // Publish by hard link so no reader ever sees a partial image. The mutex
+    // covers this process only: another cold test process sharing this cache
+    // can publish first. `link` never replaces, so an existing name is a
+    // complete probe built from the same source; reuse it. The private work
+    // directory is removed on every path, including a failed link.
+    let published = std::fs::hard_link(&built, &image);
     std::fs::remove_dir_all(&work).unwrap();
+    match published {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("could not publish the stdin probe: {error}"),
+    }
     image
 }
 
