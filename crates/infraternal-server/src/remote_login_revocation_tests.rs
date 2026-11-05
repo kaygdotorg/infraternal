@@ -520,10 +520,9 @@ async fn retirement_waits_for_durable_acceptance_on_reconnect() {
 #[tokio::test]
 async fn pending_revocation_survives_database_reopen_before_acceptance() {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    let path = std::path::PathBuf::from(
-        std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into()),
-    )
-    .join(format!("pending-login-{}.sqlite", Uuid::new_v4()));
+    // Test state is independent of Cargo's output directory and the caller's
+    // working directory, including direct invocation of the compiled test binary.
+    let path = std::env::temp_dir().join(format!("pending-login-{}.sqlite", Uuid::new_v4()));
     let options = SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(true);
