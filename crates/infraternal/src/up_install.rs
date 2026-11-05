@@ -11,6 +11,10 @@ use std::{
     io::{self, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// Explain a local refusal without exposing enrollment input or command arguments.
@@ -207,6 +211,8 @@ pub(super) struct Install {
     registered: bool,
     /// Successful activation transfers ownership to the installed service.
     committed: bool,
+    /// A scoped signal listener requests rollback even during synchronous activation.
+    interrupted: Option<Arc<AtomicBool>>,
 }
 
 impl Install {
@@ -220,11 +226,31 @@ impl Install {
             systemctl: systemctl.to_owned(),
             registered: false,
             committed: false,
+            interrupted: None,
         };
         install.directory("var/lib/infraternal", 0o711, false)?;
         install.directory("var/lib/infraternal/agent", 0o700, true)?;
         install.directory("var/lib/infraternal/bin", 0o755, true)?;
         Ok(install)
+    }
+
+    /// Attach the root helper's signal scope before enrollment can yield or activation can commit.
+    #[must_use]
+    pub(super) fn interrupt_on(mut self, interrupted: Arc<AtomicBool>) -> Self {
+        self.interrupted = Some(interrupted);
+        self
+    }
+
+    /// Observe cancellation between synchronous writes and manager operations, before commit.
+    fn check_interruption(&self) -> io::Result<()> {
+        if self
+            .interrupted
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return Err(super::termination::interrupted());
+        }
+        Ok(())
     }
 
     /// Record ownership immediately after creation, before any fallible write or fsync.
@@ -356,7 +382,9 @@ impl Install {
 
     /// Publish the binary, alias and unit, committing only after the service's active check.
     pub(super) fn activate(mut self, source: &Path) -> io::Result<()> {
+        self.check_interruption()?;
         self.binary(source)?;
+        self.check_interruption()?;
         let path = self
             .directory("usr/local/bin", 0o755, false)?
             .join("infraternal");
@@ -390,14 +418,18 @@ impl Install {
             Path::new("/etc/systemd/system/infraternal-agent.service"),
             &enabled,
         )?;
+        self.check_interruption()?;
         self.registered = true;
         run_systemctl(&self.systemctl, &["daemon-reload"], None)?;
+        self.check_interruption()?;
         run_systemctl(&self.systemctl, &["enable", "--now", SERVICE_NAME], None)?;
+        self.check_interruption()?;
         run_systemctl(
             &self.systemctl,
             &["is-active", SERVICE_NAME],
             Some("active"),
         )?;
+        self.check_interruption()?;
         self.committed = true;
         Ok(())
     }

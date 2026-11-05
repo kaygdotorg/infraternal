@@ -3,6 +3,9 @@
 #[path = "up_install.rs"]
 mod install;
 
+#[path = "up_termination.rs"]
+mod termination;
+
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
@@ -383,27 +386,31 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     }
     invitation.wipe();
     install_preflight()?;
-    let install = install::Install::begin(Path::new("/"), 0, &systemctl).map_err(|error| {
-        eprintln!("{error}");
-        Failure::LocalState
-    })?;
-    println!("UP_STAGE=enrollment");
     let join_url = format!("{origin}/remote/join");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| Failure::Runtime)?;
-    runtime
-        .block_on(crate::remote::join_with_key(
+    termination::run(|interrupted| async move {
+        let install = install::Install::begin(Path::new("/"), 0, &systemctl)
+            .map_err(|error| {
+                eprintln!("{error}");
+                Failure::LocalState
+            })?
+            .interrupt_on(interrupted);
+        println!("UP_STAGE=enrollment");
+        crate::remote::join_with_key(
             &join_url,
             Path::new(SERVICE_DATA),
             &handoff.invitation,
             &handoff.key_pkcs8,
-        ))
+        )
+        .await
         .map_err(|error| map_remote_failure(&error))?;
-    install
-        .activate(Path::new(RUNNING_IMAGE))
-        .map_err(|_| Failure::Partial)
+        install
+            .activate(Path::new(RUNNING_IMAGE))
+            .map_err(|_| Failure::Partial)
+    })
+    .map_err(|error| {
+        eprintln!("{error}");
+        Failure::Failed
+    })?
 }
 
 fn server_url(input: &str) -> Result<Url, Failure> {
