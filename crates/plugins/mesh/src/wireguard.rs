@@ -138,11 +138,15 @@ fn hex_digit(value: u8) -> Option<u8> {
     }
 }
 
-/// Test seam (#260 J213 P2): runs once in [`Device::create`], after the new link exists and
-/// before this installation claims it, so a namespace test can race another creator into that
-/// window.
+/// The hook type of [`AFTER_LINK_CREATED`]: it receives the new link's temporary name.
 #[cfg(feature = "test-support")]
-pub static AFTER_LINK_CREATED: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+pub type LinkCreatedHook = Box<dyn FnOnce(&str) + Send>;
+
+/// Test seam (#260 J213 P2, J220 P2): runs once in [`Device::create`], right after the new link
+/// exists under its temporary name and before anything else addresses it, so a namespace test
+/// can race another creator into every later step.
+#[cfg(feature = "test-support")]
+pub static AFTER_LINK_CREATED: std::sync::Mutex<Option<LinkCreatedHook>> =
     std::sync::Mutex::new(None);
 
 /// A link name no other caller uses: `infr` and 10 hex digits from the process id, a per-process
@@ -194,6 +198,14 @@ impl Device {
         attribute(&mut payload, 0x12 | NESTED, &linkinfo)?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         socket.request(16, 4 | 0x200 | 0x400, &payload)?;
+        #[cfg(feature = "test-support")]
+        if let Some(hook) = AFTER_LINK_CREATED
+            .lock()
+            .ok()
+            .and_then(|mut hook| hook.take())
+        {
+            hook(std::str::from_utf8(&temporary[..temporary.len() - 1]).unwrap_or_default());
+        }
         let ifindex = match index_of(&mut socket, &temporary) {
             Ok(ifindex) => ifindex,
             Err(error) => {
@@ -204,14 +216,6 @@ impl Device {
                 return Err(error);
             }
         };
-        #[cfg(feature = "test-support")]
-        if let Some(hook) = AFTER_LINK_CREATED
-            .lock()
-            .ok()
-            .and_then(|mut hook| hook.take())
-        {
-            hook();
-        }
         // Creation does not run the generic alias setter, so the marker is set here, with the
         // name, before a later process may adopt the link; never leave an unmarked success. The
         // owner key lets a restart prove the link is ours before its key is set (D340).

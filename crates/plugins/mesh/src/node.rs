@@ -16,6 +16,12 @@ use std::{
 
 pub use crate::dataplane::Chunk;
 
+/// Test seam (#260 J220 P2): runs once in `up` on the kernel engine, after this node created and
+/// claimed its link and before it configures the private key, so a namespace test can replace
+/// the link in that window.
+#[cfg(feature = "test-support")]
+pub static BEFORE_KERNEL_KEY: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 /// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
 /// shared-filter decision, so a namespace test can start another installation in that window.
 #[cfg(feature = "test-support")]
@@ -781,6 +787,14 @@ impl Node {
                 let created = Device::create(public_key)?;
                 self.owned = true;
                 self.kernel_owner = Some(public_key);
+                #[cfg(feature = "test-support")]
+                if let Some(hook) = BEFORE_KERNEL_KEY
+                    .lock()
+                    .ok()
+                    .and_then(|mut hook| hook.take())
+                {
+                    hook();
+                }
                 if let Err(error) = Device::configure(&key, 0) {
                     let _ = self.down();
                     return Err(error);
