@@ -45,6 +45,7 @@ finally:
  run('ip','link','delete','underlay0')
 ";
 
+/// Verifies translated ingress remains fenced while the node-local service stays reachable.
 fn check(firewall: Firewall) {
     assert!(
         Command::new("ip")

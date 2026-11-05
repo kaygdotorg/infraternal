@@ -22,7 +22,7 @@ fn command(program: &str, args: &[&str]) {
             .success()
     );
 }
-// Keep the retained address, recovery fence and packet observation in one scenario.
+/// Checks address replacement, recovery fencing, and packet delivery in one backend scenario.
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
     node.up().unwrap();

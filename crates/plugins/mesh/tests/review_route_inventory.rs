@@ -11,6 +11,7 @@ use std::{
     collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command,
 };
 
+/// Creates a started kernel node and its private state directory for route inventory proofs.
 fn fixture() -> (PathBuf, Node) {
     let target = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-inventory-{}", std::process::id()));

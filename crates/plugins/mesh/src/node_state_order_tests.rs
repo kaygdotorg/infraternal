@@ -6,6 +6,7 @@ use crate::{
     policy::model::{Addresses, NodeId},
 };
 
+/// Builds a stored node state at the supplied revision for ordering regressions.
 fn revision(version: u64) -> State {
     State {
         enabled: true,

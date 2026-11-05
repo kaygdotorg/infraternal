@@ -781,6 +781,7 @@ pub(crate) mod tests {
                 .any(|window| window == b"gotatun")
         );
     }
+    /// Records owned routes separately while preserving the legacy accepted-state bytes.
     #[test]
     fn route_recording_preserves_the_legacy_accepted_state_format() {
         let directory = Directory::new();

@@ -11,6 +11,7 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Comm
 
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
+/// Preserves an operator gateway route outside the mesh-owned peer-route inventory.
 fn restart_preserves_operator_gateway_host_route() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-route-scope-{}", std::process::id()));

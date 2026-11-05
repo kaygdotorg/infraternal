@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Comm
 /// A restart retires host routes of peers that are gone.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
+/// Removes orphan peer host routes after restart while retaining accepted routes.
 fn restart_retires_orphan_peer_host_routes() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-routes-{}", std::process::id()));

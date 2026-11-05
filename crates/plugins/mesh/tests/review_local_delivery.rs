@@ -10,6 +10,7 @@ use infraternal_plugin_mesh::{
 };
 use std::{collections::BTreeMap, net::UdpSocket, process::Command, time::Duration};
 
+/// Verifies the selected firewall preserves the authorized local peer-delivery path.
 fn check(firewall: Firewall) {
     assert!(
         Command::new("ip")

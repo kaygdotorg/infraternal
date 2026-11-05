@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Comm
 /// Retiring orphan routes on restart leaves routes this node does not own.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
+/// Retires orphan mesh routes after restart without removing a foreign host route.
 fn orphan_route_retirement_preserves_foreign_routes() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-routes-{}", std::process::id()));

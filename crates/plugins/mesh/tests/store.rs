@@ -98,6 +98,7 @@ async fn public_origin_sets_the_default_suffix_and_origin_changes_advance_the_sn
 }
 
 #[tokio::test]
+/// Tracks the server's published DNS suffix across restart and advances the snapshot revision.
 async fn publication_identity_tracks_server_public_host_across_restart() {
     let pool = pool().await;
     let first = Store::with_public_origin(pool.clone(), "https://ssh.example.test");

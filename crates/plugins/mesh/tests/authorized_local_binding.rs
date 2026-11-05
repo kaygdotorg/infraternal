@@ -18,7 +18,7 @@ fn installed() -> serde_json::Value {
     assert!(output.status.success());
     serde_json::from_slice(&output.stdout).unwrap()
 }
-// Keep the refusal, replacement and restart boundaries in one real-kernel scenario.
+/// Keeps refusal, replacement, and restart boundaries in one real-kernel scenario.
 fn check(backend: Backend) {
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
         .join(format!("binding-{}", std::process::id()));
