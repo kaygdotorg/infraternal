@@ -126,6 +126,11 @@ NOT_COVERED_TESTS = {
 PRIVILEGED_REASON = re.compile(r'namespace|as root|CAP_NET_ADMIN|unshare', re.I)
 # ...unless it also needs something this row does not provide.
 OTHER_NEEDS = re.compile(r'perf VM|CPUWeight|MESH_REVIEW_PROBE|release binary|static release|Docker|Pebble|sshd|research/', re.I)
+# Child halves of a test: started by their parent with a marker set, they
+# return at once when run alone, so selecting them would count a pass that
+# tested nothing (J266, 80581 P2-1). Their parents run them. Every child half
+# uses this one reason prefix, so the rule is explicit rather than accidental.
+CHILD_ONLY = re.compile(r'^Child-only fixture:')
 IGNORED_TEST = re.compile(r'#\[ignore\s*=\s*"([^"]*)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)')
 
 # The sandbox is built in two user namespaces. The OUTER one (where this
@@ -236,7 +241,7 @@ def privileged_ignored(root, package, directory):
             continue
         for match in IGNORED_TEST.finditer(path.read_text()):
             reason, name = match.groups()
-            if PRIVILEGED_REASON.search(reason) and not OTHER_NEEDS.search(reason):
+            if PRIVILEGED_REASON.search(reason) and not OTHER_NEEDS.search(reason) and not CHILD_ONLY.search(reason):
                 found.setdefault(target, {})[name] = reason
     return found
 

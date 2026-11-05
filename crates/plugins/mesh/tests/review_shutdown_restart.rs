@@ -100,7 +100,7 @@ fn configure(node: &mut Node) {
 }
 
 #[test]
-#[ignore = "Child-only fixture for the weighted user/network namespace restart proof."]
+#[ignore = "Child-only fixture: started by the weighted restart proof inside its namespace; does nothing alone."]
 fn crash_child() {
     let Ok(boundary) = std::env::var("INFRATERNAL_MESH_DOWN_TEST_BOUNDARY") else {
         return;

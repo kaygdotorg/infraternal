@@ -90,6 +90,28 @@ class IgnoredSelection(unittest.TestCase):
             self.assertEqual({target: set(names) for target, names in found.items()},
                              {'lib': {'in_lib'}, 'test:kernel': {'alone', 'with_attr'}, 'test:split': {'nested'}})
 
+    def test_child_only_fixtures_are_not_selected(self):
+        """A child half returns at once when run alone; selecting it would be a pass that tests nothing (J266 P2-1)."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'pkg/tests').mkdir(parents=True)
+            (root / 'pkg/tests/split.rs').write_text(
+                '#[test]\n#[ignore = "Run in a disposable user/network namespace."]\nfn parent() {}\n'
+                '#[test]\n#[ignore = "Child-only fixture: started by parent inside its namespace; does nothing alone."]\n'
+                'fn child() {}\n')
+            self.assertEqual(set(p.privileged_ignored(root, 'pkg', 'pkg')['test:split']), {'parent'})
+
+    def test_child_halves_use_the_one_prefix(self):
+        """Every ignore reason that names a child fixture starts with the shared prefix, so the rule holds."""
+        root = Path(__file__).resolve().parents[1]
+        listed = subprocess.run(['git', 'grep', '-h', '-o', '-E', r'#\[ignore = "[^"]*[Cc]hild[^"]*"\]', '--', 'crates'],
+                                cwd=root, capture_output=True, text=True).stdout.splitlines()
+        self.assertTrue(listed)
+        for attribute in listed:
+            reason = attribute.split('"')[1]
+            if 'fixture' in reason.lower() or 'inside the namespace prepared' in reason.lower():
+                self.assertRegex(reason, p.CHILD_ONLY, attribute)
+
     def test_binary_only_package(self):
         """Unit tests of a package without src/lib.rs live in its binary target."""
         self.assertEqual(p.target_of('src/install.rs', 'bin:infraternal'), 'bin:infraternal')

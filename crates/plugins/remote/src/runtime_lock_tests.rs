@@ -674,7 +674,7 @@ fn legacy_bound_endpoint_on_a_split_device_filesystem_is_kept() {
 }
 
 #[test]
-#[ignore = "runs inside the namespace prepared by the split-device test"]
+#[ignore = "Child-only fixture: started by the split-device test inside its namespace; does nothing alone."]
 fn split_device_inner() {
     use nix::sys::socket::bind;
     let Some(runtime) = std::env::var_os("RL230_SPLIT") else {
@@ -735,7 +735,7 @@ fn stale_session_endpoint_is_not_held_live_by_a_foreign_inode_twin() {
 }
 
 #[test]
-#[ignore = "runs inside the namespace prepared by the foreign-inode test"]
+#[ignore = "Child-only fixture: started by the foreign-inode test inside its namespace; does nothing alone."]
 fn foreign_inode_twin_inner() {
     let Some(root) = std::env::var_os("RL230_TWIN") else {
         return;

@@ -32,7 +32,7 @@ fn private_state(name: &str) -> std::path::PathBuf {
 /// Child half, run as `nobody`: try to attach one queue to the persisted TUN.
 /// Exit 0 when attached, 1 on `EPERM`, 2 on any other error.
 #[test]
-#[ignore = "Child-only fixture for the TUN owner proof."]
+#[ignore = "Child-only fixture: started by the TUN owner proof with its marker set; does nothing alone."]
 fn attach_child() {
     if std::env::var_os(CHILD).is_none() {
         return;
