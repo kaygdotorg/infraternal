@@ -839,7 +839,6 @@ impl Store {
             .await
     }
     // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
-    #[allow(clippy::too_many_lines)]
     async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await

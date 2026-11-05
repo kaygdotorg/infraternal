@@ -64,7 +64,6 @@ fn material() -> (CaMaterial, X509) {
 
 #[cfg(target_os = "linux")]
 #[test]
-#[allow(clippy::too_many_lines)]
 fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
     use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
     const NAME: &str =

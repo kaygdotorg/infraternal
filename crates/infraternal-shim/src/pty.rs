@@ -488,7 +488,6 @@ impl Pty {
     pub fn spawn(uid: u32, cols: u16, rows: u16) -> io::Result<Self> {
         Self::spawn_with_login(uid, cols, rows, &[0; 16], None, None, None, None)
     }
-    #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_login(
         uid: u32,
         cols: u16,
@@ -583,7 +582,6 @@ impl Pty {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn spawn_login_configured(
         uid: u32,
         cols: u16,

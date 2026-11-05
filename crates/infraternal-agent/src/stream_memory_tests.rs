@@ -19,7 +19,6 @@ fn private_kib() -> u64 {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "weighted release measurement of 200 idle relay tasks"]
-#[allow(clippy::too_many_lines)]
 async fn terminal_stream_memory_at_200() {
     let root = PathBuf::from(
         std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").unwrap_or_else(|| "../../target".into()),

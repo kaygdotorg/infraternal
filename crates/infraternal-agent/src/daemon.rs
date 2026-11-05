@@ -437,7 +437,6 @@ fn login_access_allows(
 }
 
 // Account resolution, login fencing and shell creation form one ordered admission path.
-#[allow(clippy::too_many_lines)]
 async fn open_requested(
     exe: &std::path::Path,
     state: &std::path::Path,
@@ -584,7 +583,6 @@ fn publish_session_snapshot(
 /// Run until the trusted server closes its inherited channel.
 /// # Errors
 /// Rejects invalid fd, unsafe state, malformed wire requests and resource limits.
-#[allow(clippy::too_many_lines)]
 pub async fn run(fd: i32, state: Option<PathBuf>) -> io::Result<()> {
     // The launch isolation wrapper closes fd 3 before exec. Other inherited
     // descriptors need their own audited CLOEXEC boundary before being supported.
@@ -768,7 +766,6 @@ impl<C: Channel> Drop for RetireChannel<'_, C> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run_channel<const SESSION_ONLY: bool>(
     socket: &impl Channel,
     state: PathBuf,
@@ -1132,7 +1129,6 @@ async fn run_channel<const SESSION_ONLY: bool>(
 /// # Errors
 /// Refuses missing/reserved binding, a missing bounded `AttachTerm`, unknown shim,
 /// malformed post-attachment traffic and overload. Returning never stops the shim.
-#[allow(clippy::too_many_lines)]
 #[cfg(feature = "remote")]
 pub async fn run_bound_terminal(channel: &impl Channel, state: Option<PathBuf>) -> io::Result<()> {
     run_bound_terminal_mode(
@@ -1171,7 +1167,6 @@ pub async fn run_negotiated_bound_terminal(
 }
 
 #[cfg(feature = "remote")]
-#[allow(clippy::too_many_lines)]
 async fn run_bound_terminal_mode(
     channel: &impl Channel,
     state: Option<PathBuf>,
@@ -1466,7 +1461,6 @@ async fn relink(
 }
 
 /// All relay errors preserve a sealed exit, including incomplete final handshakes.
-#[allow(clippy::too_many_arguments)]
 async fn terminal(
     path: PathBuf,
     id: [u8; 16],
@@ -1479,7 +1473,6 @@ async fn terminal(
     terminal_mode(path, id, stream, cursor, last_input, commands, tx, false).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn terminal_mode(
     path: PathBuf,
     id: [u8; 16],
@@ -1515,7 +1508,6 @@ async fn terminal_mode(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn terminal_run(
     path: PathBuf,
     id: [u8; 16],

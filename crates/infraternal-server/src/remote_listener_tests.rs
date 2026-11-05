@@ -215,7 +215,6 @@ async fn ipv6_wildcard_listener_reuses_binding_and_preserves_ipv4_discovery() {
 /// Real leased TCP/mTLS uses the current ledger and actor, releases its listen
 /// sockets on drop, and cannot retire the primary listener's TLS configuration.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usable() {
     let (server, node, root, _) = identities();
     let (store, _pool, host_id, fingerprint) =
@@ -509,7 +508,6 @@ async fn admitted_connection_moves_to_a_leased_address_and_back_without_readmiss
 /// earliest unrestricted mesh byte here.
 #[cfg(feature = "mesh-transport-proof")]
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn tcp_observer_counts_leased_and_primary_admission_and_nonempty_output() {
     use crate::embedded::{TerminalOutput, TerminalSize};
     use crate::remote_autoswitch_probe::{Capture, Kind, TEST_SERIAL};

@@ -1045,7 +1045,6 @@ impl SocketPlugins {
         });
         Some(self.entries.len() - 1)
     }
-    #[allow(clippy::too_many_lines)]
     fn control(&mut self) -> Option<&mpsc::Sender<Bytes>> {
         if self.controller.is_none() {
             let (tx, mut rx) = mpsc::channel::<Bytes>(4);
@@ -1095,7 +1094,6 @@ impl SocketPlugins {
         self.controller.as_ref().map(|controller| &controller.0)
     }
     /// Route only declared actions/topics, retaining bounded independent queues.
-    #[allow(clippy::too_many_lines)]
     pub fn dispatch(&mut self, wire: &Bytes, encode: &mut Vec<u8>) -> Dispatch {
         let Ok(decoded) = decode_muxed_frame(wire) else {
             return Dispatch::Unhandled;

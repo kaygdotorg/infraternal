@@ -105,10 +105,6 @@ async fn bridge(front: UnixStream, back: UnixStream, full: oneshot::Sender<()>) 
 
 #[tokio::test]
 #[ignore = "requires INFRATERNAL_TEST_BINARY; real host combined limits gate"]
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep simultaneous capacity barriers and pinned real-shell proof in one fixture."
-)]
 async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup() {
     if nix::unistd::Uid::effective().is_root() {
         return;

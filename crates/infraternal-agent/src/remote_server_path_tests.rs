@@ -234,7 +234,6 @@ impl Server {
         Self::from_socket(identity, roots, socket, Some(reserved))
     }
     // Keep handshake, proof and connection ownership in one fixture boundary.
-    #[allow(clippy::too_many_lines)]
     fn from_socket(
         identity: &remote_tls::Identity,
         roots: &[openssl::x509::X509],

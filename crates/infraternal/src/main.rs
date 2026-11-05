@@ -218,7 +218,7 @@ fn dispatch_selected_action(
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
 
-#[allow(clippy::too_many_lines)] // Keep feature-gated command handlers beside their registry mappings.
+// Keep feature-gated command handlers beside their registry mappings.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -2035,7 +2035,6 @@ mod setup_token_tests {
 }
 
 /// Validate identifiers before forking; clamp exited-screen retention inside the shim.
-#[allow(clippy::too_many_arguments)]
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
@@ -2272,7 +2271,6 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
 /// Startup reads an invitation once; reconnects use only the private local identity.
 #[cfg(feature = "remote")]
 // Keep enrollment and its ordered status reporting in one CLI lifecycle.
-#[allow(clippy::too_many_lines)]
 fn run_remote_agent(
     action: AgentAction,
     has_fd: bool,

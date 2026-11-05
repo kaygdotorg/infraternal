@@ -792,7 +792,6 @@ async fn real_agent_canonical_uuid_result_is_accepted() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn agent_link_loss_invalidates_the_last_live_session_snapshot() {
     let (server, mut agent_peer) = UnixStream::pair().unwrap();
     let agent = EmbeddedAgent::from_test_socket(server);

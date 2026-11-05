@@ -143,6 +143,7 @@ async fn component_off_interrupts_a_stalled_host_key_confirmation_lookup() {
     confirmation_interrupt(true).await;
 }
 
+#[cfg(feature = "remote")]
 #[tokio::test]
 async fn scoped_api_key_can_open_the_bootstrap_action_stream_without_a_cookie_or_origin() {
     let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
@@ -175,6 +176,7 @@ async fn scoped_api_key_can_open_the_bootstrap_action_stream_without_a_cookie_or
     drop(auth);
 }
 
+#[cfg(feature = "remote")]
 #[tokio::test]
 async fn each_bootstrap_action_message_uses_the_shared_api_key_rate_limit() {
     let (auth, owner, _, _, address, server, pool, _) = fixture(false).await;
@@ -713,6 +715,29 @@ async fn rejection(request: tokio_tungstenite::tungstenite::http::Request<()>, s
     }
 }
 
+/// A cookie together with an API key is one request claiming two authorities, so it is refused
+/// in every build (#303, J234 P3-1). A build without the `remote` feature used to ignore the key
+/// and admit the request as the cookie's session.
+#[tokio::test]
+async fn a_cookie_with_an_api_key_is_refused_in_every_build() {
+    let (auth, _, cookie, _, address, server, _, _) = fixture(false).await;
+    let mut both = request(address, ORIGIN, Some(&cookie));
+    both.headers_mut().insert(
+        "Authorization",
+        "Bearer fixture-cookie-pair-key-never-print"
+            .parse()
+            .unwrap(),
+    );
+    rejection(both, StatusCode::UNAUTHORIZED).await;
+    // The same cookie alone still opens the socket: the refusal is the pair's, not the cookie's.
+    let (mut socket, _) = connect_async(request(address, ORIGIN, Some(&cookie)))
+        .await
+        .unwrap();
+    let _ = socket.close(None).await;
+    server.abort();
+    drop(auth);
+}
+
 #[tokio::test]
 async fn origin_owner_unlock_and_whole_request_consent_are_required() {
     let (_, owner, cookie, backend, address, serving, pool, _) = fixture(false).await;
@@ -924,7 +949,6 @@ async fn control_frames_do_not_cancel_bootstrap_or_starve_progress() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn settings_public_key_requires_exact_origin_and_live_unlocked_owner() {
     use crate::ssh_key::{PublicSshKey, SshKeyError, SshKeyMaterial, SshKeySource};
     use axum::{body::Body, http::Request};

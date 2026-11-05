@@ -1,4 +1,8 @@
 //! Runs on each managed host and owns its local PTY and engine work [9][13][18].
+//!
+//! Benchmark probes are deliberately absent from the normal library, including
+//! release builds. The release exclusion check compiles a consumer against it.
+
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 pub mod channel;
 pub mod cli;
@@ -103,3 +107,10 @@ mod remote_native_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod process_exits_tests;
+
+/// Test and benchmark measurements with an injected slow file writer (D351).
+#[cfg(any(test, feature = "bench-probes"))]
+pub mod runtime_probe;
+/// Functional coverage for the optional responsiveness helper.
+#[cfg(test)]
+mod runtime_probe_tests;

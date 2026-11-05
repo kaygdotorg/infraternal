@@ -742,7 +742,6 @@ fn firewall_listing(pid: Option<u32>, scratch: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Run as real root inside disposable network AND mount namespaces, in the local CPUWeight scope."]
 // Keep the complete path/PTY lifecycle in one fixture so every assertion observes the same open attachment.
-#[allow(clippy::too_many_lines)]
 async fn mesh_transport_real_namespaces_preserve_the_terminal() {
     if std::env::var("INFRATERNAL_MESH_PROOF").ok().as_deref() != Some("1") {
         return;

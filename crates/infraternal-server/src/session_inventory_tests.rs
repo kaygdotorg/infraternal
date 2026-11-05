@@ -177,7 +177,6 @@ async fn pending_agent_inventory_hides_cached_rows_until_the_first_census() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn available_snapshot_reports_live_rows_and_bounded_saved_exit_statuses() {
     let (pool, user) = database().await;
     let auth = Auth::new(
