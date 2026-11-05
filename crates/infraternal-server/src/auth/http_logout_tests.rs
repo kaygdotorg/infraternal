@@ -191,7 +191,7 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
         .await
         .unwrap();
     let live = "L".repeat(43);
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, 1, 1)")
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, 100, 1)")
         .bind(hash(&live))
         .bind(user)
         .bind(NOW + SESSION)
@@ -199,16 +199,17 @@ async fn logout_refuses_more_presented_sessions_than_the_cap_without_deleting_an
         .execute(&pool)
         .await
         .unwrap();
-    // The live bearer plus `extra` made-up ones, each under its own generation name.
+    // The live bearer, as the newest generation the browser selects, plus `extra` made-up older
+    // ones, each under its own generation name.
     let headers = |extra: usize| {
         let mut cookies = vec![format!(
-            "__Host-infraternal-session-1-{}={live}",
+            "__Host-infraternal-session-100-{}={live}",
             NOW + SESSION
         )];
         for index in 0..extra {
             cookies.push(format!(
                 "__Host-infraternal-session-{}-{}={:0>43}",
-                index + 2,
+                index + 1,
                 NOW + SESSION,
                 index
             ));
@@ -375,4 +376,64 @@ async fn ambiguous_logout_across_accounts_is_refused_without_deleting_either() {
             .await
             .unwrap();
     assert_eq!(remaining, 2, "a refused logout deletes neither session");
+}
+
+/// Replaying logout after its selected account is revoked must not revoke an older foreign bearer.
+#[tokio::test]
+async fn replayed_logout_does_not_revoke_a_presented_session_for_another_user() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    auth.set_test_http_time(NOW);
+    for (user, owner) in [("current-user", 1), ("other-user", 0)] {
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,?,'unused',?,?)")
+            .bind(user).bind(user).bind(owner).bind(user).bind(user).execute(&pool).await.unwrap();
+    }
+    let current = "c".repeat(43);
+    let other = "o".repeat(43);
+    for (token, user, sequence) in [
+        (&current, "current-user", 2_i64),
+        (&other, "other-user", 1_i64),
+    ] {
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,login_sequence,unlocked) VALUES (?,?, 'test-device', ?, ?, ?, 1)")
+            .bind(hash(token)).bind(user).bind(NOW + SESSION).bind(NOW).bind(sequence).execute(&pool).await.unwrap();
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(header::ORIGIN, HeaderValue::from_static(ORIGIN));
+    headers.insert(
+        header::COOKIE,
+        format!(
+            "__Host-infraternal-session-2-{}={current}; __Host-infraternal-session-1-{}={other}",
+            NOW + SESSION,
+            NOW + SESSION
+        )
+        .parse()
+        .unwrap(),
+    );
+    run(&auth, "logout", &headers).await.unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(&other))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        before, 1,
+        "the first logout must preserve the foreign session"
+    );
+    // A duplicate request can already be in flight with exactly the same cookies.
+    let _ = run(&auth, "logout", &headers).await;
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE token_hash=?")
+        .bind(hash(&other))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, 1,
+        "replaying logout must preserve the other account's session"
+    );
 }

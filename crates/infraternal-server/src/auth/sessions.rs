@@ -152,28 +152,37 @@ impl Auth {
 
     /// Revoke the presented bearers that belong to the signed-in account, and no others (#285).
     ///
-    /// The account is the owner of the selected (newest) session cookie. When the selection is
-    /// ambiguous or already revoked, it is the one account all live presented bearers share; bearers
-    /// of more than one account then refuse the logout with nothing deleted. A browser may hold
-    /// another account's cookie, and logging out here must never end that session.
+    /// The account is the owner of the selected (newest) session cookie. If that bearer no longer
+    /// resolves (a replayed logout, or a session revoked meanwhile), the browser is already logged
+    /// out and nothing is deleted: the remaining bearers may belong to someone else. Only when no
+    /// cookie is selected (an ambiguous ordering) is the account the one that all live presented
+    /// bearers share; bearers of more than one account then refuse the logout with nothing deleted.
+    /// A browser may hold another account's cookie, and logging out here must never end that session.
     pub async fn logout_presented(&self, selected: Option<&str>, tokens: &[&str]) -> Result<()> {
-        let account = self.logout_account(selected, tokens).await?;
+        let Some(account) = self.logout_account(selected, tokens).await? else {
+            return Ok(());
+        };
         for token in tokens {
             self.revoke_session(token, Some(&account)).await?;
         }
         Ok(())
     }
 
-    /// The account a logout acts for; see `logout_presented`.
-    async fn logout_account(&self, selected: Option<&str>, tokens: &[&str]) -> Result<String> {
-        if let Some(selected) = selected
-            && let Some(user) =
-                sqlx::query_scalar::<_, String>("SELECT user_id FROM sessions WHERE token_hash=?")
-                    .bind(hash(selected))
-                    .fetch_optional(&self.pool)
-                    .await?
-        {
-            return Ok(user);
+    /// The account a logout acts for, or `None` when its selected bearer is already gone; see
+    /// `logout_presented`.
+    async fn logout_account(
+        &self,
+        selected: Option<&str>,
+        tokens: &[&str],
+    ) -> Result<Option<String>> {
+        if let Some(selected) = selected {
+            // Never infer an account from the other bearers once a cookie was selected (#285).
+            return Ok(sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM sessions WHERE token_hash=?",
+            )
+            .bind(hash(selected))
+            .fetch_optional(&self.pool)
+            .await?);
         }
         let mut owners = Vec::new();
         for token in tokens {
@@ -188,7 +197,7 @@ impl Auth {
             }
         }
         match owners.as_slice() {
-            [only] => Ok(only.clone()),
+            [only] => Ok(Some(only.clone())),
             _ => Err(Error::Denied),
         }
     }
