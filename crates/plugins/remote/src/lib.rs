@@ -81,6 +81,14 @@ pub mod runtime_lock;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod uninstall;
 
+/// Report line for a kernel object uninstall leaves in place (#235).
+/// The server's removal reply shares it, so it lives outside the Linux-only
+/// uninstall module and builds on every platform.
+#[must_use]
+pub fn left_line(name: &str) -> String {
+    format!("Left {name} because infraternal didn't create it here.")
+}
+
 /// Enroll one node; this action cannot create a server.
 pub const JOIN: ActionDef = ActionDef {
     id: "remote.host.join",

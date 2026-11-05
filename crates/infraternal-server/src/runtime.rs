@@ -1257,6 +1257,9 @@ mod tests {
         .await
         .expect("bootstrap auth against the server database");
         assert!(setup_announced, "new server database should need setup");
+        auth.shutdown_recovery_clock()
+            .await
+            .expect("stop the recovery checkpoint writer");
         drop(auth);
         pool.close().await;
         std::fs::remove_dir_all(data_dir).expect("remove temporary server database");

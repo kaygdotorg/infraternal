@@ -54,7 +54,7 @@ export async function loadDocsIndex(signal: AbortSignal): Promise<{ pages: DocsI
 }
 
 /** Loads the index, then offers the view and answers the palette. Rejects when there is no index (the caller tries again later). */
-export async function startDocs(core: CoreScreen, cx: Ctx, signal: AbortSignal, setRows: (rows: PaletteEntry[]) => void): Promise<void> {
+export async function startDocs(core: CoreScreen, cx: Ctx, signal: AbortSignal, setRows: (rows: PaletteEntry[], pages: DocsIndexPage[]) => void): Promise<void> {
   const { pages, rows } = await loadDocsIndex(signal);
   const offerView = (): void => {
     if (cx.views.size === 0 || cx.views.has(DOCS_VIEW)) return;
@@ -74,6 +74,6 @@ export async function startDocs(core: CoreScreen, cx: Ctx, signal: AbortSignal, 
     );
   }, { signal });
   offerView();
-  setRows(rows);
+  setRows(rows, pages);
   core.refreshPalette();
 }

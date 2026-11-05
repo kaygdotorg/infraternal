@@ -195,11 +195,7 @@ impl Kernel {
         retire: |_| Ok(Vec::new()),
     };
 }
-/// Report line for a kernel object uninstall leaves in place.
-#[must_use]
-pub fn left_line(name: &str) -> String {
-    format!("Left {name} because infraternal didn't create it here.")
-}
+pub use crate::left_line;
 
 /// Enabled only for a checked managed remote installation, without an idle task.
 pub struct UninstallPlugin {
@@ -571,6 +567,7 @@ pub async fn cleanup(
         .map(left_line)
         .collect();
     std::fs::remove_file(&paths.unit)?;
+    infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())

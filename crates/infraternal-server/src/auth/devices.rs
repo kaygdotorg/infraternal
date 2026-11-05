@@ -82,21 +82,25 @@ const APPROVAL_LIFETIME: i64 = 600;
 pub(super) struct PendingSources(HashMap<Network, Vec<i64>>);
 
 /// Most approval ceremonies waiting for a passkey at once (each lives
-/// for one ceremony lifetime).
+/// for one ceremony lifetime). Each person holds at most
+/// [`super::webauthn::PER_PERSON_CEREMONIES`] of them.
 const MAX_APPROVAL_CEREMONIES: usize = 1024;
 
 /// Approval passkey ceremonies, keyed by ceremony ID. Each is bound to
 /// the session that started it and the code it approves.
 #[derive(Default)]
-pub(super) struct ApprovalCeremonies(HashMap<String, ApprovalCeremony>);
+pub(super) struct ApprovalCeremonies(pub(super) HashMap<String, ApprovalCeremony>, u64);
 
-struct ApprovalCeremony {
+pub(super) struct ApprovalCeremony {
     /// `sign_in` or `join_machine`, read when the ceremony started.
     kind: String,
     session_hash: String,
-    user_id: String,
+    pub(super) user_id: String,
     code_hash: String,
     expires: i64,
+    /// Start order: expiry has one-second resolution, so this decides which
+    /// of a person's ceremonies is oldest.
+    order: u64,
 }
 
 /// Public, bounded machine facts shown before a fresh passkey approves enrollment [#263].
@@ -371,11 +375,30 @@ impl Auth {
         .ok_or(Error::Denied)?;
         let mut ceremonies = self.approval_ceremonies.lock().await;
         ceremonies.0.retain(|_, ceremony| ceremony.expires > now);
+        // One person holds at most a few; their own oldest makes room, and
+        // its passkey ceremony goes with it (#263, J161 P3-2).
+        let mut mine: Vec<_> = ceremonies
+            .0
+            .iter()
+            .filter(|(_, ceremony)| ceremony.user_id == session.user_id)
+            .map(|(id, ceremony)| (ceremony.order, id.clone()))
+            .collect();
+        if mine.len() >= super::webauthn::PER_PERSON_CEREMONIES {
+            mine.sort_unstable();
+            let excess = mine.len() + 1 - super::webauthn::PER_PERSON_CEREMONIES;
+            let mut pending = self.pending.lock().await;
+            for (_, id) in &mine[..excess] {
+                ceremonies.0.remove(id);
+                pending.logins.remove(id);
+            }
+        }
         if ceremonies.0.len() >= MAX_APPROVAL_CEREMONIES {
             return Err(Error::Throttled);
         }
         let start = self.login_start(&session.user_id, now).await?;
         let id = start["ceremony"].as_str().ok_or(Error::Denied)?.to_owned();
+        ceremonies.1 += 1;
+        let order = ceremonies.1;
         ceremonies.0.insert(
             id,
             ApprovalCeremony {
@@ -384,6 +407,7 @@ impl Auth {
                 user_id: session.user_id,
                 code_hash: hash(code),
                 expires: now + super::CEREMONY,
+                order,
             },
         );
         Ok(start)

@@ -40,7 +40,7 @@ test("a font chosen in Settings, Appearance reaches the interface, a window body
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(1000);
   await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("settings: appearance");
+  await page.keyboard.type("Appearance › Font");
   await page.keyboard.press("Enter");
   await page.waitForTimeout(1500);
   for (const font of FONTS) {

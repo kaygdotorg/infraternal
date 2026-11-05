@@ -47,6 +47,13 @@ export interface WindowModel {
   rows?: number;
   /** The band this window starts in, inside its group (D212). Only set for a window in a group; a plain column stacks its windows. */
   row?: number;
+  /**
+   * The window's own width in px, and the free space left of it, inside a row group (D212 amendment, D323). A window in a row group
+   * has the size the person gave IT: a drag changes this window and no other, and the column (track) is as wide as its widest
+   * window. Absent: the window fills its track.
+   */
+  w?: number;
+  ml?: number;
   /** The window's host is not covered by the viewer's grants (a shared layout connects through your own access). */
   noAccess?: boolean;
   /**
@@ -60,8 +67,12 @@ export interface WindowModel {
   };
 }
 
-/** A column. `half` names the two halves of one split (D212): closing one returns its width to the other. Runtime only. */
-export interface ColumnModel { id: string; w: number; half?: string; wins: WindowModel[] }
+/**
+ * A column. `half` names the two halves of one split (D212): closing one returns its width to the other. `group` names a row
+ * group (D212, amended 2026-11-03): adjacent columns with the same name are one grid, one band for each row of windows, with no
+ * window spanning columns. Both are runtime only; a generated view (Settings) declares its rows each time it is built.
+ */
+export interface ColumnModel { id: string; w: number; half?: string; group?: string; wins: WindowModel[] }
 
 export interface NodeModel {
   id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;

@@ -110,6 +110,46 @@ impl Drop for Directory {
         }
     }
 }
+/// Makes one attempt to connect to the helper's socket at `path`.
+///
+/// Returns `Ok(None)` while the helper is still starting, so the caller polls
+/// again: either the socket does not exist yet, or it exists but refuses
+/// connections. The second case is normal. A helper creates the pathname with
+/// `bind` and starts accepting only at `listen`, and a busy machine can
+/// deschedule it between the two calls. Everything else is an error that
+/// ends startup: a path that is not a private socket owned by this user, or
+/// a peer that fails [`socket::admit`].
+async fn connect_ready(path: &std::path::Path) -> io::Result<Option<UnixStream>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket()
+                || metadata.uid() != nix::unistd::geteuid().as_raw()
+                || metadata.mode() & 0o077 != 0
+            {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let stream = match UnixStream::connect(path).await {
+                Ok(stream) => stream.into_std()?,
+                // Bound but not yet listening, or removed after the metadata
+                // check: still starting, within the caller's startup budget.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                    ) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            };
+            socket::admit(&stream)?;
+            UnixStream::from_std(stream).map(Some)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 impl Helper {
     /// Launches the helper and connects to its socket, polling every 10 ms for up
     /// to 3 seconds for the socket to appear.
@@ -133,34 +173,23 @@ impl Helper {
             .map_err(|_| StartFailure::Unavailable)?;
         let path = directory.path.join("desktop.sock");
         // Startup alone owns a retry timer; idle admitted sources have none.
-        let connection = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if *stop.borrow() {
-                    return Err(io::ErrorKind::Interrupted.into());
-                }
-                match fs::symlink_metadata(&path) {
-                    Ok(metadata) => {
-                        if !metadata.file_type().is_socket()
-                            || metadata.uid() != nix::unistd::geteuid().as_raw()
-                            || metadata.mode() & 0o077 != 0
-                        {
-                            return Err(io::ErrorKind::PermissionDenied.into());
-                        }
-                        let stream = UnixStream::connect(&path).await?.into_std()?;
-                        socket::admit(&stream)?;
-                        return UnixStream::from_std(stream);
+        let connection: io::Result<UnixStream> =
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if *stop.borrow() {
+                        return Err(io::ErrorKind::Interrupted.into());
                     }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
+                    if let Some(stream) = connect_ready(&path).await? {
+                        return Ok(stream);
+                    }
+                    tokio::select! { biased;
+                        _ = stop.changed() => return Err(io::ErrorKind::Interrupted.into()),
+                        () = tokio::time::sleep(Duration::from_millis(10)) => {},
+                    }
                 }
-                tokio::select! { biased;
-                    _ = stop.changed() => return Err(io::ErrorKind::Interrupted.into()),
-                    () = tokio::time::sleep(Duration::from_millis(10)) => {},
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()));
+            })
+            .await
+            .unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()));
         let Ok(stream) = connection else {
             component
                 .set_enabled(false)
@@ -265,5 +294,46 @@ impl Reader {
             self.deadline
                 .get_or_insert_with(|| tokio::time::Instant::now() + Duration::from_secs(3));
         }
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    //! Holds a socket between `bind` and `listen`, so the startup window is
+    //! tested directly rather than by hoping the scheduler lands in it.
+    use super::*;
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket,
+    };
+    use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+
+    /// A socket that is bound but not listening leaves startup pending, and the
+    /// same socket connects as soon as its owner calls `listen`.
+    #[tokio::test]
+    async fn bound_helper_socket_waits_for_listen() {
+        let root = nix::unistd::mkdtemp("/tmp/desktop-ready-XXXXXX").unwrap();
+        let path = root.join("desktop.sock");
+        let listener = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+        .unwrap();
+        bind(listener.as_raw_fd(), &UnixAddr::new(&path).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let before = connect_ready(&path).await;
+        listen(&listener, Backlog::new(1).unwrap()).unwrap();
+        let after = connect_ready(&path).await;
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            before.unwrap().is_none(),
+            "bind alone must leave startup pending"
+        );
+        assert!(
+            after.unwrap().is_some(),
+            "listen completes helper readiness"
+        );
     }
 }

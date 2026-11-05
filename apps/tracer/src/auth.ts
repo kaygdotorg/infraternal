@@ -236,6 +236,32 @@ export async function checkSetupToken(token: string): Promise<void> {
   await post<void>("setup-check", { token });
 }
 
+/** How long an API key may go unused before it stops working, in days. Owner only: anyone else gets `undefined`. */
+export async function readKeyLifetime(): Promise<number | undefined> {
+  try {
+    const days = (await post<{ api_key_lifetime_days?: unknown }>("security-settings", {})).api_key_lifetime_days;
+    return typeof days === "number" ? days : undefined;
+  } catch (error: unknown) {
+    if (error instanceof AuthError && (error.status === 401 || error.status === 403)) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * Sets that lifetime. The server wants a passkey login from the last few minutes, so a refusal is answered once with a fresh
+ * passkey confirmation (a user action, as for a device approval) and the same request again; a second refusal is final.
+ */
+export async function writeKeyLifetime(days: number, device: string): Promise<void> {
+  const body = { api_key_lifetime_days: days };
+  try {
+    await post("security-settings-update", body);
+  } catch (error: unknown) {
+    if (!(error instanceof AuthError) || (error.status !== 401 && error.status !== 403)) throw error;
+    await loginWithPasskey(device);
+    await post("security-settings-update", body);
+  }
+}
+
 /** Checks the secure cookie when the app starts or returns to the foreground. */
 export async function checkSession(): Promise<AuthSession | undefined> {
   try {

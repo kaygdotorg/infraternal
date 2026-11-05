@@ -17,16 +17,17 @@ const STATES: Array<[string, string, (page: Page) => Promise<void>]> = [
   ["sidebar", mock("scene=3"), sidebar],
   ["palette", mock("scene=3"), async (p) => { await p.keyboard.press("Control+Shift+K"); await sleep(p, 600); }],
   ["window details popover", mock("scene=3"), async (p) => { await p.locator(".ui-window-pill").first().click(); await sleep(p, 900); }],
-  ["settings: toolbar and shortcuts", mock("scene=1"), async (p) => {
+  ["settings: typing (toolbar and shortcuts)", mock("scene=1"), async (p) => {
     // Waits for the mockup's live terminal to take the keys first, then for the palette and for the row it will run, not for fixed
     // times: on a slow or busy device the terminal attaches seconds late and takes the focus from a palette opened before that, so
     // the typed words went nowhere and Enter ran the first row (the all-views overview, which has no Settings window at reading size).
     await expect(p.locator("textarea:focus")).toHaveCount(1, { timeout: 20_000 });
     await p.keyboard.press("Control+Shift+K");
     await expect(p.locator("#palette-input")).toBeFocused();
-    await p.keyboard.type("Settings: Toolbar", { delay: 6 });
-    await expect(p.locator("#palette-results .result").first()).toContainText("Settings: Toolbar");
-    await p.keyboard.press("Enter");
+    await p.keyboard.type("Terminal › Typing", { delay: 6 });
+    const row = p.locator('#palette-results .result[data-action="canvas:settings:terminal.typing"]');
+    await expect(row).toContainText("Terminal › Typing");
+    await row.click();
     await expect(p.locator("#palette")).toBeHidden();
     await sleep(p, 1600);
   }],

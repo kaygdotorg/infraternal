@@ -459,7 +459,7 @@ fn transport_capability_withdrawal_reaches_compiled_node_providers() {
     }
 }
 
-#[cfg(feature = "socket-host")]
+#[cfg(all(feature = "socket-host", feature = "native-streams"))]
 #[tokio::test]
 async fn bulk_reply_completion_waits_for_the_last_transport_packet_reference() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);

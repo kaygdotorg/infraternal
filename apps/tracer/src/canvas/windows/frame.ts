@@ -54,6 +54,11 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
     actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
   }
   if (m.kind !== "node" && m.kind !== "settings" && m.kind !== "docs" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
+  // "Read about this window" comes first, before split, sessions and close, when the docs adapter has something to say about it (#304).
+  // Not in a terminal's header on a touch device: there the header holds Close alone, because "?" next to Close made the group fold
+  // into a "…" whose 44 px target overlapped its neighbours. It is reached from ⌘K ("Read about this window") instead. Other windows
+  // (a Settings window's header holds only "?") keep it on a phone.
+  if ((header || m.kind !== "terminal") && cx.adapters.docs?.for(m)) actions.unshift({ id: "docs", label: "Read about this window", icon: ICON.help, onSelect: (e) => { const source = e.detail === 0 ? "keyboard" : "pointer"; void onDemand(() => import("./docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, rec, source); }); } });
   // An app window or a screen is named by what it shows ("Notebook · Today"); the machine it lives on is the quiet part that gives
   // way first in a narrow pill, with its OS mark in front (D208). A terminal is the other way round: the machine, then its session.
   const title = m.kind === "app" || m.kind === "screen" ? { host: m.session ?? m.host, session: m.host } : { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
@@ -191,11 +196,26 @@ export function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
   const { camera } = cx;
   const cam = camera.cam;
   let origin = { x: 0, w: 0 };
+  /**
+   * A window of a row group has its own size (D212 amendment, D323): a drag changes this window and no other. The code for that is
+   * `resize-rows.on-demand.ts` (D188); it is fetched when the pointer first comes to such a window, long before a drag can begin.
+   */
+  let rows: ReturnType<typeof import("./resize-rows.on-demand").rowsResize> | undefined;
+  const preload = (): void => {
+    if (rows) return;
+    void onDemand(() => import("./resize-rows.on-demand")).then((m) => { rows ??= m.rowsResize(cx, rec); });
+  };
+  // A Settings window is always in a row group: fetch the code when the page is idle. Any other window that turns out to be in one
+  // fetches it when the pointer first reaches it.
+  if (rec.model.kind === "settings") whenIdle(preload, 1500);
+  else rec.card.root.addEventListener("pointerenter", () => { if (rowGroup(rec.card.root.parentElement as HTMLElement)) preload(); }, { once: true });
+  const rowGroup = (colEl: HTMLElement): boolean => colEl.dataset.group !== undefined && !!colEl.parentElement?.classList.contains("cl-group");
   return {
     // The pill has its own long-press (arrows on demand), so the resize hold starts on the rest of the header.
     holdOnPill: false,
     begin(): ResizeStart {
       const colEl = rec.card.root.parentElement as HTMLElement;
+      if (rowGroup(colEl) && rows) return rows.begin(colEl);
       // A column in a group has no box of its own (D212): its width is the one it was given.
       const width = (drawnWidthOf(colEl) || colEl.offsetWidth) * cam.z;
       origin = { x: rec.owner.x, w: Math.round(width / cam.z) };
@@ -205,6 +225,7 @@ export function resizeHost(cx: Ctx, rec: WinRec): WindowResizeHost {
     },
     apply(f: ResizeFrame): void {
       const colEl = rec.card.root.parentElement as HTMLElement;
+      if (rowGroup(colEl) && rows) { rows.apply(colEl, f); return; }
       const w = Math.round(f.width / cam.z);
       setColumnWidth(colEl, w, cx.state.metrics);
       colEl.dataset.user = "1";

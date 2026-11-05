@@ -32,6 +32,43 @@ pub struct PreparedHostKey {
     pub digest: [u8; 32],
 }
 
+/// Inputs for replacing a stuck install while retaining its enrolled host identity.
+/// The backend revalidates the host against the target and prepared key before reissuing authority.
+pub struct StuckInstallRequest<'a> {
+    pub target: &'a Target,
+    pub check: &'a Check,
+    pub host: uuid::Uuid,
+    pub lookup: Option<String>,
+    pub binding: PreparedHostKey,
+}
+
+/// What the server will do with a stuck upgrade journal. It decides at Check
+/// time, before anything on the host is stopped, offered or changed (#305).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StuckInstall {
+    /// This server enrolled the host, the key matches and the CA can reissue:
+    /// replace the stuck install and keep its host identity.
+    Replace,
+    /// The host is connected now with this identity, so the upgrade worked
+    /// and only its commit was lost: finish the journal, replace nothing.
+    Finish,
+    /// Another server enrolled this machine. After explicit confirmation it
+    /// joins this server as a new host with a new key; its old install is
+    /// set aside until the new enrollment commits, then deleted (D335, D337).
+    Reenroll,
+}
+
+/// The stuck upgrade as the read-only check saw it.
+pub struct StuckInstallCheck<'a> {
+    pub target: &'a Target,
+    pub check: &'a Check,
+    /// The host id in the journal's owner record.
+    pub host: uuid::Uuid,
+    pub lookup: Option<String>,
+    /// The enrolled key digest and issuing server, if the identity was readable.
+    pub enrolled: Option<&'a previous_attempt::Enrolled>,
+}
+
 /// Trusted request authority stays in memory and is never Debug or serialized.
 /// Browser enrollment must recheck this exact session atomically, not owner id alone.
 pub struct Authority {
@@ -98,6 +135,32 @@ pub trait Backend: Send + Sync {
         _: uuid::Uuid,
     ) -> Operation<'a, JoinMaterial> {
         Box::pin(async { Err(Failure::unsupported("Host setup retry is unavailable.")) })
+    }
+    /// Decide what a stuck upgrade journal allows before anything is offered or stopped.
+    /// Implementations check the host record, the enrolled key digest and CA readiness.
+    fn check_stuck_install<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: StuckInstallCheck<'a>,
+    ) -> Operation<'a, StuckInstall> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "Replacing a stuck install needs a compatible server enrollment path.",
+            ))
+        })
+    }
+    /// Rejoin an enrolled host after the person explicitly replaces its stuck upgrade.
+    fn reissue_stuck_install<'a>(
+        &'a self,
+        _: &'a Authority,
+        _: StuckInstallRequest<'a>,
+        _: &'a mut (dyn FnMut(uuid::Uuid) -> Result<(), Failure> + Send),
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async {
+            Err(Failure::unsupported(
+                "Replacing a stuck install needs a compatible server enrollment path.",
+            ))
+        })
     }
     /// Detached setup observes revocation independently of the wizard socket.
     fn authority_cancelled<'a>(&'a self, _: &'a Authority) -> Operation<'a, ()> {
@@ -361,7 +424,11 @@ impl Bootstrap {
             // A previous acquisition may have failed before a full image existed.
             // Reverify it before renewing any enrollment authority for this retry.
             let (binary, _) = self
-                .resolve_payload(saved.architecture, false, self.payload_budget(started))
+                .resolve_payload(
+                    saved.architecture,
+                    false,
+                    Self::payload_budget(started + self.deadline),
+                )
                 .await?;
             let join = self.backend.reissue_invitation(&authority, host).await?;
             installation.restart_setup(&binary, &join).await?;
@@ -502,6 +569,14 @@ impl Bootstrap {
             setup: Arc::default(),
             pending_setup: Arc::default(),
         }
+    }
+
+    /// Shorten the per-attempt limit, so tests reach the deadline path quickly.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_attempt_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     /// Resolve signed production payloads through the existing installation transaction [225].
@@ -783,6 +858,9 @@ impl Bootstrap {
                 } => permit,
             }
         };
+        // The slot lives in the attempt's resources, so a confirmation wait can
+        // hand it back (#305 P3-2); it is still dropped only with this future.
+        let admission = admission.map(|permit| resources.slot = Some(permit));
         let result = if let Err(error) = &admission {
             Err(error.clone())
         } else if *cancel.borrow() {
@@ -790,22 +868,33 @@ impl Bootstrap {
         } else {
             let mut closed = batch.socket_closed.subscribe();
             let mut detached = false;
-            let running = tokio::time::timeout(
-                self.deadline,
-                self.run(&batch, &target, attempt, started, &mut resources, auth_once),
-            );
+            let (deadline, mut until) = watch::channel(started + self.deadline);
+            resources.deadline = Some(deadline);
+            let expiry = tokio::time::sleep_until((*until.borrow_and_update()).into());
+            tokio::pin!(expiry);
+            let running = self.run(&batch, &target, attempt, started, &mut resources, auth_once);
             tokio::pin!(running);
+            // One watcher for the whole attempt: the loop turns again on every
+            // deadline change, and a watcher made per turn would drop its
+            // authorization query mid-flight each time.
+            let revoked = self.backend.authority_cancelled(&batch.authority);
+            tokio::pin!(revoked);
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel.changed() => break Err(cancelled),
-                    _ = self.backend.authority_cancelled(&batch.authority) => break Err(cancelled),
+                    _ = &mut revoked => break Err(cancelled),
                     () = async { if *closed.borrow() { return; } let _ = closed.changed().await; }, if !detached => {
                         let published = lock(&batch.history).metadata.get(&target.id).is_some_and(|m| m.session_id.is_some());
                         if !published { break Err(cancelled); }
                         detached = true;
                     },
-                    result = &mut running => break result.unwrap_or_else(|_| Err(Failure::install("Host installation exceeded its time limit."))),
+                    result = &mut running => break result,
+                    Ok(()) = until.changed() => {
+                        let at = *until.borrow_and_update();
+                        expiry.as_mut().reset(at.into());
+                    },
+                    () = &mut expiry => break Err(Failure::install("Host installation exceeded its time limit.")),
                 }
             }
         };
@@ -832,11 +921,13 @@ impl Bootstrap {
                     )
                     .await;
                 }
+                let mut rolled_back = true;
                 if let Some(installation) = resources.installation {
                     let cleanup =
                         tokio::time::timeout(Duration::from_secs(30), installation.rollback())
                             .await;
-                    if !matches!(cleanup, Ok(Ok(()))) {
+                    rolled_back = matches!(cleanup, Ok(Ok(())));
+                    if !rolled_back {
                         if let Some(state) = lock(&batch.states).get_mut(&target.id) {
                             state.cleanup = Some(installation.cleanup_coordinates());
                         }
@@ -846,6 +937,46 @@ impl Bootstrap {
                             attempt,
                             Step::Install,
                             "Automatic cleanup could not finish. Retry to finish the earlier setup before continuing.",
+                            started,
+                            None,
+                        );
+                    }
+                }
+                // The new enrollment failed: put back the install it set aside,
+                // but only once this attempt's own files are gone (#305 P1-1, D335).
+                if let Some(aside) = resources.set_aside
+                    && rolled_back
+                {
+                    // The host restore queues up to 25 s behind a set-aside that
+                    // is still running (#305 P2-1); the cap leaves it time to
+                    // finish after that, so "not put back" is never said of a
+                    // restore that is about to complete.
+                    let restored = tokio::time::timeout(
+                        Duration::from_secs(45),
+                        aside.previous.restore_set_aside(
+                            aside.session.as_ref(),
+                            &target,
+                            aside.replaced,
+                        ),
+                    )
+                    .await;
+                    let message = match restored {
+                        Ok(Ok(true)) => {
+                            Some("The earlier infraternal agent was put back as it was found.")
+                        }
+                        // Never set aside: the host is as it was found.
+                        Ok(Ok(false)) => None,
+                        _ => Some(
+                            "The earlier infraternal agent was not put back. Add the host again to put it back.",
+                        ),
+                    };
+                    if let Some(message) = message {
+                        emit(
+                            &batch,
+                            &target,
+                            attempt,
+                            Step::Install,
+                            message,
                             started,
                             None,
                         );
@@ -938,12 +1069,14 @@ impl Bootstrap {
 
     /// Resolve the first trusted image before any installation writes. A full
     /// fallback is retained so an older release does not repeat its acquisition.
+    #[allow(clippy::too_many_arguments)]
     async fn payload(
         &self,
         batch: &BatchInner,
         target: &Target,
         attempt: u32,
         started: Instant,
+        until: Instant,
         architecture: crate::probe::Architecture,
         early: bool,
     ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), Failure> {
@@ -961,15 +1094,15 @@ impl Bootstrap {
                 None,
             );
         }
-        self.resolve_payload(architecture, early, self.payload_budget(started))
+        self.resolve_payload(architecture, early, Self::payload_budget(until))
             .await
     }
 
-    fn payload_budget(&self, started: Instant) -> Duration {
-        // End acquisition before the enclosing attempt deadline so its named
-        // failure survives instead of becoming a generic installation timeout.
-        self.deadline
-            .saturating_sub(started.elapsed())
+    /// End acquisition before the enclosing attempt deadline `until` so its
+    /// named failure survives instead of becoming a generic installation timeout.
+    fn payload_budget(until: Instant) -> Duration {
+        until
+            .saturating_duration_since(Instant::now())
             .saturating_sub(Duration::from_secs(1))
             .min(Duration::from_secs(60))
     }
@@ -1035,12 +1168,22 @@ impl Bootstrap {
                 check.architecture
             };
             let (binary, _) = self
-                .payload(batch, target, attempt, started, architecture, false)
+                .payload(
+                    batch,
+                    target,
+                    attempt,
+                    started,
+                    started + self.deadline,
+                    architecture,
+                    false,
+                )
                 .await?;
             Installation::prepare_recovery(session, target, &binary).await
         })
     }
 
+    /// Enroll one host, publish its CLI, report setup warnings, and prove readiness.
+    /// All changes stay bound to this attempt's transaction for cancellation recovery.
     #[allow(
         clippy::too_many_lines,
         reason = "Keep ordered bootstrap steps and transaction ownership in one cancellation-safe attempt."
@@ -1144,33 +1287,185 @@ impl Bootstrap {
                 result => result?,
             }
             let lookup = session.trust_lookup();
-            if let Some(previous) = previous {
-                // Only this server's durable failed-host binding finishes the
-                // earlier setup without asking; anything else still asks (#230).
-                let automatic = self
-                    .backend
-                    .owns_failed_setup(
-                        &batch.authority,
+            let replacement_host = if let Some(previous) = previous {
+                if let Some(replaced) = previous.set_aside() {
+                    // An earlier Replace or Re-enroll set the stuck install aside
+                    // and could not put it back. Offer that, never an install
+                    // beside it (#305 P2-1).
+                    self.confirm_start_fresh(
+                        batch,
                         target,
-                        &check,
-                        previous.host,
-                        lookup.clone(),
+                        attempt,
+                        started,
+                        &previous,
+                        FreshMode::PutBack,
+                        resources,
                     )
                     .await?;
-                self.await_start_fresh(
-                    batch,
-                    target,
-                    attempt,
-                    started,
-                    session.as_ref(),
-                    &previous,
-                    automatic,
-                )
-                .await?;
-            }
+                    let restored = previous
+                        .restore_set_aside(session.as_ref(), target, replaced)
+                        .await?;
+                    return Err(Failure::install(if restored {
+                        "The earlier infraternal agent was put back as it was found. Add the host again to continue."
+                    } else {
+                        "Nothing was set aside any more. Add the host again to continue."
+                    }));
+                } else if let Some(host) = previous.replacement_host() {
+                    // The server decides before anything is offered or stopped:
+                    // a stuck upgrade is replaced only when this server can
+                    // re-enroll the same identity (#305, D335).
+                    let verdict = self
+                        .backend
+                        .check_stuck_install(
+                            &batch.authority,
+                            StuckInstallCheck {
+                                target,
+                                check: &check,
+                                host,
+                                lookup: lookup.clone(),
+                                enrolled: previous.enrolled(),
+                            },
+                        )
+                        .await?;
+                    match verdict {
+                        StuckInstall::Finish => {
+                            previous
+                                .finish_upgrade(session.as_ref(), target)
+                                .await
+                                .map_err(|mut error| {
+                                    // 75: the agent stopped between the server's
+                                    // online check and the host's delete; the
+                                    // journal and rollback copies stay (J202 P2).
+                                    if error.exit_status == Some(75) {
+                                        error.message = AGENT_STOPPED_BEFORE_FINISH;
+                                    }
+                                    error
+                                })?;
+                            self.backend
+                                .preflight_existing_host(&batch.authority, target, lookup.clone())
+                                .await?;
+                            return Err(Failure::install(
+                                "This host is already added. Open its terminal from Console.",
+                            ));
+                        }
+                        StuckInstall::Reenroll if previous.in_use_elsewhere() => {
+                            // Running with open terminals: it may be in use by its
+                            // server. Refuse by name; nothing is offered (D337).
+                            return Err(previous.in_use_failure());
+                        }
+                        StuckInstall::Replace | StuckInstall::Reenroll => {
+                            let mode = if verdict == StuckInstall::Replace {
+                                FreshMode::Replace
+                            } else {
+                                FreshMode::Reenroll
+                            };
+                            self.confirm_start_fresh(
+                                batch, target, attempt, started, &previous, mode, resources,
+                            )
+                            .await?;
+                            // The person may have waited most of the attempt: the
+                            // host could have been revoked, or the old agent could
+                            // have connected since. Ask again right before the stop;
+                            // only the same verdict may stop anything (#305 P1-1, P3-1).
+                            let again = self
+                                .backend
+                                .check_stuck_install(
+                                    &batch.authority,
+                                    StuckInstallCheck {
+                                        target,
+                                        check: &check,
+                                        host,
+                                        lookup: lookup.clone(),
+                                        enrolled: previous.enrolled(),
+                                    },
+                                )
+                                .await?;
+                            if again != verdict {
+                                return Err(Failure::install(CHANGED_WHILE_WAITING));
+                            }
+                            let replaced = mode == FreshMode::Replace;
+                            // One token for this attempt's set-aside and restore:
+                            // whichever takes the host's setup guard first decides,
+                            // and a restore that finds nothing moved stops the
+                            // set-aside from starting later (#305, J202 P2).
+                            let previous = previous.clone().with_cancel(uuid::Uuid::new_v4());
+                            // Recorded before the stop: any later failure, even an
+                            // attempt dropped while the script runs, puts the old
+                            // install back (#305 P1-1, P2-1). A restore of what was
+                            // never set aside reports "untouched" and changes nothing.
+                            resources.set_aside = Some(SetAside {
+                                session: session.clone(),
+                                previous: previous.clone(),
+                                replaced,
+                            });
+                            let acted = self
+                                .act_start_fresh(
+                                    batch,
+                                    target,
+                                    attempt,
+                                    started,
+                                    session.as_ref(),
+                                    &previous,
+                                    mode,
+                                )
+                                .await;
+                            if let Err(error) = &acted
+                                && script_finished(error)
+                            {
+                                // The script ran to its end: its own trap already
+                                // put the service back, and nothing is set aside.
+                                resources.set_aside = None;
+                            }
+                            acted.map_err(|mut error| {
+                                // 75 here is the record changing since Check, for
+                                // example its agent starting while the person
+                                // decided; Check shows it again (#305 P2-2).
+                                if error.exit_status == Some(75) {
+                                    error.message = CHANGED_WHILE_WAITING;
+                                }
+                                error
+                            })?;
+                            replaced.then_some(host)
+                        }
+                    }
+                } else {
+                    // Only this server's durable failed-host binding finishes the
+                    // earlier setup without asking (#230).
+                    let automatic = self
+                        .backend
+                        .owns_failed_setup(
+                            &batch.authority,
+                            target,
+                            &check,
+                            previous.host,
+                            lookup.clone(),
+                        )
+                        .await?;
+                    self.await_start_fresh(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        session.as_ref(),
+                        &previous,
+                        if automatic {
+                            FreshMode::Automatic
+                        } else {
+                            FreshMode::Confirm
+                        },
+                        resources,
+                    )
+                    .await?;
+                    None
+                }
+            } else {
+                None
+            };
             // Existing remote identities must be reported before the first
             // payload is staged, even if the replacement binary is unavailable.
-            if server_origin.is_some() {
+            // A stuck upgrade already names its enrolled identity; reissue checks
+            // that exact host binding before publishing the replacement enrollment.
+            if server_origin.is_some() && replacement_host.is_none() {
                 self.backend
                     .preflight_existing_host(&batch.authority, target, lookup.clone())
                     .await?;
@@ -1181,12 +1476,20 @@ impl Bootstrap {
             let mut staged_payload = None;
             let key_binding = if let Some(origin) = server_origin.as_deref() {
                 let (session_binary, full_binary) = self
-                    .payload(batch, target, attempt, started, check.architecture, false)
+                    .payload(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        resources.until(started + self.deadline),
+                        check.architecture,
+                        false,
+                    )
                     .await?;
                 let binary = full_binary
                     .clone()
                     .unwrap_or_else(|| session_binary.clone());
-                let host = uuid::Uuid::new_v4();
+                let host = replacement_host.unwrap_or_else(uuid::Uuid::new_v4);
                 resources.installation =
                     Some(Installation::new_pending(session.clone(), target, host)?);
                 let transaction = resources.installation.as_ref().ok_or_else(|| {
@@ -1204,21 +1507,50 @@ impl Bootstrap {
                 resources.host = Some(host);
                 Ok(())
             };
-            let join = if let Some(binding) = key_binding {
-                self.backend
-                    .invitation_registered_with_key(
-                        &batch.authority,
-                        target,
-                        &check,
-                        lookup.clone(),
-                        binding,
-                        &mut register,
-                    )
-                    .await?
-            } else {
-                self.backend
-                    .invitation_registered(&batch.authority, target, &check, lookup, &mut register)
-                    .await?
+            let join = match (replacement_host, key_binding) {
+                (Some(host), Some(binding)) => {
+                    self.backend
+                        .reissue_stuck_install(
+                            &batch.authority,
+                            StuckInstallRequest {
+                                target,
+                                check: &check,
+                                host,
+                                lookup: lookup.clone(),
+                                binding,
+                            },
+                            &mut register,
+                        )
+                        .await?
+                }
+                (Some(_), None) => {
+                    return Err(Failure::install(
+                        "Replacing this stuck install needs HTTPS enrollment.",
+                    ));
+                }
+                (None, Some(binding)) => {
+                    self.backend
+                        .invitation_registered_with_key(
+                            &batch.authority,
+                            target,
+                            &check,
+                            lookup.clone(),
+                            binding,
+                            &mut register,
+                        )
+                        .await?
+                }
+                (None, None) => {
+                    self.backend
+                        .invitation_registered(
+                            &batch.authority,
+                            target,
+                            &check,
+                            lookup,
+                            &mut register,
+                        )
+                        .await?
+                }
             };
             let key_prepared = server_origin.is_some();
             resources.host = Some(join.host);
@@ -1230,8 +1562,16 @@ impl Bootstrap {
             let (session_binary, mut full_binary) = match staged_payload {
                 Some(payload) => payload,
                 None => {
-                    self.payload(batch, target, attempt, started, check.architecture, early)
-                        .await?
+                    self.payload(
+                        batch,
+                        target,
+                        attempt,
+                        started,
+                        resources.until(started + self.deadline),
+                        check.architecture,
+                        early,
+                    )
+                    .await?
                 }
             };
             if resources.installation.is_none() {
@@ -1250,6 +1590,7 @@ impl Bootstrap {
                 started,
                 None,
             );
+            let until = resources.until(started + self.deadline);
             let setup = async {
                 if early {
                     let encoding = checked
@@ -1310,7 +1651,7 @@ impl Bootstrap {
                                 let (full, _) = self.resolve_payload(
                                     check.architecture,
                                     false,
-                                    self.payload_budget(started),
+                                    Self::payload_budget(until),
                                 ).await?;
                                 full_binary = Some(full.clone());
                                 full
@@ -1370,6 +1711,17 @@ impl Bootstrap {
                 )?;
             }
             drop(join); // Capability plaintext is erased immediately after its stdin handoff.
+            if transaction.alias_skipped() {
+                emit(
+                    batch,
+                    target,
+                    attempt,
+                    Step::Install,
+                    "Skipped infra because an existing path belongs to another command. Use infraternal instead.",
+                    started,
+                    None,
+                );
+            }
             if !linger && !early {
                 emit(
                     batch,
@@ -1609,9 +1961,34 @@ impl Bootstrap {
         started: Instant,
         session: &dyn SshSession,
         previous: &PreviousAttempt,
-        automatic: bool,
+        mode: FreshMode,
+        resources: &mut AttemptResources,
     ) -> Result<(), Failure> {
-        if automatic {
+        self.confirm_start_fresh(batch, target, attempt, started, previous, mode, resources)
+            .await?;
+        self.act_start_fresh(batch, target, attempt, started, session, previous, mode)
+            .await
+    }
+
+    /// Offer the earlier attempt's action and wait for the person's confirmation;
+    /// an automatic recovery only announces itself. Changes nothing on the host.
+    /// The wait does not count toward the attempt's deadline: the deadline
+    /// starts again in full once the person confirms, so a slow decision never
+    /// leaves the stop and the new enrollment only seconds (#305 P2-1).
+    /// Nor does it hold an add-host slot: eight unanswered confirmations would
+    /// otherwise block every add-host on the server for the whole wait (#305 P3-2).
+    #[allow(clippy::too_many_arguments)]
+    async fn confirm_start_fresh(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        previous: &PreviousAttempt,
+        mode: FreshMode,
+        resources: &mut AttemptResources,
+    ) -> Result<(), Failure> {
+        if mode == FreshMode::Automatic {
             emit(
                 batch,
                 target,
@@ -1638,19 +2015,61 @@ impl Bootstrap {
                 Step::Check,
                 "This host has leftovers from an earlier setup",
                 started,
-                Some(Failure::new(
-                    crate::model::FailureKind::StalePreviousAttempt,
-                    "infraternal didn't finish setting up here before. Start fresh to remove what it left behind and continue.",
-                )),
-                Some(Box::new(previous.findings(target.mode, challenge))),
+                Some(if mode == FreshMode::PutBack {
+                    previous.set_aside_failure()
+                } else {
+                    previous.stuck_failure(mode == FreshMode::Reenroll)
+                }),
+                Some(Box::new(match mode {
+                    FreshMode::Reenroll => previous.reenroll_findings(target.mode, challenge),
+                    FreshMode::PutBack => previous.set_aside_findings(target.mode, challenge),
+                    _ => previous.findings(target.mode, challenge),
+                })),
             );
+            if let Some(deadline) = &resources.deadline {
+                deadline.send_replace(Instant::now() + CONFIRMATION_WAIT);
+            }
+            let held = resources.slot.take().is_some();
             resumed.await.map_err(|_| {
                 Failure::install("Host provisioning stopped while waiting to start fresh.")
             })?;
+            if held {
+                // Queue like any new add-host; the confirmation wait's limit
+                // still applies until the slot is ours again.
+                resources.slot = Some(
+                    self.concurrency
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| Failure::install("Bootstrap is shutting down."))?,
+                );
+            }
+            if let Some(deadline) = &resources.deadline {
+                deadline.send_replace(Instant::now() + self.deadline);
+            }
         }
+        Ok(())
+    }
+
+    /// Run the confirmed action on the host.
+    #[allow(clippy::too_many_arguments)]
+    async fn act_start_fresh(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        session: &dyn SshSession,
+        previous: &PreviousAttempt,
+        mode: FreshMode,
+    ) -> Result<(), Failure> {
         self.backend
             .record_start_fresh(target, previous.host, previous.transaction, "started");
-        let result = previous.start_fresh(session, target).await;
+        let result = if mode == FreshMode::Reenroll {
+            previous.supersede(session, target).await
+        } else {
+            previous.start_fresh(session, target).await
+        };
         self.backend.record_start_fresh(
             target,
             previous.host,
@@ -1731,15 +2150,72 @@ async fn restore_previous(
     Ok(())
 }
 
+/// How long a confirmation may wait for the person. Closing the add-host
+/// window cancels it sooner; this only bounds a window left open.
+/// A Finish whose host agent stopped after the server saw it online (#305, J202 P2).
+const AGENT_STOPPED_BEFORE_FINISH: &str = "This host's infraternal agent stopped before its setup could be finished. Nothing was removed; add the host again.";
+
+/// A confirmed Replace or Re-enroll whose host no longer matches what was confirmed.
+const CHANGED_WHILE_WAITING: &str = "This host changed while it waited for your confirmation. Nothing was stopped; add it again to see what it needs now.";
+
+const CONFIRMATION_WAIT: Duration = Duration::from_mins(15);
+
+/// How an earlier attempt is cleared before this one continues.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FreshMode {
+    /// This server's failed-host binding owns it: clear it without asking.
+    Automatic,
+    /// Ask, then remove an earlier fresh setup's leftovers.
+    Confirm,
+    /// Ask, then replace a stuck upgrade this server enrolled.
+    Replace,
+    /// Ask, then set aside an install another server enrolled (D335).
+    Reenroll,
+    /// Ask, then put back an install an earlier Replace or Re-enroll set aside.
+    PutBack,
+}
+
+/// A stuck install this attempt set aside, or may have: put back if the attempt fails.
+struct SetAside {
+    session: Arc<dyn SshSession>,
+    previous: PreviousAttempt,
+    /// A Replace moved only the journal; a Re-enroll moved the whole install (D335).
+    replaced: bool,
+}
+
+/// Whether a failed host step is the script's own exit, so its trap has run.
+/// No status, or ssh's own 255, means the connection failed and the host
+/// side may still have finished.
+fn script_finished(error: &Failure) -> bool {
+    error.exit_status.is_some_and(|status| status != 255)
+}
+
 /// Mutation resources belong to one attempt, including its rollback and host retirement.
 #[derive(Default)]
 struct AttemptResources {
+    /// The attempt's deadline. A confirmation pauses it and restarts it in full
+    /// once the person confirms (#305 P2-1).
+    deadline: Option<watch::Sender<Instant>>,
+    /// The server-wide add-host slot (`CONCURRENT_HOSTS`). Handed back while the
+    /// attempt waits for a person to confirm, taken again once they do (#305 P3-2).
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// A stuck install set aside for Replace or Re-enroll; put back if this attempt fails.
+    set_aside: Option<SetAside>,
     installation: Option<Installation>,
     host: Option<uuid::Uuid>,
     // Protect the real shim before a durable routing write can be cancelled.
     published: bool,
     // Only an acknowledged publication may suppress the wizard failure event.
     announced: bool,
+}
+
+impl AttemptResources {
+    /// The attempt's current deadline, or `fallback` before the attempt set one.
+    fn until(&self, fallback: Instant) -> Instant {
+        self.deadline
+            .as_ref()
+            .map_or(fallback, |deadline| *deadline.borrow())
+    }
 }
 
 // Retain only failed live-session transaction coordinates; success removes the

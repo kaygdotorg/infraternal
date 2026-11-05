@@ -21,10 +21,10 @@ export function createViewListPanel(cx: Ctx): ViewList {
     abort?.abort(); abort = undefined;
     morph?.close(instant);
   };
-  const toggle = (): void => {
+  const toggle = (from?: HTMLElement): void => {
     if (morph?.isOpen) { close(); return; }
     if (cx.float.isOpen()) cx.float.close(true);
-    const capsule = cx.pill.capsule;
+    const capsule = from ?? cx.pill.capsule;
     const panel = el("section", "cl-viewlist ui-overlay-surface");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", "Views");

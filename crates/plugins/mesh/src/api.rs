@@ -481,23 +481,6 @@ fn validate_name(name: &str) -> Result<(), MeshApiError> {
     Ok(())
 }
 
-/// Whether `name` is the stored label for a node without a known name (`unnamed`, `unnamed-<n>`). Nobody may
-/// hold one as a real name. No view derives such a label for a viewer: a machine a viewer may not see is absent.
-pub(crate) fn is_unnamed_label(name: &str) -> bool {
-    name == "unnamed"
-        || name
-            .strip_prefix("unnamed-")
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
-/// A person cannot choose a label kept for unnamed nodes; it would read as a placeholder.
-fn refuse_unnamed_label(name: &str) -> Result<(), MeshApiError> {
-    if is_unnamed_label(name) {
-        return Err(MeshApiError::InvalidInput);
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_host(name: &str) -> Result<(), MeshApiError> {
     validate_name(name)
 }
@@ -956,7 +939,6 @@ impl MeshService {
             }
         }
         // Enrolment only ever adds a remote machine; the server's node comes from its own channel.
-        refuse_unnamed_label(&request.name)?;
         crate::store::make_room(&mut tx, actor, None, &request.name).await?;
         // Persist allocation history independently of live rows. Explicitly imported
         // IDs also advance allocation; exhaustion refuses before any identity is issued.
@@ -1059,7 +1041,6 @@ impl MeshService {
         // hidden collision would let scoped managers confirm hostnames by comparing it with a free name.
         authorize(&mut tx, actor, MANAGE_NODES, &[]).await?;
         let scopes = endpoint_scopes(&mut tx, &Endpoint::Node(NodeId(request.node_id))).await?;
-        refuse_unnamed_label(&request.name)?;
         let mut scopes = scopes;
         for moved in crate::store::make_room(&mut tx, actor, Some(id), &request.name).await? {
             let moved =

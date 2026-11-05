@@ -4019,3 +4019,93 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        actually use, and a test of the Mac side: "screenshots look pretty
        good but i want mockups with the buttons we are going to use, has the
        mac agent been tested?"
+350. **App-window controls, round 1 (owner, 2026-11-04, #146; extends D342,
+     D343, D349):**
+     - **Top right:** Send keys stays. Bring to front is questioned ("send
+       keys is a good action but what is bring to front? we need to refine
+       this"). The owner pointed to the Screens 5 App Store screenshots as a
+       reference. The final set is asked as a follow-up.
+     - **Send keys:** a short list on desktop. "on phone it should replace
+       the terminal row in the toolbar."
+     - **Settings** (1:1 or fit, frame rate, reconnect) sit behind a gear in
+       the window's pill, "but global defaults need to be in Settings →
+       Remote Desktop → MacOS".
+     - **Frame rate:** "Automatic" or "Save data" ("agreed").
+     - **Phone layout:** "i think for both terminal and mac, we should bring
+       the machine pill down. headers are the wrong place for mobile. what
+       you're suggesting belongs to the phone toolbar row." On a phone, the
+       machine pill moves down to the bottom toolbar area, for terminals
+       and app windows alike, and Full screen and Close live in the phone
+       toolbar row, not a header.
+     - **Picker rows:** "<Icon> <App> <Window Title> <Optional Number>". The
+       number appears only when two windows of one app share a title.
+351. **App-window top right, and engineering practices adopted (owner,
+     2026-11-04, #146, #344):**
+     - **App-window top right:** Send keys plus ⋯. The ⋯ menu holds
+       Screenshot, View only, Close window on the machine (with a
+       confirmation) and Settings. Bring to front is dropped, because input
+       already brings the app forward (D208 A3): "correct, that's all for
+       now. we can change it later as needs arise."
+     - **Engineering practices (#344) are adopted:** "yes this is way better
+       than arbitrary rules because these are grounded in experience". They
+       live in `docs/ENGINEERING.md`, enforced through review plus cheap
+       checks ("agreed"). Specifically:
+       - an event-loop lag probe in tests and the benchmark harness only,
+         never in shipped builds ("agreed");
+       - a root gate step for changes that touch root-install, proxy, mesh
+         or shim code ("agreed but isn't that what test.ssh.kayg.org
+         for?"). The test server stays the real-environment check for
+         browser and passkey flows; the root gate covers root-only code
+         paths on every change;
+       - clippy's `too_many_lines` and `too_many_arguments` are turned off
+         ("sure");
+       - D345 doc comments are checked on the diff ("correct");
+       - a new fixed sleep in a test needs a written reason, flagged on the
+         diff ("agreed");
+       - the fuzz targets run nightly on dev-02, about 1 h, with crashes
+         filed as issues ("agreed").
+
+352. **Overnight answers: revocations, mesh SSH, sessions CLI, Themes, Mac
+     parity (owner, 2026-11-05; #347, #221, #355, #323, #285, #260, #328):**
+     - **Revocation backpressure (#347; replaces J196's host-wide latch):**
+       the server does not treat access as retired until the infraternal
+       agent has durably accepted the revocation, and it waits when the
+       agent's reserved lane is full. Only the people affected are blocked,
+       and there is no host-wide lockout. The owner agreed ("correct") to:
+       "Only the affected people are blocked, the server stays the source
+       of truth, and there's no host-wide lockout to recover from."
+     - **SSH to the server's own host follows Access (#221; narrows D164
+       for D235):** the implicit reach toward the server covers only the
+       infraternal control plane. SSH and every other service on the
+       server's host follow Access like any other machine ("correct").
+     - **The server is not a place to work from (#221):** nobody on the
+       server's host may use the mesh SSH key socket. "if you remember, we
+       were heading towards an untrusted server where the canvas runs
+       entirely on the client. so yes the server is not a place to work
+       from."
+     - **`infraternal sessions` deadlines (#355; extends #324 and #334):**
+       there is no whole-request 4 s clock. Each shim exchange is bounded
+       by progress, so a stuck shim still fails fast ("this is correct").
+     - **Themes follow the account (#323; D178, D180):** the theme belongs
+       to the per-account canvas document and appears the same on every
+       device; only the camera is per device. "shouldn't this follow the
+       decentralised canvas rule such that the canvas appears the same on
+       all devices per account?" The blur cost is measured on a GPU Mac
+       before any default changes. The small Themes items (default font
+       weights, Catppuccin Frappé and Macchiato rows, Ayu without Mirage,
+       Gruvbox under MIT, J206's two TASTE edits) are accepted ("agreed").
+     - **macOS reaches parity with Linux (#285, #260):** a mesh that
+       includes a Mac rotates no WireGuard keys until Mac rotation ships,
+       as its own slice (D166 fail-safe kept). The owner said "agreed,
+       you're asking me mac questions that basically equate to get the mac
+       cli in feature parity to the linux cli :P". The Mac runs our
+       GotaTun fork once its current changes settle, measured on the Mac
+       VM first: "again, you're asking if mac should have feauter parity
+       and the answer is yes. moreso yes since we moved it to userspace".
+       Parity questions are not asked again.
+     - **Engine work deferred, not dropped (#260, J201):** io_uring,
+       AF_XDP, a second SIMD crypto library and a multi-queue TUN wait
+       until a profile shows the need: "agreed measure first but keep them
+       noted".
+     - **macOS "logged in" means a desktop login (#328, D335):** someone
+       logged in only over SSH gets the plain shell ("yes").
