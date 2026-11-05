@@ -554,7 +554,7 @@ def main():
         scratch = Path(tempfile.mkdtemp(prefix='privileged-', dir=Path.home() / '.cache'))
         try:
             (scratch / 'root').mkdir()
-            escaped = self_check(scratch, target, root)
+            escaped = self_check(scratch, target, root, memory_scope())
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         raise SystemExit('\n'.join(escaped) if escaped else 0)

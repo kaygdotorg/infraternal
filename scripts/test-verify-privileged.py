@@ -329,6 +329,28 @@ class Lifecycle(unittest.TestCase):
             self.assertIn(name, p.privileged_ignored(root, package, directories[package]).get(target, {}),
                           f'{package} {target} {name}')
 
+    def test_self_check_command_line(self):
+        """`verify-privileged --self-check` runs the escape probes and exits 0 when contained (J266 P3-1)."""
+        contained = subprocess.CompletedProcess([], 0, ''.join(f'contained: {label}\n' for label in p.ESCAPES)
+                                                + 'contained: wrote only to the sandbox tmpfs\n', '')
+        with mock.patch.object(p, 'run_sandboxed', return_value=contained) as run, \
+                mock.patch.object(p, 'memory_scope', return_value=['scope-prefix']), \
+                mock.patch.object(sys, 'argv', ['verify-privileged', '--self-check']), \
+                self.assertRaises(SystemExit) as stop:
+            p.main()
+        self.assertIn(stop.exception.code, (0, None))
+        self.assertEqual(run.call_args[0][5], ['scope-prefix'])
+
+    def test_self_check_command_line_fails_on_escape(self):
+        """An escape reported by the probes makes `--self-check` exit non-zero, naming it."""
+        escaped = subprocess.CompletedProcess([], 0, 'ESCAPED: write /etc\n', '')
+        with mock.patch.object(p, 'run_sandboxed', return_value=escaped), \
+                mock.patch.object(p, 'memory_scope', return_value=[]), \
+                mock.patch.object(sys, 'argv', ['verify-privileged', '--self-check']), \
+                self.assertRaises(SystemExit) as stop:
+            p.main()
+        self.assertIn('ESCAPED: write /etc', str(stop.exception.code))
+
     def test_fails_closed_when_the_sandbox_cannot_start(self):
         """A sandbox that exits early or prints nothing counts as an escape, never as contained."""
         broken = subprocess.CompletedProcess([], 1, '', 'unshare: unshare failed: Operation not permitted')
