@@ -112,21 +112,25 @@ impl Config {
     /// Whether the Access policy lets `peer` start a TCP/22 connection to
     /// this node: the check mesh SSH makes on every connection (#221).
     ///
-    /// On the server's own node the installed inbound admits everything for
-    /// the control plane, so only `access_ssh` answers; a server-node
-    /// snapshot without it (written before #221) refuses rather than reading
-    /// the control-plane exemption as policy. On every other node the
-    /// installed inbound is the policy.
+    /// On the server's own node only `access_ssh` answers (its inbound also
+    /// carries the control plane); a server-node snapshot without it
+    /// (written before #221) refuses. A saved configuration without the
+    /// `server` field refuses too, since it cannot say whether it is the
+    /// server's node. On every other node the installed inbound is the policy.
     #[must_use]
     pub fn admits_ssh(&self, peer: &PeerPolicy) -> bool {
         let ssh = crate::policy::rules::Port {
             protocol: crate::policy::rules::Protocol::Tcp,
             number: 22,
         };
-        match peer.access_ssh {
-            Some(admitted) => admitted,
-            None if self.server == Some(self.node) => false,
-            None => peer.inbound.allows(ssh),
+        match (peer.access_ssh, self.server) {
+            (Some(admitted), _) => admitted,
+            // Another node's configuration: its installed inbound is the policy.
+            (None, Some(server)) if server != self.node => peer.inbound.allows(ssh),
+            // The server's node without the answer (written before #221), or
+            // a saved configuration that predates the `server` field and so
+            // cannot say which node it is (J236 P3-4): refuse.
+            (None, _) => false,
         }
     }
 }

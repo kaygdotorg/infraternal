@@ -761,3 +761,20 @@ fn the_server_node_admits_the_control_plane_and_otherwise_follows_access() {
         assert_eq!(node.peers[&NodeId(1)].outbound, TrafficPolicy::All);
     }
 }
+
+/// J236 P3-4 (#221): a saved configuration from before the `server` field
+/// existed cannot say whether it is the server's node, whose installed
+/// inbound used to be "all". Mesh SSH refuses on it until a current
+/// configuration arrives, instead of reading "all" as the policy.
+#[test]
+fn a_saved_config_without_the_server_field_refuses_ssh() {
+    let coord = coordinator();
+    let mut legacy =
+        configuration::compile(&coord, NodeId(2), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
+    legacy.server = None;
+    for peer in legacy.peers.values_mut() {
+        peer.inbound = TrafficPolicy::All;
+        peer.access_ssh = None;
+    }
+    assert!(legacy.peers.values().all(|peer| !legacy.admits_ssh(peer)));
+}
