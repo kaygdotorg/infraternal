@@ -8,6 +8,7 @@ use infraternal_plugin_api::{
 /// Stable plugin owner used by the shared action registry.
 pub const ID: &str = "proxy";
 
+/// Publish a local TCP port to permitted mesh peers, or list this node's publications.
 pub const PUBLISH_ACTION: infraternal_plugin_api::ActionDef = infraternal_plugin_api::ActionDef {
     id: "proxy.publish",
     summary: "Publish or list services on this node.",
@@ -24,6 +25,10 @@ pub const PUBLISH_ACTION: infraternal_plugin_api::ActionDef = infraternal_plugin
     target: Target::Node,
     dry_run: infraternal_plugin_api::DryRun::Unsupported,
     opens: None,
+    // A node-local CLI command: no API key can call it (D333), and publishing is not one of
+    // D333's per-action-tap changes.
+    api_scope: None,
+    fresh_passkey: false,
 };
 
 /// Remove one publication by local port or exact DNS name.
@@ -41,6 +46,10 @@ pub const UNPUBLISH_ACTION: infraternal_plugin_api::ActionDef = infraternal_plug
     target: Target::Node,
     dry_run: infraternal_plugin_api::DryRun::Unsupported,
     opens: None,
+    // A node-local CLI command: no API key can call it (D333), and publishing is not one of
+    // D333's per-action-tap changes.
+    api_scope: None,
+    fresh_passkey: false,
 };
 
 /// Build the proxy command table.

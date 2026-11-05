@@ -327,8 +327,10 @@ async fn one_person_cannot_fill_the_approval_or_identified_pools() {
             .unwrap_or_else(|error| panic!("fresh tap {attempt}: {error:?}"));
     }
     assert_eq!(held(&f, &other).await, (5, 5));
-    // The owner's add-passkey registrations are bounded the same way.
+    // The owner's add-passkey registrations are bounded the same way. Each start spends its own
+    // `passkey.add` tap (D336), so the session is given one before every start.
     for attempt in 0..1100 {
+        bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
         f.auth
             .add_start(&f.session, NOW)
             .await

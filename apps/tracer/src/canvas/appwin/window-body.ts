@@ -7,8 +7,10 @@
  * refits and disposes it. Everything about the stream is in `stream.ts`; this file is the DOM and the input.
  *
  * Control (D208 A3). Looking never moves anything on the machine. The first click, key or scroll that is meant for the
- * machine takes control (an explicit handover on the server) and shows "Controlled from infraternal" in a quiet badge,
- * mirroring the indicator on the machine. Input reaches the machine only when
+ * machine takes control (an explicit handover on the server) and shows it as a small icon in the window's pill (D342),
+ * mirroring the indicator on the machine. Resizing the card, or moving it into a column, is layout and not input: the
+ * real window still follows (D208 A2), but that never shows control (see `AppStream.resize`). Input reaches the machine
+ * only when
  * - the window is the active one, and the press that activated it is not forwarded (the second press acts, as in a
  *   terminal), and
  * - the keys: the window has typing focus (a click, or the input lock); the wheel: the input lock holds this window
@@ -25,7 +27,7 @@ import type { VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { Ctx, WinRec } from "../context";
 import type { SessionBinding } from "../sessions/adapter";
 import { coarse, el } from "../dom";
-import { paintStrip, type StripView } from "../../../../../packages/ui/src/window-strip";
+import { peekTip, refreshTip } from "../../../../../packages/ui/src/tooltip";
 import { DesktopKeyboard } from "../../../../../packages/protocol/src/desktop-input";
 import { containedRect, framePoint, modifierBits, movedEnough, scrollDelta, wireButton } from "./input";
 import { controlLine, describe, type ControlState, type StateView, type StreamState } from "./status";
@@ -44,9 +46,6 @@ export interface AppBodyOptions {
   /** The machine's window shape (width / height) as listed: the window takes it before the stream starts. */
   aspect?: number;
 }
-
-/** A box change this soon after the window took the machine's shape came from that, not from the person's hand. */
-const SHAPE_SETTLE_MS = 600;
 
 /** Icons of the state cards, from the shared set. */
 const CARD_ICON: Record<NonNullable<StateView["card"]>["mark"], string | undefined> = {
@@ -76,7 +75,10 @@ export class AppBinding implements SessionBinding {
   private picture = { width: 0, height: 0 };
   /** The machine's own window or screen shape (width / height), once it has reported one. */
   private remoteShape: number | undefined;
-  private shapedAt = -Infinity;
+  /** A person's resize, move or split has just settled (`refit`): the next size the box settles on follows on the machine. */
+  private handPending = false;
+  /** The window is taking the machine's shape right now (see `applyShape`). */
+  private shaping = false;
   private listedShapeTried = false;
   private resizeTimer = 0;
   private opened = false;
@@ -92,6 +94,10 @@ export class AppBinding implements SessionBinding {
   private readonly keyboard = new DesktopKeyboard();
   private touch: { id: number; x: number; y: number; t: number; mode: "tap" | "scroll" | "drag"; timer: number } | undefined;
   private removers: Array<() => void> = [];
+  /** The small icon in the pill (control, view only, paused); absent while there is nothing to say. */
+  private pillMark: HTMLElement | undefined;
+  /** The press on the mark was a touch: its tap peeks the tooltip instead of opening the pill's popover. */
+  private markTouch = false;
 
   constructor(private readonly cx: Ctx, private readonly rec: WinRec, private readonly o: AppBodyOptions) {
     this.stream = new AppStream({
@@ -100,7 +106,7 @@ export class AppBinding implements SessionBinding {
         state: (s) => this.paintState(s),
         control: (c) => this.paintControl(c),
         picture: (size) => { this.picture = size; },
-        shape: (aspect) => { this.remoteShape = aspect; this.applyShape(aspect, true); },
+        shape: (aspect) => { this.remoteShape = aspect; this.applyShape(aspect); },
         surface: (canvas) => this.setSurface(canvas),
       },
     });
@@ -135,21 +141,26 @@ export class AppBinding implements SessionBinding {
   private measure(first: boolean): void {
     if (this.disposed) return;
     const size = this.css();
-    if (size.width < 2 || size.height < 2) return;
+    // Nothing to follow yet (too small to measure, or the stream is not open): a person's pending resize has nothing to
+    // act on, and must not wait around for the machine's first shape report to be mistaken for it.
+    if (size.width < 2 || size.height < 2) { this.handPending = false; return; }
     if (!this.opened) {
+      this.handPending = false;
       // Open in the shape the machine listed: the first size the stream asks for is then already the right one. Tried
       // once; later shapes come only from the machine's own reports while it streams.
       const tried = this.listedShapeTried;
       this.listedShapeTried = true;
-      if (!tried && this.applyShape(this.o.aspect, true)) return;
+      if (!tried && this.applyShape(this.o.aspect)) return;
       this.opened = true;
       this.stream.setVisible(this.visible);
       void this.stream.open(size);
       return;
     }
     window.clearTimeout(this.resizeTimer);
-    // Only a resize by hand takes control; taking the machine's shape is looking, which never moves anything (D208 A3).
-    this.resizeTimer = window.setTimeout(() => this.stream.resize(this.css(), performance.now() - this.shapedAt > SHAPE_SETTLE_MS), first ? 0 : 120);
+    // Only a person's resize, move or split (`refit`) makes the machine's window follow, and quietly (no control shown). A
+    // box change from anything else, such as taking the machine's own shape, is looking and never moves anything (D208 A3).
+    // The flag is read when the timer fires, so a later observer callback that restarts the timer cannot lose it.
+    this.resizeTimer = window.setTimeout(() => { const byHand = this.handPending; this.handPending = false; this.stream.resize(this.css(), byHand); }, first ? 0 : 120);
   }
 
   private setSurface(canvas: HTMLCanvasElement | undefined): void {
@@ -161,7 +172,7 @@ export class AppBinding implements SessionBinding {
   /** Hides the picture when the state has nothing true to show; dims it when it is only a memory. */
   private applyPicture(view?: StateView): void {
     const v = view ?? describe(this.lastState, this.words());
-    this.stage.dataset.picture = !v.keepPicture ? "none" : v.strip ? "dim" : "live";
+    this.stage.dataset.picture = !v.keepPicture ? "none" : v.dim ? "dim" : "live";
   }
 
   private words(): { machine: string; app: string; screen: boolean } { return { machine: this.o.machine, app: this.o.app, screen: this.o.target.type === "screen" }; }
@@ -175,7 +186,7 @@ export class AppBinding implements SessionBinding {
     this.rec.card.setStatus(view.dot);
     this.applyPicture(view);
     this.paintCard(view, state);
-    this.paintStripFor(view);
+    this.paintPillMark();
     this.cx.sessionUi?.paint(this.rec);
     if (state.kind !== "live") this.stopInput();
   }
@@ -206,15 +217,35 @@ export class AppBinding implements SessionBinding {
     card.replaceChildren(...nodes);
   }
 
-  /** The strip slot: a state's own strip, else the quiet control line over a live picture. */
-  private paintStripFor(view: StateView): void {
-    if (view.strip) {
-      const s = view.strip;
-      const strip: StripView = { signature: `state:${s.text}`, result: "info", label: s.text, text: s.text, mark: { svg: s.mark === "paused" ? PAUSE_ICON : ICONS.warning } };
-      paintStrip(this.root, strip);
-      return;
+  /**
+   * The pill's small mark, beside the status dot: the one icon that says what the dot cannot. A paused stream shows
+   * the pause icon; a live picture shows who is driving (cursor: controlled, eye: view only, pause: remote input
+   * waiting). Nothing is ever drawn over the picture (D342, TASTE: status is an icon, not a text box), and no mark is
+   * made at all until there is something to say. The words are the mark's warm tooltip and its accessible name.
+   */
+  private paintPillMark(): void {
+    const stateMark = describe(this.lastState, this.words()).mark;
+    const line = !stateMark && this.lastState.kind === "live" ? controlLine(this.lastControl, this.o.machine) : undefined;
+    const spec = stateMark ? { glyph: PAUSE_ICON, kind: "paused", tip: stateMark.tip }
+      : line ? { glyph: line.mark === "view" ? VIEW_ICON : line.mark === "paused" ? PAUSE_ICON : CONTROL_ICON, kind: line.mark, tip: line.text }
+      : undefined;
+    let mark = this.pillMark;
+    if (!spec) { mark?.remove(); this.pillMark = undefined; return; }
+    if (!mark) {
+      mark = el("span", "aw-pillmark");
+      mark.setAttribute("role", "img");
+      // A tap on a touch screen shows the sentence and does nothing else, as the connection dot beside it does.
+      mark.addEventListener("pointerdown", (e) => { this.markTouch = e.pointerType === "touch"; }, true);
+      mark.addEventListener("click", (e) => { if (!this.markTouch) return; this.markTouch = false; e.stopPropagation(); e.preventDefault(); peekTip(mark!); });
+      this.rec.card.pill.querySelector(".ui-window-conn")?.before(mark);
+      this.pillMark = mark;
     }
-    this.paintControl(this.lastControl);
+    if (mark.dataset.kind === spec.kind && mark.dataset.tip === spec.tip) return;
+    mark.dataset.kind = spec.kind;
+    mark.dataset.tip = spec.tip;
+    mark.setAttribute("aria-label", spec.tip);
+    mark.innerHTML = icon(spec.glyph);
+    refreshTip(mark);
   }
 
   private paintControl(control: ControlState): void {
@@ -228,29 +259,7 @@ export class AppBinding implements SessionBinding {
       const pending = this.queued.splice(0);
       for (const input of pending) this.stream.sendInput(input);
     });
-    // Only a live picture carries the control line; a state's own strip owns the slot otherwise.
-    if (this.lastState.kind !== "live") return;
-    const line = controlLine(control, this.o.machine);
-    const existing = this.root.querySelector<HTMLButtonElement>(".aw-control");
-    if (!line) { existing?.setAttribute("data-leaving", ""); window.setTimeout(() => { if (existing?.hasAttribute("data-leaving")) existing.remove(); }, 160); paintStrip(this.root, undefined); return; }
-    paintStrip(this.root, undefined);
-    let badge = existing;
-    if (!badge || badge.hasAttribute("data-leaving")) {
-      badge?.remove();
-      badge = el("button", "cl-sx-badge aw-control");
-      badge.type = "button";
-      badge.addEventListener("click", () => this.endControl());
-      this.root.append(badge);
-    }
-    badge.removeAttribute("data-leaving");
-    badge.dataset.kind = line.mark;
-    const glyph = line.mark === "view" ? VIEW_ICON : line.mark === "paused" ? PAUSE_ICON : CONTROL_ICON;
-    badge.innerHTML = `${icon(glyph)}<span></span>`;
-    badge.querySelector("span")!.textContent = line.text;
-    const tip = line.mark === "controlled" ? "Click to release control" : line.mark === "paused" ? "Remote input resumes in a moment" : "You can watch this window";
-    badge.dataset.tip = tip;
-    badge.setAttribute("aria-label", `${line.text}. ${tip}`);
-    badge.disabled = line.mark !== "controlled";
+    this.paintPillMark();
   }
 
   // ---- input ----------------------------------------------------------------------------------------------------
@@ -269,13 +278,6 @@ export class AppBinding implements SessionBinding {
     // A cooldown or detached stream can decline before announcing requesting.
     // Such input must not survive for an unrelated later lease.
     if (this.stream.controlState.kind === "requesting" && this.queued.length < 32) this.queued.push(input);
-  }
-
-  private endControl(): void {
-    this.stopInput();
-    this.stream.releaseControl();
-    this.typing = false;
-    if (document.activeElement === this.stage) this.stage.blur();
   }
 
   /** Held buttons and keys are released on the machine whenever the window can no longer be trusted to send their ups. */
@@ -467,15 +469,16 @@ export class AppBinding implements SessionBinding {
   }
 
   /** The canvas window takes the machine's shape (TASTE "A remote window takes its own shape"); a no-op once it has it. */
-  /** `looking` marks the change as the window following the machine, so the size it causes never takes control. */
-  private applyShape(aspect: number | undefined, looking: boolean): boolean {
-    if (aspect === undefined || this.disposed || !shapeStreamWindow(this.cx, this.rec, this.stage, aspect)) return false;
-    if (looking) this.shapedAt = performance.now();
-    return true;
+  private applyShape(aspect: number | undefined): boolean {
+    if (aspect === undefined || this.disposed) return false;
+    // Shaping ends through the shared resize host, which calls `refit()` again: that nested call is the window following
+    // the machine, not a person's resize, so it must not mark the change as by hand.
+    this.shaping = true;
+    try { return shapeStreamWindow(this.cx, this.rec, this.stage, aspect); } finally { this.shaping = false; }
   }
 
   // A resize by hand ends here too: the window settles back into the machine's shape, keeping the height it was given.
-  refit(): void { this.applyShape(this.remoteShape, false); this.measure(false); }
+  refit(): void { if (!this.shaping) this.handPending = true; this.applyShape(this.remoteShape); this.measure(false); }
 
   dispose(): void {
     if (this.disposed) return;
@@ -486,6 +489,7 @@ export class AppBinding implements SessionBinding {
     for (const remove of this.removers) remove();
     this.removers.length = 0;
     this.stream.dispose();
+    this.pillMark?.remove();
     this.root?.remove();
   }
 

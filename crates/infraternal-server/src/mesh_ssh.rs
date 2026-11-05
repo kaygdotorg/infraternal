@@ -69,6 +69,10 @@ const fn action(id: &'static str, summary: &'static str, effect: Effect) -> Acti
         permission: Permission::One("authenticated"),
         dry_run: DryRun::Unsupported,
         opens: None,
+        // Not callable with an API key until an owner decides which key
+        // scope may change who can log in where (#221).
+        api_scope: None,
+        fresh_passkey: false,
     }
 }
 

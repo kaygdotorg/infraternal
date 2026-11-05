@@ -62,6 +62,9 @@ const fn control(id: &'static str, summary: &'static str) -> ActionDef {
         target: Target::Node,
         dry_run: DryRun::Unsupported,
         opens: None,
+        // Server-link control only: never callable with an API key.
+        api_scope: None,
+        fresh_passkey: false,
     }
 }
 /// The actions only the authenticated server link may call.

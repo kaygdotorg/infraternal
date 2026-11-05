@@ -89,16 +89,16 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | setup-start | legacy `{token,name}` or `{token,username,display_name?}` | `{ceremony,user_id,options,recovery_words}` |
 | registration-finish | `{ceremony,proof,passkey_wrap,recovery_wrap}` | secure session cookie |
 | status | `{}` | `{setup_required: bool, setup_token_command: string}` only |
-| login-start | `{}` (legacy `{user_id}` supported) | `{ceremony,options}` |
+| login-start | `{}` (legacy `{user_id}` supported), optional `action` (per-action tap, below) | `{ceremony,options}` |
 | login-finish | `{ceremony,proof,device}` | restricted secure session cookie and `pending_transaction` |
 | session | `{}` | `{user_id,username,display_name,device,fresh}` and refreshed cookie |
 | account-summary | `{}` + unlocked session | `{user_id,session_incarnation,passkeys,recovery_set_up}` only; no verification history is recorded |
-| add-start | `{}` + session | enrollment options; recovery_words=null |
+| add-start | `{}` + session tapped for `passkey.add` | enrollment options; recovery_words=null |
 | wraps | `{}` + session | `[{kind,key_id,wrap}]` for the session user |
 | recovery-start | `{username|user_id,verifier}` | `{token,delay_seconds,ready_at}` |
 | recovery-ready | `{token}` | replacement enrollment and old_recovery_wrap |
 | recovery-status | `{token}` | `{ready, delay_seconds, ready_at}` from the server elapsed clock |
-| recovery-rotate | `{recovery_wrap,recovery_verifier}` + fresh unlocked session | `{ok:true}` |
+| recovery-rotate | `{recovery_wrap,recovery_verifier}` + unlocked session tapped for `recovery.rotate` | `{ok:true}` |
 | recovery-cancel | `{}` + any live session | `{ok:true}` |
 | device-start | `{device,scopes}` | `{poll_token,user_code,expires_in:600}` |
 | device-inspect | `{code}` + session | requested device/scopes for approval UI |
@@ -107,7 +107,7 @@ Argon2 work at two simultaneous calls; exhausted capacity fails closed.
 | device-redeem | `{token:poll_token}` | `{api_key}` once |
 | api-list | `{}` + session | device/scopes and nonsecret revocation `id` |
 | security-settings | `{}` + live owner session | `{api_key_lifetime_days}` |
-| security-settings-update | `{api_key_lifetime_days: integer 1..365}` + fresh owner session | saved `{api_key_lifetime_days}` |
+| security-settings-update | `{api_key_lifetime_days: integer 1..365}` + owner session tapped for `security.settings` with this value | saved `{api_key_lifetime_days}` |
 | api-revoke | `{id}` + fresh session | `{ok:true}` |
 | logout | `{}` + session | revoked session and expired cookie |
 
@@ -122,9 +122,23 @@ entry point, and registration finish remains the one-shot token consumption [26,
 A cookie is `__Host-infraternal=<opaque random id>; Secure; HttpOnly;
 SameSite=Strict; Path=/; Max-Age=2592000` with no Domain. Storage slides 30 days
 on authenticated use; every successful cookie-authenticated HTTP action also
-refreshes the cookie. The client calls `session` on app resume to check validity. Fresh tap lifetime is five
-minutes; obtain a new session via login for destructive UI actions. Server action
-adapters call `Auth::fresh_session` to enforce this without duplicating policy. CLI keys
+refreshes the cookie. The client calls `session` on app resume to check validity. A sign-in
+tap opens the 15-minute admin window (D333). Server action adapters call `Auth::fresh_session`
+to enforce it without duplicating policy.
+
+Per-action taps (D333, D336) are bound to the one action shown on screen. The browser signs in
+again with `login-start {user_id?, action}`, where `action` is one of `{"kind":"passkey.add"}`,
+`{"kind":"recovery.rotate"}` or `{"kind":"security.settings","api_key_lifetime_days":n}`. An
+unknown kind, an extra field or an out-of-range value is `400`. The server keeps a
+domain-separated digest of the action and its parameters on the ceremony, and `login-finish`
+writes it on the new session. The matching change spends it once in its own writer
+transaction, within 120 s of the tap. Any other action or parameters, a second use, a later
+use or a plain sign-in is `401`. A refused change rolls back and leaves the tap unspent.
+`add-start` spends the `passkey.add` tap, and `registration-finish` then only checks that
+this live session spent it. A new authenticator may take longer than 120 s. Key approval
+(sign-in and machine join) is its own ceremony: `device-approve-start` binds a passkey ceremony
+to this session and this code, and `device-approve-finish` spends it once (#263). CA setup and CA
+role changes use their own operation-bound ceremonies (`contracts/remote.md`). CLI keys
 never establish a fresh browser session. Initial scopes are `hosts:read`,
 `terminal:connect`, `actions:dry-run`; destructive MCP execution is not granted
 by this lane. Action adapters must require the separate dry-run contract [28].

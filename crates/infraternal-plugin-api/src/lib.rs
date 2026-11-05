@@ -51,8 +51,13 @@ use tokio::sync::mpsc;
 
 /// The interface version compiled into every descriptor.
 pub const API_VERSION: u16 = 1;
-/// Fresh destructive confirmation window shared by host and plugins [28].
+/// How recent the tap must be that one per-action change spends (D333: key approval, passkey
+/// and recovery-key changes, security settings) [28].
 pub const FRESH_SECONDS: i64 = 300;
+/// D333: "In the browser, one tap starts 15 minutes of admin actions without taps." Admin
+/// actions (plugin switches, mesh and release settings, node approvals, key revocation) accept
+/// a session whose tap is at most this old. Per-action changes still spend their own tap.
+pub const ADMIN_WINDOW_SECONDS: i64 = 900;
 /// A plugin operation remains cancellable by the host's session watchdog.
 pub type Operation<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Permission and confirmation semantics exposed to every adapter.
@@ -75,7 +80,43 @@ pub struct ActionDef {
     pub target: Target,
     pub dry_run: DryRun,
     pub opens: Option<&'static str>,
+    /// Narrow API-key scope for the API adapter; absent actions are not key-callable.
+    pub api_scope: Option<&'static str>,
+    /// D333 per-action tap: every run needs its own passkey ceremony, so no API key can start
+    /// it (see `key_callable`).
+    pub fresh_passkey: bool,
 }
+/// Server actions backed by existing health and session snapshot handlers [16][202].
+pub const CORE_API_ACTIONS: &[ActionDef] = &[
+    ActionDef {
+        id: "server.status",
+        summary: "Read server status",
+        instructions: &["Read whether the server is ready to accept actions."],
+        input: SchemaRef("Empty"),
+        output: SchemaRef("server.status"),
+        permission: Permission::One("authenticated"),
+        effect: Effect::Read,
+        target: Target::Global,
+        dry_run: DryRun::Unsupported,
+        opens: None,
+        api_scope: Some("status:read"),
+        fresh_passkey: false,
+    },
+    ActionDef {
+        id: "sessions.list",
+        summary: "List terminal sessions.",
+        instructions: &["Read the current person's session snapshot."],
+        input: SchemaRef("Empty"),
+        output: SchemaRef("sessions.snapshot"),
+        permission: Permission::One("authenticated"),
+        effect: Effect::Read,
+        target: Target::Global,
+        dry_run: DryRun::Unsupported,
+        opens: None,
+        api_scope: Some("sessions:read"),
+        fresh_passkey: false,
+    },
+];
 /// Read visibility may follow any management action without introducing a view-only role [187].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Permission {
@@ -117,6 +158,10 @@ pub trait SocketHost: Send + Sync {
         false
     }
     fn token_hash(&self) -> &str;
+    /// A nonsecret label from the authenticated client credential, when one exists.
+    fn device_label(&self) -> Option<&str> {
+        None
+    }
     /// Public authenticated lifetime for binding pending layout requests. Test hosts may omit it.
     fn session_incarnation(&self) -> Option<&str> {
         None
@@ -499,6 +544,34 @@ pub trait ComponentPlugin: Send + Sync {
 pub type PluginOperation<'a, T> = Operation<'a, Result<T, &'static str>>;
 
 impl ActionDef {
+    /// Attach the narrow bearer scope and any separate fresh-passkey requirement to this action.
+    #[must_use]
+    pub const fn with_api_access(
+        mut self,
+        api_scope: Option<&'static str>,
+        fresh_passkey: bool,
+    ) -> Self {
+        self.api_scope = api_scope;
+        self.fresh_passkey = fresh_passkey;
+        self
+    }
+
+    /// Whether an API key may start this action at all. Every key adapter (HTTP route, MCP)
+    /// asks this one question (D333):
+    /// - it needs an API scope; inside that scope there is no further tap;
+    /// - a per-action-tap action (`fresh_passkey`: key creation, role and CA setup, recovery
+    ///   and passkey changes, account deletion, turning these rules off) is never key-callable,
+    ///   because a key cannot tap;
+    /// - a destructive action is key-callable only with a required dry run (D28), so a
+    ///   descriptor that forgets one fails closed.
+    #[must_use]
+    pub const fn key_callable(&self) -> bool {
+        self.api_scope.is_some()
+            && !self.fresh_passkey
+            && (!matches!(self.effect, Effect::Destructive)
+                || matches!(self.dry_run, DryRun::Required))
+    }
+
     /// Render the declared steps for operator help without a second copy of the instructions.
     #[must_use]
     pub fn help(&self) -> String {
@@ -526,6 +599,8 @@ mod component_tests {
         permission: Permission::One("fixture.read"),
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     };
     const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         id: "fixture",

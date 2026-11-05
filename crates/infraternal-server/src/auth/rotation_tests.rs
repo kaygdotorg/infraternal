@@ -1,11 +1,17 @@
 //! Recovery rotation HTTP checks: only a signed-in device installs local ciphertext.
 use super::*;
 
+/// Digest of the `recovery.rotate` tap (D336); these tests set the session's tap directly.
+fn rotation_tap() -> String {
+    super::super::action_tap::digest(&TapAction::RotateRecovery)
+}
+
 #[tokio::test]
 async fn recovery_rotation_requires_session_and_replaces_legacy_envelope() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
-    sqlx::query("UPDATE sessions SET fresh=unixepoch()")
+    sqlx::query("UPDATE sessions SET fresh=unixepoch(),tap_action=?")
+        .bind(rotation_tap())
         .execute(&f.auth.pool)
         .await
         .unwrap();
@@ -113,11 +119,18 @@ async fn recovery_rotation_denies_pending_expired_and_stale_sessions() {
         "recovery",
     );
     for statement in [
-        "UPDATE sessions SET unlocked=0,fresh=unixepoch(),expires=unixepoch()+60",
-        "UPDATE sessions SET unlocked=1,fresh=unixepoch(),expires=unixepoch()-1",
-        "UPDATE sessions SET unlocked=1,fresh=unixepoch()-300,expires=unixepoch()+60",
+        "UPDATE sessions SET unlocked=0,fresh=unixepoch(),expires=unixepoch()+60,tap_action=?",
+        "UPDATE sessions SET unlocked=1,fresh=unixepoch(),expires=unixepoch()-1,tap_action=?",
+        // `ACTION_TAP_SECONDS` (120) after the tap it is stale.
+        "UPDATE sessions SET unlocked=1,fresh=unixepoch()-120,expires=unixepoch()+60,tap_action=?",
+        // A plain sign-in carries no action.
+        "UPDATE sessions SET unlocked=1,fresh=unixepoch(),expires=unixepoch()+60,tap_action=NULL WHERE ?<>''",
     ] {
-        sqlx::query(statement).execute(&f.auth.pool).await.unwrap();
+        sqlx::query(statement)
+            .bind(rotation_tap())
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
         assert_eq!(
             rotation_post(
                 &app,
@@ -148,7 +161,8 @@ async fn reviewer_concurrent_signed_in_rotations_commit_once() {
         .await
         .unwrap();
     let begun = f.auth.recovery_ready(&old, ready).await.unwrap();
-    sqlx::query("UPDATE sessions SET fresh=unixepoch()")
+    sqlx::query("UPDATE sessions SET fresh=unixepoch(),tap_action=?")
+        .bind(rotation_tap())
         .execute(&f.auth.pool)
         .await
         .unwrap();
@@ -229,7 +243,7 @@ async fn recovery_rotation_cannot_follow_a_cookie_account_switch() {
     let other = Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'other',0,'unused','other','Other')").bind(&other).execute(&f.auth.pool).await.unwrap();
     let token = random();
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES (?,?,'other device',unixepoch()+60,unixepoch())").bind(hash(&token)).bind(&other).execute(&f.auth.pool).await.unwrap();
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,tap_action) VALUES (?,?,'other device',unixepoch()+60,unixepoch(),?)").bind(hash(&token)).bind(&other).bind(rotation_tap()).execute(&f.auth.pool).await.unwrap();
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={token}");
     let words = bip39::Mnemonic::generate(24).unwrap().to_string();

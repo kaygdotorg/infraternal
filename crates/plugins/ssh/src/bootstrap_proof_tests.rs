@@ -171,6 +171,7 @@ fn context() -> (Bootstrap, Authority, Installation, Arc<Proofs>, uuid::Uuid) {
         owner: "owner".into(),
         batch: uuid::Uuid::new_v4(),
         session: None,
+        api_key_hash: None,
     };
     let target = Target {
         id: "proof".into(),
@@ -186,6 +187,46 @@ fn context() -> (Bootstrap, Authority, Installation, Arc<Proofs>, uuid::Uuid) {
     };
     let installation = Installation::new(Arc::new(Commit(proofs.clone())), &target, &join).unwrap();
     (runner, authority, installation, proofs, host)
+}
+
+#[tokio::test]
+async fn api_key_bootstrap_accepts_the_server_sha256_base64url_key_id() {
+    let (runner, _, _, _, _) = context();
+    let key_hash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    assert_eq!(key_hash.len(), 43);
+
+    let result = runner.start_api_key(
+        "owner".into(),
+        key_hash.into(),
+        vec![Target {
+            id: "api-target".into(),
+            address: TargetAddress::Manual("owner@fixture.test".into()),
+            credential: None,
+            mode: InstallMode::Rootless,
+            root_consent: false,
+        }],
+    );
+    assert!(
+        result.is_ok(),
+        "Auth::hash uses unpadded base64url SHA-256 ids, not hex"
+    );
+}
+
+#[tokio::test]
+async fn api_key_bootstrap_rejects_noncanonical_key_ids() {
+    let (runner, _, _, _, _) = context();
+    let result = runner.start_api_key(
+        "owner".into(),
+        "B".repeat(43),
+        vec![Target {
+            id: "api-target".into(),
+            address: TargetAddress::Manual("owner@fixture.test".into()),
+            credential: None,
+            mode: InstallMode::Rootless,
+            root_consent: false,
+        }],
+    );
+    assert!(result.is_err());
 }
 
 #[tokio::test]

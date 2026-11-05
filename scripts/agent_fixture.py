@@ -16,6 +16,13 @@ import time
 import uuid
 from latency_proxy import LatencyConfig, LatencyDuplex
 
+# Hang guard for the fixture's socket waits (#334 rule). Every wait reads until
+# a specific frame or marker arrives; this bound only detects a hang. Under
+# gate load a debug infraternal agent can take longer than the former 20 s to
+# answer a control action or to start a shell, which failed 8 real-binary
+# oracles at once while each passed alone (#355).
+HANG = 120
+
 
 def event_object(body):
     """Decode a mux Event after checking its reserved event id."""
@@ -157,7 +164,7 @@ def weight_fixture_shim(state, session_id, weight, caller_pid=None, diagnose=Fal
         caller_pid = os.getpid()
     path = state / 'sessions' / f'{session_id.hex}.sock'
     with socket.socket(socket.AF_UNIX) as peer:
-        peer.settimeout(20)
+        peer.settimeout(HANG)
         peer.connect(str(path))
         hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
     # Authenticate ownership before changing any scope. These are the same
@@ -216,7 +223,7 @@ class Binary:
             raise PermissionError(f'fixture binary is not executable: {self.binary}')
         self.sock, test_peer = socket.socketpair()
         agent_peer, child_peer = socket.socketpair()
-        self.sock.settimeout(20)
+        self.sock.settimeout(HANG)
         config = LatencyConfig.from_environment()
         self.link = LatencyDuplex(test_peer, agent_peer, config)
         self.link.start()
@@ -343,7 +350,7 @@ class Binary:
         # keeps every daemon test writer's input cursor at its original zero.
         path = self.state / 'sessions' / f'{self.id.hex}.sock'
         with socket.socket(socket.AF_UNIX) as peer:
-            peer.settimeout(20)
+            peer.settimeout(HANG)
             peer.connect(str(path))
             hello = exact(peer, struct.unpack('<I', exact(peer, 4))[0])
             assert hello[0] == 1 and hello[11:27] == self.id.bytes
