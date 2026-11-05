@@ -1,6 +1,6 @@
 //! Long-lived local PTY sessions with frozen v1 resume semantics [13][17].
 //!
-//! Unsafe code is confined to the audited PTY/process, parent-bound child, readiness and Ghostty FFI boundaries;
+//! Unsafe code is confined to the audited PTY/process, filesystem, parent-bound child, readiness and Ghostty FFI boundaries;
 //! data modules forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
@@ -71,6 +71,20 @@ pub fn session_locale_environment() -> Vec<(std::ffi::OsString, std::ffi::OsStri
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn prepare_child(command: &mut std::process::Command) {
     pty::prepare_child(command);
+}
+
+/// Publish a staged install directory without replacing a pre-existing path (#338).
+///
+/// The caller records the staging inode durably before calling this boundary.
+/// Success moves that same inode; even an empty occupied destination is preserved.
+/// # Errors
+/// Returns invalid path bytes or the kernel publication error, including `AlreadyExists`.
+#[cfg(all(feature = "session-image", target_os = "linux"))]
+pub fn publish_install_directory(
+    staging: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    pty::publish_install_directory(staging, destination)
 }
 
 /// Whether atomic replacement would drop extended attributes, including access-control lists.
@@ -254,6 +268,13 @@ pub fn stdout_columns() -> Option<u16> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
+}
+
+/// Restore SIGTERM's default action and re-raise it, after a process handled
+/// SIGTERM to finish its shutdown steps (#221).
+#[cfg(target_os = "linux")]
+pub fn terminate_by_default() -> ! {
+    pty::terminate_by_default()
 }
 
 /// Tell the SIGINT handler that the final JSON result is about to be written.

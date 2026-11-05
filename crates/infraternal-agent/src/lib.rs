@@ -47,6 +47,7 @@ pub use infraternal_plugin_remote::remote_tls;
 #[cfg(target_os = "linux")]
 pub mod automation;
 pub mod sessions;
+pub mod shutdown;
 pub mod startup_guard;
 pub mod transport;
 #[cfg(any(test, feature = "native-streams"))]
@@ -77,7 +78,11 @@ pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Resu
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    block_on_io(&runtime, Box::pin(daemon::run(fd, state)))
+    // Components' host state goes when this daemon ends, by return or SIGTERM (#221).
+    block_on_io(
+        &runtime,
+        Box::pin(shutdown::run_then_stop(daemon::run(fd, state))),
+    )
 }
 
 /// Share the reactor poll loop across process entrypoints (D243, #189).

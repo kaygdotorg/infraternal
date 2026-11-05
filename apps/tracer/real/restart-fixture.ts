@@ -1,5 +1,5 @@
 /** Keeps the production browser and real PTY across a server-only stop (#199, D13, D259). */
-import { expect, type Browser } from "playwright/test";
+import { expect, type Browser, type BrowserContext } from "playwright/test";
 import { WebSocket } from "ws";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -65,16 +65,18 @@ async function populate(server: RealServer, count: number): Promise<() => void> 
   } catch (error) { cleanup(); throw error; }
 }
 
+/** Keep live sessions across a real restart using an isolated listener and owned fixture cleanup. */
 export async function exerciseRestart(browser: Browser, unlock: boolean, retainBrowserRoute = false, upstream?: "daemon" | "shim", visibleSessions = 1): Promise<void> {
-  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: `127.0.0.1:${Number(process.env.TRACER_TEST_PORT ?? 4299) + 1000}`, ...(process.env.RESTART_MEASURE === "1" ? { port: Number(process.env.TRACER_TEST_PORT), address: "::" } : {}) });
+  const server = await startRealServer({ systemd: process.env.REAL_ROOT_NAMESPACE !== "1", remoteListen: "127.0.0.1:0", ...(process.env.RESTART_MEASURE === "1" ? { port: Number(process.env.TRACER_TEST_PORT), address: "::" } : {}) });
   const mobile = unlock && visibleSessions === 1;
-  const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: mobile ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: mobile, hasTouch: mobile });
-  const page = await context.newPage();
+  let context: BrowserContext | undefined;
   let retainedBridges: number[] = [];
   let measuringRecovery = false;
   let cleanupScale = () => {};
-  page.on("pageerror", (error) => console.log("browser error kind:", error.name));
   try {
+    context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: mobile ? { width: 393, height: 852 } : { width: 1440, height: 900 }, isMobile: mobile, hasTouch: mobile });
+    const page = await context.newPage();
+    page.on("pageerror", (error) => console.log("browser error kind:", error.name));
     const cdp = await context.newCDPSession(page);
     if (process.env.RESTART_MEASURE === "1") {
       const sockets = new Map<string, WebSocketFrameDecoder>();
@@ -304,5 +306,5 @@ export async function exerciseRestart(browser: Browser, unlock: boolean, retainB
       expect(probe.retained).toBe(true);
       expect(recovery).toBeLessThanOrEqual(upstream ? roundTrip + 50 : roundTrip * 3 + 50);
     }
-  } finally { cleanupScale(); await server.dispose(); await context.close(); }
+  } finally { cleanupScale(); try { await server.dispose(); } finally { await context?.close(); } }
 }

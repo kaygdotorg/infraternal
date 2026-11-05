@@ -126,7 +126,11 @@ async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup(
                 px_h: 0,
             },
             person,
-            Some(account),
+            Some(account.clone()),
+            crate::embedded::LoginGrant {
+                accounts: [account].into(),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
