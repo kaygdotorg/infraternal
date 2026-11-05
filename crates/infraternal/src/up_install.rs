@@ -29,10 +29,14 @@ fn existing(path: &Path) -> io::Result<Option<fs::Metadata>> {
 
 /// Read the command of an infraternal process without interpreting later remote command arguments.
 fn process_command(arguments: &[u8]) -> Option<&[u8]> {
-    let mut arguments = arguments.split(|byte| *byte == 0);
+    host_command(arguments.split(|byte| *byte == 0))
+}
+
+/// Recognize both CLI spellings in process argv and parsed systemd commands (D349).
+fn host_command<'a>(mut arguments: impl Iterator<Item = &'a [u8]>) -> Option<&'a [u8]> {
     let image = arguments.next()?;
     let name = image.rsplit(|byte| *byte == b'/').next()?;
-    if !name.starts_with(b"infraternal") {
+    if name != b"infra" && !name.starts_with(b"infraternal") {
         return None;
     }
     // JSON output is the only root-level option that can precede a running command.
@@ -104,11 +108,14 @@ fn installed_services(root: &Path) -> io::Result<()> {
             let Ok(unit) = fs::read_to_string(entry.path()) else {
                 continue;
             };
-            if unit.lines().any(|line| {
-                line.starts_with("ExecStart=")
-                    && line.contains("infraternal")
-                    && line.contains(" server")
-            }) {
+            if unit
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("ExecStart="))
+                .filter_map(infraternal_status::exec_words)
+                .any(|words| {
+                    host_command(words.iter().map(String::as_bytes)) == Some(b"server".as_slice())
+                })
+            {
                 return Err(refused(
                     "An infraternal server service is installed on this host. Use its embedded infraternal agent; run infraternal up on a different host.",
                 ));
@@ -452,3 +459,8 @@ mod tests {
         assert_eq!(super::process_command(b"other\0server\0"), None);
     }
 }
+
+/// Independent regression probes for host refusal and transactional rollback (#338).
+#[cfg(test)]
+#[path = "j218_review_tests.rs"]
+mod j218_review;
