@@ -257,9 +257,25 @@ fn manager_units(systemctl: &Path, units: &mut BTreeSet<OsString>) -> io::Result
     Ok(())
 }
 
-/// Identify a reference without interpreting unit-file command syntax or printing its contents.
+/// Recognize whole program or path components without interpreting unit-file commands.
+/// Keep punctuation inside basenames so infrastructure and my-infra-helper are
+/// unrelated. Strip one leading systemd ignore-failure sigil from a bare token;
+/// this preserves the unresolved -infra command hint without matching /opt/-infra.
 fn mentions_install(value: &str) -> bool {
-    value.to_ascii_lowercase().contains("infra")
+    value
+        .split(|character: char| {
+            character.is_whitespace() || "\"';|&()={}[]:@+!".contains(character)
+        })
+        .any(|word| {
+            Path::new(word.strip_prefix('-').unwrap_or(word))
+                .components()
+                .any(|component| {
+                    matches!(
+                        component.as_os_str().to_str(),
+                        Some("infra" | "infraternal")
+                    )
+                })
+        })
 }
 
 /// Report an installed command without exposing its arguments or environment values.
@@ -779,6 +795,34 @@ mod tests {
         }
     }
 
+    /// Unrelated infrastructure text cannot make an unresolved command look like our program.
+    #[test]
+    fn unresolved_references_require_whole_program_components() {
+        for value in [
+            "LoadState=loaded\nExecStart={ path=/opt/infrastructure-tools/missing ; argv[]=missing --x ; }\n",
+            "LoadState=loaded\nEnvironment=LABEL=infrastructure\nExecStart={ path=/opt/missing ; argv[]=missing ; }\n",
+            "LoadState=error\nDescription=an infrasonic monitor\n",
+            "LoadState=loaded\nExecStart={ path=/opt/my-infra-helper/missing ; argv[]=missing ; }\n",
+            "LoadState=loaded\nExecStart={ path=/opt/-infra/missing ; argv[]=missing ; }\n",
+        ] {
+            assert!(
+                resolved_service(OsStr::new("stock.service"), value).is_ok(),
+                "unrelated text refused: {value}"
+            );
+        }
+        for value in [
+            "LoadState=loaded\nExecStart={ path=/srv/infra/missing ; argv[]=missing ; }\n",
+            "LoadState=loaded\nExecStart={ path=/srv/infraternal/missing ; argv[]=missing ; }\n",
+            "LoadState=error\nExecStart=infra server\n",
+            "LoadState=error\nExecStart=-infra server\n",
+            "LoadState=error\nExecStart=/opt/infraternal server\n",
+        ] {
+            assert!(
+                resolved_service(OsStr::new("custom.service"), value).is_err(),
+                "literal reference missed: {value}"
+            );
+        }
+    }
     /// Stopped wrappers and secondary startup commands cannot conceal our executable.
     #[test]
     fn indirect_service_commands_are_refused() {
