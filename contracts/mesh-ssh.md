@@ -24,6 +24,12 @@ mesh SSH.
   to the destination's exact mesh-IP:22 and shared Login access for the person
   to the requested OS account. Login access applies to every shell and file
   entry point in the same release; SSH remains unavailable until Q14 is met.
+- The server's own host is no exception (owner, #221 Q-A (b)). Every node's
+  implicit reach to the server (D164) covers only the infraternal control
+  plane; TCP/22 there follows Access like on any other node: an explicit
+  arrow toward the server, or the default. The server's node carries that
+  answer per peer (`PeerPolicy::access_ssh`), and the default-policy preview
+  lists the nodes that would lose it (`loses_ssh_to_server`).
 - During a partition, the last-applied access rules remain usable. The person
   can see their revision and coverage are stale. Certificate expiry by itself
   does not disconnect an allowed live session; revocation or narrowed access
