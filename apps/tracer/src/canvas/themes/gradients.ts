@@ -15,19 +15,15 @@
  */
 import { hexToOklab, oklabToHex } from "../../../../../packages/ui/src/color";
 import type { Theme } from "../../../../../packages/ui/src/themes";
+import { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, MIN_STOPS, SOLID_CUSTOM_ID, type CustomGradient } from "./backgrounds";
+
+// The ids and defaults live in backgrounds.ts (they are on the critical path, this module is not); everything that used to import them from here still can.
+export { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, DEFAULT_GRADIENT, GRADIENT_IDS, isSolid, MAX_STOPS, MIN_STOPS, SOLID_CUSTOM_ID, SOLID_IDS, type CustomGradient } from "./backgrounds";
 
 export interface NamedGradient { id: string; name: string; css: string }
-export interface CustomGradient { stops: string[]; angle: number }
 
 export interface NamedSolid { id: string; name: string; /** "" for the scheme's own colour, else the colour. */ colour: string }
 
-export const MIN_STOPS = 2, MAX_STOPS = 4;
-export const DEFAULT_CUSTOM: CustomGradient = { stops: ["#7a9cff", "#cba6f7"], angle: 135 };
-export const CUSTOM_ID = "custom";
-/** A solid background has the ids "solid" (the scheme's own colour), "solid-<role>" (a colour drawn from the scheme's palette) and "solid-custom". */
-export const SOLID_CUSTOM_ID = "solid-custom";
-export const DEFAULT_CUSTOM_SOLID = "#3b4252";
-export const isSolid = (background: string): boolean => background === "solid" || background.startsWith("solid-");
 
 /** Where each blob sits (percent of the width and height) for the three colours of a recipe. */
 type At = [number, number];
@@ -97,12 +93,9 @@ export function solidsFor(theme: Theme): NamedSolid[] {
   return [{ id: "solid", name: "Default", colour: "" }, ...all.filter((s, i) => all.findIndex((o) => o.colour === s.colour) === i)];
 }
 /** Every id a solid can have, in order; a scheme whose palette repeats a colour offers fewer (`solidsFor`). */
-export const SOLID_IDS: readonly string[] = ["solid", ...SOLID_ROLES.map((r) => r.id)];
 const flat = (colour: string): string => `linear-gradient(${colour}, ${colour})`;
 
-export const GRADIENT_IDS: readonly string[] = [...RECIPES.map((r) => r.id), "horizon"];
 /** The gradient a theme starts with: the first one, the scheme's own accent with its cyan and magenta. */
-export const DEFAULT_GRADIENT = "aurora";
 
 /** The person's own gradient: their stops, in OKLab (no grey dip between two bright colours), at their angle. */
 export function customGradient(custom: CustomGradient): string {

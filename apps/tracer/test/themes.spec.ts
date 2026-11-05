@@ -160,6 +160,8 @@ test.describe("the Themes window", () => {
     await grain.scrollIntoViewIfNeeded();
     await grain.fill("60");
     await expect.poll(async () => (await look(page)).grain).toBe(true);
+    // The tile is drawn by code that loads on demand the first time, so it arrives a moment after the attribute does.
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector('[data-window-id="s-appearance-themes"]')!).backgroundImage), { timeout: 10_000 }).toContain("data:image/png");
     const seen = await page.evaluate(() => {
       const image = (sel: string): string => { const n = document.querySelector(sel); return n ? getComputedStyle(n).backgroundImage : "missing"; };
       return { win: image('[data-window-id="s-appearance-themes"]'), backdrop: image(".ui-canvas-backdrop"), size: document.documentElement.style.getPropertyValue("--look-grain-size") };

@@ -16,7 +16,7 @@
  * argument are how a list leaves and comes back (`persist.ts` writes it to the device and to the account); anything read back is
  * checked by {@link restore}, so a damaged or hand-edited copy can never put a theme out of range.
  */
-import { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, DEFAULT_GRADIENT, GRADIENT_IDS, MAX_STOPS, MIN_STOPS, SOLID_CUSTOM_ID, SOLID_IDS, type CustomGradient } from "./gradients";
+import { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, DEFAULT_GRADIENT, GRADIENT_IDS, MAX_STOPS, MIN_STOPS, SOLID_CUSTOM_ID, SOLID_IDS, type CustomGradient } from "./backgrounds";
 import { fontById } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
 

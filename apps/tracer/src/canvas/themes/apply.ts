@@ -10,7 +10,7 @@
  *
  * The **background** is the product's own backdrop layers: a theme's gradient (generated per scheme, or the person's own) or flat colour
  * is plain CSS written with `core.setBackdrop`, and the background mode `themed` shows it without ever running the mesh painter.
- * "Solid" with the scheme's own colour is the product's `none`.
+ * "Solid" with the scheme's own colour is the product's `none`. The image and the grain tile are drawn by `paint.on-demand.ts`, which loads after the first paint.
  *
  * Windows follow the theme, and so do the floating cards (popovers, palette, sidebar, pills, tooltips; the owner's answer in D322). A
  * floating card follows the tint but never blurs less than the shared overlay blur ({@link CARD_BLUR_FLOOR_PX}, D329), so Tinted shows no ghost
@@ -21,9 +21,7 @@
  */
 import type { CoreScreen } from "../../core-screen";
 import { readUiSize, setUiSize } from "../../../../../packages/ui/src/ui-scale";
-import { THEMES } from "../../../../../packages/ui/src/themes";
-import { backgroundCss } from "./gradients";
-import { grainImage } from "./grain";
+import { onDemand } from "../../on-demand";
 import { blurPx, type AppearanceTheme } from "./model";
 
 /** The shared overlay blur (D72): floating cards follow a theme's tint but never blur less than this (owner, D329). */
@@ -43,13 +41,10 @@ export function applyLook(core: CoreScreen, theme: AppearanceTheme): void {
   const level = theme.tint < 100 ? 2 : 1;
   if (now.windows !== level) core.act(`windows:${level}`);
   if (now.card !== 2) core.act("card:2");
-  // The image behind the windows: a gradient, or a flat colour for a solid that is not the scheme's own. "" is the scheme's own colour alone.
-  const image = backgroundCss(theme.background, theme.custom, THEMES[theme.colors] ?? THEMES.mocha!, theme.customSolid);
-  const mode = image ? "themed" : "none";
+  // Whether the look has an image at all is known from its id: only the scheme's own colour ("solid") is plain. The image itself is drawn on demand (`paint.on-demand.ts`).
+  const mode = theme.background === "solid" ? "none" : "themed";
   if (now.background !== mode) core.act(`bg:${mode}`);
-  core.setBackdrop(image);
   // The tile's pixels are device pixels, so it is drawn at 128 / devicePixelRatio CSS pixels.
-  root.style.setProperty("--look-grain-url", grainImage(theme.grain));
   root.style.setProperty("--look-grain-size", `${128 / devicePixelRatio}px`);
   root.toggleAttribute("data-look-grain", theme.grain > 0);
   root.dataset.look = theme.id;
@@ -58,4 +53,23 @@ export function applyLook(core: CoreScreen, theme: AppearanceTheme): void {
   root.style.setProperty("--look-blur", `${blurPx(theme.blur)}px`);
   // The blur is a layer per window that cannot be skipped once it is on, so the rule that adds it exists only for blur above 0.
   root.toggleAttribute("data-look-blur", theme.blur > 0);
+  paint(core, theme);
+}
+
+/** The painter once it has loaded; after that a look is painted in the same call. */
+let painter: typeof import("./paint.on-demand") | undefined;
+/** Which look asked last while the painter was loading: an older request that arrives late is dropped. */
+let latest = 0;
+
+/** Draws the image part of `theme` (background and grain), loading the painter the first time a look has an image. */
+function paint(core: CoreScreen, theme: AppearanceTheme): void {
+  const mine = ++latest;
+  if (theme.background === "solid" && theme.grain === 0) {
+    // Nothing to draw: no image behind the windows and no grain, so the properties are cleared without loading anything.
+    core.setBackdrop("");
+    document.documentElement.style.setProperty("--look-grain-url", "none");
+    return;
+  }
+  if (painter) { painter.paintLook(core, theme); return; }
+  void onDemand(() => import("./paint.on-demand")).then((loaded) => { painter = loaded; if (mine === latest) loaded.paintLook(core, theme); });
 }
