@@ -1482,6 +1482,9 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             readiness: matches.get_flag("readiness"),
             command_stdin: matches.get_flag("command_stdin"),
             retain_output: matches.get_flag("retain_output"),
+            lifeline_fd: matches
+                .get_one::<i64>("lifeline_fd")
+                .and_then(|descriptor| i32::try_from(*descriptor).ok()),
         })
     })() {
         Ok(options) => options,

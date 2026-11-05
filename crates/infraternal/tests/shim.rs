@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
+/// The descriptor number a lifelined test shim receives its lifeline on.
+const LIFELINE_FD: i32 = 9;
 struct Session {
     state: PathBuf,
     id: String,
@@ -40,6 +42,18 @@ impl Session {
         retention_ms: u64,
         readiness: bool,
     ) -> Self {
+        Self::start_lifelined(ring, detach, units, retention_ms, readiness, None)
+    }
+    /// Start a shim, optionally handing it a launch lifeline (the write end of a pipe) as
+    /// descriptor `LIFELINE_FD`, named by `--lifeline-fd`.
+    fn start_lifelined(
+        ring: usize,
+        detach: bool,
+        units: Option<(&str, &str)>,
+        retention_ms: u64,
+        readiness: bool,
+        lifeline: Option<&std::os::fd::OwnedFd>,
+    ) -> Self {
         let counter = NEXT.fetch_add(1, Ordering::Relaxed);
         let id = format!("{:016x}{counter:016x}", std::process::id());
         // Socket names include the full state path; keep gate fixtures under its per-job root.
@@ -58,6 +72,17 @@ impl Session {
                 .arg(std::env::current_dir().unwrap())
                 .arg(format!("--setenv=ZDOTDIR={}/tests/profile",env!("CARGO_MANIFEST_DIR")))
                 .args(["/bin/sh","-c","scope=$1; shift; systemd-run --user --quiet --scope --unit=\"$scope\" \"$@\" & wait","shim-parent",scope,env!("CARGO_BIN_EXE_infraternal")]);
+            command
+        } else if let Some(_write_end) = lifeline {
+            // The pipe arrives as this process's stdout; the shell copies it to the lifeline descriptor,
+            // points stdout at /dev/null, and replaces itself with the launcher, so no extra holder remains.
+            let mut command = Command::new("/bin/sh");
+            command.args([
+                "-c",
+                &format!("exec \"$@\" {LIFELINE_FD}>&1 1>/dev/null"),
+                "shim-lifeline",
+                env!("CARGO_BIN_EXE_infraternal"),
+            ]);
             command
         } else if detach {
             let mut command = Command::new("/bin/sh");
@@ -100,11 +125,13 @@ impl Session {
         if readiness {
             command.arg("--readiness");
         }
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
+        if lifeline.is_some() {
+            command.arg("--lifeline-fd").arg(LIFELINE_FD.to_string());
+        }
+        let stdout = lifeline.map_or_else(Stdio::null, |write_end| {
+            Stdio::from(write_end.try_clone().unwrap())
+        });
+        let child = command.stdin(Stdio::null()).stdout(stdout).spawn().unwrap();
         let mut session = Self {
             state,
             id,
@@ -1381,4 +1408,140 @@ fn assert_shared_queue_pressure(writer: u32, replacements: usize, probe: QueuePr
         thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(fs::read_to_string(result).unwrap(), "900000,200000");
+}
+
+/// A fresh lifeline: the pipe's read end stays with the test, the write end goes to the shim.
+fn lifeline() -> (std::fs::File, std::os::fd::OwnedFd) {
+    let (read, write) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).unwrap();
+    (std::fs::File::from(read), write)
+}
+
+/// Whether the lifeline's read end has hit end-of-file, waiting at most `limit` (a hang bound, not a
+/// speed claim): true only when every holder of the write end is gone.
+fn lifeline_eof_within(read: &std::fs::File, limit: Duration) -> bool {
+    use std::os::fd::AsFd as _;
+    let deadline = Instant::now() + limit;
+    loop {
+        let mut poll = [nix::poll::PollFd::new(
+            read.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        let left = deadline.saturating_duration_since(Instant::now());
+        let millis = u16::try_from(left.as_millis().min(1000)).unwrap();
+        if nix::poll::poll(&mut poll, nix::poll::PollTimeout::from(millis)).unwrap() > 0 {
+            let mut byte = [0_u8; 8];
+            match (&*read).read(&mut byte) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(error) => panic!("lifeline read: {error}"),
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+    }
+}
+
+/// The launcher forks, the original exits, the shim lives on holding the lifeline: no EOF while it
+/// runs, and EOF as soon as it is killed (whatever its shell is doing).
+#[test]
+fn lifeline_reaches_eof_when_the_shim_is_killed_and_not_before() {
+    let (read, write) = lifeline();
+    let session = Session::start_lifelined(8192, true, None, 600_000, false, Some(&write));
+    drop(write);
+    assert!(
+        !lifeline_eof_within(&read, Duration::from_millis(300)),
+        "the lifeline reached EOF while the shim was alive"
+    );
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(session.pid).unwrap()),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    assert!(
+        lifeline_eof_within(&read, Duration::from_secs(10)),
+        "a killed shim still held the lifeline"
+    );
+}
+
+/// A shim that exits by itself, when its shell exits, releases the lifeline too.
+#[test]
+fn lifeline_reaches_eof_when_the_shim_exits_normally() {
+    let (read, write) = lifeline();
+    let mut session = Session::start_lifelined(8192, true, None, 200, false, Some(&write));
+    drop(write);
+    let mut peer = session.attach(0);
+    send(&mut peer, Frame::Input(b"exit 0\n".to_vec()));
+    // Keep reading until the shim sends its exit and retires.
+    peer.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    while !matches!(try_read(&mut peer), None | Some(Frame::Exited(..))) {}
+    drop(peer);
+    assert!(
+        lifeline_eof_within(&read, Duration::from_secs(15)),
+        "an exited shim still held the lifeline"
+    );
+    session.pid = 0;
+}
+
+/// The shell, and anything it starts, never holds the lifeline: only the shim does.
+#[test]
+fn the_shell_and_its_children_never_hold_the_lifeline() {
+    let (read, write) = lifeline();
+    let session = Session::start_lifelined(8192, true, None, 600_000, false, Some(&write));
+    drop(write);
+    let mut peer = session.attach(0);
+    let mut seq = 0;
+    // The digits are computed, so the terminal's echo of this line never contains the answer.
+    let command = format!(
+        "a=0; [ -e /proc/$$/fd/{LIFELINE_FD} ] && a=1; sleep 1 & b=0; \\
+         [ -e /proc/$!/fd/{LIFELINE_FD} ] && b=1; printf 'RES%sULT\\n' \"$a$b\"\n"
+    );
+    send(&mut peer, Frame::Input(command.into_bytes()));
+    let output = until(&mut peer, &mut seq, b"ULT\r\n");
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("RES00ULT"),
+        "the shell or its child held the lifeline: {text}"
+    );
+    // And the shim itself still holds it.
+    assert!(!lifeline_eof_within(&read, Duration::from_millis(200)));
+}
+
+/// Without its lifeline a shim refuses to run, instead of letting the launch's proof of death lie.
+#[test]
+fn a_missing_lifeline_descriptor_stops_the_shim_before_it_runs() {
+    let state = std::env::temp_dir().join(format!("lifeline-missing-{}", std::process::id()));
+    let status = Command::new(env!("CARGO_BIN_EXE_infraternal"))
+        .args([
+            "__shim",
+            "--session",
+            "0123456789abcdef0123456789abcdef",
+            "--uid",
+            &nix::unistd::Uid::effective().as_raw().to_string(),
+            "--state",
+        ])
+        .arg(&state)
+        .args(["--lifeline-fd", "77"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&state);
+    let message = String::from_utf8_lossy(&status.stderr);
+    assert!(!status.status.success(), "a shim ran without its lifeline");
+    assert!(
+        message.contains("Bad file descriptor"),
+        "the shim refused for another reason: {message}"
+    );
+}
+
+/// One frame, or `None` at end of stream or on a read timeout.
+fn try_read(peer: &mut UnixStream) -> Option<Frame> {
+    let mut prefix = [0; 4];
+    peer.read_exact(&mut prefix).ok()?;
+    let len = u32::from_le_bytes(prefix) as usize;
+    let mut bytes = vec![0; len];
+    peer.read_exact(&mut bytes).ok()?;
+    Frame::decode(&bytes).ok()
 }

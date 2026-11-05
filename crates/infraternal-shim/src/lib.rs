@@ -117,6 +117,29 @@ pub fn protect_login_process_at(path: &std::path::Path) -> std::io::Result<()> {
     pty::protect_login_process_at(path)
 }
 
+/// Admit the launch lifeline (the write end of a pipe) into the child by number, and return
+/// that number for `--lifeline-fd`. The parent keeps its own copy close-on-exec, so it never
+/// leaks to another child; drop the command after spawn, or this process holds the lifeline too.
+/// Register after `inherit_only_standard_descriptors`, which would otherwise close it.
+/// # Errors
+/// Returns descriptor duplication failures.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn inherit_lifeline(
+    command: &mut std::process::Command,
+    write_end: &dyn std::os::fd::AsFd,
+) -> std::io::Result<i32> {
+    pty::inherit_descriptor(command, write_end)
+}
+
+/// Hold the inherited lifeline for the life of this shim and mark it close-on-exec, so no program
+/// the shim starts, the user's shell included, ever holds it.
+/// # Errors
+/// Fails closed when the descriptor is absent, a standard handle or not a pipe.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn hold_lifeline(descriptor: i32) -> std::io::Result<()> {
+    pty::hold_lifeline(descriptor)
+}
+
 /// Let the child inherit only standard input, output and error: every other
 /// descriptor is marked close-on-exec after fork (an allowlist, #328 P1).
 /// Hooks the caller registers afterwards may still admit a named descriptor.

@@ -34,6 +34,8 @@ fn spawned_shapes_reuse_full_shim_options_and_defaults() {
         &["--readiness", "--detach"],
         &["--retain-output", "--detach"],
         &["--retain-output", "--command-stdin", "--detach"],
+        &["--detach", "--lifeline-fd", "9"],
+        &["--retain-output", "--detach", "--lifeline-fd", "12"],
     ] {
         let mut args = arguments();
         args.extend(flags.iter().map(OsString::from));
@@ -48,6 +50,7 @@ fn spawned_shapes_reuse_full_shim_options_and_defaults() {
         );
         assert_eq!(spawned.state, full.state);
         assert_eq!(spawned.retain_output, full.retain_output);
+        assert_eq!(spawned.lifeline_fd, full.lifeline_fd);
         assert_eq!(spawned.command_stdin, full.command_stdin);
         assert_eq!(
             (

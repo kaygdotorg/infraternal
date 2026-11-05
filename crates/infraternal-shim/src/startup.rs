@@ -35,6 +35,10 @@ pub struct Options {
     /// Keep automation output until the existing bounded exit deadline.
     #[cfg_attr(feature = "cli", arg(long))]
     pub retain_output: bool,
+    /// The launch lifeline: an inherited pipe's write end that every process of the launch holds and
+    /// that this shim holds for its whole life, never passing it to its shell (contracts/shim.md §2).
+    #[cfg_attr(feature = "cli", arg(long))]
+    pub lifeline_fd: Option<i32>,
 }
 
 impl Options {
@@ -55,6 +59,7 @@ impl Options {
             readiness,
             command_stdin,
             retain_output,
+            lifeline_fd,
         } = self;
 
         let id = session_id(&session)?;
@@ -65,6 +70,12 @@ impl Options {
         };
         if readiness && command_stdin {
             return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        // Hold the lifeline before forking: the original launcher and the intermediate inherit it and let
+        // go when they exit, and the session process keeps it until it exits. An absent descriptor fails
+        // closed, because a shim running without it would make the launch's proof of death meaningless.
+        if let Some(descriptor) = lifeline_fd {
+            crate::hold_lifeline(descriptor)?;
         }
         if detach && !crate::detach()? {
             return Ok(());
@@ -111,6 +122,11 @@ impl Options {
         {
             return None;
         }
+        // The launcher appends the lifeline pair last, so peel it off before the fixed shapes below.
+        let (trailing, lifeline_fd) = match trailing {
+            [rest @ .., flag, value] if flag == "--lifeline-fd" => (rest, Some(number(value)?)),
+            _ => (trailing, None),
+        };
         let retain_output = trailing
             .first()
             .is_some_and(|flag| flag == "--retain-output");
@@ -146,6 +162,7 @@ impl Options {
             readiness,
             command_stdin,
             retain_output,
+            lifeline_fd,
             ring_capacity: RING_CAPACITY,
             exit_retention_ms: EXIT_RETENTION_MS,
         })

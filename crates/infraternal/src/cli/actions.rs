@@ -494,6 +494,7 @@ fn session_shim_action() -> ActionDefinition {
                 ("retain_output".to_owned(), JsonSchema::boolean("Keep automation output until the bounded exit deadline.")),
                 ("command_stdin".to_owned(), JsonSchema::boolean("Read literal program arguments from a private pipe.")),
                 ("readiness".to_owned(), JsonSchema::boolean("Private fixed-command readiness probe; never reads login startup.")),
+                ("lifeline_fd".to_owned(), JsonSchema::integer("Internal launch lifeline descriptor, an inherited pipe held for the shim's whole life.")),
                 ("exit_retention_ms".to_owned(), JsonSchema::integer("Exited session retention in milliseconds, clamped to the production ceiling.")),
                 (
                     "ring_capacity".to_owned(),

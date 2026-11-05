@@ -49,7 +49,9 @@ pub(super) fn inherit_login_process(
     )))
 }
 
-#[cfg(feature = "host-login")]
+/// Let `command`'s child inherit `file` at the returned descriptor number (at least 8, so it can never
+/// shadow the standard handles or Command's private exec-error pipe). The parent's copy stays close-on-exec.
+#[cfg(any(feature = "host-login", target_os = "linux", target_os = "macos"))]
 pub(crate) fn inherit_descriptor(
     command: &mut Command,
     file: &dyn std::os::fd::AsFd,
@@ -71,6 +73,35 @@ pub(crate) fn inherit_descriptor(
         });
     }
     Ok(descriptor)
+}
+
+/// Keep the launch lifeline for this process's whole life, and out of every program it starts.
+/// Fails closed: the descriptor must be an open pipe, because a shim without its lifeline would
+/// let the agent mistake a live terminal for a dead one.
+pub(crate) fn hold_lifeline(descriptor: i32) -> io::Result<()> {
+    if descriptor < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lifeline descriptor is a standard handle",
+        ));
+    }
+    // SAFETY: fstat only reads the kernel's record of an integer; a closed or invalid
+    // descriptor is an error, and the zeroed buffer is written entirely on success.
+    let mut status: nix::libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { nix::libc::fstat(descriptor, &raw mut status) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if status.st_mode & nix::libc::S_IFMT != nix::libc::S_IFIFO {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lifeline descriptor is not a pipe",
+        ));
+    }
+    // SAFETY: F_SETFD with an integer flag on a descriptor just checked as open.
+    if unsafe { nix::libc::fcntl(descriptor, nix::libc::F_SETFD, nix::libc::FD_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "host-login")]
