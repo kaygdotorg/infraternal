@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Create a UTC migration with `scripts/new-migration add_foo` (D347, #344)."""
+from datetime import datetime, timezone
+import fcntl
+import os
+from pathlib import Path
+import re
+import sys
+
+
+def create_migration(directory: Path, name: str, now: datetime) -> Path:
+    """Create one empty migration; reject invalid names and occupied seconds.
+
+    The directory lock serializes helper calls in this checkout. A different
+    branch may still choose the same second; the verification guard catches it.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", name):
+        raise ValueError("name must be lowercase words joined by underscores")
+    version = now.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
+    # Lock the directory itself, without leaving a lock file among migrations.
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if any(directory.glob(f"{version}_*.sql")):
+            raise FileExistsError(f"migration version {version} exists; retry next second")
+        path = directory / f"{version}_{name}.sql"
+        with path.open("x") as output:
+            output.write(f"-- {name.replace('_', ' ')}.\n")
+        return path
+    finally:
+        os.close(descriptor)
+
+
+def main() -> int:
+    """Resolve the migration directory from this script, independent of cwd."""
+    if len(sys.argv) != 2:
+        print("usage: scripts/new-migration <name>", file=sys.stderr)
+        return 2
+    directory = Path(__file__).resolve().parents[1] / "crates/infraternal-server/migrations"
+    try:
+        print(create_migration(directory, sys.argv[1], datetime.now(timezone.utc)))
+    except (OSError, ValueError) as error:
+        print(error, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
