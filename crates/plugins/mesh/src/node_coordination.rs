@@ -1160,6 +1160,173 @@ mod tests {
         );
     }
 
+    /// Start a rotation for one supported node and return its id, row id and operation (J252 P2 fixtures).
+    async fn rotating_node(
+        service: &crate::api::MeshService,
+        host: &str,
+        key: PublicKey,
+    ) -> (NodeId, i64, crate::store::RotationRecord) {
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach_named_with_capability(
+                host,
+                key,
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        // Every node supports rotation, so the D166 all-node gate opens.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let node_id = i64::try_from(node.0).unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET last_rotation=0,schedule_boot_id='test-boot',schedule_monotonic=0,schedule_period_secs=604800 WHERE node_id=?",
+        )
+        .bind(node_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let operation = store
+            .begin_rotation(node, "test-boot", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        (node, node_id, operation)
+    }
+
+    /// A node's stored key, rotation support, phase, candidate, predecessor and operation id.
+    type RotationRow = (
+        Vec<u8>,
+        bool,
+        Option<String>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<String>,
+    );
+
+    /// Read a node's stored key, rotation support and rotation columns.
+    async fn rotation_row(service: &crate::api::MeshService, node_id: i64) -> RotationRow {
+        sqlx::query_as(
+            "SELECT n.public_key,n.key_rotation_supported,r.rotation_phase,r.candidate_public_key,r.previous_public_key,r.operation_id \
+             FROM mesh_nodes AS n JOIN mesh_node_key_rotation AS r ON r.node_id=n.id WHERE n.id=?",
+        )
+        .bind(node_id)
+        .fetch_one(&service.pool_for_tests())
+        .await
+        .unwrap()
+    }
+
+    /// J252 P2: a node whose rotation is being prepared restarts on an engine without rotation support (kernel to
+    /// `GotaTun`, D346). The attach must succeed, record the lost support and abandon the rotation in one
+    /// transaction, so the candidate is never published and later restarts are not refused.
+    #[tokio::test]
+    async fn a_node_that_loses_rotation_support_while_preparing_abandons_the_rotation() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let key = PublicKey([2; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, node_id, operation) = rotating_node(&service, host, key).await;
+
+        store
+            .attach_named_with_capability(host, key, endpoint, false, None, false)
+            .await
+            .expect("an attach without rotation support is accepted while a rotation is open");
+        let (current, supported, phase, candidate, previous, operation_id) =
+            rotation_row(&service, node_id).await;
+        assert_eq!(
+            current,
+            key.0.to_vec(),
+            "the node keeps the key it presented"
+        );
+        assert!(!supported, "the lost support is recorded");
+        assert_eq!(
+            (phase, candidate, previous, operation_id),
+            (None, None, None, None),
+            "the rotation is abandoned"
+        );
+        assert!(
+            store
+                .start_rotation_overlap(
+                    node,
+                    &operation.operation_id,
+                    PublicKey([3; 32]),
+                    100,
+                    "test-boot",
+                    1_000
+                )
+                .await
+                .is_err(),
+            "the abandoned operation cannot publish its candidate"
+        );
+        assert!(
+            store
+                .begin_rotation(node, "test-boot", 2)
+                .await
+                .unwrap()
+                .is_none(),
+            "no new rotation starts while the node reports no support"
+        );
+        store
+            .attach_named_with_capability(host, key, endpoint, false, None, false)
+            .await
+            .expect("a later restart attaches too");
+    }
+
+    /// J252 P2 in the overlap phase: peers already hold both keys and the node restarts without rotation support,
+    /// presenting the predecessor it carried. The coordinator returns to that key alone and refuses the stale
+    /// commit, so no peer is left routing to a key the node may not hold.
+    #[tokio::test]
+    async fn a_node_that_loses_rotation_support_during_overlap_keeps_the_key_it_presents() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let previous = PublicKey([2; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, node_id, operation) = rotating_node(&service, host, previous).await;
+        store
+            .start_rotation_overlap(
+                node,
+                &operation.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        store
+            .attach_named_with_capability(host, previous, endpoint, false, None, false)
+            .await
+            .expect("an attach without rotation support is accepted during the overlap");
+        let (current, supported, phase, candidate, stored_previous, operation_id) =
+            rotation_row(&service, node_id).await;
+        assert_eq!(
+            current,
+            previous.0.to_vec(),
+            "peers route to the key the node holds"
+        );
+        assert!(!supported);
+        assert_eq!(
+            (phase, candidate, stored_previous, operation_id),
+            (None, None, None, None)
+        );
+        assert!(
+            store
+                .commit_rotation(node, &operation.operation_id)
+                .await
+                .is_err(),
+            "the abandoned operation cannot commit"
+        );
+    }
+
     /// A coordinator restart in the overlap phase still publishes the previous key to peers.
     #[tokio::test]
     async fn coordinator_restart_restores_the_previous_key_during_overlap() {

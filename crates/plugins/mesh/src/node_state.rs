@@ -298,13 +298,22 @@ impl Store {
         FileSync::parent(&self.rotation_path)
     }
     /// Persist the selected engine separately from the legacy accepted snapshot.
+    ///
+    /// Only kernel `WireGuard` rotates (D166, D352), so recording any other engine also retires the rotation
+    /// journal: whether or not a live link was switched, a later return to kernel must start from the key the
+    /// node now uses, never from a journal key (#285, J252 P3-2). The engine is written first; a stop between the
+    /// two leaves a journal that the kernel ownership proof already ignores, and the next recording removes it.
     /// # Errors
     /// Refuses unsafe state files and reports durable-write failures.
     pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
         write_public(
             &self.engine_path,
             &serde_json::to_vec(&engine).map_err(io::Error::other)?,
-        )
+        )?;
+        if engine == crate::gotatun_node::EngineKind::Kernel {
+            return Ok(());
+        }
+        self.discard_rotation_secret()
     }
     /// Read the selected engine, if this node has recorded one.
     /// # Errors
@@ -649,6 +658,39 @@ pub(crate) mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    /// Recording an engine other than kernel retires the rotation journal, even with no live link to switch, so a
+    /// later return to kernel cannot revive an old key of ours from it (#285, J252 P3-2). Recording kernel keeps it.
+    #[test]
+    fn leaving_kernel_retires_the_rotation_journal() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+                sequence: 1,
+                previous: [0; 32],
+                candidate: [0x22; 32],
+                commit_requested: true,
+                completed: true,
+            })
+            .expect("completed journal");
+        store
+            .record_engine(crate::gotatun_node::EngineKind::Kernel)
+            .expect("record kernel");
+        assert!(
+            store.rotation_secret().expect("read journal").is_some(),
+            "kernel keeps its own journal"
+        );
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record GotaTun");
+        assert!(store.rotation_secret().expect("read journal").is_none());
+        assert!(!store.rotation_path.exists());
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("recording again is harmless");
     }
 
     /// A stop inside `write_private` leaves `mesh-private-key.<pid>.new` holding the key. Opening

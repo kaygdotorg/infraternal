@@ -109,6 +109,7 @@ fn snapshot(local: (u32, PublicKey), peer: (u32, PublicKey), endpoint: SocketAdd
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
+                access_ssh: None,
             },
         )]),
         merged: BTreeMap::new(),
@@ -143,6 +144,7 @@ fn cleanup(states: &[&PathBuf]) {
     }
 }
 
+/// Keep the topology, open flow and restart in one scenario so the assertions observe the same interfaces.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
 // One scenario: the topology, the open flow, the restart in the middle of it, and the checks.

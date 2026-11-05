@@ -2992,6 +2992,11 @@ async fn open_terminal(
     );
     #[cfg(not(feature = "ssh"))]
     let account = None;
+    // Login access (D235 Q14): the same check as mesh SSH. The host applies it
+    // to the account it actually opens, including a fallback to root.
+    let grant = crate::login_access::grant(&state.pool, user_id, host)
+        .await
+        .map_err(|_| crate::embedded::AgentError::Unavailable)?;
     let opened = match tokio::time::timeout(
         connect_timeout,
         agent.open_for_with_metadata(
@@ -3003,6 +3008,7 @@ async fn open_terminal(
             },
             person,
             account,
+            grant,
         ),
     )
     .await

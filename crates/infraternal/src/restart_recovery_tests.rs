@@ -17,6 +17,69 @@ use openssl::{
 };
 use std::sync::Arc;
 
+/// Restart fixtures must work from an oversized debug image without raising production's limit.
+/// Pad a staging inode and publish a separate executable: sibling tests may fork
+/// while the staging writer is open, so closing our descriptor alone cannot make it executable.
+#[cfg(target_os = "linux")]
+#[test]
+fn oversized_debug_image_does_not_limit_restart_fixtures() {
+    use crate::restart_binary::fixture::{Directory, Signed};
+    use std::os::unix::process::CommandExt;
+    const NAME: &str =
+        "restart::recovery_tests::oversized_debug_image_does_not_limit_restart_fixtures";
+    if std::env::var_os("INFRATERNAL_OVERSIZED_RESTART_BOUND").is_some() {
+        assert!(crate::restart_binary::Opened::running().is_err());
+        println!("production oversized running-image refusal: preserved");
+        return;
+    }
+    let directory = Directory::new();
+    let image = Signed::image(directory.0.join("oversized-debug-staging"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&image.path)
+        .unwrap()
+        .set_len(512 * 1024 * 1024 + 1)
+        .unwrap();
+    let executable = directory.0.join("oversized-debug-image");
+    crate::test_executable::copy(&image.path, &executable, 0o700);
+    // ELF ignores trailing padding; strip removes it along with debug sections.
+    // A sparse extension crosses the real bound without manufacturing debug symbols.
+    for check_bound in [true, false] {
+        let mut command = std::process::Command::new(&executable);
+        if check_bound {
+            command
+                .args(["--exact", NAME, "--nocapture"])
+                .env("INFRATERNAL_OVERSIZED_RESTART_BOUND", "1");
+        } else {
+            command.args([
+                "restart::",
+                "--skip",
+                NAME,
+                "--test-threads=2",
+                "--nocapture",
+            ]);
+        }
+        // A failing nested suite can exceed a pipe buffer; collect its logs in private files.
+        let stdout = directory.0.join(format!("{check_bound}.stdout"));
+        let stderr = directory.0.join(format!("{check_bound}.stderr"));
+        let child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::fs::File::create(&stdout).unwrap())
+            .stderr(std::fs::File::create(&stderr).unwrap())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let output = super::tests::bounded_output(child, Duration::from_secs(300), NAME);
+        let stdout = std::fs::read_to_string(stdout).unwrap();
+        let stderr = std::fs::read_to_string(stderr).unwrap();
+        assert!(
+            output.status.success(),
+            "check_bound={check_bound}\n{stdout}\n{stderr}"
+        );
+        println!("{stdout}");
+    }
+}
+
 fn material() -> (CaMaterial, X509) {
     let key = PKey::generate_ed25519().unwrap();
     let mut name = X509NameBuilder::new().unwrap();
@@ -64,8 +127,9 @@ fn material() -> (CaMaterial, X509) {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Verify real execution and late recovery using compact images, private state, and owned children.
 fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
-    use std::os::unix::{ffi::OsStrExt, fs::DirBuilderExt};
+    use std::os::unix::{ffi::OsStrExt, process::CommandExt};
     const NAME: &str =
         "restart::recovery_tests::verified_exec_and_late_refusal_preserve_listener_and_ca";
     if let Some(directory) = std::env::var_os("INFRATERNAL_RECOVERY_FIXTURE") {
@@ -155,41 +219,27 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         let outcome = replace(runtime, replacement, true);
         panic!("verified replacement or recovery returned: {outcome:?}");
     }
-    // Use the gate's private root for nested fixtures; retain the HOME fallback
-    // for standalone test runs that do not provide one.
-    let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
-        || {
-            PathBuf::from(std::env::var_os("HOME").unwrap())
-                .join(".cache/codex-scratch/release-pipeline-r4")
-        },
-        PathBuf::from,
-    );
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&root)
-        .unwrap();
     for case in ["replacement", "late"] {
-        let directory = root.join(uuid::Uuid::new_v4().to_string());
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&directory)
-            .unwrap();
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let directory = fixture.0.clone();
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
-        let mut child = std::process::Command::new(
-            crate::restart_binary::fixture::stripped_test_image(&std::env::current_exe().unwrap()),
-        )
-        .args(["--exact", NAME, "--nocapture"])
-        .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
-        .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
-        .env("INFRATERNAL_RECOVERY_CASE", case)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+        let mut child = crate::restart_binary::fixture::ChildGuard::new(
+            std::process::Command::new(crate::restart_binary::fixture::stripped_test_image(
+                &std::env::current_exe().unwrap(),
+            ))
+            .args(["--exact", NAME, "--nocapture"])
+            .env("INFRATERNAL_RECOVERY_FIXTURE", &directory)
+            .env("INFRATERNAL_RECOVERY_ADDRESS", address.to_string())
+            .env("INFRATERNAL_RECOVERY_CASE", case)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+        );
         let preparation_deadline = std::time::Instant::now() + Duration::from_secs(300);
         let mut recovery_deadline = None;
         while !directory.join("ready").exists() || !directory.join("recovered").exists() {
@@ -197,11 +247,11 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
                 recovery_deadline
                     .get_or_insert_with(|| std::time::Instant::now() + RESTART_TEST_HANG_BOUND);
             }
-            if child.try_wait().unwrap().is_some()
+            if child.process().try_wait().unwrap().is_some()
                 || std::time::Instant::now() >= recovery_deadline.unwrap_or(preparation_deadline)
             {
-                let _ = child.kill();
-                let output = child.wait_with_output().unwrap();
+                let _ = child.process().kill();
+                let output = child.output();
                 let _ = std::fs::remove_dir_all(&directory);
                 panic!(
                     "{case} did not recover: {}\n{}",
@@ -220,12 +270,12 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         assert_eq!(&alive, b"alive\n");
         let output_deadline = std::time::Instant::now() + RESTART_TEST_HANG_BOUND;
         loop {
-            if child.try_wait().unwrap().is_some() {
+            if child.process().try_wait().unwrap().is_some() {
                 break;
             }
             if std::time::Instant::now() >= output_deadline {
-                let _ = child.kill();
-                let output = child.wait_with_output().unwrap();
+                let _ = child.process().kill();
+                let output = child.output();
                 panic!(
                     "{case} child did not exit within its hang bound:\n{}\n{}",
                     String::from_utf8_lossy(&output.stdout),
@@ -234,7 +284,7 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let output = child.wait_with_output().unwrap();
+        let output = child.output();
         std::fs::remove_dir_all(&directory).unwrap();
         assert!(
             output.status.success(),

@@ -8,6 +8,7 @@ use std::{
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Exercise pathname recovery with private state and panic-safe child ownership.
 fn relative_recovery_after_atomic_install_keeps_live_install_path() {
     const NAME: &str = "restart::tests::deleted_path_review::relative_recovery_after_atomic_install_keeps_live_install_path";
     if let Some(installed) = std::env::var_os("REVIEW_REPLACED_INSTALL_PATH") {
@@ -50,12 +51,11 @@ fn relative_recovery_after_atomic_install_keeps_live_install_path() {
         let error = recovery.image.execute(&argv, &environment).unwrap_err();
         panic!("recovery exec refused: {error}");
     }
-    let state = crate::restart_binary::fixture::scratch_root()
-        .join(format!("review-replaced-path-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&state).unwrap();
+    let fixture = crate::restart_binary::fixture::Directory::new();
+    let state = fixture.0.clone();
     let installed = state.join("infraternal");
     let _fixture = crate::restart_binary::fixture::Signed::image(installed.clone());
-    let mut child = Command::new(&installed)
+    let child = Command::new(&installed)
         .arg0("./infraternal")
         .args(["--exact", NAME, "--nocapture"])
         .current_dir(&state)
@@ -63,19 +63,10 @@ fn relative_recovery_after_atomic_install_keeps_live_install_path() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + super::HANG_BOUND;
-    while child.try_wait().unwrap().is_none() {
-        if std::time::Instant::now() >= deadline {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            std::fs::remove_dir_all(&state).unwrap();
-            panic!("replaced-path child did not complete");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let output = child.wait_with_output().unwrap();
+    let output = super::bounded_output(child, super::HANG_BOUND, NAME);
     std::fs::remove_dir_all(state).unwrap();
     assert!(
         output.status.success(),

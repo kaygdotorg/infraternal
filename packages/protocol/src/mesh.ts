@@ -104,6 +104,13 @@ export interface MeshDefaultPreview {
   revision: number;
   loses_reach: readonly (readonly [MeshNodeId, MeshNodeId])[];
   total_pairs: number;
+  /**
+   * Nodes that would lose access to the server's own host: SSH and every
+   * other service there follow Access, while control-plane reach to the
+   * server is never lost (#221, D352). Sent on the first page only; later
+   * pages carry an empty list.
+   */
+  loses_ssh_to_server: readonly MeshNodeId[];
   next_cursor: MeshCursor | null;
 }
 

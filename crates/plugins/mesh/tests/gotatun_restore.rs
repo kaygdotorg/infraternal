@@ -278,6 +278,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )]),
             merged: BTreeMap::new(),

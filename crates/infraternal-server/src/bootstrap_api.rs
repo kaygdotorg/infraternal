@@ -195,11 +195,13 @@ async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // A cookie with an API key claims two authorities in one request: refused in every build,
+    // before any build-specific path can honour only one of them (#303, J234 P3-1).
+    if headers.contains_key(header::AUTHORIZATION) && headers.contains_key(header::COOKIE) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     #[cfg(feature = "remote")]
     let (owner, token, api_key) = if headers.contains_key(header::AUTHORIZATION) {
-        if headers.contains_key(header::COOKIE) {
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
         let Some(token) = crate::api_actions::bearer_token(&headers) else {
             return StatusCode::UNAUTHORIZED.into_response();
         };

@@ -1400,6 +1400,7 @@ mod tests {
     /// J137 P3-1: a well-formed bearer that is not a key learns nothing about the catalogue.
     /// Unknown, non-key-callable and key-callable ids all get the same 403; only a caller
     /// whose key authenticates can tell an unknown action (404) from an out-of-scope one.
+    #[cfg(feature = "remote")]
     #[tokio::test]
     async fn an_unknown_bearer_cannot_probe_action_ids() {
         let data_dir = temp_dir();
@@ -1718,6 +1719,7 @@ mod tests {
 
     /// J154 P2-1: reads by key are one summary row per key, action and minute, never one audit
     /// row per call.
+    #[cfg(feature = "remote")]
     #[tokio::test]
     async fn key_reads_are_counted_per_minute_not_written_per_call() {
         let data_dir = temp_dir();

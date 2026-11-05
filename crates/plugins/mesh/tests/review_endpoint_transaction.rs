@@ -87,6 +87,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,
+                access_ssh: None,
             },
         )]),
         #[cfg(feature = "mesh-dns-spike")]

@@ -90,6 +90,8 @@ pub(crate) struct RotationSchedule {
 pub(crate) struct Snapshot {
     loaded: Loaded,
     default_dns_suffix: String,
+    /// The server's infraternal control-plane ports when this snapshot was taken.
+    control_plane: TrafficPolicy,
 }
 impl Snapshot {
     /// Whether any node is past preparation, so applied views need durable acknowledgments before the rotation moves on.
@@ -115,6 +117,7 @@ impl Snapshot {
             default,
             endpoints,
             &self.default_dns_suffix,
+            &self.control_plane,
         );
         let mut config = compiled.map_err(|error| match error {
             MeshError::UnknownNode => MeshApiError::NotFound,
@@ -383,6 +386,30 @@ fn is_legacy_unnamed_label(name: &str) -> bool {
             !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
         })
 }
+/// Abandon a node's open rotation because it reattached without rotation support (J252 P2, D166, D352).
+///
+/// A node that restarts on an engine that cannot rotate (kernel to `GotaTun`, D346), loses its journal or runs an
+/// older binary keeps only one key. Keeping the rotation open would refuse that node forever, since only its own
+/// commit can close it, and the overlap could later publish a candidate it no longer holds. The caller runs
+/// this inside the attach transaction that records the lost support and the key the node presents, and bumps
+/// the revision, so peers drop the abandoned candidate or predecessor in the same view. The sequence moves on,
+/// so a step still in flight for the abandoned operation matches nothing.
+async fn abandon_rotation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    node_id: i64,
+) -> Result<(), &'static str> {
+    sqlx::query(
+        "UPDATE mesh_node_key_rotation SET candidate_public_key=NULL,previous_public_key=NULL,rotation_phase=NULL,\
+         rotation_started_at=NULL,rotation_boot_id=NULL,rotation_monotonic=NULL,operation_id=NULL,rotation_revision=NULL,\
+         local_committed=0,sequence=sequence+1 WHERE node_id=? AND rotation_phase IS NOT NULL",
+    )
+    .bind(node_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "Mesh storage unavailable.")?;
+    Ok(())
+}
+
 /// What names a node of `host`, and who gives it, with the names the owner gave every other host.
 ///
 /// The server is named after its own hostname; a remote machine after the name the owner typed when adding it,
@@ -563,7 +590,16 @@ pub struct Store {
     config_diagnostics: StorageDiagnostics,
     preview_diagnostics: StorageDiagnostics,
     default_dns_suffix: String,
+    /// Where the server's infraternal control plane listens; shared by every
+    /// clone, set once by the server ([`Self::set_control_plane`]).
+    control_plane: std::sync::Arc<std::sync::OnceLock<ControlPlane>>,
 }
+
+/// The ports every member may reach on the server's own node: the server's
+/// infraternal control-plane listeners (D215). Read again for each snapshot,
+/// because a fresh server starts its listener only after its CA is set up.
+pub type ControlPlane = std::sync::Arc<dyn Fn() -> TrafficPolicy + Send + Sync>;
+
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
@@ -586,6 +622,7 @@ impl Store {
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
             preview_diagnostics: StorageDiagnostics::new("mesh.default.preview"),
             default_dns_suffix,
+            control_plane: std::sync::Arc::default(),
         }
     }
     /// The server instance ID that tags acknowledgment receipts.
@@ -1276,6 +1313,12 @@ impl Store {
             storage_error("Mesh rotation key invalid.")
         })?))
     }
+    /// Tell every clone of this store where the server's control plane
+    /// listens. Only the first call takes effect. Until it is set, the
+    /// server's node admits peers only as Access allows (D352, #221).
+    pub fn set_control_plane(&self, control_plane: ControlPlane) {
+        let _ = self.control_plane.set(control_plane);
+    }
     /// Attach an authenticated host using its approved inventory binding, never a public key as authority.
     /// # Errors
     /// Returns fixed public errors, not database input or authentication data.
@@ -1322,12 +1365,11 @@ impl Store {
         let phase: Option<String> = row
             .try_get("rotation_phase")
             .map_err(|_| "Mesh storage unavailable.")?;
-        let Some(phase) = phase else {
+        // Without support the caller abandons any open rotation in this same transaction (J252 P2), so the
+        // node attaches as one that is not rotating: with the key it presents.
+        let Some(phase) = phase.filter(|_| rotation_supported) else {
             return Ok(presented.0.to_vec());
         };
-        if !rotation_supported {
-            return Err("Mesh key rotation is in progress.");
-        }
         let candidate: Option<Vec<u8>> = row
             .try_get("candidate_public_key")
             .map_err(|_| "Mesh storage unavailable.")?;
@@ -1401,6 +1443,14 @@ impl Store {
         let mut renamed = Vec::new();
         let id = if let Some(row) = existing {
             let public_key = Self::attached_public_key(&row, key, key_rotation_supported)?;
+            let abandoned = !key_rotation_supported
+                && row
+                    .try_get::<Option<String>, _>("rotation_phase")
+                    .map_err(|_| "Mesh storage unavailable.")?
+                    .is_some();
+            if abandoned {
+                abandon_rotation(&mut tx, row.get("id")).await?;
+            }
             // Temporary discovery absence is not an endpoint removal [166].
             // Keep the last known direct coordinate until an observed replacement arrives.
             let endpoint = endpoint.or_else(|| row.get::<Option<String>, _>("endpoint"));
@@ -1423,6 +1473,7 @@ impl Store {
             }
             rename(&mut tx, &renamed).await?;
             if renamed.is_empty()
+                && !abandoned
                 && row.get::<Option<String>, _>("dataplane_host").as_deref() == Some(host)
                 && row.get::<Vec<u8>, _>("public_key") == public_key
                 && row.get::<Option<String>, _>("endpoint").as_deref() == endpoint.as_deref()
@@ -1536,6 +1587,18 @@ impl Store {
             .ok()??;
         u64::try_from(id).ok().map(NodeId)
     }
+    /// The deployment's IPv4 range, for services that match mesh addresses
+    /// (the mesh SSH client configuration, #221). `None` before the first allocation.
+    pub async fn ipv4_range(&self) -> Option<crate::policy::model::Ipv4Range> {
+        let serialized: Option<String> =
+            sqlx::query_scalar("SELECT allocation_json FROM mesh_dataplane WHERE singleton=1")
+                .fetch_optional(&self.pool)
+                .await
+                .ok()??;
+        let state: State = serde_json::from_str(&serialized?).ok()?;
+        state.settings.ipv4.validate().ok()?;
+        Some(state.settings.ipv4)
+    }
     /// Compile a consistent current configuration and persist every new allocation before delivery.
     /// # Errors
     /// Refuses absent server identity, invalid inventory, allocation exhaustion or storage errors.
@@ -1549,6 +1612,10 @@ impl Store {
         self.load().await.map(|loaded| Snapshot {
             loaded,
             default_dns_suffix: self.default_dns_suffix.clone(),
+            control_plane: self
+                .control_plane
+                .get()
+                .map_or(TrafficPolicy::None, |control_plane| control_plane()),
         })
     }
     /// Page directed reach losses at one revision without allocating the pair matrix.
@@ -1590,9 +1657,31 @@ impl Store {
             if offset > total {
                 return Err(MeshApiError::InvalidInput);
             }
+            // SSH and every other service on the server's own host follow
+            // Access (owner, #221, D352): closing the default closes them for
+            // every node without its own arrow there. Control-plane reach to the server is never lost, so
+            // these are listed apart from `loses_reach`: on the first page
+            // only, at most one entry per node, within the same frame budget.
+            let server = coordinator.server();
+            let mut ssh_to_server = Vec::new();
+            let mut bytes = 2usize;
+            if reducing && offset == 0 {
+                for node in views.keys().filter(|node| **node != server) {
+                    if coordinator.granted(*node, server) == TrafficPolicy::None {
+                        let length = serde_json::to_vec(node)
+                            .map_err(|_| storage_error("node serialization failed"))?
+                            .len()
+                            + 1;
+                        if bytes + length > (MAX_MESH_FRAME_LEN - 1024) / 2 {
+                            break;
+                        }
+                        bytes += length;
+                        ssh_to_server.push(*node);
+                    }
+                }
+            }
             let mut skip = offset;
             let mut pairs = Vec::new();
-            let mut bytes = 2usize;
             'sources: for (node, view) in views.iter().filter(|_| reducing) {
                 let count = losses(view);
                 if skip >= count {
@@ -1632,7 +1721,7 @@ impl Store {
                 offset: delivered,
             });
             Ok(
-                serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"next_cursor":cursor}),
+                serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"loses_ssh_to_server":ssh_to_server,"next_cursor":cursor}),
             )
         }).await
     }

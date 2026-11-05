@@ -302,6 +302,7 @@ mod tests {
                     .collect(),
             ),
             outbound: TrafficPolicy::None,
+            access_ssh: None,
         };
         let tuple = ConnectionTuple {
             source: IpAddr::from([10, 254, 0, 3]),
@@ -363,6 +364,7 @@ mod tests {
                             .collect(),
                     ),
                     outbound: TrafficPolicy::None,
+                    access_ssh: None,
                 },
             );
             config

@@ -51,7 +51,11 @@ pub(super) async fn prepare(state: Arc<WebSocketState>, user: &str, token: &str)
                     let Ok(actor) = terminal_agent(&state, user, host).await else {
                         return;
                     };
-                    let _ = actor.prepare_login(person, Some(account)).await;
+                    let Ok(grant) = crate::login_access::grant(&state.pool, user, host).await
+                    else {
+                        return;
+                    };
+                    let _ = actor.prepare_login(person, Some(account), grant).await;
                 })
                 .await;
             }

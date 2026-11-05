@@ -151,7 +151,7 @@ fn proven_kernel_link(link: &crate::wireguard::ActiveLink, proof: &KernelProof) 
         && !proof.is_empty()
         && match link.owner {
             Some(owner) => proof.accepts(owner),
-            None => Device::identity().is_ok_and(|(key, _)| proof.accepts(key)),
+            None => Device::identity_at(link.ifindex).is_ok_and(|(key, _)| proof.accepts(key)),
         }
 }
 
@@ -175,11 +175,9 @@ fn switch_engine(
         }
         // Retire peers before the link deletion removes all routes, as `down` does.
         Client::new()?.clear_peers()?;
-        Device::delete_ifindex(link.ifindex)?;
-        // `GotaTun` does not rotate (D166, D352): its identity is the key carried above, so an
-        // open kernel rotation ends here. Keeping its journal would let a later kernel start
-        // reuse a key the device no longer holds (#285).
-        return store.discard_rotation_secret();
+        // The caller then records the new engine, which retires an open kernel rotation's
+        // journal: `GotaTun` does not rotate (D166, D352), and its identity is the key carried
+        // above (#285).
     }
     Device::delete_ifindex(link.ifindex)
 }
@@ -417,7 +415,7 @@ impl Node {
         if let Some(link) = adopted_kernel {
             node.owned = true;
             node.kernel_owner = kernel_proof.clone();
-            let identity = Device::identity();
+            let identity = Device::identity_at(link.ifindex);
             // A process can stop after marking the interface but before setting
             // its key. With no saved configuration there are no retained mesh
             // sessions to preserve; remove that incomplete owned startup only,
@@ -873,11 +871,14 @@ impl Node {
                     hook();
                 }
                 if let Err(error) = Device::configure(created, public_key, &key, 0) {
+                    // Delete exactly the link this call created: `down` proves links by the
+                    // shared name, which may no longer lead to ours (#260 J242).
+                    let _ = Device::delete_ifindex(created);
                     let _ = self.down();
                     return Err(error);
                 }
                 let prepared = (|| {
-                    let (device_key, port) = Device::identity()?;
+                    let (device_key, port) = Device::identity_at(created)?;
                     if device_key != public_key || port == 0 {
                         return Err(io::ErrorKind::InvalidData.into());
                     }
@@ -2073,6 +2074,7 @@ mod tests {
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
+                            access_ssh: None,
                         },
                     )
                 })

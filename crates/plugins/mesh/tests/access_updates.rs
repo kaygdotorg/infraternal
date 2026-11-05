@@ -48,6 +48,7 @@ fn config() -> Config {
                         },
                         inbound: TrafficPolicy::All,
                         outbound: TrafficPolicy::All,
+                        access_ssh: None,
                     },
                 )
             })

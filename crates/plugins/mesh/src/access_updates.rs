@@ -32,7 +32,13 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
             && old
                 .peers
                 .iter()
-                .all(|(id, peer)| new.peers.get(id).is_some_and(|next| peer.peer == next.peer))
+                // Updates carry only inbound and outbound; a changed mesh SSH
+                // flag (server node, #221) takes the full path.
+                .all(|(id, peer)| {
+                    new.peers.get(id).is_some_and(|next| {
+                        peer.peer == next.peer && peer.access_ssh == next.access_ssh
+                    })
+                })
     }) else {
         return configuration::chunks(old, new);
     };

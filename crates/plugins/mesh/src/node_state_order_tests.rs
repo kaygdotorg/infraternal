@@ -145,6 +145,7 @@ fn accepted_snapshot_persistence_at_1000_peers() {
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )
         })
