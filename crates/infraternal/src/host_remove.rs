@@ -181,6 +181,7 @@ impl Drop for Connection {
 
 #[cfg(test)]
 mod tests {
+    //! Human rendering and transport regressions for reviewed host removal.
     /// Human output must include the structured leftover-install command even
     /// when a pending response has only a short status sentence.
     #[test]

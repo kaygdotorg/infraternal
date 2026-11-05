@@ -228,6 +228,7 @@ async fn authenticate(
 
 #[cfg(test)]
 mod tests {
+    //! Host proof validation and handshake capacity through cleanup delivery.
     use super::*;
     use openssl::{
         asn1::Asn1Time,
