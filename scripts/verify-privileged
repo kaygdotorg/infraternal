@@ -111,7 +111,15 @@ NOT_COVERED = {
 # Individual namespace tests this row cannot run, each with its reason. They
 # are skipped, printed by name, and must still exist: an entry whose test is
 # gone fails the row, so the list only shrinks.
-NOT_COVERED_TESTS = {}
+NOT_COVERED_TESTS = {
+    # The test drops to uid 65534 to prove an unprivileged user cannot attach
+    # the persisted TUN. The sandbox maps exactly one uid (the caller's), so
+    # setresuid(65534) fails with EINVAL before the test reaches its check.
+    # Mapping a second uid needs a setuid-root newuidmap on the build VMs.
+    ('infraternal-plugin-mesh', 'test:gotatun_tun_owner',
+     'an_unprivileged_user_cannot_attach_the_persisted_tun'):
+        'needs a second real uid (setresuid 65534); the sandbox maps one uid',
+}
 
 
 # An ignore reason that asks for privileges or a disposable namespace...

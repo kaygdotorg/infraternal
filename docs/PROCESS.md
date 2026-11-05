@@ -643,6 +643,14 @@ those paths without giving the branch real root, which this row refuses to do.
 changes them still proves them as root by hand on a build VM, and its review
 checks that proof.
 
+Individual tests on `NOT_COVERED_TESTS` today:
+- `infraternal-plugin-mesh` `gotatun_tun_owner::an_unprivileged_user_cannot_attach_the_persisted_tun`:
+  it drops to uid 65534, but the sandbox maps exactly one uid, so
+  `setresuid` fails with EINVAL before the check. Mapping a second uid would
+  need a setuid-root `newuidmap` on the build VMs (not installed) and a new
+  sandbox layout, which needs a fresh manual escape review; it is the
+  owner's call.
+
 **Where it runs:** any Linux build VM that allows unprivileged user
 namespaces, inside the flake dev shell (for `ip`, `nft`, cargo). compute01
 and dev-02 both qualify.
