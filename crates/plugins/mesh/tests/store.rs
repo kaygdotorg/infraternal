@@ -376,3 +376,56 @@ async fn attach_cancelled_at_any_await_leaves_the_store_writable() {
         );
     }
 }
+
+/// Closing the default also closes mesh SSH toward the server's own host for
+/// every node without its own arrow there (owner, #221 Q-A (b)), so the
+/// preview names those nodes. Control-plane reach to the server is never a
+/// loss, and a node with an explicit arrow keeps its SSH.
+#[tokio::test]
+async fn closing_the_default_previews_ssh_lost_toward_the_server() {
+    let pool = pool().await;
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('owner','owner',1,'fixture','owner','Owner')")
+        .execute(&pool).await.unwrap();
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    let (server, _) = store.attach("server", key(1), None, true).await.unwrap();
+    let (granted, _) = store.attach("granted", key(2), None, false).await.unwrap();
+    let (ungranted, _) = store
+        .attach("ungranted", key(3), None, false)
+        .await
+        .unwrap();
+    service
+        .execute(
+            "owner",
+            "mesh.grant.create",
+            &serde_json::to_vec(&serde_json::json!({
+                "name":"ssh-to-server", "from":{"Node":granted.0}, "to":{"Node":server.0},
+                "both_ways":false, "ports":{"Ports":[{"protocol":"Tcp","number":22}]}
+            }))
+            .unwrap(),
+            1_800_000_000,
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mesh_dataplane SET default_policy='allow' WHERE singleton=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let page = store.preview_page(DefaultPolicy::Deny, None).await.unwrap();
+    assert_eq!(
+        page["loses_ssh_to_server"],
+        serde_json::json!([ungranted.0])
+    );
+    let reach = page["loses_reach"].as_array().unwrap();
+    assert!(reach.iter().all(|pair| pair[1] != server.0), "{reach:?}");
+    // Nothing is lost when the default stays closed or opens.
+    sqlx::query("UPDATE mesh_dataplane SET default_policy='deny' WHERE singleton=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let page = store
+        .preview_page(DefaultPolicy::Allow, None)
+        .await
+        .unwrap();
+    assert_eq!(page["loses_ssh_to_server"], serde_json::json!([]));
+}

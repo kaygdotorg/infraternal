@@ -89,6 +89,11 @@ impl Coordinator {
     pub fn names(&self) -> &NameTable {
         &self.names
     }
+    /// The server's own node.
+    #[must_use]
+    pub const fn server(&self) -> NodeId {
+        self.server
+    }
     #[must_use]
     pub fn view(&self, node: NodeId) -> Option<&PeerView> {
         self.views.get(&node)

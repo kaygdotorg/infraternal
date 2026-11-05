@@ -724,9 +724,31 @@ impl Store {
             if offset > total {
                 return Err(MeshApiError::InvalidInput);
             }
+            // Mesh SSH toward the server's own host follows Access (owner, #221):
+            // closing the default closes it for every node without its own
+            // arrow there. Control-plane reach to the server is never lost, so
+            // these are listed apart from `loses_reach`: on the first page
+            // only, at most one entry per node, within the same frame budget.
+            let server = coordinator.server();
+            let mut ssh_to_server = Vec::new();
+            let mut bytes = 2usize;
+            if reducing && offset == 0 {
+                for node in views.keys().filter(|node| **node != server) {
+                    if coordinator.granted(*node, server) == TrafficPolicy::None {
+                        let length = serde_json::to_vec(node)
+                            .map_err(|_| storage_error("node serialization failed"))?
+                            .len()
+                            + 1;
+                        if bytes + length > (MAX_MESH_FRAME_LEN - 1024) / 2 {
+                            break;
+                        }
+                        bytes += length;
+                        ssh_to_server.push(*node);
+                    }
+                }
+            }
             let mut skip = offset;
             let mut pairs = Vec::new();
-            let mut bytes = 2usize;
             'sources: for (node, view) in views.iter().filter(|_| reducing) {
                 let count = losses(view);
                 if skip >= count {
@@ -766,7 +788,7 @@ impl Store {
                 offset: delivered,
             });
             Ok(
-                serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"next_cursor":cursor}),
+                serde_json::json!({"default_policy":next,"revision":revision,"loses_reach":pairs,"total_pairs":total,"loses_ssh_to_server":ssh_to_server,"next_cursor":cursor}),
             )
         }).await
     }
