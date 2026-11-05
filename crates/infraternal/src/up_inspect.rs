@@ -257,9 +257,25 @@ fn manager_units(systemctl: &Path, units: &mut BTreeSet<OsString>) -> io::Result
     Ok(())
 }
 
-/// Identify a reference without interpreting unit-file command syntax or printing its contents.
+/// Recognize whole program or path components without interpreting unit-file commands.
+/// Keep punctuation inside basenames so infrastructure and my-infra-helper are
+/// unrelated. Strip one leading systemd ignore-failure sigil from a bare token;
+/// this preserves the unresolved -infra command hint without matching /opt/-infra.
 fn mentions_install(value: &str) -> bool {
-    value.to_ascii_lowercase().contains("infra")
+    value
+        .split(|character: char| {
+            character.is_whitespace() || "\"';|&()={}[]:@+!".contains(character)
+        })
+        .any(|word| {
+            Path::new(word.strip_prefix('-').unwrap_or(word))
+                .components()
+                .any(|component| {
+                    matches!(
+                        component.as_os_str().to_str(),
+                        Some("infra" | "infraternal")
+                    )
+                })
+        })
 }
 
 /// Report an installed command without exposing its arguments or environment values.
@@ -273,71 +289,14 @@ fn installed(unit: &OsStr) -> io::Error {
     )
 }
 
-/// Decode systemctl's quoted property-list serialization, not systemd unit-file command syntax.
-/// Unknown serialization cannot prove executable identity and is left unresolved.
-fn property_words(value: &str) -> Option<Vec<String>> {
-    let mut words = Vec::new();
-    let mut word = Vec::new();
-    let mut quoted = false;
-    let mut bytes = value.bytes();
-    while let Some(byte) = bytes.next() {
-        match byte {
-            b'"' => quoted = !quoted,
-            b'\\' => word.push(match bytes.next()? {
-                b'x' => u8::from_str_radix(
-                    std::str::from_utf8(&[bytes.next()?, bytes.next()?]).ok()?,
-                    16,
-                )
-                .ok()?,
-                b'a' => 7,
-                b'b' => 8,
-                b'f' => 12,
-                b'v' => 11,
-                b'n' => b'\n',
-                b'r' => b'\r',
-                b't' => b'\t',
-                b'\\' => b'\\',
-                b'"' => b'"',
-                _ => return None,
-            }),
-            byte if byte.is_ascii_whitespace() && !quoted => {
-                if !word.is_empty() {
-                    words.push(String::from_utf8(std::mem::take(&mut word)).ok()?);
-                }
-            }
-            byte => word.push(byte),
-        }
-    }
-    if quoted {
-        return None;
-    }
-    if !word.is_empty() {
-        words.push(String::from_utf8(word).ok()?);
-    }
-    Some(words)
-}
-
-/// Prefer the unit's PATH, then `ExecSearchPath`, then the manager build's default search path.
-fn search_path(output: &str, default: &str) -> Option<String> {
-    let environment = output
+/// Search bare executables on systemd's configured or compiled-in path.
+/// Environment PATH belongs to the child process and cannot change this lookup.
+fn search_path<'a>(output: &'a str, default: &'a str) -> &'a str {
+    output
         .lines()
-        .find_map(|line| line.strip_prefix("Environment="))
-        .unwrap_or_default();
-    if let Some(path) = property_words(environment)?
-        .iter()
-        .rev()
-        .find_map(|word| word.strip_prefix("PATH=").map(str::to_owned))
-    {
-        return Some(path);
-    }
-    Some(
-        output
-            .lines()
-            .find_map(|line| line.strip_prefix("ExecSearchPath="))
-            .filter(|value| !value.is_empty())
-            .unwrap_or(default)
-            .to_owned(),
-    )
+        .find_map(|line| line.strip_prefix("ExecSearchPath="))
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
 }
 
 /// Resolve a manager path or bare executable name using only absolute search directories.
@@ -370,20 +329,45 @@ fn default_search_path() -> String {
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_owned()
 }
 
-/// Conservatively recognize literal CLI references in manager-resolved env and shell wrappers.
-/// We do not evaluate shell programs: dynamically constructed commands and external
-/// scripts require runtime executable inspection rather than static interpretation.
-fn wrapper_mentions_install(program: &str, arguments: &str) -> bool {
+/// Inspect literal arguments of a small explicit set of exec wrappers.
+/// env, shells, nice, setpriv, ionice, chrt, taskset and stdbuf may launch another
+/// program. Recognize its distributed name or an absolute known-build identity.
+/// This is a conservative scan, not shell evaluation or wrapper option parsing;
+/// dynamic commands and external scripts still need runtime process inspection.
+fn wrapper_mentions_install(
+    program: &str,
+    arguments: &str,
+    images: &mut KnownImages,
+) -> io::Result<bool> {
     let wrapper = Path::new(program).file_name().unwrap_or_default();
-    if !["env", "sh", "bash", "dash", "zsh", "ksh", "fish"]
-        .iter()
-        .any(|name| wrapper == OsStr::new(name))
+    if ![
+        "env", "sh", "bash", "dash", "zsh", "ksh", "fish", "nice", "setpriv", "ionice", "chrt",
+        "taskset", "stdbuf",
+    ]
+    .iter()
+    .any(|name| wrapper == OsStr::new(name))
     {
-        return false;
+        return Ok(false);
     }
-    arguments
+    for word in arguments
         .split(|character: char| character.is_whitespace() || "\"';|&()=".contains(character))
-        .any(|word| image_name(Path::new(word)))
+    {
+        let path = Path::new(word);
+        if image_name(path) {
+            return Ok(true);
+        }
+        if path.is_absolute()
+            && let Ok(mut file) = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NONBLOCK)
+                .open(path)
+            && file.metadata()?.is_file()
+            && images.matches(path, &mut file)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Ignore inert stock units and classify executable identity rather than every resolution failure.
@@ -409,8 +393,8 @@ fn resolved_service(
             };
         }
     }
-    // Absolute executables do not depend on PATH or unrelated environment serialization.
-    let search = search_path(output, default).unwrap_or_default();
+    // Bare names use the manager's exec search path, independently of the child environment.
+    let search = search_path(output, default);
     let commands = output
         .lines()
         .filter_map(|line| {
@@ -432,10 +416,10 @@ fn resolved_service(
             }
             continue;
         };
-        if image_name(Path::new(program)) || wrapper_mentions_install(program, arguments) {
+        if image_name(Path::new(program)) || wrapper_mentions_install(program, arguments, images)? {
             return Err(installed(unit));
         }
-        let Some(path) = executable_path(program, &search) else {
+        let Some(path) = executable_path(program, search) else {
             if relevant {
                 return Err(unresolved(unit));
             }
@@ -547,7 +531,6 @@ pub(super) fn installed_services(
                 OsStr::new("--property=ExecStartPre"),
                 OsStr::new("--property=ExecStartPost"),
                 OsStr::new("--property=ExecCondition"),
-                OsStr::new("--property=Environment"),
                 OsStr::new("--property=ExecSearchPath"),
                 OsStr::new("--"),
                 &unit,
@@ -742,22 +725,103 @@ mod tests {
         );
     }
 
-    /// A unit's explicit PATH must take precedence over the manager's unrelated program of the same name.
+    /// The manager's executable search is independent of the environment passed to the child.
     #[test]
-    fn unit_environment_path_exposes_an_inode_alias() {
+    fn manager_search_path_ignores_unit_environment() {
         let fixture = crate::restart_binary::fixture::Directory::new();
         let directory = fixture.0.join("private binaries");
         fs::create_dir(&directory).unwrap();
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), directory.join("python3"))
             .unwrap();
-        let value = format!(
+        let hidden = "LoadState=loaded\nEnvironment=PATH=/nonexistent\nExecStart={ path=python3 ; argv[]=python3 server ; }\n";
+        assert!(
+            super::resolved_service(
+                OsStr::new("custom.service"),
+                hidden,
+                directory.to_str().unwrap(),
+                &mut KnownImages::new().unwrap(),
+            )
+            .is_err(),
+            "child PATH hid the manager's inode alias"
+        );
+        let unrelated = format!(
             "LoadState=loaded\nEnvironment=\"PATH={}\"\nExecStart={{ path=python3 ; argv[]=python3 server ; }}\n",
             directory.display()
         );
         assert!(
-            resolved_service(OsStr::new("custom.service"), &value).is_err(),
-            "unit PATH was ignored"
+            super::resolved_service(
+                OsStr::new("custom.service"),
+                &unrelated,
+                "/usr/bin:/bin",
+                &mut KnownImages::new().unwrap(),
+            )
+            .is_ok(),
+            "child PATH invented an installed executable"
         );
+        let explicit = format!(
+            "LoadState=loaded\nEnvironment=PATH=/nonexistent\nExecSearchPath={}\nExecStart={{ path=python3 ; argv[]=python3 server ; }}\n",
+            directory.display()
+        );
+        assert!(resolved_service(OsStr::new("custom.service"), &explicit).is_err());
+    }
+
+    /// Common literal exec wrappers must expose named binaries and renamed inode aliases.
+    #[test]
+    fn scheduling_and_privilege_wrappers_expose_installs() {
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let alias = fixture.0.join("control");
+        fs::hard_link(std::env::current_exe().unwrap(), &alias).unwrap();
+        for (wrapper, options) in [
+            ("nice", "-n5"),
+            ("setpriv", "--reuid=0"),
+            ("ionice", "-c3"),
+            ("chrt", "-f 1"),
+            ("taskset", "-c 0"),
+            ("stdbuf", "-oL"),
+        ] {
+            for image in ["/opt/infra", alias.to_str().unwrap()] {
+                let value = format!(
+                    "LoadState=loaded\nExecStart={{ path=/usr/bin/{wrapper} ; argv[]=/usr/bin/{wrapper} {options} {image} server ; }}\n"
+                );
+                assert!(
+                    resolved_service(OsStr::new("custom.service"), &value).is_err(),
+                    "wrapper {wrapper} hid {image}"
+                );
+            }
+            let benign = format!(
+                "LoadState=loaded\nExecStart={{ path=/usr/bin/{wrapper} ; argv[]=/usr/bin/{wrapper} {options} /usr/bin/true ; }}\n"
+            );
+            resolved_service(OsStr::new("custom.service"), &benign).unwrap();
+        }
+    }
+
+    /// Unrelated infrastructure text cannot make an unresolved command look like our program.
+    #[test]
+    fn unresolved_references_require_whole_program_components() {
+        for value in [
+            "LoadState=loaded\nExecStart={ path=/opt/infrastructure-tools/missing ; argv[]=missing --x ; }\n",
+            "LoadState=loaded\nEnvironment=LABEL=infrastructure\nExecStart={ path=/opt/missing ; argv[]=missing ; }\n",
+            "LoadState=error\nDescription=an infrasonic monitor\n",
+            "LoadState=loaded\nExecStart={ path=/opt/my-infra-helper/missing ; argv[]=missing ; }\n",
+            "LoadState=loaded\nExecStart={ path=/opt/-infra/missing ; argv[]=missing ; }\n",
+        ] {
+            assert!(
+                resolved_service(OsStr::new("stock.service"), value).is_ok(),
+                "unrelated text refused: {value}"
+            );
+        }
+        for value in [
+            "LoadState=loaded\nExecStart={ path=/srv/infra/missing ; argv[]=missing ; }\n",
+            "LoadState=loaded\nExecStart={ path=/srv/infraternal/missing ; argv[]=missing ; }\n",
+            "LoadState=error\nExecStart=infra server\n",
+            "LoadState=error\nExecStart=-infra server\n",
+            "LoadState=error\nExecStart=/opt/infraternal server\n",
+        ] {
+            assert!(
+                resolved_service(OsStr::new("custom.service"), value).is_err(),
+                "literal reference missed: {value}"
+            );
+        }
     }
     /// Stopped wrappers and secondary startup commands cannot conceal our executable.
     #[test]
@@ -866,6 +930,43 @@ mod tests {
             assert_eq!(result.is_err(), refuse, "manager form {index}: {result:?}");
         }
     }
+    /// Classify one owned stopped unit through the real system manager on a shared root host.
+    /// The external proof creates and removes the uniquely prefixed unit; unrelated
+    /// infraternal login workers may legitimately make a whole-host scan refuse.
+    #[test]
+    #[ignore = "requires real root and a stopped J198_REVIEW_UNIT planted in the system manager"]
+    fn real_system_manager_classifies_review_unit() {
+        assert!(nix::unistd::geteuid().is_root());
+        let unit = std::env::var("J198_REVIEW_UNIT").unwrap();
+        assert!(unit.starts_with("j198-p3-") && unit.ends_with(".service") && !unit.contains('/'));
+        let output = super::manager(
+            Path::new("/usr/bin/systemctl"),
+            &[
+                OsStr::new("show"),
+                OsStr::new("--property=LoadState"),
+                OsStr::new("--property=ExecStart"),
+                OsStr::new("--property=ExecStartPre"),
+                OsStr::new("--property=ExecStartPost"),
+                OsStr::new("--property=ExecCondition"),
+                OsStr::new("--property=ExecSearchPath"),
+                OsStr::new("--"),
+                OsStr::new(&unit),
+            ],
+        )
+        .unwrap();
+        let result = super::resolved_service(
+            OsStr::new(&unit),
+            &output,
+            &default_search_path(),
+            &mut KnownImages::new().unwrap(),
+        );
+        println!("real system manager {unit}: {result:?}");
+        assert_eq!(
+            result.is_err(),
+            std::env::var_os("J198_REVIEW_REFUSE").is_some()
+        );
+    }
+
     /// A byte-identical copy retains CLI identity even when its inode and name change.
     #[test]
     fn renamed_copy_of_known_build_is_detected() {

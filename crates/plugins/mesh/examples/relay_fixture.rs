@@ -304,6 +304,7 @@ async fn node() {
                             peer: peer.1.clone(),
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
+                            access_ssh: None,
                         },
                     );
                 }
