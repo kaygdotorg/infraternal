@@ -219,6 +219,7 @@ impl Backend for PendingRemoteRuntime {
                     session: authority
                         .session()
                         .map(|session| Secret::new(session.expose().to_vec())),
+                    api_key_hash: authority.api_key_hash().map(str::to_owned),
                 })),
                 mesh: MeshEvidence::default(),
             })
@@ -306,6 +307,7 @@ struct ServerAuthentication {
     key: Arc<dyn SshKeySource>,
     owner: String,
     session: Option<Secret>,
+    api_key_hash: Option<String>,
 }
 impl AuthProvider for ServerAuthentication {
     fn network(&self) -> Option<NetworkProvider> {
@@ -313,21 +315,33 @@ impl AuthProvider for ServerAuthentication {
     }
     fn server_key(&self) -> Operation<'_, Option<Credentials>> {
         Box::pin(async move {
-            let (Some(auth), Some(session)) = (&self.auth, &self.session) else {
+            // Without a browser session or key there is no live authority to export under:
+            // offer no server key and leave the ordinary credential fallback in place.
+            let (Some(auth), true) = (
+                &self.auth,
+                self.session.is_some() || self.api_key_hash.is_some(),
+            ) else {
                 return Ok(None);
             };
-            let token = std::str::from_utf8(session.expose())
-                .map_err(|_| Failure::unsupported("The bootstrap session is unavailable."))?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|time| i64::try_from(time.as_secs()).ok())
-                .ok_or_else(|| Failure::install("The server clock is unavailable."))?;
-            if !auth
-                .bootstrap_owner(token, now)
-                .await
-                .is_ok_and(|owner| owner == self.owner)
-            {
+            let authorized = if let Some(session) = &self.session {
+                let token = std::str::from_utf8(session.expose())
+                    .map_err(|_| Failure::unsupported("The bootstrap session is unavailable."))?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|time| i64::try_from(time.as_secs()).ok())
+                    .ok_or_else(|| Failure::install("The server clock is unavailable."))?;
+                auth.bootstrap_owner(token, now)
+                    .await
+                    .is_ok_and(|owner| owner == self.owner)
+            } else if let Some(key_hash) = &self.api_key_hash {
+                auth.api_authorize_key_hash(key_hash, "hosts:write")
+                    .await
+                    .is_ok_and(|owner| owner == self.owner)
+            } else {
+                false
+            };
+            if !authorized {
                 // Revoked authority stops all fallback, rather than admitting a
                 // later browser key/password after a permission failure.
                 return Err(Failure::unsupported(
@@ -350,6 +364,31 @@ impl AuthProvider for ServerAuthentication {
     }
     fn password(&self) -> Operation<'_, Option<Credentials>> {
         Box::pin(async { Ok(None) })
+    }
+}
+
+/// Recheck the exact session or narrow API key before every server-side action boundary.
+pub(crate) async fn authorize_authority(auth: &Auth, authority: &Authority) -> bool {
+    if let Some(session) = authority.session() {
+        let Ok(token) = std::str::from_utf8(session.expose()) else {
+            return false;
+        };
+        let Some(now) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|time| i64::try_from(time.as_secs()).ok())
+        else {
+            return false;
+        };
+        auth.bootstrap_owner(token, now)
+            .await
+            .is_ok_and(|owner| owner == authority.owner)
+    } else if let Some(key_hash) = authority.api_key_hash() {
+        auth.api_authorize_key_hash(key_hash, "hosts:write")
+            .await
+            .is_ok_and(|owner| owner == authority.owner)
+    } else {
+        false
     }
 }
 

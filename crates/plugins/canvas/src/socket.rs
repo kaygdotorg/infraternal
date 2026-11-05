@@ -28,6 +28,8 @@ const APPLY: ActionDef = ActionDef {
     target: Target::Global,
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: None,
+    fresh_passkey: false,
 };
 const INITIALIZE: ActionDef = ActionDef {
     id: "canvas.layout.initialize",

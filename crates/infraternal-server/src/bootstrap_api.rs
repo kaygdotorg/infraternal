@@ -1,5 +1,7 @@
 //! Additive owner-authenticated bootstrap WebSocket; #78 runtime injects the trusted backend [63][138][139].
 
+#[cfg(feature = "remote")]
+use crate::api_actions::{ActionGuard, AuthorizedKey};
 use crate::{
     auth::Auth,
     ssh_key::{SshKeySource, UnavailableSshKey},
@@ -37,20 +39,61 @@ struct Api {
     runner: Bootstrap,
     sockets: Arc<Semaphore>,
     #[cfg(feature = "remote")]
+    action_guard: ActionGuard,
+    #[cfg(feature = "remote")]
     setup_sockets: Arc<Semaphore>,
     ssh_key: Arc<dyn SshKeySource>,
 }
 
+#[cfg(feature = "remote")]
+#[derive(Clone)]
+struct ApiKeyCaller {
+    identity: AuthorizedKey,
+}
+
 /// Mount an additive router with a trusted runtime backend; unavailable enrollment fails before mutation.
-pub fn router(auth: Auth, runner: Bootstrap) -> Router {
+pub fn router(auth: &Auth, runner: Bootstrap) -> Router {
     router_with_ssh_key(auth, runner, Arc::new(UnavailableSshKey))
 }
 
 /// Share the runtime's dedicated identity source without exposing private material.
 pub fn router_with_ssh_key(
+    auth: &Auth,
+    runner: Bootstrap,
+    ssh_key: Arc<dyn SshKeySource>,
+) -> Router {
+    #[cfg(feature = "remote")]
+    {
+        router_with_ssh_key_and_action_guard(
+            auth.clone(),
+            runner,
+            ssh_key,
+            ActionGuard::new(auth.clone(), auth.pool().clone()),
+        )
+    }
+    #[cfg(not(feature = "remote"))]
+    {
+        build_router_state(auth.clone(), runner, ssh_key)
+    }
+}
+
+/// Mount bootstrap beside API actions while sharing their per-key rate budget.
+#[cfg(feature = "remote")]
+pub(crate) fn router_with_ssh_key_and_action_guard(
     auth: Auth,
     runner: Bootstrap,
     ssh_key: Arc<dyn SshKeySource>,
+    action_guard: ActionGuard,
+) -> Router {
+    build_router_state(auth, runner, ssh_key, action_guard)
+}
+
+#[cfg(feature = "remote")]
+fn build_router_state(
+    auth: Auth,
+    runner: Bootstrap,
+    ssh_key: Arc<dyn SshKeySource>,
+    action_guard: ActionGuard,
 ) -> Router {
     let router = Router::new().route("/v1/bootstrap/ws", get(upgrade)).route(
         "/v1/bootstrap/ssh-key",
@@ -62,11 +105,26 @@ pub fn router_with_ssh_key(
         auth,
         runner,
         ssh_key,
+        action_guard,
         sockets: Arc::new(Semaphore::new(16)),
         #[cfg(feature = "remote")]
         setup_sockets: Arc::new(Semaphore::new(
             infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
         )),
+    }))
+}
+
+#[cfg(not(feature = "remote"))]
+fn build_router_state(auth: Auth, runner: Bootstrap, ssh_key: Arc<dyn SshKeySource>) -> Router {
+    let router = Router::new().route("/v1/bootstrap/ws", get(upgrade)).route(
+        "/v1/bootstrap/ssh-key",
+        get(public_ssh_key).post(public_ssh_key),
+    );
+    router.with_state(Arc::new(Api {
+        auth,
+        runner,
+        ssh_key,
+        sockets: Arc::new(Semaphore::new(16)),
     }))
 }
 
@@ -137,8 +195,46 @@ async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    #[cfg(feature = "remote")]
+    let (owner, token, api_key) = if headers.contains_key(header::AUTHORIZATION) {
+        if headers.contains_key(header::COOKIE) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let Some(token) = crate::api_actions::bearer_token(&headers) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        let action = &infraternal_plugin_ssh::manifest::START;
+        let identity = match api.action_guard.authorize_token(token, action).await {
+            Ok(identity) => identity,
+            Err(status) => return status.into_response(),
+        };
+        // Only the owner adds hosts (invitation issuance refuses everyone else), so only the
+        // owner's keys may hold one of the shared bootstrap sockets. A non-owner key with
+        // `hosts:write` could otherwise park all of them and block the owner's add-host.
+        // Rejected: a per-account share of the sockets, which still lets several non-owner
+        // accounts together exhaust the pool for a call that can never succeed.
+        let owner: Option<bool> = sqlx::query_scalar("SELECT owner=1 FROM users WHERE id=?")
+            .bind(&identity.person_id)
+            .fetch_optional(api.auth.pool())
+            .await
+            .unwrap_or(None);
+        if owner != Some(true) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        (
+            identity.person_id.clone(),
+            Secret::new(Vec::new()),
+            Some(ApiKeyCaller { identity }),
+        )
+    } else {
+        match authenticate_headers(&api, &headers).await {
+            Ok((owner, token)) => (owner, Secret::new(token.as_bytes().to_vec()), None),
+            Err(status) => return status.into_response(),
+        }
+    };
+    #[cfg(not(feature = "remote"))]
     let (owner, token) = match authenticate_headers(&api, &headers).await {
-        Ok(identity) => identity,
+        Ok((owner, token)) => (owner, Secret::new(token.as_bytes().to_vec())),
         Err(status) => return status.into_response(),
     };
     let Ok(activity) = api.runner.activity() else {
@@ -147,7 +243,6 @@ async fn upgrade(
     let Ok(permit) = api.sockets.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let token = Secret::new(token.as_bytes().to_vec());
     upgrade_admitted(
         ws.max_message_size(32 * 1024).max_frame_size(32 * 1024),
         api,
@@ -155,7 +250,11 @@ async fn upgrade(
         token,
         activity,
         permit,
-        SocketMode::Bootstrap,
+        UpgradeContext {
+            mode: SocketMode::Bootstrap,
+            #[cfg(feature = "remote")]
+            api_key,
+        },
     )
 }
 
@@ -169,6 +268,13 @@ enum SocketMode {
     Setup,
 }
 
+/// Per-upgrade mode and optional API-key caller travel together into the socket task.
+struct UpgradeContext {
+    mode: SocketMode,
+    #[cfg(feature = "remote")]
+    api_key: Option<ApiKeyCaller>,
+}
+
 #[inline(never)]
 fn upgrade_admitted(
     ws: WebSocketUpgrade,
@@ -177,14 +283,27 @@ fn upgrade_admitted(
     token: Secret,
     activity: infraternal_plugin_ssh::bootstrap::Activity,
     permit: tokio::sync::OwnedSemaphorePermit,
-    mode: SocketMode,
+    context: UpgradeContext,
 ) -> Response {
     ws.on_upgrade(move |mut socket| async move {
         // Retire stream and admission before publishing this lifetime inactive.
         let _activity = activity;
         let _permit = permit;
+        let mode = context.mode;
+        #[cfg(feature = "remote")]
+        let api_key = context.api_key;
         let result = match mode {
-            SocketMode::Bootstrap => run(&mut socket, api, owner, token).await,
+            SocketMode::Bootstrap => {
+                run(
+                    &mut socket,
+                    api.clone(),
+                    owner,
+                    token,
+                    #[cfg(feature = "remote")]
+                    api_key,
+                )
+                .await
+            }
             #[cfg(feature = "remote")]
             SocketMode::Setup => setup_api::run(&mut socket, api, owner, token).await,
         };
@@ -283,6 +402,50 @@ async fn authorized(api: &Api, token: &str, owner: &str) -> bool {
         .is_ok_and(|id| id == owner)
 }
 
+#[cfg(feature = "remote")]
+async fn authorized_api_key(api: &Api, identity: &AuthorizedKey, owner: &str) -> bool {
+    identity.person_id == owner
+        && api
+            .action_guard
+            .identity_is_live(identity, "hosts:write")
+            .await
+}
+
+/// Keep the shared socket writer available in default builds without key support.
+async fn socket_authorized(
+    api: &Api,
+    token: &str,
+    owner: &str,
+    #[cfg(feature = "remote")] identity: Option<&AuthorizedKey>,
+) -> bool {
+    #[cfg(feature = "remote")]
+    if let Some(identity) = identity {
+        return authorized_api_key(api, identity, owner).await;
+    }
+    authorized(api, token, owner).await
+}
+
+/// Preserve the browser event shape and add raw setup detail only to bearer-key streams.
+fn encode_bootstrap_event(
+    event: &infraternal_plugin_ssh::model::Event,
+    expose_setup_stderr: bool,
+) -> Option<String> {
+    if !expose_setup_stderr {
+        return serde_json::to_string(event).ok();
+    }
+    let Some(stderr) = event
+        .failure
+        .as_ref()
+        .and_then(|failure| failure.captured_setup_stderr())
+    else {
+        return serde_json::to_string(event).ok();
+    };
+    let mut value = serde_json::to_value(event).ok()?;
+    value["failure"]["captured_stderr"] =
+        serde_json::Value::String(String::from_utf8_lossy(stderr).into_owned());
+    serde_json::to_string(&value).ok()
+}
+
 /// Preserve source loss across pending writes so the upgrade owner can close with 1013.
 enum SocketFailure {
     Closed,
@@ -302,6 +465,7 @@ async fn send_live(
     token: &str,
     revocation: &mut crate::auth::AccountSubscription,
     encoded: Option<String>,
+    #[cfg(feature = "remote")] api_key: Option<&AuthorizedKey>,
 ) -> Result<(), SocketFailure> {
     // Keep the same write future after another session's revocation. Dropping and
     // restarting a partially buffered frame would duplicate sequence delivery.
@@ -319,7 +483,15 @@ async fn send_live(
             _ = enabled.changed() => return Err(SocketFailure::Closed),
             change = revocation.changed() => {
                 change.map_err(|_| SocketFailure::AuthorityUnavailable)?;
-                if !authorized(api, token, owner).await { return Err(SocketFailure::Closed); }
+                let authorized = socket_authorized(
+                    api,
+                    token,
+                    owner,
+                    #[cfg(feature = "remote")]
+                    api_key,
+                )
+                .await;
+                if !authorized { return Err(SocketFailure::Closed); }
             }
             result = &mut writing => return result.map_err(SocketFailure::from),
         }
@@ -331,6 +503,7 @@ async fn run(
     api: Arc<Api>,
     owner: String,
     token: Secret,
+    #[cfg(feature = "remote")] api_key: Option<ApiKeyCaller>,
 ) -> Result<(), SocketFailure> {
     let Ok(token) = std::str::from_utf8(token.expose()) else {
         return Ok(());
@@ -341,7 +514,17 @@ async fn run(
     }
     let mut revocation = api.auth.revocation_events(&owner);
     // Admission preceded this subscription; recheck so an intervening logout cannot be missed.
-    if !authorized(&api, token, &owner).await {
+    #[cfg(feature = "remote")]
+    let key_identity = api_key.as_ref().map(|caller| &caller.identity);
+    let is_authorized = socket_authorized(
+        &api,
+        token,
+        &owner,
+        #[cfg(feature = "remote")]
+        key_identity,
+    )
+    .await;
+    if !is_authorized {
         return Ok(());
     }
     let mut batch: Option<Batch> = None;
@@ -356,32 +539,167 @@ async fn run(
             () = &mut expiry => break,
             change = revocation.changed() => {
                 change.map_err(|_| SocketFailure::AuthorityUnavailable)?;
-                if !authorized(&api, token, &owner).await { break; }
+                let is_authorized = socket_authorized(
+                    &api,
+                    token,
+                    &owner,
+                    #[cfg(feature = "remote")]
+                    key_identity,
+                )
+                .await;
+                if !is_authorized { break; }
             }
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
-                if !authorized(&api, token, &owner).await { break; }
+                #[cfg(feature = "remote")]
+                let is_authorized = if key_identity.is_some() {
+                    true
+                } else {
+                    authorized(&api, token, &owner).await
+                };
+                #[cfg(not(feature = "remote"))]
+                let is_authorized = authorized(&api, token, &owner).await;
+                if !is_authorized { break; }
                 expiry.as_mut().reset(tokio::time::Instant::now() + Duration::from_hours(30 * 24));
                 let decoded = serde_json::from_str::<Request>(&text);
                 // Transient private fields are now owned zeroizing buffers; no raw
                 // JSON is retained by batch state, helper tasks or replay history.
                 drop(text);
+                #[cfg(feature = "remote")]
+                let mut api_key_audit = if let Some(identity) = key_identity {
+                    let action = &infraternal_plugin_ssh::manifest::START;
+                    // One row per add-host target, each naming the target only by a valid
+                    // host identifier. The batch admits at most 100 targets, the 32 KiB
+                    // message bounds the rest, and the per-key limit bounds messages.
+                    let target_ids: Vec<Option<&str>> = match decoded.as_ref() {
+                        Ok(Request::Start { targets, .. }) if !targets.is_empty() && targets.len() <= 100 => targets
+                            .iter()
+                            .map(|target| infraternal_plugin_ssh::model::identifier(&target.id).then_some(target.id.as_str()))
+                            .collect(),
+                        _ => vec![None],
+                    };
+                    let authorized_at = match api.action_guard.authorize_identity(identity, action).await {
+                        Ok(at) => at,
+                        Err(status) => {
+                            let error = if status == StatusCode::TOO_MANY_REQUESTS {
+                                "rate_limited"
+                            } else if status == StatusCode::FORBIDDEN {
+                                "unauthorized"
+                            } else {
+                                "action_unavailable"
+                            };
+                            send_live(
+                                socket,
+                                &api,
+                                &owner,
+                                token,
+                                &mut revocation,
+                                serde_json::to_string(&serde_json::json!({"error":error})).ok(),
+                                key_identity,
+                            )
+                            .await?;
+                            break 'connection;
+                        }
+                    };
+                    let mut audit_ids = Vec::with_capacity(target_ids.len());
+                    for target_id in target_ids {
+                        let Ok(audit_id) = api
+                            .action_guard
+                            .begin_audit(identity, action.id, target_id, authorized_at)
+                            .await
+                        else {
+                            for audit_id in audit_ids {
+                                let _ = api.action_guard.finish_audit(audit_id, "failed", Some("audit_unavailable"), authorized_at).await;
+                            }
+                            let event = serde_json::to_string(&serde_json::json!({"error":"action_unavailable"})).ok();
+                            send_live(socket, &api, &owner, token, &mut revocation, event, key_identity).await?;
+                            break 'connection;
+                        };
+                        audit_ids.push(audit_id);
+                    }
+                    Some((audit_ids, authorized_at))
+                } else {
+                    None
+                };
                 let Ok(request) = decoded else {
-                    send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok()).await?;
+                    #[cfg(feature = "remote")]
+                    if let Some((audit_ids, audit_time)) = api_key_audit.take() {
+                        for audit_id in audit_ids {
+                            let _ = api.action_guard.finish_audit(
+                                audit_id,
+                                "denied",
+                                Some("invalid_request"),
+                                audit_time,
+                            ).await;
+                        }
+                    }
+                    send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":"invalid bootstrap request"})).ok(), #[cfg(feature = "remote")] key_identity).await?;
                     continue;
                 };
                 let result = match request {
                     Request::Start { targets, credential, auth_once } if batch.is_none() => {
+                        #[cfg(feature = "remote")]
+                        if let Some(caller) = &api_key {
+                            match api_key_audit.take() {
+                                None => Err(infraternal_plugin_ssh::model::Failure::install("The host action could not be recorded.")),
+                                Some((audit_ids, audit_time)) => {
+                                        let outcome = if credential.is_some() || !auth_once.is_empty() {
+                                            Err(infraternal_plugin_ssh::model::Failure::unsupported("API-key host setup does not accept credential material."))
+                                        } else if !authorized_api_key(&api, &caller.identity, &owner).await {
+                                            Err(infraternal_plugin_ssh::model::Failure::unsupported("The host action is no longer authorized."))
+                                        } else {
+                                            api.runner.start_api_key(
+                                                owner.clone(),
+                                                caller.identity.key_id.clone(),
+                                                targets,
+                                            )
+                                        };
+                                        let (state, result) = if outcome.is_ok() { ("complete", None) } else { ("failed", Some("handler_refused")) };
+                                        let finished_at = now().unwrap_or(audit_time);
+                                        for audit_id in audit_ids {
+                                            let _ = api.action_guard.finish_audit(audit_id, state, result, finished_at).await;
+                                        }
+                                        match outcome {
+                                            Ok(started) => { changed = Some(started.subscribe()); batch = Some(started); Ok(()) }
+                                            Err(error) => Err(error),
+                                        }
+                                }
+                            }
+                        } else {
+                            match api.runner.start_authenticated_with_auth(owner.clone(), Secret::new(token.as_bytes().to_vec()), targets, credential, auth_once) {
+                                Ok(started) => { changed = Some(started.subscribe()); batch = Some(started); Ok(()) }
+                                Err(error) => Err(error)
+                            }
+                        }
+                        #[cfg(not(feature = "remote"))]
                         match api.runner.start_authenticated_with_auth(owner.clone(), Secret::new(token.as_bytes().to_vec()), targets, credential, auth_once) {
                             Ok(started) => { changed = Some(started.subscribe()); batch = Some(started); Ok(()) }
                             Err(error) => Err(error)
                         }
                     }
-                    Request::Retry { target, auth_once } => batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.retry_with_auth(batch, &owner, &target, auth_once)),
-                    Request::StartFresh {target, challenge} => batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.start_fresh(batch, &owner, &target, challenge)),
+                    Request::Retry { target, auth_once } => {
+                        #[cfg(feature = "remote")]
+                        if api_key.is_some() { Err(infraternal_plugin_ssh::model::Failure::unsupported("This follow-up action needs its own scoped request.")) }
+                        else { batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.retry_with_auth(batch, &owner, &target, auth_once)) }
+                        #[cfg(not(feature = "remote"))]
+                        batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.retry_with_auth(batch, &owner, &target, auth_once))
+                    }
+                    Request::StartFresh {target, challenge} => {
+                        #[cfg(feature = "remote")]
+                        if api_key.is_some() { Err(infraternal_plugin_ssh::model::Failure::unsupported("This follow-up action needs its own scoped request.")) }
+                        else { batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.start_fresh(batch, &owner, &target, challenge)) }
+                        #[cfg(not(feature = "remote"))]
+                        batch.as_ref().ok_or_else(|| infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first.")).and_then(|batch| api.runner.start_fresh(batch, &owner, &target, challenge))
+                    }
                     Request::ConfirmHostKey {target,challenge,fingerprint} => {
-                        if let Some(batch)=&batch {
+                        #[cfg(feature = "remote")]
+                        let api_key_request = api_key.is_some();
+                        #[cfg(not(feature = "remote"))]
+                        let api_key_request = false;
+                        if api_key_request {
+                            Err(infraternal_plugin_ssh::model::Failure::unsupported("Host-key confirmation needs a signed-in browser session."))
+                        } else if let Some(batch)=&batch {
                             let proof=LiveConfirmation {auth:api.auth.clone(),owner:owner.clone(),token:Secret::new(token.as_bytes().to_vec())};
                             let confirmed = {
                                 let confirmation = api.runner.confirm_host_key(batch,&owner,&target,&challenge,&fingerprint,&proof);
@@ -403,7 +721,7 @@ async fn run(
                                                     // Refuse concurrent requests without retaining private inputs
                                                     // or cancelling the batch that owns this confirmation.
                                                     let busy = serde_json::to_string(&serde_json::json!({"error":"host-key confirmation busy; retry after confirmation"})).ok();
-                                                    send_live(socket,&api,&owner,token,&mut revocation,busy).await?;
+                                                    send_live(socket,&api,&owner,token,&mut revocation,busy, #[cfg(feature = "remote")] key_identity).await?;
                                                 },
                                                 Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => {},
                                                 Some(Ok(Message::Close(_)) | Err(_)) | None => break 'connection,
@@ -416,18 +734,35 @@ async fn run(
                             match confirmed {
                                 Ok(())=>{
                                     let reply=serde_json::to_string(&serde_json::json!({"host_key_confirmed":{"target":target,"fingerprint":fingerprint}})).ok();
-                                    send_live(socket,&api,&owner,token,&mut revocation,reply).await?;
+                                    send_live(socket,&api,&owner,token,&mut revocation,reply, #[cfg(feature = "remote")] key_identity).await?;
                                     Ok(())
                                 }
                                 Err(error)=>Err(error),
                             }
                         } else {Err(infraternal_plugin_ssh::model::Failure::unsupported("Start a host batch first."))}
                     }
-                    Request::Replay { after: sequence } => { after = sequence; Ok(()) }
+                    Request::Replay { after: sequence } => {
+                        #[cfg(feature = "remote")]
+                        if api_key.is_some() { Err(infraternal_plugin_ssh::model::Failure::unsupported("This follow-up action needs its own scoped request.")) }
+                        else { after = sequence; Ok(()) }
+                        #[cfg(not(feature = "remote"))]
+                        { after = sequence; Ok(()) }
+                    }
                     Request::Start { .. } => Err(infraternal_plugin_ssh::model::Failure::unsupported("A host batch is already running.")),
                 };
+                #[cfg(feature = "remote")]
+                if let Some((audit_ids, audit_time)) = api_key_audit.take() {
+                    let (state, result) = if result.is_ok() {
+                        ("complete", None)
+                    } else {
+                        ("denied", Some("handler_refused"))
+                    };
+                    for audit_id in audit_ids {
+                        let _ = api.action_guard.finish_audit(audit_id, state, result, audit_time).await;
+                    }
+                }
                 if let Err(error) = result {
-                    send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok()).await?;
+                    send_live(socket, &api, &owner, token, &mut revocation, serde_json::to_string(&serde_json::json!({"error":error})).ok(), #[cfg(feature = "remote")] key_identity).await?;
                 }
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
@@ -446,19 +781,27 @@ async fn run(
                     token,
                     &mut revocation,
                     serde_json::to_string(&serde_json::json!({"resync":true,"oldest":oldest})).ok(),
+                    #[cfg(feature = "remote")]
+                    key_identity,
                 )
                 .await?;
             }
             for event in events {
                 // Revocation interrupts a stalled five-second send too. No remote
                 // mutation is admitted by a socket that has lost owner authority.
+                #[cfg(feature = "remote")]
+                let encoded_event = encode_bootstrap_event(&event, api_key.is_some());
+                #[cfg(not(feature = "remote"))]
+                let encoded_event = encode_bootstrap_event(&event, false);
                 send_live(
                     socket,
                     &api,
                     &owner,
                     token,
                     &mut revocation,
-                    serde_json::to_string(&event).ok(),
+                    encoded_event,
+                    #[cfg(feature = "remote")]
+                    key_identity,
                 )
                 .await?;
                 after = event.sequence;

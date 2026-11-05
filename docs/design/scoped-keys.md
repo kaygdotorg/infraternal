@@ -186,7 +186,7 @@ cleans up a CI fleet within the hour.
 
 Creating any key with `hosts:join`, or with no expiry, or any key at all in
 Settings, needs a passkey tap bound to its exact settings (D333, D336,
-D342). A new tap kind is added beside `TapAction::ApproveKey`:
+D342). A new tap kind is added to `TapAction` (`auth/action_tap.rs`):
 
 ```
 TapAction::CreateKey { settings_digest }

@@ -389,7 +389,7 @@ impl WebSocketState {
             .send_modify(|version| *version = version.wrapping_add(1));
     }
 
-    fn action(&self, action_id: &str) -> Option<ActionDef> {
+    pub(crate) fn action(&self, action_id: &str) -> Option<ActionDef> {
         self.plugin_descriptors
             .iter()
             .flat_map(|descriptor| descriptor.actions)
@@ -1304,6 +1304,25 @@ async fn send_terminal_sessions_snapshot<K>(
 where
     K: futures_util::Sink<Message, Error = axum::Error> + Unpin,
 {
+    let event = terminal_sessions_snapshot(state, user).await?;
+    let event = serde_json::to_vec(&event).map_err(|_| ())?;
+    send_frame(
+        sink,
+        CONTROL_STREAM,
+        &Frame::Event {
+            sub_id,
+            event_json: &event,
+        },
+        encode,
+    )
+    .await
+}
+
+/// Shared account-filtered terminal snapshot for the browser and API action adapters.
+pub(crate) async fn terminal_sessions_snapshot(
+    state: &WebSocketState,
+    user: &str,
+) -> Result<serde_json::Value, ()> {
     let source = state.agent.session_inventory();
     let mut inventory = source.borrow().clone();
     // Unavailability needs no storage. For a census, acquire first and refresh
@@ -1364,17 +1383,7 @@ where
             })
         }
     };
-    let event = serde_json::to_vec(&event).map_err(|_| ())?;
-    send_frame(
-        sink,
-        CONTROL_STREAM,
-        &Frame::Event {
-            sub_id,
-            event_json: &event,
-        },
-        encode,
-    )
-    .await
+    Ok(event)
 }
 
 async fn handle_terminal_output<K>(
@@ -3571,7 +3580,7 @@ impl SocketHost for PluginHost {
                     &self.hash,
                     &self.user,
                     unix_seconds().unwrap_or(i64::MAX),
-                    infraternal_plugin_api::FRESH_SECONDS,
+                    infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
                 )
                 .await
                 .unwrap_or(false)

@@ -1,4 +1,5 @@
-//! Bounded same-origin adapters for the remote plugin's fresh, purpose-bound removal action [16][168], #87.
+//! Bounded same-origin adapters for the remote plugin's removal action: a dry run, then the
+//! removal, inside the browser's admin window [16][168], #87, D339.
 use crate::{auth::Auth, remote_removal::Removal};
 use axum::{
     Json, Router,
@@ -30,11 +31,10 @@ fn default_uninstall() -> bool {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-/// Private passkey proof, deliberately without Debug or serialization.
+/// The host and the review from its dry run, deliberately without Debug or serialization.
 pub struct Finish {
     host_id: Uuid,
-    ceremony: String,
-    proof: Value,
+    review: String,
 }
 pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
     Router::new()
@@ -108,11 +108,8 @@ async fn finish(
 ) -> Result<Json<Value>, StatusCode> {
     let (token, now, bytes, _permit) = body(&api, incoming).await?;
     let input = decode_finish(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if input.ceremony.is_empty() || input.ceremony.len() > 128 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
     api.removal
-        .finish_host(&token, input.host_id, &input.ceremony, input.proof, now)
+        .finish_host(&token, input.host_id, &input.review, now)
         .await
         .map(Json)
         .map_err(|_| StatusCode::FORBIDDEN)
@@ -150,12 +147,12 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::auth
 pub fn decode_start(bytes: &[u8]) -> Result<Start, crate::auth::Error> {
     decode(bytes)
 }
-/// Decode the exact bounded host and ceremony proof; parsing never authorizes a mutation.
+/// Decode the exact bounded host and review; parsing never authorizes a mutation.
 /// # Errors
-/// Refuses malformed objects, duplicates, unknown fields and invalid ceremony lengths.
+/// Refuses malformed objects, duplicates, unknown fields and invalid review lengths.
 pub fn decode_finish(bytes: &[u8]) -> Result<Finish, crate::auth::Error> {
     let request: Finish = decode(bytes)?;
-    if request.ceremony.is_empty() || request.ceremony.len() > 128 {
+    if request.review.is_empty() || request.review.len() > 128 {
         return Err(crate::auth::Error::Invalid);
     }
     Ok(request)
@@ -173,10 +170,8 @@ mod tests {
                 .uninstall
         );
         assert!(
-            decode_finish(
-                br#"{"host_id":"11111111-2222-3333-4444-555555555555","ceremony":"","proof":{}}"#
-            )
-            .is_err()
+            decode_finish(br#"{"host_id":"11111111-2222-3333-4444-555555555555","review":""}"#)
+                .is_err()
         );
         assert!(decode_finish(&vec![b' '; 32769]).is_err());
     }

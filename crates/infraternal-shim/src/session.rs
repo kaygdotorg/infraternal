@@ -114,6 +114,28 @@ impl Config {
         }
     }
 }
+/// How long a private readiness probe may wait for its canary input before
+/// the shim ends it: 10 s.
+///
+/// Debug builds only: an integration oracle may put a decimal millisecond
+/// count in `<state>/test-readiness-lifetime-ms` to hold a probe longer. The
+/// revoke-readiness oracle keeps its probe alive across a launch and a revoke,
+/// which can exceed 10 s on a loaded build host (#355). Release builds never
+/// read the file. The state directory is private to the account.
+fn readiness_lifetime(config: &Config) -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(milliseconds) = config
+        .state
+        .as_ref()
+        .and_then(|state| fs::read_to_string(state.join("test-readiness-lifetime-ms")).ok())
+        .and_then(|text| text.trim().parse().ok())
+    {
+        return Duration::from_millis(milliseconds);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = config;
+    Duration::from_secs(10)
+}
 struct SocketPath(PathBuf, bool);
 impl Drop for SocketPath {
     fn drop(&mut self) {
@@ -744,7 +766,7 @@ fn run_configured(
     // transport cannot leave its read waiting forever; ordinary live PTYs have no timer.
     let readiness_deadline = config
         .readiness
-        .then(|| Instant::now() + Duration::from_secs(10));
+        .then(|| Instant::now() + readiness_lifetime(&config));
     let mut next_deferred = 0_u64;
     loop {
         if readiness_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
