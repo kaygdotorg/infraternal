@@ -45,6 +45,7 @@ verify_quick() {
     rust_run_gate "scope guard" python3 "${script_dir}/test-verify-quick-scope.py"
     rust_run_gate "migration names" python3 "${script_dir}/verify.d/migration-names.py"
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
+    rust_run_gate "Nix Cargo vendoring" scripts/check-nix-vendor
     rust_run_gate "fmt" cargo fmt --all --check
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 
