@@ -127,6 +127,8 @@ export interface Adapters {
   teach?: (hint: string) => boolean;
   /** The canvas document's home (local storage today, the server sync of #98 later). */
   store: CanvasStore;
+  /** The account's look (D322), which the canvas document carries so every device of the account shows the same one; absent in previews that have no themes. */
+  look?: import("./themes/controller").LookAdapter;
   /** Mesh data and edits; absent until the Mesh API exists, and the Mesh view is then not offered. */
   mesh?: import("./mesh/source").MeshSource;
   /** Sharing layouts; absent when the instance cannot share. */

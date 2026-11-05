@@ -25,6 +25,7 @@ import { THEMES, type Theme } from "../../../../../packages/ui/src/themes";
 import { UI_SIZE } from "../../../../../packages/ui/src/ui-scale";
 import { el } from "../dom";
 import { themeStore } from "./controller";
+import { MAX_THEMES } from "./model";
 import { grainImage } from "./grain";
 import { FAMILIES, familyOf, versionIn } from "./colors";
 import { backgroundCss, CUSTOM_ID, customGradient, DEFAULT_GRADIENT, gradientsFor, isSolid, MAX_STOPS, MIN_STOPS, SOLID_CUSTOM_ID, solidsFor } from "./gradients";
@@ -61,7 +62,7 @@ export function renderThemeEditor(pane: HTMLElement): () => void {
   const strip = createThemeStrip({
     label: "Themes",
     behind: BEHIND,
-    addTip: (selected) => (selected ? `New theme from ${selected.name}` : "New theme"),
+    addTip: (selected) => (store.themes().length >= MAX_THEMES ? `An account keeps at most ${MAX_THEMES} themes` : selected ? `New theme from ${selected.name}` : "New theme"),
     onSelect: (id) => store.select(id),
     onReset: (id) => store.reset(id),
     onAdd: () => {

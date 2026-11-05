@@ -19,6 +19,7 @@
 import { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, DEFAULT_GRADIENT, GRADIENT_IDS, MAX_STOPS, MIN_STOPS, SOLID_CUSTOM_ID, SOLID_IDS, type CustomGradient } from "./backgrounds";
 import { fontById } from "../../../../../packages/ui/src/fonts";
 import { THEMES } from "../../../../../packages/ui/src/themes";
+import { MAX_THEMES } from "../model/schema";
 
 /** Blur at 100%: the scale is linear from 0 px (0%) to this many pixels (D322: "0 px = 0% and 24 px = 100%"). */
 export const BLUR_AT_FULL_PX = 24;
@@ -31,8 +32,8 @@ export const blurPercent = (px: number): number => Math.round((px * 100) / BLUR_
 export const UI_SIZE_RANGE = { min: 50, max: 150 } as const;
 /** The longest name a person may give a theme. */
 export const NAME_MAX = 24;
-/** How many themes one person may keep (a saved list is never allowed to grow without limit). */
-export const MAX_THEMES = 48;
+/** How many themes one account may keep: the canvas document holds the whole list in one edit, which the server bounds (`model/schema.ts`). */
+export { MAX_THEMES };
 
 /** One theme: everything the Themes window edits and every card of the strip shows. */
 export interface AppearanceTheme {
@@ -100,7 +101,7 @@ export interface ThemeStore {
   /** Edits the selected theme. A built-in theme's name is fixed, so a `name` in the patch is ignored for it. */
   edit(patch: Partial<Omit<AppearanceTheme, "id">>): void;
   reset(id: string): void;
-  /** A new theme, a copy of the selected one, selected. Returns it. */
+  /** A new theme, a copy of the selected one, selected. Returns it. At the most themes an account may keep, it adds nothing and returns the selected theme. */
   add(): AppearanceTheme;
   /** Takes a theme the person made out of the list; the built-in themes stay. When the removed theme was selected, Tinted is (a copy does not remember where it came from). */
   remove(id: string): void;
@@ -207,6 +208,8 @@ export function createThemeStore(basics: Basics, saved?: unknown, start: string 
       emit();
     },
     add() {
+      // The account keeps at most MAX_THEMES (the document holds the list in one edit): at the limit nothing is added and the selected theme stays.
+      if (list.length >= MAX_THEMES) return find(current)!;
       const serial = nextSerial(list);
       const source = find(current)!;
       const made: AppearanceTheme = { ...copyTheme(source), id: `custom-${serial}`, name: `Theme ${list.length + 1}` };

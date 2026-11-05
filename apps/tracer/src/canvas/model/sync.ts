@@ -26,7 +26,7 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
   let revision = 0;
   let before: CanvasDocument | undefined;
   const splits = new Map<string, LayoutEdit>();
-  const document = (): CanvasDocument => toDocument([...cx.views.values()].filter((c) => persisted(c.view.id)).map((c) => c.view), cx.state.metrics, revision, cx.adapters.store.acceptsPendingReferences);
+  const document = (): CanvasDocument => toDocument([...cx.views.values()].filter((c) => persisted(c.view.id)).map((c) => c.view), cx.state.metrics, revision, cx.adapters.store.acceptsPendingReferences, cx.adapters.look?.snapshot());
   const save = (): void => {
     queued = false;
     if (disposed) return;
@@ -39,10 +39,15 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
     cx.adapters.inventory?.setLayout?.(cx.adapters.store.current?.() ?? next);
     for (const id of splits.keys()) if (next.views.some((v) => v.layout.type === "tiled" && v.layout.columns.some((c) => c.windows.some((w) => w.id === id)))) splits.delete(id);
   };
+  // The person changed the account's look on this page: it is saved with the layout, by the same edits (D322). The adapter waits for a pause, so a slider drag is one save.
+  const offLook = cx.adapters.look?.onChange(() => { if (!disposed && !queued) { queued = true; queueMicrotask(() => { if (queued) save(); }); } });
   return {
     changed(split) { if (split) splits.set(split.windowId, split); if (!disposed && !queued) { queued = true; queueMicrotask(() => { if (queued) save(); }); } },
     reset(protectedIds = new Set(), protectedViews = new Set()) {
       before = document();
+      // The baseline's look is the one the store holds, not this page's: a page whose look differs from the account's (or an account with none) then saves it.
+      const held = cx.adapters.store.current?.().look;
+      if (held) before.look = held; else delete before.look;
       before.views = before.views.filter((v) => !protectedViews.has(v.id));
       for (const v of before.views) if (v.layout.type === "tiled") for (const c of v.layout.columns) c.windows = c.windows.filter((w) => !protectedIds.has(w.id));
     },
@@ -56,6 +61,6 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
     },
     flush() { if (queued) save(); cx.adapters.store.flush?.(); },
     /** After this nothing is written again: sign-out removes the document right after (D245). */
-    dispose() { disposed = true; queued = false; cx.adapters.store.dispose?.(); },
+    dispose() { disposed = true; queued = false; offLook?.(); cx.adapters.store.dispose?.(); },
   };
 }

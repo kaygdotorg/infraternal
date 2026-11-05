@@ -32,11 +32,27 @@ export type DocLayout =
   | { type: "graph"; pinned: Record<string, { x: number; y: number }> };
 export interface DocView { id: string; kind: string; name: string; cell: { x: number; y: number }; layout: DocLayout }
 
+/** One theme of the account's look, as it travels in the document (the model of `themes/model.ts` is exactly this shape). */
+export interface DocTheme {
+  id: string; name: string; tint: number; blur: number; grain: number; font: string; colors: string; uiSize: number; background: string; customSolid: string;
+  custom: { stops: string[]; angle: number };
+}
+/**
+ * The account's look (D322): its themes, which one is selected, and the Colour, font and size the built-in themes started from. It is part of the
+ * canvas document so every device of the account shows the same look; only the camera stays per device (D178).
+ */
+export interface DocLook { v: 1; selected: string; basics: { colors: string; font: string; uiSize: number }; themes: DocTheme[] }
+
+/** The most themes one account's look may hold: an intent carries the whole list and an intent is at most 8 KiB (the server's own bound). */
+export const MAX_THEMES = 16;
+
 export interface CanvasDocument {
   format: typeof FORMAT;
   version: typeof VERSION;
   revision: number;
   views: DocView[];
+  /** The account's look; absent until a device has saved one (older documents never have it). */
+  look?: DocLook;
 }
 
 /** Enumerate drawing memberships without consulting device-local terminal attachments. */
@@ -56,6 +72,24 @@ function parseTarget(v: unknown): DocTarget | undefined {
   if (v.type === "settings" && text(v.section)) return { type: "settings", section: v.section };
   if ((v.type === "containers" || v.type === "logs") && text(v.host)) return { type: v.type, host: v.host };
   return undefined;
+}
+
+const whole = (v: unknown, lo: number, hi: number): v is number => finite(v, lo, hi) && Number.isInteger(v);
+const hex = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
+
+/** Checks an untrusted look with the server's bounds (text up to 200 characters, percentages 0 to 100, size 50 to 150, hex colours, at most 16 distinct themes). */
+export function parseLook(input: unknown): DocLook | undefined {
+  if (!isObject(input) || input.v !== 1 || !text(input.selected) || !isObject(input.basics) || !Array.isArray(input.themes) || input.themes.length > MAX_THEMES) return undefined;
+  const b = input.basics;
+  if (!text(b.colors) || !text(b.font) || !whole(b.uiSize, 50, 150)) return undefined;
+  const themes: DocTheme[] = [];
+  for (const t of input.themes) {
+    if (!isObject(t) || !text(t.id) || !text(t.name) || !text(t.font) || !text(t.colors) || !text(t.background) || !whole(t.tint, 0, 100) || !whole(t.blur, 0, 100) || !whole(t.grain, 0, 100) || !whole(t.uiSize, 50, 150) || !hex(t.customSolid) || !isObject(t.custom)) return undefined;
+    const c = t.custom;
+    if (!Array.isArray(c.stops) || c.stops.length < 2 || c.stops.length > 4 || !c.stops.every(hex) || !whole(c.angle, 0, 360) || themes.some((seen) => seen.id === t.id)) return undefined;
+    themes.push({ id: t.id, name: t.name, tint: t.tint, blur: t.blur, grain: t.grain, font: t.font, colors: t.colors, uiSize: t.uiSize, background: t.background, customSolid: t.customSolid, custom: { stops: [...c.stops as string[]], angle: c.angle } });
+  }
+  return { v: 1, selected: input.selected, basics: { colors: b.colors, font: b.font, uiSize: b.uiSize }, themes };
 }
 
 /** Checks untrusted JSON and returns a document, or nothing. */
@@ -96,5 +130,8 @@ export function parseDocument(input: unknown): CanvasDocument | undefined {
     }
     views.push({ id: raw.id, kind: raw.kind, name: raw.name, cell, layout: { type: "tiled", columns } });
   }
-  return { format: FORMAT, version: VERSION, revision: input.revision as number, views };
+  // A look that is present must be valid: the server never stores one that is not, so a bad one is a damaged document.
+  const look = input.look === undefined ? undefined : parseLook(input.look);
+  if (input.look !== undefined && !look) return undefined;
+  return { format: FORMAT, version: VERSION, revision: input.revision as number, views, ...(look ? { look } : {}) };
 }
