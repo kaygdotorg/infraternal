@@ -694,6 +694,7 @@ fn save_refusal(root: &Path, name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Persist person refusals in a reserved lane while preserving immediate denial.
 #[path = "revocations.rs"]
 mod revocations;
 
@@ -1686,6 +1687,7 @@ mod durable_tests {
     }
 }
 
+/// Exercise revocation saturation, restart denial and durable retry ordering.
 #[cfg(test)]
 #[path = "revocation_tests.rs"]
 mod revocation_tests;

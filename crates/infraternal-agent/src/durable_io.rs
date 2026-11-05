@@ -104,6 +104,7 @@ impl Admission {
     }
 }
 
+/// Prove cancelled floods release owned resources within the fixed admission bound.
 #[cfg(test)]
 #[path = "durable_io_tests.rs"]
 mod tests;

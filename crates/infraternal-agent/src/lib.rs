@@ -9,7 +9,9 @@ pub use control as daemon;
 #[path = "daemon_portable.rs"]
 pub mod control;
 mod daemon_writer;
+/// Admit bounded durable work before moving it off the async runtime.
 mod durable_io;
+/// Hold real saves until unrelated reactor work proves it can still run.
 #[cfg(test)]
 mod durable_tests;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
