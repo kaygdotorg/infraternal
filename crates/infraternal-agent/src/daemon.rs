@@ -402,7 +402,7 @@ pub async fn open_mesh_ssh_shell(
 ) -> io::Result<Session> {
     static MANAGER: tokio::sync::OnceCell<Manager> = tokio::sync::OnceCell::const_new();
     let exe = std::env::current_exe()?;
-    let manager = *MANAGER.get_or_init(Manager::detect).await;
+    let manager = Manager::resolve(&MANAGER).await;
     let input = Open {
         person: Some(person),
         account: Some(account.to_owned()),
