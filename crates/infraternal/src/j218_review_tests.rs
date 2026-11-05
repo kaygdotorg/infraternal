@@ -48,7 +48,7 @@ fn j218_installed_server_alias_is_detected() {
     );
 }
 
-/// Process arguments retain boundaries; installed commands without manager resolution refuse.
+/// Process arguments retain boundaries; unresolved units need a whole CLI name or path component.
 #[test]
 fn j218_alias_commands_respect_word_boundaries() {
     assert_eq!(
@@ -62,7 +62,7 @@ fn j218_alias_commands_respect_word_boundaries() {
         ),
         ("/opt/infra ssh host server", true),
         ("/opt/unrelated server --data /srv/private", false),
-        ("/opt/infra-other server", true),
+        ("/opt/infra-other server", false),
     ] {
         let fixture = Fixture::new();
         let units = fixture.0.join("etc/systemd/system");
@@ -735,8 +735,13 @@ fn j226_recovery_preserves_replaced_enrollment_inode() {
 }
 
 /// A failed stop retains durable ownership, and a later healthy manager can recover it.
+/// Keep both attempts in a private test process: sibling test forks must not
+/// inherit the UUID-rooted journal's lock and outlive the first transaction.
 #[test]
 fn j226_failed_stop_keeps_recovery_authority() {
+    if isolated_enrollment_proof("j226_failed_stop_keeps_recovery_authority") {
+        return;
+    }
     let fixture = Fixture::new();
     let manager = fixture.0.join("systemctl");
     crate::test_executable::write(

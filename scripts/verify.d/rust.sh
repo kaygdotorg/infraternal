@@ -290,6 +290,7 @@ rust_verify_fast() {
     RUST_GATE_ROWS=()
     RUST_GATE_FAILED=0
 
+    rust_run_gate "Nix Cargo vendoring" scripts/check-nix-vendor
     rust_run_gate "fmt" cargo fmt --all --check
     rust_run_gate "migration names" python3 scripts/verify.d/migration-names.py
     rust_run_gate "migration tooling tests" python3 scripts/test-migration-names.py

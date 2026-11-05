@@ -11,7 +11,7 @@ import sys
 import time
 
 sys.dont_write_bytecode = True
-from agent_fixture import Binary, cleanup, exact, fixture_state, varint
+from agent_fixture import HANG, Binary, cleanup, exact, fixture_state, varint
 
 
 def run(binary):
@@ -66,8 +66,14 @@ def run(binary):
             return True
 
     def retired(path, pid, started):
+        """Wait for the dead shell's shim to retire: its socket and process gone.
+
+        The wait ends on that event; HANG only detects a shim that never
+        retires. The elapsed time is reported, not asserted: a one-second bound
+        measured the host and failed under gate load (#355).
+        """
         while path.exists() or process_active(pid):
-            assert time.monotonic() - started < 1, 'dead shim exceeded one-second retirement bound'
+            assert time.monotonic() - started < HANG, 'dead shim was never retired'
             time.sleep(.005)
         counts(0, 0)
         return (time.monotonic() - started) * 1000
