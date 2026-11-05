@@ -394,14 +394,35 @@ The remote plugin declares `remote.host.remove` once. Its summary and instructio
 supply the UI label, CLI help and `infraternal skill remote.host.remove` output.
 `POST /remote/hosts/actions` returns that definition only to a live server owner.
 
+In the browser, removal is a dry run, then the removal, both inside the 15-minute
+admin window a sign-in tap opens (D333, D339). It has no passkey ceremony of its own.
 `POST /remote/hosts/remove/start` accepts `host_id` and optional `uninstall`
-(default true), under the exact same-origin session policy. It returns a real
-user-verifying passkey challenge and the selected public host coordinates.
-A bounded private registry binds the challenge to that host, uninstall choice,
-original session and owner, for 300 seconds. The finish body contains `host_id`,
-`ceremony` and `proof`. An ordinary sign-in or CA challenge cannot remove a host.
-A foreign host UUID, replay, expired challenge, logout, lost owner authority or
-removed signing passkey is refused.
+(default true), under the exact same-origin session policy. It is the dry run: it
+changes nothing and returns `{review, review_expires_in: 120, action: {id, label,
+host_id, host, uninstall}}`. A bounded private registry binds the review to that
+host, uninstall choice, original session and owner, for 120 seconds. The finish
+body is `{host_id, review}`. The removal transaction rechecks the live session,
+owner, host and admin window. A foreign host UUID is refused without spending the
+review. A replay, an expired review, another session, logout, lost owner authority
+or a closed admin window is refused. Each removal is still recorded in
+`remote_host_removals`.
+
+With an API key (D333), `POST /v1/actions/remote.host.remove` takes `host_id` and a
+required `dry_run`. `dry_run: true` returns the review (host, label, and that the
+agent is uninstalled) and changes nothing. `dry_run: false` removes the host with no
+further passkey tap: inside one writer transaction the key is rechecked for
+`hosts:write` (J90, clock read in the transaction), its account must be the owner's
+and own the host, and the key's audit row is completed with the removal. The agent
+is always uninstalled (D334). Every call is audited.
+
+D28 ("dry run first") is enforced by the route for every `DryRun::Required` action.
+A successful dry run also returns `review_token` and `review_expires_in` (120 s).
+The real call must send the same input with `dry_run: false` and that token. The
+token is bound to the key, the action and the exact input apart from `dry_run` and
+`review_token`. It works once, and its first presentation spends it. A missing
+token gets `400 {"error":"review_required"}`. A mismatched, replayed or expired
+token gets `400 {"error":"review_invalid"}`. Nothing runs in either case, and the
+refusal is audited as `denied`.
 
 A process-owned operation keeps the authorized mutation alive after a browser
 HTTP disconnect. SQLite's writer transaction serializes final authorization,

@@ -18,13 +18,20 @@ test("connecting shows a spinner card and no picture", () => {
   expect(v.card?.title).toBe("Opening Editor");
 });
 
-test("paused and reconnecting keep only a dimmed memory and say so", () => {
+test("paused and reconnecting keep only a dimmed memory and say so in the pill, never in a text strip", () => {
   const paused = describe({ kind: "paused" }, ctx);
-  expect(paused.strip?.text).toBe("Paused");
+  expect(paused.dim).toBe(true);
+  expect(paused.mark?.glyph).toBe("paused");
+  expect(paused.mark?.tip).toContain("Editor is not drawn");
   expect(paused.keepPicture).toBe(true);
+  expect(paused.card).toBeUndefined();
   const re = describe({ kind: "reconnecting" }, ctx);
   expect(re.dot).toBe("connecting");
-  expect(re.strip?.text).toBe("Reconnecting");
+  expect(re.dim).toBe(true);
+  expect(re.keepPicture).toBe(true);
+  expect(re.card).toBeUndefined();
+  // No state has a text strip over the picture any more.
+  expect(Object.keys(paused).concat(Object.keys(re))).not.toContain("strip");
 });
 
 test("a closed app, a missing permission, an unsupported browser and a failure each name the cause and the next step", () => {

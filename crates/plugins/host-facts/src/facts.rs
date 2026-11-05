@@ -21,6 +21,8 @@ const ACTIONS: &[ActionDef] = &[
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: MEMORY_ACTION,
         summary: "Configure memory headroom for new terminal sessions",
         input: infraternal_plugin_api::SchemaRef(
@@ -40,6 +42,8 @@ const ACTIONS: &[ActionDef] = &[
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: READ_ACTION,
         summary: "Read host identity and current resource use",
         input: infraternal_plugin_api::SchemaRef(
@@ -59,6 +63,8 @@ const ACTIONS: &[ActionDef] = &[
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: CONFIGURE_ACTION,
         summary: "Enable or disable host facts collection",
         input: infraternal_plugin_api::SchemaRef(

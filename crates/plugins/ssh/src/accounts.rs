@@ -119,6 +119,8 @@ const fn action(
         permission: Permission::One("authenticated"),
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     }
 }
 /// Login account preferences are removable independently of host provisioning [198].

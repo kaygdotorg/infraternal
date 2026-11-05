@@ -18,6 +18,8 @@ const fn action(id: &'static str, summary: &'static str, effect: Effect) -> Acti
         target: Target::Node,
         dry_run: DryRun::Unsupported,
         opens: None,
+        api_scope: None,
+        fresh_passkey: false,
     }
 }
 pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {

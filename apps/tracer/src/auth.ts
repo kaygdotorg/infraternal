@@ -67,7 +67,40 @@ export interface DeviceApprovalReview {
   kind: "sign_in";
   device: string;
   scopes: string[];
+  /** How long the approved key lasts; the tap approves this together with the scopes (D333). */
+  lifetimeSeconds: number;
 }
+
+/** Bounds the server applies to a requested key lifetime: 1 hour up to the 365-day policy maximum. */
+const MIN_KEY_LIFETIME_SECONDS = 3_600;
+const MAX_KEY_LIFETIME_SECONDS = 365 * 86_400;
+
+/**
+ * A key lifetime as a person reads it: hours up to two days ("24 hours"), days after.
+ * The tap approves what this says, and the requester picks the number, so it is exact: every
+ * leftover minute and second is named ("1 hour, 59 minutes and 59 seconds"), never rounded down.
+ */
+export function keyLifetimeLabel(seconds: number): string {
+  const days = seconds >= 2 * 86_400 ? Math.floor(seconds / 86_400) : 0;
+  let rest = seconds - days * 86_400;
+  const hours = Math.floor(rest / 3_600);
+  rest -= hours * 3_600;
+  const minutes = Math.floor(rest / 60);
+  const parts = ([[days, "day"], [hours, "hour"], [minutes, "minute"], [rest - minutes * 60, "second"]] as const)
+    .filter(([count]) => count > 0)
+    .map(([count, unit]) => `${count} ${unit}${count === 1 ? "" : "s"}`);
+  if (parts.length < 2) return parts[0] ?? "0 seconds";
+  return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+}
+
+const DEVICE_APPROVAL_SCOPES = new Set([
+  "hosts:read",
+  "hosts:write",
+  "sessions:read",
+  "status:read",
+  "terminal:connect",
+  "actions:dry-run",
+]);
 
 /**
  * A machine asking to join this server (`infraternal up`): its name, how it will run, and the fingerprint of the key it
@@ -82,7 +115,6 @@ export interface JoinApprovalReview {
 
 export type ApprovalReview = DeviceApprovalReview | JoinApprovalReview;
 
-const DEVICE_APPROVAL_SCOPES = ["hosts:read", "terminal:connect", "actions:dry-run"] as const;
 
 /** Server-generated user codes are 12 random bytes encoded as unpadded base64url. */
 export function isDeviceUserCode(code: string): boolean {
@@ -111,7 +143,7 @@ export async function inspectDeviceApproval(code: string, expected: "sign_in"): 
 export async function inspectDeviceApproval(code: string, expected: "join_machine"): Promise<JoinApprovalReview>;
 export async function inspectDeviceApproval(code: string, expected: ApprovalReview["kind"] = "sign_in"): Promise<ApprovalReview> {
   if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink(expected);
-  let review: { kind?: unknown; device?: unknown; scopes?: unknown; hostname?: unknown; mode?: unknown; key_fingerprint?: unknown };
+  let review: { kind?: unknown; device?: unknown; scopes?: unknown; lifetime_seconds?: unknown; hostname?: unknown; mode?: unknown; key_fingerprint?: unknown };
   try {
     review = await post("device-inspect", { code });
   } catch (error: unknown) {
@@ -131,11 +163,17 @@ export async function inspectDeviceApproval(code: string, expected: ApprovalRevi
   if ((review?.kind !== undefined && review.kind !== "sign_in")
     || !isShownName(review?.device)
     || !Array.isArray(scopes)
-    || scopes.length !== DEVICE_APPROVAL_SCOPES.length
-    || !DEVICE_APPROVAL_SCOPES.every((scope, index) => scopes[index] === scope)) {
+    || scopes.length === 0
+    || scopes.length > 32
+    || new Set(scopes).size !== scopes.length
+    || !scopes.every((scope) => typeof scope === "string" && DEVICE_APPROVAL_SCOPES.has(scope))
+    || typeof review.lifetime_seconds !== "number"
+    || !Number.isInteger(review.lifetime_seconds)
+    || review.lifetime_seconds < MIN_KEY_LIFETIME_SECONDS
+    || review.lifetime_seconds > MAX_KEY_LIFETIME_SECONDS) {
     throw new AuthError("The server's sign-in request could not be reviewed. Check that the server is up to date, then ask for a new link.");
   }
-  return { kind: "sign_in", device: review.device as string, scopes: [...DEVICE_APPROVAL_SCOPES] };
+  return { kind: "sign_in", device: review.device as string, scopes: [...scopes] as string[], lifetimeSeconds: review.lifetime_seconds };
 }
 
 /** `SHA256:` and the 43 unpadded base64 characters of a SHA-256 digest. */
@@ -210,8 +248,9 @@ export async function readKeyLifetime(): Promise<number | undefined> {
 }
 
 /**
- * Sets that lifetime. The server wants a passkey login from the last few minutes, so a refusal is answered once with a fresh
- * passkey confirmation (a user action, as for a device approval) and the same request again; a second refusal is final.
+ * Sets that lifetime. The server wants a passkey tap bound to this exact value (D336): a plain sign-in authorizes no
+ * security-settings change. So a refusal is answered once with a passkey confirmation that names the action and the new
+ * value (a user action, as for a device approval), then the same request again; a second refusal is final.
  */
 export async function writeKeyLifetime(days: number, device: string): Promise<void> {
   const body = { api_key_lifetime_days: days };
@@ -219,7 +258,7 @@ export async function writeKeyLifetime(days: number, device: string): Promise<vo
     await post("security-settings-update", body);
   } catch (error: unknown) {
     if (!(error instanceof AuthError) || (error.status !== 401 && error.status !== 403)) throw error;
-    await loginWithPasskey(device);
+    await loginWithPasskey(device, { kind: "security.settings", api_key_lifetime_days: days });
     await post("security-settings-update", body);
   }
 }
@@ -329,9 +368,19 @@ export async function registerOwner(
   }
 }
 
+/**
+ * The one change a passkey tap is for (D336). The server binds the tap to exactly this action and
+ * these parameters, once, for two minutes; a sign-in without one authorizes none of these changes.
+ * Key approval is not listed: its tap is its own ceremony (`approveDeviceApproval`), bound to its code.
+ */
+export type TapAction =
+  | { kind: "passkey.add" }
+  | { kind: "recovery.rotate" }
+  | { kind: "security.settings"; api_key_lifetime_days: number };
+
 /** Completes a UV-required passkey login and verifies its DEK envelope locally. */
-export async function loginWithPasskey(device: string): Promise<string> {
-  return unlockWithPasskey(device);
+export async function loginWithPasskey(device: string, action?: TapAction): Promise<string> {
+  return unlockWithPasskey(device, undefined, undefined, action);
 }
 
 /** Adding a key needs the same authenticated local unwrap, without retaining a DEK in the screen. */
@@ -350,11 +399,19 @@ export async function addSecondPasskey(userId: string): Promise<void> {
       const wrap = await wrapDek(prf, dek, userId, "passkey");
       await post("registration-finish", { ceremony: requiredString(start.ceremony, "registration ceremony"), proof: credentialProof(created), passkey_wrap: wrap });
     } finally { prf?.fill(0); input.fill(0); }
-  });
+  }, { kind: "passkey.add" });
 }
 
-async function unlockWithPasskey(device: string, expectedUser?: string, useKey?: (key: Uint8Array) => Promise<void>): Promise<string> {
-  const start = await post<AuthStart>("login-start", expectedUser ? { user_id: expectedUser } : {});
+async function unlockWithPasskey(
+  device: string,
+  expectedUser?: string,
+  useKey?: (key: Uint8Array) => Promise<void>,
+  action?: TapAction,
+): Promise<string> {
+  const start = await post<AuthStart>("login-start", {
+    ...(expectedUser ? { user_id: expectedUser } : {}),
+    ...(action ? { action } : {}),
+  });
   const publicKey = requestOptions(start.options.publicKey);
   let prf: Uint8Array | undefined;
   let userId: string;
