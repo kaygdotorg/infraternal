@@ -42,9 +42,10 @@ use tokio::{
 
 /// Most simultaneous session channels per connection; further opens are ignored.
 const MAX_CHANNELS: usize = 4;
-/// How long a connection may take to authenticate, like OpenSSH's
-/// `LoginGraceTime` (J181 M2). A certificate login over the mesh completes
-/// in well under a second; this bounds peers that never try.
+/// How long a connection may stay unauthenticated before it is closed
+/// (J181 M2). A certificate login over the mesh completes in well under a
+/// second; this bounds peers that connect and never try, so they cannot
+/// hold one of the per-source and total unauthenticated slots.
 pub const LOGIN_GRACE: Duration = Duration::from_secs(20);
 /// Keepalives detect a dead peer on an idle but authenticated session,
 /// instead of an inactivity timeout that would end an idle editor.
