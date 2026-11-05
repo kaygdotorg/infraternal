@@ -175,11 +175,9 @@ fn switch_engine(
         }
         // Retire peers before the link deletion removes all routes, as `down` does.
         Client::new()?.clear_peers()?;
-        Device::delete_ifindex(link.ifindex)?;
-        // `GotaTun` does not rotate (D166, D352): its identity is the key carried above, so an
-        // open kernel rotation ends here. Keeping its journal would let a later kernel start
-        // reuse a key the device no longer holds (#285).
-        return store.discard_rotation_secret();
+        // The caller then records the new engine, which retires an open kernel rotation's
+        // journal: `GotaTun` does not rotate (D166, D352), and its identity is the key carried
+        // above (#285).
     }
     Device::delete_ifindex(link.ifindex)
 }
