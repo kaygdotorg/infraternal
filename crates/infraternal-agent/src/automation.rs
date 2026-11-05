@@ -184,14 +184,18 @@ fn same_account(session: &Session, uid: u32, names: &operations::Names) -> bool 
         }))
 }
 
-/// What the request deadline in [`execute`] hands on.
+/// What the caller checks in [`execute`] hand on.
 enum Step {
-    /// A verb that finished inside the deadline.
+    /// A reply decided by the checks themselves (a refusal).
     Done(Reply),
-    /// A `new` request that passed every check; its launch runs after the
-    /// deadline, under the launch's own progress bound.
-    Launch(Vec<Session>, operations::Names),
+    /// The live sessions and names for a request that passed every check.
+    Ready(Vec<Session>, operations::Names),
 }
+
+/// Hang guard for one verb's exchange with a shim (`read`, `send`, `close`,
+/// or `list`, which has none). It only detects a stuck shim; it is not a
+/// latency budget. A loaded host may answer slowly and still succeeds.
+const EXCHANGE_HANG: Duration = Duration::from_secs(30);
 
 pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes: &[u8]) -> Reply {
     let Ok(input) = serde_json::from_slice::<Value>(bytes) else {
@@ -205,13 +209,16 @@ pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes:
         return reply;
     }
     let mut pending = None;
-    // The deadline bounds loading, discovery and the caller checks, which can
-    // stall on unresponsive shims. It does not bound a `new` launch: starting
-    // a process through the init manager took 3.5-5.1 s on loaded hosts, and
-    // launch already fails on progress, not a short clock (`LAUNCH`, #324).
-    // A launch cut here was reported unreachable while it was still starting,
-    // and could leave the session running without its name (#355).
-    let result = tokio::time::timeout(Duration::from_secs(4), async {
+    // No clock covers the whole request (kayg on #355, 79296). Each part is
+    // bounded by its own progress rule instead:
+    // - discovery bounds every shim's Hello with `HANDSHAKE` (2 s), so a stuck
+    //   shim still fails fast;
+    // - a `new` launch fails on launcher exit, with `LAUNCH` only detecting a
+    //   hang (#324);
+    // - the verb's shim exchange has the hang-only `EXCHANGE_HANG`.
+    // The old 4 s whole-request deadline reported a loaded but progressing
+    // host as unreachable (exit 5), and could cut a launch mid-start.
+    let checked = async {
         let names = operations::load(state)?;
         let mut live = sessions::discover(state).await?;
         live.retain(|session| same_account(session, uid, &names));
@@ -224,23 +231,25 @@ pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes:
         if machine.is_some_and(|m| m != "local" && m != hostname) {
             return Ok(Step::Done(Reply::error(3, "Cross-machine session automation is not allowed yet.", "Run on the target machine in your saved session; remote control requires an access rule and approval.")));
         }
-        if verb == "new" {
-            return Ok(Step::Launch(live, names));
-        }
-        operations::run(state, uid, verb, &input, live, names, &mut pending)
-            .await
-            .map(Step::Done)
-    }).await;
-    let result = match result {
-        Ok(Ok(Step::Launch(live, names))) => {
+        Ok::<_, io::Error>(Step::Ready(live, names))
+    }
+    .await;
+    let result = match checked {
+        Ok(Step::Ready(live, names)) if verb == "new" => {
             Ok(operations::create(state, uid, &input, &live, names, &mut pending).await)
         }
-        Ok(Ok(Step::Done(reply))) => Ok(Ok(reply)),
-        Ok(Err(error)) => Ok(Err(error)),
-        Err(elapsed) => Err(elapsed),
+        Ok(Step::Ready(live, names)) => {
+            tokio::time::timeout(
+                EXCHANGE_HANG,
+                operations::run(state, uid, verb, &input, live, names, &mut pending),
+            )
+            .await
+        }
+        Ok(Step::Done(reply)) => Ok(Ok(reply)),
+        Err(error) => Ok(Err(error)),
     };
-    // A created session's name is made durable off the reactor and outside the
-    // deadline: success still means the name is saved, and a disk busy with
+    // A created session's name is made durable off the reactor and outside
+    // every bound above: success still means the name is saved, and a disk busy with
     // writeback delays only this reply, never other terminals (#334).
     let published = match pending {
         Some(publication) => publication
@@ -267,6 +276,70 @@ pub(crate) async fn execute(state: &Path, uid: u32, pid: u32, verb: &str, bytes:
 mod tests {
     //! Rejects malformed requests before filesystem/process discovery and unproven caller trees.
     use super::*;
+
+    /// A loaded but progressing host is not reported unreachable. The fake
+    /// shim answers discovery's Hello after 1.9 s (inside `HANDSHAKE`) and the
+    /// read after another 2.5 s: 4.4 s in all, with every step progressing. The
+    /// old 4 s whole-request clock returned exit 5 here (#355; kayg on 79296).
+    /// Paused tokio time makes the schedule exact and the test instant.
+    #[tokio::test(start_paused = true)]
+    async fn slow_but_progressing_read_is_not_reported_unreachable() {
+        use infraternal_shim::frame::Frame as Shim;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use tokio::io::AsyncWriteExt;
+        let uid = nix::unistd::Uid::effective().as_raw();
+        if uid == 0 {
+            return; // Root sessions need saved names; this checks only the clock.
+        }
+        let state = crate::test_state_root()
+            .join("au")
+            .join(&uuid::Uuid::new_v4().simple().to_string()[..8]);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(state.join("sessions"))
+            .unwrap();
+        let id = *uuid::Uuid::new_v4().as_bytes();
+        let socket = sessions::rendezvous(&state, id);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let shim = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1900)).await;
+            let hello = Shim::Hello {
+                version: 1,
+                caps: 0,
+                session: id,
+                pid: std::process::id(),
+                created: 0,
+                cols: 80,
+                rows: 24,
+                head: 3,
+                start: 0,
+            };
+            peer.write_all(&hello.encode().unwrap()).await.unwrap();
+            let mut reader = sessions::Reader::default();
+            while let Ok(frame) = reader.read(&mut peer).await {
+                if let Shim::ReadFrom(seq) = frame {
+                    tokio::time::sleep(Duration::from_millis(2500)).await;
+                    let output = Shim::Output(seq, b"abc".to_vec());
+                    peer.write_all(&output.encode().unwrap()).await.unwrap();
+                }
+            }
+        });
+        let request = json!({"target": format!("local:{}", uuid::Uuid::from_bytes(id)), "last": 1});
+        let reply = execute(
+            &state,
+            uid,
+            std::process::id(),
+            "read",
+            &serde_json::to_vec(&request).unwrap(),
+        )
+        .await;
+        shim.abort();
+        let _ = std::fs::remove_dir_all(&state);
+        assert_eq!(reply.code, 0, "{}", reply.message);
+    }
     #[test]
     fn rejects_unknown_fields_types_bounds_and_path_names() {
         for (verb, value) in [
