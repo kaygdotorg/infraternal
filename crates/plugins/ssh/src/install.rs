@@ -957,8 +957,11 @@ fi
         } else {
             "700"
         };
+        // The shared routines read their control flags with defaults; a login
+        // environment must never preset them (an inherited setup_check=yes would
+        // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -1117,7 +1120,7 @@ fi
 stage="$base/.bootstrap-lock"
 retire_setup_lease
 rm -rf "$stage"
-"#);
+retire_set_aside"#);
         let result = if let Some(timeout) = timeout {
             self.session
                 .run_with_timeout(&script, Input::Empty, timeout)
@@ -1163,7 +1166,7 @@ setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
 retire_setup_lease
 rm -rf "$stage"
-"#
+retire_set_aside"#
             ),
         );
         let result = if let Some(timeout) = timeout {
@@ -1390,6 +1393,9 @@ pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
 // The shell keeps the same open description until all receipt cleanup ends.
 // Legacy runtimes without that file use the binary's conservative socket probe.
 // A private parent-directory setup guard fences startup during final lock unlink.
+// `refuse <cause>` names why an earlier journal is not recoverable with a fixed
+// token (#305). The read-only check sets setup_check=yes, so the record reaches
+// parse_check and the person sees the cause; every mutating caller still exits 75.
 pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats
@@ -1557,8 +1563,16 @@ case "$kind" in
     upgrade) :;;
     *) exit 71;;
 esac
+if [ -e "$stage/activating" ] || [ -L "$stage/activating" ]; then
+    [ -f "$stage/activating" ] && [ ! -L "$stage/activating" ] && [ -O "$stage/activating" ] && [ "$(stat -c '%a:%h:%s' "$stage/activating")" = 600:1:0 ] || exit 71
+    [ ! -e "$stage/failed" ] && [ ! -L "$stage/failed" ] || exit 71
+    mv -T "$stage/activating" "$stage/failed"
+fi
+if [ -e "$stage/failed" ] || [ -L "$stage/failed" ]; then
+    [ -f "$stage/failed" ] && [ ! -L "$stage/failed" ] && [ -O "$stage/failed" ] && [ "$(stat -c '%a:%h:%s' "$stage/failed")" = 600:1:0 ] || exit 71
+fi
 retire_setup_lease
-if [ -f "$stage/activating" ]; then
+if [ -f "$stage/failed" ]; then
     $manager stop infraternal-agent.service >/dev/null 2>&1
 fi
 if [ "$kind" = fresh ]; then
@@ -1572,7 +1586,7 @@ if [ -f "$stage/linger-requested" ]; then
     fi
     rm -f "$stage/linger-requested"
 fi
-if [ -f "$stage/activating" ]; then
+if [ -f "$stage/failed" ]; then
     $manager disable infraternal-agent.service >/dev/null 2>&1 || :
     if [ -f "$stage/replacing-binary" ] || [ -f "$stage/previous-binary" ]; then rm -f "$base/bin/live" "$base/bin/current"; fi
     if [ "${preserve_session:-no}" != yes ] || [ "$kind" != fresh ]; then
@@ -1598,7 +1612,7 @@ if [ -f "$stage/activating" ]; then
     [ ! -f "$stage/was-enabled" ] || $manager enable infraternal-agent.service
     [ ! -f "$stage/was-active" ] || $manager start infraternal-agent.service
 fi
-if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ]; then
+if [ -f "$stage/stopping" ] && [ -f "$stage/was-active" ] && [ ! -f "$stage/stop-refused" ] && [ ! -f "$stage/activating" ] && [ ! -f "$stage/failed" ]; then
     $manager start infraternal-agent.service
 fi
 if [ "$kind" = fresh ]; then
@@ -1972,6 +1986,41 @@ mod tests {
         ] {
             assert_eq!(TransferCaps::parse(invalid.as_bytes()), None, "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn inherited_control_variables_cannot_change_a_setup_program() {
+        // The login environment can carry any of these names. A mutating
+        // program must still refuse with 75, never report success (#305).
+        let body = format!(
+            "{RUNTIME_CLEANUP}\nprintf '%s ' \"$setup_check\" \"$setup_blocked\" \"$setup_guarded\" \"$setup_allow_locked_inspection\" \"$runtime_locked\" \"$lease_runtime\" \"$preserve_session\" \"${{previous_kind:-unset}}\" \"${{parent:-unset}}\"\nrefuse kind"
+        );
+        let script = Installation::script_for(
+            InstallMode::Rootless,
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            &body,
+        );
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", "/nonexistent/j93d-prelude")
+            .env("setup_check", "yes")
+            .env("setup_blocked", "yes")
+            .env("setup_guarded", "yes")
+            .env("setup_allow_locked_inspection", "yes")
+            .env("runtime_locked", "yes")
+            .env("lease_runtime", "yes")
+            .env("preserve_session", "yes")
+            .env("previous_kind", "upgrade")
+            .env("parent", "/tmp")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(75));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "no no no no no no no unset unset INFRATERNAL_SETUP_REFUSED kind\n"
+        );
     }
 
     #[test]

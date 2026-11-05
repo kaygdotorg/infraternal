@@ -368,7 +368,9 @@ impl Bindings {
     ///
     /// # Errors
     /// Returns an error if the routing state lock is poisoned.
-    #[cfg(feature = "test-support")]
+    // The crate's own probe tests read it too. They also build when a sibling
+    // package in the same Cargo run enables only `transport`.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn retained_history(&self) -> io::Result<[usize; 4]> {
         let mut peers = self.peers.lock().map_err(|_| io::ErrorKind::Other)?;
         let mut total = [0; 4];

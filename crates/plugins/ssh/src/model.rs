@@ -2,6 +2,8 @@
 
 use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::net::Ipv6Addr;
 
 pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs the matching infraternal binary on this host. Its files were kept.";
@@ -194,7 +196,7 @@ pub enum FailureKind {
 pub struct Leftovers {
     pub challenge: uuid::Uuid,
     pub mode: InstallMode,
-    pub findings: Vec<&'static str>,
+    pub findings: Vec<Cow<'static, str>>,
 }
 
 /// Trusted installation boundary; no request chooses its diagnostic context.
@@ -266,6 +268,41 @@ struct FailureIds {
     host_key_challenge: Option<uuid::Uuid>,
     /// The owner's existing host that makes this an already-added failure.
     existing_host_id: Option<uuid::Uuid>,
+    /// Validated lease owner details for the setup-running and stuck-upgrade messages.
+    setup_lock: Option<SetupLock>,
+}
+
+/// Host-local lease metadata parsed from the fixed setup-check record.
+// Each flag is its own optional field of the public wire shape the tracer
+// reads; an enum would change that JSON, not the meaning (#305, D337).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SetupLock {
+    machine: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    since: String,
+    active: bool,
+    /// The setup attempt that holds or last held the lock, by its first id characters (#305).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempt: Option<String>,
+    /// Open terminal sessions a stuck-install replacement ends (#305, D13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sessions: Option<u16>,
+    /// The other server a stuck install is enrolled with; it may join as a new host (D335).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enrolled_with: Option<String>,
+    /// An earlier add-host set this install aside and did not put it back (#305).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    set_aside: bool,
+    /// The stuck install's agent is running and may be connected to its other server (#305).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    live: bool,
+    /// Another server's install is running with open terminals, so it may be in use
+    /// there: taking it over is refused until ownership of that server can be
+    /// proven (D337).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_use: bool,
 }
 
 /// Serialize the failure's wire fields; each UUID has its own key and its own field.
@@ -276,10 +313,13 @@ impl Serialize for Failure {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Failure", 12)?;
+        let mut state = serializer.serialize_struct("Failure", 14)?;
         state.serialize_field("kind", &self.kind)?;
-        state.serialize_field("message", &self.message)?;
+        state.serialize_field("message", &self.public_message())?;
         state.serialize_field("log_tail", &self.log_tail)?;
+        if let Some(setup_lock) = self.ids.as_deref().and_then(|ids| ids.setup_lock.as_ref()) {
+            state.serialize_field("setup_lock", setup_lock)?;
+        }
         if let Some(failed_step) = self.failed_step {
             state.serialize_field("failed_step", &failed_step)?;
         }
@@ -333,6 +373,185 @@ impl Failure {
             choose_method: false,
             ids: None,
         }
+    }
+    /// Attach validated lease coordinates without growing the common failure payload.
+    #[must_use]
+    pub(crate) fn with_setup_lock(
+        mut self,
+        machine: String,
+        pid: Option<u32>,
+        since: String,
+        active: bool,
+    ) -> Self {
+        self.ids.get_or_insert_with(Box::default).setup_lock = Some(SetupLock {
+            machine,
+            pid,
+            since,
+            active,
+            attempt: None,
+            sessions: None,
+            enrolled_with: None,
+            in_use: false,
+            set_aside: false,
+            live: false,
+        });
+        self
+    }
+
+    /// Mark the lock as an install an earlier add-host set aside and did not put back.
+    #[must_use]
+    pub(crate) fn with_set_aside(mut self) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.set_aside = true;
+        }
+        self
+    }
+
+    /// Name the setup attempt that holds the lock; the host's own name says only where it is.
+    #[must_use]
+    pub(crate) fn with_setup_attempt(mut self, attempt: Option<uuid::Uuid>) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.attempt = attempt.map(|attempt| attempt.simple().to_string()[..8].to_owned());
+        }
+        self
+    }
+
+    /// Mark another server's stuck install as in use there, so it is refused, not offered (D337).
+    #[must_use]
+    pub(crate) fn in_use_elsewhere(mut self) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.in_use = true;
+        }
+        self
+    }
+
+    /// Name what confirming a stuck-install replacement ends and where the machine is enrolled.
+    #[must_use]
+    pub(crate) fn with_stuck_install(
+        mut self,
+        sessions: u16,
+        enrolled_with: Option<String>,
+        live: bool,
+    ) -> Self {
+        if let Some(lock) = self
+            .ids
+            .as_deref_mut()
+            .and_then(|ids| ids.setup_lock.as_mut())
+        {
+            lock.sessions = Some(sessions);
+            lock.enrolled_with = enrolled_with;
+            lock.live = live;
+        }
+        self
+    }
+
+    fn public_message(&self) -> Cow<'_, str> {
+        let Some(lock) = self.ids.as_deref().and_then(|ids| ids.setup_lock.as_ref()) else {
+            return Cow::Borrowed(self.message);
+        };
+        let process = lock.pid.map_or_else(
+            || "unknown process".to_owned(),
+            |pid| format!("process {pid}"),
+        );
+        let holder = lock.attempt.as_ref().map_or_else(
+            || process.clone(),
+            |attempt| format!("setup attempt {attempt} ({process})"),
+        );
+        if lock.set_aside {
+            return Cow::Owned(format!(
+                "An earlier add-host on {} set this machine's infraternal agent aside and did not put it back. Nothing was deleted. Put it back as it was found, then add the host again to continue.",
+                lock.machine
+            ));
+        }
+        if lock.active {
+            // Only an upgrade journal offers a replacement, and only once its
+            // lease is gone; a running setup can only be waited for (#305).
+            return Cow::Owned(format!(
+                "On {}, {holder} has held the setup lock since {}. Wait for it to finish, then try again. A setup that stopped releases the lock within 3 minutes of its last step.",
+                lock.machine, lock.since
+            ));
+        }
+        let mut text = format!(
+            "The failed setup on {} left a lease last held by {holder} since {}.",
+            lock.machine, lock.since
+        );
+        if lock.in_use {
+            // The host cannot see whether the old agent is connected; a running
+            // agent with open terminals may be, so it is not taken (D337).
+            let server = lock
+                .enrolled_with
+                .as_deref()
+                .filter(|server| !server.is_empty())
+                .unwrap_or("the server that enrolled it");
+            let open = lock.sessions.unwrap_or(0);
+            let terminals = if open == 1 {
+                "1 open terminal".to_owned()
+            } else {
+                format!("{open} open terminals")
+            };
+            return Cow::Owned(format!(
+                "{} is enrolled with {server}. Its infraternal agent is running with {terminals} and may still be connected to {server}. Prove you own {server} to take it over; that isn't available yet.",
+                lock.machine
+            ));
+        }
+        if let Some(server) = &lock.enrolled_with {
+            // An empty name: the host could not read its identity file, so
+            // nothing shows that another server enrolled it (#305 P2-2).
+            if server.is_empty() {
+                text.push_str(
+                    " This server did not enroll this machine, and its identity cannot be read.",
+                );
+            } else {
+                let _ = write!(
+                    text,
+                    " This machine is enrolled with another server, {server}."
+                );
+            }
+            if lock.live {
+                let other = if server.is_empty() {
+                    "the server that enrolled it"
+                } else {
+                    server.as_str()
+                };
+                let _ = write!(
+                    text,
+                    " Its infraternal agent is running and may be connected to {other} now. Joining it here disconnects it from {other}; remove it there afterwards."
+                );
+            }
+            text.push_str(" Joining it to this server makes it a new host with a new key; its old infraternal agent and key are deleted once it has joined.");
+        } else {
+            text.push_str(" Replace the stuck install to continue.");
+        }
+        // A Replace (no other server) hands open terminals to the new agent;
+        // a Re-enroll ends them (D337).
+        let fate = if lock.enrolled_with.is_some() {
+            "will end"
+        } else {
+            "will carry over"
+        };
+        match lock.sessions {
+            Some(0) => text.push_str(" No terminal sessions are open."),
+            Some(1) => {
+                let _ = write!(text, " 1 open terminal session {fate}.");
+            }
+            Some(open) => {
+                let _ = write!(text, " {open} open terminal sessions {fate}.");
+            }
+            None => {}
+        }
+        Cow::Owned(text)
     }
     /// Return the public challenge only while this error represents a host-key refusal.
     #[must_use]
@@ -492,7 +711,7 @@ impl std::fmt::Display for Failure {
             Some(InstallStep::GetX86_64Binary) => f.write_str("Get the x86_64 binary: ")?,
             _ => (),
         }
-        f.write_str(self.message)
+        f.write_str(&self.public_message())
     }
 }
 impl std::error::Error for Failure {}
