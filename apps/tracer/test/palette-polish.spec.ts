@@ -55,7 +55,7 @@ test("no palette row renders without a title, whole list and scoped to Settings"
   await expect(page.locator("#palette")).toBeVisible();
   const names = await page.locator("#palette-results .result-label").allTextContents();
   expect(names.length).toBeGreaterThanOrEqual(5);
-  expect(names).toContain("Theme");
+  expect(names).toContain("Themes");
   expect(await blank()).toEqual([]);
 });
 

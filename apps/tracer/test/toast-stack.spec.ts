@@ -44,6 +44,8 @@ for (const { name, viewport, touch } of VIEWPORTS) {
       await expect(front).toContainText("Notice 4");
       // Order in the DOM is creation order: the oldest (hidden) first, then the two behind, then the front.
       await expect(cards(page).nth(0)).toHaveAttribute("data-hidden", "true");
+      // Measure at rest: the stack's transitions have finished (under a look with blurred windows the first frame of a transition can come some 100 ms after the toast is drawn).
+      await expect.poll(() => page.evaluate(() => document.getAnimations().filter((a) => (a.effect as KeyframeEffect | null)?.target?.closest(".ui-toast-stack")).every((a) => a.playState === "finished")), { timeout: 5000 }).toBe(true);
       const [mid, behind, f] = [await box(page, 2), await box(page, 1), await box(page, 3)];
       // Behind means smaller and higher, centred on the same line.
       expect(behind.width).toBeLessThan(mid.width);
