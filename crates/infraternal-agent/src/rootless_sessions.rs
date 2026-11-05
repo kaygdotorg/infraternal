@@ -95,7 +95,8 @@ pub(crate) async fn launch(
         .await
 }
 
-/// Bound shell cleanup, then await directory durability outside that deadline.
+/// Clean up the person's shells (each stop step hang-bounded), then await
+/// directory durability.
 /// A supplied person fence stays owned until the blocking sync finishes, including
 /// when the caller is cancelled; a busy disk delays only this operation's reply.
 /// Admission is retained from marker publication so cleanup never needs another
@@ -109,9 +110,12 @@ pub(crate) async fn revoke(
 ) -> io::Result<()> {
     let state = state.to_owned();
     tokio::spawn(async move {
-        let failure = tokio::time::timeout(Duration::from_secs(5), cleanup(&state, person))
-            .await
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        // No clock covers the whole cleanup: each shell stop bounds its own
+        // progress steps (`stop`, `STOP_STEP_HANG`). A whole-cleanup deadline
+        // failed revocations on a slow host while the shim was still working
+        // (#355). The shim runs as the infraternal agent's own account (D18),
+        // so its silence is a hang, not a hostile peer.
+        let failure = cleanup(&state, person).await?;
         admission
             .run(move || {
                 let _person = person_guard;
@@ -224,66 +228,212 @@ fn private_readiness(path: &Path) -> io::Result<bool> {
         && metadata.len() == 0)
 }
 
+/// Hang guard for each step of stopping one person's shell (D352 principle,
+/// #355). It only detects a stuck shim, or a shell that cannot die (for
+/// example one in uninterruptible sleep), and then this revocation attempt
+/// fails. The person stays denied and the revocation owner retries
+/// (`logins::revocations`), but the shell keeps running until an attempt
+/// succeeds, so a slow but progressing host must not fail one.
+const STOP_STEP_HANG: Duration = Duration::from_secs(60);
+
+/// Runs one step of a shell stop under [`STOP_STEP_HANG`]; `what` names the
+/// step in the timeout error.
+async fn step<T>(
+    what: &'static str,
+    work: impl std::future::Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    tokio::time::timeout(STOP_STEP_HANG, work)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, what))?
+}
+
+/// Stops the shell of the session whose rendezvous socket is `path`, and
+/// returns only after the shim has proved the shell is gone.
+///
+/// The shim does the work: on the stop request it kills the shell, waits for
+/// its exit, reaps it and retires adopted descendants, and only then writes
+/// its proof (its Hello followed by `ShellStopped`). This side bounds each step
+/// it can observe separately: connecting, delivering the request, and each
+/// part of the proof. No clock covers the whole stop. A sealed exit record is
+/// already proof; refusal, a missing rendezvous, an unsupported capability or
+/// a step that hangs fail honestly.
 async fn stop(path: PathBuf, id: [u8; 16]) -> io::Result<()> {
-    // A sealed exit remains proof after listener retirement. Refusal, missing
-    // rendezvous, unsupported capability and timeout otherwise fail honestly.
     if infraternal_shim::ended::read(&path)?.is_some() {
         return Ok(());
     }
-    tokio::time::timeout(Duration::from_secs(3), async {
-        match tokio::net::UnixStream::connect(path.with_extension("stop")).await {
-            Ok(mut peer) => {
-                // This private endpoint has no ordinary link, decoder quota
-                // or owner limit. Authenticate before requesting retirement.
-                let credentials = peer.peer_cred()?;
-                if credentials.uid() != 0
-                    && credentials.uid() != nix::unistd::Uid::effective().as_raw()
-                {
-                    return Err(io::ErrorKind::PermissionDenied.into());
-                }
-                tokio::io::AsyncWriteExt::write_all(&mut peer, b"!").await?;
-                let mut reader = Reader::default();
-                if !matches!(reader.read(&mut peer).await?, Frame::Hello {
-                    version: 1, caps: SHELL_CLEANUP, session, pid, ..
-                } if session == id && i32::try_from(pid).ok() == credentials.pid())
-                {
-                    return Err(io::Error::other("host login cleanup identity differs"));
-                }
-                if reader.read(&mut peer).await? != Frame::ShellStopped {
-                    return Err(io::Error::other(
-                        "host login path did not confirm shell cleanup",
-                    ));
-                }
-                return Ok(());
-            }
-            Err(error) if sessions::gone(&error) => {}
-            Err(error) => return Err(error),
-        }
-        // Older surviving shims retain the negotiated cleanup capability path. Failure at
-        // their ordinary capacity remains an honest refusal, never exit proof.
-        let mut session = sessions::connect_with(path.clone(), id, SHELL_CLEANUP).await?;
-        if session.caps != SHELL_CLEANUP {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "host login path cannot confirm shell cleanup",
-            ));
-        }
-        sessions::send(&mut session.peer, &Frame::StopShell).await?;
-        if Reader::default().read(&mut session.peer).await? != Frame::ShellStopped {
-            return Err(io::Error::other(
-                "host login path did not confirm shell cleanup",
-            ));
-        }
-        Ok(())
-    })
+    match step(
+        "connect to the shell stop endpoint",
+        tokio::net::UnixStream::connect(path.with_extension("stop")),
+    )
     .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    {
+        Ok(mut peer) => {
+            // This private endpoint has no ordinary link, decoder quota or
+            // owner limit. Authenticate before requesting retirement.
+            let credentials = peer.peer_cred()?;
+            if credentials.uid() != 0 && credentials.uid() != nix::unistd::Uid::effective().as_raw()
+            {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            step(
+                "deliver the shell stop request",
+                tokio::io::AsyncWriteExt::write_all(&mut peer, b"!"),
+            )
+            .await?;
+            let mut reader = Reader::default();
+            let hello = step("receive the shell stop proof", reader.read(&mut peer)).await?;
+            if !matches!(hello, Frame::Hello {
+                version: 1, caps: SHELL_CLEANUP, session, pid, ..
+            } if session == id && i32::try_from(pid).ok() == credentials.pid())
+            {
+                return Err(io::Error::other("host login cleanup identity differs"));
+            }
+            if step("receive shell stop confirmation", reader.read(&mut peer)).await?
+                != Frame::ShellStopped
+            {
+                return Err(io::Error::other(
+                    "host login path did not confirm shell cleanup",
+                ));
+            }
+            return Ok(());
+        }
+        Err(error) if sessions::gone(&error) => {}
+        Err(error) => return Err(error),
+    }
+    // Older surviving shims retain the negotiated cleanup capability path. Failure at
+    // their ordinary capacity remains an honest refusal, never exit proof.
+    let mut session = step(
+        "connect to the older shim",
+        sessions::connect_with(path.clone(), id, SHELL_CLEANUP),
+    )
+    .await?;
+    if session.caps != SHELL_CLEANUP {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "host login path cannot confirm shell cleanup",
+        ));
+    }
+    step(
+        "deliver the shell stop request",
+        sessions::send(&mut session.peer, &Frame::StopShell),
+    )
+    .await?;
+    if step(
+        "receive shell stop confirmation",
+        Reader::default().read(&mut session.peer),
+    )
+    .await?
+        != Frame::ShellStopped
+    {
+        return Err(io::Error::other(
+            "host login path did not confirm shell cleanup",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     //! Cleanup refuses unsupported or unconfirmed peers without inventing exit proof.
     use super::*;
+
+    /// A private state root with one recorded terminal of `person` and a fake
+    /// shim stop endpoint for it. Returns the root, the endpoint listener and
+    /// the terminal id.
+    fn revocation_fixture(person: uuid::Uuid) -> (PathBuf, tokio::net::UnixListener, [u8; 16]) {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/codex-scratch/real-logins")
+            .join(format!(
+                "v{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ));
+        for directory in ["sessions", "infraternal-login-locks"] {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(root.join(directory))
+                .unwrap();
+        }
+        let id = uuid::Uuid::new_v4();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(root.join("infraternal-login-locks").join(format!(
+                "{}-{}.terminal",
+                person.simple(),
+                id.simple()
+            )))
+            .unwrap();
+        let endpoint = sessions::rendezvous(&root, id.into_bytes()).with_extension("stop");
+        let listener = tokio::net::UnixListener::bind(endpoint).unwrap();
+        (root, listener, id.into_bytes())
+    }
+
+    /// A slow but progressing shell stop still revokes access. The fake shim
+    /// sends its stop proof 8 s after the request, as a loaded host can: past
+    /// the former 3 s stop deadline and the former 5 s whole-revoke deadline,
+    /// both of which refused the revocation and left access in place (#355).
+    /// Paused tokio time makes the schedule exact and the test instant.
+    #[tokio::test(start_paused = true)]
+    async fn slow_but_progressing_shell_stop_still_revokes() {
+        if nix::unistd::Uid::effective().is_root() {
+            return; // Root uses the login-unit path, not rootless records.
+        }
+        let person = uuid::Uuid::new_v4();
+        let (root, listener, id) = revocation_fixture(person);
+        let shim = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let mut request = [0];
+            tokio::io::AsyncReadExt::read_exact(&mut peer, &mut request)
+                .await
+                .unwrap();
+            assert_eq!(&request, b"!");
+            // sleep: simulates a slow shim (virtual under paused tokio time).
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            let hello = Frame::Hello {
+                version: 1,
+                caps: SHELL_CLEANUP,
+                session: id,
+                pid: std::process::id(),
+                cols: 80,
+                rows: 24,
+                created: 0,
+                head: 0,
+                start: 0,
+            };
+            sessions::send(&mut peer, &hello).await.unwrap();
+            sessions::send(&mut peer, &Frame::ShellStopped)
+                .await
+                .unwrap();
+        });
+        let revoked = crate::logins::revoke(&root, Manager::Detached, person).await;
+        shim.await.unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        revoked.unwrap();
+    }
+
+    /// A shell that never dies still ends in the refusal path: the fake shim
+    /// takes the stop request and never proves the shell gone, so revocation
+    /// fails at the step's hang bound instead of acknowledging cleanup.
+    #[tokio::test(start_paused = true)]
+    async fn shell_that_never_stops_still_refuses_revocation() {
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let person = uuid::Uuid::new_v4();
+        let (root, listener, _) = revocation_fixture(person);
+        let shim = tokio::spawn(async move {
+            let (peer, _) = listener.accept().await.unwrap();
+            let _held = peer;
+            std::future::pending::<()>().await;
+        });
+        let revoked = crate::logins::revoke(&root, Manager::Detached, person).await;
+        shim.abort();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(revoked.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
 
     #[tokio::test]
     async fn dedicated_cleanup_requires_bound_identity_and_reaping_proof() {
