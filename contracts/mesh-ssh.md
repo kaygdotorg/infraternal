@@ -123,7 +123,11 @@ The listener binds only an applied mesh address on TCP/22, for IPv4 or IPv6.
 If the exact bind reports address-in-use, an owned redirect scoped to the mesh
 interface may select an internal listener only after tests prove original
 destination-port enforcement, cleanup and acceptable latency. An internal
-port is never an additional Network access permission. No wildcard or loopback
+port is never an additional Network access permission. It is a port only root
+can bind (below the kernel's `ip_unprivileged_port_start`, read each time), so
+a table left by an abrupt exit cannot hand mesh TCP/22 to a local account
+(J236 P2-2). A rootless infraternal agent, or a host whose bound leaves no
+such port, gets no redirect. No wildcard or loopback
 listener, host sshd edit, host-wide firewall flush or host sysctl change is
 allowed. Published underlay traffic rewritten onto a mesh address remains
 refused; node-local delivery remains supported.

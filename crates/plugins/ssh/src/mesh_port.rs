@@ -24,7 +24,8 @@ pub enum PortMode {
     Stopped,
     /// Listening on TCP/22 of the mesh address itself.
     Direct,
-    /// TCP/22 was taken, so we listen on a random port and redirect mesh TCP/22 to it.
+    /// TCP/22 was taken, so we listen on a privileged internal port and
+    /// redirect mesh TCP/22 to it.
     Redirect,
 }
 
@@ -55,7 +56,7 @@ impl MeshPort {
         let (listener, redirected) = match TcpListener::bind(SocketAddr::new(address, 22)) {
             Ok(listener) => (listener, false),
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                (TcpListener::bind(SocketAddr::new(address, 0))?, true)
+                (internal_listener(address)?, true)
             }
             Err(error) => return Err(error),
         };
@@ -140,6 +141,56 @@ impl Drop for MeshPort {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+/// The internal ports a redirect may listen on, tried highest first.
+///
+/// Invariant (J236 P2-2, #221): only root can bind them. After an abrupt exit
+/// (SIGKILL, OOM) the owned table stays until restart recovery, and its guard
+/// admits any flow originally addressed to :22 whoever owns the internal
+/// port. An unprivileged port let any local account take mesh TCP/22 over
+/// in that window.
+const INTERNAL_PORTS: std::ops::RangeInclusive<u16> = 960..=1022;
+
+/// The kernel's lowest port an unprivileged account may bind. It is one value
+/// for both IPv4 and IPv6, despite its name.
+const UNPRIVILEGED_PORT_START: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+
+/// The internal ports usable for `euid` when unprivileged accounts may bind
+/// from `unprivileged_start` up.
+///
+/// # Errors
+/// `PermissionDenied` for a rootless infraternal agent (it cannot hold a port
+/// only root may take, so it never redirects), and for a host whose bound
+/// leaves no port in [`INTERNAL_PORTS`] reserved to root.
+pub(crate) fn internal_ports(
+    euid: u32,
+    unprivileged_start: u16,
+) -> io::Result<impl Iterator<Item = u16>> {
+    let mut ports = INTERNAL_PORTS
+        .rev()
+        .filter(move |port| *port < unprivileged_start)
+        .peekable();
+    if euid != 0 || ports.peek().is_none() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(ports)
+}
+
+/// Bind the redirect's internal listener on a free port only root can bind,
+/// reading the kernel's bound each time (a host may have lowered it).
+fn internal_listener(address: IpAddr) -> io::Result<TcpListener> {
+    let start = std::fs::read_to_string(UNPRIVILEGED_PORT_START)?
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    for port in internal_ports(nix::unistd::Uid::effective().as_raw(), start)? {
+        match TcpListener::bind(SocketAddr::new(address, port)) {
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+            bound => return bound,
+        }
+    }
+    Err(io::ErrorKind::AddrInUse.into())
 }
 
 /// Reject addresses that make no sense for a mesh listener (unspecified,

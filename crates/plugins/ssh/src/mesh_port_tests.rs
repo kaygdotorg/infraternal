@@ -347,3 +347,56 @@ fn namespace_restart_recovers_a_retained_owned_table() {
     assert!(MeshPort::bind_after_restart(address, "infraternal0").is_err());
     transaction(&format!("delete table inet {}\n", table(address))).unwrap();
 }
+
+/// J236 P2-2 (#221): the redirect's internal port is one only root can bind,
+/// so after an abrupt exit no local account can take mesh TCP/22 over through
+/// the leftover table. A rootless infraternal agent never redirects at all,
+/// and neither does a host that lets every account bind low ports.
+#[test]
+fn internal_ports_are_privileged_and_rootless_never_redirects() {
+    let ports: Vec<u16> = internal_ports(0, 1024).unwrap().collect();
+    assert!(ports.contains(&1022), "{ports:?}");
+    assert!(ports.iter().all(|port| *port < 1024 && *port != 22));
+    assert_eq!(
+        internal_ports(1000, 1024).err().map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    // A host that lowered the bound below the whole range gets no redirect.
+    assert_eq!(
+        internal_ports(0, 0).err().map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert!(internal_ports(0, 1000).unwrap().all(|port| port < 1000));
+}
+
+/// The real redirect, end to end in a namespace: its internal port is below
+/// the kernel's unprivileged bound, and with that bound lowered to 0 the bind
+/// is refused and no table is left behind.
+#[test]
+#[ignore = "Run alone inside unshare -Urn with a disposable network namespace."]
+fn namespace_the_redirect_listens_only_on_a_privileged_port() {
+    const BOUND: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
+    ip(&["link", "set", "lo", "up"]);
+    ip(&["address", "add", "10.254.0.5/32", "dev", "lo"]);
+    let address: IpAddr = "10.254.0.5".parse().unwrap();
+    let _host = TcpListener::bind("0.0.0.0:22").unwrap();
+    let start: u16 = std::fs::read_to_string(BOUND)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut port = MeshPort::bind(address, "infraternal0").unwrap();
+    assert_eq!(port.mode(), PortMode::Redirect);
+    let internal = port.listener().unwrap().local_addr().unwrap().port();
+    assert!(
+        internal < start,
+        "internal port {internal} is not below {start}"
+    );
+    assert_delivery(&port, SocketAddr::new(address, 22));
+    port.stop().unwrap();
+    std::fs::write(BOUND, "0").unwrap();
+    let refused = MeshPort::bind(address, "infraternal0");
+    std::fs::write(BOUND, start.to_string()).unwrap();
+    assert!(refused.is_err());
+    assert!(!presence(address).unwrap());
+}
