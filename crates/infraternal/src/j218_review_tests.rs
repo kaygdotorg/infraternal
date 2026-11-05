@@ -104,3 +104,34 @@ fn j218_untrusted_install_ancestry_is_read_only() {
         assert!(!fixture.0.join("var/lib").exists());
     }
 }
+
+/// Disabling a failed installation must preserve an earlier unit alias owned by its administrator.
+#[test]
+fn j218_rollback_preserves_preexisting_unit_alias() {
+    let fixture = Fixture::new();
+    let units = fixture.0.join("etc/systemd/system");
+    fs::create_dir_all(&units).unwrap();
+    let alias = units.join("control.service");
+    std::os::unix::fs::symlink("infraternal-agent.service", &alias).unwrap();
+    let before = fs::symlink_metadata(&alias).unwrap();
+    let source = fixture.0.join("source");
+    fs::write(&source, b"fixture executable").unwrap();
+    let systemctl = fixture.0.join("systemctl");
+    let log = fixture.0.join("offline-disable.log");
+    fs::write(&log, b"").unwrap();
+    // Offline disable exercises real unit-file removal without touching the host manager.
+    fs::write(&systemctl, format!("#!/bin/sh\nif [ \"$1\" = disable ]; then\n  /usr/bin/systemctl --root='{}' disable infraternal-agent.service > '{}' 2>&1\n  exit $?\nfi\n[ \"$1\" != is-active ]\n", fixture.0.display(), log.display())).unwrap();
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        Install::begin(&fixture.0, nix::unistd::geteuid().as_raw(), &systemctl)
+            .unwrap()
+            .activate(&source)
+            .is_err()
+    );
+    println!(
+        "offline unit-file disable: {}",
+        fs::read_to_string(log).unwrap()
+    );
+    let after = fs::symlink_metadata(&alias).expect("rollback removed a pre-existing unit alias");
+    assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+}

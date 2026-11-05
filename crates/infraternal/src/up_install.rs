@@ -409,8 +409,10 @@ impl Drop for Install {
         if self.committed {
             return;
         }
+        // Stop affects runtime state only. Disable would also delete administrator-owned
+        // unit aliases; the inode journal already owns our sole enablement link.
         if self.registered {
-            let _ = run_systemctl(&self.systemctl, &["disable", "--now", SERVICE_NAME], None);
+            let _ = run_systemctl(&self.systemctl, &["stop", SERVICE_NAME], None);
         }
         for created in self.created.iter().rev() {
             let Ok(metadata) = fs::symlink_metadata(&created.path) else {
