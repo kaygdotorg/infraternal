@@ -38,6 +38,8 @@ mod sign_in;
 mod ssh_askpass;
 #[cfg(feature = "ssh")]
 mod ssh_internal;
+#[cfg(test)]
+mod test_executable;
 #[cfg(all(feature = "remote", target_os = "linux"))]
 mod up;
 
@@ -115,6 +117,12 @@ fn mesh_ssh_service(state: &std::path::Path) -> Option<infraternal_agent::plugin
 fn run_invocation() -> ExitCode {
     if harden_startup().is_err() {
         return ExitCode::FAILURE;
+    }
+    // The macOS PTY child's private entry runs before any runtime or thread
+    // exists: it drops privileges and execs the person's shell (D335, #328).
+    #[cfg(target_os = "macos")]
+    if let Some(result) = infraternal_shim::session_shell::run_if_requested() {
+        return result;
     }
     #[cfg(target_os = "linux")]
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
@@ -286,16 +294,16 @@ fn dispatch_action(
                 run_unavailable(action, json_output)
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         CliHandler::SessionShim => run_shim_command(matches),
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         CliHandler::SessionShim => run_unavailable(action, json_output),
         CliHandler::SshSession => {
-            #[cfg(all(feature = "ssh", feature = "remote"))]
+            #[cfg(all(feature = "ssh", feature = "remote", target_os = "linux"))]
             {
                 run_ssh_session(matches)
             }
-            #[cfg(not(all(feature = "ssh", feature = "remote")))]
+            #[cfg(not(all(feature = "ssh", feature = "remote", target_os = "linux")))]
             {
                 run_unavailable(action, json_output)
             }
@@ -562,7 +570,7 @@ fn run_up_system(matches: &ArgMatches, json_output: bool) -> ExitCode {
     up::run_helper(server, json_output)
 }
 
-#[cfg(all(feature = "ssh", feature = "remote"))]
+#[cfg(all(feature = "ssh", feature = "remote", target_os = "linux"))]
 fn run_ssh_session(matches: &ArgMatches) -> ExitCode {
     let (Some(state), session) = (
         matches.get_one::<String>("state"),
@@ -1472,7 +1480,7 @@ fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, Ex
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_shim_command(matches: &ArgMatches) -> ExitCode {
     let options = match (|| {
         Ok::<_, String>(shim_cli::Options {
@@ -1513,7 +1521,7 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    #[cfg(feature = "plugin-agent")]
+    #[cfg(all(feature = "plugin-agent", target_os = "linux"))]
     if let Some(result) = run_login_shim_if_requested(matches, &options) {
         return result;
     }
@@ -1668,7 +1676,7 @@ fn run_login_command(
 }
 
 /// Parse schema-generated integer inputs into the shim's platform-specific types.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn shim_integer<T>(matches: &ArgMatches, name: &str, default: Option<T>) -> Result<T, String>
 where
     T: TryFrom<i64>,

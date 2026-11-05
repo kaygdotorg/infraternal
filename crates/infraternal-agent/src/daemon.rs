@@ -689,7 +689,7 @@ pub async fn run_authenticated_with_installation(
     state: Option<PathBuf>,
     execution_uid: u32,
     renewal: Option<&RenewalIdentity>,
-    installation: Option<&infraternal_plugin_remote::uninstall::Context>,
+    installation: Option<&crate::plugins::Installation>,
 ) -> io::Result<()> {
     dispatch_authenticated(channel, state, execution_uid, renewal, installation).await
 }

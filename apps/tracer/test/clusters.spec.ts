@@ -2,6 +2,7 @@
  * Clusters concept mockup (`?proto=clusters`, issue #89): walks the six scenes and checks the
  * behaviours the owner's open questions are about. Everything runs against the test double.
  */
+import { paletteOpen } from "./settings-palette";
 import { expect, test, type Browser, type Page } from "playwright/test";
 
 type Probe = {
@@ -123,7 +124,8 @@ test("split right divides the window beside it, split down stacks below it, from
   const n0 = await count();
   // Two controls with names, and the right one is first.
   const actions = await page.locator(`.ui-window[data-window-id="${id}"] .ui-window-action`).evaluateAll((b) => b.map((x) => [(x as HTMLElement).dataset.action, (x as HTMLElement).dataset.tip]));
-  expect(actions.slice(0, 2)).toEqual([["split-right", "Split right"], ["split-down", "Split down"]]);
+  // "?" (read about this window) is the first button of a terminal's group; the two split buttons follow it.
+  expect(actions.slice(0, 3)).toEqual([["docs", "Read about this window"], ["split-right", "Split right"], ["split-down", "Split down"]]);
   const a0 = await rect(`.ui-window[data-window-id="${id}"]`);
   await page.locator(`.ui-window[data-window-id="${id}"] [data-action="split-right"]`).evaluate((b) => (b as HTMLElement).click());
   await expect.poll(count).toBe(n0 + 1);
@@ -175,6 +177,22 @@ test("canvas lock off frees pan and zoom in place; the overview is its own actio
   expect((await probe(page, (p) => p.camera())).z).toBeLessThan(cam0.z);
   await page.keyboard.press("Escape");
   await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 4000 }).toBeLessThan(0.5);
+});
+
+test("a Ctrl+wheel that lands while the free-canvas code is still loading is kept and zooms once it arrives", async ({ page }) => {
+  await open(page, 3);
+  const cam0 = await probe(page, (p) => p.camera());
+  // Every script requested from now on takes 1.5 s, so the free-canvas gestures (fetched when the lock turns off, D188) are still on their way
+  // when the wheel turns.
+  await page.route("**/*.js", async (route) => { await new Promise((done) => setTimeout(done, 1500)); await route.continue().catch(() => undefined); });
+  await page.keyboard.press("Control+Shift+G");
+  await expect.poll(async () => (await probe(page, (p) => p.canvasLock())).on, { timeout: 5000 }).toBe(false);
+  await page.mouse.move(720, 450);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, 240);
+  await page.keyboard.up("Control");
+  // The gestures arrive about 1.5 s later and the held wheel is played then: the camera zooms out, it does not stay where it was.
+  await expect.poll(async () => (await probe(page, (p) => p.camera())).z, { timeout: 8000 }).toBeLessThan(cam0.z);
 });
 
 test("the dots sit on the gradient: the gradient shows everywhere, the dot layers are plain tiles with no cover or mask", async ({ page }) => {
@@ -643,9 +661,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
     await page.locator(".keyedit-done").tap();
     await expect(page.locator("#terminal-screen")).not.toHaveAttribute("data-toolbar-edit", "");
     // Settings, Toolbar: the layout comes from the account until "Customise for this device".
-    await page.keyboard.press("Control+Shift+K");
-    await page.keyboard.type("settings: toolbar");
-    await page.keyboard.press("Enter");
+    await paletteOpen(page, "Terminal › Typing", "terminal.typing");
     await expect(page.locator(".ui-ts-tag")).toHaveText("Account layout");
     await page.getByRole("button", { name: "Customise for this device" }).click();
     await expect(page.locator(".ui-ts-tag")).toHaveText("This device");
@@ -656,9 +672,7 @@ test("toolbar: a long press edits it in place (hide with a badge, a tray brings 
 
 test("shortcuts: Settings lists the registry, a row rebinds with a conflict warning, and the new key works everywhere", async ({ page }) => {
   await open(page, 3);
-  await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("settings: shortcuts");
-  await page.keyboard.press("Enter");
+  await paletteOpen(page, "Terminal › Typing", "terminal.typing");
   await expect(page.locator(".ui-ss-row")).not.toHaveCount(0);
   await page.waitForTimeout(1600);
   await expect(page.locator('.ui-ss-row[data-id="canvas-lock"]')).toContainText("G");
@@ -836,11 +850,24 @@ test("closing the last window of a column removes the column, its neighbours clo
   for (const f of fills) expect(f).toBeLessThan(2);
 });
 
-test("settings is a view: a gear after a divider, one window per section, admin windows only for operators, nothing modal", async ({ page }) => {
+/** The windows of Settings in rows (#304), in order: one row per component, one window per group; the administrator rows come from the owner's map. */
+const SETTINGS_WINDOWS = {
+  appearance: ["s-appearance-theme", "s-appearance-font", "s-appearance-size", "s-appearance-layout"],
+  terminal: ["s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-terminal-multiplexer"],
+  you: ["s-you-profile", "s-you-passkeys", "s-you-recovery", "s-you-apps", "s-you-devices"],
+  machines: ["s-machines-new-machines", "s-machines-updates"],
+  mesh: ["s-mesh-keys", "s-mesh-names", "s-mesh-access", "s-mesh-connections"],
+  sharing: ["s-sharing-published-services", "s-sharing-certificates"],
+  about: ["s-about-version", "s-about-licences"],
+};
+const SETTINGS_OPERATOR = [...SETTINGS_WINDOWS.appearance, ...SETTINGS_WINDOWS.terminal, ...SETTINGS_WINDOWS.you, ...SETTINGS_WINDOWS.machines, ...SETTINGS_WINDOWS.mesh, ...SETTINGS_WINDOWS.sharing, ...SETTINGS_WINDOWS.about];
+const SETTINGS_VIEWER = [...SETTINGS_WINDOWS.appearance, ...SETTINGS_WINDOWS.terminal, ...SETTINGS_WINDOWS.you, ...SETTINGS_WINDOWS.about];
+
+test("settings is a view: a gear after a divider, a row of windows for each component, administrator rows only for operators, nothing modal", async ({ page }) => {
   await open(page, 1);
   const sections = async (): Promise<string[]> => (await probe(page, (p) => p.views())).find((v) => v.id === "settings")!.windows;
-  // "Hosts" is a built-in section after Window Sizes: the Extended info switch moved out of Appearance (cc0966858, D157).
-  expect(await sections()).toEqual(["s-appearance", "s-windows", "s-hosts", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about", "s-users", "s-grants", "s-discovery"]);
+  // The windows come in the order of the table: components top to bottom, the groups of each from the left (the order the probe lists the columns in is the track order, so compare as sets).
+  expect([...(await sections())].sort()).toEqual([...SETTINGS_OPERATOR].sort());
   // The sidebar lists it last, after a divider; the gear in the sidebar footer flies there.
   await page.locator("#sidebar-toggle").click();
   await expect(page.locator('#tree .bm-sec[data-id="view:settings"].cl-divided')).toHaveCount(1);
@@ -849,33 +876,31 @@ test("settings is a view: a gear after a divider, one window per section, admin 
   // starts turns the snap on a moment later (a probe sees on=false at the click and on=true 400 ms after). Wait for both together.
   await expect.poll(async () => { const lock = await probe(page, (p) => p.canvasLock()); return `${lock.view}:${lock.on}`; }, { timeout: 4000 }).toBe("settings:true");
   await expect(page.locator(".ui-settings")).toHaveCount(0); // the overlay shell is gone
-  // The palette goes straight to a section's window.
-  await page.keyboard.press("Control+Shift+K");
-  await page.keyboard.type("settings: devices");
-  await page.keyboard.press("Enter");
-  await expect(page.locator('.ui-window[data-window-id="s-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
+  // The palette goes straight to a group's window.
+  await paletteOpen(page, "You › Devices", "you.devices");
+  await expect(page.locator('.ui-window[data-window-id="s-you-devices"][data-active]')).toHaveCount(1, { timeout: 4000 });
   // The sidebar is a layer over the canvas (it no longer docks), so it is closed before reaching under it.
   await page.locator("#sidebar-toggle").click();
   // Appearance applies live: choosing a theme repaints at once.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("appearance"));
-  await page.locator('.ui-window[data-window-id="s-appearance"] .ui-sp-row[data-id="ink"]').click();
+  await page.locator('.ui-window[data-window-id="s-appearance-theme"] .ui-sp-row[data-id="ink"]').click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "ink");
-  // Viewers get no admin windows.
+  // Viewers get no administrator rows.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { setRole(r: string): void } }).__tracerClusters.setRole("viewer"));
-  await expect.poll(sections, { timeout: 4000 }).toEqual(["s-appearance", "s-windows", "s-hosts", "s-toolbar", "s-shortcuts", "s-devices", "s-account", "s-about"]);
+  await expect.poll(async () => [...(await sections())].sort(), { timeout: 4000 }).toEqual([...SETTINGS_VIEWER].sort());
 });
 
 test("devices: the name edits in place, a sign-out asks first, and a device switch offers to continue once", async ({ page }) => {
   await open(page, 1);
-  await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("devices"));
+  await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("you.devices"));
   await page.waitForTimeout(1600);
-  const row = page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device').nth(1);
+  const row = page.locator('.ui-window[data-window-id="s-you-devices"] .ui-sp-device').nth(1);
   const name = row.locator(".ui-sp-name");
   await name.fill("Studio MacBook");
   await name.press("Enter");
   await expect(page.locator(".ui-toast", { hasText: "Renamed" })).toContainText("Renamed to Studio MacBook");
   await expect(row.locator(".ui-sp-kind svg")).toHaveCount(1);
-  const before = await page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device').count();
+  const before = await page.locator('.ui-window[data-window-id="s-you-devices"] .ui-sp-device').count();
   await row.locator('[aria-label="Sign out this device"]').click();
   // The confirmation says what happens in plain words, and its two buttons carry their names.
   const tip = page.locator(".ui-confirm-tip");
@@ -884,7 +909,7 @@ test("devices: the name edits in place, a sign-out asks first, and a device swit
   await expect(tip.locator(".ui-confirm-yes")).toHaveText("Sign out device");
   await expect(tip.locator(".ui-confirm-no")).toHaveText("Keep signed in");
   await page.locator(".ui-confirm-yes").click();
-  await expect(page.locator('.ui-window[data-window-id="s-devices"] .ui-sp-device')).toHaveCount(before - 1);
+  await expect(page.locator('.ui-window[data-window-id="s-you-devices"] .ui-sp-device')).toHaveCount(before - 1);
   await page.keyboard.press("Control+Shift+K");
   await page.keyboard.type("simulate device switch");
   await page.keyboard.press("Enter");
@@ -1100,8 +1125,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
     return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action:not(.ui-window-more)")].map((b) => b.dataset.tip) };
   }, id);
   const d = await geometry(page, "w-nix-cache");
-  expect(d.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
-  expect(d.tip).toEqual(["Split right", "Split down", "Sessions", "Close"]);
+  expect(d.buttons).toEqual(["docs", "split-right", "split-down", "sessions", "close"]);
+  expect(d.tip).toEqual(["Read about this window", "Split right", "Split down", "Sessions", "Close"]);
   expect(Math.abs(d.aH - d.tH)).toBeLessThan(0.5);
   expect(Math.abs(d.aTop - d.tTop)).toBeLessThan(0.5);
   expect(Math.max(...d.gaps) - Math.min(...d.gaps)).toBeLessThan(0.5); // equal spacing
@@ -1110,8 +1135,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
   try {
     const p = t.page;
     const pd = await geometry(p, "w-build-01");
-    // TASTE "Phone window headers carry two actions": on a touch device the header holds Close only; the splits and the
-    // session manager are in the canvas row while a terminal is focused, and in ⌘K.
+    // On a touch device a terminal's header holds Close alone: "?" (read about this window, #304) is not there, because with it the group folded into a "…"
+    // whose 44 px target overlapped its neighbours (J211). "?" stays in ⌘K; the splits and the session manager are in the canvas row while a terminal is focused.
     expect(pd.buttons).toEqual(["close"]);
     // Header pills are one size (TASTE): on touch both are 36 px visible; the 44 px target is invisible padding (checked below).
     expect(Math.abs(pd.aH - pd.tH)).toBeLessThan(1);

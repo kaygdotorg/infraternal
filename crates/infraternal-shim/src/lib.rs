@@ -4,14 +4,14 @@
 //! data modules forbid it. Each boundary documents descriptor, pointer and fork invariants.
 #![deny(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod child;
 #[cfg(all(feature = "host-login", target_os = "linux"))]
 mod cleanup;
 #[cfg(all(feature = "host-diagnostics", target_os = "linux"))]
 mod host_trace;
 // All arguments disappear from normal builds, including timestamp calls.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 macro_rules! trace_host {
     ($stage:ident, $session:expr, $fd:expr, $offset:expr, $bytes:expr) => {
         trace_host!($stage, $session, $fd, $offset, $bytes, 0);
@@ -30,46 +30,48 @@ macro_rules! trace_host {
 }
 pub mod ended;
 pub mod frame;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod locale;
 #[cfg(all(feature = "host-login", target_os = "linux"))]
 pub mod login;
 #[cfg(all(feature = "host-login", target_os = "linux"))]
 pub mod login_handoff;
-#[cfg(feature = "host-login")]
+// The macOS record codec stays for the agent's Linux login code paths; its
+// receive refuses there, because host-login workers are Linux-only (D247).
+#[cfg(any(feature = "host-login", target_os = "macos"))]
 pub mod login_ready;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty;
 #[cfg(feature = "async-fd")]
 pub mod readiness;
 pub mod ring;
-#[cfg(target_os = "linux")]
+/// Private macOS entry that places and drops privileges for each PTY child (D335).
+#[cfg(target_os = "macos")]
+pub mod session_shell;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod shell_startup;
 pub mod startup;
 
-// The shared daemon API is compiled on Darwin, but its Linux PTY/session
-// implementation is not. These inert compatibility hooks keep unrelated CLI
-// and agent code type-checking; actual Darwin child/session policy stays out of
-// this slice and remains tracked in #300.
+// The PTY/session engine runs on Linux and macOS (#328). Host-login workers
+// (systemd/PAM units, D247), pidfds and the per-user reactor stay Linux-only;
+// on macOS the D335 login-session placement replaces the host-login worker.
 
 /// Resolve locale variables for a scrubbed login shell [#161].
 ///
 /// The host locale files and installed locale list are read once per caller
 /// process, so a long-lived session launcher does not repeat discovery per PTY.
 #[must_use]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn session_locale_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     locale::environment()
 }
 
 /// Restore default child signal policy before exec, without changing the parent.
 /// Attach this before any caller-specific pre-exec setup.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn prepare_child(command: &mut std::process::Command) {
     pty::prepare_child(command);
 }
-#[cfg(target_os = "macos")]
-pub fn prepare_child(_command: &mut std::process::Command) {}
 
 /// Whether atomic replacement would drop extended attributes, including access-control lists.
 /// # Errors
@@ -78,6 +80,8 @@ pub fn prepare_child(_command: &mut std::process::Command) {}
 pub fn startup_file_has_attributes(file: &std::fs::File) -> std::io::Result<bool> {
     pty::file_has_attributes(file)
 }
+/// # Errors
+/// Always `Unsupported` on macOS: replacing startup files is a Linux restart path.
 #[cfg(target_os = "macos")]
 pub fn startup_file_has_attributes(_file: &std::fs::File) -> std::io::Result<bool> {
     Err(std::io::ErrorKind::Unsupported.into())
@@ -113,14 +117,20 @@ pub fn protect_login_process_at(path: &std::path::Path) -> std::io::Result<()> {
     pty::protect_login_process_at(path)
 }
 
+/// Let the child inherit only standard input, output and error: every other
+/// descriptor is marked close-on-exec after fork (an allowlist, #328 P1).
+/// Hooks the caller registers afterwards may still admit a named descriptor.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn inherit_only_standard_descriptors(command: &mut std::process::Command) {
+    pty::only_standard_descriptors(command);
+}
+
 /// Apply child signal policy and close the trusted fd3 before direct exec.
 /// This avoids an intermediate shell changing `/proc/self/exe` for anonymous images.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn prepare_child_without_control(command: &mut std::process::Command) {
     pty::prepare_child_without_control(command);
 }
-#[cfg(target_os = "macos")]
-pub fn prepare_child_without_control(_command: &mut std::process::Command) {}
 
 /// Ensure a Linux child exits if its infraternal owner exits before the child.
 ///
@@ -167,6 +177,7 @@ pub fn prepare_proxy_child(
     _working_directory: &std::fs::File,
     _descriptors: &[(std::os::fd::RawFd, std::os::fd::RawFd)],
     _identity: Option<(u32, u32)>,
+    _cgroup_procs: Option<&std::fs::File>,
 ) -> std::io::Result<()> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
@@ -187,55 +198,40 @@ pub fn prepare_spawn(attributes: &mut nix::spawn::PosixSpawnAttr) -> nix::Result
 /// Exclude the borrowed leg-B descriptor at exec and reset child signal state.
 /// Unlike closing fd3 before exec, CLOEXEC preserves a possible spawn-error
 /// pipe using that slot. The caller keeps ownership of its original descriptor.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn prepare_isolated_child(command: &mut std::process::Command) {
     pty::prepare_isolated_child(command);
 }
-#[cfg(target_os = "macos")]
-pub fn prepare_isolated_child(_command: &mut std::process::Command) {}
 
 /// Establish a controller-owned child's independent session before fresh exec.
 /// Standard handles must be configured by the caller; no parent-death signal
 /// is installed. Only async-signal-safe syscalls run between fork and exec.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn prepare_independent_session(command: &mut std::process::Command) {
     pty::prepare_independent_session(command);
 }
-#[cfg(target_os = "macos")]
-pub fn prepare_independent_session(_command: &mut std::process::Command) {}
 
 /// Double-fork and setsid startup for hosts without an init scope.
 /// Call only during single-threaded startup, before threads or PTYs exist.
 /// # Errors
 /// Returns syscall failures during detachment.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn detach() -> std::io::Result<bool> {
     pty::detach()
 }
-#[cfg(target_os = "macos")]
-pub fn detach() -> std::io::Result<bool> {
-    Err(std::io::ErrorKind::Unsupported.into())
-}
 /// Width in columns of the terminal on standard output, or `None` when it is not a terminal.
 /// The CLI sizes its tables from this before it falls back to `$COLUMNS`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use]
 pub fn stdout_columns() -> Option<u16> {
     pty::stdout_columns()
 }
-#[cfg(target_os = "macos")]
-#[must_use]
-pub fn stdout_columns() -> Option<u16> {
-    None
-}
 /// Make SIGINT write `notice` to standard output, restore the default SIGINT action and re-raise
 /// the signal (the CLI's one-envelope contract in JSON mode, D305/#239).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
 }
-#[cfg(target_os = "macos")]
-pub fn exit_on_interrupt(_notice: Vec<u8>) {}
 
 /// Restore SIGTERM's default action and re-raise it, after a process handled
 /// SIGTERM to finish its shutdown steps (#221).
@@ -245,39 +241,39 @@ pub fn terminate_by_default() -> ! {
 }
 
 /// Tell the SIGINT handler that the final JSON result is about to be written.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn begin_final_output() {
     pty::begin_final_output();
 }
-#[cfg(target_os = "macos")]
-pub fn begin_final_output() {}
 
 /// Tell the SIGINT handler that the final JSON result has finished writing.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn finish_final_output() {
     pty::finish_final_output();
 }
-#[cfg(target_os = "macos")]
-pub fn finish_final_output() {}
 #[cfg(all(test, feature = "process-per-user"))]
 #[path = "../tests/unit/heap_accounting.rs"]
 mod heap_accounting;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod terminal;
 #[cfg(all(feature = "process-per-user", target_os = "linux"))]
 mod terminal_limits;
 #[cfg(all(feature = "process-per-user", target_os = "linux"))]
 mod terminal_memory;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod terminal_native;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use session::{Config, run, run_with_retention};
 #[cfg(all(feature = "host-login", target_os = "linux"))]
 pub use session::{run_with_login_group, run_with_prestarted_login};
 
 #[cfg(all(feature = "ca-handoff", target_os = "linux"))]
+pub mod locked_bytes;
+#[cfg(all(feature = "ca-handoff", not(target_os = "linux")))]
+#[path = "locked_bytes_refused.rs"]
+/// Key memory for the CA handoff: refused off Linux, where no reviewed dump exclusion exists (D244).
 pub mod locked_bytes;
 
 #[cfg(all(test, feature = "host-login", target_os = "linux"))]
@@ -302,6 +298,14 @@ pub fn signal_process_descriptor(
     signal: nix::sys::signal::Signal,
 ) -> std::io::Result<()> {
     pty::signal_process_descriptor(process, signal)
+}
+/// The start time (microseconds since the epoch) that identifies one lifetime
+/// of a macOS process; `Ok(None)` for a zombie [D81, #328].
+/// # Errors
+/// Returns `NotFound` for an absent process, or the kernel query error.
+#[cfg(target_os = "macos")]
+pub fn process_start(pid: u32) -> std::io::Result<Option<u64>> {
+    pty::process_start(pid)
 }
 #[cfg(feature = "ca-handoff")]
 pub mod openssl_secure;

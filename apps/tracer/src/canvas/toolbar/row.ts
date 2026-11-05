@@ -4,7 +4,7 @@
  * right and down, new window right and below (D212), sessions (only with an inventory), add host (only when the flow exists), sidebar. Items disable while the input lock is on, and
  * the window actions when the active window is not a terminal.
  */
-import { ICONS, iconSvg, withLockBadge } from "../../../../../packages/ui/src/icons";
+import { ICONS, withLockBadge } from "../../../../../packages/ui/src/icons";
 import { isMacPlatform } from "../../../../../packages/ui/src/platform";
 import { refreshTip } from "../../../../../packages/ui/src/tooltip";
 import type { ToolbarItem, ToolbarRow } from "../../core-screen";
@@ -24,18 +24,12 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   const { stage, signal, state, core } = cx;
   const openPalette = (): void => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: isMacPlatform(), ctrlKey: !isMacPlatform(), bubbles: true })); };
 
-  // Desktop: the canvas lock toggle and the view switcher sit next to the top pill.
+  // Desktop: the canvas lock toggle sits next to the top pill. The view switcher is the top pill itself (a second round button for it did the same and was removed).
   const lockBtn = el("button", "ui-pill ui-pill-icon cl-snap");
   lockBtn.type = "button";
   lockBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${withLockBadge(ICONS.canvas)}</svg>`;
-  const viewsBtn = el("button", "ui-pill ui-pill-icon cl-viewsbtn");
-  viewsBtn.type = "button";
-  viewsBtn.innerHTML = iconSvg("views");
-  viewsBtn.setAttribute("aria-label", "Views");
-  viewsBtn.dataset.tip = "Views";
-  stage.querySelector(".tabs")?.prepend(viewsBtn, lockBtn);
+  stage.querySelector(".tabs")?.prepend(lockBtn);
   lockBtn.addEventListener("click", () => cx.nav.setCanvasLock(!state.canvasLock), { signal });
-  viewsBtn.addEventListener("click", () => cx.viewList.toggle(), { signal });
 
   // The "+" beside the top pill opens a new shell window on the first host.
   const add = stage.querySelector<HTMLButtonElement>(".tab-add");
@@ -103,5 +97,5 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   };
   const offLock = cx.nav.onLockChange(update);
   update();
-  return { update, dispose() { offLock(); row.dispose(); lockBtn.remove(); viewsBtn.remove(); if (add) { add.disabled = true; add.removeAttribute("data-tip"); } } };
+  return { update, dispose() { offLock(); row.dispose(); lockBtn.remove(); if (add) { add.disabled = true; add.removeAttribute("data-tip"); } } };
 }

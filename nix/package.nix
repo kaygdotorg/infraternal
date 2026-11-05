@@ -13,14 +13,8 @@ let
   version = if releaseVersion == null
     then (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version
     else releaseVersion;
-  zigHash = {
-    x86_64 = "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239";
-    aarch64 = "958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f";
-  };
-  zigArchive = fetchurl {
-    url = "https://ziglang.org/download/0.15.2/zig-${arch}-linux-0.15.2.tar.xz";
-    sha256 = zigHash.${arch};
-  };
+  # Same tarball and checksum table as scripts/auth-toolchain (D213, D328).
+  zigArchive = (import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; }).archive;
   zig = runCommand "infraternal-zig-0.15.2" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
     ${lowerBuildPriority}
     mkdir -p "$out"
@@ -206,6 +200,9 @@ in stdenv.mkDerivation {
     mkdir -p "$out/bin" "$out/share/infraternal"
     cp -R "$TMPDIR/bundle/." "$out/share/infraternal/"
     ln -s ../share/infraternal/infraternal "$out/bin/infraternal"
+    # Both entry directories expose the same replaceable canonical executable [349].
+    ln -s infraternal "$out/share/infraternal/infra"
+    ln -s infraternal "$out/bin/infra"
     runHook postInstall
   '';
   passthru = { inherit binaries bunDeps vtDeps cargoDeps zig; };

@@ -903,6 +903,12 @@ fn install_system_service(
 
     let path_directory = ensure_directory(root, "usr/local/bin", expected_uid)?;
     install_path_link(&path_directory.join("infraternal"), expected_uid)?;
+    if !infraternal_plugin_api::cli_alias::install(
+        &path_directory.join("infraternal"),
+        expected_uid,
+    )? {
+        eprintln!("infraternal: skipped infra; an existing path belongs to another command.");
+    }
 
     let unit_directory = ensure_directory(root, "etc/systemd/system", expected_uid)?;
     let unit_path = unit_directory.join("infraternal-agent.service");
@@ -1430,6 +1436,7 @@ mod tests {
         );
     }
 
+    /// Both public names must reach the installed system image.
     #[test]
     fn system_install_copies_the_running_binary_links_path_and_enables_one_unit() {
         let temporary = TemporaryDirectory::new();
@@ -1438,15 +1445,14 @@ mod tests {
         let calls = temporary.0.join("systemctl-calls");
         fs::write(&source, b"running version bytes").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(
+        crate::test_executable::write(
             &systemctl,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" != is-active ] || echo active\n",
                 calls.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
 
         install_system_service(
             &temporary.0,
@@ -1466,6 +1472,10 @@ mod tests {
             fs::read_link(&link).unwrap(),
             Path::new("/var/lib/infraternal/bin/infraternal")
         );
+        assert_eq!(
+            fs::read_link(link.with_file_name("infra")).unwrap(),
+            Path::new("infraternal")
+        );
         let unit_text = fs::read_to_string(unit).unwrap();
         assert!(unit_text.contains("ExecStart=/var/lib/infraternal/bin/infraternal agent run"));
         assert!(unit_text.contains("--data /var/lib/infraternal/agent"));
@@ -1473,6 +1483,18 @@ mod tests {
             fs::read_to_string(calls).unwrap(),
             "daemon-reload\nenable --now infraternal-agent.service\nis-active infraternal-agent.service\n"
         );
+        // A later foreign command wins even when this installation is repeated.
+        let alias = link.with_file_name("infra");
+        fs::remove_file(&alias).unwrap();
+        fs::write(&alias, b"foreign infra").unwrap();
+        install_system_service(
+            &temporary.0,
+            &source,
+            &systemctl,
+            nix::unistd::geteuid().as_raw(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(alias).unwrap(), b"foreign infra");
     }
 
     #[test]
@@ -1483,12 +1505,11 @@ mod tests {
         let systemctl = temporary.0.join("systemctl");
         fs::write(&source, b"binary").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(
+        crate::test_executable::write(
             &systemctl,
             "#!/bin/sh\n[ \"$1\" != is-active ] || echo active\n",
-        )
-        .unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         let base = temporary.0.join("var/lib/infraternal");
         fs::create_dir_all(temporary.0.join("var/lib")).unwrap();
         std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
@@ -1598,12 +1619,11 @@ mod tests {
         // J134 P3-4: the helper copies /proc/self/exe, not a path.
         let temporary = TemporaryDirectory::new();
         let systemctl = temporary.0.join("systemctl");
-        fs::write(
+        crate::test_executable::write(
             &systemctl,
             "#!/bin/sh\n[ \"$1\" != is-active ] || echo active\n",
-        )
-        .unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
 
         install_system_service(
             &temporary.0,
@@ -1629,8 +1649,7 @@ mod tests {
         let source = temporary.0.join("running-infraternal");
         let systemctl = temporary.0.join("systemctl");
         fs::write(&source, b"binary").unwrap();
-        fs::write(&systemctl, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::write(&systemctl, "#!/bin/sh\nexit 0\n", 0o755);
         let bin_dir = temporary.0.join("usr/local/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         fs::write(bin_dir.join("infraternal"), b"another command").unwrap();
@@ -1679,8 +1698,7 @@ mod tests {
     fn sudo_denial_has_a_local_permission_cause() {
         let temporary = TemporaryDirectory::new();
         let sudo = temporary.0.join("sudo");
-        fs::write(&sudo, "#!/bin/sh\nexit 1\n").unwrap();
-        fs::set_permissions(&sudo, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_executable::write(&sudo, "#!/bin/sh\nexit 1\n", 0o755);
         let mut command = std::process::Command::new(sudo);
 
         let failure = invoke_sudo(&mut command, b"").unwrap_err();

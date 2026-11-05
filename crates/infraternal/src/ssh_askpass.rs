@@ -13,7 +13,7 @@ pub(crate) fn run() -> ExitCode {
         let _ = nix::unistd::close(0);
         return ExitCode::FAILURE;
     }
-    if nix::sys::prctl::set_dumpable(true).is_err() {
+    if !allow_parent_inspection() {
         return ExitCode::FAILURE;
     }
 
@@ -23,4 +23,17 @@ pub(crate) fn run() -> ExitCode {
         // stdout belongs exclusively to OpenSSH's private reply pipe.
         ExitCode::FAILURE
     }
+}
+
+#[cfg(target_os = "linux")]
+/// Whether the askpass parent check can read the caller; macOS has no /proc, so it refuses.
+fn allow_parent_inspection() -> bool {
+    nix::sys::prctl::set_dumpable(true).is_ok()
+}
+
+/// The parent's executable check reads /proc, which macOS lacks, so it could
+/// never authorize this helper there: refuse before connecting (#320).
+#[cfg(not(target_os = "linux"))]
+fn allow_parent_inspection() -> bool {
+    false
 }

@@ -46,6 +46,7 @@ fn connect(args: &[OsString]) -> Option<ExitCode> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn session(args: &[OsString]) -> Option<ExitCode> {
     let options = infraternal_plugin_ssh::session_bridge::Options::decode(args)?;
     Some(if options.run().is_ok() {
@@ -53,6 +54,13 @@ fn session(args: &[OsString]) -> Option<ExitCode> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// SSH sessions run in the Linux session daemon, which macOS does not build
+/// (#320). The shape stays recognized so it is refused, not parsed as public.
+#[cfg(not(target_os = "linux"))]
+fn session(_args: &[OsString]) -> Option<ExitCode> {
+    Some(ExitCode::FAILURE)
 }
 
 #[cfg(test)]

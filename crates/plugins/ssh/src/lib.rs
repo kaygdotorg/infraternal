@@ -6,6 +6,8 @@ pub mod auth_evidence;
 pub mod auth_once;
 pub mod auth_order;
 pub mod bootstrap;
+/// Check whether a helper exited without reaping it (Linux and macOS).
+mod child_exit;
 pub mod cli;
 pub mod config;
 pub mod credentials;
@@ -27,7 +29,8 @@ pub mod mesh_port;
 #[cfg(all(feature = "session-bridge", target_os = "linux"))]
 pub mod mesh_runtime;
 pub mod mesh_server;
-#[cfg(feature = "session-bridge")]
+// The bridge runs inside the Linux session daemon, which macOS does not build (#320).
+#[cfg(all(feature = "session-bridge", target_os = "linux"))]
 pub mod session_bridge;
 pub mod setup;
 pub mod stdio;

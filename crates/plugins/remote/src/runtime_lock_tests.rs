@@ -6,15 +6,32 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 #[path = "../../../infraternal-shim/tests/unit/fixture_state.rs"]
 mod fixture_state;
 
-struct Fixture(fixture_state::FixtureState);
+/// The root path, plus the shared fixture state that owns it when one is used.
+struct Fixture(
+    PathBuf,
+    #[expect(dead_code, reason = "held only so its Drop removes the shared root")]
+    Option<fixture_state::FixtureState>,
+);
 impl Fixture {
     fn new() -> Self {
-        let root = fixture_state::fixture_state();
+        let state = fixture_state::fixture_state();
+        Self::prepare(state.to_path_buf(), Some(state))
+    }
+
+    /// Session shims bind `base/sessions/sessions/<32 hex>.sock`, which is
+    /// longer than the shared fixture's `AF_UNIX` budget allows for, so these
+    /// tests take a private directory directly under /tmp.
+    fn short() -> Self {
+        let root = nix::unistd::mkdtemp("/tmp/rl-XXXXXX").unwrap();
+        Self::prepare(root, None)
+    }
+
+    fn prepare(root: PathBuf, state: Option<fixture_state::FixtureState>) -> Self {
         fs::create_dir_all(root.join("base/sessions")).unwrap();
         for path in [&root, &root.join("base"), &root.join("base/sessions")] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        Self(root)
+        Self(root, state)
     }
     fn state(&self) -> PathBuf {
         self.0.join("base/sessions")
@@ -145,6 +162,7 @@ fn dump_records_accept_only_known_shapes() {
         uid: 1001,
         inode: 4321,
         device: 123,
+        socket: 1234,
     };
     for (length, expected, checked) in [
         (
@@ -303,6 +321,270 @@ fn session_inspection_finds_bound_endpoints_by_identity() {
     drop(bound);
     assert_eq!(sessions_after_close(&runtime), Ok(()));
     drop(control);
+}
+
+/// The replacement confirmation counts sessions a shim still serves: a socket
+/// file left by an exited shim and the control socket are not sessions (#305).
+#[test]
+fn open_session_count_includes_only_bound_endpoints() {
+    let fixture = Fixture::new();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let runtime = directory(&fixture.state()).unwrap();
+    let control =
+        std::os::unix::net::UnixListener::bind(fixture.state().join("plugins.sock")).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(nested.join("left.sock")).unwrap());
+    assert_eq!(after_close(&Ok(1), || open_sessions(&runtime)), Ok(0));
+    let first = std::os::unix::net::UnixListener::bind(nested.join("one.sock")).unwrap();
+    let second = std::os::unix::net::UnixListener::bind(fixture.state().join("two.sock")).unwrap();
+    assert_eq!(open_sessions(&runtime), Ok(2));
+    drop(first);
+    assert_eq!(after_close(&Ok(2), || open_sessions(&runtime)), Ok(1));
+    drop((second, control));
+}
+
+/// A process running the staged payload counts as a shim only while it holds
+/// a socket bound to one of the install's session endpoints. Any other one is
+/// refused before a replacement stops anything (#305 P2-3).
+#[test]
+fn a_payload_process_without_a_session_endpoint_is_refused_before_any_stop() {
+    let fixture = Fixture::short();
+    let base = fixture.0.join("base");
+    let stage = base.join(".bootstrap-lock");
+    fs::create_dir(&stage).unwrap();
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+    let payload = stage.join("payload");
+    fs::copy("/bin/sleep", &payload).unwrap();
+    fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
+    let root = directory(&base).unwrap();
+    assert_eq!(stage_processes(&root), Ok(()), "nothing runs the payload");
+
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(nested.join(format!("{}.sock", "3".repeat(32))))
+            .unwrap();
+    // dup clears close-on-exec, so the payload process inherits the endpoint.
+    let inherited = nix::unistd::dup(&listener).unwrap();
+    let mut shim = std::process::Command::new(&payload)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    drop(inherited);
+    assert_eq!(stage_processes(&root), Ok(()), "a shim serves its endpoint");
+
+    let mut stray = std::process::Command::new(&payload)
+        .arg("30")
+        .spawn()
+        .unwrap();
+    assert_eq!(stage_processes(&root), Err(73), "a stray payload process");
+    for child in [&mut shim, &mut stray] {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    drop(listener);
+}
+
+/// A non-dumpable legacy shim can be retired only through its owned session socket.
+fn start_legacy_shim(
+    path: &std::path::Path,
+    session: &str,
+    reported_pid: &str,
+) -> std::process::Child {
+    use std::io::{BufRead, BufReader, Read};
+
+    let shim = r"
+import ctypes, os, socket, struct, sys
+path, session, reported_pid = sys.argv[1:]
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+os.chmod(path, 0o600)
+listener.listen(1)
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+print('READY', flush=True)
+peer, _ = listener.accept()
+def frame(body):
+    return struct.pack('<I', len(body)) + body
+def read_frame():
+    header = peer.recv(4)
+    while len(header) < 4:
+        header += peer.recv(4 - len(header))
+    size = struct.unpack('<I', header)[0]
+    body = b''
+    while len(body) < size:
+        body += peer.recv(size - len(body))
+    return body
+hello = b'\x01' + struct.pack('<H', 1) + struct.pack('<Q', 0)
+pid = os.getpid() if reported_pid in ('self', 'close') else os.getpid() + 1
+hello += bytes.fromhex(session) + struct.pack('<I', pid)
+hello += struct.pack('<HHQQQ', 80, 24, 0, 0, 0)
+peer.sendall(frame(hello))
+assert read_frame() == b'\x02' + struct.pack('<Q', 0)
+assert read_frame() == b'\x13' + struct.pack('<Q', 0)
+assert read_frame() == b'\x16\x01'
+peer.sendall(frame(b'\x20' + struct.pack('<iQ', 0, 0)))
+if reported_pid == 'close':
+    # An older shim closes as soon as Exited is sent and never reads ExitAck.
+    peer.close()
+    sys.exit(0)
+assert read_frame() == b'\x21'
+while True:
+    peer.recv(1)
+";
+    let mut server = std::process::Command::new("python3")
+        .args(["-c", shim])
+        .arg(path)
+        .arg(session)
+        .arg(reported_pid)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(server.stdout.take().unwrap());
+    let mut ready = String::new();
+    stdout.read_line(&mut ready).unwrap();
+    drop(stdout);
+    if ready != "READY\n" {
+        let _ = server.kill();
+        let status = server.wait().unwrap();
+        let mut stderr_text = String::new();
+        BufReader::new(server.stderr.take().unwrap())
+            .read_to_string(&mut stderr_text)
+            .unwrap();
+        panic!("legacy shim fixture did not start: {ready:?}, {status}: {stderr_text}");
+    }
+    server
+}
+
+#[test]
+fn stale_session_cleanup_reaps_legacy_shell_before_stopping_its_shim() {
+    use std::{
+        io::{BufReader, Read},
+        os::unix::process::ExitStatusExt,
+    };
+
+    let fixture = Fixture::short();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let path = nested.join(format!("{}.sock", id.simple()));
+    let mut server = start_legacy_shim(&path, &id.simple().to_string(), "self");
+    let base = fixture.0.join("base");
+    let root = fs::metadata(&base).unwrap();
+    let args = [
+        "--bootstrap-runtime".into(),
+        base.as_os_str().to_owned(),
+        format!("{}:{}", root.dev(), root.ino()).into(),
+        "sessions-stop".into(),
+    ];
+    let result = command(&mut args.into_iter());
+    if result != Some(0) {
+        let _ = server.kill();
+    }
+    let status = server.wait().unwrap();
+    let mut stderr_text = String::new();
+    BufReader::new(server.stderr.take().unwrap())
+        .read_to_string(&mut stderr_text)
+        .unwrap();
+    assert_eq!(
+        result,
+        Some(0),
+        "legacy session cleanup was refused: {stderr_text}"
+    );
+    assert_eq!(status.signal(), Some(nix::libc::SIGTERM));
+    assert!(!path.exists(), "retired session socket was left behind");
+}
+
+/// The #305 field shim closes right after Exited; its session is over, not uncertain.
+#[test]
+fn exit_ack_to_a_shim_that_already_closed_counts_as_acknowledged() {
+    let (mut helper, shim) = UnixStream::pair().unwrap();
+    drop(shim);
+    assert_eq!(acknowledge_exit(&mut helper), Ok(()));
+    let (mut helper, _shim) = UnixStream::pair().unwrap();
+    assert_eq!(acknowledge_exit(&mut helper), Ok(()));
+}
+
+#[test]
+fn stale_session_cleanup_accepts_a_legacy_shim_that_closes_after_exited() {
+    let fixture = Fixture::short();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let path = nested.join(format!("{}.sock", id.simple()));
+    let mut server = start_legacy_shim(&path, &id.simple().to_string(), "close");
+    let base = fixture.0.join("base");
+    let root = fs::metadata(&base).unwrap();
+    let args = [
+        "--bootstrap-runtime".into(),
+        base.as_os_str().to_owned(),
+        format!("{}:{}", root.dev(), root.ino()).into(),
+        "sessions-stop".into(),
+    ];
+    let result = command(&mut args.into_iter());
+    if result != Some(0) {
+        let _ = server.kill();
+    }
+    let status = server.wait().unwrap();
+    assert_eq!(
+        result,
+        Some(0),
+        "a shim that closed after Exited was not retired"
+    );
+    // It exits on its own; the verified pidfd may still deliver SIGTERM first.
+    assert!(
+        status.success()
+            || std::os::unix::process::ExitStatusExt::signal(&status) == Some(nix::libc::SIGTERM),
+        "{status}"
+    );
+    assert!(!path.exists(), "retired session socket was left behind");
+}
+
+#[test]
+fn session_cleanup_refuses_a_hello_that_names_another_peer_process() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let fixture = Fixture::short();
+    let nested = fixture.state().join("sessions");
+    fs::create_dir(&nested).unwrap();
+    fs::set_permissions(&nested, fs::Permissions::from_mode(0o700)).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let path = nested.join(format!("{}.sock", id.simple()));
+    let mut server = start_legacy_shim(&path, &id.simple().to_string(), "other");
+    let base = fixture.0.join("base");
+    let root = fs::metadata(&base).unwrap();
+    let args = [
+        "--bootstrap-runtime".into(),
+        base.as_os_str().to_owned(),
+        format!("{}:{}", root.dev(), root.ino()).into(),
+        "sessions-stop".into(),
+    ];
+    let result = command(&mut args.into_iter());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let stopped_by_helper = loop {
+        if server.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let still_bound = kernel_holds(&path) == Some(true);
+    if !stopped_by_helper {
+        let _ = server.kill();
+    }
+    let status = server.wait().unwrap();
+    assert_eq!(result, Some(77), "mismatched peer pid was not refused");
+    assert!(!stopped_by_helper, "cleanup signalled an unverified peer");
+    assert!(still_bound, "unverified session endpoint was changed");
+    assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+    assert!(path.exists(), "unverified session socket was removed");
 }
 
 /// A held lifetime description remains an explicit nonblocking refusal.
@@ -465,4 +747,20 @@ fn foreign_inode_twin_inner() {
     let result = sessions(&directory);
     eprintln!("target inode={target} sessions={result:?}");
     assert_eq!(result, Ok(()), "dead endpoint reported live (73)");
+}
+
+/// #263: only root's `infraternal up` base may be 0711; every other base,
+/// and every directory under one, stays exactly 0700 (J145 P3-4).
+#[test]
+fn only_roots_up_base_may_be_traversable() {
+    let up = Path::new("/var/lib/infraternal");
+    assert!(traversable_base(up, 0, 0o40711));
+    assert!(traversable_base(up, 0, 0o700));
+    assert!(!traversable_base(up, 1000, 0o711), "not for another user");
+    assert!(
+        !traversable_base(Path::new("/home/a/.local/share/infraternal"), 0, 0o711),
+        "not for another path, even as root"
+    );
+    assert!(!traversable_base(up, 0, 0o755), "never readable by others");
+    assert!(!traversable_base(up, 0, 0o701));
 }
