@@ -121,6 +121,26 @@ class Builds(unittest.TestCase):
         self.assertEqual(provided[-1], ('infraternal-plugin-mesh', 'test:dns'))
         self.assertNotIn('infraternal-plugin-remote', provided)
 
+    def test_examples_never_replace_the_lib_test(self):
+        """`cargo test --examples` builds examples in test mode; they must not land on the lib key (#285, 80225)."""
+        self.assertEqual(p.target_key({'target': {'kind': ['lib'], 'name': 'm'}}), 'lib')
+        self.assertEqual(p.target_key({'target': {'kind': ['rlib', 'cdylib'], 'name': 'm'}}), 'lib')
+        self.assertEqual(p.target_key({'target': {'kind': ['example'], 'name': 'coordinator_fixture'}}),
+                         'example:coordinator_fixture')
+        root = Path('/clone')
+        lines = '\n'.join(json.dumps({'reason': 'compiler-artifact', 'manifest_path': '/clone/crates/plugins/mesh/Cargo.toml',
+                                      'target': {'kind': [kind], 'name': name}, 'profile': {'test': True},
+                                      'executable': exe})
+                          for kind, name, exe in (('lib', 'mesh', '/w/lib'), ('example', 'coordinator_fixture', '/w/ex')))
+
+        def fake_run(command, **_kwargs):
+            """Answer every build with the same two artifacts."""
+            return subprocess.CompletedProcess(command, 0, lines if command[1] == 'test' else '', '')
+
+        with mock.patch.object(p.subprocess, 'run', side_effect=fake_run):
+            found = p.executables(root, {'mesh'})
+        self.assertEqual(found[('crates/plugins/mesh', 'lib')], '/w/lib')
+
     def test_executable_mapping(self):
         """Later builds replace only what they provide; non-test artifacts are ignored."""
         root = Path('/clone')

@@ -258,13 +258,21 @@ def builds(selected):
 
 
 def target_key(artifact):
-    """Name a compiled test target the way this script does: 'lib', 'bin:x' or 'test:y'."""
+    """Name a compiled test target the way this script does: 'lib', 'bin:x', 'test:y' or 'example:z'.
+
+    Examples get their own key: `cargo test --examples` builds them in test
+    mode too, and mapping them to 'lib' made an example binary replace the
+    real lib test binary, so the lib's namespace tests were never listed
+    (#285, comment 80225). Only library kinds map to 'lib'.
+    """
     kinds = artifact['target']['kind']
-    if 'bin' in kinds:
-        return 'bin:' + artifact['target']['name']
-    if 'test' in kinds:
-        return 'test:' + artifact['target']['name']
-    return 'lib'
+    name = artifact['target']['name']
+    for kind in ('bin', 'test', 'example', 'bench'):
+        if kind in kinds:
+            return f'{kind}:{name}'
+    if any(kind in ('lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro') for kind in kinds):
+        return 'lib'
+    return 'other:' + name
 
 
 def executables(root, selected):
