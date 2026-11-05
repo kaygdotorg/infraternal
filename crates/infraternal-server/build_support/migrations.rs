@@ -31,7 +31,7 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
     files.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
     let mut generated = String::from(
         "/// Static executable SQL; checksums identify the immutable original migration sources.\n\
-         /// Generated UTC version literals retain their canonical numeric identity [D347].\n\
+         // Timestamp versions read as YYYYMMDDHHMMSS (D347); digit separators would hide that.\n\
          #[allow(clippy::unreadable_literal)]\n\
          pub(super) static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate::Migrator {\n\
          migrations: std::borrow::Cow::Borrowed(&[\n",
