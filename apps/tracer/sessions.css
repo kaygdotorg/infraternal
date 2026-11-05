@@ -93,6 +93,10 @@
 .cl-sx-dismiss { display: inline-grid; place-items: center; width: calc(var(--pill-h, 2.375rem) - 0.625rem); height: calc(var(--pill-h, 2.375rem) - 0.625rem); border: 0; border-radius: 999px; background: none; color: var(--fg-2); cursor: pointer; }
 .cl-sx-dismiss:active { transform: scale(var(--ui-press-scale)); }
 .cl-sx-strip .ui-mark { margin-left: -2px; }
+/* The shared busy mark is a 28% ring in the secondary text colour: on the strip's light-theme fill it nearly vanished. Here it is the
+   only sign that the window is still trying, so its ring is the full text colour at about half strength and a touch thicker,
+   which stays above 3:1 against the strip in both themes. */
+.cl-sx-strip .ui-mark[data-mark="busy"] { color: var(--fg); border-width: 2px; border-color: color-mix(in oklab, currentColor 50%, transparent); border-top-color: currentColor; }
 .ui-window-body:has(.cl-sx-strip) .cl-preview { padding-bottom: 4.5rem; }
 /* On a phone the pill sits at the start edge, clear of the corner the mock badge keeps. */
 @media (pointer: coarse) { .cl-sx-strip { left: 0.75rem; right: auto; margin-inline: 0; } }
