@@ -273,71 +273,14 @@ fn installed(unit: &OsStr) -> io::Error {
     )
 }
 
-/// Decode systemctl's quoted property-list serialization, not systemd unit-file command syntax.
-/// Unknown serialization cannot prove executable identity and is left unresolved.
-fn property_words(value: &str) -> Option<Vec<String>> {
-    let mut words = Vec::new();
-    let mut word = Vec::new();
-    let mut quoted = false;
-    let mut bytes = value.bytes();
-    while let Some(byte) = bytes.next() {
-        match byte {
-            b'"' => quoted = !quoted,
-            b'\\' => word.push(match bytes.next()? {
-                b'x' => u8::from_str_radix(
-                    std::str::from_utf8(&[bytes.next()?, bytes.next()?]).ok()?,
-                    16,
-                )
-                .ok()?,
-                b'a' => 7,
-                b'b' => 8,
-                b'f' => 12,
-                b'v' => 11,
-                b'n' => b'\n',
-                b'r' => b'\r',
-                b't' => b'\t',
-                b'\\' => b'\\',
-                b'"' => b'"',
-                _ => return None,
-            }),
-            byte if byte.is_ascii_whitespace() && !quoted => {
-                if !word.is_empty() {
-                    words.push(String::from_utf8(std::mem::take(&mut word)).ok()?);
-                }
-            }
-            byte => word.push(byte),
-        }
-    }
-    if quoted {
-        return None;
-    }
-    if !word.is_empty() {
-        words.push(String::from_utf8(word).ok()?);
-    }
-    Some(words)
-}
-
-/// Prefer the unit's PATH, then `ExecSearchPath`, then the manager build's default search path.
-fn search_path(output: &str, default: &str) -> Option<String> {
-    let environment = output
+/// Search bare executables on systemd's configured or compiled-in path.
+/// Environment PATH belongs to the child process and cannot change this lookup.
+fn search_path<'a>(output: &'a str, default: &'a str) -> &'a str {
+    output
         .lines()
-        .find_map(|line| line.strip_prefix("Environment="))
-        .unwrap_or_default();
-    if let Some(path) = property_words(environment)?
-        .iter()
-        .rev()
-        .find_map(|word| word.strip_prefix("PATH=").map(str::to_owned))
-    {
-        return Some(path);
-    }
-    Some(
-        output
-            .lines()
-            .find_map(|line| line.strip_prefix("ExecSearchPath="))
-            .filter(|value| !value.is_empty())
-            .unwrap_or(default)
-            .to_owned(),
-    )
+        .find_map(|line| line.strip_prefix("ExecSearchPath="))
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default)
 }
 
 /// Resolve a manager path or bare executable name using only absolute search directories.
@@ -409,8 +352,8 @@ fn resolved_service(
             };
         }
     }
-    // Absolute executables do not depend on PATH or unrelated environment serialization.
-    let search = search_path(output, default).unwrap_or_default();
+    // Bare names use the manager's exec search path, independently of the child environment.
+    let search = search_path(output, default);
     let commands = output
         .lines()
         .filter_map(|line| {
@@ -435,7 +378,7 @@ fn resolved_service(
         if image_name(Path::new(program)) || wrapper_mentions_install(program, arguments) {
             return Err(installed(unit));
         }
-        let Some(path) = executable_path(program, &search) else {
+        let Some(path) = executable_path(program, search) else {
             if relevant {
                 return Err(unresolved(unit));
             }
@@ -547,7 +490,6 @@ pub(super) fn installed_services(
                 OsStr::new("--property=ExecStartPre"),
                 OsStr::new("--property=ExecStartPost"),
                 OsStr::new("--property=ExecCondition"),
-                OsStr::new("--property=Environment"),
                 OsStr::new("--property=ExecSearchPath"),
                 OsStr::new("--"),
                 &unit,
@@ -742,23 +684,46 @@ mod tests {
         );
     }
 
-    /// A unit's explicit PATH must take precedence over the manager's unrelated program of the same name.
+    /// The manager's executable search is independent of the environment passed to the child.
     #[test]
-    fn unit_environment_path_exposes_an_inode_alias() {
+    fn manager_search_path_ignores_unit_environment() {
         let fixture = crate::restart_binary::fixture::Directory::new();
         let directory = fixture.0.join("private binaries");
         fs::create_dir(&directory).unwrap();
         std::os::unix::fs::symlink(std::env::current_exe().unwrap(), directory.join("python3"))
             .unwrap();
-        let value = format!(
+        let hidden = "LoadState=loaded\nEnvironment=PATH=/nonexistent\nExecStart={ path=python3 ; argv[]=python3 server ; }\n";
+        assert!(
+            super::resolved_service(
+                OsStr::new("custom.service"),
+                hidden,
+                directory.to_str().unwrap(),
+                &mut KnownImages::new().unwrap(),
+            )
+            .is_err(),
+            "child PATH hid the manager's inode alias"
+        );
+        let unrelated = format!(
             "LoadState=loaded\nEnvironment=\"PATH={}\"\nExecStart={{ path=python3 ; argv[]=python3 server ; }}\n",
             directory.display()
         );
         assert!(
-            resolved_service(OsStr::new("custom.service"), &value).is_err(),
-            "unit PATH was ignored"
+            super::resolved_service(
+                OsStr::new("custom.service"),
+                &unrelated,
+                "/usr/bin:/bin",
+                &mut KnownImages::new().unwrap(),
+            )
+            .is_ok(),
+            "child PATH invented an installed executable"
         );
+        let explicit = format!(
+            "LoadState=loaded\nEnvironment=PATH=/nonexistent\nExecSearchPath={}\nExecStart={{ path=python3 ; argv[]=python3 server ; }}\n",
+            directory.display()
+        );
+        assert!(resolved_service(OsStr::new("custom.service"), &explicit).is_err());
     }
+
     /// Stopped wrappers and secondary startup commands cannot conceal our executable.
     #[test]
     fn indirect_service_commands_are_refused() {
