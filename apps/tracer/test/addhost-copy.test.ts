@@ -1,6 +1,7 @@
 /** Pins add-host copy to actual authentication and installation evidence (#87). */
 import { expect, test } from "bun:test";
 import { authLabel, failureDiagnostics, guideFor } from "../src/canvas/addhost/model";
+import type { FailureDetail } from "../src/provisioning-client";
 
 test("a user key does not imply that it was saved", () => {
   expect(authLabel({ method: "user-key" })).toBe("your key");
@@ -29,6 +30,102 @@ test("leftovers offer one way forward in plain words, with a neutral tone", () =
 test("a setup already running says to wait", () => {
   const guide = guideFor("host", { kind: "setup_running", message: "x", log_tail: [] });
   expect(guide).toMatchObject({ title: "Setup is already running on this host", fix: "retry", tone: "info" });
+});
+
+test("a held setup lock identifies its machine, attempt, process and age", () => {
+  const failure = {
+    kind: "setup_running",
+    message: "Setup is already running on this host.",
+    log_tail: [],
+    setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: true },
+  } as unknown as FailureDetail;
+  const guide = guideFor("fixture host", failure);
+  expect(guide.happened).toBe("Process 254 on build-node has held the setup lock since 2026-11-02T04:05:06Z.");
+  // Only an upgrade journal offers a replacement; a running setup is waited for (#305).
+  expect(guide.next).toBe("Wait for it to finish, then try again. A setup that stopped releases the lock within 3 minutes.");
+  const named = guideFor("fixture host", { ...failure, setup_lock: { ...failure.setup_lock!, attempt: "1a2b3c4d" } } as FailureDetail);
+  expect(named.happened).toBe("Setup attempt 1a2b3c4d (process 254) on build-node has held the setup lock since 2026-11-02T04:05:06Z.");
+});
+
+test("a failed upgrade offers an explicit stuck-install replacement", () => {
+  const failure = {
+    kind: "stale_previous_attempt",
+    message: "An earlier install stopped while replacing this infraternal agent.",
+    log_tail: [],
+    setup_lock: { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false },
+  } as unknown as FailureDetail;
+  const guide = guideFor("fixture host", failure);
+  expect(guide).toMatchObject({
+    title: "A stuck infraternal agent was found on fixture host",
+    happened: "The failed install on build-node was last held by process 254 since 2026-11-02T04:05:06Z.",
+    fix: "replace-stuck-install",
+    tone: "info",
+  });
+  expect(guide.next).toBe("");
+});
+
+test("a stuck-install replacement says its open terminal sessions carry over (#305, D337)", () => {
+  const lock = { machine: "build-node", pid: 254, since: "2026-11-02T04:05:06Z", active: false };
+  const guide = (sessions: number) => guideFor("fixture host", {
+    kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock: { ...lock, sessions },
+  } as unknown as FailureDetail);
+  expect(guide(0).next).toBe("No terminal sessions are open on it.");
+  expect(guide(1).next).toBe("1 open terminal session will carry over.");
+  expect(guide(3).next).toBe("3 open terminal sessions will carry over.");
+});
+
+test("a machine enrolled with another server asks to join as a new host (D335)", () => {
+  const failure = {
+    kind: "stale_previous_attempt",
+    message: "x",
+    log_tail: [],
+    setup_lock: { machine: "code", pid: 254, since: "2026-11-02T04:05:06Z", active: false, sessions: 2, enrolled_with: "monitor01.example" },
+  } as unknown as FailureDetail;
+  expect(guideFor("code", failure)).toMatchObject({
+    title: "code is enrolled with another server",
+    happened: "It belongs to monitor01.example. Join it to this server as a new host with a new key. Its old infraternal agent is stopped, and deleted with its key once the machine has joined.",
+    next: "2 open terminal sessions will end.",
+    fix: "replace-stuck-install",
+  });
+  const unnamed = { ...failure, setup_lock: { ...failure.setup_lock!, enrolled_with: "" } } as FailureDetail;
+  expect(guideFor("code", unnamed).happened).toBe("Join it to this server as a new host with a new key. Its old infraternal agent is stopped, and deleted with its key once the machine has joined.");
+});
+
+test("another server's install running with open terminals is refused by name, with no action (D337)", () => {
+  const lock = { machine: "code", pid: 254, since: "2026-11-02T04:05:06Z", active: false, sessions: 2, live: true, in_use: true };
+  const guide = (setup_lock: object) => guideFor("code", { kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock } as unknown as FailureDetail);
+  expect(guide({ ...lock, enrolled_with: "monitor01.example" })).toMatchObject({
+    title: "code is in use by another server",
+    happened: "Its infraternal agent is running with 2 open terminals and may still be connected to monitor01.example.",
+    next: "Prove you own monitor01.example to take it over. That isn't available yet.",
+    fix: "none",
+  });
+  expect(guide({ ...lock, sessions: 1, enrolled_with: "" }).happened)
+    .toBe("Its infraternal agent is running with 1 open terminal and may still be connected to the server that enrolled it.");
+});
+
+test("a live install says joining here disconnects it from its server, and an unread one claims no server (#305)", () => {
+  const lock = { machine: "code", pid: 254, since: "2026-11-02T04:05:06Z", active: false, sessions: 0 };
+  const guide = (setup_lock: object) => guideFor("code", { kind: "stale_previous_attempt", message: "x", log_tail: [], setup_lock } as unknown as FailureDetail);
+  expect(guide({ ...lock, enrolled_with: "monitor01.example", live: true }).happened)
+    .toStartWith("Its infraternal agent is running and may be connected to monitor01.example now. Joining it here disconnects it from that server; remove it there afterwards.");
+  expect(guide({ ...lock, enrolled_with: "" }).title).toBe("code has an install this server did not enroll");
+  expect(guide({ ...lock, enrolled_with: "", live: true }).happened).toContain("connected to the server that enrolled it now");
+});
+
+test("an install an earlier add-host set aside is offered back, not installed beside (#305)", () => {
+  const failure = {
+    kind: "stale_previous_attempt",
+    message: "x",
+    log_tail: [],
+    setup_lock: { machine: "code", since: "unknown", active: false, set_aside: true },
+  } as unknown as FailureDetail;
+  expect(guideFor("code", failure)).toMatchObject({
+    title: "code's infraternal agent was set aside",
+    happened: "An earlier add-host set it aside and could not put it back. Nothing was deleted.",
+    next: "Put it back as it was found, then add the host again to continue.",
+    fix: "replace-stuck-install",
+  });
 });
 
 test("install advice follows the step that stopped, and never tells people to restore access", () => {
