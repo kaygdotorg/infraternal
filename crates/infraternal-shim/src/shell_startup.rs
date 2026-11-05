@@ -71,8 +71,9 @@ fn environment(command: &Command, name: &str, inherited: bool) -> Option<OsStrin
 /// must be owned by root or `uid`, and none may be writable by its group or by
 /// others. Group write is refused outright, because group membership and
 /// named ACL entries cannot be proven exclusive (J215 P3-2). Only a sticky
-/// world-writable ancestor such as /tmp is accepted, since others cannot
-/// rename entries in it. The result is the canonical path, so a later symlink
+/// writable ancestor such as /tmp (mode 1777) is accepted, since nobody but
+/// an entry's owner can rename or remove entries in it; the directory itself
+/// must never be writable by group or others. The result is the canonical path, so a later symlink
 /// swap cannot redirect it. macOS never forwards `ZDOTDIR` (`session_shell`).
 #[cfg(target_os = "linux")]
 pub(crate) fn zsh_directory(user: &nix::unistd::User) -> Option<std::path::PathBuf> {
@@ -97,8 +98,9 @@ fn trusted_directory(path: &Path, user: &nix::unistd::User) -> Option<std::path:
         let sticky = mode & 0o1000 != 0;
         if !metadata.is_dir()
             || (owner != 0 && owner != user.uid.as_raw())
-            || (mode & 0o002 != 0 && (leaf || !sticky))
-            || mode & 0o020 != 0
+            // Group or other write is refused, except on a sticky ancestor,
+            // where nobody but an entry's owner can rename or remove it.
+            || (mode & 0o022 != 0 && (leaf || !sticky))
         {
             return None;
         }
