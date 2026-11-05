@@ -1041,6 +1041,35 @@ mod tests {
             .unwrap();
     }
 
+    /// Enroll a new node for `host` the way an owner would. It has not negotiated rotation support.
+    async fn enroll_without_rotation_support(
+        service: &MeshService,
+        pool: &sqlx::SqlitePool,
+        host: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)",
+        )
+        .bind(uuid::Uuid::parse_str(host).unwrap().as_bytes().as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        service
+            .execute(
+                "owner",
+                "mesh.node.enroll",
+                &serde_json::to_vec(&serde_json::json!({
+                    "name":"unsupported-during-rotation",
+                    "public_key":PublicKey([4; 32]),
+                    "host_id":host
+                }))
+                .unwrap(),
+                1_800_000_000,
+            )
+            .await
+            .unwrap();
+    }
+
     /// An unsupported node enrolled during preparation must keep the candidate unpublished.
     #[tokio::test]
     async fn overlap_is_refused_if_an_unsupported_node_joins_during_preparation() {
@@ -1077,32 +1106,7 @@ mod tests {
             .unwrap();
 
         let unsupported_host = "00000000-0000-4000-8000-000000000002";
-        sqlx::query(
-            "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)",
-        )
-        .bind(
-            uuid::Uuid::parse_str(unsupported_host)
-                .unwrap()
-                .as_bytes()
-                .as_slice(),
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        service
-            .execute(
-                "owner",
-                "mesh.node.enroll",
-                &serde_json::to_vec(&serde_json::json!({
-                    "name":"unsupported-during-rotation",
-                    "public_key":PublicKey([4; 32]),
-                    "host_id":unsupported_host
-                }))
-                .unwrap(),
-                1_800_000_000,
-            )
-            .await
-            .unwrap();
+        enroll_without_rotation_support(&service, &pool, unsupported_host).await;
 
         let supported: bool = sqlx::query_scalar(
             "SELECT key_rotation_supported FROM mesh_nodes WHERE dataplane_host=?",
