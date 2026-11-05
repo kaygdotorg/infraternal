@@ -1617,45 +1617,6 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e37c2134d46523ed5b3c4bbdb578225e2e7379d03aea65baef41584725b1991"
-dependencies = [
- "aead 0.5.2",
- "base64 0.22.1",
- "bitfield-struct",
- "blake2 0.10.6",
- "bytes",
- "chacha20poly1305",
- "constant_time_eq",
- "duplicate",
- "either",
- "eyre",
- "futures",
- "hmac 0.12.1",
- "ip_network",
- "ip_network_table",
- "ipnetwork",
- "libc",
- "nix 0.31.3",
- "parking_lot",
- "rand 0.9.5",
- "rand_chacha 0.9.0",
- "rand_core 0.6.4",
- "ring",
- "socket2",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "tracing",
- "typed-builder",
- "windows-sys 0.61.2",
- "x25519-dalek",
- "zerocopy",
-]
-
-[[package]]
-name = "gotatun"
-version = "0.10.2"
 source = "git+https://github.com/kaygdotorg/gotatun?rev=84b7bb28e385d57dfb80493e78202898fad24d1e#84b7bb28e385d57dfb80493e78202898fad24d1e"
 dependencies = [
  "aead 0.5.2",
@@ -2284,8 +2245,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
- "gotatun 0.10.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "gotatun 0.10.2 (git+https://github.com/kaygdotorg/gotatun?rev=84b7bb28e385d57dfb80493e78202898fad24d1e)",
+ "gotatun",
  "hickory-proto",
  "infraternal-linux-tun",
  "infraternal-mesh",

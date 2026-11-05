@@ -198,8 +198,6 @@ enum Command {
     Stats,
 }
 
-/// Run one fixture mesh node: read its config, then apply each JSON command
-/// from stdin (snapshots, relay observations, evidence and stats requests).
 async fn node() {
     let mut input = lines();
     let config: NodeConfig = serde_json::from_str(&input.recv().await.unwrap()).unwrap();
@@ -303,7 +301,6 @@ async fn node() {
                             peer: peer.1.clone(),
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
-                            // The relay fixture carries no mesh SSH access (#221).
                             access_ssh: None,
                         },
                     );
