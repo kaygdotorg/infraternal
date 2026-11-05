@@ -109,6 +109,15 @@ debug = "line-tables-only"
 [profile.test.package.gotatun]
 debug = "line-tables-only"
 
+# GotaTun's generic code is instantiated in the mesh plugin, whose debug info follows its own
+# profile, so the mesh plugin keeps line tables only as well. Without it the x86 debug test
+# binary stays above the bound (543,574,712 bytes against 536,870,912).
+[profile.dev.package.infraternal-plugin-mesh]
+debug = "line-tables-only"
+
+[profile.test.package.infraternal-plugin-mesh]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 lto = true
