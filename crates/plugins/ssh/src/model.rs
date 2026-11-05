@@ -1,10 +1,11 @@
-//! Validates bootstrap admission before SSH or privilege changes, and defines content-free progress [139][141].
+//! Validates bootstrap admission and defines bounded progress plus API-only setup diagnostics [139][141].
 
 use crate::auth_order::Authentication;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::net::Ipv6Addr;
+use std::sync::Arc;
 
 pub(crate) const SOCKET_PROBE_UNAVAILABLE: &str = "Finishing earlier setup needs the matching infraternal binary on this host. Its files were kept.";
 pub(crate) const SOCKET_PROBE_UNCERTAIN: &str = "Setup could not determine whether the infraternal agent is still running. Its files were kept; check host permissions and retry.";
@@ -238,6 +239,16 @@ pub struct MissingBinary {
     pub path: String,
 }
 
+/// Retain only a bounded child diagnostic; normal serialization and debug output stay opaque.
+#[derive(Clone)]
+struct CapturedSetupStderr(Arc<crate::transport::Secret>);
+
+impl std::fmt::Debug for CapturedSetupStderr {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
 /// Human diagnostics are trusted static text; fingerprints are independently validated.
 #[derive(Clone, Debug)]
 pub struct Failure {
@@ -257,7 +268,7 @@ pub struct Failure {
     pub host_key_changed: bool,
     /// Only exhausted D183 authentication permits the UI to request another method.
     pub choose_method: bool,
-    /// The two rarely-set uuids, boxed so every `Result<_, Failure>` stays small (`clippy::result_large_err`).
+    /// Rare failure details stay boxed so every `Result<_, Failure>` remains small.
     ids: Option<Box<FailureIds>>,
 }
 
@@ -268,6 +279,8 @@ struct FailureIds {
     host_key_challenge: Option<uuid::Uuid>,
     /// The owner's existing host that makes this an already-added failure.
     existing_host_id: Option<uuid::Uuid>,
+    /// Bounded SSH setup output is released only by the API-key event adapter.
+    captured_setup_stderr: Option<CapturedSetupStderr>,
     /// Validated lease owner details for the setup-running and stuck-upgrade messages.
     setup_lock: Option<SetupLock>,
 }
@@ -374,6 +387,23 @@ impl Failure {
             ids: None,
         }
     }
+    /// Attach bounded output from a failed trusted setup command for API-action diagnostics.
+    ///
+    /// This data is intentionally omitted from `Debug` and normal serialization. The server
+    /// may add it to a key-authorized setup event only.
+    #[must_use]
+    pub fn with_captured_setup_stderr(mut self, stderr: &[u8]) -> Self {
+        let stderr = &stderr[..stderr.len().min(8 * 1024)];
+        if !stderr.is_empty() {
+            self.ids
+                .get_or_insert_with(Box::default)
+                .captured_setup_stderr = Some(CapturedSetupStderr(Arc::new(
+                crate::transport::Secret::new(stderr.to_vec()),
+            )));
+        }
+        self
+    }
+
     /// Attach validated lease coordinates without growing the common failure payload.
     #[must_use]
     pub(crate) fn with_setup_lock(
@@ -409,6 +439,15 @@ impl Failure {
             lock.set_aside = true;
         }
         self
+    }
+
+    /// Read retained setup output only from the server's key-authorized event adapter.
+    #[must_use]
+    pub fn captured_setup_stderr(&self) -> Option<&[u8]> {
+        self.ids
+            .as_deref()
+            .and_then(|details| details.captured_setup_stderr.as_ref())
+            .map(|captured| captured.0.expose())
     }
 
     /// Name the setup attempt that holds the lock; the host's own name says only where it is.
@@ -553,6 +592,7 @@ impl Failure {
         }
         Cow::Owned(text)
     }
+
     /// Return the public challenge only while this error represents a host-key refusal.
     #[must_use]
     pub fn host_key_challenge(&self) -> Option<uuid::Uuid> {
@@ -779,6 +819,22 @@ mod failure_serialization_tests {
         assert_eq!(duplicate["host_id"], id.to_string());
         assert_eq!(duplicate["already_added"].as_bool(), Some(true));
         assert!(duplicate.get("host_key_challenge").is_none());
+    }
+
+    #[test]
+    fn captured_setup_stderr_is_secret_debug_data_and_stays_out_of_normal_serialization() {
+        let marker = "private-remote-setup-detail";
+        let failure = Failure::install("The remote setup command failed.")
+            .with_captured_setup_stderr(marker.as_bytes());
+
+        assert_eq!(failure.captured_setup_stderr(), Some(marker.as_bytes()));
+        assert!(!format!("{failure:?}").contains(marker));
+        assert!(!serde_json::to_string(&failure).unwrap().contains(marker));
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("captured_stderr")
+        );
     }
 
     /// The exact JSON of both uuid-bearing shapes, and a size bound so `Result<_, Failure>` stays below the lint limit.

@@ -1,5 +1,7 @@
 //! Replace legacy recovery metadata from a signed-in device without receiving wrapping material.
-use super::{Auth, Error, FRESH, Result, Wrap, hash, put_wrap, recovery_hash, require_session_tx};
+use super::{
+    Auth, Error, Result, TapAction, Wrap, action_tap, hash, put_wrap, recovery_hash, require_tap_tx,
+};
 
 impl Auth {
     /// Install browser-generated recovery ciphertext and its independent verifier [23,28,#45].
@@ -34,10 +36,16 @@ impl Auth {
         // This snapshot locates the account only; commit authority is rechecked below.
         // Pin the account used for local envelope AAD. A shared cookie switching
         // accounts while words are displayed must not retarget this ciphertext.
-        let permitted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>? AND fresh>? AND fresh<=?)")
-            .bind(hash(token)).bind(user).bind(now).bind(now-FRESH).bind(now)
-            .fetch_one(&self.pool).await?;
-        if !permitted {
+        // The tap must have been made for this rotation (D336); the transaction below spends it.
+        if !action_tap::tap_ready(
+            &self.pool,
+            &hash(token),
+            user,
+            &TapAction::RotateRecovery,
+            now,
+        )
+        .await?
+        {
             return Err(Error::Denied);
         }
         let verifier_hash = recovery_hash(verifier).await?;
@@ -47,7 +55,7 @@ impl Auth {
             .execute(&mut *tx)
             .await?;
         let now = clock()?;
-        require_session_tx(&mut tx, &hash(token), user, now).await?;
+        require_tap_tx(&mut tx, &hash(token), user, &TapAction::RotateRecovery, now).await?;
         // Both metadata versions and the envelope change together. This predicate
         // also makes competing signed-in replacements one-shot for a legacy account.
         if sqlx::query("UPDATE users SET recovery_hash=?,recovery_version=2,recovery_wrap_version=2 WHERE id=? AND (recovery_version=1 OR recovery_wrap_version=1)")

@@ -906,3 +906,164 @@ async fn pending_administrator_cannot_replace_the_last_retained_wrapped_copy() {
 
 #[path = "ca_unlock_audit_tests.rs"]
 mod audit_tests;
+
+/// D333 and D336: CA setup and CA role changes are per-action taps. Each ceremony is bound to
+/// its one operation (setup, or one exact role change), is spent by its first finish, and
+/// expires 300 s after it starts. `action_tap_tests` checks the other per-action categories.
+#[tokio::test]
+async fn ca_setup_ceremonies_are_bound_to_their_action_once_and_expire() {
+    let mut f = bootstrap_fixture().await;
+    let key = || Zeroizing::new([7; 32]);
+    let session = f.auth.session.clone();
+
+    // A setup tap cannot change a role, and the attempt spends it.
+    let setup = f
+        .administration
+        .bootstrap_start(&session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&setup, ORIGIN, true);
+    let id = str_field(&setup, "ceremony");
+    assert!(
+        f.administration
+            .membership_finish(&session, id, proof.clone(), NOW)
+            .await
+            .is_err(),
+        "a CA setup tap changed a role"
+    );
+    assert!(
+        f.administration
+            .bootstrap_finish(&session, id, proof, key(), NOW)
+            .await
+            .is_err(),
+        "a ceremony refused for another action stays spent"
+    );
+
+    // Expiry: a setup tap is refused once its 300 s are over.
+    let late = f
+        .administration
+        .bootstrap_start(&session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&late, ORIGIN, true);
+    assert!(
+        f.administration
+            .bootstrap_finish(
+                &session,
+                str_field(&late, "ceremony"),
+                proof,
+                key(),
+                NOW + 300
+            )
+            .await
+            .is_err(),
+        "an expired CA setup tap set up the CA"
+    );
+
+    // The setup tap sets up the CA once; its replay is refused.
+    let setup = f
+        .administration
+        .bootstrap_start(&session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&setup, ORIGIN, true);
+    let id = str_field(&setup, "ceremony");
+    f.administration
+        .bootstrap_finish(&session, id, proof.clone(), key(), NOW)
+        .await
+        .unwrap();
+    assert!(
+        f.administration
+            .bootstrap_finish(&session, id, proof, key(), NOW)
+            .await
+            .is_err(),
+        "a CA setup tap was replayed"
+    );
+}
+
+/// The role-change half of the check above: a role tap is bound to its one change.
+#[tokio::test]
+async fn ca_role_ceremonies_are_bound_to_their_change_once_and_expire() {
+    let mut f = bootstrap_fixture().await;
+    let key = || Zeroizing::new([7; 32]);
+    let session = f.auth.session.clone();
+    let setup = f
+        .administration
+        .bootstrap_start(&session, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&setup, ORIGIN, true);
+    f.administration
+        .bootstrap_finish(&session, str_field(&setup, "ceremony"), proof, key(), NOW)
+        .await
+        .unwrap();
+
+    // A role tap cannot set up or rewrap the CA, and the attempt spends it.
+    let (recipient, _, _) = registered_recipient(&f.auth.auth).await;
+    let grant = crate::ca_administration::RoleChange {
+        user_id: recipient.clone(),
+        administrator: true,
+    };
+    let role = f
+        .administration
+        .membership_start(&session, grant.clone(), NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&role, ORIGIN, true);
+    let id = str_field(&role, "ceremony");
+    assert!(
+        f.administration
+            .bootstrap_finish(&session, id, proof.clone(), key(), NOW)
+            .await
+            .is_err(),
+        "a role tap ran CA setup"
+    );
+    assert!(
+        f.administration
+            .membership_finish(&session, id, proof, NOW)
+            .await
+            .is_err(),
+        "a ceremony refused for another action stays spent"
+    );
+
+    // Expiry: a role tap is refused once its 300 s are over.
+    let late = f
+        .administration
+        .membership_start(&session, grant.clone(), NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&late, ORIGIN, true);
+    assert!(
+        f.administration
+            .membership_finish(&session, str_field(&late, "ceremony"), proof, NOW + 300)
+            .await
+            .is_err(),
+        "an expired role tap changed a role"
+    );
+
+    // The role tap applies its one change once; its replay is refused.
+    let role = f
+        .administration
+        .membership_start(&session, grant, NOW)
+        .await
+        .unwrap();
+    let proof = f.auth.software.login(&role, ORIGIN, true);
+    let id = str_field(&role, "ceremony");
+    f.administration
+        .membership_finish(&session, id, proof.clone(), NOW)
+        .await
+        .unwrap();
+    let active: bool = sqlx::query_scalar("SELECT active FROM ca_administrators WHERE user_id=?")
+        .bind(&recipient)
+        .fetch_one(&f.auth.auth.pool)
+        .await
+        .unwrap();
+    assert!(active, "the role tap granted exactly the change it showed");
+    assert!(
+        f.administration
+            .membership_finish(&session, id, proof, NOW)
+            .await
+            .is_err(),
+        "a role tap was replayed"
+    );
+}

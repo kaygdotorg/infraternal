@@ -12,10 +12,17 @@
    machine is catching up with a resize, or when an app refuses a size. */
 .aw-stage { position: absolute; inset: 0; display: grid; outline: none; cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .aw-stage:focus, .aw-stage:focus-visible { outline: none; }
-.aw-surface { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: contain; transition: opacity 200ms var(--ease-out, ease-out); }
-/* Nothing true to show: the picture goes. Only a memory of one (paused, reconnecting): it stays, dimmed. */
+.aw-surface { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: contain; transition: opacity 200ms var(--ease-out, ease-out), filter 200ms var(--ease-out, ease-out); }
+/* Nothing true to show: the picture goes. Only a memory of one (paused, reconnecting): it stays, dimmed. The dim is
+   told by the pill's dot and mark; the picture only has to read as "not live" and stay a picture.
+   Fading alone is not enough: a fade pulls the picture toward the card, which is the window's own colour. On the dark
+   card that reads as a quiet picture; on the light card a dark app turns into a flat grey slab that looks dead, not
+   paused. So the picture is also drained of colour, and keeps more of its own contrast in light mode. */
 .aw-stage[data-picture="none"] .aw-surface { opacity: 0; }
-.aw-stage[data-picture="dim"] .aw-surface { opacity: 0.45; }
+.aw-stage[data-picture="dim"] .aw-surface { opacity: var(--aw-dim-opacity, 0.5); filter: saturate(var(--aw-dim-saturate, 0.45)); }
+/* Keyed on the product's own scheme (the chosen theme, written on the root), not on the operating system's: a light theme on a
+   dark system still has the light card behind the picture. */
+:root[data-scheme="light"] .aw-stage { --aw-dim-opacity: 0.72; --aw-dim-saturate: 0.35; }
 
 /* The state card is the "No access" card's twin: same position, same type, same rhythm (message, 24 px, action). */
 .aw-card { z-index: 1; transition: opacity 200ms var(--ease-out, ease-out); }
@@ -25,16 +32,18 @@
 .aw-mark .ui-spinner { width: 18px; height: 18px; }
 .aw-action { margin-top: 18px; }
 
-/* The strip and the badge sit over the picture; neither blocks the machine's own pixels outside its small box. */
-.aw > .cl-sx-strip { z-index: 2; }
-/* "Controlled from infraternal": the badge mirrors the machine's own menu-bar indicator. Quiet, and a button only to let go. */
-.aw-control { z-index: 2; animation: aw-in 180ms var(--ease-out, ease-out); transition: opacity 160ms ease, transform 140ms var(--ease-out, ease-out), background-color 140ms ease; }
-.aw-control[data-leaving] { opacity: 0; pointer-events: none; }
-.aw-control[data-kind="controlled"] { color: var(--fg); }
-.aw-control[data-kind="paused"], .aw-control[data-kind="view"] { color: var(--fg-2); cursor: default; }
-.aw-control:disabled { opacity: 1; }
+/* The pill's small mark (window-body.ts `paintPillMark`): control, view only or paused, 14 px like the connection dot beside
+   it. Nothing about control or state is drawn over the picture. Its colour follows the quiet scale: the one thing the
+   person is doing (controlling) is the full text colour, everything else is secondary. */
+.aw-pillmark { position: relative; z-index: 1; display: inline-grid; flex: none; place-items: center; width: 0.875rem; height: 0.875rem; color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
+.aw-pillmark[data-kind="controlled"] { color: var(--fg); }
+.aw-pillmark svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 @keyframes aw-in { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .aw-control { animation: none; } .aw-surface, .aw-card { transition: opacity 120ms linear; } }
+@media (prefers-reduced-motion: reduce) { .aw-pillmark { animation: none; } .aw-surface, .aw-card { transition: opacity 120ms linear; } }
+/* An app's or a screen's pill reads title first (the text that tells two windows of one app apart), and the quiet part,
+   the machine and the app, gives way before the title does: it shrinks far faster than the title, so the title is cut only
+   once nothing else is left to cut. */
+.ui-window:is([data-kind="app"], [data-kind="screen"]) .ui-window-session { flex-shrink: 100000; }
 
 /* ---- the picker (the session manager's card, with a field) ------------------------------------------------------ */
 .aw-head { padding-bottom: 8px; }

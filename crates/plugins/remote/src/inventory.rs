@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch};
 /// Public read action; the source repeats the terminal admission account filter.
 pub const LIST: ActionDef = ActionDef {
     id: "remote.host.list",
-    summary: "List admitted hosts",
+    summary: "List admitted hosts.",
     instructions: &[
         "Sign in to the existing server.",
         "Read admitted hosts, including offline machines.",
@@ -25,6 +25,8 @@ pub const LIST: ActionDef = ActionDef {
     permission: Permission::One("authenticated"),
     dry_run: DryRun::Unsupported,
     opens: None,
+    api_scope: Some("hosts:read"),
+    fresh_passkey: false,
 };
 /// Inventory remains readable when transport is unavailable; disabling this feature cancels all its socket work.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
