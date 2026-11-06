@@ -889,8 +889,12 @@ async fn revoke_once(
 }
 
 /// Whether another person still has access to host account `uid` here, as
-/// far as this host can tell from its durable, root-only state: a login lock
-/// for that account, without a revocation marker or a pending revocation.
+/// far as this host can tell from its durable, root-only state: a recorded
+/// scope of a login of theirs on that account (written only when an open
+/// succeeded, and removed when they are revoked), without a revocation
+/// marker or a pending revocation. Lock files do not count: any open
+/// attempt creates one and none is ever removed, so they would keep D353
+/// off forever (J295 P3).
 /// The agent never sees other people's grants, and the in-memory grants are
 /// empty after a restart, so this errs towards "shared", which stops nothing
 /// (D353). Root's account (D231's fallback) is always shared: its user
@@ -900,7 +904,7 @@ fn others_share(root: &Path, person: uuid::Uuid, uid: u32) -> io::Result<bool> {
         return Ok(true);
     }
     let registry = root.join("infraternal-login-locks");
-    let suffix = format!("-{uid}.lock");
+    let suffix = format!("-{uid}.scope");
     for entry in std::fs::read_dir(&registry)? {
         let name = entry?.file_name();
         let Some(other) = name
@@ -1999,16 +2003,55 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// D353: while another person still has the account, its background
-    /// services stay, and the revocation says so.
+    /// A person whose open never succeeded (only a lock file, no recorded
+    /// scope) does not count as still sharing the account: the revocation of
+    /// its last real holder still ends its user services (J295 P3).
     #[tokio::test]
-    async fn revoking_one_of_several_holders_leaves_user_services_and_warns() {
+    async fn an_open_attempt_alone_does_not_count_as_sharing_the_account() {
         let (root, person, uid, unit) = system_login_fixture().await;
         drop(
             acquire(&root, &name(uuid::Uuid::new_v4(), uid))
                 .await
                 .unwrap(),
         );
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
+        let calls = host.calls();
+        assert_eq!(
+            revoked.as_ref().ok(),
+            Some(&Revoked::default()),
+            "{revoked:?}; {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("systemctl stop user@{uid}.service")),
+            "{calls:?}"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// D353: while another person still has the account, its background
+    /// services stay, and the revocation says so.
+    #[tokio::test]
+    async fn revoking_one_of_several_holders_leaves_user_services_and_warns() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        // The other person really opened a login on this account.
+        let other = name(uuid::Uuid::new_v4(), uid);
+        drop(acquire(&root, &other).await.unwrap());
+        record_scope(
+            &root,
+            &other,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-9.scope"),
+        )
+        .unwrap();
         let host = ScriptedHost::new(&root, &unit, uid, true, true);
         record_scope(
             &root,
