@@ -923,6 +923,7 @@
 .ui-conn[data-state="reconnecting"] .ui-conn-g-reconnecting,
 .ui-conn[data-state="resumed"] .ui-conn-g-resumed,
 .ui-conn[data-state="approximate"] .ui-conn-g-approximate,
+.ui-conn[data-state="stale"] .ui-conn-g-stale,
 .ui-conn[data-state="offline"] .ui-conn-g-offline { opacity: 1; transform: none; }
 
 .ui-conn-g-connected .core { fill: var(--ok); }
@@ -951,6 +952,12 @@
 .ui-conn .ui-conn-g-approximate .frame { stroke: var(--fg-2); stroke-width: 1.4; }
 .ui-conn-g-approximate .fill { fill: var(--fg-2); opacity: 0.55; }
 .ui-conn .ui-conn-g-approximate .foot { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; }
+
+/* Stale: the approximate screen's frame and foot, two lines of text, and an amber badge on a ground-coloured ring so it reads at 14 px. */
+.ui-conn .ui-conn-g-stale .frame, .ui-conn .ui-conn-g-stale .foot { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; }
+.ui-conn .ui-conn-g-stale .line { stroke: var(--fg-3); stroke-width: 1.4; stroke-linecap: round; }
+.ui-conn-g-stale .ground { fill: var(--ui-conn-ground, var(--bg)); }
+.ui-conn-g-stale .badge { fill: var(--warn); }
 
 .ui-conn .ui-conn-g-offline .ring { stroke: var(--fg-2); stroke-width: 1.4; opacity: 0.8; }
 .ui-conn .ui-conn-g-offline .slash { stroke: var(--fg-2); stroke-width: 1.4; stroke-linecap: round; opacity: 0.8; }
