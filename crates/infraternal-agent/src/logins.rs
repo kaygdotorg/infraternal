@@ -328,6 +328,40 @@ pub async fn ensure(
     Ok(adopted)
 }
 
+/// The manager a root revocation stops logins under. A launch's `Detached`
+/// may stand for a probe that only timed out, for example right after an
+/// agent restart, so it is probed again. `System` and "no system manager" are
+/// used as answered (the latter keeps the fail-closed path for logins from
+/// before D354). A probe that times out again fails this attempt: the person
+/// stays denied and the revocation owner retries (J295 P1, #355).
+async fn root_revoke_manager(
+    manager: Manager,
+    probe: impl std::future::Future<Output = Option<Manager>>,
+) -> io::Result<Manager> {
+    if matches!(manager, Manager::System) {
+        return Ok(manager);
+    }
+    probe.await.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the host's service manager did not answer; revocation will retry",
+        )
+    })
+}
+
+/// The manager probe for a root revocation.
+#[cfg(not(test))]
+fn revoke_probe(_given: Manager) -> impl std::future::Future<Output = Option<Manager>> {
+    Manager::probe()
+}
+
+/// The manager probe for a root revocation, in tests: the scripted host's
+/// answer, or the manager the test passed when it scripts none.
+#[cfg(test)]
+fn revoke_probe(given: Manager) -> impl std::future::Future<Output = Option<Manager>> {
+    std::future::ready(stand_in().map_or(Some(given), |host| host.probe))
+}
+
 /// The manager a root agent opens another account's login under: always the
 /// system manager.
 ///
@@ -705,6 +739,10 @@ async fn revoke_once(
             .await
             .map(|()| Revoked::default());
     }
+    // The refusal is durable above; now find how this host's logins run. A
+    // probe that times out never means "no system manager": that would take
+    // the path that cannot see a login's session scope (J295 P1, #355).
+    let manager = root_revoke_manager(manager, revoke_probe(manager)).await?;
     let prefix = format!("infraternal-login-{}-", person.simple());
     let mut failure = None;
     let mut revoked = Revoked::default();
@@ -991,6 +1029,8 @@ struct HostStandIn {
     cgroups: PathBuf,
     /// Replaces [`CGROUP_EMPTY_HANG`].
     empty_hang: Duration,
+    /// The manager probe's answer; `None` is a probe that timed out.
+    probe: Option<Manager>,
 }
 
 #[cfg(test)]
@@ -1581,6 +1621,7 @@ mod tests {
                     loginctl,
                     cgroups,
                     empty_hang: Duration::from_secs(2),
+                    probe: Some(Manager::System),
                 });
             });
             Self {
@@ -1774,6 +1815,39 @@ mod tests {
         assert!(
             !calls.contains("user@"),
             "a shared account's services were stopped: {calls:?}"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J295 `restartslow`: after an agent restart the manager probe stalls,
+    /// the launch passes `Detached`, the worker is gone and its unit
+    /// collected, but detached children live in the recorded scope. A root
+    /// revocation must not take the no-system-manager path on that timeout:
+    /// it fails (retryable) and keeps the record, so the next attempt kills
+    /// the scope.
+    #[tokio::test]
+    async fn a_stalled_probe_never_makes_a_root_revocation_skip_the_scope() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, false, true);
+        HOST_UNITS.with(|units| units.borrow_mut().as_mut().unwrap().probe = None);
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::Detached, person, false).await;
+        assert_eq!(
+            revoked.as_ref().map_err(io::Error::kind).err(),
+            Some(io::ErrorKind::TimedOut),
+            "{revoked:?}; calls: {:?}",
+            host.calls()
+        );
+        assert!(
+            scope_record(&root, &unit).exists(),
+            "the record of a live scope was dropped"
         );
         drop(host);
         std::fs::remove_dir_all(root).unwrap();
