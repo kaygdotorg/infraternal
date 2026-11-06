@@ -41,7 +41,7 @@ def parse_ping_reply(line: str) -> tuple[float, int, float] | None:
 def summarize_latency(
     expected_sequences: Sequence[int], replies: Sequence[tuple[int, float]]
 ) -> dict[str, float | int | str | None]:
-    """Summarize one probe window, making its p99 infinite whenever a probe was lost."""
+    """Summarize one probe window with losses as infinite RTTs for nearest-rank p99."""
     expected = tuple(expected_sequences)
     if len(set(expected)) != len(expected) or any(sequence < 1 for sequence in expected):
         raise ValueError("expected probe sequences must be unique and positive")
