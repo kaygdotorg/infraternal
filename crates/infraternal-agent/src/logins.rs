@@ -1205,12 +1205,21 @@ fn relative_group(identity: &crate::login_auth::Identity) -> io::Result<String> 
         .ok_or_else(|| io::Error::other("host login cgroup absent"))
 }
 
-/// Kills every process in cgroup `group` at once. A missing cgroup has no
-/// processes left to kill.
+/// Whether `error` from a cgroup control file means the cgroup is gone or
+/// being removed. The kernel answers `ENODEV` for the files of a cgroup that
+/// is being torn down while its directory is still visible, and it removes a
+/// cgroup only once no process is left in it (#355).
+fn cgroup_gone(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(nix::libc::ENODEV)
+}
+
+/// Kills every process in cgroup `group` at once. A missing or dying cgroup
+/// has no processes left to kill.
 fn kill_cgroup(group: &str) -> io::Result<()> {
     let directory = cgroup_root().join(group.trim_start_matches('/'));
     match std::fs::write(directory.join("cgroup.kill"), b"1") {
         Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(nix::libc::ENODEV) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound && !directory.exists() => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Err(io::Error::other(
             "host login cgroup lacks immediate cleanup",
@@ -1228,7 +1237,7 @@ async fn cgroup_emptied(group: &str) -> io::Result<()> {
     tokio::time::timeout(empty_hang(), async {
         loop {
             match std::fs::read_to_string(&events) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if cgroup_gone(&error) => return Ok(()),
                 Err(error) => return Err(error),
                 Ok(text) if text.lines().any(|line| line == "populated 0") => return Ok(()),
                 Ok(_) => {}
@@ -1825,6 +1834,21 @@ mod tests {
         );
         drop(host);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A cgroup that the kernel is removing (control files answer `ENODEV`)
+    /// counts as emptied: the kernel removes only cgroups with no process
+    /// left. Treating it as an error failed the first attempt of every real
+    /// last-holder revocation, as systemd tore down `user@<uid>.service` (#355).
+    #[test]
+    fn a_dying_cgroup_counts_as_gone() {
+        assert!(cgroup_gone(&io::Error::from_raw_os_error(
+            nix::libc::ENODEV
+        )));
+        assert!(cgroup_gone(&io::Error::from(io::ErrorKind::NotFound)));
+        assert!(!cgroup_gone(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
     }
 
     /// D353: revoking an account's last holder also ends the account's own
