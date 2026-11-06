@@ -643,6 +643,8 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    //! Uninstall decides ownership before it stops anything, removes only
+    //! what setup created, and retires every shell before it reports done.
     use super::*;
     /// A complete rootless bootstrap layout under a private fixture home.
     fn installation(name: &str, locked: bool) -> Option<(PathBuf, Context, u32)> {
