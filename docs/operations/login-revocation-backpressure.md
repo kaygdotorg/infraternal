@@ -84,14 +84,23 @@ Cancellation releases a queued claim promptly. A delivery attempt lasts at most
 reconnect. There is no retry budget that silently discards it.
 
 On the next inventory read after all individually unrevoked leaf certificates
-have expired, an undelivered removal is shown as `retired-unreachable`. The host
-cannot authenticate to receive cleanup or renew its certificate. This status is
-derived from the persisted certificate ledger, including after a server restart;
-it does not forge a durable receipt or clear the pending denial. The host remains
-listed with this terminal delivery outcome for the person and operators.
+have expired, an undelivered removal is shown as `retired-unreachable`. Its
+expired certificate cannot authenticate an ordinary connection or renew. The
+status comes from the persisted certificate ledger, including after a server
+restart; it never forges a durable receipt or clears the pending denial.
 
-For `retired-unreachable`, remote cleanup cannot finish. An operator with local
-access can remove the original installation using its ownership-checked uninstall
-command. Returning the machine to service requires a fresh authorized enrollment
-and an explicit authorized restoration of any refused person. No host-wide latch
-or marker exists to recover, and unrelated hosts and people retain their access.
+Certificate recovery (#285) can still recover an expired, individually unrevoked
+identity within its 90-day recovery window when the host proves possession of
+its predecessor key and the server has a trusted clock and unlocked signing
+material. The new certificate lasts seven days, but a pending-removed host gets
+only cleanup admission, capped at 300 seconds per admitted connection. It never
+becomes available for ordinary work, and ordinary renewal stays refused. With a
+valid recovered certificate, an unconfirmed removal is deliverable and appears
+as pending again; the durable receipt alone completes it.
+
+If recovery is unavailable or its eligibility window has closed, an operator
+with local access can remove the original installation using its ownership-checked
+uninstall command. Returning the machine to ordinary service still requires a
+fresh authorized enrollment and an explicit authorized restoration of any refused
+person. No host-wide latch or marker exists to recover, and unrelated hosts and
+people retain their access.
