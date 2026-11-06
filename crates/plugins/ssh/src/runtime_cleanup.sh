@@ -50,6 +50,12 @@ validate_retired_stage() {
      "current:$base/bin/live"|"launcher:$base/bin/current") continue;;
      *) exit 71;;
     esac;;
+   transfer-chunk|transfer-progress|transfer-progress-next)
+    [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a:%h' "$entry")" = 600:1 ] || exit 71
+    limit=24
+    [ "${entry##*/}" != transfer-chunk ] || limit=65536
+    [ "$(stat -c '%s' "$entry")" -le "$limit" ] || exit 71
+    continue;;
    payload)
     [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || exit 71
     case "$(stat -c '%a' "$entry")" in 600|700) continue;; *) exit 71;; esac;;

@@ -64,6 +64,20 @@ pub enum PayloadInput<'a> {
     File { path: &'a Path, size: u64 },
 }
 
+impl PayloadInput<'_> {
+    /// Wire length is fixed before upload and excludes all subsequent private input.
+    pub(crate) fn size(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::File { size, .. } => *size,
+        }
+    }
+}
+
+/// Bootstrap transfers fail after 30 seconds without acknowledged byte movement.
+/// Connection, verification and completion exchanges each receive their own bound.
+pub const TRANSFER_IDLE: Duration = Duration::from_secs(30);
+
 /// Public transfer choices never convey authority or diagnostic text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferChoice {
@@ -103,6 +117,9 @@ impl TransferChoice {
 
 /// What is written to a command's stdin.
 pub enum Input<'a> {
+    /// Public payload whose reader emits exact `PROGRESS <bytes>` receipts.
+    /// Local SSH buffering never renews the inactivity deadline.
+    Transfer(PayloadInput<'a>),
     /// A fixed public receipt selects a source before any invitation byte is sent.
     Negotiated {
         /// The uncompressed payload.

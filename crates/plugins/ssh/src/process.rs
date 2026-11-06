@@ -9,15 +9,9 @@ use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
-use std::{
-    os::unix::process::CommandExt,
-    pin::Pin,
-    process::Stdio,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{os::unix::process::CommandExt, process::Stdio, time::Duration};
 use tokio::{
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     process::Command,
     signal::unix::{Signal as ExitEvents, SignalKind, signal},
     sync::watch,
@@ -35,10 +29,10 @@ pub struct Output {
 }
 
 /// Run one trusted helper with bounded pipes and a progress deadline.
-/// Successful stdin writes renew `timeout`; idle input, receipt waits and exit
-/// waits expire after that interval. Output cannot renew the bound, so banners
-/// and diagnostics cannot keep a blocked upload alive. Commands without input
-/// retain their total deadline. Production SSH uses a 30-second interval.
+/// Only validated remote byte acknowledgements renew `timeout`. The last byte
+/// starts a separate completion/exit interval. Local pipe writes, banners and
+/// diagnostics cannot renew it. Unacknowledged commands keep a total deadline.
+/// Production SSH uses a 30-second interval.
 /// # Errors
 /// Reports helper startup, bounded I/O or active timeout without printing process data.
 pub async fn execute(
@@ -120,13 +114,21 @@ async fn execute_inner(
         .stderr
         .take()
         .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
-    // One latest timestamp per child, never a queue proportional to payload size.
-    // Waiting for terminal proof is not transfer progress and keeps its total bound.
+    // Only the remote receipt parser can renew this bounded latest timestamp.
     let (progress, mut moved) = watch::channel(Instant::now());
-    let transferring = !matches!(input, Input::Empty | Input::Signal(_));
-    let stdin = ProgressWriter {
-        inner: stdin,
-        progress: transferring.then(|| progress.clone()),
+    let total = match &input {
+        Input::Transfer(payload) => Some(payload.size()),
+        _ => None,
+    };
+    let sizes = match &input {
+        Input::Negotiated {
+            raw, gzip, zstd, ..
+        } => (
+            raw.size(),
+            gzip.map(|bytes| bytes.len() as u64),
+            zstd.map(|bytes| bytes.len() as u64),
+        ),
+        _ => (0, None, None),
     };
     let (negotiated, payload_ack, declared) = transfer_options(&input);
     let (choice, selected) = tokio::sync::oneshot::channel();
@@ -145,10 +147,16 @@ async fn execute_inner(
                                 ready,
                                 payload_ack,
                                 declared,
+                                sizes,
+                                &progress,
                             )
                             .await
+                        } else if let Some(total) = total {
+                            progress_output(stdout, stdout_limit, total, &progress).await
                         } else {
-                            bounded(stdout, stdout_limit).await
+                            bounded(stdout, stdout_limit)
+                                .await
+                                .map(|bytes| (bytes, true))
                         }
                     },
                     bounded(stderr, 8192)
@@ -167,7 +175,7 @@ async fn execute_inner(
             let status = child.wait().await;
             let status =
                 status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
-            let (stdout, stderr) = read?;
+            let ((stdout, acknowledged), stderr) = read?;
             // A negotiated setup may refuse a stage without consuming invitation
             // stdin. Keep only a complete canonical refusal for the caller's typed
             // decoder; successful or malformed receipts still require input delivery.
@@ -176,6 +184,11 @@ async fn execute_inner(
                     .is_err_and(|failure| failure.exit_status.is_some());
             if status.success() && !refused {
                 write?;
+                if !acknowledged {
+                    return Err(Failure::install(
+                        "The SSH upload ended before its byte acknowledgement.",
+                    ));
+                }
             }
             Ok(Output {
                 stdout,
@@ -208,48 +221,6 @@ async fn execute_inner(
         group.retire();
         let _ = child.wait().await;
         Err(Failure::install("The SSH operation timed out."))
-    }
-}
-
-/// Observe bytes accepted by the SSH input pipe, including partial writes.
-/// File reads, empty writes and remote chatter cannot renew an upload deadline.
-struct ProgressWriter<W> {
-    /// The owned input pipe; cancellation still drops it with the child scope.
-    inner: W,
-    /// Latest successful write, absent for commands waiting on non-byte signals.
-    progress: Option<watch::Sender<Instant>>,
-}
-
-impl<W: AsyncWrite + Unpin> AsyncWrite for ProgressWriter<W> {
-    /// Renew only after the underlying writer accepts a nonempty byte range.
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        bytes: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let result = Pin::new(&mut self.inner).poll_write(context, bytes);
-        if matches!(&result, Poll::Ready(Ok(count)) if *count != 0)
-            && let Some(progress) = &self.progress
-        {
-            progress.send_replace(Instant::now());
-        }
-        result
-    }
-
-    /// Flushing buffered data does not prove that another byte was accepted.
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(context)
-    }
-
-    /// Close input without manufacturing a final progress event.
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(context)
     }
 }
 
@@ -340,6 +311,7 @@ async fn write_input(
     received: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), Failure> {
     match input {
+        Input::Transfer(payload) => write_payload(&mut stdin, payload).await?,
         Input::Negotiated {
             raw,
             gzip,
@@ -426,7 +398,9 @@ async fn negotiated_output(
     ready: tokio::sync::oneshot::Sender<()>,
     payload_ack: bool,
     declared: Option<TransferChoice>,
-) -> Result<Vec<u8>, Failure> {
+    sizes: (u64, Option<u64>, Option<u64>),
+    progress: &watch::Sender<Instant>,
+) -> Result<(Vec<u8>, bool), Failure> {
     let mut prefix = Vec::new();
     let mut lines = 0;
     for _ in 0..limit.min(64) {
@@ -458,7 +432,21 @@ async fn negotiated_output(
         ));
     }
     let _ = choice.send(selected);
+    let mut acknowledged = true;
     if payload_ack && selected.is_some() {
+        let total = match selected {
+            Some(TransferChoice::Raw) => sizes.0,
+            Some(TransferChoice::Gzip) => sizes
+                .1
+                .ok_or_else(|| Failure::install("The payload encoding is unavailable."))?,
+            Some(TransferChoice::Zstd) => sizes
+                .2
+                .ok_or_else(|| Failure::install("The payload encoding is unavailable."))?,
+            _ => 0,
+        };
+        let (mut refusal, complete) = consume_progress(&mut stdout, total, progress).await?;
+        acknowledged = complete;
+        prefix.append(&mut refusal);
         // Read only the public readiness receipt; leave final setup output in
         // its existing canonical shape for the shared refusal decoder.
         let mut line = Vec::new();
@@ -475,7 +463,7 @@ async fn negotiated_output(
             }
             line.push(byte[0]);
             if byte[0] == b'\n' {
-                if line == b"PAYLOAD ready\n" {
+                if line == b"PAYLOAD ready\n" && acknowledged {
                     line.clear();
                     let _ = ready.send(());
                     break;
@@ -487,7 +475,61 @@ async fn negotiated_output(
     }
     let mut rest = bounded(stdout, limit.saturating_sub(prefix.len())).await?;
     prefix.append(&mut rest);
-    Ok(prefix)
+    Ok((prefix, acknowledged))
+}
+
+/// Consume a single bounded line without reading into later private protocol data.
+async fn progress_line(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, Failure> {
+    let mut line = Vec::new();
+    while line.len() < 32 {
+        let mut byte = [0];
+        if reader
+            .read(&mut byte)
+            .await
+            .map_err(|_| Failure::install("The SSH progress pipe closed."))?
+            == 0
+        {
+            return Ok(line);
+        }
+        line.push(byte[0]);
+        if byte[0] == b'\n' {
+            return Ok(line);
+        }
+    }
+    Err(Failure::install(
+        "The SSH progress receipt exceeded its safety limit.",
+    ))
+}
+
+/// Strip strictly increasing remote counters; retain a refusal for the existing decoder.
+async fn consume_progress(
+    reader: &mut (impl AsyncRead + Unpin),
+    total: u64,
+    progress: &watch::Sender<Instant>,
+) -> Result<(Vec<u8>, bool), Failure> {
+    let mut counter = crate::transfer_progress::Progress::new(total);
+    while !counter.complete() {
+        let line = progress_line(reader).await?;
+        if !line.starts_with(b"PROGRESS ") {
+            return Ok((line, false));
+        }
+        counter.accept(&line)?;
+        progress.send_replace(Instant::now());
+    }
+    Ok((Vec::new(), true))
+}
+
+/// Public acknowledgements are not command output and do not consume its fixed cap.
+async fn progress_output(
+    mut stdout: tokio::process::ChildStdout,
+    limit: usize,
+    total: u64,
+    progress: &watch::Sender<Instant>,
+) -> Result<(Vec<u8>, bool), Failure> {
+    let (mut prefix, complete) = consume_progress(&mut stdout, total, progress).await?;
+    let mut rest = bounded(stdout, limit.saturating_sub(prefix.len())).await?;
+    prefix.append(&mut rest);
+    Ok((prefix, complete))
 }
 
 /// Public file framing is shared by both fixed and negotiated input paths.

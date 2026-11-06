@@ -1,7 +1,8 @@
 //! Streams bounded release downloads through the existing Hyper/OpenSSL engines [224,225].
 use http_body_util::BodyExt;
+use infraternal_plugin_ssh::transport::TRANSFER_IDLE;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
-use std::{path::Path, pin::Pin, time::Duration};
+use std::{path::Path, pin::Pin};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 pub(crate) enum DownloadError {
@@ -22,16 +23,32 @@ impl DownloadError {
         }
     }
 }
+/// Download one bounded release object without observing acquisition externally.
 pub(crate) async fn download(
     address: &str,
     destination: &Path,
     max: u64,
 ) -> Result<(), DownloadError> {
-    tokio::time::timeout(Duration::from_secs(90), fetch(address, destination, max))
-        .await
-        .map_err(|_| DownloadError::Network)?
+    download_progress(address, destination, max, None).await
 }
-async fn fetch(address: &str, destination: &Path, max: u64) -> Result<(), DownloadError> {
+
+/// Report only bytes saved from nonempty body data; headers and keepalives do not renew acquisition.
+pub(crate) async fn download_progress(
+    address: &str,
+    destination: &Path,
+    max: u64,
+    progress: Option<&tokio::sync::watch::Sender<u64>>,
+) -> Result<(), DownloadError> {
+    fetch(address, destination, max, progress).await
+}
+
+/// Give each connection/handshake exchange a short bound, independent of body length.
+async fn fetch(
+    address: &str,
+    destination: &Path,
+    max: u64,
+    progress: Option<&tokio::sync::watch::Sender<u64>>,
+) -> Result<(), DownloadError> {
     let url = url::Url::parse(address).map_err(|_| DownloadError::Network)?;
     let name = url.host_str().ok_or(DownloadError::Network)?;
     let port = url.port_or_known_default().ok_or(DownloadError::Network)?;
@@ -44,12 +61,13 @@ async fn fetch(address: &str, destination: &Path, max: u64) -> Result<(), Downlo
     {
         return Err(DownloadError::Network);
     }
-    let socket = tokio::net::TcpStream::connect((name, port))
+    let socket = tokio::time::timeout(TRANSFER_IDLE, tokio::net::TcpStream::connect((name, port)))
         .await
+        .map_err(|_| DownloadError::Network)?
         .map_err(|_| DownloadError::Network)?;
     #[cfg(test)]
     if url.scheme() == "http" && name == "127.0.0.1" {
-        return receive(socket, &url, destination, max).await;
+        return receive(socket, &url, destination, max, progress).await;
     }
     if url.scheme() != "https" || url.username() != "" || url.password().is_some() {
         return Err(DownloadError::Network);
@@ -79,22 +97,27 @@ async fn fetch(address: &str, destination: &Path, max: u64) -> Result<(), Downlo
         .map_err(|_| DownloadError::Network)?;
     let mut stream =
         tokio_openssl::SslStream::new(ssl, socket).map_err(|_| DownloadError::Network)?;
-    Pin::new(&mut stream)
-        .connect()
+    tokio::time::timeout(TRANSFER_IDLE, Pin::new(&mut stream).connect())
         .await
+        .map_err(|_| DownloadError::Network)?
         .map_err(|_| DownloadError::Network)?;
-    receive(stream, &url, destination, max).await
+    receive(stream, &url, destination, max, progress).await
 }
+/// Bound body inactivity by actual data and give storage completion its own interval.
 async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     url: &url::Url,
     destination: &Path,
     max: u64,
+    progress: Option<&tokio::sync::watch::Sender<u64>>,
 ) -> Result<(), DownloadError> {
-    let (mut sender, connection) =
-        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-            .await
-            .map_err(|_| DownloadError::Network)?;
+    let (mut sender, connection) = tokio::time::timeout(
+        TRANSFER_IDLE,
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)),
+    )
+    .await
+    .map_err(|_| DownloadError::Network)?
+    .map_err(|_| DownloadError::Network)?;
     let _connection = Connection(tokio::spawn(async move {
         let _ = connection.await;
     }));
@@ -107,9 +130,9 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         .header("user-agent", infraternal_plugin_api::RELEASE_USER_AGENT)
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|_| DownloadError::Http)?;
-    let response = sender
-        .send_request(request)
+    let response = tokio::time::timeout(TRANSFER_IDLE, sender.send_request(request))
         .await
+        .map_err(|_| DownloadError::Network)?
         .map_err(|_| DownloadError::Network)?;
     match response.status() {
         hyper::StatusCode::NOT_FOUND => return Err(DownloadError::Missing),
@@ -117,29 +140,48 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         _ => return Err(DownloadError::Http),
     }
     let mut body = response.into_body();
-    let mut file = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(destination)
-        .await
-        .map_err(|_| DownloadError::Storage)?;
+    let mut file = tokio::time::timeout(
+        TRANSFER_IDLE,
+        tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(destination),
+    )
+    .await
+    .map_err(|_| DownloadError::Storage)?
+    .map_err(|_| DownloadError::Storage)?;
     let mut received = 0u64;
-    while let Some(frame) = body.frame().await {
+    let mut until = tokio::time::Instant::now() + TRANSFER_IDLE;
+    while let Some(frame) = tokio::time::timeout_at(until, body.frame())
+        .await
+        .map_err(|_| DownloadError::Network)?
+    {
         let frame = frame.map_err(|_| DownloadError::Network)?;
         if let Ok(bytes) = frame.into_data() {
+            if bytes.is_empty() {
+                continue;
+            }
             received = received
                 .checked_add(bytes.len().try_into().map_err(|_| DownloadError::Size)?)
                 .ok_or(DownloadError::Size)?;
             if received > max {
                 return Err(DownloadError::Size);
             }
-            file.write_all(&bytes)
+            tokio::time::timeout(TRANSFER_IDLE, file.write_all(&bytes))
                 .await
+                .map_err(|_| DownloadError::Storage)?
                 .map_err(|_| DownloadError::Storage)?;
+            until = tokio::time::Instant::now() + TRANSFER_IDLE;
+            if let Some(progress) = progress {
+                progress.send_modify(|count| *count = count.saturating_add(bytes.len() as u64));
+            }
         }
     }
-    file.sync_all().await.map_err(|_| DownloadError::Storage)?;
+    tokio::time::timeout(TRANSFER_IDLE, file.sync_all())
+        .await
+        .map_err(|_| DownloadError::Storage)?
+        .map_err(|_| DownloadError::Storage)?;
     Ok(())
 }
 struct Connection(tokio::task::JoinHandle<()>);

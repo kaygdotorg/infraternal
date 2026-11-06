@@ -48,6 +48,8 @@ mod prompt;
 mod prompt_image;
 pub mod socket_connector;
 mod tasks;
+/// Authored remote consumption receipts for bootstrap payloads.
+mod transfer_progress;
 pub mod transport;
 pub mod trust;
 

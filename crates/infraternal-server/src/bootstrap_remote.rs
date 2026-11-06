@@ -1620,12 +1620,9 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    mod breakit2_live {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/bootstrap_breakit2_tests.rs"
-        ));
-    }
+    /// Exercises real SSH setup against an explicitly selected disposable host.
+    #[path = "../bootstrap_breakit2_tests.rs"]
+    mod breakit2_live;
 
     #[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
     mod mesh_acceptance {
@@ -1655,13 +1652,9 @@ mod tests {
         ));
     }
 
-    mod stuck_restore {
-        //! A failed Replace or Re-enroll puts the stuck install back as found (#305).
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/bootstrap_stuck_restore_tests.rs"
-        ));
-    }
+    /// A failed Replace or Re-enroll restores the stuck installation.
+    #[path = "../bootstrap_stuck_restore_tests.rs"]
+    mod stuck_restore;
 
     mod retirement_contention {
         //! A separate SQLite writer can outlive the connection's busy timeout.
@@ -1718,9 +1711,12 @@ mod tests {
                     if self.refuse_key_payload_upload
                         && (script.contains("zstd -dc > \"$stage/payload\"")
                             || script.contains("gzip -dc > \"$stage/payload\"")
-                            || script.contains("cat > \"$stage/payload\""))
+                            || script.contains("read_payload "))
                     {
-                        assert!(matches!(input, Input::Bytes(_) | Input::File(_)));
+                        assert!(matches!(
+                            input,
+                            Input::Bytes(_) | Input::File(_) | Input::Transfer(_)
+                        ));
                         return Err(Failure::install(
                             "The fixture refused the key-preparation payload upload.",
                         )
