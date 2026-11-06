@@ -1,9 +1,6 @@
-// SPDX-License-Identifier: AGPL-3.0-only
-// A Replace or Re-enroll that fails after the stuck install was set aside puts
-// it back as it was found (#305 P1-1, P2-1, P3-3). The set-aside and restore
-// programs run for real in sh against a private HOME, with a service manager
-// that keeps state. Only the set-aside's read-only proofs are stubbed; the
-// shell oracle (previous_attempt_shell.py) proves those.
+//! Checks that a failed Replace or Re-enroll restores the stuck installation (#305).
+//! Set-aside and restore programs run in a private HOME with a stateful service fixture.
+//! Only read-only ownership proofs are stubbed; previous_attempt_shell.py covers those.
 use super::*;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf};
 
@@ -83,7 +80,8 @@ impl Home {
     }
     /// The stuck install's user unit file.
     fn unit(&self) -> PathBuf {
-        self.root.join(".config/systemd/user/infraternal-agent.service")
+        self.root
+            .join(".config/systemd/user/infraternal-agent.service")
     }
     /// Write `text` to `path` as an owner-only (0600) file.
     fn private(path: &std::path::Path, text: &str) {
@@ -102,18 +100,14 @@ impl Home {
     /// host runs a command to the end after the client goes away (#305 P2-1).
     fn sh(&self, script: &str) -> tokio::process::Command {
         let mut command = tokio::process::Command::new("sh");
-        command
-            .arg("-c")
-            .arg(script)
-            .env("HOME", &self.root)
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    self.root.join("bin").display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            );
+        command.arg("-c").arg(script).env("HOME", &self.root).env(
+            "PATH",
+            format!(
+                "{}:{}",
+                self.root.join("bin").display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
         command
     }
     /// What `supersede_stuck_install` leaves: the whole install, its unit and
@@ -144,7 +138,11 @@ impl Home {
         );
         assert!(!self.base().join(".bootstrap-lock/found-service").exists());
         assert!(self.unit().exists());
-        assert_eq!(self.service(), (true, true), "enabled and running, as found");
+        assert_eq!(
+            self.service(),
+            (true, true),
+            "enabled and running, as found"
+        );
     }
 }
 impl Drop for Home {
@@ -153,6 +151,7 @@ impl Drop for Home {
     }
 }
 
+/// Simulates independently bounded SSH commands against the private host fixture.
 struct HostSession {
     check: Vec<u8>,
     digest: [u8; 32],
@@ -162,6 +161,8 @@ struct HostSession {
     /// Notified when the work reaches `Stop::AfterSetAside`.
     reached: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+    /// Each mock SSH command has the same independent bound as production.
+    command_timeout: Duration,
 }
 impl SshTransport for HostSession {
     fn open(
@@ -179,6 +180,7 @@ impl SshTransport for HostSession {
                 scripts: self.scripts.clone(),
                 reached: self.reached.clone(),
                 release: self.release.clone(),
+                command_timeout: self.command_timeout,
             }) as Arc<dyn SshSession>)
         })
     }
@@ -187,50 +189,60 @@ impl SshSession for HostSession {
     fn run<'a>(&'a self, script: &'a str, _: Input<'a>) -> Operation<'a, CommandOutput> {
         let script = script.to_owned();
         Box::pin(async move {
-            self.scripts.lock().unwrap().push(script.clone());
-            let stdout = if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) {
-                self.check.clone()
-            } else if let Some(call) = ["\nreplace_stuck_install ", "\nsupersede_stuck_install "]
-                .into_iter()
-                .find(|call| script.contains(call))
-            {
-                // The real set-aside program; a dropped attempt leaves it running.
-                let script = script.replacen(call, &format!("{SET_ASIDE_PROOFS}{call}"), 1);
-                let output = self.home.sh(&script).output().await.unwrap();
-                if !output.status.success() {
-                    eprintln!("set-aside stderr: {}", String::from_utf8_lossy(&output.stderr));
-                    let mut failure = Failure::install("the set-aside program failed");
-                    failure.exit_status = output.status.code().and_then(|c| u8::try_from(c).ok());
-                    return Err(failure);
-                }
-                if self.stop == Stop::InSetAside {
-                    self.reached.notify_one();
-                    std::future::pending::<()>().await;
-                }
-                Vec::new()
-            } else if script.contains("\nrestore_replaced_install ")
-                || script.contains("\nrestore_superseded_install ")
-            {
-                // The real restore program, against the private HOME.
-                let output = self.home.sh(&script).output().await.unwrap();
-                if !output.status.success() {
-                    let mut failure = Failure::install("the restore program refused");
-                    failure.exit_status = output.status.code().and_then(|c| u8::try_from(c).ok());
-                    return Err(failure);
-                }
-                output.stdout
-            } else if script.contains("prepare-join-key") {
-                if self.stop == Stop::AfterSetAside {
-                    self.reached.notify_one();
-                    self.release.notified().await;
-                }
-                format!("KEY-DIGEST {}\n", hex(&self.digest)).into_bytes()
-            } else if script.contains("agent --data \"$stage/state\" join ") {
-                return Err(Failure::install("stop after the invitation"));
-            } else {
-                Vec::new()
-            };
-            Ok(CommandOutput { stdout })
+            tokio::time::timeout(self.command_timeout, async move {
+                self.scripts.lock().unwrap().push(script.clone());
+                let stdout = if script.starts_with(infraternal_plugin_ssh::probe::CHECK_SCRIPT) {
+                    self.check.clone()
+                } else if let Some(call) =
+                    ["\nreplace_stuck_install ", "\nsupersede_stuck_install "]
+                        .into_iter()
+                        .find(|call| script.contains(call))
+                {
+                    // The real set-aside program; a dropped attempt leaves it running.
+                    let script = script.replacen(call, &format!("{SET_ASIDE_PROOFS}{call}"), 1);
+                    let output = self.home.sh(&script).output().await.unwrap();
+                    if !output.status.success() {
+                        eprintln!(
+                            "set-aside stderr: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        let mut failure = Failure::install("the set-aside program failed");
+                        failure.exit_status =
+                            output.status.code().and_then(|c| u8::try_from(c).ok());
+                        return Err(failure);
+                    }
+                    if self.stop == Stop::InSetAside {
+                        self.reached.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                    Vec::new()
+                } else if script.contains("\nrestore_replaced_install ")
+                    || script.contains("\nrestore_superseded_install ")
+                {
+                    // The real restore program, against the private HOME.
+                    let output = self.home.sh(&script).output().await.unwrap();
+                    if !output.status.success() {
+                        let mut failure = Failure::install("the restore program refused");
+                        failure.exit_status =
+                            output.status.code().and_then(|c| u8::try_from(c).ok());
+                        return Err(failure);
+                    }
+                    output.stdout
+                } else if script.contains("prepare-join-key") {
+                    if self.stop == Stop::AfterSetAside {
+                        self.reached.notify_one();
+                        self.release.notified().await;
+                    }
+                    format!("KEY-DIGEST {}\n", hex(&self.digest)).into_bytes()
+                } else if script.contains("agent --data \"$stage/state\" join ") {
+                    return Err(Failure::install("stop after the invitation"));
+                } else {
+                    Vec::new()
+                };
+                Ok(CommandOutput { stdout })
+            })
+            .await
+            .map_err(|_| Failure::install("The SSH command exceeded its time limit."))?
         })
     }
 }
@@ -281,7 +293,7 @@ impl Run {
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let binary = std::env::current_exe().unwrap();
-        let mut runner = Bootstrap::new(
+        let runner = Bootstrap::new(
             Arc::new(HostSession {
                 check,
                 digest,
@@ -290,6 +302,7 @@ impl Run {
                 scripts: scripts.clone(),
                 reached: reached.clone(),
                 release: release.clone(),
+                command_timeout: deadline.unwrap_or(Duration::from_secs(30)),
             }),
             f.backend.clone(),
             BinaryPaths {
@@ -297,16 +310,17 @@ impl Run {
                 aarch64: binary,
             },
         );
-        if let Some(deadline) = deadline {
-            runner = runner.with_attempt_deadline(deadline);
-        }
         let batch = runner
             .start_authenticated(
                 "owner".into(),
                 Secret::new(f.cookie.as_bytes().to_vec()),
                 (0..hosts)
                     .map(|index| Target {
-                        id: if index == 0 { "one".into() } else { format!("host-{index}") },
+                        id: if index == 0 {
+                            "one".into()
+                        } else {
+                            format!("host-{index}")
+                        },
                         address: TargetAddress::Manual(if index == 0 {
                             "user@fixture".into()
                         } else {
@@ -420,9 +434,9 @@ async fn a_replace_whose_join_fails_puts_the_stuck_install_back_as_found() {
     );
 }
 
-/// A Replace that passes its deadline puts the stuck install back as found (#305).
+/// A Replace that exceeds its command bound puts the stuck install back as found (#305).
 #[tokio::test]
-async fn a_replace_that_passes_its_deadline_puts_the_stuck_install_back_as_found() {
+async fn a_replace_that_exceeds_its_command_bound_puts_the_stuck_install_back_as_found() {
     let f = fixture(true).await;
     let digest = own_stuck_host(&f).await;
     let home = Arc::new(Home::new());
@@ -437,7 +451,13 @@ async fn a_replace_that_passes_its_deadline_puts_the_stuck_install_back_as_found
     );
     run.confirm(run.offer().await);
     let event = finished(run.batch()).await;
-    assert!(event.message.contains("time limit"), "{}", event.message);
+    // Command timeouts retain the named connection failure, unlike the removed
+    // whole-attempt clock. The stalled key-preparation command never returns.
+    assert_eq!(event.step, Step::Failed);
+    assert!(matches!(
+        event.failure.as_ref().unwrap().failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Connect)
+    ));
     assert!(run.ran("\nrestore_replaced_install "));
     home.assert_as_found();
 }
@@ -469,9 +489,15 @@ async fn cancel_during_the_stop(own: bool) {
     std::fs::write(home.root.join("slow-stop"), "").unwrap();
     let (check, digest) = if own {
         let digest = own_stuck_host(&f).await;
-        (home_check(&home, f.prior, &digest, "remote.example.test"), digest)
+        (
+            home_check(&home, f.prior, &digest, "remote.example.test"),
+            digest,
+        )
     } else {
-        (home_check(&home, Uuid::new_v4(), &[9; 32], "old.example"), [7; 32])
+        (
+            home_check(&home, Uuid::new_v4(), &[9; 32], "old.example"),
+            [7; 32],
+        )
     };
     let mut run = Run::start(&f, &home, check, digest, Stop::Join);
     run.confirm(run.offer().await);
@@ -534,7 +560,10 @@ async fn unanswered_confirmations_leave_the_add_host_slots_free() {
     })
     .await
     .unwrap_or_else(|_| panic!("not every host was offered: {:?}", run.batch().events(0).1));
-    assert!(!run.ran("\nsupersede_stuck_install "), "nothing is stopped before a confirmation");
+    assert!(
+        !run.ran("\nsupersede_stuck_install "),
+        "nothing is stopped before a confirmation"
+    );
 }
 
 /// A host revoked while its confirmation waits is never stopped (#305).
@@ -634,9 +663,9 @@ async fn a_reenroll_dropped_while_it_sets_the_install_aside_still_puts_it_back()
     home.assert_as_found();
 }
 
-/// The confirmation wait does not use up the attempt deadline (#305).
+/// The confirmation wait does not use up a later command bound (#305).
 #[tokio::test]
-async fn the_confirmation_wait_does_not_use_up_the_attempt_deadline() {
+async fn the_confirmation_wait_does_not_use_up_a_later_command_bound() {
     let f = fixture(true).await;
     let digest = own_stuck_host(&f).await;
     let home = Arc::new(Home::new());
@@ -644,12 +673,15 @@ async fn the_confirmation_wait_does_not_use_up_the_attempt_deadline() {
     let deadline = Duration::from_secs(10);
     let run = Run::start_with(&f, &home, check, digest, Stop::Join, Some(deadline));
     let challenge = run.offer().await;
-    // The person takes longer than the whole attempt deadline to decide.
+    // sleep: the person decides after a later command’s entire budget has elapsed.
     tokio::time::sleep(deadline + Duration::from_secs(1)).await;
     run.confirm(challenge);
     let event = finished(run.batch()).await;
     assert!(!event.message.contains("time limit"), "{}", event.message);
-    assert!(run.ran("\nreplace_stuck_install "), "the confirmed action runs");
+    assert!(
+        run.ran("\nreplace_stuck_install "),
+        "the confirmed action runs"
+    );
     home.assert_as_found();
 }
 
@@ -678,10 +710,17 @@ async fn check_offers_back_an_install_an_earlier_attempt_left_set_aside() {
             .unwrap()
     };
     assert_eq!(lock["set_aside"], true);
-    assert!(!run.ran("prepare-join-key"), "nothing is installed beside it");
+    assert!(
+        !run.ran("prepare-join-key"),
+        "nothing is installed beside it"
+    );
     run.confirm(run.offer().await);
     let event = finished(run.batch()).await;
-    assert!(event.message.contains("put back as it was found"), "{}", event.message);
+    assert!(
+        event.message.contains("put back as it was found"),
+        "{}",
+        event.message
+    );
     assert!(run.ran("\nrestore_superseded_install "));
     assert!(!run.ran("prepare-join-key"));
     home.assert_as_found();
@@ -699,7 +738,10 @@ async fn a_live_install_is_named_live_before_it_is_disconnected_from_its_server(
     let run = Run::start(&f, &home, check, [7; 32], Stop::Join);
     run.offer().await;
     let events = run.batch().events(0).1;
-    let offer = events.iter().find(|event| event.leftovers.is_some()).unwrap();
+    let offer = events
+        .iter()
+        .find(|event| event.leftovers.is_some())
+        .unwrap();
     let failure = serde_json::to_value(offer.failure.as_ref().unwrap()).unwrap();
     assert_eq!(failure["setup_lock"]["live"], true);
     let message = failure["message"].as_str().unwrap();
@@ -708,10 +750,11 @@ async fn a_live_install_is_named_live_before_it_is_disconnected_from_its_server(
             && message.contains("disconnects it from old.example"),
         "{message}"
     );
+    assert!(offer.leftovers.as_ref().unwrap().findings[1].contains("joining here disconnects it"));
     assert!(
-        offer.leftovers.as_ref().unwrap().findings[1].contains("joining here disconnects it")
+        !run.ran("\nsupersede_stuck_install "),
+        "nothing is stopped before the person confirms"
     );
-    assert!(!run.ran("\nsupersede_stuck_install "), "nothing is stopped before the person confirms");
 }
 
 /// Another server's install running with open terminals is refused by name (D337, #305).
@@ -739,7 +782,11 @@ async fn another_servers_install_running_with_open_terminals_is_refused_by_name(
         "{message}"
     );
     assert!(
-        run.batch().events(0).1.iter().all(|event| event.leftovers.is_none()),
+        run.batch()
+            .events(0)
+            .1
+            .iter()
+            .all(|event| event.leftovers.is_none()),
         "no confirmation is offered"
     );
     assert!(!run.ran("\nsupersede_stuck_install "));

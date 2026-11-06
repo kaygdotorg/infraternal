@@ -2,6 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 mod common;
+/// Remote-consumption and inactivity oracles for duplex setup.
+#[path = "install/progress.rs"]
+mod progress;
 #[path = "install/streaming.rs"]
 mod streaming;
 
@@ -89,8 +92,17 @@ impl SshSession for Local {
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let script = self.fixture_script(script, &input);
-            if matches!(&input, Input::Negotiated { .. }) {
-                let mut command = Command::new("/bin/sh");
+            if matches!(&input, Input::Negotiated { .. } | Input::Transfer(_)) {
+                // A real SSH client's process group excludes its remote lease.
+                // Keep the direct-transfer shell in a separate session too, so
+                // retiring the synthetic client cannot kill that remote lease.
+                let mut command = if matches!(&input, Input::Transfer(_)) {
+                    let mut command = Command::new("/usr/bin/setsid");
+                    command.args(["--fork", "--wait", "/bin/sh"]);
+                    command
+                } else {
+                    Command::new("/bin/sh")
+                };
                 command.args(["-c", &script]).env(
                     "PATH",
                     format!("{}:/usr/bin:/bin", self.root.join("tools").display()),
@@ -123,7 +135,7 @@ impl SshSession for Local {
             // A refusal may close stdin before consuming an upload. Inspect the
             // command status first; successful commands still require a full write.
             let written = match input {
-                Input::Negotiated { .. } => {
+                Input::Negotiated { .. } | Input::Transfer(_) => {
                     unreachable!("negotiation uses the bounded process helper")
                 }
                 Input::PayloadAndInvitation {
@@ -927,6 +939,11 @@ impl SshSession for TransferCount {
             if let Input::File(path) = input {
                 self.bytes.fetch_add(
                     usize::try_from(path.metadata().unwrap().len()).unwrap(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            } else if let Input::Transfer(PayloadInput::File { size, .. }) = &input {
+                self.bytes.fetch_add(
+                    usize::try_from(*size).unwrap(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
             }
@@ -2584,7 +2601,7 @@ def line():
 def quiet():
     return not select.select([0], [], [], 0.3)[0]
 def size(choice):
-    return int(re.search(choice.encode() + rb'\)[^\n]*?head -c (\d+)', script)[1])
+    return int(re.search(choice.encode() + rb'\)[^\n]*?read_payload (\d+)', script)[1])
 out.write(b'STEP connect\nINFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n{caps}CHECK ready {reader}\n')
 out.flush()
 script = exact(int(line()))
@@ -2627,6 +2644,7 @@ fn large_fixture_binary(f: &Fixture, id: uuid::Uuid) {
 }
 
 #[tokio::test]
+/// Declared payloads flow before receipts while byte counts remain exact.
 async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
     let f = Fixture::new();
     let id = uuid::Uuid::new_v4();
@@ -2637,7 +2655,7 @@ async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
         "CAPS zstd gzip -\n",
         "dd",
         &format!(
-            "choice = re.search(rb'\\nchoice=(\\w+)\\n', script)[1].decode()\nassert choice in ('zstd', 'gzip', 'raw'), choice\npayload = exact(size(choice))\nout.write(b'STEP upload\\nTRANSFER ' + choice.encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
+            "choice = re.search(rb'\\nchoice=(\\w+)\\n', script)[1].decode()\nassert choice in ('zstd', 'gzip', 'raw'), choice\npayload = exact(size(choice))\nout.write(b'STEP upload\\nTRANSFER ' + choice.encode() + b'\\nPROGRESS ' + str(len(payload)).encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
         ),
     );
     let (session, bridge) = scripted_staging(&f, remote).await.unwrap();
@@ -2647,6 +2665,7 @@ async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
 }
 
 #[tokio::test]
+/// A buffering setup reader receives only its script until it selects the public payload.
 async fn buffering_setup_reader_receives_no_payload_until_selection() {
     let f = Fixture::new();
     let id = uuid::Uuid::new_v4();
@@ -2657,7 +2676,7 @@ async fn buffering_setup_reader_receives_no_payload_until_selection() {
         "CAPS zstd gzip -\n",
         "head",
         &format!(
-            "assert b'\\nchoice=raw\\nif ' in script\nassert quiet(), 'payload followed the setup script'\nout.write(b'STEP upload\\nTRANSFER raw\\n'); out.flush()\npayload = exact(size('raw'))\nout.write(b'STEP start\\nSESSION {id}\\n')"
+            "assert b'\\nchoice=raw\\nif ' in script\nassert quiet(), 'payload followed the setup script'\nout.write(b'STEP upload\\nTRANSFER raw\\n'); out.flush()\npayload = exact(size('raw'))\nout.write(b'PROGRESS ' + str(len(payload)).encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
         ),
     );
     assert_eq!(scripted_staging(&f, remote).await.unwrap().0, id);

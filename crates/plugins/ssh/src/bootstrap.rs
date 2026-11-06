@@ -311,7 +311,6 @@ pub struct Bootstrap {
     payloads: Option<Arc<dyn PayloadSource>>,
     concurrency: Arc<Semaphore>,
     batches: Arc<Semaphore>,
-    deadline: Duration,
     lifecycle: Arc<Lifecycle>,
     setup: Arc<crate::setup::Status>,
     pending_setup: Arc<Mutex<HashMap<uuid::Uuid, SetupAttempt>>>,
@@ -376,10 +375,10 @@ impl Bootstrap {
         Ok(())
     }
 
+    /// Retry retained setup with fresh requester authority and independent exchanges.
     async fn resume_setup(&self, authority: Authority, host: uuid::Uuid, saved: SetupAttempt) {
         use crate::setup::{Stage, State};
         let mut enabled = self.enabled_changes();
-        let started = Instant::now();
         let work = async {
             self.setup
                 .emit(&authority.owner, host, Stage::Install, State::Running, None)?;
@@ -423,13 +422,7 @@ impl Bootstrap {
                 .await?;
             // A previous acquisition may have failed before a full image existed.
             // Reverify it before renewing any enrollment authority for this retry.
-            let (binary, _) = self
-                .resolve_payload(
-                    saved.architecture,
-                    false,
-                    Self::payload_budget(started + self.deadline),
-                )
-                .await?;
+            let (binary, _) = self.resolve_payload(saved.architecture, false).await?;
             let join = self.backend.reissue_invitation(&authority, host).await?;
             installation.restart_setup(&binary, &join).await?;
             drop(join);
@@ -449,7 +442,7 @@ impl Bootstrap {
             _ = enabled.changed() => Err(Failure::install("SSH host provisioning is off.")),
             _ = self.backend.authority_cancelled(&authority) => Err(Failure::unsupported("The setup request is no longer authorized.")),
             _ = self.backend.setup_cancelled(host) => Err(Failure::unsupported("The host setup is no longer authorized.")),
-            result = tokio::time::timeout(self.deadline, work) => result.unwrap_or_else(|_| Err(Failure::install("Host setup exceeded its time limit."))),
+            result = work => result,
         };
         if let Err(failure) = &result {
             self.cleanup_probe(&authority, host).await;
@@ -508,13 +501,12 @@ impl Bootstrap {
         ] {
             // Encode the small first image before acquiring the full image, so
             // a stalled full release cannot delay a verified prompt payload.
-            let budget = Duration::from_secs(60);
-            if let Ok((session, full)) = self.resolve_payload(architecture, true, budget).await {
+            if let Ok((session, full)) = self.resolve_payload(architecture, true).await {
                 Self::warm_payload(&session).await;
                 let full = if let Some(full) = full {
                     Some(full)
                 } else {
-                    self.resolve_payload(architecture, false, budget)
+                    self.resolve_payload(architecture, false)
                         .await
                         .ok()
                         .map(|(path, _)| path)
@@ -564,19 +556,10 @@ impl Bootstrap {
             payloads: None,
             concurrency: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_HOSTS)),
             batches: Arc::new(Semaphore::new(crate::manifest::CONCURRENT_BATCHES)),
-            deadline: Duration::from_secs(crate::manifest::ATTEMPT_SECONDS),
             lifecycle: Lifecycle::new(),
             setup: Arc::default(),
             pending_setup: Arc::default(),
         }
-    }
-
-    /// Shorten the per-attempt limit, so tests reach the deadline path quickly.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn with_attempt_deadline(mut self, deadline: Duration) -> Self {
-        self.deadline = deadline;
-        self
     }
 
     /// Resolve signed production payloads through the existing installation transaction [225].
@@ -819,6 +802,7 @@ impl Bootstrap {
         Ok(())
     }
 
+    /// Own one admitted host attempt through cancellation, rollback and publication.
     async fn attempt(
         &self,
         batch: Arc<BatchInner>,
@@ -833,7 +817,7 @@ impl Bootstrap {
         let cancelled = Failure::install("Host installation was cancelled.");
         // Hold the admission slot through rollback too: failed hosts must not
         // create another eight live SSH children while the next hosts install.
-        // Queued plaintext never waits behind the full 180-second install limit.
+        // Queued plaintext expires independently of transfer duration.
         // It belongs to this future, not HostState, and drops on timeout/cancellation.
         let queue_limit = auth_once.as_ref().map(OneUseAuth::remaining);
         let admission = if *cancel.borrow() || *socket_closed.borrow() {
@@ -864,15 +848,10 @@ impl Bootstrap {
         } else {
             let mut closed = batch.socket_closed.subscribe();
             let mut detached = false;
-            let (deadline, mut until) = watch::channel(started + self.deadline);
-            resources.deadline = Some(deadline);
-            let expiry = tokio::time::sleep_until((*until.borrow_and_update()).into());
-            tokio::pin!(expiry);
             let running = self.run(&batch, &target, attempt, started, &mut resources, auth_once);
             tokio::pin!(running);
-            // One watcher for the whole attempt: the loop turns again on every
-            // deadline change, and a watcher made per turn would drop its
-            // authorization query mid-flight each time.
+            // Keep one authorization query alive through every transfer and
+            // confirmation, independent of their own progress/exchange bounds.
             let revoked = self.backend.authority_cancelled(&batch.authority);
             tokio::pin!(revoked);
             loop {
@@ -886,11 +865,7 @@ impl Bootstrap {
                         detached = true;
                     },
                     result = &mut running => break result,
-                    Ok(()) = until.changed() => {
-                        let at = *until.borrow_and_update();
-                        expiry.as_mut().reset(at.into());
-                    },
-                    () = &mut expiry => break Err(Failure::install("Host installation exceeded its time limit.")),
+
                 }
             }
         };
@@ -1028,6 +1003,7 @@ impl Bootstrap {
         }
     }
 
+    /// Resolve transient credentials under their own short lifetime bound.
     // Transient bytes remain in this future and its lazy provider, never batch state.
     async fn resolve_attempt(
         &self,
@@ -1049,7 +1025,9 @@ impl Bootstrap {
                     )
                 })??
         } else {
-            resolving.await?
+            tokio::time::timeout(crate::transport::TRANSFER_IDLE, resolving)
+                .await
+                .map_err(|_| Failure::install("Host credential resolution timed out."))??
         };
         if let Some(material) = auth_once {
             let Credentials::Automatic(base) = resolved.credentials else {
@@ -1070,7 +1048,6 @@ impl Bootstrap {
         target: &Target,
         attempt: u32,
         started: Instant,
-        until: Instant,
         architecture: crate::probe::Architecture,
         early: bool,
     ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), Failure> {
@@ -1088,17 +1065,7 @@ impl Bootstrap {
                 None,
             );
         }
-        self.resolve_payload(architecture, early, Self::payload_budget(until))
-            .await
-    }
-
-    /// End acquisition before the enclosing attempt deadline `until` so its
-    /// named failure survives instead of becoming a generic installation timeout.
-    fn payload_budget(until: Instant) -> Duration {
-        until
-            .saturating_duration_since(Instant::now())
-            .saturating_sub(Duration::from_secs(1))
-            .min(Duration::from_secs(60))
+        self.resolve_payload(architecture, early).await
     }
 
     /// Source admission is authoritative for both images: session absence may
@@ -1107,22 +1074,41 @@ impl Bootstrap {
         &self,
         architecture: crate::probe::Architecture,
         early: bool,
-        budget: Duration,
     ) -> Result<(std::path::PathBuf, Option<std::path::PathBuf>), Failure> {
         if let Some(source) = &self.payloads {
             let step = match architecture {
                 crate::probe::Architecture::Aarch64 => InstallStep::GetArm64Binary,
                 crate::probe::Architecture::X86_64 => InstallStep::GetX86_64Binary,
             };
-            tokio::time::timeout(budget, async {
+            let mut progress = source.progress();
+            let mut count = progress.as_mut().map_or(0, |rx| *rx.borrow_and_update());
+            let acquire = async {
                 if early && let Some(session) = source.session(architecture).await? {
                     return Ok((session, None));
                 }
                 let full = source.get(architecture).await?;
                 Ok((full.clone(), Some(full)))
-            })
-            .await
-            .map_err(|_| Failure::install("the builds host did not respond in time.").at(step))?
+            };
+            tokio::pin!(acquire);
+            let expiry = tokio::time::sleep(crate::transport::TRANSFER_IDLE);
+            tokio::pin!(expiry);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut acquire => break result,
+                    () = &mut expiry => break Err(Failure::install("the builds host did not respond in time.").at(step)),
+                    changed = async {
+                        if let Some(rx) = &mut progress { rx.changed().await } else { std::future::pending().await }
+                    } => {
+                        if changed.is_err() { progress = None; continue; }
+                        let next = progress.as_mut().map_or(count, |rx| *rx.borrow_and_update());
+                        if next > count {
+                            count = next;
+                            expiry.as_mut().reset(tokio::time::Instant::now() + crate::transport::TRANSFER_IDLE);
+                        }
+                    }
+                }
+            }
         } else {
             let full = self.binaries.get(architecture).to_owned();
             let first = if early {
@@ -1162,15 +1148,7 @@ impl Bootstrap {
                 check.architecture
             };
             let (binary, _) = self
-                .payload(
-                    batch,
-                    target,
-                    attempt,
-                    started,
-                    started + self.deadline,
-                    architecture,
-                    false,
-                )
+                .payload(batch, target, attempt, started, architecture, false)
                 .await?;
             Installation::prepare_recovery(session, target, &binary).await
         })
@@ -1187,7 +1165,7 @@ impl Bootstrap {
         resources: &'a mut AttemptResources,
         auth_once: Option<OneUseAuth>,
     ) -> Operation<'a, ()> {
-        // One setup state machine is shared with the deadline/cancellation driver [243].
+        // One setup state machine is shared with the cancellation driver [243].
         // The allocation ends with this host attempt and is never on a session path.
         Box::pin(async move {
             emit(
@@ -1200,6 +1178,8 @@ impl Bootstrap {
                 None,
             );
             let resolved = self.resolve_attempt(batch, target, auth_once).await?;
+            // Each transport exchange keeps its own short bound; automatic
+            // authentication may perform several exchanges before this check.
             let session = self
                 .transport
                 .open(resolved.destination, resolved.credentials, resolved.mesh)
@@ -1466,15 +1446,7 @@ impl Bootstrap {
             let mut staged_payload = None;
             let key_binding = if let Some(origin) = server_origin.as_deref() {
                 let (session_binary, full_binary) = self
-                    .payload(
-                        batch,
-                        target,
-                        attempt,
-                        started,
-                        resources.until(started + self.deadline),
-                        check.architecture,
-                        false,
-                    )
+                    .payload(batch, target, attempt, started, check.architecture, false)
                     .await?;
                 let binary = full_binary
                     .clone()
@@ -1552,16 +1524,8 @@ impl Bootstrap {
             let (session_binary, mut full_binary) = match staged_payload {
                 Some(payload) => payload,
                 None => {
-                    self.payload(
-                        batch,
-                        target,
-                        attempt,
-                        started,
-                        resources.until(started + self.deadline),
-                        check.architecture,
-                        early,
-                    )
-                    .await?
+                    self.payload(batch, target, attempt, started, check.architecture, early)
+                        .await?
                 }
             };
             if resources.installation.is_none() {
@@ -1580,7 +1544,6 @@ impl Bootstrap {
                 started,
                 None,
             );
-            let until = resources.until(started + self.deadline);
             let setup = async {
                 if early {
                     let encoding = checked
@@ -1641,7 +1604,7 @@ impl Bootstrap {
                                 let (full, _) = self.resolve_payload(
                                     check.architecture,
                                     false,
-                                    Self::payload_budget(until),
+
                                 ).await?;
                                 full_binary = Some(full.clone());
                                 full
@@ -1777,13 +1740,14 @@ impl Bootstrap {
             let proof = async {
                 let (release, approved) = tokio::sync::oneshot::channel();
                 // The SSH commit child must outlive both sequential readiness
-                // phases and its own command/exit round trips. Clamp it to the
-                // attempt limit; below that ceiling, readiness reports its
-                // route-specific failure before SSH cancels the command.
+                // phases and its own command/exit round trips. This separate
+                // 180-second proof ceiling cannot cut off any payload transfer;
+                // it prevents an anomalous route observation from leaving the
+                // final command alive indefinitely.
                 let commit_timeout = self
                     .backend
                     .setup_commit_timeout(authority, host)
-                    .map(|timeout| timeout.min(self.deadline));
+                    .map(|timeout| timeout.min(Duration::from_secs(180)));
                 tokio::try_join!(
                     async {
                         if published {
@@ -1828,7 +1792,7 @@ impl Bootstrap {
         })
     }
 
-    /// Idempotent cleanup also covers an outer setup deadline dropping proof.
+    /// Idempotent cleanup also covers cancellation or a failed final commit.
     async fn cleanup_probe(&self, authority: &Authority, host: uuid::Uuid) {
         let _ = tokio::time::timeout(
             Duration::from_secs(5),
@@ -1961,9 +1925,7 @@ impl Bootstrap {
 
     /// Offer the earlier attempt's action and wait for the person's confirmation;
     /// an automatic recovery only announces itself. Changes nothing on the host.
-    /// The wait does not count toward the attempt's deadline: the deadline
-    /// starts again in full once the person confirms, so a slow decision never
-    /// leaves the stop and the new enrollment only seconds (#305 P2-1).
+    /// Confirmation has its own limit; every subsequent exchange starts fresh (#305 P2-1).
     /// Nor does it hold an add-host slot: eight unanswered confirmations would
     /// otherwise block every add-host on the server for the whole wait (#305 P3-2).
     async fn confirm_start_fresh(
@@ -2014,27 +1976,24 @@ impl Bootstrap {
                     _ => previous.findings(target.mode, challenge),
                 })),
             );
-            if let Some(deadline) = &resources.deadline {
-                deadline.send_replace(Instant::now() + CONFIRMATION_WAIT);
-            }
             let held = resources.slot.take().is_some();
-            resumed.await.map_err(|_| {
-                Failure::install("Host provisioning stopped while waiting to start fresh.")
-            })?;
-            if held {
-                // Queue like any new add-host; the confirmation wait's limit
-                // still applies until the slot is ours again.
-                resources.slot = Some(
-                    self.concurrency
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| Failure::install("Bootstrap is shutting down."))?,
-                );
-            }
-            if let Some(deadline) = &resources.deadline {
-                deadline.send_replace(Instant::now() + self.deadline);
-            }
+            tokio::time::timeout(CONFIRMATION_WAIT, async {
+                resumed.await.map_err(|_| {
+                    Failure::install("Host provisioning stopped while waiting to start fresh.")
+                })?;
+                if held {
+                    resources.slot = Some(
+                        self.concurrency
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| Failure::install("Bootstrap is shutting down."))?,
+                    );
+                }
+                Ok::<_, Failure>(())
+            })
+            .await
+            .map_err(|_| Failure::install("Host confirmation exceeded its time limit."))??;
         }
         Ok(())
     }
@@ -2180,9 +2139,6 @@ fn script_finished(error: &Failure) -> bool {
 /// Mutation resources belong to one attempt, including its rollback and host retirement.
 #[derive(Default)]
 struct AttemptResources {
-    /// The attempt's deadline. A confirmation pauses it and restarts it in full
-    /// once the person confirms (#305 P2-1).
-    deadline: Option<watch::Sender<Instant>>,
     /// The server-wide add-host slot (`CONCURRENT_HOSTS`). Handed back while the
     /// attempt waits for a person to confirm, taken again once they do (#305 P3-2).
     slot: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -2194,15 +2150,6 @@ struct AttemptResources {
     published: bool,
     // Only an acknowledged publication may suppress the wizard failure event.
     announced: bool,
-}
-
-impl AttemptResources {
-    /// The attempt's current deadline, or `fallback` before the attempt set one.
-    fn until(&self, fallback: Instant) -> Instant {
-        self.deadline
-            .as_ref()
-            .map_or(fallback, |deadline| *deadline.borrow())
-    }
 }
 
 // Retain only failed live-session transaction coordinates; success removes the

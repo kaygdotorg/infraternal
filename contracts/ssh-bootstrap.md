@@ -386,8 +386,9 @@ this binds the release to its version rather than trusting the URL path.
 The existing `install` progress phase emits “Get the arm64 binary” or
 “Get the x86_64 binary” before resolution. Failures add two values to the
 optional `failed_step` field: `get-arm64-binary` and `get-x86-64-binary`.
-Their plain public reason is retained. Resolution is bounded to 60 seconds,
-shortened to finish before the whole attempt deadline. Download or verification
+Their plain public reason is retained. Resolution expires after 30 seconds
+without saved release-body bytes. Connection, headers and final verification
+each retain a short bound; no whole-transfer clock applies. Download or verification
 failure stops before any upload or installation transaction.
 
 Verified payloads and signed metadata are published together by atomic directory
@@ -438,7 +439,7 @@ service admission phase and the greeted actor phase each receive the original
 the existing check or session reattach supplies a conservative RTT upper bound
 including remote execution, without another command. Installed registration
 advances startup once; unrelated notifications never renew the allowance.
-The outer attempt deadline and cancellation still apply. A deliberately
+Cancellation still applies, and each exchange has its own bound. A deliberately
 unreachable first attempt can exhaust that allowance; its failure wait is
 reported separately from the subsequent Retry duration. Facts, execution UID,
 private terminal proof and commit remain required on initial setup and Retry.
@@ -467,8 +468,9 @@ non-dumpable, so a session socket counts as live when the native helper's one
 socket-diagnostic dump reports any socket bound to an owned `sessions/*.sock`,
 matched by owner and inode, never by name; an unavailable or unexpected dump is
 uncertain and retains the attempt. New setup commands
-serialize on the private installation parent and hold a bounded 180-second
-transaction lease across command gaps. Commit and rollback retire only the
+serialize on the private installation parent and hold a transaction lease across
+command gaps. Its 180-second sampling interval renews only when the authored reader
+publishes an increasing consumed-byte counter, never on output or keepalives. Commit and rollback retire only the
 lease whose PID birth and inherited descriptor match that transaction.
 
 A private owner marker plus the exact fresh transaction journal may return
@@ -479,7 +481,7 @@ same authenticated WebSocket accepts `{ "action": "start-fresh", "target": "…"
 "challenge": "…" }` (registry action `ssh.start-fresh`, permission `ssh.manage`).
 The target and single-use challenge belong to that socket's batch and owner;
 clients never select a path, host identity or previous transaction. Socket loss,
-component disable or the existing attempt deadline cancels the pause without
+component disable or the confirmation wait limit cancels the pause without
 removing earlier leftovers.
 
 Confirmation rechecks the owner, transaction, device/inode binding, full root
@@ -594,3 +596,24 @@ dangling symlink; a skipped alias produces a fixed setup warning. Rollback remov
 only a link created by that attempt, and uninstall removes only an owned link whose
 literal target still names the canonical launcher. Both names use canonical
 `infraternal` help, usage and error text. Shell configuration is never edited.
+
+### Bootstrap transfer progress (#378, D352)
+
+SSH payload transfers expire after 30 seconds without an increasing remote
+consumed-byte acknowledgement. Local pipe writes cannot renew this interval:
+SSH can buffer the entire remaining payload while the remote is still reading.
+The authored reader consumes at most 64 KiB per read and acknowledges short
+reads too. Counters are canonical, strictly increasing and bounded by the
+selected public wire length. The final counter starts a separate 30-second
+verification/completion exchange. Private invitation input remains behind the
+verified payload receipt. Duplex staging reads counters concurrently with its
+writer, preserving backpressure and cancellation. Neither path has a total
+transfer or attempt clock. Short commands and unresponsive connections remain
+bounded, independently of transfers.
+
+Release acquisition uses actual nonempty HTTP body bytes saved to the private
+staging file. Headers, empty frames, arbitrary output and keepalives never count
+as transfer progress. HTTP connect, TLS, response headers and storage completion
+each have a 30-second bound. A payload source without byte observations gets a
+30-second acquisition bound. Confirmation and authenticated readiness retain
+their own independent limits.

@@ -109,7 +109,7 @@ impl SshSession for Commit {
 }
 
 /// A caller's anomalous observation cannot create a command timer past the
-/// setup limit, and the timer must not impose any minimum successful duration.
+/// proof ceiling, and the timer must not impose any minimum successful duration.
 #[tokio::test(start_paused = true)]
 async fn review_commit_clamps_outliers_and_releases_immediately() {
     for budget in [
@@ -137,9 +137,9 @@ async fn review_commit_clamps_outliers_and_releases_immediately() {
 }
 
 /// An outlier must not leave a stalled command or its private proof alive
-/// beyond the attempt cap, even when no readiness notification arrives.
+/// beyond its separate proof bound, even when no readiness notification arrives.
 #[tokio::test(start_paused = true)]
-async fn review_stalled_commit_cannot_outlive_attempt_cap() {
+async fn review_stalled_commit_keeps_its_separate_proof_bound() {
     let (runner, authority, installation, proofs, host) = context();
     *proofs.commit_budget.lock().unwrap() = Some(Duration::MAX);
     let started = tokio::time::Instant::now();

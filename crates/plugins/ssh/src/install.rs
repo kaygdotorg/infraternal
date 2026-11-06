@@ -65,6 +65,12 @@ impl BinaryPaths {
 pub trait PayloadSource: Send + Sync {
     fn get(&self, architecture: Architecture) -> crate::transport::Operation<'_, PathBuf>;
 
+    /// Observe real acquisition bytes, including a shared download this caller awaits.
+    /// Sources without a byte stream keep a short bounded resolution exchange.
+    fn progress(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
+
     /// An authenticated optional session image; absence selects the full payload.
     /// Existing sources retain their full-payload behavior without local guessing.
     fn session(
@@ -146,15 +152,21 @@ struct PreparedPayload {
     reuse: bool,
     packed: Option<Arc<[u8]>>,
     binary: PathBuf,
+    /// Exact raw wire length for the acknowledged public file source.
+    size: u64,
 }
 impl PreparedPayload {
+    /// Bind this prepared source to exact remote byte acknowledgements.
     fn input(&self) -> Input<'_> {
         if self.reuse {
             Input::Empty
         } else if let Some(bytes) = &self.packed {
-            Input::Bytes(bytes)
+            Input::Transfer(PayloadInput::Bytes(bytes))
         } else {
-            Input::File(&self.binary)
+            Input::Transfer(PayloadInput::File {
+                path: &self.binary,
+                size: self.size,
+            })
         }
     }
 }
@@ -178,16 +190,17 @@ impl Transfer {
         // failed output), so the exact size completes the proof. A reused
         // cache entry is read back and hashed as before.
         format!(
-            r#"{PAYLOAD_CACHE}
+            r#"{reader}
+{PAYLOAD_CACHE}
 validate_cache
 {selection}
 {STAGE_TRANSACTION}
 printf 'TRANSFER %s\n' "$choice"
 case "$choice" in
 reuse) ln "$cache/payload" "$stage/payload"; streamed=$(sha256sum < "$stage/payload");;
-zstd) streamed=$(head -c {zstd_size} | zstd -dc | tee "$stage/payload" | sha256sum);;
-gzip) streamed=$(head -c {gzip_size} | gzip -dc | tee "$stage/payload" | sha256sum);;
-raw) streamed=$(head -c {raw_size} | tee "$stage/payload" | sha256sum);;
+zstd) streamed=$(read_payload {zstd_size} | zstd -dc | tee "$stage/payload" | sha256sum);;
+gzip) streamed=$(read_payload {gzip_size} | gzip -dc | tee "$stage/payload" | sha256sum);;
+raw) streamed=$(read_payload {raw_size} | tee "$stage/payload" | sha256sum);;
 *) exit 1;;
 esac
 [ "$streamed" = "{digest}  -" ] || exit 1
@@ -197,6 +210,7 @@ if [ "$choice" != reuse ]; then
 {PUBLISH_PAYLOAD_CACHE}
 fi"#,
             digest = self.digest,
+            reader = crate::transfer_progress::READER,
             zstd_size = self.zstd.as_ref().map_or(0, |bytes| bytes.len()),
             gzip_size = self.gzip.as_ref().map_or(0, |bytes| bytes.len()),
             raw_size = self.raw_size,
@@ -694,53 +708,78 @@ start_setup_lease
             }
             let mut framed = format!("{}\n", script.len()).into_bytes();
             framed.extend_from_slice(script.as_bytes());
-            checked
-                .channel
-                .write(&framed)
-                .await
-                .map_err(|_| invalid_setup().at(InstallStep::Upload))?;
+            tokio::time::timeout(
+                crate::transport::TRANSFER_IDLE,
+                checked.channel.write(&framed),
+            )
+            .await
+            .map_err(|_| Failure::install("The SSH operation timed out.").at(InstallStep::Upload))?
+            .map_err(|_| invalid_setup().at(InstallStep::Upload))?;
             checked.channel
         } else {
             self.session.stream(&script).await?
         };
-        let written = if let Some(choice) = declared {
-            // Bytes flow while the host takes its lock; a refusal receipt
-            // stops sending. The receipt must name the declared encoding.
-            let send = send_transfer(&channel, &transfer, binary, choice);
-            let receipt = self.upload_receipt(&channel, Some(choice));
-            tokio::pin!(send, receipt);
-            let mut written = None;
-            loop {
-                tokio::select! {
-                    biased;
-                    result = &mut receipt => {
-                        result?;
-                        break;
-                    }
-                    result = &mut send, if written.is_none() => written = Some(result),
+        // Reading counters concurrently prevents a full stdout pipe from
+        // deadlocking the upload writer. A receipt failure cancels that writer.
+        let (selection, selected) = tokio::sync::oneshot::channel();
+        let (upload_finished, written) = tokio::sync::oneshot::channel();
+        let receive = async {
+            let choice = self.upload_receipt(&channel, declared).await?;
+            let _ = selection.send(choice);
+            let total = match choice {
+                TransferChoice::Raw => transfer.raw_size,
+                TransferChoice::Gzip => {
+                    transfer.gzip.as_ref().map_or(0, |bytes| bytes.len() as u64)
                 }
+                TransferChoice::Zstd => {
+                    transfer.zstd.as_ref().map_or(0, |bytes| bytes.len() as u64)
+                }
+                TransferChoice::Reuse => 0,
+            };
+            let mut progress = crate::transfer_progress::Progress::new(total);
+            while !progress.complete() {
+                let receipt = channel.line(32).await?;
+                if let Some(failure) = parse_refusal(&receipt, InstallStep::Upload) {
+                    return Err(failure.in_mode(self.mode));
+                }
+                progress.accept(&receipt)?;
             }
-            match written {
-                Some(written) => written,
-                None => send.await,
-            }
-        } else {
-            let choice = self.upload_receipt(&channel, None).await?;
-            send_transfer(&channel, &transfer, binary, choice).await
+            // Bound writer completion too: a dishonest acknowledgement must
+            // never leave a blocked local writer alive after receipts finish.
+            tokio::time::timeout(crate::transport::TRANSFER_IDLE, async {
+                written
+                    .await
+                    .map_err(|_| invalid_setup().at(InstallStep::Upload))?;
+                // The final byte starts a fresh verification/start exchange.
+                let receipt = channel.line(64).await?;
+                if let Some(failure) = parse_refusal(&receipt, InstallStep::Upload) {
+                    return Err(failure.in_mode(self.mode));
+                }
+                if receipt != b"STEP start\n" {
+                    return Err(invalid_setup().at(InstallStep::Start));
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|_| Failure::install("The SSH operation timed out."))?
         };
-        if let Err(error) = &written
-            && error.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            return Err(invalid_setup().at(InstallStep::Upload));
-        }
-        let receipt = channel.line(64).await?;
-        if let Some(failure) = parse_refusal(&receipt, InstallStep::Upload) {
-            return Err(failure.in_mode(self.mode));
-        }
-        written.map_err(|_| invalid_setup().at(InstallStep::Upload))?;
-        if receipt != b"STEP start\n" {
-            return Err(invalid_setup().at(InstallStep::Start));
-        }
+        let send = async {
+            let choice = if let Some(choice) = declared {
+                choice
+            } else {
+                selected
+                    .await
+                    .map_err(|_| invalid_setup().at(InstallStep::Upload))?
+            };
+            let result = match send_transfer(&channel, &transfer, binary, choice).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                Err(_) => Err(invalid_setup().at(InstallStep::Upload)),
+            };
+            let _ = upload_finished.send(());
+            result
+        };
+        tokio::try_join!(receive, send)?;
         let receipt = channel.line(64).await?;
         if let Some(failure) = parse_refusal(&receipt, InstallStep::Start) {
             return Err(failure.in_mode(self.mode));
@@ -773,6 +812,7 @@ start_setup_lease
             .ok_or_else(|| invalid_setup().at(InstallStep::Upload))
     }
 
+    /// Negotiate cache reuse or a verified, progress-bounded public transfer.
     async fn prepare_payload(
         &self,
         binary: &Path,
@@ -808,21 +848,31 @@ start_setup_lease
         } else {
             None
         };
+        let size = tokio::fs::metadata(binary)
+            .await
+            .map_err(|_| invalid_setup())?
+            .len();
+        let wire_size = packed.as_ref().map_or(size, |bytes| bytes.len() as u64);
         let transfer = if reuse {
-            "ln \"$cache/payload\" \"$stage/payload\""
+            "ln \"$cache/payload\" \"$stage/payload\"".to_owned()
         } else if packed.is_some() {
             match codec {
-                Some(crate::payload_encoding::Codec::Zstd) => "zstd -dc > \"$stage/payload\"",
-                Some(crate::payload_encoding::Codec::Gzip) => "gzip -dc > \"$stage/payload\"",
+                Some(crate::payload_encoding::Codec::Zstd) => {
+                    format!("read_payload {wire_size} | zstd -dc > \"$stage/payload\"")
+                }
+                Some(crate::payload_encoding::Codec::Gzip) => {
+                    format!("read_payload {wire_size} | gzip -dc > \"$stage/payload\"")
+                }
                 None => return Err(Failure::install("The payload encoding is unavailable.")),
             }
         } else {
-            "cat > \"$stage/payload\""
+            format!("read_payload {wire_size} > \"$stage/payload\"")
         };
         let publish = if reuse { "" } else { PUBLISH_PAYLOAD_CACHE };
         let runtime_handoff = if runtime_handoff { RUNTIME_HANDOFF } else { "" };
         let body = format!(
-            "{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{runtime_handoff}",
+            "{}\n{PAYLOAD_CACHE}\n{STAGE_TRANSACTION}\n{transfer}\nprintf '%s  %s\\n' {} \"$stage/payload\" | sha256sum -c - >/dev/null\nchmod 700 \"$stage/payload\"\n{publish}\n{runtime_handoff}",
+            crate::transfer_progress::READER,
             shell_quote(&digest)
         );
         Ok(PreparedPayload {
@@ -830,6 +880,7 @@ start_setup_lease
             reuse,
             packed,
             binary: binary.to_path_buf(),
+            size,
         })
     }
 
@@ -848,15 +899,22 @@ start_setup_lease
         Box::pin(async move {
             target.validate()?;
             let digest = crate::payload::digest(binary).await?;
+            let size = tokio::fs::metadata(binary)
+                .await
+                .map_err(|_| invalid_setup())?
+                .len();
             let body = format!(
-                r#"{SETUP_GUARD}
+                r#"{reader}
+{SETUP_GUARD}
 setup_guard
 {PAYLOAD_CACHE}
 validate_cache
 prepared="$cache.recovery-$transaction"
 mkdir "$prepared"
-trap 'rm -f "$prepared/payload" "$prepared/owner"; rmdir "$prepared" 2>/dev/null || :' EXIT
-cat > "$prepared/payload"
+trap 'rm -f "$prepared/payload" "$prepared/owner" "$prepared/transfer-chunk" "$prepared/transfer-progress" "$prepared/transfer-progress-next"; rmdir "$prepared" 2>/dev/null || :' EXIT
+progress_dir="$prepared"
+read_payload {size} > "$prepared/payload"
+rm -f "$prepared/transfer-progress"
 printf '%s  %s\n' {} "$prepared/payload" | sha256sum -c - >/dev/null
 chmod 700 "$prepared/payload"
 printf 'INFRATERNAL_PAYLOAD_CACHE_V1\n' > "$prepared/owner"
@@ -868,11 +926,12 @@ else
 fi
 "#,
                 shell_quote(&digest),
+                reader = crate::transfer_progress::READER,
             );
             session
                 .run(
                     &Self::script_for(target.mode, uuid::Uuid::nil(), uuid::Uuid::new_v4(), &body),
-                    Input::File(binary),
+                    Input::Transfer(PayloadInput::File { path: binary, size }),
                 )
                 .await?;
             Ok(())
