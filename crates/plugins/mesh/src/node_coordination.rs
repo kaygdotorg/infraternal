@@ -52,9 +52,10 @@ async fn read_identity(channel: &dyn NodeChannel) -> Option<(Identity, Option<bo
 /// Classify a node's identity replies into its rotation support (J262).
 ///
 /// - The full probe answers, first or on one immediate retry: the reply says whether the node rotates.
-/// - The full probe fails but the same request without `key_rotation` answers: the node deterministically rejects
-///   that field, so it is an older binary without rotation support (`Some(false)`), and the coordinator may
-///   abandon its open rotation.
+/// - The node refuses the full probe both times ([`CALL_REFUSED`](infraternal_plugin_api::node_channel::CALL_REFUSED))
+///   and answers the same request without `key_rotation`: it deterministically rejects that field, so it is an
+///   older binary without rotation support (`Some(false)`), and the coordinator may abandon its open rotation. A
+///   timeout or a lost channel proves nothing, and leaves support unknown (J273 P3-1).
 /// - Only the legacy `{}` request answers: the failures prove nothing about rotation, so support is unknown
 ///   (`None`) unless the reply itself claims it. A transient failure must not abandon a rotation, since that is
 ///   what left kernel nodes with an open journal (J262 P2); the node also settles such a journal itself.
@@ -67,18 +68,30 @@ where
     F: Fn(Vec<u8>) -> R,
     R: std::future::Future<Output = Result<Vec<u8>, &'static str>>,
 {
+    let mut refused = true;
     for _ in 0..2 {
-        if let Ok(reply) = call(probe.to_vec()).await {
-            return parse_identity(&reply).map(|identity| {
-                let supported = identity.key_rotation;
-                (identity, Some(supported))
-            });
+        match call(probe.to_vec()).await {
+            Ok(reply) => {
+                return parse_identity(&reply).map(|identity| {
+                    let supported = identity.key_rotation;
+                    (identity, Some(supported))
+                });
+            }
+            Err(error) => {
+                refused &= error == infraternal_plugin_api::node_channel::CALL_REFUSED;
+            }
         }
     }
     if let Ok(reply) = call(before_rotation.to_vec()).await {
         return parse_identity(&reply).map(|identity| {
-            let supported = identity.key_rotation;
-            (identity, Some(supported))
+            // Only a node that refused the full probe both times rejected it deterministically; a timeout or a
+            // lost channel says nothing about rotation (J273 P3-1).
+            let supported = if refused {
+                Some(identity.key_rotation)
+            } else {
+                identity.key_rotation.then_some(true)
+            };
+            (identity, supported)
         });
     }
     let reply = call(b"{}".to_vec()).await.ok()?;
@@ -1487,6 +1500,31 @@ mod tests {
         (result, requests.into_inner().unwrap())
     }
 
+    /// J273 P3-1: full-probe timeouts prove nothing, so an answer to the request without `key_rotation` after
+    /// two of them leaves support unknown. Marking the node unsupported would close the D166 gate for the whole
+    /// mesh until it reconnects.
+    #[tokio::test]
+    async fn probe_timeouts_never_read_as_an_older_binary() {
+        for failure in [
+            "Node control timed out.",
+            "Node control unavailable.",
+            "Node authority ended.",
+        ] {
+            let (supported, requests) =
+                classify(vec![Err(failure), Err(failure), Ok(identity_reply(false))]).await;
+            assert_eq!(supported, Some(None), "{failure}");
+            assert_eq!(requests.len(), 3, "{failure}");
+        }
+        // One refusal and one timeout is still not a deterministic rejection.
+        let (supported, _) = classify(vec![
+            Err(infraternal_plugin_api::node_channel::CALL_REFUSED),
+            Err("Node control timed out."),
+            Ok(identity_reply(false)),
+        ])
+        .await;
+        assert_eq!(supported, Some(None));
+    }
+
     /// J262 (b): one transient probe failure is retried and the retry proves support.
     #[tokio::test]
     async fn a_transient_probe_failure_is_retried_before_any_fallback() {
@@ -1504,8 +1542,8 @@ mod tests {
     #[tokio::test]
     async fn an_older_binary_that_rejects_only_the_rotation_field_reports_no_support() {
         let (supported, requests) = classify(vec![
-            Err("Node action refused."),
-            Err("Node action refused."),
+            Err(infraternal_plugin_api::node_channel::CALL_REFUSED),
+            Err(infraternal_plugin_api::node_channel::CALL_REFUSED),
             Ok(identity_reply(false)),
         ])
         .await;
