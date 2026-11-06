@@ -563,9 +563,22 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(failure.locator(".ah-text")).toHaveCount(0);
     await expect(inWizard(page, "Try again")).toBeVisible();
     await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
-    await failure.locator(".ah-details summary").click();
-    await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
+    // The page as it opens: its icon and title are fully inside the card (J314: clipped at 375).
+    const top = await failure.evaluate((page) => {
+      const scroller = page.closest<HTMLElement>(".ah-scroll") ?? page.parentElement!;
+      const box = scroller.getBoundingClientRect();
+      return { scrolled: scroller.scrollTop, hero: page.querySelector(".ah-hero")!.getBoundingClientRect().top - box.top, title: page.querySelector(".ah-title")!.getBoundingClientRect().top - box.top };
+    });
+    expect(top.scrolled).toBe(0);
+    expect(top.hero).toBeGreaterThanOrEqual(0);
+    expect(top.title).toBeGreaterThanOrEqual(0);
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-failure-${viewport.width}.png`) });
+    // Details open shows its text, not an empty caret (J314).
+    await failure.locator(".ah-details summary").click();
+    await expect(failure.locator(".ah-details pre")).toBeVisible();
+    await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
+    await failure.locator(".ah-details pre").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-details-${viewport.width}.png`) });
   });
 
   test(`a login name with no account says so by name at ${viewport.width}`, async ({ page }) => {
@@ -599,6 +612,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
       return { lines: Math.round(own.height / parseFloat(style.lineHeight)), overlap: own.top < name.bottom - 0.5 };
     });
     expect(box).toEqual({ lines: 1, overlap: false });
+    // The row tells this news in the page's neutral tone, never red (J314).
+    const tone = await row.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--fg-2)";
+      element.append(probe);
+      const neutral = getComputedStyle(probe).color;
+      probe.remove();
+      return { tone: (element as HTMLElement).dataset.tone, step: getComputedStyle(element.querySelector(".ah-job-step")!).color, neutral };
+    });
+    expect(tone.tone).toBe("info");
+    expect(tone.step).toBe(tone.neutral);
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `progress-row-${viewport.width}.png`) });
   });
 }

@@ -752,6 +752,8 @@ export class Wizard {
     const fix = state === "failed" ? guideFor(job.entry.label, job.view.failure).fix : "none";
     // A dead end ("none") has no retry either: it would only meet the same refusal (J314 P2-1).
     row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none";
+    // The row tells the news in the page's tone: neutral news is never red here (TASTE: the icon matches the news).
+    row.dataset.tone = state === "failed" ? guideFor(job.entry.label, job.view.failure).tone : "";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.

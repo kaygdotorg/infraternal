@@ -375,6 +375,10 @@
 .ah-stage-detail { color: var(--fg-2); font-size: 0.8125rem; line-height: 1.55; overflow-wrap: anywhere; }
 .ah-stage-detail:empty { display: none; }
 .ah-stage-row[data-state="failed"] .ah-stage-detail { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
+/* News that needs a decision, not an error (leftovers, set up elsewhere): the row matches its page's neutral tone (#394). */
+.ah-run[data-state="failed"][data-tone="info"] :is(.ah-job-step, .ah-stage-row[data-state="failed"] .ah-stage-detail) { color: var(--fg-2); }
+.ah-run[data-state="failed"][data-tone="info"] .ah-seg > span[data-state="failed"] { background: var(--fg-2); }
+.ah-run[data-state="failed"][data-tone="info"] .ui-step-status-failed { stroke: var(--fg-2); }
 /* A hint under a key/value block sits one gap below it; the base hint style pulls up into a lede. */
 .ah-keyblock + .ah-text, .ah-install .ah-text { margin-top: 0; }
 .ah-install .ui-kv { margin-bottom: 0.875rem; }
