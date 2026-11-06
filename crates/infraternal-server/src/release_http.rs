@@ -1,9 +1,12 @@
 //! Streams bounded release downloads through the existing Hyper/OpenSSL engines [224,225].
 use http_body_util::BodyExt;
-use infraternal_plugin_ssh::transport::TRANSFER_IDLE;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode, SslVersion};
-use std::{path::Path, pin::Pin};
+use std::{path::Path, pin::Pin, time::Duration};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+
+/// Allow 30 seconds without saved body bytes, with separate connection and completion bounds.
+/// This downloader also serves release-only builds, where SSH is compiled out.
+const DOWNLOAD_IDLE: Duration = Duration::from_secs(30);
 
 pub(crate) enum DownloadError {
     Missing,
@@ -61,7 +64,7 @@ async fn fetch(
     {
         return Err(DownloadError::Network);
     }
-    let socket = tokio::time::timeout(TRANSFER_IDLE, tokio::net::TcpStream::connect((name, port)))
+    let socket = tokio::time::timeout(DOWNLOAD_IDLE, tokio::net::TcpStream::connect((name, port)))
         .await
         .map_err(|_| DownloadError::Network)?
         .map_err(|_| DownloadError::Network)?;
@@ -97,7 +100,7 @@ async fn fetch(
         .map_err(|_| DownloadError::Network)?;
     let mut stream =
         tokio_openssl::SslStream::new(ssl, socket).map_err(|_| DownloadError::Network)?;
-    tokio::time::timeout(TRANSFER_IDLE, Pin::new(&mut stream).connect())
+    tokio::time::timeout(DOWNLOAD_IDLE, Pin::new(&mut stream).connect())
         .await
         .map_err(|_| DownloadError::Network)?
         .map_err(|_| DownloadError::Network)?;
@@ -112,7 +115,7 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     progress: Option<&tokio::sync::watch::Sender<u64>>,
 ) -> Result<(), DownloadError> {
     let (mut sender, connection) = tokio::time::timeout(
-        TRANSFER_IDLE,
+        DOWNLOAD_IDLE,
         hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)),
     )
     .await
@@ -130,7 +133,7 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         .header("user-agent", infraternal_plugin_api::RELEASE_USER_AGENT)
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|_| DownloadError::Http)?;
-    let response = tokio::time::timeout(TRANSFER_IDLE, sender.send_request(request))
+    let response = tokio::time::timeout(DOWNLOAD_IDLE, sender.send_request(request))
         .await
         .map_err(|_| DownloadError::Network)?
         .map_err(|_| DownloadError::Network)?;
@@ -141,7 +144,7 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     }
     let mut body = response.into_body();
     let mut file = tokio::time::timeout(
-        TRANSFER_IDLE,
+        DOWNLOAD_IDLE,
         tokio::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -152,7 +155,7 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     .map_err(|_| DownloadError::Storage)?
     .map_err(|_| DownloadError::Storage)?;
     let mut received = 0u64;
-    let mut until = tokio::time::Instant::now() + TRANSFER_IDLE;
+    let mut until = tokio::time::Instant::now() + DOWNLOAD_IDLE;
     while let Some(frame) = tokio::time::timeout_at(until, body.frame())
         .await
         .map_err(|_| DownloadError::Network)?
@@ -168,17 +171,17 @@ async fn receive<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             if received > max {
                 return Err(DownloadError::Size);
             }
-            tokio::time::timeout(TRANSFER_IDLE, file.write_all(&bytes))
+            tokio::time::timeout(DOWNLOAD_IDLE, file.write_all(&bytes))
                 .await
                 .map_err(|_| DownloadError::Storage)?
                 .map_err(|_| DownloadError::Storage)?;
-            until = tokio::time::Instant::now() + TRANSFER_IDLE;
+            until = tokio::time::Instant::now() + DOWNLOAD_IDLE;
             if let Some(progress) = progress {
                 progress.send_modify(|count| *count = count.saturating_add(bytes.len() as u64));
             }
         }
     }
-    tokio::time::timeout(TRANSFER_IDLE, file.sync_all())
+    tokio::time::timeout(DOWNLOAD_IDLE, file.sync_all())
         .await
         .map_err(|_| DownloadError::Storage)?
         .map_err(|_| DownloadError::Storage)?;
