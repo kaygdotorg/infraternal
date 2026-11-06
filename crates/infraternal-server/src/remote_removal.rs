@@ -340,25 +340,21 @@ impl Removal {
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         let installation = installed_by_setup.then(|| entry.host.simple().to_string());
-        let (mut message, manual) = outcome(
+        let (message, manual) = outcome(
             cleanup,
             &mode,
             display_name(&name),
             &left,
             installation.as_deref(),
+            pending,
         );
-        if pending {
-            message = format!(
-                "{}: revoked, cleanup pending. {message}",
-                display_name(&name)
-            );
-        }
         Ok(
             json!({"host_id":entry.host,"state":if pending { "pending" } else { "removed" },"host_cleanup":cleanup,"message":message,"manual":manual}),
         )
     }
 }
-/// What removal tells the person, and the commands for a leftover install.
+/// Describe removal once, distinguishing pending cleanup from completed retirement.
+/// Pending responses keep the ownership-checked manual command available.
 ///
 /// `installation` is the host id when infraternal setup installed the host:
 /// only then are there commands, because only then is there an installation
@@ -369,7 +365,33 @@ fn outcome(
     name: &str,
     left: &[&str],
     installation: Option<&str>,
+    pending: bool,
 ) -> (String, Option<String>) {
+    if pending {
+        let (detail, manual) = match cleanup {
+            "requested" => {
+                let mut detail = "its infraternal agent is uninstalling itself".to_owned();
+                for object in left {
+                    detail.push_str(&format!("; {object} stays because this installation did not create it"));
+                }
+                (detail, None)
+            }
+            "retained" => ("its infraternal agent stays installed on it".to_owned(), None),
+            _ if installation.is_none() => (
+                "infraternal setup didn't install its infraternal agent, so remove it there the way it was installed".to_owned(),
+                None,
+            ),
+            _ => {
+                let commands = manual_uninstall(mode, installation.unwrap_or_default());
+                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                (format!("infraternal is still installed on it, so remove it there {account} with: {commands}"), Some(commands))
+            }
+        };
+        return (
+            format!("{name}: revoked, cleanup pending; {detail}."),
+            manual,
+        );
+    }
     match cleanup {
         "requested" => {
             let mut message =

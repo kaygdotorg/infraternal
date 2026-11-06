@@ -519,3 +519,27 @@ async fn pending_removal_releases_its_bootstrap_coordinates() {
     );
 }
 
+/// Pending cleanup names the host once and does not claim its inventory row is gone.
+#[tokio::test]
+async fn pending_removal_describes_one_host_without_claiming_completion() {
+    for uninstall in [false, true] {
+        let f = fixture().await;
+        let host = owned_host(&f).await;
+        let service = removal(&f);
+        let start = service
+            .start(&f.session, host, uninstall, NOW)
+            .await
+            .unwrap();
+        let result = service
+            .finish_host(&f.session, host, str_field(&start, "review"), NOW)
+            .await
+            .unwrap();
+        let message = result["message"].as_str().unwrap();
+        assert_eq!(message.matches("host.example").count(), 1, "{message}");
+        assert!(!message.contains("was removed"), "{message}");
+        assert!(message.contains("revoked, cleanup pending"), "{message}");
+        if let Some(manual) = result["manual"].as_str() {
+            assert!(message.contains(manual));
+        }
+    }
+}
