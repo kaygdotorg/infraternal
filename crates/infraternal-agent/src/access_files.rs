@@ -1190,6 +1190,7 @@ pub(crate) fn forget(store: &Path, person: uuid::Uuid) -> io::Result<()> {
     Ok(())
 }
 
+/// J322's planted cases and the report's outcomes and bounds.
 #[cfg(test)]
 #[path = "access_files_tests.rs"]
 mod tests;
