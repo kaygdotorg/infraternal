@@ -48,6 +48,7 @@ const RETAINED_EVENTS = 1024;
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 
 type Step = "check" | "install" | "facts" | "connect" | "done" | "failed";
+/** The failure kinds the double can script, mirroring the server contract (contracts/ssh-bootstrap.md). */
 type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "no_account";
 const PHASES = [
   { step: "check", message: "Checking the system" },

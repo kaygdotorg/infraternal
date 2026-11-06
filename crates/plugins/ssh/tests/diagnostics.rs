@@ -150,6 +150,8 @@ fn every_failed_step_names_the_step_and_a_next_action() {
     }
 }
 
+/// Every installer exit status at every step and mode maps to its fixed public
+/// text; a staging refusal (71) also names the setup location in Details (#394).
 #[test]
 fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
     use infraternal_plugin_ssh::model::{

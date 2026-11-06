@@ -527,6 +527,7 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
     failure.at_ssh_boundary(!ssh_failure)
 }
 
+/// Pins stderr classification and setup-stderr capture to their allowlists.
 #[cfg(test)]
 mod tests {
     use super::*;

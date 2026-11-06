@@ -1782,6 +1782,8 @@ async fn command_failure_names_upload_join_install_and_start_separately() {
     }
 }
 
+/// A setup directory without our owner record refuses staging with exit 71,
+/// as kind `unrecognized_install` with the location in Details (#394).
 #[tokio::test]
 async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
     let fixture = Fixture::new();
@@ -1907,6 +1909,8 @@ async fn stale_previous_attempt_socket_can_be_retired_without_manual_cleanup() {
     next.commit().await.unwrap();
 }
 
+/// A staged transaction keeps its lease between separate SSH commands, so a
+/// later check reports setup running, never leftovers to remove.
 #[tokio::test]
 async fn active_transaction_is_live_between_ssh_setup_commands() {
     let fixture = Fixture::new();

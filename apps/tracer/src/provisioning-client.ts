@@ -137,6 +137,7 @@ export interface OneUseAuth { key?: string; passphrase?: string; password?: stri
 
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 const STEPS: readonly string[] = ["check", "install", "facts", "connect", "done", "failed"];
+/** Every failure kind the server may send; anything else is dropped rather than shown (see {@link FailureKind}). */
 const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running", "unrecognized_install", "no_account"];
 
 /** Turns a host label into a valid request-local id (`[A-Za-z0-9._-]{1,128}`). */
