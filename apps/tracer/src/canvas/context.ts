@@ -112,7 +112,7 @@ export interface Adapters {
   /** Registry-labelled removal, shared by the palette and machine popover. */
   /** Raises an agent's privileges after the person's consent (#215); absent, the machine details show no "Access level" row. */
   privilege?: import("./sessions/privilege").PrivilegeService;
-  hostRemoval?: { label(): string | undefined; remove(id: string, name: string, anchor: HTMLElement): void };
+  hostRemoval?: { label(): string | undefined; remove(id: string, name: string, anchor: HTMLElement | null): void };
   /** Binds terminal windows to sessions (real in the product, previews in mockups). */
   sessions: SessionService;
   /** The terminal of the active window, for keyboard font size (D222); absent in mockups, where the font keys do nothing. */

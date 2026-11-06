@@ -103,7 +103,18 @@ const STYLE = `
   .ui-confirm-tip[data-stack][data-named] button { width: 100%; }
 }
 /* Named actions: the buttons carry their words. */
-.ui-confirm-tip[data-named] button { width: auto; min-width: 1.75rem; padding: 0 0.75rem; font: 500 var(--text-secondary, 0.75rem)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+.ui-confirm-tip[data-named] button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: 100%; overflow: hidden; padding: 0 0.75rem; font: 500 var(--text-secondary, 0.75rem)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+/* A label that still does not fit (a long host name) is cut with an ellipsis inside its button, never run past the card's edge. */
+.ui-confirm-tip[data-named] button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Two named actions sit side by side and share the row; the dismissal is a real button with a quiet flat fill, not loose text. */
+.ui-confirm-tip[data-named]:not([data-stack]) .ui-confirm-tip-actions { flex-wrap: nowrap; }
+.ui-confirm-tip[data-named] .ui-confirm-no { background: color-mix(in oklab, var(--fg) 10%, transparent); color: var(--fg); }
+/* The question is a decision, so the material behind it must never show readable text: the blur is at least 1.5x a terminal
+   line, at every transparency level (a level's own blur is lower than that at the "clear" end). The :where level rules
+   have zero specificity, so this wins; the solid level has no backdrop at all and is opaque anyway. */
+.ui-confirm-tip { --ui-overlay-blur: 32px; }
+.ui-confirm-tip[data-side="center"] .ui-confirm-tip-arrow { display: none; }
+.ui-confirm-tip-message { overflow-wrap: anywhere; }
 @media (pointer: coarse) {
   .ui-confirm-tip { gap: 0.875rem; padding: 1rem; }
   .ui-confirm-tip[data-named] button { width: auto; padding: 0 0.75rem; }
@@ -180,11 +191,18 @@ export interface ConfirmTipOptions {
 
 export interface ConfirmTipController { close(restoreFocus?: boolean): void }
 
+/** The longest button label drawn in full; the accessible name and the tooltip keep the whole text. A button is a verb, never a sentence. */
+const MAX_BUTTON_LABEL = 28;
+function capLabel(label: string): string { return label.length > MAX_BUTTON_LABEL ? `${label.slice(0, MAX_BUTTON_LABEL - 1)}…` : label; }
+
 let activeConfirmTip: ConfirmTipController | undefined;
 let confirmTipSerial = 0;
 
 /** Mounts a single reusable, trigger-anchored confirmation for a reversible choice. */
-export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions): ConfirmTipController {
+export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: ConfirmTipOptions): ConfirmTipController {
+  // No anchor means the question is not about anything on screen (it started from the palette): it sits centred, with no tail.
+  const anchor = anchorOrNull ?? document.createElement("span");
+  const centred = anchorOrNull === null;
   activeConfirmTip?.close(false);
   buildStyleOnly();
 
@@ -222,7 +240,7 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   cancel.setAttribute("aria-label", options.cancelLabel);
   cancel.dataset.tip = options.cancelLabel;
   cancel.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`;
-  if (options.named) { cancel.querySelector("span")!.textContent = options.cancelLabel; tip.dataset.named = ""; }
+  if (options.named) { cancel.querySelector("span")!.textContent = capLabel(options.cancelLabel); tip.dataset.named = ""; }
   const confirm = document.createElement("button");
   confirm.type = "button";
   confirm.disabled = options.confirmDisabled ?? false;
@@ -230,7 +248,7 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   confirm.setAttribute("aria-label", options.confirmLabel);
   confirm.dataset.tip = options.confirmLabel;
   confirm.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true">${options.confirmIcon ?? '<path d="m5.5 12.5 4 4 9-9"/>'}</svg>`;
-  if (options.named) confirm.querySelector("span")!.textContent = options.confirmLabel;
+  if (options.named) confirm.querySelector("span")!.textContent = capLabel(options.confirmLabel);
   if (options.named && options.secondary) {
     const alt = document.createElement("button");
     alt.type = "button";
@@ -252,8 +270,18 @@ export function mountConfirmTip(anchor: HTMLElement, options: ConfirmTipOptions)
   let controller: ConfirmTipController | undefined;
   const place = (): void => {
     if (tip.hidden) return;
-    const anchorRect = anchor.getBoundingClientRect();
     const bound = options.boundary?.getBoundingClientRect();
+    if (centred) {
+      // Centred in the boundary (or the viewport); `data-side="center"` hides the tail.
+      tip.style.maxWidth = `${Math.max(160, Math.floor((bound ? bound.width : innerWidth) - 18))}px`;
+      const w = tip.offsetWidth, h = tip.offsetHeight;
+      tip.style.left = `${Math.max(9, (bound ? bound.left + bound.width / 2 : innerWidth / 2) - w / 2)}px`;
+      tip.style.top = `${Math.max(9, (bound ? bound.top + bound.height / 2 : innerHeight / 2) - h / 2)}px`;
+      tip.style.transformOrigin = "50% 50%";
+      tip.dataset.side = "center";
+      return;
+    }
+    const anchorRect = anchor.getBoundingClientRect();
     // A narrow card (a phone window) is narrower than the tip's own cap: the tip never outgrows its 9 px insets.
     if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
     // Layout size: the open animation scales the tip, and a scaled rect would misplace it.

@@ -8,7 +8,7 @@
  * `window.__tracerClusters` probe the specs drive. The canvas itself is the product code in `create.ts`; this file
  * only gives it mock adapters and calls its public operations.
  */
-import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
+import { confirmHostRemoval } from "../host-removal-confirm";
 import { createPrivilegeDouble, isScenario, type Scenario } from "./privilege";
 import { teachOnce } from "../../hints";
 import type { WinRec } from "../context";
@@ -125,7 +125,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       // `?privilege=<scenario>`: the machine details offer the privileged-access consent (the product has no service for it yet).
       // `?removal=1`: the host row's "Remove host…" (D309). The product's removal asks for a passkey; the test double only asks and says so.
-      ...(query.get("removal") === "1" ? { hostRemoval: { label: () => "Remove host", remove: (_id: string, name: string, anchor: HTMLElement) => { mountConfirmTip(anchor, { label: `Remove host: ${name}`, title: `Remove ${name}?`, effect: "Revoke its access and uninstall the infraternal agent.", named: true, confirmLabel: "Remove host", cancelLabel: "Keep it", onConfirm: () => core.toast.show({ message: `Test double: ${name} would be removed here.`, duration: 3000 }) }); } } } : {}),
+      ...(query.get("removal") === "1" ? { hostRemoval: { label: () => "Remove host", remove: (_id: string, name: string, anchor: HTMLElement | null) => { confirmHostRemoval(name, anchor, () => core.toast.show({ message: `Test double: ${name} would be removed here.`, duration: 3000 })); } } } : {}),
       ...(isScenario(query.get("privilege")) ? { privilege: createPrivilegeDouble(query.get("privilege") as Scenario) } : {}),
       addHost: openAddHost,
       authority,
