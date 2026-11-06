@@ -50,7 +50,9 @@ exec 9>/root/.cache/tun-real-root-proof.lock
 flock 9
 
 work=$(mktemp -d /root/tun-proof.XXXXXX)
-run=$(mktemp -d /tmp/tun-proof-run.XXXXXX)
+# Not in /tmp: /tmp is shared with claude, and the test gets a private /tmp
+# below. /var/lib is root-owned 0755 on the root filesystem (exec allowed).
+run=$(mktemp -d /var/lib/tun-proof-run.XXXXXX)
 cleanup() { rm -rf -- "$work" "$run"; }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -85,8 +87,12 @@ python3 "$work/src/scripts/elf-runpath-guard" "$binary" --allow "$work"
 chmod 755 "$run"; install -m 755 "$binary" "$run/gotatun_tun_owner"
 cd "$run"
 echo "running as $(id -un) (uid $(id -u)) in a fresh network namespace"
+# A private tmpfs on /tmp: the test's state dir is /tmp/gotatun-tun-owner-<pid>,
+# and as PID 1 in the namespace that name is predictable, so in the shared
+# /tmp claude could pre-create it and fail the proof (J277, 81454). unshare
+# --mount makes mounts private, so this tmpfs never reaches the host.
 timeout 300 unshare --net --mount --pid --fork --kill-child --mount-proc \
-    bash -c 'ip link set lo up; "$@"' proof \
+    bash -c 'mount -t tmpfs -o mode=1777,size=256m tmpfs /tmp; ip link set lo up; "$@"' proof \
     "$run/gotatun_tun_owner" --ignored --exact "$test" --nocapture --test-threads=1
 ROOT
 

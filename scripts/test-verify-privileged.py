@@ -234,6 +234,20 @@ class RealRootProof(unittest.TestCase):
                 self.assertEqual(guard.main([str(binary)]), 1)
             self.assertIn('/home/claude/worktrees/x/outputs/out/lib', err.getvalue())
 
+    def proof_code(self):
+        """The proof script without its comment lines."""
+        script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()
+        return '\n'.join(line for line in script.splitlines() if not line.lstrip().startswith('#'))
+
+    def test_proof_runs_with_a_private_tmp(self):
+        """The test sees a fresh tmpfs /tmp, and its copy lives outside /tmp (J277 P3-1)."""
+        code = self.proof_code()
+        namespace = code[code.index('unshare --net'):]
+        self.assertIn("mount -t tmpfs -o mode=1777,size=256m tmpfs /tmp;", namespace)
+        self.assertLess(namespace.index('mount -t tmpfs'), namespace.index('"$@"'))
+        self.assertIn('run=$(mktemp -d /var/lib/tun-proof-run.', code)
+        self.assertNotIn('mktemp -d /tmp/', code)
+
     def test_proof_script_keeps_claude_out_of_roots_process(self):
         """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
         script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()
