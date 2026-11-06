@@ -155,7 +155,7 @@ test("an install this server didn't make is named once, with no chore and no pat
   const failure = {
     kind: "unrecognized_install",
     failed_step: "connect",
-    message: "This machine already has an infraternal agent from an earlier setup that this server does not know, so nothing was changed. If another infraternal server still lists it, remove it there to uninstall it, then add it here again.",
+    message: "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.",
     log_tail: ["Setup location: /var/lib/infraternal"],
   } as const;
   const detail = { ...failure, log_tail: [...failure.log_tail] };

@@ -632,8 +632,9 @@ A base with no journal is a finished install owned by the host id in its
 every new attempt carries a new host id, and staging refuses (71) a base whose
 owner names another host. After the existing already-added preflight, the
 server answers `unrecognized_install` at the `connect` step before any write.
-Taking such an install over is D359's Take over, a separate slice on
-`addhost-takeover-d359`.
+Its sentence holds whoever enrolled it: another server, another person on this
+server, or an earlier setup this server retired. Taking such an install over is
+D359's Take over, a separate slice on `addhost-takeover-d359`.
 
 When the NetBird SSH server accepts a network sign-in and then ends a command
 session with exactly `User authentication failed` and status 1, the host could

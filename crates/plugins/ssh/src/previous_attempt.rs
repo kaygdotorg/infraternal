@@ -189,7 +189,9 @@ pub fn installed_elsewhere(mode: InstallMode) -> Failure {
 }
 
 /// Public text for [`installed_elsewhere`]; also pinned by the tracer copy test.
-pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal agent from an earlier setup that this server does not know, so nothing was changed. If another infraternal server still lists it, remove it there to uninstall it, then add it here again.";
+/// True in every case it covers: an install of another server, of another
+/// person on this server, or of an earlier setup this server retired (J314).
+pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.";
 
 fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if bytes == b"INFRATERNAL_SETUP_CLEAR\n" {
