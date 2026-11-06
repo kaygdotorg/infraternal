@@ -87,7 +87,8 @@ impl EnrollmentStore {
         if matched != 1 {
             return Err(EnrollmentError::Denied);
         }
-        self.commit_revocation_intent(transaction, host, now).await?;
+        self.commit_revocation_intent(transaction, host, now)
+            .await?;
         Ok(())
     }
 
