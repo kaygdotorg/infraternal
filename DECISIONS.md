@@ -4123,3 +4123,26 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      remain. The rejected options were stopping them on every revoke (this
      also kills other people's jobs on a shared account) and leaving them as
      the host owner's job.
+
+354. **Root logins need systemd (owner, 2026-11-06, #355; amends D247):** on a
+     Linux host without systemd (openrc, runit, s6), D247's `su` fallback let a
+     revoked person keep their shell alive. They deleted the login socket, the
+     revoke reported success, and typing still reached the shell (J291). Without
+     systemd's process groups, infraternal can't prove that every process of
+     that login is gone. The owner chose "Refuse root logins there": a root
+     infraternal agent on a host without systemd refuses person logins with a
+     clear message until revocation can be proven there. Rootless agents and
+     systemd hosts keep working. The rejected options were a root-owned cgroup
+     v2 leaf per login (larger, and it needs a real openrc VM; it may come later
+     if such hosts matter) and keeping `su` with a revoke that fails closed
+     (the shell could live until reboot).
+
+355. **Start fresh completes the old entry's cleanup (owner, 2026-11-06, #305):**
+     when Add host's Start fresh has removed the leftovers of an earlier
+     unfinished setup, which it proves before it continues, the server treats
+     that as the old entry's cleanup confirmation and drops the old entry at
+     once. Before this, Console showed a second offline "pending cleanup" host
+     with the same name forever, because the abandoned setup's infraternal
+     agent never confirms. The owner chose "Drop it when Start fresh cleaned
+     up". Entries whose machine was never cleaned keep showing as pending. The
+     rejected options were a Forget button and leaving the entry as it was.
