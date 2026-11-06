@@ -1964,3 +1964,25 @@ fn query_reply_compatibility_notice_is_strict_and_session_bound() {
     extra["bytes"] = serde_json::json!("unexpected");
     assert!(serde_json::from_value::<TerminalNotice>(extra).is_err());
 }
+
+/// An open refusal with a reason this server does not know (from a newer
+/// infraternal agent) reads as "could not start a shell, try again", not as
+/// an offline host. Known reasons pass through, and non-refusal replies stay
+/// protocol errors (J308 P3-3, #355).
+#[test]
+fn an_unknown_refusal_reason_reads_as_could_not_start_a_shell() {
+    use infraternal_plugin_api::admission::OpenRefusal;
+    assert_eq!(
+        super::refused_open(br#"{"error":"terminal unavailable","reason":"some_future_reason"}"#),
+        AgentError::OpenRefused(OpenRefusal::ResourceUnavailable)
+    );
+    assert_eq!(
+        super::refused_open(br#"{"error":"terminal unavailable","reason":"invalid"}"#),
+        AgentError::OpenRefused(OpenRefusal::Invalid)
+    );
+    assert_eq!(super::refused_open(b"not json"), AgentError::Rejected);
+    assert_eq!(
+        super::refused_open(br#"{"ok":false}"#),
+        AgentError::Rejected
+    );
+}

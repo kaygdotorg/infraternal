@@ -58,6 +58,34 @@ const RECONNECT_FLOOR: Duration = Duration::from_millis(200);
 const RECONNECT_CEILING: Duration = Duration::from_secs(30);
 const STABLE_LINK: Duration = Duration::from_secs(10);
 
+/// The error for a refused terminal open from the agent's reply `json`. A
+/// known refusal reason passes through. A refusal envelope
+/// (`"error":"terminal unavailable"`) whose reason this server does not know,
+/// from a newer infraternal agent, becomes "could not start a shell, try
+/// again" (`ResourceUnavailable`), never "offline": the host answered (J308
+/// P3-3, #355). Anything else is a protocol error.
+fn refused_open(json: &[u8]) -> AgentError {
+    if json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
+        return AgentError::Rejected;
+    }
+    if let Ok(refusal) = serde_json::from_slice(json) {
+        return AgentError::OpenRefused(refusal);
+    }
+    #[derive(serde::Deserialize)]
+    struct Envelope<'a> {
+        error: &'a str,
+        reason: &'a str,
+    }
+    match serde_json::from_slice::<Envelope<'_>>(json) {
+        Ok(envelope) if envelope.error == "terminal unavailable" && !envelope.reason.is_empty() => {
+            AgentError::OpenRefused(
+                infraternal_plugin_api::admission::OpenRefusal::ResourceUnavailable,
+            )
+        }
+        _ => AgentError::Rejected,
+    }
+}
+
 /// Protocol or process failures are deliberately independent of user input and agent log output.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub(crate) enum AgentError {
@@ -2694,14 +2722,7 @@ async fn process_incoming(
                         let _ = reply.send(Err(AgentError::Rejected));
                     }
                     PendingCall::Open(reply) => {
-                        let error =
-                            if json.len() <= infraternal_plugin_api::channel::MAX_CONTROL_JSON {
-                                serde_json::from_slice(&json)
-                                    .map_or(AgentError::Rejected, AgentError::OpenRefused)
-                            } else {
-                                AgentError::Rejected
-                            };
-                        let _ = reply.send(Err(error));
+                        let _ = reply.send(Err(refused_open(&json)));
                     }
                     PendingCall::Action(reply) | PendingCall::Preparation(reply) => {
                         let _ = reply.send(Err(AgentError::Rejected));
