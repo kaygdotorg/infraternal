@@ -299,6 +299,8 @@ struct FailureIds {
     setup_lock: Option<SetupLock>,
     /// Which staging check refused with exit 71, as the host named it.
     refusal: Option<Refusal>,
+    /// A finished install of another server that this attempt offers to take over (D359).
+    takeover: Option<TakeoverOffer>,
 }
 
 /// The staging check that refused with exit 71 (#394, J314 P2-1). The host
@@ -331,6 +333,16 @@ impl Refusal {
             _ => None,
         })
     }
+}
+
+/// What a Take over confirmation must show (D359): the old install's id, which
+/// the person confirms, and whether its agent is running now (Take over stops it).
+/// Public: the id is the host id in its `.bootstrap-owner`, never a secret.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TakeoverOffer {
+    /// The old install's id, as 32 lowercase hex characters.
+    install: String,
+    live: bool,
 }
 
 /// Host-local lease metadata parsed from the fixed setup-check record.
@@ -374,7 +386,7 @@ impl Serialize for Failure {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Failure", 15)?;
+        let mut state = serializer.serialize_struct("Failure", 16)?;
         state.serialize_field("kind", &self.kind)?;
         state.serialize_field("message", &self.public_message())?;
         state.serialize_field("log_tail", &self.log_tail)?;
@@ -383,6 +395,9 @@ impl Serialize for Failure {
         }
         if let Some(refusal) = self.ids.as_deref().and_then(|ids| ids.refusal) {
             state.serialize_field("refusal", &refusal)?;
+        }
+        if let Some(takeover) = self.ids.as_deref().and_then(|ids| ids.takeover.as_ref()) {
+            state.serialize_field("takeover", takeover)?;
         }
         if let Some(failed_step) = self.failed_step {
             state.serialize_field("failed_step", &failed_step)?;
@@ -492,6 +507,17 @@ impl Failure {
     #[must_use]
     pub fn refusal(&self) -> Option<Refusal> {
         self.ids.as_deref().and_then(|ids| ids.refusal)
+    }
+
+    /// Offer to take over the finished install of another server whose id is
+    /// `install`, and say whether its agent runs (D359).
+    #[must_use]
+    pub(crate) fn with_takeover(mut self, install: uuid::Uuid, live: bool) -> Self {
+        self.ids.get_or_insert_with(Box::default).takeover = Some(TakeoverOffer {
+            install: install.simple().to_string(),
+            live,
+        });
+        self
     }
 
     /// Mark the lock as an install an earlier add-host set aside and did not put back.

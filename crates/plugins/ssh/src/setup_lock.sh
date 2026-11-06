@@ -98,14 +98,16 @@ handoff_setup_lease() {
  start_setup_lease
 }
 
-# A commit deletes what a Replace or Re-enroll set aside: a replaced journal
-# with its rollback copies, or a whole superseded install with its old key
-# and unit. The host now serves the committed install, and no set-aside copy
-# is kept (D337). Until this commit they stay, for rollback and Put it back.
-# Every commit runs this, including finish_stuck_upgrade (#305 P2-3). Only our
-# own private directories under those fixed names are removed.
+# A commit deletes what a Replace, Re-enroll or Take over set aside: a
+# replaced journal with its rollback copies, or a whole superseded or
+# taken-over install with its old key and unit (and a Take over's set-aside
+# left half-built). The host now serves the committed install, and no
+# set-aside copy is kept (D337, D359). Until this commit they stay, for
+# rollback and Put it back. Every commit runs this, including
+# finish_stuck_upgrade (#305 P2-3). Only our own private directories under
+# those fixed names are removed.
 retire_set_aside() {
- for set_aside in "$base".bootstrap-replaced-* "$base".bootstrap-superseded-*; do
+ for set_aside in "$base".bootstrap-replaced-* "$base".bootstrap-superseded-* "$base".bootstrap-takeover-* "$base".bootstrap-taking-*; do
   [ -d "$set_aside" ] && [ ! -L "$set_aside" ] && [ -O "$set_aside" ] || continue
   rm -rf "$set_aside"
  done
