@@ -731,6 +731,10 @@ export class Wizard {
       : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="finish"><span>Done</span></button>`);
   }
 
+  /**
+   * Redraws one host's row on the progress page from its view: state and tone, its one-line status, each stage,
+   * and the row's retry and fix buttons. Does nothing when the progress page isn't showing.
+   */
   private paint(job: Job, page: HTMLElement | undefined = this.current): void {
     const row = page?.dataset.page === "progress" ? page.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.target)}"]`) : null;
     if (!row) return;

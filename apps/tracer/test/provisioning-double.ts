@@ -60,6 +60,7 @@ const PHASES = [
   { step: "connect", message: "Connecting" },
 ] as const;
 
+/** One bootstrap event as the double sends it over the socket, in the server's wire shape. */
 interface BootstrapEvent {
   sequence: number;
   target: string;
@@ -130,6 +131,7 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
   return known;
 }
 
+/** The scripted failure of a named host: where it stops, what it reports and what Details shows. */
 interface Failure { failed_step?: "connect" | "upload" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean; refusal?: "cache" | "prepared" | "foreign" }
 
 /** The existing host a duplicate (`added*`) names; the mock world maps it to a host it already has. */
@@ -190,6 +192,7 @@ function authOf(target: Target): NonNullable<BootstrapEvent["authentication"]> {
   return network ? { method: "network", network } : { method: "server-key" };
 }
 
+/** Serves one bootstrap socket: starts, retries, confirms and replays scripted host attempts. */
 export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, publishTerminal?: (hostId: string) => string): void {
   const targets = new Map<string, Target>();
   const events: BootstrapEvent[] = [];
