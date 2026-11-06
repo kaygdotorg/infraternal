@@ -102,7 +102,41 @@ impl EnrollmentStore {
         host: Uuid,
         person: Uuid,
     ) -> Result<(), EnrollmentError> {
+        self.confirm_removal_cleanup(host, person, None).await
+    }
+
+    /// Whether this host's removal asked for an uninstall that its infraternal
+    /// agent has not accepted yet, so the removal outbox must still ask (#409).
+    /// `unreachable` rows come from before the outbox delivered uninstalls,
+    /// when the one live attempt failed; they are asked again too.
+    pub(crate) async fn pending_uninstall(&self, host: Uuid) -> Result<bool, EnrollmentError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_removals WHERE host_id=? AND uninstall=1 AND host_cleanup IN ('pending','unreachable'))")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&self.0)
+            .await?)
+    }
+
+    /// [`Self::confirm_login_cleanup`], also recording how the host answered
+    /// its removal's uninstall request (`host_cleanup`), in the same
+    /// transaction as the receipt. Once the receipt commits, the host is never
+    /// admitted again, so an answer recorded later could be lost (#409).
+    pub(crate) async fn confirm_removal_cleanup(
+        &self,
+        host: Uuid,
+        person: Uuid,
+        host_cleanup: Option<&'static str>,
+    ) -> Result<(), EnrollmentError> {
         let mut transaction = self.0.begin().await?;
+        // Like the receipt below, only this person's unconfirmed cleanup may
+        // record an answer; a foreign or duplicate one changes nothing.
+        if let Some(host_cleanup) = host_cleanup {
+            sqlx::query("UPDATE remote_host_removals SET host_cleanup=? WHERE host_id=? AND uninstall=1 AND host_cleanup IN ('pending','unreachable') AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_host_removals.host_id AND q.person_id=? AND q.confirmed=0)")
+                .bind(host_cleanup)
+                .bind(host.as_bytes().as_slice())
+                .bind(person.to_string())
+                .execute(&mut *transaction)
+                .await?;
+        }
         // Keep tombstoning and its trigger effects in the same transaction as
         // the durable receipt. A foreign or duplicate receipt changes nothing.
         sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,unixepoch()) WHERE id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.person_id=? AND q.confirmed=0)")

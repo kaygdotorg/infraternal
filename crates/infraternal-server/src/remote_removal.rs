@@ -282,10 +282,19 @@ impl Removal {
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
             .bind(entry.host.as_bytes().as_slice()).bind(&entry.user).bind(live).bind(entry.uninstall).execute(&mut *tx).await?;
-        let (cleanup, left) = if entry.uninstall {
-            request_uninstall(&self.hosts, entry.host).await
-        } else {
-            ("retained", Vec::new())
+        // One delivery path (#409): for a person's host the removal outbox asks
+        // for the uninstall on the agent's cleanup-only reconnect, right after
+        // its login revocation receipt, and records the answer with that
+        // receipt. That reconnect follows this commit's link cut at once for an
+        // online host, and the host's return for an offline one. So nothing
+        // here waits on the network under the writer lock, and the uninstall
+        // can no longer stop the agent before its receipt is in. Legacy owners
+        // have no outbox and keep a single immediate attempt.
+        let outbox = Uuid::parse_str(&entry.user).is_ok();
+        let (cleanup, left) = match (entry.uninstall, outbox) {
+            (false, _) => ("retained", Vec::new()),
+            (true, true) => ("pending", Vec::new()),
+            (true, false) => request_uninstall(&self.hosts, entry.host).await,
         };
         sqlx::query(
             "UPDATE remote_host_removals SET host_cleanup=?,completed_at=? WHERE host_id=?",
@@ -380,6 +389,13 @@ fn outcome(
                 (detail, None)
             }
             "retained" => ("its infraternal agent stays installed on it".to_owned(), None),
+            // The outbox asks the host when it next connects (#409). Hand over
+            // the manual command too, for a machine that never comes back.
+            "pending" if installation.is_some() => {
+                let commands = manual_uninstall(mode, installation.unwrap_or_default());
+                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                (format!("its infraternal agent uninstalls itself as soon as it connects. If it never does, remove it there {account} by running: {commands}"), Some(commands))
+            }
             _ if installation.is_none() => (
                 "infraternal setup didn't install its infraternal agent, so remove it there the way it was installed".to_owned(),
                 None,
@@ -436,47 +452,78 @@ fn outcome(
         }
     }
 }
-/// Ask a connected host's infraternal agent to uninstall itself (D273).
+/// How a host's infraternal agent answered one uninstall request.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UninstallReply {
+    /// It accepted, and its helper is removing the installation. These are the
+    /// kernel objects it leaves because its installation did not create them.
+    Accepted(Vec<&'static str>),
+    /// It answered, but will not uninstall (for example an installation that
+    /// infraternal setup did not make). Asking again gets the same answer.
+    Refused,
+    /// No answer: the link was gone, ended mid-call, or timed out. The
+    /// request may be repeated on the next connection.
+    Lost,
+}
+
+/// Ask the infraternal agent behind `actor` to uninstall itself (D273, #235).
 ///
-/// `requested` only when the host accepted the exact action; any refusal, error
-/// or absent connection is `unreachable`, which the caller reports as a leftover
-/// installation. The real-binary removal check calls this same path (#235).
-///
-/// With `requested` come the kernel objects the host will leave because its
-/// installation did not create them. Only names this server knows are kept:
-/// a host never puts its own text into the owner's message.
-pub(crate) async fn request_uninstall(
-    hosts: &RemoteHosts,
+/// The removal outbox calls this on the host's cleanup-only reconnect, after
+/// its login revocation receipt (#409); legacy owners and the real-binary
+/// removal check reach it through [`request_uninstall`]. Only names this
+/// server knows are kept from the reply: a host never puts its own text into
+/// the owner's message.
+pub(crate) async fn ask_uninstall(
+    actor: &crate::embedded::EmbeddedAgent,
     host: Uuid,
-) -> (&'static str, Vec<&'static str>) {
+) -> UninstallReply {
     const KNOWN: [&str; 3] = [
         "infraternal0",
         "infraternal_mesh",
         "the IFM_* iptables chains",
     ];
-    let Some(actor) = hosts.actor(host).await else {
-        return ("unreachable", Vec::new());
-    };
     let Ok(input) = serde_json::to_vec(&json!({"host":host.simple().to_string(),"dry_run":false}))
     else {
-        return ("unreachable", Vec::new());
+        return UninstallReply::Lost;
     };
-    let reply = actor
+    let reply = match actor
         .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
         .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+        // A `Result` frame with `ok:false` is the host's own refusal.
+        Err(crate::embedded::AgentError::Rejected) => None,
+        Err(_) => return UninstallReply::Lost,
+    };
     match reply {
         Some(reply) if reply["state"] == "accepted" => {
-            let left = reply["left"].as_array().map_or_else(Vec::new, |left| {
+            UninstallReply::Accepted(reply["left"].as_array().map_or_else(Vec::new, |left| {
                 KNOWN
                     .into_iter()
                     .filter(|known| left.iter().any(|name| name == known))
                     .collect()
-            });
-            ("requested", left)
+            }))
         }
-        _ => ("unreachable", Vec::new()),
+        _ => UninstallReply::Refused,
+    }
+}
+
+/// Ask a connected host's infraternal agent to uninstall itself, once, now.
+///
+/// `requested` only when the host accepted the exact action; any refusal, error
+/// or absent connection is `unreachable`, which the caller reports as a leftover
+/// installation. Only removals with no outbox use it (legacy owners), plus the
+/// real-binary removal check (#235).
+pub(crate) async fn request_uninstall(
+    hosts: &RemoteHosts,
+    host: Uuid,
+) -> (&'static str, Vec<&'static str>) {
+    let Some(actor) = hosts.actor(host).await else {
+        return ("unreachable", Vec::new());
+    };
+    match ask_uninstall(&actor, host).await {
+        UninstallReply::Accepted(left) => ("requested", left),
+        UninstallReply::Refused | UninstallReply::Lost => ("unreachable", Vec::new()),
     }
 }
 /// The machine part of a stored `account@machine` address, as people name the host.
