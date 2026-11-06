@@ -221,6 +221,47 @@ fn kernel_rotation_sends_the_candidate_to_our_index_and_moves_the_marker() {
     node.down().unwrap();
 }
 
+/// The `GotaTun` node reports rotation support and changes its key, marker and private key file together.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_rotation_changes_the_live_identity_and_marker() {
+    let state = RotationState::new();
+    let operation = "00000000-0000-4000-8000-000000000041";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let previous = node.up().unwrap();
+    assert!(previous.key_rotation, "GotaTun offers durable rotation");
+    let link = Device::active_link().unwrap().unwrap();
+    assert_eq!(link.engine, EngineKind::GotaTun);
+    assert_eq!(link.owner, Some(previous.public_key));
+
+    let candidate = node.prepare_rotation(operation, 1).unwrap();
+    assert_ne!(candidate, previous.public_key);
+    assert_eq!(
+        Device::active_link().unwrap().unwrap().owner,
+        Some(previous.public_key),
+        "prepare leaves the live TUN identity unchanged"
+    );
+
+    let committed = node.commit_rotation(operation, 1).unwrap();
+    assert_eq!(committed.public_key, candidate);
+    assert_eq!(
+        Device::active_link().unwrap().unwrap().owner,
+        Some(candidate),
+        "the TUN marker follows the active device key"
+    );
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    assert_eq!(store.recorded_interface().unwrap(), Some(candidate));
+    let bytes = store.read_private_key().unwrap().unwrap();
+    assert_eq!(
+        crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
+        candidate
+    );
+    node.finish_rotation(operation, 1).unwrap();
+    assert!(store.rotation_secret().unwrap().unwrap().completed);
+    drop(store);
+    node.down().unwrap();
+}
+
 /// After a rotation, a restarted node still adopts its interface as its own.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]

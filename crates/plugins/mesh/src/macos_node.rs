@@ -1610,6 +1610,37 @@ mod tests {
         );
     }
 
+    /// Install both keys during overlap and leave routes only on the active key.
+    #[test]
+    fn peer_conversion_keeps_the_inactive_rotation_key_without_routes_or_endpoint() {
+        let endpoint: SocketAddr = "192.0.2.4:51820".parse().expect("endpoint");
+        let mut config = config();
+        let policy = config.peers.get_mut(&NodeId(4)).expect("configured peer");
+        policy.peer.previous_key = Some(PublicKey([7; 32]));
+        policy.peer.previous_active = true;
+        policy.peer.endpoint = Some(endpoint);
+        let peers = peers_for_config(&config).expect("convert both rotation keys");
+
+        assert_eq!(peers.len(), 2, "the peer accepts both overlap identities");
+        let candidate = peers
+            .iter()
+            .find(|peer| peer.public_key.as_bytes() == &[2; 32])
+            .expect("candidate identity");
+        let previous = peers
+            .iter()
+            .find(|peer| peer.public_key.as_bytes() == &[7; 32])
+            .expect("previous identity");
+        assert_eq!(candidate.allowed_ips.as_slice(), &[]);
+        assert_eq!(candidate.endpoint, None);
+        assert!(
+            previous
+                .allowed_ips
+                .iter()
+                .any(|ip| ip.to_string() == "10.254.0.4/32")
+        );
+        assert_eq!(previous.endpoint, Some(endpoint));
+    }
+
     /// A test peer `id` with the given inbound policy.
     fn peer_policy(id: u8, inbound: TrafficPolicy) -> PeerPolicy {
         PeerPolicy {
@@ -1819,6 +1850,7 @@ mod tests {
         assert!(state.routes.is_empty());
     }
 
+    /// Restore the saved node state from its agent state directory.
     #[test]
     fn restore_uses_the_agent_state_directory() {
         let directory = test_directory();
@@ -1838,6 +1870,28 @@ mod tests {
 
         assert!(!restored.enabled());
         assert!(directory.join(PUBLIC_STATE).is_file());
+    }
+
+    /// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
+    #[test]
+    #[ignore = "Run on the macOS VM with system service privileges."]
+    fn macos_gotatun_node_supports_key_rotation() {
+        let directory = test_directory();
+        let mut node = Node::restore(&directory.0, None).expect("restore Mac node");
+        let previous = node.up().expect("start GotaTun");
+        assert!(previous.key_rotation, "macOS offers durable rotation");
+
+        let operation = "00000000-0000-4000-8000-000000000051";
+        let candidate = node
+            .prepare_rotation(operation, 1)
+            .expect("prepare rotation");
+        assert_ne!(candidate, previous.public_key);
+        let committed = node.commit_rotation(operation, 1).expect("commit rotation");
+        assert_eq!(committed.public_key, candidate);
+        let (_, persisted) = crate::macos_key::load_or_create(&directory.0).expect("read key file");
+        assert_eq!(persisted, candidate);
+        node.finish_rotation(operation, 1).expect("finish rotation");
+        node.down().expect("stop GotaTun");
     }
 
     fn enrolment(coordinator: &[u8]) -> Enrolment {

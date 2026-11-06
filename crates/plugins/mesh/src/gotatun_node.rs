@@ -1172,4 +1172,34 @@ mod tests {
             ["10.254.0.1/32", "fd01::1/128"]
         );
     }
+
+    /// Keep both rotation keys installed while routing only through the currently active one.
+    #[test]
+    fn peer_conversion_keeps_the_inactive_rotation_key_without_routes_or_endpoint() {
+        let endpoint: SocketAddr = "192.0.2.4:51831".parse().expect("endpoint");
+        let mut config = one_peer_config(Some(endpoint));
+        let policy = config.peers.get_mut(&NodeId(1)).expect("configured peer");
+        policy.peer.previous_key = Some(PublicKey([4; 32]));
+        policy.peer.previous_active = true;
+        let peers = peers_for_config(&config).expect("convert both rotation keys");
+
+        assert_eq!(peers.len(), 2, "the peer accepts both overlap identities");
+        let candidate = peers
+            .iter()
+            .find(|peer| peer.public_key.as_bytes() == &[3; 32])
+            .expect("candidate identity");
+        let previous = peers
+            .iter()
+            .find(|peer| peer.public_key.as_bytes() == &[4; 32])
+            .expect("previous identity");
+        assert_eq!(candidate.allowed_ips.as_slice(), &[]);
+        assert_eq!(candidate.endpoint, None);
+        assert!(
+            previous
+                .allowed_ips
+                .iter()
+                .any(|ip| ip.to_string() == "10.254.0.1/32")
+        );
+        assert_eq!(previous.endpoint, Some(endpoint));
+    }
 }
