@@ -129,7 +129,7 @@ pub(crate) struct RuntimeInfo {
     offloads_enabled: bool,
 }
 
-/// Requests serialized by the GotaTun worker; each operation replies after touching the device.
+/// Requests serialized by the `GotaTun` worker; each operation replies after touching the device.
 enum WorkerCommand {
     Apply {
         config: Config,
@@ -1051,6 +1051,7 @@ fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<Wire
 }
 
 /// Select the identity that currently owns this peer's host routes.
+#[cfg(feature = "relay")]
 fn active_peer_key(peer: &crate::dataplane::Peer) -> PublicKey {
     if peer.previous_active {
         peer.previous_key.unwrap_or(peer.key)

@@ -70,6 +70,11 @@ impl GotatunProof {
     fn accepts(&self, key: crate::policy::model::PublicKey) -> bool {
         self.0.contains(&key)
     }
+
+    /// Whether there is no saved identity that can prove ownership of a live link.
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Build the owner proof from the saved engine, interface key, private key and bounded journal.
@@ -113,7 +118,9 @@ fn gotatun_owner_proof(
 
 /// Whether `link` is the `GotaTun` TUN named by `proof`.
 fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof) -> bool {
-    link.engine == EngineKind::GotaTun && link.owner.is_some_and(|owner| proof.accepts(owner))
+    link.engine == EngineKind::GotaTun
+        && !proof.is_empty()
+        && link.owner.is_some_and(|owner| proof.accepts(owner))
 }
 
 /// Recreate the `GotaTun` private-key file only from the durable rotation journal.
@@ -338,18 +345,17 @@ fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<
     node.config.clone_from(&saved_config);
     let identity = node.up()?;
     let mut config = saved_config;
-    if let Some(config) = config.as_mut() {
-        if let Some(bound) = config.local_key
-            && bound != identity.public_key
-        {
-            let store = node.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
-            if !gotatun_snapshot_binding_is_authorized(store, bound)? {
-                return Err(io::ErrorKind::InvalidData.into());
-            }
-            // Commit intent selects the candidate for reattach; normalize the replayed snapshot
-            // so a later restart cannot mistake its older local-key field for the active identity.
-            config.local_key = Some(identity.public_key);
+    if let Some(config) = config.as_mut()
+        && let Some(bound) = config.local_key
+        && bound != identity.public_key
+    {
+        let store = node.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        if !gotatun_snapshot_binding_is_authorized(store, bound)? {
+            return Err(io::ErrorKind::InvalidData.into());
         }
+        // Commit intent selects the candidate for reattach; normalize the replayed snapshot
+        // so a later restart cannot mistake its older local-key field for the active identity.
+        config.local_key = Some(identity.public_key);
     }
     if let Some(config) = config {
         node.config = None;
@@ -1117,7 +1123,7 @@ impl Node {
     }
 
     /// Read the identity the selected live engine currently presents for a proven link.
-    /// Kernel WireGuard reports it by ifindex; GotaTun keeps the accepted live identity in memory.
+    /// Kernel `WireGuard` reports it by ifindex; `GotaTun` keeps the accepted live identity in memory.
     fn rotation_public_key(
         &self,
         link: &crate::wireguard::ActiveLink,
@@ -1311,7 +1317,7 @@ impl Node {
     ///
     /// Order (#285): durable commit intent, then the key, sent by index after the owner marker is
     /// re-verified (`Device::configure`), then the marker moved to the candidate
-    /// (`Device::remark`, again re-verified first), then the recorded key and GotaTun key file.
+    /// (`Device::remark`, again re-verified first), then the recorded key and `GotaTun` key file.
     /// Each step finds the previous ones done on a retry, and the engine-specific owner proof
     /// authorizes the predecessor and candidate only for the open journal.
     /// # Errors
