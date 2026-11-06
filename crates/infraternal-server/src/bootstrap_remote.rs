@@ -186,7 +186,9 @@ impl RemoteBackend {
     /// person has confirmed anything (J247 P3); the add retires it later.
     ///
     /// Hosts with a pending removal are not active destinations: their retained
-    /// removal coordinates belong only to cleanup (#347).
+    /// removal coordinates belong only to cleanup (#347). Nor are hosts whose
+    /// denial is committed but whose login cleanup awaits their agent's receipt:
+    /// they are no longer admitted.
     async fn existing_host(
         &self,
         owner: &str,
@@ -197,7 +199,7 @@ impl RemoteBackend {
         // Each pass retires at most one record; the bound only stops a storage
         // fault that keeps refusing the retirement from looping forever.
         for _ in 0..16 {
-            let existing: Option<(Vec<u8>, bool)> = sqlx::query_as("SELECT h.id, EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents i WHERE i.host_id=h.id) FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+            let existing: Option<(Vec<u8>, bool)> = sqlx::query_as("SELECT h.id, EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents i WHERE i.host_id=h.id) FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
                 .bind(owner)
                 .bind(address)
                 .bind(lookup)
@@ -240,7 +242,11 @@ impl RemoteBackend {
         let store = self.issuer.store();
         let now = unix_now()?;
         let _fence = store.1.cut(host).map_err(|_| unavailable())?;
-        match store.retire_bootstrap(owner, host, now).await {
+        // Deny without waiting for the gone agent's receipt (#305 round 4): a
+        // person's retirement otherwise waits for it, and the add hung to its
+        // deadline. The outbox keeps the login cleanup; the cut stays until it is
+        // confirmed, as for a removed offline host.
+        match store.deny_abandoned_bootstrap(owner, host, now).await {
             Ok(()) => {}
             // Another path consumed the intent first (a cancelled attempt's own
             // retirement, or a completion): the caller's next lookup decides.
@@ -2321,6 +2327,51 @@ mod tests {
         .unwrap();
         assert_eq!(open, 0, "the replaced host still reads as unfinished");
         assert!(f.backend.attempts.lock().unwrap().is_empty());
+    }
+
+    /// #305 round 4: production owners are person UUIDs, whose host retirement waits
+    /// for a receipt from the host's infraternal agent. An abandoned setup's agent is
+    /// gone, so retiring it during the add must deny it without that wait (as Remove
+    /// does for an offline host), or every add of the address hangs to its deadline.
+    #[tokio::test]
+    async fn an_abandoned_setup_of_a_person_is_denied_without_waiting_for_its_gone_agent() {
+        let f = fixture(true).await;
+        let person = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,?,?,0,'test')")
+            .bind(&person).bind(&person).bind(&person).execute(&f.pool).await.unwrap();
+        let ghost = Uuid::new_v4();
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,100)")
+            .bind(ghost.as_bytes().as_slice()).bind(&person).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@ghost',NULL)")
+            .bind(ghost.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
+            .bind(ghost.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let found = tokio::time::timeout(
+            Duration::from_secs(10),
+            f.backend.existing_host(&person, "user@ghost", None, true),
+        )
+        .await
+        .expect("retiring an abandoned setup must not wait for its gone agent")
+        .unwrap();
+        assert_eq!(found, None);
+        // Denied durably: its certificate is no longer admitted, and the login
+        // cleanup stays queued for an agent that may still reconnect.
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_login_cleanup WHERE host_id=? AND confirmed=0",
+        )
+        .bind(ghost.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 1);
+        // And a second lookup does not find it again.
+        assert_eq!(
+            f.backend
+                .existing_host(&person, "user@ghost", None, true)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     /// J247 P3: the stuck-install check runs before the person confirms anything, so
