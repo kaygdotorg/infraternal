@@ -2737,10 +2737,17 @@ async fn process_incoming(
             match call {
                 #[cfg(feature = "remote")]
                 PendingCall::Revoke(reply) => {
+                    // Strict about shape, but it accepts the agent's D353
+                    // warning ("background programs may remain"): a revoke
+                    // that carried it was a protocol error, so the server
+                    // never recorded the revocation as done and kept
+                    // retrying it (#355).
                     #[derive(serde::Deserialize)]
                     #[serde(deny_unknown_fields)]
                     struct Revoked {
                         revoked: bool,
+                        #[serde(default, rename = "warning")]
+                        _warning: Option<String>,
                     }
                     // Serde structs also accept positional arrays. Cleanup
                     // acknowledgements declare an object, so reject that shape.
