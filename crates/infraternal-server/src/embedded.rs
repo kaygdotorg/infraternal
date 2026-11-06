@@ -2773,7 +2773,7 @@ async fn process_incoming(
                     // retrying it (#355).
                     #[derive(serde::Deserialize)]
                     #[serde(deny_unknown_fields)]
-                    struct Revoked {
+                    struct RevokeReply {
                         revoked: bool,
                         #[serde(default, rename = "warning")]
                         _warning: Option<String>,
@@ -2788,7 +2788,7 @@ async fn process_incoming(
                     // acknowledgements declare an object, so reject that shape.
                     let outcome =
                         if json.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{') {
-                            serde_json::from_slice::<Revoked>(&json)
+                            serde_json::from_slice::<RevokeReply>(&json)
                                 .map_err(|_| AgentError::Protocol)
                                 .and_then(|result| {
                                     if result.revoked {
