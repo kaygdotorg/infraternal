@@ -325,13 +325,16 @@ impl Refusal {
     /// `stderr`, if any.
     #[must_use]
     pub fn from_stderr(stderr: &str) -> Option<Self> {
-        stderr.lines().rev().find_map(|line| match line.strip_prefix("INFRATERNAL_REFUSED ")? {
-            "cache" => Some(Self::Cache),
-            "prepared" => Some(Self::Prepared),
-            "foreign" => Some(Self::Foreign),
-            "owner" => Some(Self::Owner),
-            _ => None,
-        })
+        stderr
+            .lines()
+            .rev()
+            .find_map(|line| match line.strip_prefix("INFRATERNAL_REFUSED ")? {
+                "cache" => Some(Self::Cache),
+                "prepared" => Some(Self::Prepared),
+                "foreign" => Some(Self::Foreign),
+                "owner" => Some(Self::Owner),
+                _ => None,
+            })
     }
 }
 

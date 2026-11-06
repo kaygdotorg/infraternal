@@ -174,7 +174,7 @@ test("a login name with no account says so, by name, and offers the two ways for
   const guide = guideFor("minipc01", { ...failure, log_tail: [] }, false, "kayg");
   expect(guide.title).toBe("minipc01 couldn't find an account named kayg");
   expect(guide.happened).toBe("Use an account that exists there, or add it as root.");
-  expect(guideFor("minipc01", { ...failure, log_tail: [] }).title).toBe("minipc01 has no account with the name used to sign in");
+  expect(guideFor("minipc01", { ...failure, log_tail: [] }).title).toBe("minipc01 couldn't find the account used to sign in");
 });
 
 test("the progress row's line for every install step is one short phrase, never the server's paragraph", () => {
