@@ -4185,3 +4185,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      reports real trouble (a slow or lost connection), never a normal edit.
      It still stays until every waiting edit is saved. The rejected option
      was showing it at once (D312 as it was).
+
+359. **Root SSH may take over another server's install (owner, 2026-11-06,
+     #394; amends D337):** a machine can hold a finished install whose
+     server is gone (for example the retired monitor01 server), and D337's
+     "prove the old server is mine" can't be met then. The owner chose "Yes,
+     root SSH is proof enough". A root-mode add that finds a finished
+     install of another server offers **Take over**. The person must
+     confirm, and the confirmation names the old install's id. Infraternal
+     sets the old install aside, installs fresh, puts the old one back if
+     anything fails, and deletes it only after the new install has
+     committed. Root SSH can already delete those files by hand, so this
+     adds no power. Rootless adds of another account's install still
+     refuse. The rejected options were keeping D337 strict (a by-hand
+     uninstall when the old server is gone) and never offering a button.
