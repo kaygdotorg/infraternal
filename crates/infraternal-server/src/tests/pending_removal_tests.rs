@@ -130,11 +130,13 @@ async fn a_denied_abandoned_setup_does_not_occupy_its_destination() {
     let f = fixture(true).await;
     sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)")
         .bind(f.prior.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
-    sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES(?,'owner',0)")
-        .bind(f.prior.as_bytes().as_slice())
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES(?,'owner',0)",
+    )
+    .bind(f.prior.as_bytes().as_slice())
+    .execute(&f.pool)
+    .await
+    .unwrap();
     let host = Uuid::new_v4();
     f.backend
         .issuer

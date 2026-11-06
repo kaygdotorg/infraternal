@@ -127,8 +127,8 @@ test("split right divides the window beside it, split down stacks below it, from
   const n0 = await count();
   // Two controls with names, and the right one is first.
   const actions = await page.locator(`.ui-window[data-window-id="${id}"] .ui-window-action`).evaluateAll((b) => b.map((x) => [(x as HTMLElement).dataset.action, (x as HTMLElement).dataset.tip]));
-  // "?" (read about this window) is the first button of a terminal's group; the two split buttons follow it.
-  expect(actions.slice(0, 3)).toEqual([["docs", "Read about this window"], ["split-right", "Split right"], ["split-down", "Split down"]]);
+  // A terminal has no "?" (owner, 2026-11-06): the two split buttons are its first controls.
+  expect(actions.slice(0, 2)).toEqual([["split-right", "Split right"], ["split-down", "Split down"]]);
   const a0 = await rect(`.ui-window[data-window-id="${id}"]`);
   await page.locator(`.ui-window[data-window-id="${id}"] [data-action="split-right"]`).evaluate((b) => (b as HTMLElement).click());
   await expect.poll(count).toBe(n0 + 1);
@@ -1130,8 +1130,8 @@ test("window header actions are one pill: as tall as the title pill, on its line
     return { aTop: a.top, aH: a.height, tTop: t.top, tH: t.height, buttons, gaps, tip: [...w.querySelectorAll<HTMLElement>(".ui-window-action:not(.ui-window-more)")].map((b) => b.dataset.tip) };
   }, id);
   const d = await geometry(page, "w-nix-cache");
-  expect(d.buttons).toEqual(["docs", "split-right", "split-down", "sessions", "close"]);
-  expect(d.tip).toEqual(["Read about this window", "Split right", "Split down", "Sessions", "Close"]);
+  expect(d.buttons).toEqual(["split-right", "split-down", "sessions", "close"]);
+  expect(d.tip).toEqual(["Split right", "Split down", "Sessions", "Close"]);
   expect(Math.abs(d.aH - d.tH)).toBeLessThan(0.5);
   expect(Math.abs(d.aTop - d.tTop)).toBeLessThan(0.5);
   expect(Math.max(...d.gaps) - Math.min(...d.gaps)).toBeLessThan(0.5); // equal spacing

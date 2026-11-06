@@ -136,7 +136,8 @@ async function checkPreview(page: Page, kind: "popover" | "sheet", windowId?: st
     // It lines up with the "?" it grew from (its right edges meet), or, in a window too narrow for that, sits at the window's own inset on the left;
     // either way it keeps the header's inset from the window's edges.
     const inset = 8 + m.border, atButton = Math.abs(m.root.right - m.anchorRight!) <= 0.5, atEdge = Math.abs(m.root.left - (m.win!.left + inset)) <= 0.5;
-    expect(atButton || atEdge, `the popover meets the "?" at its right edge (${m.root.right} vs ${m.anchorRight}) or the window's inset on the left`).toBe(true);
+    // A terminal has no "?" (it is opened from ⌘K and anchors to the title pill): then only the containment below applies.
+    if (m.anchorRight !== undefined) expect(atButton || atEdge, `the popover meets the "?" at its right edge (${m.root.right} vs ${m.anchorRight}) or the window's inset on the left`).toBe(true);
     expect(m.root.left).toBeGreaterThanOrEqual(m.win!.left + inset - 0.5); expect(m.root.right).toBeLessThanOrEqual(m.win!.right - inset + 0.5);
   } else {
     near(m.root.left, m.vw - m.root.right, "the sheet has equal gutters left and right");
@@ -544,20 +545,24 @@ test("\"?\": the first button on a terminal, the add-host dialog and an error ca
   await expect(rowK).toContainText("Ctrl+Shift+Alt+/");
   await page.keyboard.press("Escape");
 
-  // A terminal: "?" comes before the splits, the sessions button and Close, on the same rules.
+  // A terminal has no "?" (owner, 2026-11-06): its group is the splits, the sessions button and Close, on the same rules.
   await flyConsole(page);
   const terminal = await terminalId(page);
   const terminals = await page.evaluate(measureActions, `[data-window-id="${terminal}"]`);
-  expect(terminals[0]!.ids).toEqual(["docs", "split-right", "split-down", "sessions", "close"]);
-  checkGroups(terminals, "docs", settingsInset);
-  // An error card ("No access"): "?" and Close.
+  expect(terminals[0]!.ids).toEqual(["split-right", "split-down", "sessions", "close"]);
+  checkGroups(terminals, "split-right", settingsInset);
+  // An error card ("No access") is a terminal too: Close alone.
   const card = await cardId(page);
   await expect(page.locator(`[data-window-id="${card}"] .cl-noaccess`)).toBeVisible();
   const cards = await page.evaluate(measureActions, `[data-window-id="${card}"]`);
-  expect(cards[0]!.ids).toEqual(["docs", "close"]);
-  checkGroups(cards, "docs", settingsInset);
-  await goTo(page, `canvas:win:${card}`); // bring the card into view, as a person would before pressing its button
-  await page.locator(`[data-window-id="${card}"] .ui-window-action[data-action="docs"]`).click({ timeout: 15_000 });
+  expect(cards[0]!.ids).toEqual(["close"]);
+  checkGroups(cards, "close", settingsInset);
+  // Its page is still one step away: ⌘K, "Read about this window" (Canvas group, with the other actions on the focused window), opens the preview (anchored to the title pill, which stands in for the absent button).
+  await goTo(page, `canvas:win:${card}`);
+  await palette(page, "read about");
+  const helpRow = page.locator(".result", { has: page.locator(".result-label", { hasText: /^Read about this window$/ }) });
+  await expect(helpRow).toBeVisible();
+  await helpRow.click();
   await expect(page.locator(".ui-dp-pop")).toBeVisible();
   await page.waitForTimeout(450);
   await expect(page.locator(".ui-dp-pop .ui-dp-title")).toHaveText("All keys at a glance");
@@ -595,10 +600,10 @@ test("close-ups of the action group at DPR 2 and 3 (desktop and phone), alignmen
       await page.screenshot({ path: `${SHOTS}/closeup-${tag}-${name}-header.png`, clip: fit(head, 8) });
       await page.screenshot({ path: `${SHOTS}/closeup-${tag}-${name}-actions.png`, clip: fit(group, 10) });
     };
-    const checkOne = async (windowId: string, expected: string[] | undefined): Promise<void> => {
+    const checkOne = async (windowId: string, expected: string[] | undefined, first = "docs"): Promise<void> => {
       const m = await page.evaluate(measureActions, `[data-window-id="${windowId}"]`);
       if (expected && size === SIZES.desktop) expect(m[0]!.ids).toEqual(expected);
-      checkGroups(m, "docs");
+      checkGroups(m, first);
     };
     // The preview itself: a popover on a desktop, a bottom sheet on a phone, with its alignment measured at this pixel ratio.
     const kind = size === SIZES.phone ? "sheet" : "popover";
@@ -629,14 +634,15 @@ test("close-ups of the action group at DPR 2 and 3 (desktop and phone), alignmen
     await flyConsole(page);
     const terminal = await terminalId(page);
     await goTo(page, `canvas:win:${terminal}`);
+    // A terminal and a "No access" card have no "?" (owner, 2026-11-06); their docs are in ⌘K, in ⌘K ("Read about this window").
     await closeUp("terminal", terminal);
-    await previewShot("terminal", terminal);
-    await checkOne(terminal, ["docs", "split-right", "split-down", "sessions", "close"]);
+    await checkOne(terminal, ["split-right", "split-down", "sessions", "close"], size === SIZES.desktop ? "split-right" : "close");
+    expect(await page.locator(`[data-window-id="${terminal}"] .ui-window-action[data-action="docs"]`).count()).toBe(0);
     const card = await cardId(page);
     await goTo(page, `canvas:win:${card}`);
     await closeUp("no-access", card);
-    await previewShot("no-access", card);
-    await checkOne(card, ["docs", "close"]);
+    await checkOne(card, ["close"], "close");
+    expect(await page.locator(`[data-window-id="${card}"] .ui-window-action[data-action="docs"]`).count()).toBe(0);
     await goTo(page, `canvas:win:${terminal}`);
     const dialog = await openAddHost(page);
     await closeUp("add-host", dialog);
