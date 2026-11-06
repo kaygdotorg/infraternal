@@ -136,6 +136,12 @@ pub struct AcquireHold {
 #[cfg(feature = "test-support")]
 pub static ACQUIRE_HOLD: std::sync::Mutex<Option<AcquireHold>> = std::sync::Mutex::new(None);
 
+/// Takes the runtime lifetime lock for `state`, bound to `host` when given,
+/// under the parent directory's shared admission guard. It may block: on
+/// filesystem work, and on the kernel socket dump under its hang-only bound.
+/// So async callers run it off their event loop. With `test-support`, a
+/// pending [`AcquireHold`] for `state` first holds the call until it is
+/// released (at most 10 s).
 #[cold]
 #[inline(never)]
 fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {

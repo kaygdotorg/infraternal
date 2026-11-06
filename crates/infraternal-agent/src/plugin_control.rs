@@ -525,6 +525,13 @@ impl Service {
         lifetime.clone_from(&service.registry.lifetime);
         Ok(service)
     }
+
+    /// Starts the plugin service for `state` in `mode`, shared by embedded and
+    /// remote dispatch. In remote mode on Linux it first holds the runtime
+    /// lifetime lock: it validates a `lifetime` lock the caller already has, or
+    /// acquires one on a blocking thread, so the caller's event loop keeps
+    /// running while acquisition waits (#355). `installation`, when present,
+    /// binds acquisition to its host; `supplied` replaces the registry in tests.
     fn start_inner<'a>(
         state: &'a Path,
         mode: crate::plugins::ExecutionMode,
