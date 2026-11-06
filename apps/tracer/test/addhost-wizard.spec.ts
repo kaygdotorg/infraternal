@@ -555,8 +555,12 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(page.getByRole("heading", { name: "installed.lab has an infraternal install this server didn't make" })).toBeVisible({ timeout: 15_000 });
     const failure = wizard(page).locator(".ah-page[data-page='failure']");
     await expect(failure.locator(".ah-lede")).toContainText("nothing was changed");
-    await expect(failure).not.toContainText("/var/lib/infraternal");
-    await expect(failure).not.toContainText("didn't finish");
+    // What the page says outside the collapsed Details: no path, no "didn't finish".
+    for (const visible of [page.getByRole("heading", { name: /installed\.lab/ }), failure.locator(".ah-lede")]) {
+      await expect(visible).not.toContainText("/var/lib/infraternal");
+      await expect(visible).not.toContainText("didn't finish");
+    }
+    await expect(failure.locator(".ah-text")).toHaveCount(0);
     await expect(inWizard(page, "Try again")).toBeVisible();
     await failure.locator(".ah-details summary").click();
     await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
