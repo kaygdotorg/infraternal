@@ -475,7 +475,7 @@ scan_holders() {
  # process that has exited meanwhile is moot; a permission error about one that
  # turned non-dumpable meanwhile (an ssh or a shim starting) is decided as
  # above; any other error is unknown and refuses.
- live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>&1 >&4 | sed 's/^/unreadable: /'; } 4>&1 )
+ live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print 2>&1 >&4 | sed 's/^/unreadable: /'; } 4>&1 )
  # One line per entry; no here-document (compaction, see install.rs) and no
  # pipeline, whose subshell would swallow exit 73.
  scan_nl=$(printf '\n_'); scan_nl=${scan_nl%_}
@@ -494,10 +494,21 @@ scan_holders() {
      *": Permission denied") ! hidden_holder "/proc/$scan_pid" || exit 73;;
      *) exit 73;;
     esac;;
-   *) exit 73;;
+   *) scan_ours "$scan_line" || continue; exit 73;;
   esac
  done
  set +f; IFS=$scan_ifs
+}
+# Whether /proc link $1, whose text names a path under $base, is that very
+# file here. A process in another mount namespace, such as a container that
+# runs its own infraternal, names its own /var/lib/infraternal, which is not
+# this install: refusing on it made every add on such a host "busy" (#394,
+# J315 on compute01). A link that vanished holds nothing; a deleted file
+# cannot be compared, so it still counts.
+scan_ours() {
+ scan_target=$(readlink "$1" 2>/dev/null) || return 1
+ case "$scan_target" in *" (deleted)") return 0;; esac
+ [ "$1" -ef "$scan_target" ]
 }
 # Whether /proc entry $1, whose exe or fds are hidden (non-dumpable), may hold
 # this install. A process that has exited (or is a zombie) holds nothing.
@@ -519,7 +530,13 @@ install_process() {
  agent_unit_process "$1" && return 0
  session_scope_process "$1" && return 0
  install_argv0=$({ tr '\0' '\n' < "$1/cmdline" | sed -n 1p; } 2>/dev/null || :)
- case "$install_argv0" in "$base"/*|"$base_real"/*) return 0;; esac
+ case "$install_argv0" in
+  "$base"/*|"$base_real"/*)
+   # Started from that path in its own root: when that file is visibly
+   # another one (a container's own install), it is not this install's.
+   if [ -e "$1/root$install_argv0" ] && [ -e "$install_argv0" ] && ! [ "$1/root$install_argv0" -ef "$install_argv0" ]; then return 1; fi
+   return 0;;
+ esac
  return 1
 }
 # Whether /proc entry $1 runs in an infraternal terminal session scope.

@@ -1917,6 +1917,28 @@ manager=kill_manager
             time.sleep(0.01)
         return holder
 
+    def test_a_container_running_its_own_install_does_not_make_it_busy(self):
+        # J315, real root on compute01: a container's own infraternal names
+        # the same path, in its own mount namespace. Not a holder of this
+        # install; a process holding this install's file still is.
+        self.make_takeover_fixture()
+        ready = subprocess.run(['unshare', '-Urm', 'true'], capture_output=True)
+        if ready.returncode != 0:
+            self.skipTest('no unprivileged mount namespaces here')
+        marker = Path(self.temp).resolve() / 'container-ready'
+        container = subprocess.Popen(['unshare', '-Urm', 'sh', '-c',
+            f'mount -t tmpfs none "{self.base}" && mkdir -p "{self.base}/state" && : > "{self.identity_path}" '
+            f'&& exec 3< "{self.identity_path}" && : > "{marker}" && exec sleep 30'])
+        self.children.append(container)
+        for _ in range(500):
+            if marker.exists():
+                break
+            time.sleep(0.01)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        self.hold_a_file()
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='busy'))
+
     def test_an_install_another_process_uses_is_busy_and_never_stopped(self):
         record = self.make_takeover_fixture()
         self.hold_a_file()
