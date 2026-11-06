@@ -110,7 +110,7 @@ fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof
     link.engine == EngineKind::GotaTun && link.owner.is_some_and(|owner| proof.accepts(owner))
 }
 
-/// Recreate the GotaTun private-key file only from the durable rotation journal.
+/// Recreate the `GotaTun` private-key file only from the durable rotation journal.
 ///
 /// A clean stop removes that file after stopping the userspace engine. During an open commit, a
 /// restart must select the candidate even if the old file survived; before commit intent, only
@@ -290,7 +290,7 @@ fn carry_kernel_key(
     store.write_private_key(&key[..])
 }
 
-/// Whether a saved GotaTun snapshot key is still supported by the private records and rotation journal.
+/// Whether a saved `GotaTun` snapshot key is still supported by the private records and rotation journal.
 fn gotatun_snapshot_binding_is_authorized(
     store: &crate::node_state::Store,
     bound: crate::policy::model::PublicKey,
@@ -321,7 +321,7 @@ fn gotatun_snapshot_binding_is_authorized(
     Ok(bound_is_authorized && private_is_authorized && record_is_authorized)
 }
 
-/// Restore accepted GotaTun configuration while allowing only a journal-proven commit transition.
+/// Restore accepted `GotaTun` configuration while allowing only a journal-proven commit transition.
 fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<()> {
     let store = node.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
     recover_gotatun_private_key_from_journal(store)?;
@@ -1462,6 +1462,46 @@ impl Node {
             rotation_tests::crash_checkpoint("rotation_finished");
         }
         Ok(())
+    }
+
+    /// Prepare a rotation through the real node journal for an isolated namespace fixture.
+    ///
+    /// This entry point exists only with `test-support`; shipping callers use the authenticated
+    /// action dispatcher, which keeps untrusted code from bypassing the coordinator protocol.
+    /// # Errors
+    /// Returns the same validation and durable-write failures as the internal rotation method.
+    #[cfg(feature = "test-support")]
+    pub fn prepare_rotation_for_fixture(
+        &mut self,
+        operation_id: &str,
+        sequence: u64,
+    ) -> io::Result<crate::policy::model::PublicKey> {
+        self.prepare_rotation(operation_id, sequence)
+    }
+
+    /// Commit a prepared rotation through the real node engine for an isolated namespace fixture.
+    /// # Errors
+    /// Returns the same validation and engine-update failures as the internal rotation method.
+    #[cfg(feature = "test-support")]
+    pub fn commit_rotation_for_fixture(
+        &mut self,
+        operation_id: &str,
+        sequence: u64,
+    ) -> io::Result<crate::policy::model::PublicKey> {
+        self.commit_rotation(operation_id, sequence)
+            .map(|identity| identity.public_key)
+    }
+
+    /// Finish a committed rotation through the real node journal for an isolated namespace fixture.
+    /// # Errors
+    /// Returns the same validation and durable-write failures as the internal rotation method.
+    #[cfg(feature = "test-support")]
+    pub fn finish_rotation_for_fixture(
+        &mut self,
+        operation_id: &str,
+        sequence: u64,
+    ) -> io::Result<()> {
+        self.finish_rotation(operation_id, sequence)
     }
 
     /// Remove all owned kernel work before reporting off. A failed cleanup remains visible.

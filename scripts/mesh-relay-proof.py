@@ -388,8 +388,10 @@ def inner(binary):
         results["tap_delivered_after_probes"] = {"A": 2, "B": 2}
 
         # 3. Peers. A and B only know each other's private address: no direct path.
-        def peer(node, endpoint):
-            return {"host": HOSTS[node], "key": identity[node]["public_key"],
+        def peer(node, endpoint, key=None, previous_key=None, previous_active=False):
+            """Build one fixture peer, optionally retaining a rotation overlap identity."""
+            return {"host": HOSTS[node], "key": key or identity[node]["public_key"],
+                    "previous_key": previous_key, "previous_active": previous_active,
                     "addresses": {"ipv4": MESH[node][0], "ipv6": MESH[node][1]}, "endpoint": endpoint}
         a.ask({"peers": [peer("B", f"10.2.0.2:{identity['B']['port']}"),
                          peer("C", f"198.51.100.31:{identity['C']['port']}")]}, "peers")
@@ -496,7 +498,58 @@ def inner(binary):
                                     "mbit_s": round(got["bytes"] * 8 / got["seconds"] / 1e6, 1)}
         results["tap_delivered_after_streams"] = {"A": after_direct["tap_delivered"], "B": b_stats["tap_delivered"]}
 
-        # 5. Relay 1 killed mid-stream: capture link state and counters on relay 2.
+        # 5. The same relayed TCP stream survives a live GotaTun key rotation.
+        rotation = {"operation_id": "00000000-0000-4000-8000-000000003679", "sequence": 1}
+        rotation_state = {}
+
+        def rotate_during_stream(sender, gate_read, resume_write):
+            """Rotate B while the receiver holds the same relayed TCP stream open."""
+            ready, _, _ = select.select([gate_read], [], [], 30)
+            assert ready and os.read(gate_read, 1) == b"G", "receiver did not reach the rotation gate"
+            assert sender.poll() is None, "the rotation stream finished before the key switch"
+            started_rotation = time.monotonic()
+            prepared = b.ask({"rotation_prepare": rotation}, "rotation_prepared")
+            candidate = prepared["public_key"]
+            assert candidate != identity["B"]["public_key"], prepared
+            a.ask({"peers": [
+                peer("B", f"10.2.0.2:{identity['B']['port']}", key=candidate,
+                     previous_key=identity["B"]["public_key"], previous_active=True),
+                peer("C", f"198.51.100.31:{identity['C']['port']}")], "peers")
+            overlap = a.ask("\"stats\"", "stats")
+            assert identity["B"]["public_key"] in overlap["peer_keys"] and candidate in overlap["peer_keys"], overlap
+
+            committed = b.ask({"rotation_commit": rotation}, "rotation_committed")
+            assert committed["public_key"] == candidate, committed
+            a.ask({"peers": [
+                peer("B", f"10.2.0.2:{identity['B']['port']}", key=candidate,
+                     previous_key=identity["B"]["public_key"], previous_active=False),
+                peer("C", f"198.51.100.31:{identity['C']['port']}")], "peers")
+            a.ask({"peers": [
+                peer("B", f"10.2.0.2:{identity['B']['port']}", key=candidate),
+                peer("C", f"198.51.100.31:{identity['C']['port']}")], "peers")
+            b.ask({"rotation_finish": rotation}, "rotation_finished")
+            rotation_state.update({
+                "old_key": identity["B"]["public_key"],
+                "candidate_key": candidate,
+                "overlap_had_both_keys": True,
+                "stream_gate_rotation_ms": round((time.monotonic() - started_rotation) * 1000, 1),
+            })
+            os.write(resume_write, b"R")
+
+        a.drain()
+        b.drain()
+        sent, got = stream("nodeA", "nodeB", MESH["B"][0], 5205, 128 << 20,
+                           during=rotate_during_stream, gate_after=1 << 20)
+        assert sent["sha256"] == got["sha256"] and got["bytes"] == 128 << 20, (sent, got)
+        results["rotation_during_relayed_stream"] = {
+            **rotation_state,
+            "bytes": got["bytes"], "sha256_equal": True,
+            "mbit_s": round(got["bytes"] * 8 / got["seconds"] / 1e6, 1),
+            "max_gap_ms": round(got["max_gap_ms"], 1),
+            "stream_seconds": round(got["seconds"], 2),
+        }
+
+        # 6. Relay 1 killed mid-stream: capture link state and counters on relay 2.
         killed = {}
         switched = {}
 
@@ -536,7 +589,7 @@ def inner(binary):
             "killed_after_stream_start_s": round(killed["at"] - (ended - got["seconds"]), 2),
         }
 
-        # 6. No relay left: the pair says so plainly; a restarted relay brings it back.
+        # 7. No relay left: the pair says so plainly; a restarted relay brings it back.
         a.drain()
         b.drain()
         relays[1].kill()
@@ -566,7 +619,7 @@ def inner(binary):
             (time.monotonic() - restarted) * 1000, 1)
         results["no_relay"]["ping_after"] = recovered
 
-        # 7. Rebind: A moves to another uplink (another NAT, another public address).
+        # 8. Rebind: A moves to another uplink (another NAT, another public address).
         old = [o["reflexive"] for o in observed["A"][:2]]
         moved_at = time.monotonic()
         rebind = {}

@@ -987,6 +987,9 @@ impl IpRecv for LinuxPacketIo {
     }
 }
 
+/// Build the device's complete peer list, retaining both keys during a rotation overlap.
+/// # Errors
+/// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     let peers = config
         .peers
@@ -996,7 +999,12 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     Ok(peers.into_iter().flatten().collect())
 }
 
-/// Return both identities during rotation and assign routes only to the active identity.
+/// Convert each configured peer to one live identity or its journaled overlap pair.
+///
+/// Only the active identity owns allowed IPs and the endpoint, so the second identity can accept
+/// a handshake during overlap without stealing routes or initiating a competing path.
+/// # Errors
+/// Rejects invalid host routes before they reach the userspace device.
 fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
     let addresses = vec![

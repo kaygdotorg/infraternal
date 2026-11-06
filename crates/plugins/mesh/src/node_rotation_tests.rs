@@ -58,7 +58,7 @@ fn gotatun_rotation_crash_child() {
     panic!("the requested crash boundary was never reached");
 }
 
-/// SIGKILL after each durable GotaTun transition leaves enough journal evidence to restart safely.
+/// SIGKILL after each durable `GotaTun` transition leaves enough journal evidence to restart safely.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
@@ -273,7 +273,7 @@ fn gotatun_rotation_recovers_its_private_key_after_down() {
     restored.down().unwrap();
 }
 
-/// A GotaTun candidate is not an ownership proof until its durable commit intent exists.
+/// A `GotaTun` candidate is not an ownership proof until its durable commit intent exists.
 #[test]
 fn gotatun_owner_proof_rejects_a_candidate_before_commit_intent() {
     let state = RotationState::new();
@@ -545,7 +545,7 @@ fn gotatun_rotation_changes_the_live_identity_and_marker() {
     node.down().unwrap();
 }
 
-/// A higher coordinator sequence settles both prepared and committed GotaTun journals on the held key.
+/// A higher coordinator sequence settles both prepared and committed `GotaTun` journals on the held key.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn gotatun_higher_sequence_settles_abandoned_rotations_on_the_held_key() {
