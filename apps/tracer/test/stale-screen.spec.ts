@@ -95,6 +95,8 @@ for (const [name, viewport] of [["desktop", { width: 1440, height: 900 }], ["pho
       expect(after.pillTop).toBeCloseTo(before.pillTop, 1);
       expect(Math.abs(after.connMid - after.hostMid)).toBeLessThanOrEqual(0.5);
       await openTooltip(page, name === "phone");
+      // A tap on the mark only says why; it does not also open the machine details (frame.ts).
+      if (name === "phone") await expect(page.locator(".canvas-popover")).toHaveCount(0);
       await page.screenshot({ path: tracerEvidencePath(`stale-icon-${name}-ink-tooltip.png`) });
       await page.context().request.post("/__mock/live-output", { data: { text: "x" } });
       await expect(stateShown(page)).toHaveCount(0);
