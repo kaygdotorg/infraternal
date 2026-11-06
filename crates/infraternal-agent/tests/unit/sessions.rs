@@ -523,6 +523,11 @@ thread_local! {
     /// A per-thread shortening of the launch hang bound, so a test reaches the failure path in milliseconds.
     pub(super) static LAUNCH_BOUND: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
+    /// Arms the launch bound on an event: with a path set, the next launch's bound starts only once the path
+    /// exists, so a test can put "the launcher has reached this point" before the launch gives up. A Hello that
+    /// arrives before then still completes the launch. Taken by that launch.
+    pub(super) static LAUNCH_ARMED: std::cell::Cell<Option<std::path::PathBuf>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Whether `pid` is a live process; a zombie, which still answers `kill(0)`, counts as gone.
@@ -622,6 +627,25 @@ fn detached_fixture(
     tokio::task::JoinHandle<()>,
     tokio::sync::oneshot::Receiver<()>,
 ) {
+    // sleep: the stand-in shim binds late on purpose (`bind_delay`), to exercise a late bind
+    let bind = tokio::time::sleep(bind_delay);
+    detached_fixture_gated(state, root, bind, silent, retire, launcher_body)
+}
+
+/// [`detached_fixture`] whose stand-in shim binds when `bind` completes, once the launcher has
+/// named the session. A test passes an event here when the order of bind and launch failure matters.
+fn detached_fixture_gated(
+    state: &std::path::Path,
+    root: &std::path::Path,
+    bind: impl std::future::Future<Output = ()> + Send + 'static,
+    silent: usize,
+    retire: bool,
+    launcher_body: &str,
+) -> (
+    std::path::PathBuf,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
     use infraternal_shim::frame::{CLOSE_SESSION, Frame, SEQUENCED_INPUT};
     // The detaching launcher: record the session name it was given, then exit successfully, as the real one does.
     let name_file = root.join("session.name");
@@ -647,8 +671,7 @@ fn detached_fixture(
             // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         };
-        // sleep: the stand-in shim binds late on purpose (`bind_delay`), to exercise a late bind
-        tokio::time::sleep(bind_delay).await;
+        bind.await;
         let id = uuid::Uuid::parse_str(&name).unwrap();
         let path = sessions.join(format!("{name}.sock"));
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -990,26 +1013,36 @@ async fn a_forked_launcher_is_not_proof_the_live_terminal_is_dead() {
     let locks = person_locks(&state);
     let launcher_pid = root.join("launcher.pid");
     let descendant_pid = root.join("descendant.pid");
+    // Each pid file is renamed into place whole, the launcher's last, so its existence means both are
+    // complete and the launcher has forked its child and is waiting on it.
     let body = format!(
-        "sleep 300 &\necho $! > '{}'\necho $$ > '{}'\nwait",
-        descendant_pid.display(),
-        launcher_pid.display()
+        "sleep 300 &\necho $! > '{d}.tmp' && mv '{d}.tmp' '{d}'\necho $$ > '{l}.tmp' && mv '{l}.tmp' '{l}'\nwait",
+        d = descendant_pid.display(),
+        l = launcher_pid.display()
     );
-    let (exe, shim, closed) = detached_fixture(
+    // The shim binds only after the launch has given up, and the launch gives up only after the launcher has
+    // reached that point: both orders are events, so host load cannot reorder them (#355).
+    let (failed, launch_failed) = tokio::sync::oneshot::channel::<()>();
+    let (exe, shim, closed) = detached_fixture_gated(
         &state,
         &root,
-        std::time::Duration::from_millis(1000),
+        async {
+            let _ = launch_failed.await;
+        },
         0,
         false,
         &body,
     );
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(launcher_pid.clone())));
     let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     assert!(
         result.is_err(),
         "a shim that has not bound fails the launch"
     );
+    let _ = failed.send(());
     tokio::time::timeout(std::time::Duration::from_secs(20), closed)
         .await
         .expect("the late shim was never asked to close")
