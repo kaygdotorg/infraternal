@@ -337,7 +337,7 @@ class Binary:
             if stream == 0:
                 self.process(frame=(stream, kind, body))
             else:
-                assert stream == self.stream
+                assert stream == self.stream or stream in self.retired, (stream, kind)
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
         self.benchmark_scope()
@@ -419,13 +419,13 @@ class Binary:
             assert body[:4] == bytes(4)
             self.inventory = json.loads(body[4:])
             return kind
-        assert stream == self.stream, (stream, kind)
         if stream in self.retired:
             # A frame of a terminal this client already left: the writer
             # sends control replies (Pong) before queued terminal output, so
             # output and acknowledgements of the old attachment can still
             # arrive after detach's fence. Its own stream id names it (#347).
             return kind
+        assert stream == self.stream, (stream, kind)
         if kind == 0x11:
             seq = struct.unpack('<Q', body[:8])[0]
             assert seq == self.out, (seq, self.out)
