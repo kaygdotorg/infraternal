@@ -129,6 +129,7 @@ pub(crate) struct RuntimeInfo {
     offloads_enabled: bool,
 }
 
+/// Requests serialized by the GotaTun worker; each operation replies after touching the device.
 enum WorkerCommand {
     Apply {
         config: Config,
@@ -596,6 +597,7 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
+/// Serialize device changes, relay work, fatal-error recovery, and shutdown on the runtime thread.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     loop {
         tokio::select! {
@@ -665,6 +667,7 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Install a relay endpoint on the peer whose key currently owns its host routes.
     #[cfg(feature = "relay")]
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         let policy = self
@@ -691,6 +694,7 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("GotaTun relay endpoint could not be installed."))
     }
 
+    /// Prepare a peer for relayed traffic while preserving any session it already established.
     #[cfg(feature = "relay")]
     async fn prepare_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         // GotaTun records a handshake as soon as either side derives a session, including a
@@ -798,6 +802,7 @@ impl RuntimeState {
         }
     }
 
+    /// Apply a coordinator snapshot, updating both overlap keys when their route roles change.
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
         if self.device.is_none() {
             self.start_device(&config).await?;

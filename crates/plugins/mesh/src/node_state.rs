@@ -771,6 +771,7 @@ pub(crate) mod tests {
         );
     }
 
+    /// A GotaTun identity can be restored from its private file without weakening its mode.
     #[test]
     fn gotatun_private_key_round_trips_only_as_a_private_file() {
         let directory = Directory::new();
@@ -805,7 +806,8 @@ pub(crate) mod tests {
         let abandoned = store.key_path.with_extension("4242.new");
         fs::write(&abandoned, [0x77; 32]).expect("simulate a stop before the replacement rename");
         drop(store);
-        let (store, _) = Store::open(&directory.0).expect("reopen after the interrupted replacement");
+        let (store, _) =
+            Store::open(&directory.0).expect("reopen after the interrupted replacement");
         assert!(
             !abandoned.exists(),
             "restart removes the private temporary left by a stopped replacement"

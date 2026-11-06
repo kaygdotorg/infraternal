@@ -122,9 +122,7 @@ fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof
 /// restart must select the candidate even if the old file survived; before commit intent, only
 /// the predecessor is authorized. The recorded public key bounds both states so an unrelated or
 /// incomplete journal can never replace the local key.
-fn recover_gotatun_private_key_from_journal(
-    store: &crate::node_state::Store,
-) -> io::Result<()> {
+fn recover_gotatun_private_key_from_journal(store: &crate::node_state::Store) -> io::Result<()> {
     let Some(rotation) = store.rotation_secret()? else {
         return Ok(());
     };

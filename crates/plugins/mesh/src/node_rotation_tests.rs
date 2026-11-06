@@ -134,11 +134,12 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
             .read_private_key()
             .expect("read the key left by the child")
             .expect("the GotaTun key file survives the crash");
-        let file_key_at_crash = if matches!(stage, "rotation_private_key_saved" | "rotation_finished") {
-            candidate_public
-        } else {
-            previous_public
-        };
+        let file_key_at_crash =
+            if matches!(stage, "rotation_private_key_saved" | "rotation_finished") {
+                candidate_public
+            } else {
+                previous_public
+            };
         assert_eq!(
             crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
             file_key_at_crash,

@@ -79,6 +79,7 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Decode a 32-byte mesh public key from the fixture's 64-character hexadecimal input.
 fn key(text: &str) -> PublicKey {
     let mut out = [0; 32];
     for (index, byte) in out.iter_mut().enumerate() {
@@ -174,6 +175,10 @@ struct RelayConfig {
     name: String,
 }
 
+/// One peer and its host routes from the relay fixture's node input.
+///
+/// During a key overlap, `previous_key` stays installed while route ownership follows
+/// `previous_active`, so the fixture exercises the same active-key transition as a real node.
 #[derive(Deserialize)]
 struct PeerConfig {
     host: String,
