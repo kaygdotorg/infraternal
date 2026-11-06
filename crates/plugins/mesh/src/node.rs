@@ -54,33 +54,60 @@ fn restore_routes(
     Ok(routes)
 }
 
-/// The key that proves a live `GotaTun` link is this installation's: the state recorded the
-/// `GotaTun` engine, it names the interface key (or, for older state, the accepted snapshot's key),
-/// and the private key on disk derives that same key. Retirement, firewall adoption and TUN
-/// adoption all use this one proof (#235, D332).
+/// The keys that prove a live `GotaTun` TUN is this installation's, bounded by its durable
+/// rotation journal. The root-only key file and interface marker must each name one of those
+/// journal keys; retirement and TUN adoption use this same proof (D332, #367).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GotatunProof(Vec<crate::policy::model::PublicKey>);
+impl GotatunProof {
+    /// Whether `key` is one of the identities this installation can prove.
+    fn accepts(&self, key: crate::policy::model::PublicKey) -> bool {
+        self.0.contains(&key)
+    }
+}
+
+/// Build the owner proof from the saved engine, interface key, private key and bounded journal.
 fn gotatun_owner_proof(
     store: &crate::node_state::Store,
     snapshot_key: Option<crate::policy::model::PublicKey>,
-) -> io::Result<Option<crate::policy::model::PublicKey>> {
+) -> io::Result<GotatunProof> {
     if store.recorded_engine()? != Some(EngineKind::GotaTun) {
-        return Ok(None);
+        return Ok(GotatunProof::default());
     }
     let Some(recorded) = store.recorded_interface()?.or(snapshot_key) else {
-        return Ok(None);
+        return Ok(GotatunProof::default());
     };
-    let private_public = store
+    let Some(private_public) = store
         .read_private_key()?
         .map(|bytes| crate::gotatun_node::secret_from_bytes(&bytes).map(|pair| pair.1))
-        .transpose()?;
-    Ok((private_public == Some(recorded)).then_some(recorded))
+        .transpose()?
+    else {
+        return Ok(GotatunProof::default());
+    };
+    let mut keys = if let Some(rotation) = store.rotation_secret()? {
+        let mut keys = Vec::with_capacity(2);
+        if !rotation.completed {
+            keys.push(crate::wireguard::Key::from_private(&rotation.previous)?.1);
+        }
+        if rotation.commit_requested || rotation.completed {
+            keys.push(crate::wireguard::Key::from_private(&rotation.candidate)?.1);
+        }
+        keys
+    } else {
+        vec![recorded]
+    };
+    keys.sort_unstable();
+    keys.dedup();
+    if keys.contains(&recorded) && keys.contains(&private_public) {
+        Ok(GotatunProof(keys))
+    } else {
+        Ok(GotatunProof::default())
+    }
 }
 
-/// Whether `link` is the `GotaTun` TUN that `proof` (from [`gotatun_owner_proof`]) owns.
-fn proven_gotatun_link(
-    link: &crate::wireguard::ActiveLink,
-    proof: Option<crate::policy::model::PublicKey>,
-) -> bool {
-    link.engine == EngineKind::GotaTun && proof.is_some() && link.owner == proof
+/// Whether `link` is the `GotaTun` TUN named by `proof`.
+fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof) -> bool {
+    link.engine == EngineKind::GotaTun && link.owner.is_some_and(|owner| proof.accepts(owner))
 }
 
 /// The keys that prove a live kernel link is this installation's (D340, #285).
@@ -380,7 +407,7 @@ impl Node {
             // left alone and keeps the name (D340).
             let kernel_proof = kernel_owner_proof(&store, snapshot_key)?;
             let ours = proven_kernel_link(&link, &kernel_proof)
-                || proven_gotatun_link(&link, gotatun_owner_proof(&store, snapshot_key)?);
+                || proven_gotatun_link(&link, &gotatun_owner_proof(&store, snapshot_key)?);
             if ours {
                 switch_engine(&store, link, state.enabled, &kernel_proof)?;
                 store.record_engine(engine_kind)?;
@@ -391,7 +418,7 @@ impl Node {
         let foreign_link = active_engine.is_some_and(|engine| engine != engine_kind);
         let routes = restore_routes(&store, &state)?;
         let proof = gotatun_owner_proof(&store, snapshot_key)?;
-        let persisted = active_link.filter(|link| proven_gotatun_link(link, proof));
+        let persisted = active_link.filter(|link| proven_gotatun_link(link, &proof));
         let kernel_proof = kernel_owner_proof(&store, snapshot_key)?;
         let adopted_kernel = active_link.filter(|link| proven_kernel_link(link, &kernel_proof));
         let mut node = Self {
@@ -531,9 +558,13 @@ impl Node {
                         Some(store),
                     )
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    (None, None, KernelProof::default(), None, None)
-                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (
+                    None,
+                    None,
+                    KernelProof::default(),
+                    GotatunProof::default(),
+                    None,
+                ),
                 Err(error) => return Err(error),
             };
         let mut left = Vec::new();
@@ -545,7 +576,7 @@ impl Node {
             Ok(Some(link)) => {
                 let owned = match link.engine {
                     EngineKind::Kernel => proven_kernel_link(&link, &kernel_proof),
-                    EngineKind::GotaTun => proven_gotatun_link(&link, gotatun_proof),
+                    EngineKind::GotaTun => proven_gotatun_link(&link, &gotatun_proof),
                 };
                 if owned {
                     interface_index = Some(link.ifindex);
@@ -823,7 +854,7 @@ impl Node {
             return Ok(None);
         };
         let proof = gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?;
-        if !proven_gotatun_link(&link, proof) {
+        if !proven_gotatun_link(&link, &proof) {
             return Ok(None);
         }
         let restricted = link.tun_owner == Some(nix::unistd::geteuid().as_raw())
@@ -1215,7 +1246,7 @@ impl Node {
             if let (Some(store), Ok(Some(link))) = (&self.store, Device::active_link())
                 && proven_gotatun_link(
                     &link,
-                    gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?,
+                    &gotatun_owner_proof(store, self.config.as_ref().and_then(|c| c.local_key))?,
                 )
             {
                 if let Some(mut engine) = self.gotatun.take() {

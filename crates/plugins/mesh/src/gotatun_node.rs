@@ -134,6 +134,10 @@ enum WorkerCommand {
         config: Config,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
+    SetPrivateKey {
+        private_key: StaticSecret,
+        reply: sync::SyncSender<io::Result<()>>,
+    },
     Counters(sync::SyncSender<io::Result<CounterMap>>),
     #[cfg(feature = "relay")]
     PrepareHandshake {
@@ -320,6 +324,17 @@ impl Engine {
         let (reply, result) = sync::sync_channel(1);
         self.commands
             .send(WorkerCommand::Apply { config, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
+    /// Switch the userspace device and its rebuild key to one journaled rotation identity.
+    /// # Errors
+    /// Reports a stopped worker or a failed device reconfiguration.
+    pub(crate) fn set_private_key(&self, private_key: StaticSecret) -> io::Result<()> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::SetPrivateKey { private_key, reply })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
@@ -585,6 +600,9 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 Some(WorkerCommand::Apply { config, reply }) => {
                     let _ = reply.send(state.apply(config).await);
                 }
+                Some(WorkerCommand::SetPrivateKey { private_key, reply }) => {
+                    let _ = reply.send(state.set_private_key(private_key).await);
+                }
                 Some(WorkerCommand::Counters(reply)) => {
                     let _ = reply.send(state.counters().await);
                 }
@@ -621,6 +639,29 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
 }
 
 impl RuntimeState {
+    /// Change the live device key and retain that key for a later device rebuild.
+    ///
+    /// The pending key changes only after the device accepts the new key, so a failed update
+    /// cannot make a later rebuild silently use an identity the live device never accepted.
+    /// # Errors
+    /// Reports an absent runtime or a failed userspace device reconfiguration.
+    async fn set_private_key(&mut self, private_key: StaticSecret) -> io::Result<()> {
+        if self.pending.is_none() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        if let Some(device) = self.device.as_ref() {
+            device
+                .set_private_key(private_key.clone())
+                .await
+                .map_err(|_| io::Error::other("GotaTun private key could not be updated."))?;
+        }
+        self.pending
+            .as_mut()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .private_key = private_key;
+        Ok(())
+    }
+
     #[cfg(feature = "relay")]
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         let policy = self

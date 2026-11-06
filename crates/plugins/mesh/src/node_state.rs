@@ -299,21 +299,15 @@ impl Store {
     }
     /// Persist the selected engine separately from the legacy accepted snapshot.
     ///
-    /// Only kernel `WireGuard` rotates (D166, D352), so recording any other engine also retires the rotation
-    /// journal: whether or not a live link was switched, a later return to kernel must start from the key the
-    /// node now uses, never from a journal key (#285, J252 P3-2). The engine is written first; a stop between the
-    /// two leaves a journal that the kernel ownership proof already ignores, and the next recording removes it.
+    /// Both supported Linux engines use the same journal, so an engine switch must keep it with
+    /// the key it describes. `switch_engine` carries the live key before changing this record.
     /// # Errors
     /// Refuses unsafe state files and reports durable-write failures.
     pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
         write_public(
             &self.engine_path,
             &serde_json::to_vec(&engine).map_err(io::Error::other)?,
-        )?;
-        if engine == crate::gotatun_node::EngineKind::Kernel {
-            return Ok(());
-        }
-        self.discard_rotation_secret()
+        )
     }
     /// Read the selected engine, if this node has recorded one.
     /// # Errors
@@ -339,6 +333,50 @@ impl Store {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         write_private(&self.key_path, key)
+    }
+    /// Atomically replace the private key after the rotation journal authorizes the candidate.
+    ///
+    /// The directory lock keeps temporary-file cleanup and another local writer from racing this
+    /// replacement. The file and parent directory are synced before success is returned.
+    /// # Errors
+    /// Refuses malformed keys, unsafe existing files and failed durable replacements.
+    pub(crate) fn replace_private_key(&self, key: &[u8]) -> io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if key.len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let parent = self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(parent)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        if self
+            .read_private_key()?
+            .is_some_and(|current| current.as_slice() == key)
+        {
+            return Ok(());
+        }
+        let temporary = self
+            .key_path
+            .with_extension(format!("{}.new", std::process::id()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&temporary)?;
+            file.write_all(key)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &self.key_path)?;
+            FileSync::parent(&self.key_path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
     }
     /// Read the private key through a checked no-follow descriptor.
     /// # Errors
@@ -764,6 +802,44 @@ pub(crate) mod tests {
         );
         store.remove_private_key().expect("remove private key");
         assert!(store.read_private_key().expect("key removed").is_none());
+    }
+
+    /// Rotation replaces the old key atomically while keeping its restrictive file mode.
+    #[test]
+    fn replacing_a_private_key_is_durable_private_and_idempotent() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x31; 32];
+        let candidate = [0x42; 32];
+        store.write_private_key(&previous).expect("initial key");
+        store
+            .replace_private_key(&candidate)
+            .expect("replace with the journaled key");
+        let bytes = store
+            .read_private_key()
+            .expect("read replacement")
+            .expect("replacement exists");
+        assert_eq!(bytes.as_slice(), &candidate);
+        assert_eq!(
+            fs::metadata(&store.key_path)
+                .expect("replacement metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store
+            .replace_private_key(&candidate)
+            .expect("replaying the same replacement is harmless");
+        assert!(
+            fs::read_dir(&directory.0)
+                .expect("list private state")
+                .all(|entry| !entry
+                    .expect("state entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".new")),
+            "no private temporary remains after a completed replacement"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Exercises the real restart ingress fence before retained replacement aliases are reconciled [166,199], #173.
+//! Proves Linux node recovery across ingress fences and journaled key-rotation stops [166,199], #173, #367.
 #![allow(clippy::unwrap_used)]
 use super::*;
 use crate::{
@@ -92,7 +92,9 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
         let deadline = Instant::now() + Duration::from_secs(20);
         while !ready.exists() {
             if let Some(status) = child.try_wait().expect("check the child") {
-                let output = child.wait_with_output().expect("collect the child's failure");
+                let output = child
+                    .wait_with_output()
+                    .expect("collect the child's failure");
                 panic!(
                     "child exited before {stage}: {status}\n{}",
                     String::from_utf8_lossy(&output.stderr)
@@ -123,7 +125,11 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
         };
         let candidate_public = Key::from_private(&journal.candidate).unwrap().1;
         assert_eq!(previous_public.0, previous, "stage {stage}");
-        assert_eq!(journal.completed, stage == "rotation_finished", "stage {stage}");
+        assert_eq!(
+            journal.completed,
+            stage == "rotation_finished",
+            "stage {stage}"
+        );
         drop(journal);
         drop(store);
 
@@ -138,22 +144,109 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
         assert!(identity.key_rotation, "GotaTun retains rotation support");
         assert_eq!(identity.public_key, expected, "recovered key at {stage}");
         let link = Device::active_link().unwrap().unwrap();
-        assert_eq!(link.owner, Some(expected), "recovered owner marker at {stage}");
+        let marker = if expects_candidate {
+            candidate_public
+        } else {
+            previous_public
+        };
+        assert_eq!(link.owner, Some(marker), "owner marker at {stage}");
+        assert!(
+            Node::plan_retirement(&state.0).unwrap().interface,
+            "the journal proves the link is still ours at {stage}"
+        );
         let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+        let bytes = store.read_private_key().unwrap().unwrap();
+        let saved_key = if matches!(stage, "rotation_private_key_saved" | "rotation_finished") {
+            candidate_public
+        } else {
+            previous_public
+        };
+        assert_eq!(
+            crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
+            saved_key,
+            "private-key file at {stage}"
+        );
+        restored
+            .commit_rotation("00000000-0000-4000-8000-000000000367", 1)
+            .unwrap();
+        restored
+            .finish_rotation("00000000-0000-4000-8000-000000000367", 1)
+            .unwrap();
+        assert!(store.rotation_secret().unwrap().unwrap().completed);
+        assert_eq!(
+            Device::active_link().unwrap().unwrap().owner,
+            Some(candidate_public),
+            "the retry completes the marker transition at {stage}"
+        );
         let bytes = store.read_private_key().unwrap().unwrap();
         assert_eq!(
             crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
-            expected,
-            "recovered private-key file at {stage}"
+            candidate_public,
+            "the retry completes the private-key transition at {stage}"
         );
-        restored.commit_rotation("00000000-0000-4000-8000-000000000367", 1)
-            .unwrap();
-        restored.finish_rotation("00000000-0000-4000-8000-000000000367", 1)
-            .unwrap();
-        assert!(store.rotation_secret().unwrap().unwrap().completed);
         drop(store);
         restored.down().unwrap();
     }
+}
+
+/// A restart during commit accepts the old saved binding only when the open journal proves both keys.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() {
+    let state = RotationState::new();
+    let operation = "00000000-0000-4000-8000-000000000042";
+    let node_id = NodeId(1);
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let previous = node.up().unwrap().public_key;
+    let snapshot = crate::dataplane::Config {
+        local_key: Some(previous),
+        server: None,
+        node: node_id,
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+        version: 1,
+        addresses: Addresses {
+            ipv4: "10.254.0.1".parse().unwrap(),
+            ipv6: "fd01::1".parse().unwrap(),
+        },
+        default_policy: DefaultPolicy::Deny,
+        exposure: None,
+        peers: BTreeMap::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: BTreeMap::new(),
+    };
+    let (store, mut saved) = crate::node_state::Store::open(&state.0).unwrap();
+    saved.config = Some(snapshot);
+    store.save(&saved).unwrap();
+    let previous_private = store.read_private_key().unwrap().unwrap();
+    let (candidate_key, candidate_public) = Key::generate().unwrap();
+    store
+        .save_rotation_secret(&crate::node_state::RotationSecret {
+            operation_id: operation.to_owned(),
+            sequence: 1,
+            previous: previous_private.try_into().unwrap(),
+            candidate: candidate_key.private_bytes().try_into().unwrap(),
+            commit_requested: true,
+            completed: false,
+        })
+        .unwrap();
+    store
+        .replace_private_key(candidate_key.private_bytes())
+        .unwrap();
+    drop(store);
+    drop(node);
+
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    assert_eq!(restored.up().unwrap().public_key, candidate_public);
+    restored.commit_rotation(operation, 1).unwrap();
+    restored.finish_rotation(operation, 1).unwrap();
+    assert_eq!(
+        Device::active_link().unwrap().unwrap().owner,
+        Some(candidate_public)
+    );
+    restored.down().unwrap();
 }
 // Keep the retained address, recovery fence and packet observation in one scenario.
 fn check(backend: Backend) {
@@ -393,6 +486,57 @@ fn gotatun_rotation_changes_the_live_identity_and_marker() {
     assert!(store.rotation_secret().unwrap().unwrap().completed);
     drop(store);
     node.down().unwrap();
+}
+
+/// A higher coordinator sequence settles both prepared and committed GotaTun journals on the held key.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_higher_sequence_settles_abandoned_rotations_on_the_held_key() {
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000043";
+    let second = "00000000-0000-4000-8000-000000000044";
+    let third = "00000000-0000-4000-8000-000000000045";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let original = node.up().unwrap().public_key;
+    let abandoned = node.prepare_rotation(first, 1).unwrap();
+    assert_eq!(
+        node.prepare_rotation(second, 1).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock,
+        "an equal sequence does not prove the server abandoned the first operation"
+    );
+
+    let committed = node.prepare_rotation(second, 3).unwrap();
+    assert_ne!(committed, abandoned);
+    assert_eq!(node.interface_key(), Some(original));
+    node.commit_rotation(second, 3).unwrap();
+    drop(node);
+
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    assert_eq!(restored.up().unwrap().public_key, committed);
+    let next = restored.prepare_rotation(third, 5).unwrap();
+    assert_ne!(next, committed);
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let journal = store.rotation_secret().unwrap().unwrap();
+    assert_eq!(
+        (journal.operation_id.as_str(), journal.sequence),
+        (third, 5)
+    );
+    assert_eq!(Key::from_private(&journal.previous).unwrap().1, committed);
+    assert_eq!(store.recorded_interface().unwrap(), Some(committed));
+    let bytes = store.read_private_key().unwrap().unwrap();
+    assert_eq!(
+        crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
+        committed
+    );
+    assert_eq!(
+        Device::active_link().unwrap().unwrap().owner,
+        Some(committed)
+    );
+    drop(journal);
+    drop(store);
+    restored.commit_rotation(third, 5).unwrap();
+    restored.finish_rotation(third, 5).unwrap();
+    restored.down().unwrap();
 }
 
 /// After a rotation, a restarted node still adopts its interface as its own.
