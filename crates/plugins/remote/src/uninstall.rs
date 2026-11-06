@@ -643,6 +643,8 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    //! Uninstall decides ownership before it stops anything, removes only
+    //! what setup created, and retires every shell before it reports done.
     use super::*;
     /// A complete rootless bootstrap layout under a private fixture home.
     fn installation(name: &str, locked: bool) -> Option<(PathBuf, Context, u32)> {
@@ -853,6 +855,19 @@ mod tests {
         assert_eq!(reached.unwrap_err().kind(), io::ErrorKind::Unsupported);
         assert!(intact, "a refused check changed the installation");
     }
+    /// Hang guard for retiring the fake shim below (#334 rule). The test's
+    /// claims are orders, enforced by the fake shim: the retirement signals
+    /// again after a foreground job exits, and a partly read exit frame
+    /// survives a signal tick. A retirement that stopped re-signalling would
+    /// hang here, not pass. The product's own numbers live elsewhere: the
+    /// 100 ms re-signal interval in `retire_shim` and the 2 s per-shim limit
+    /// in `cleanup`. A 1 s clock here asserted neither, and failed under a
+    /// loaded gate (#355).
+    const RETIREMENT_HANG: Duration = Duration::from_secs(60);
+
+    /// Retiring a shim whose foreground job exits first keeps signalling
+    /// until the restored shell has exited too, and it acknowledges that
+    /// exit even when the exit frame arrives in two parts across a tick.
     #[tokio::test]
     async fn retirement_signals_the_shell_after_its_foreground_job_exits() {
         use infraternal_shim::frame::Frame;
@@ -912,14 +927,15 @@ mod tests {
             ));
         });
         let result = tokio::time::timeout(
-            Duration::from_secs(1),
+            RETIREMENT_HANG,
             retire_shim(&path, nix::unistd::Uid::effective().as_raw()),
         )
         .await;
         server.abort();
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
-        assert!(result.is_ok_and(|r| r.is_ok()));
+        let retired = result.expect("retirement hung: no exit acknowledged within the hang guard");
+        assert!(retired.is_ok(), "retirement failed: {retired:?}");
     }
     /// #235: the server's CA and a joined node's data can share the rootless
     /// base; uninstall removes only setup's own entries and keeps the rest.
