@@ -69,6 +69,12 @@ export interface FailureDetail {
   };
   /** Which staging check refused, only on `unproven_files`, when the host named it (#394). */
   refusal?: "cache" | "prepared" | "foreign";
+  /**
+   * A finished install of another server that a root-mode add may take over (D359), only on
+   * `unrecognized_install`: the old install's id (32 lowercase hex characters), which the
+   * confirmation names, and whether its infraternal agent is running (Take over stops it).
+   */
+  takeover?: { install: string; live: boolean };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -191,6 +197,10 @@ function parseFailure(value: unknown): FailureDetail | undefined {
     if (setupLock) failure.setup_lock = setupLock;
   }
   if (value.kind === "unproven_files" && (value.refusal === "cache" || value.refusal === "prepared" || value.refusal === "foreign")) failure.refusal = value.refusal;
+  if (value.kind === "unrecognized_install" && isRecord(value.takeover) && typeof value.takeover.install === "string"
+    && /^[0-9a-f]{32}$/.test(value.takeover.install) && typeof value.takeover.live === "boolean") {
+    failure.takeover = { install: value.takeover.install, live: value.takeover.live };
+  }
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
   if (["get-arm64-binary", "get-x86-64-binary", "connect", "upload", "install", "join", "start", "readiness"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;

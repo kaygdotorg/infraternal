@@ -659,3 +659,91 @@ for (const [host, title] of [
   });
 }
 
+// ── D359: Take over a finished install of another server (#394) ─────────────────────────────────────────────
+
+/** The old install's id the provisioning double reports for `takeover*` hosts. */
+const TAKEOVER_INSTALL = "c10909d16e8147a3b0f2e5d4c3b2a190";
+
+/** Adds `root@takeover.lab` as root, with consent, and waits for the "set up elsewhere" page. */
+async function addTakeoverAsRoot(page: Page): Promise<Array<Record<string, unknown>>> {
+  const sent: Array<Record<string, unknown>> = [];
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+    if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* unrelated binary protocol */ } }
+  }));
+  await addTyped(page, "root@takeover.lab");
+  await page.locator(".ah-consent").click();
+  await inWizard(page, "Install as root").click();
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
+  return sent;
+}
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
+  test(`root: Take over asks first, names the old install, then sets the host up at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    const sent = await addTakeoverAsRoot(page);
+    const failure = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(failure.locator(".ah-lede")).toHaveText("This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.");
+    expect(await heroTone(page)).toBeNull();
+    await expect(inWizard(page, "Try again")).toHaveCount(0);
+    await expect(inWizard(page, "Start fresh")).toHaveCount(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `offer-${viewport.width}.png`) });
+
+    await inWizard(page, "Take over").click();
+    const confirm = wizard(page).locator(".ah-page[data-page='takeover']");
+    await expect(confirm.getByRole("heading", { name: "Take over takeover.lab?", exact: true })).toBeVisible();
+    await expect(confirm.locator(".ah-lede")).toHaveText("Its old infraternal agent is stopped and set aside, and a new one is installed for this server.");
+    await expect(confirm.locator(".ui-kv-key")).toHaveText("Old install");
+    await expect(confirm.locator(".ui-kv-value")).toHaveText(TAKEOVER_INSTALL);
+    await expect(confirm.locator(".ah-text")).toHaveText("If setup fails, the old one is put back as it was. Once takeover.lab has joined, the old one is deleted.");
+    // Nothing reaches the server until the confirmation's own button.
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    // One left edge: title, lede, the key and the text line up; the value ends on the list's right edge.
+    const edges = await confirm.evaluate((page) => {
+      const left = (selector: string) => page.querySelector(selector)!.getBoundingClientRect().left;
+      const text = page.querySelector(".ui-kv-key .ui-kv-text")!.getBoundingClientRect();
+      const value = page.querySelector(".ui-kv-value .ui-kv-text")!.getBoundingClientRect();
+      const list = page.querySelector(".ui-kv")!.getBoundingClientRect();
+      return { title: left(".ah-title"), lede: left(".ah-lede"), text: left(".ah-text"), key: text.left, valueRight: value.right, listRight: list.right, inside: value.left >= list.left - 0.5 };
+    });
+    expect(Math.abs(edges.lede - edges.title)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(edges.text - edges.title)).toBeLessThanOrEqual(0.5);
+    expect(edges.inside).toBe(true);
+    expect(edges.valueRight).toBeLessThanOrEqual(edges.listRight + 0.5);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `confirm-${viewport.width}.png`) });
+
+    await inWizard(page, "Take over").click();
+    await expect.poll(() => sent.filter((command) => command.action === "start-fresh").length).toBe(1);
+    await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  });
+}
+
+test("root: Back from the Take over confirmation changes nothing, and the row asks first too", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  const sent = await addTakeoverAsRoot(page);
+  await inWizard(page, "Take over").click();
+  await expect(wizard(page).locator(".ah-page[data-page='takeover']")).toBeVisible();
+  await inWizard(page, "Back").click();
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
+  await inWizard(page, "Back").click();
+  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  await expect(page.locator(".ah-job-retry")).toBeHidden();
+  await expect(page.locator(".ah-job-fix")).toHaveText("Take over");
+  await page.locator(".ah-job-fix").click();
+  // The row opens the page, never the action itself.
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
+  expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+});
+
+test("rootless: a finished install of another server offers no Take over", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "takeover.lab");
+  await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
+  await expect(inWizard(page, "Take over")).toHaveCount(0);
+  await expect(inWizard(page, "Try again")).toBeVisible();
+  await page.screenshot({ path: tracerEvidencePath("addhost-takeover", "rootless-1440.png") });
+});
