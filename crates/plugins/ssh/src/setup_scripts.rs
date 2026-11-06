@@ -42,6 +42,15 @@ for replacement in "$base/bin/current.new" "$launcher.new" "$unit.new"; do
     [ ! -e "$replacement" ] && [ ! -L "$replacement" ] || exit 71
 done
 mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
+# SELinux: systemd starts the service only from an executable file type, and
+# the payload inherited /var/lib's var_lib_t (203/EXEC, #401). Keep its user,
+# role and level, set bin_t and check it, before the running service stops.
+# Rootless installs under ~/.local/share are already executable for the
+# account's own service manager, so they are left as they are.
+if [ "$(id -u)" = 0 ] && [ -e /sys/fs/selinux/enforce ]; then
+    chcon -t bin_t "$stage/payload" 2>/dev/null || exit 78
+    [ "$(stat -c '%C' "$stage/payload" | cut -d: -f3)" = bin_t ] || exit 78
+fi
 # Rename the old live binary/state into the transaction, not into a disposable
 # upload file. This makes failures after a service stop explicitly reversible.
 # Replacing a running daemon requires an acknowledged stop; otherwise its old
