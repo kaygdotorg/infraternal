@@ -55,6 +55,7 @@ fn gotatun_rotation_crash_child() {
     node.prepare_rotation(operation, 1).unwrap();
     node.commit_rotation(operation, 1).unwrap();
     node.finish_rotation(operation, 1).unwrap();
+    crash_checkpoint("rotation_finished");
     panic!("the requested crash boundary was never reached");
 }
 
@@ -84,14 +85,18 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
             .env("INFRATERNAL_ROTATION_STATE", &state.0)
             .env("INFRATERNAL_ROTATION_CRASH_POINT", stage)
             .env("INFRATERNAL_ROTATION_CRASH_READY", &ready)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("start the rotation child");
         let deadline = Instant::now() + Duration::from_secs(20);
         while !ready.exists() {
             if let Some(status) = child.try_wait().expect("check the child") {
-                panic!("child exited before {stage}: {status}");
+                let output = child.wait_with_output().expect("collect the child's failure");
+                panic!(
+                    "child exited before {stage}: {status}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             assert!(Instant::now() < deadline, "child did not reach {stage}");
             // sleep: allow the child to finish the next durability boundary without busy polling.
