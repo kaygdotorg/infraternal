@@ -152,7 +152,9 @@ fn every_failed_step_names_the_step_and_a_next_action() {
 
 #[test]
 fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
-    use infraternal_plugin_ssh::model::{Failure, InstallMode, InstallStep};
+    use infraternal_plugin_ssh::model::{
+        Failure, InstallMode, InstallStep, UNPROVEN_FILES, setup_location,
+    };
     println!(
         "METRIC failure_bytes={} retained_events=1024 failure_storage_bytes={}",
         std::mem::size_of::<Failure>(),
@@ -176,12 +178,18 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
                 let public = serde_json::to_value(&failure).unwrap();
                 assert_eq!(public["exit_status"], status);
                 assert!(public.get("failed_step").is_some());
-                assert_eq!(failure.log_tail, Vec::<&str>::new());
                 let path = if mode == InstallMode::Root {
                     "/var/lib/infraternal"
                 } else {
                     "~/.local/share/infraternal"
                 };
+                // Only a staging refusal (71) names where it looked, in Details (#394).
+                if status == 71 && !matches!(step, InstallStep::Join) {
+                    assert_eq!(failure.log_tail, vec![setup_location(mode)]);
+                    assert!(failure.log_tail[0].ends_with(path));
+                } else {
+                    assert_eq!(failure.log_tail, Vec::<&str>::new());
+                }
                 match status {
                     71..=73 if matches!(step, InstallStep::Join) => {
                         assert!(
@@ -193,8 +201,11 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
                         assert!(!failure.message.contains("Finish its cleanup"));
                     }
                     71 => {
-                        assert!(failure.message.contains(path));
-                        assert!(failure.message.contains("ownership"));
+                        // One finding, no folder chore, no path in the sentence (#394, TASTE).
+                        assert_eq!(failure.kind, FailureKind::UnrecognizedInstall);
+                        assert_eq!(failure.message, UNPROVEN_FILES);
+                        assert!(!failure.message.contains(path));
+                        assert!(!failure.message.contains("Check"));
                     }
                     72 => {
                         assert!(failure.message.contains("Retry the host check"));

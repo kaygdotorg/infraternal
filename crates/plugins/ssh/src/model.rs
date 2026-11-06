@@ -190,6 +190,12 @@ pub enum FailureKind {
     StalePreviousAttempt,
     #[serde(rename = "setup_running")]
     SetupRunning,
+    /// Setup found infraternal files at its location that it cannot prove are
+    /// this setup's own, such as a finished install for a host id this server
+    /// does not know (#394). Nothing was changed; the message says what was
+    /// found, and the location goes in Details.
+    #[serde(rename = "unrecognized_install")]
+    UnrecognizedInstall,
 }
 
 /// Public, bounded findings from a host-local ownership check; paths belong in Details.
@@ -624,6 +630,7 @@ impl Failure {
             FailureKind::Auth => "auth",
             FailureKind::HostKey => "host-key",
             FailureKind::Unreachable | FailureKind::MeshPolicy => "transport",
+            FailureKind::UnrecognizedInstall => "unrecognized-install",
             _ if self.log_tail.contains(&"The SSH command channel failed.") => "channel",
             _ if self.log_tail.contains(&"The SSH connection setup failed.") => "transport",
             _ => "setup",
@@ -711,11 +718,14 @@ impl Failure {
         }
         match (self.exit_status, mode) {
             (Some(71..=77), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
-            (Some(71), InstallMode::Rootless) => {
-                self.message = "Setup could not verify ownership or permissions of its files on this host. Check ~/.local/share/infraternal, its parent folders and the infraternal service files, then try again.";
-            }
-            (Some(71), InstallMode::Root) => {
-                self.message = "Setup could not verify ownership or permissions of its files on this host. Check /var/lib/infraternal, its parent folders and the infraternal service files with administrator access, then try again.";
+            (Some(71), mode) => {
+                // One plain finding, no chore and no second explanation: the
+                // step's own advice ("copying didn't finish") does not apply
+                // to a refusal, so the kind changes and the tracer shows only
+                // this text; the location goes in Details (#394, TASTE).
+                self.kind = FailureKind::UnrecognizedInstall;
+                self.message = UNPROVEN_FILES;
+                self.log_tail.push(setup_location(mode));
             }
             (Some(72), _) => {
                 self.message = "An earlier setup on this host did not finish. Retry the host check to finish its cleanup before continuing.";
@@ -744,6 +754,19 @@ impl Failure {
         Self::new(FailureKind::Install, message)
     }
 }
+/// Exit 71 outside the read-only check: a staging step met files at the setup
+/// location that it cannot prove are this setup's own, and changed nothing.
+pub const UNPROVEN_FILES: &str = "Setup found infraternal files on this machine that it can't prove belong to this setup, so it changed nothing.";
+
+/// The Details line naming where setup looked, by install mode (#394).
+#[must_use]
+pub fn setup_location(mode: InstallMode) -> &'static str {
+    match mode {
+        InstallMode::Rootless => "Setup location: ~/.local/share/infraternal",
+        InstallMode::Root => "Setup location: /var/lib/infraternal",
+    }
+}
+
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.failed_step {

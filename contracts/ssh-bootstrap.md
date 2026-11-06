@@ -408,9 +408,10 @@ the default server supplies the verified source through the same SSH plugin.
 ## Classified attempt failures (#169)
 
 Failure adds optional `exit_status` from the authenticated command process (a
-signal or unavailable status omits it). Fixed installer code 71 retains
-`failed_step` and identifies the approved root/rootless directory with ownership,
-permission and setup-file guidance. An unfinished transaction (72) directs the
+signal or unavailable status omits it). Fixed installer code 71 outside the
+check and join retains `failed_step`, becomes kind `unrecognized_install` (setup
+found files it cannot prove are its own and changed nothing) and names the
+root/rootless setup location in `log_tail` only (#394). An unfinished transaction (72) directs the
 person back to cleanup; a live setup (73) offers to wait. A retry with retained
 coordinates actually finishes the original cleanup before continuing. A returned
 script status is a setup failure, including status 255 after authentication;
@@ -617,3 +618,13 @@ as transfer progress. HTTP connect, TLS, response headers and storage completion
 each have a 30-second bound. A payload source without byte observations gets a
 30-second acquisition bound. Confirmation and authenticated readiness retain
 their own independent limits.
+
+## Finished installs (#394)
+
+A base with no journal is a finished install owned by the host id in its
+`.bootstrap-owner`. The read-only check reports it as
+`INFRATERNAL_SETUP_INSTALLED <32 hex host id>`, never `INFRATERNAL_SETUP_CLEAR`:
+every new attempt carries a new host id, and staging refuses (71) a base whose
+owner names another host. After the existing already-added preflight, the
+server answers `unrecognized_install` at the `connect` step before any write.
+Taking such an install over (D337) is not offered by this slice.

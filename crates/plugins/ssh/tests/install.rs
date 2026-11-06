@@ -1793,8 +1793,17 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
         .await
         .unwrap_err();
     assert_eq!(serde_json::to_value(&failure).unwrap()["exit_status"], 71);
-    assert!(failure.message.contains("~/.local/share/infraternal"));
-    assert!(failure.message.contains("ownership"));
+    // One plain finding; the location is in Details, never in the sentence (#394).
+    assert_eq!(
+        failure.kind,
+        infraternal_plugin_ssh::model::FailureKind::UnrecognizedInstall
+    );
+    assert!(!failure.message.contains("~/.local/share/infraternal"));
+    assert!(
+        failure
+            .log_tail
+            .contains(&"Setup location: ~/.local/share/infraternal")
+    );
 }
 
 #[tokio::test]
@@ -1923,6 +1932,46 @@ async fn active_transaction_is_live_between_ssh_setup_commands() {
     assert!(fixture.base().join(".bootstrap-lock").exists());
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
+}
+
+/// #394: a finished install is named, not reported clear; only the exact
+/// record with a canonical host id is accepted.
+#[test]
+fn a_finished_install_record_is_recognized_exactly() {
+    use infraternal_plugin_ssh::previous_attempt::{Remains, parse_check_with_absence};
+    let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
+    let valid = format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "1".repeat(32));
+    let (_, previous, remains) = parse_check_with_absence(valid.as_bytes()).unwrap();
+    assert!(previous.is_none());
+    assert_eq!(remains, Remains::Installed);
+    let clear = format!("{check}INFRATERNAL_SETUP_CLEAR\n");
+    assert_eq!(
+        parse_check_with_absence(clear.as_bytes()).unwrap().2,
+        Remains::Unproven
+    );
+    for invalid in [
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "1".repeat(31)),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "G".repeat(32)),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {} x\n", "1".repeat(32)),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {}", "1".repeat(32)),
+    ] {
+        assert!(
+            parse_check_with_absence(invalid.as_bytes()).is_err(),
+            "{invalid}"
+        );
+    }
+    let failure = infraternal_plugin_ssh::previous_attempt::installed_elsewhere(
+        infraternal_plugin_ssh::model::InstallMode::Root,
+    );
+    assert_eq!(
+        failure.kind,
+        infraternal_plugin_ssh::model::FailureKind::UnrecognizedInstall
+    );
+    assert_eq!(
+        failure.log_tail,
+        vec!["Setup location: /var/lib/infraternal"]
+    );
+    assert!(!failure.message.contains('/'), "paths go in Details only");
 }
 
 #[test]
