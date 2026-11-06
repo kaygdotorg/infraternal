@@ -1,4 +1,19 @@
 //! Publishes immutable, account-readable copies of the current binary for host login workers [D247].
+//!
+//! A root infraternal agent starts each person login as a systemd unit with
+//! `User=<account>` (D240, D247). systemd execs the image after it has switched
+//! to that account, and the installed binary usually sits in a root-private
+//! directory, so the agent publishes a root-owned, read-only copy under a
+//! directory accounts may traverse.
+//!
+//! On `SELinux` hosts the copy also needs an executable file type: files created
+//! under `/var/cache` inherit `var_t`, and the policy refuses to let systemd
+//! (`init_t`) exec `var_t`, so every login unit fails with `203/EXEC` (#401).
+//! Each published image is therefore labelled `bin_t`, the policy's generic
+//! executable type, before it becomes visible. Reused images have their label
+//! checked again, so a later `restorecon` or full relabel heals on the next
+//! login. Nothing changes on hosts without `SELinux`, and the host policy itself
+//! is never modified.
 #![forbid(unsafe_code)]
 
 use std::{
@@ -76,6 +91,8 @@ fn identity(metadata: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
     )
 }
 
+/// Check that a published image is still ours and unchanged, then make sure the
+/// host's mandatory access control lets systemd exec it ([`executable_label`]).
 fn validate_image(path: &Path, uid: u32, length: u64) -> io::Result<()> {
     let file = opened(path)?;
     let metadata = file.metadata()?;
@@ -89,7 +106,96 @@ fn validate_image(path: &Path, uid: u32, length: u64) -> io::Result<()> {
             "untrusted login worker image",
         ));
     }
+    executable_label(&file)
+}
+
+/// The extended attribute that holds a file's `SELinux` context.
+#[cfg(target_os = "linux")]
+const SELINUX_ATTRIBUTE: &str = "security.selinux";
+
+/// The `SELinux` type published images carry: the policy's generic type for
+/// programs in `/usr/bin` and `/usr/libexec`, which systemd may exec as a
+/// service entrypoint (#401).
+#[cfg(target_os = "linux")]
+const EXECUTABLE_TYPE: &[u8] = b"bin_t";
+
+/// Give an image an `SELinux` context that systemd may exec, keeping the user,
+/// role and level `SELinux` chose for the file and replacing only its type.
+///
+/// A file has a `security.selinux` attribute only while `SELinux` labels the
+/// filesystem, so a file without one (no `SELinux`, or a filesystem without
+/// labels) is left alone. The label is read back after writing, and a policy
+/// without `bin_t` fails here with a clear error, instead of later as an
+/// opaque `203/EXEC` in the login unit.
+/// # Errors
+/// Returns attribute read or write failures and labels that cannot be parsed or
+/// do not stick.
+#[cfg(target_os = "linux")]
+fn executable_label(file: &File) -> io::Result<()> {
+    use xattr::FileExt as _;
+    let current = match file.get_xattr(SELINUX_ATTRIBUTE) {
+        Ok(Some(current)) => current,
+        Ok(None) => return Ok(()),
+        Err(error) if error.raw_os_error() == Some(nix::libc::EOPNOTSUPP) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let wanted = with_type(&current, EXECUTABLE_TYPE).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unreadable SELinux label on login image",
+        )
+    })?;
+    if context(&current) == context(&wanted) {
+        return Ok(());
+    }
+    file.set_xattr(SELINUX_ATTRIBUTE, &wanted)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot label login image bin_t for SELinux: {error}"),
+            )
+        })?;
+    match file.get_xattr(SELINUX_ATTRIBUTE)? {
+        Some(applied) if context(&applied) == context(&wanted) => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "SELinux kept a non-executable label on login image",
+        )),
+    }
+}
+
+/// macOS publishes no login images (see [`executable_filesystem`]).
+#[cfg(not(target_os = "linux"))]
+fn executable_label(_file: &File) -> io::Result<()> {
     Ok(())
+}
+
+/// A context without the trailing NUL that the kernel may include.
+#[cfg(target_os = "linux")]
+fn context(label: &[u8]) -> &[u8] {
+    label.strip_suffix(b"\0").unwrap_or(label)
+}
+
+/// Replace the type field of an `SELinux` context `user:role:type[:level]`.
+///
+/// The level may itself contain colons (`s0:c0.c1023`), so only the first three
+/// separators split fields. Returns `None` unless user, role and type are all
+/// present and non-empty. The result ends with a NUL, as `SELinux`'s own tools
+/// write it.
+#[cfg(target_os = "linux")]
+fn with_type(label: &[u8], kind: &[u8]) -> Option<Vec<u8>> {
+    let mut fields = context(label).splitn(4, |byte| *byte == b':');
+    let user = fields.next().filter(|field| !field.is_empty())?;
+    let role = fields.next().filter(|field| !field.is_empty())?;
+    fields.next().filter(|field| !field.is_empty())?;
+    let level = fields.next();
+    let mut result = [user, role, kind].join(&b':');
+    if let Some(level) = level {
+        result.push(b':');
+        result.extend_from_slice(level);
+    }
+    result.push(0);
+    Some(result)
 }
 
 struct Temporary(PathBuf);
@@ -411,6 +517,9 @@ fn publication(exe: &Path, root: &Path, blocking: bool) -> io::Result<Published>
         return Err(io::Error::other("login binary changed while copying"));
     }
     output.set_permissions(fs::Permissions::from_mode(0o555))?;
+    // Label the private staging inode before the hard link makes it visible,
+    // so no worker ever observes an image that SELinux refuses to exec.
+    executable_label(&output)?;
     output.sync_all()?;
     // Close the writable handle before publication so a racing worker exec
     // cannot fail with ETXTBSY despite observing a fully copied image.
@@ -491,6 +600,8 @@ mod tests {
         }
     }
 
+    /// A cache on a `noexec` filesystem is refused before any image is copied,
+    /// so the login unit never fails later with an opaque exec error.
     #[cfg(target_os = "linux")]
     #[test]
     fn noexec_host_mount_is_refused_before_image_publication() {
@@ -507,6 +618,78 @@ mod tests {
             executable_filesystem(path).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
+    }
+
+    /// #401: only the type field changes; user, role and an MLS level that
+    /// contains colons survive, and malformed contexts are refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn selinux_type_rewrite_keeps_user_role_and_level() {
+        assert_eq!(
+            with_type(b"system_u:object_r:var_t:s0\0", b"bin_t").unwrap(),
+            b"system_u:object_r:bin_t:s0\0"
+        );
+        assert_eq!(
+            with_type(b"unconfined_u:object_r:cache_home_t:s0:c0.c1023", b"bin_t").unwrap(),
+            b"unconfined_u:object_r:bin_t:s0:c0.c1023\0"
+        );
+        assert_eq!(
+            with_type(b"user_u:object_r:var_t", b"bin_t").unwrap(),
+            b"user_u:object_r:bin_t\0"
+        );
+        for malformed in [
+            &b""[..],
+            b"\0",
+            b"system_u",
+            b"system_u:object_r",
+            b"a::var_t:s0",
+        ] {
+            assert!(with_type(malformed, b"bin_t").is_none(), "{malformed:?}");
+        }
+    }
+
+    /// #401: on an `SELinux` host, systemd (`init_t`) refuses to exec a login
+    /// image that kept the cache directory's type (`203/EXEC` for every person
+    /// login). Published and reused images must carry `bin_t`, including after
+    /// a relabel reset them. Hosts whose fixture filesystem carries no `SELinux`
+    /// labels have nothing to check.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn published_image_carries_an_executable_selinux_type() {
+        use xattr::FileExt as _;
+        let fixture = Fixture::new();
+        let source = fixture.source();
+        let root = fixture.0.join("published");
+        let label = |path: &Path| {
+            File::open(path)
+                .unwrap()
+                .get_xattr(SELINUX_ATTRIBUTE)
+                .unwrap()
+        };
+        if label(&source).is_none() {
+            eprintln!("no SELinux labels on this filesystem; nothing to check");
+            return;
+        }
+        let kind = |path: &Path| {
+            let label = label(path).unwrap();
+            context(&label)
+                .split(|byte| *byte == b':')
+                .nth(2)
+                .unwrap()
+                .to_vec()
+        };
+        let image = staged(&source, &root).unwrap();
+        assert_eq!(kind(&image), EXECUTABLE_TYPE, "new image");
+        // Model `restorecon`: the image falls back to its directory's type.
+        let reset = label(&root).unwrap();
+        assert_ne!(kind(&root), EXECUTABLE_TYPE);
+        File::open(&image)
+            .unwrap()
+            .set_xattr(SELINUX_ATTRIBUTE, &reset)
+            .unwrap();
+        assert_ne!(kind(&image), EXECUTABLE_TYPE);
+        assert_eq!(staged(&source, &root).unwrap(), image);
+        assert_eq!(kind(&image), EXECUTABLE_TYPE, "reused image");
     }
 
     #[cfg(target_os = "linux")]
