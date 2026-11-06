@@ -213,7 +213,12 @@ async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup(
         )
         .await
         .unwrap(),
-        Ok(crate::embedded::Revoked::default())
+        // The fake host answers like an agent older than D356.
+        Ok(crate::embedded::Revoked {
+            report: Some(crate::access_report::AccessReport::not_checked(
+                crate::access_report::Reason::OlderAgent
+            )),
+        })
     );
     let mut exited = [nix::poll::PollFd::new(
         pin.as_fd(),

@@ -289,7 +289,12 @@ async fn cleanup_remains_admitted_beyond_the_former_reserve_limit() {
             tokio::time::timeout(Duration::from_secs(5), weak.revoke_login(Uuid::new_v4()))
                 .await
                 .unwrap(),
-            Ok(crate::embedded::Revoked::default())
+            // The fake host answers like an agent older than D356.
+            Ok(crate::embedded::Revoked {
+                report: Some(crate::access_report::AccessReport::not_checked(
+                    crate::access_report::Reason::OlderAgent
+                )),
+            })
         );
     }
     for task in held {

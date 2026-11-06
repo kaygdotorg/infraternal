@@ -1288,6 +1288,7 @@ async fn remote_cli_enrollment_and_browser_terminal_at(
 #[path = "remote_host_tests.rs"]
 mod real_host;
 
+/// D356 delivered on a real root host through a live server (#355).
 #[path = "remote_access_report_live_tests.rs"]
 mod access_report_live;
 
