@@ -1179,16 +1179,30 @@ fn scope_record(root: &Path, unit: &str) -> PathBuf {
         .join(format!("{unit}.scope"))
 }
 
-/// Records, durably, the cgroup that login `unit` of `uid` lives in. With
-/// `PAMName=` that is the logind session scope (`session-N.scope`), not the
-/// unit's own cgroup, and it holds the worker, the PTY owners and every
-/// descendant. Revocation kills it from this record, never from anything the
-/// login's account can touch (J291, #355).
+/// How many scopes one login's record keeps. Each launch of the unit adds
+/// one; an open fails closed rather than forget one.
+const RECORDED_SCOPES: usize = 16;
+
+/// Adds, durably, a cgroup that login `unit` of `uid` lives in to its record.
+/// With `PAMName=` that is the logind session scope (`session-N.scope`), not
+/// the unit's own cgroup, and it holds the worker, the PTY owners and every
+/// descendant. Revocation kills every recorded scope, never trusting anything
+/// the login's account can touch (J291, #355). Scopes of earlier launches
+/// stay recorded: a process the account left in one is still the revoked
+/// person's code, and a new launch must not make revocation forget it (J295).
 fn record_scope(root: &Path, unit: &str, uid: u32, group: &str) -> io::Result<()> {
     use std::{fs::OpenOptions, io::Write as _, os::unix::fs::OpenOptionsExt as _};
     if !login_cgroup(group, uid, &format!("{unit}.service")) {
         return Err(io::Error::other("host login is in an unexpected cgroup"));
     }
+    let mut groups = recorded_scopes(root, unit, uid)?;
+    if groups.iter().any(|recorded| recorded == group) {
+        return Ok(());
+    }
+    if groups.len() >= RECORDED_SCOPES {
+        return Err(io::Error::other("host login has too many recorded scopes"));
+    }
+    groups.push(group.to_owned());
     let record = scope_record(root, unit);
     let staging = record.with_extension("scope.staging");
     let mut file = OpenOptions::new()
@@ -1198,30 +1212,37 @@ fn record_scope(root: &Path, unit: &str, uid: u32, group: &str) -> io::Result<()
         .mode(0o600)
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(&staging)?;
-    file.write_all(group.as_bytes())?;
+    file.write_all(groups.join("\n").as_bytes())?;
     file.sync_all()?;
     std::fs::rename(&staging, &record)?;
     std::fs::File::open(root.join("infraternal-login-locks"))?.sync_all()
 }
 
-/// The recorded cgroup of login `unit` of `uid`, if one was recorded.
-fn recorded_scope(root: &Path, unit: &str, uid: u32) -> io::Result<Option<String>> {
+/// Every cgroup recorded for login `unit` of `uid`; empty when none was.
+fn recorded_scopes(root: &Path, unit: &str, uid: u32) -> io::Result<Vec<String>> {
     use std::os::unix::fs::MetadataExt as _;
     let record = scope_record(root, unit);
     let metadata = match std::fs::symlink_metadata(&record) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         result => result?,
     };
     let unsafe_record =
         || io::Error::new(io::ErrorKind::PermissionDenied, "unsafe login scope record");
-    if !metadata.is_file() || metadata.uid() != Uid::effective().as_raw() || metadata.len() > 256 {
+    if !metadata.is_file() || metadata.uid() != Uid::effective().as_raw() || metadata.len() > 4096 {
         return Err(unsafe_record());
     }
-    let group = std::fs::read_to_string(&record)?;
-    if !login_cgroup(&group, uid, &format!("{unit}.service")) {
+    let text = std::fs::read_to_string(&record)?;
+    let service = format!("{unit}.service");
+    let groups: Vec<String> = text.lines().map(str::to_owned).collect();
+    if groups.is_empty()
+        || groups.len() > RECORDED_SCOPES
+        || groups
+            .iter()
+            .any(|group| !login_cgroup(group, uid, &service))
+    {
         return Err(unsafe_record());
     }
-    Ok(Some(group))
+    Ok(groups)
 }
 
 /// The cgroup that process `pid` is in, from the kernel.
@@ -1234,8 +1255,9 @@ fn process_cgroup(pid: i32) -> io::Result<String> {
         .ok_or_else(|| io::Error::other("host login path needs a unified cgroup"))
 }
 
-/// Records the session scope of the authenticated worker at `endpoint`, if
-/// login `unit` has none recorded yet.
+/// Records the session scope of the worker at `endpoint`, authenticated
+/// against the unit's `MainPID`, on every open. An older record never stands
+/// in for the live worker's scope (J295 P1, #355): a new launch adds its own.
 async fn remember_scope(
     root: &Path,
     unit: &str,
@@ -1243,9 +1265,6 @@ async fn remember_scope(
     person: uuid::Uuid,
     uid: u32,
 ) -> io::Result<()> {
-    if recorded_scope(root, unit, uid)?.is_some() {
-        return Ok(());
-    }
     let identity = cgroup(endpoint, Manager::System, person, uid)
         .await?
         .ok_or_else(|| io::Error::other("host login worker absent"))?;
@@ -1319,21 +1338,20 @@ async fn cgroup_emptied(group: &str) -> io::Result<()> {
 ///
 /// The login's processes live in its logind session scope, not in the unit's
 /// own cgroup: `PAMName=` moves the worker, the PTY owners and every
-/// descendant there (J291, #355). So revocation kills the scope recorded at
-/// open (or, without a record, the scope the kernel reports for the unit's
-/// `MainPID`), and the unit's cgroup too, before any courtesy. It then stops the
-/// unit, terminates the logind session, and requires both cgroups to be
-/// empty. Nothing the account controls is asked or waited on: it can stop or
+/// descendant there (J291, #355). So revocation kills every scope recorded at
+/// open, the scope the kernel reports for the loaded unit's `MainPID` (a
+/// stale record must not hide the current launch, J295), and the unit's own
+/// cgroup, before any courtesy. It then stops the unit, terminates the logind
+/// sessions, and requires every one of those cgroups to be empty. Nothing the account controls is asked or waited on: it can stop or
 /// kill its own worker, and that must neither keep the login alive nor make a
 /// revoke report success (J261 P1/P2, J291 P1). A login with no unit and no
 /// record, but with its runtime directory still present, cannot be accounted
 /// for, so revocation fails closed.
 async fn stop_system_login(root: &Path, uid: u32, unit: &str) -> io::Result<()> {
     let service = format!("{unit}.service");
-    let recorded = recorded_scope(root, unit, uid)?;
+    let recorded = recorded_scopes(root, unit, uid)?;
     let state = unit_state(&service).await?;
-    let mut groups = Vec::new();
-    groups.extend(recorded.clone());
+    let mut groups = recorded.clone();
     if state.load != "not-found" {
         if !state.control_group.is_empty() {
             if !login_cgroup(&state.control_group, uid, &service) {
@@ -1341,14 +1359,16 @@ async fn stop_system_login(root: &Path, uid: u32, unit: &str) -> io::Result<()> 
             }
             groups.push(state.control_group.clone());
         }
-        if recorded.is_none() && state.main_pid > 0 {
+        // The scope the kernel reports for the live unit's MainPID, even with a
+        // record: a stale record must not hide the current launch (J295).
+        if state.main_pid > 0 {
             let group = process_cgroup(state.main_pid)?;
             if !login_cgroup(&group, uid, &service) {
                 return Err(io::Error::other("host login is in an unexpected cgroup"));
             }
             groups.push(group);
         }
-    } else if recorded.is_none() {
+    } else if recorded.is_empty() {
         if root.join(unit).exists() {
             return Err(io::Error::other(
                 "host login has no unit and no recorded scope; cannot prove it ended",
@@ -1849,6 +1869,59 @@ mod tests {
             scope_record(&root, &unit).exists(),
             "the record of a live scope was dropped"
         );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A login's record keeps every scope its launches lived in, without
+    /// duplicates (J295 `stale`): a new launch adds its scope and never
+    /// replaces one that may still hold the account's processes.
+    #[tokio::test]
+    async fn scope_records_keep_every_launch() {
+        let (root, _, uid, unit) = system_login_fixture().await;
+        let old = format!("/user.slice/user-{uid}.slice/session-1029.scope");
+        let new = format!("/user.slice/user-{uid}.slice/session-1031.scope");
+        record_scope(&root, &unit, uid, &old).unwrap();
+        record_scope(&root, &unit, uid, &new).unwrap();
+        record_scope(&root, &unit, uid, &old).unwrap();
+        assert_eq!(recorded_scopes(&root, &unit, uid).unwrap(), [old, new]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Revocation kills every recorded scope of a login, not only the first:
+    /// a stale record of an earlier launch next to the live one (J295 P1).
+    #[tokio::test]
+    async fn revocation_kills_every_recorded_scope() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        let live = host.scope.parent().unwrap().join("session-8.scope");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("cgroup.kill"), b"").unwrap();
+        std::fs::write(live.join("cgroup.events"), "populated 0\n").unwrap();
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-8.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
+        assert!(revoked.is_ok(), "{revoked:?}; calls: {:?}", host.calls());
+        for scope in [&host.scope, &live] {
+            assert_eq!(
+                std::fs::read(scope.join("cgroup.kill")).unwrap(),
+                b"1",
+                "{} survived",
+                scope.display()
+            );
+        }
         drop(host);
         std::fs::remove_dir_all(root).unwrap();
     }
