@@ -227,6 +227,19 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+    /// Start fresh just removed every leftover of this account's install base on
+    /// the host at `target` (D355): the server may finish the same person's stale
+    /// entries for that address and account. Backends without host records have
+    /// none.
+    fn start_fresh_cleaned<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _target: &'a Target,
+        _check: &'a Check,
+        _lookup: Option<String>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
     /// Whether the infraternal agent of an earlier setup's journal (`host`) is
     /// connected to this server now. Its leftovers are then in use, never offered
     /// for cleanup (#305, J257). Backends without host links have none.
@@ -1476,6 +1489,11 @@ impl Bootstrap {
                         resources,
                     )
                     .await?;
+                    // The account's base is now empty: its stale entries on this
+                    // server are finished at once (D355).
+                    self.backend
+                        .start_fresh_cleaned(&batch.authority, target, &check, lookup.clone())
+                        .await?;
                     None
                 }
             } else {

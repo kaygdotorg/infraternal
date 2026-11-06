@@ -424,6 +424,80 @@ impl RemoteBackend {
             Err(_) => Err(unavailable()),
         }
     }
+    /// D355: Start fresh just proved it emptied this account's install base on the
+    /// host at `target` (one base per account and mode), so any install the same
+    /// person's stale entries had there is gone. Finish those entries now instead
+    /// of leaving them pending for a receipt their gone agent never sends: deny
+    /// the ones not yet denied, then complete their cleanup as that receipt would,
+    /// which retires them and removes them from Console (#305).
+    ///
+    /// Only rows that are this person's, at this address (or SSH lookup), for this
+    /// mode and execution account, unrevoked, and stale (an open setup intent or
+    /// an unconfirmed cleanup) qualify; one a running attempt here owns, or whose
+    /// infraternal agent is connected, is kept. Everything else stays as it is.
+    async fn drop_cleaned_stale_entries(
+        &self,
+        owner: &str,
+        target: &Target,
+        check: &Check,
+        lookup: Option<&str>,
+    ) -> Result<(), Failure> {
+        target.validate()?;
+        check.authorize_mode(target.mode)?;
+        let infraternal_plugin_ssh::model::TargetAddress::Manual(address) = &target.address else {
+            return Ok(());
+        };
+        let (mode, uid) = match target.mode {
+            InstallMode::Rootless => ("rootless", check.uid),
+            InstallMode::Root => ("rootful", 0),
+        };
+        let store = self.issuer.store();
+        let rows: Vec<(Vec<u8>, bool)> = sqlx::query_as("SELECT h.id, EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) FROM remote_hosts h JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND h.mode=? AND h.execution_uid=? AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) AND (EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents i WHERE i.host_id=h.id) OR EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)) ORDER BY h.id LIMIT 64")
+            .bind(owner)
+            .bind(mode)
+            .bind(i64::from(uid))
+            .bind(address)
+            .bind(lookup)
+            .bind(lookup)
+            .fetch_all(&store.0)
+            .await
+            .map_err(|_| unavailable())?;
+        let person = Uuid::parse_str(owner).ok();
+        for (host, pending) in rows {
+            let host = Uuid::from_slice(&host).map_err(|_| unavailable())?;
+            let running = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .contains_key(&host);
+            if running || self.hosts.actor(host).await.is_some() {
+                continue;
+            }
+            let now = unix_now()?;
+            let _fence = store.1.cut(host).map_err(|_| unavailable())?;
+            if !pending {
+                match store.deny_abandoned_bootstrap(owner, host, now).await {
+                    Ok(()) | Err(crate::enrollment::EnrollmentError::Denied) => {}
+                    Err(_) => return Err(unavailable()),
+                }
+            }
+            match person {
+                // The cleanup Start fresh proved stands in for the gone agent's receipt.
+                Some(person) => store
+                    .confirm_login_cleanup(host, person)
+                    .await
+                    .map_err(|_| unavailable())?,
+                // Legacy ledger owners are revoked directly by the denial.
+                None => store.1.tombstoned(host),
+            }
+            tracing::info!(
+                host_id = %host,
+                outcome = "dropped",
+                "host provisioning dropped an earlier entry whose install Start fresh removed"
+            );
+        }
+        Ok(())
+    }
     fn completed_record(&self, authority: &Authority, host: Uuid) -> Result<(), Failure> {
         self.uid(authority, host)?;
         self.attempts
@@ -687,6 +761,19 @@ impl Backend for RemoteBackend {
                 current.send_modify(|version| *version = version.wrapping_add(1));
             }
             self.authorize(authority).await
+        })
+    }
+    fn start_fresh_cleaned<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.drop_cleaned_stale_entries(&authority.owner, target, check, lookup.as_deref())
+                .await
         })
     }
     fn leftover_connected<'a>(
@@ -1768,6 +1855,9 @@ mod tests {
 
     /// Pending removals release setup coordinates without reviving their identity.
     mod pending_removal_tests;
+
+    /// D355: Start fresh's proven cleanup drops the person's stale entries.
+    mod drop_cleaned_stale_tests;
 
     mod already_added_breakit {
         //! Break-it review of the already-added host id (#189).
