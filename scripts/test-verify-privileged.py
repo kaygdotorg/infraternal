@@ -212,6 +212,21 @@ class RealRootProof(unittest.TestCase):
             if os.geteuid() != 0:
                 self.assertTrue(guard.problems('/nix/store/x/ld.so', [str(mine)], [directory]))
 
+    def test_guard_refuses_a_needed_library_given_by_path(self):
+        """A DT_NEEDED entry with a `/` outside trusted dirs is refused; plain sonames are not (J277 nit)."""
+        store = '/nix/store/x/ld.so'
+        self.assertEqual(guard.problems(store, [], [], ['libc.so.6', 'libgcc_s.so.1']), [])
+        self.assertEqual(guard.problems(store, [], [], ['/nix/store/abc-glibc/lib/libc.so.6']), [])
+        reasons = guard.problems(store, [], [], ['/home/claude/evil.so'])
+        self.assertEqual(len(reasons), 1)
+        self.assertIn('/home/claude/evil.so', reasons[0])
+        self.assertTrue(guard.problems(store, [], [], ['./local.so']))
+
+    def test_guard_reads_needed_entries_of_a_real_binary(self):
+        """The ELF reader returns this interpreter's own DT_NEEDED names."""
+        _interpreter, _search, needed = guard.read_elf_full(os.path.realpath(sys.executable))
+        self.assertIsInstance(needed, list)
+
     def test_guard_reads_a_real_binary(self):
         """The ELF reader parses this interpreter's own executable."""
         interpreter, search = guard.read_elf(os.path.realpath(sys.executable))
