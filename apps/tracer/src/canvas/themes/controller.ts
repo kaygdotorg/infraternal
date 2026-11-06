@@ -141,6 +141,13 @@ function completeLook(look: DocLook | undefined): look is DocLook & { windowSize
   return Boolean(look?.windowSizes && typeof look.extendedInfo === "boolean");
 }
 
+/** Compares valid looks after the document schema normalizes their nested object field order. */
+function sameLook(left: unknown, right: unknown): boolean {
+  const canonicalLeft = parseLook(left), canonicalRight = parseLook(right);
+  return canonicalLeft !== undefined && canonicalRight !== undefined
+    && JSON.stringify(canonicalLeft) === JSON.stringify(canonicalRight);
+}
+
 /** Starts the page's Themes and look bridge. Calling it again stops the first instance. */
 export function startThemes(core: CoreScreen, options: StartThemesOptions = {}): () => void {
   stopRunning?.();
@@ -225,7 +232,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
         || nextDefaults.windowSizes.desktop !== defaults.windowSizes.desktop;
       const changedExtendedInfo = nextDefaults.extendedInfo !== defaults.extendedInfo;
       const next: DocLook = { ...restored, ...nextDefaults };
-      if (JSON.stringify(next) === JSON.stringify(snapshot()) && !needsCompletion) return;
+      if (sameLook(next, snapshot()) && !needsCompletion) return;
 
       applyingDocument = true;
       defaults.windowSizes = { ...nextDefaults.windowSizes };
@@ -241,7 +248,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
     confirmed(look) {
       if (!accountId || previewing || !completeLook(parseLook(look))) return;
       const canonical = parseLook(look)!;
-      if (JSON.stringify(canonical) !== JSON.stringify(snapshot())) return;
+      if (!sameLook(canonical, snapshot())) return;
       writeCache(accountId, canonical);
       clearLegacyAppearance(accountId);
     },

@@ -43,8 +43,11 @@ async function enrol(page: Page, server: { origin: string; token: string }): Pro
 /** Changes one palette value through the real command palette. */
 async function choosePaletteValue(page: Page, value: string): Promise<void> {
   await page.keyboard.press("Control+Shift+K");
+  await expect(page.locator("#palette")).toBeVisible({ timeout: 10_000 });
   await page.locator("#palette-input").fill(value);
-  await page.locator("#palette-results [role=option]").filter({ hasText: value }).first().click();
+  const option = page.locator("#palette-results [role=option]").filter({ hasText: value }).first();
+  await expect(option).toBeVisible({ timeout: 10_000 });
+  await option.click();
 }
 
 /** Returns the world transform that represents this tab's camera framing. */
@@ -168,7 +171,7 @@ test("theme and font changes reach the same account live and after reload withou
 
     await startFrameCapture(b);
     await choosePaletteValue(a, "Theme: Solid");
-    await choosePaletteValue(a, "Font: Fira Code");
+    await choosePaletteValue(a, "Fira Code");
     await expect.poll(async () => {
       const look = (await cache(b)).canonical.look;
       return look?.selected === "solid" && look.themes.find((theme) => theme.id === "solid")?.font === "fira-code";
@@ -177,9 +180,9 @@ test("theme and font changes reach the same account live and after reload withou
     await expect.poll(() => b.locator("html").getAttribute("data-font"), { timeout: 30_000 }).toBe("fira-code");
     const frameIntervalsMs = await stopFrameCapture(b);
     const maxFrameIntervalMs = Math.max(0, ...frameIntervalsMs);
-    const framesOver50ms = frameIntervalsMs.filter((interval) => interval > 50).length;
+    const framesOver20ms = frameIntervalsMs.filter((interval) => interval > 20).length;
     expect(frameIntervalsMs.length).toBeGreaterThan(10);
-    expect(framesOver50ms).toBe(0);
+    expect(framesOver20ms).toBe(0);
     expect(await cameraTransform(a)).toBe(aCamera);
     expect(await cameraTransform(b)).toBe(bCamera);
 
@@ -209,7 +212,7 @@ test("theme and font changes reach the same account live and after reload withou
       clientBLookWrites: lookWritesOnB,
       frameSamples: frameIntervalsMs.length,
       maxFrameIntervalMs,
-      framesOver50ms,
+      framesOver20ms,
       cameraAStayedLocal: true,
       cameraBStayedLocal: true,
       themeAndFontSurvivedReload: true,
