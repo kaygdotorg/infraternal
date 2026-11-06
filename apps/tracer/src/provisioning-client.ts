@@ -363,7 +363,6 @@ export interface TargetView {
   authentication: AuthenticationInfo | undefined;
 }
 
-/** True while the attempt is paused on earlier-setup leftovers: it waits for the person, nothing is running. */
 /**
  * A host whose SSH key this server has never pinned. The server still reports it as a `host-key` failure (the wire
  * contract is unchanged, #397), but it is a question for the person, not a fault: the wizard shows it as an ordinary
@@ -371,6 +370,7 @@ export interface TargetView {
  */
 export const awaitingKey = (view: TargetView): boolean =>
   view.state === "failed" && view.failure?.kind === "host-key" && view.failure.host_key_changed !== true && !!view.failure.fingerprints?.length;
+/** True while the attempt is paused on earlier-setup leftovers: it waits for the person, nothing is running. */
 export const awaitingFresh = (view: TargetView): boolean => view.state === "running" && !!view.leftovers;
 
 export const pendingTarget = (): TargetView => ({ state: "pending", attempt: 0, phase: 0, message: "", failure: undefined, leftovers: undefined, elapsedMs: 0, authentication: undefined });
