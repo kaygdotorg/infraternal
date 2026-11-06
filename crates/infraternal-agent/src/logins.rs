@@ -175,7 +175,9 @@ pub async fn ensure(
     let endpoint = root.join(&name).join("login.sock");
     match ready(&endpoint, user.uid.as_raw()).await {
         Ok(()) => {
-            if !matches!(manager, Manager::System) {
+            if matches!(manager, Manager::System) {
+                remember_scope(root, &name, &endpoint, person, user.uid.as_raw()).await?;
+            } else {
                 cgroup(&endpoint, manager, person, user.uid.as_raw()).await?;
             }
             return Ok(Some(endpoint));
@@ -276,6 +278,8 @@ pub async fn ensure(
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
         set_group(&mut identity)?;
+        // Before any shell can run in it: revocation kills this scope (#355).
+        record_scope(root, &name, user.uid.as_raw(), &relative_group(&identity)?)?;
         crate::login_auth::remember(person, user.uid.as_raw(), identity);
         // The original announcement is emitted only after account setup,
         // endpoint binding and signal readiness. Socket credentials and the
@@ -284,7 +288,7 @@ pub async fn ensure(
         // Adoption without an original announcement still takes the loop below.
         return Ok(Some(endpoint));
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let adopted = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match ready(&endpoint, user.uid.as_raw()).await {
                 Ok(()) => return Ok(Some(endpoint.clone())),
@@ -301,7 +305,11 @@ pub async fn ensure(
         }
     })
     .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    // An adopted worker (a racing launch won the unit name) gets its scope
+    // recorded too, before this open returns (#355).
+    remember_scope(root, &name, &endpoint, person, user.uid.as_raw()).await?;
+    Ok(adopted)
 }
 
 // The manager passes this root controller's original socket to the exact
@@ -750,7 +758,7 @@ async fn request_stop(
 /// Stops one person's host login for account `uid` (`unit`).
 ///
 /// With the system manager, the unit is ended through systemd alone
-/// ([`stop_unit`]). The login worker runs as the revoked account, which can
+/// ([`stop_system_login`]). The login worker runs as the revoked account, which can
 /// freeze or ptrace it, so revocation must not depend on its answers (J261
 /// P1/P2, #355). Without a system manager there is no unit and the worker is
 /// the only handle: it is authenticated and asked to stop its shells, under
@@ -763,7 +771,7 @@ async fn stop_login(
     unit: &str,
 ) -> io::Result<()> {
     if matches!(manager, Manager::System) {
-        return stop_unit(unit).await;
+        return stop_system_login(root, uid, unit).await;
     }
     let endpoint = root.join(unit).join("login.sock");
     let scope = tokio::time::timeout(
@@ -809,31 +817,74 @@ const SYSTEMD_QUERY_HANG: Duration = Duration::from_secs(60);
 /// that never answers (#355).
 const UNIT_STOP_HANG: Duration = Duration::from_secs(180);
 
+/// Hang guard for a killed login cgroup to empty. `cgroup.kill` delivers
+/// SIGKILL to every member at once, so only a process stuck in the kernel
+/// (uninterruptible sleep) can keep it populated; then revocation fails
+/// rather than report a login it could not end (#355).
+const CGROUP_EMPTY_HANG: Duration = Duration::from_secs(60);
+
+/// Test-only stand-ins for the host: the `systemctl` and `loginctl`
+/// programs, the cgroup filesystem root, and the empty-cgroup hang guard.
+#[cfg(test)]
+#[derive(Clone)]
+struct HostStandIn {
+    /// Scripted `systemctl`.
+    systemctl: PathBuf,
+    /// Scripted `loginctl`.
+    loginctl: PathBuf,
+    /// Stand-in for `/sys/fs/cgroup`.
+    cgroups: PathBuf,
+    /// Replaces [`CGROUP_EMPTY_HANG`].
+    empty_hang: Duration,
+}
+
 #[cfg(test)]
 thread_local! {
-    /// Test-only stand-ins for the `systemctl` program and the cgroup
-    /// filesystem root, so `stop_unit` runs against a scripted manager.
-    static HOST_UNITS: std::cell::RefCell<Option<(PathBuf, PathBuf)>> =
+    /// The scripted host for `stop_system_login` on this test thread.
+    static HOST_UNITS: std::cell::RefCell<Option<HostStandIn>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// The scripted host on this test thread, if any.
+#[cfg(test)]
+fn stand_in() -> Option<HostStandIn> {
+    HOST_UNITS.with(|units| units.borrow().clone())
 }
 
 /// A `systemctl` command, isolated like every host-manager child.
 fn systemctl() -> tokio::process::Command {
     #[cfg(test)]
-    if let Some((program, _)) = HOST_UNITS.with(|units| units.borrow().clone()) {
-        return crate::sessions::isolated(&program);
+    if let Some(host) = stand_in() {
+        return crate::sessions::isolated(&host.systemctl);
     }
     crate::sessions::isolated(Path::new("systemctl"))
 }
 
-/// Root of the unified cgroup hierarchy that systemd's `ControlGroup` paths
-/// are relative to.
+/// A `loginctl` command, isolated like every host-manager child.
+fn loginctl() -> tokio::process::Command {
+    #[cfg(test)]
+    if let Some(host) = stand_in() {
+        return crate::sessions::isolated(&host.loginctl);
+    }
+    crate::sessions::isolated(Path::new("loginctl"))
+}
+
+/// Root of the unified cgroup hierarchy that cgroup paths are relative to.
 fn cgroup_root() -> PathBuf {
     #[cfg(test)]
-    if let Some((_, root)) = HOST_UNITS.with(|units| units.borrow().clone()) {
-        return root;
+    if let Some(host) = stand_in() {
+        return host.cgroups;
     }
     PathBuf::from("/sys/fs/cgroup")
+}
+
+/// How long a killed cgroup may take to empty before revocation fails.
+fn empty_hang() -> Duration {
+    #[cfg(test)]
+    if let Some(host) = stand_in() {
+        return host.empty_hang;
+    }
+    CGROUP_EMPTY_HANG
 }
 
 /// What systemd reports about one unit.
@@ -844,9 +895,11 @@ struct UnitState {
     active: String,
     /// `ControlGroup`, relative to [`cgroup_root`]; empty when it has none.
     control_group: String,
+    /// `MainPID`: the login worker while the unit runs, otherwise 0.
+    main_pid: i32,
 }
 
-/// Asks systemd for `service`'s load, active and cgroup state.
+/// Asks systemd for `service`'s load, active, cgroup and main process state.
 async fn unit_state(service: &str) -> io::Result<UnitState> {
     let output = tokio::time::timeout(
         SYSTEMD_QUERY_HANG,
@@ -857,6 +910,7 @@ async fn unit_state(service: &str) -> io::Result<UnitState> {
                     "--property=LoadState",
                     "--property=ActiveState",
                     "--property=ControlGroup",
+                    "--property=MainPID",
                     service,
                 ]
                 .as_slice(),
@@ -878,12 +932,14 @@ async fn unit_state(service: &str) -> io::Result<UnitState> {
         load: String::new(),
         active: String::new(),
         control_group: String::new(),
+        main_pid: 0,
     };
     for line in text.lines() {
         match line.split_once('=') {
             Some(("LoadState", value)) => value.trim().clone_into(&mut state.load),
             Some(("ActiveState", value)) => value.trim().clone_into(&mut state.active),
             Some(("ControlGroup", value)) => value.trim().clone_into(&mut state.control_group),
+            Some(("MainPID", value)) => state.main_pid = value.trim().parse().unwrap_or(0),
             _ => {}
         }
     }
@@ -893,68 +949,265 @@ async fn unit_state(service: &str) -> io::Result<UnitState> {
     Ok(state)
 }
 
-/// Ends the host login unit `unit` through systemd alone, then refuses only
-/// if systemd still reports it running.
-///
-/// The cgroup comes from systemd's `ControlGroup` of a unit only root can
-/// create, so nothing here depends on the login worker, which runs as the
-/// revoked account (J261 P1, #355). `cgroup.kill` ends every process in it at
-/// once, the shells, their PTY owners and any `setsid` escapees, before any
-/// courtesy, so no exchange the account controls can delay the kill (J261
-/// P2). `systemctl stop` then retires the unit and its PAM session.
-async fn stop_unit(unit: &str) -> io::Result<()> {
-    let service = format!("{unit}.service");
-    let state = unit_state(&service).await?;
-    // Collected transient units leave their private account lock as history.
-    // Repeated access removal must not fail merely because cleanup already
-    // unloaded that unit.
-    if state.load == "not-found" {
+/// Whether `group` (a cgroup path relative to the hierarchy root) is one a
+/// login of `uid` with unit `service` can own: that unit's own cgroup, or a
+/// logind session scope of that account. Absolute, with no empty, `.` or `..`
+/// parts: cgroupfs has no symlinks, so nothing else can be reached.
+fn login_cgroup(group: &str, uid: u32, service: &str) -> bool {
+    let Some(rest) = group.strip_prefix('/') else {
+        return false;
+    };
+    let parts: Vec<_> = rest.split('/').collect();
+    if parts.iter().any(|part| matches!(*part, "" | "." | "..")) {
+        return false;
+    }
+    let slice = format!("user-{uid}.slice");
+    match parts.as_slice() {
+        ["system.slice", unit] => *unit == service,
+        ["user.slice", user, scope] => {
+            *user == slice
+                && scope
+                    .strip_prefix("session-")
+                    .and_then(|rest| rest.strip_suffix(".scope"))
+                    .is_some_and(|id| {
+                        !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                    })
+        }
+        _ => false,
+    }
+}
+
+/// Where the session scope of login `unit` is recorded: the root-only lock
+/// registry, next to the unit's lock.
+fn scope_record(root: &Path, unit: &str) -> PathBuf {
+    root.join("infraternal-login-locks")
+        .join(format!("{unit}.scope"))
+}
+
+/// Records, durably, the cgroup that login `unit` of `uid` lives in. With
+/// `PAMName=` that is the logind session scope (`session-N.scope`), not the
+/// unit's own cgroup, and it holds the worker, the PTY owners and every
+/// descendant. Revocation kills it from this record, never from anything the
+/// login's account can touch (J291, #355).
+fn record_scope(root: &Path, unit: &str, uid: u32, group: &str) -> io::Result<()> {
+    use std::{fs::OpenOptions, io::Write as _, os::unix::fs::OpenOptionsExt as _};
+    if !login_cgroup(group, uid, &format!("{unit}.service")) {
+        return Err(io::Error::other("host login is in an unexpected cgroup"));
+    }
+    let record = scope_record(root, unit);
+    let staging = record.with_extension("scope.staging");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&staging)?;
+    file.write_all(group.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&staging, &record)?;
+    std::fs::File::open(root.join("infraternal-login-locks"))?.sync_all()
+}
+
+/// The recorded cgroup of login `unit` of `uid`, if one was recorded.
+fn recorded_scope(root: &Path, unit: &str, uid: u32) -> io::Result<Option<String>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let record = scope_record(root, unit);
+    let metadata = match std::fs::symlink_metadata(&record) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        result => result?,
+    };
+    let unsafe_record =
+        || io::Error::new(io::ErrorKind::PermissionDenied, "unsafe login scope record");
+    if !metadata.is_file() || metadata.uid() != Uid::effective().as_raw() || metadata.len() > 256 {
+        return Err(unsafe_record());
+    }
+    let group = std::fs::read_to_string(&record)?;
+    if !login_cgroup(&group, uid, &format!("{unit}.service")) {
+        return Err(unsafe_record());
+    }
+    Ok(Some(group))
+}
+
+/// The cgroup that process `pid` is in, from the kernel.
+fn process_cgroup(pid: i32) -> io::Result<String> {
+    let record = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))?;
+    record
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(str::to_owned)
+        .ok_or_else(|| io::Error::other("host login path needs a unified cgroup"))
+}
+
+/// Records the session scope of the authenticated worker at `endpoint`, if
+/// login `unit` has none recorded yet.
+async fn remember_scope(
+    root: &Path,
+    unit: &str,
+    endpoint: &Path,
+    person: uuid::Uuid,
+    uid: u32,
+) -> io::Result<()> {
+    if recorded_scope(root, unit, uid)?.is_some() {
         return Ok(());
     }
-    if !state.control_group.is_empty() {
-        let group = &state.control_group;
-        let parts: Vec<_> = group.split('/').collect();
-        if !group.starts_with('/')
-            || parts[1..]
-                .iter()
-                .any(|part| matches!(*part, "" | "." | ".."))
-            || parts.last() != Some(&service.as_str())
-        {
-            return Err(io::Error::other("invalid host login cgroup"));
-        }
-        let directory = cgroup_root().join(group.trim_start_matches('/'));
-        match std::fs::write(directory.join("cgroup.kill"), b"1") {
-            Ok(()) => {}
-            // The unit's cgroup is already gone: nothing is left to kill.
-            Err(error) if error.kind() == io::ErrorKind::NotFound && !directory.exists() => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(io::Error::other(
-                    "host login cgroup lacks immediate cleanup",
-                ));
-            }
-            Err(error) => return Err(error),
-        }
+    let identity = cgroup(endpoint, Manager::System, person, uid)
+        .await?
+        .ok_or_else(|| io::Error::other("host login worker absent"))?;
+    record_scope(root, unit, uid, &relative_group(&identity)?)
+}
+
+/// The cgroup path, relative to the hierarchy root, of an authenticated
+/// worker identity.
+fn relative_group(identity: &crate::login_auth::Identity) -> io::Result<String> {
+    identity
+        .group
+        .parent()
+        .and_then(|group| group.strip_prefix("/sys/fs/cgroup").ok())
+        .and_then(Path::to_str)
+        .map(|group| format!("/{group}"))
+        .ok_or_else(|| io::Error::other("host login cgroup absent"))
+}
+
+/// Kills every process in cgroup `group` at once. A missing cgroup has no
+/// processes left to kill.
+fn kill_cgroup(group: &str) -> io::Result<()> {
+    let directory = cgroup_root().join(group.trim_start_matches('/'));
+    match std::fs::write(directory.join("cgroup.kill"), b"1") {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !directory.exists() => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(io::Error::other(
+            "host login cgroup lacks immediate cleanup",
+        )),
+        Err(error) => Err(error),
     }
-    let status = tokio::time::timeout(
-        UNIT_STOP_HANG,
-        systemctl()
-            .args(["stop", &service].as_slice())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status(),
-    )
+}
+
+/// Waits until cgroup `group` has no process left, or is gone. Fails at
+/// [`empty_hang`]: a login that cannot be shown empty is not revoked.
+async fn cgroup_emptied(group: &str) -> io::Result<()> {
+    let events = cgroup_root()
+        .join(group.trim_start_matches('/'))
+        .join("cgroup.events");
+    tokio::time::timeout(empty_hang(), async {
+        loop {
+            match std::fs::read_to_string(&events) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+                Ok(text) if text.lines().any(|line| line == "populated 0") => return Ok(()),
+                Ok(_) => {}
+            }
+            // sleep: poll interval for the kernel's populated flag; the loop ends on that condition.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
     .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-    if !status.success() {
-        return Err(io::Error::other("host login unit refused stop"));
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "host login processes outlived cgroup.kill",
+        )
+    })?
+}
+
+/// Ends host login `unit` of `uid` through root-owned sources only, and
+/// reports success only once every process of it is shown gone.
+///
+/// The login's processes live in its logind session scope, not in the unit's
+/// own cgroup: `PAMName=` moves the worker, the PTY owners and every
+/// descendant there (J291, #355). So revocation kills the scope recorded at
+/// open (or, without a record, the scope the kernel reports for the unit's
+/// `MainPID`), and the unit's cgroup too, before any courtesy. It then stops the
+/// unit, terminates the logind session, and requires both cgroups to be
+/// empty. Nothing the account controls is asked or waited on: it can stop or
+/// kill its own worker, and that must neither keep the login alive nor make a
+/// revoke report success (J261 P1/P2, J291 P1). A login with no unit and no
+/// record, but with its runtime directory still present, cannot be accounted
+/// for, so revocation fails closed.
+async fn stop_system_login(root: &Path, uid: u32, unit: &str) -> io::Result<()> {
+    let service = format!("{unit}.service");
+    let recorded = recorded_scope(root, unit, uid)?;
+    let state = unit_state(&service).await?;
+    let mut groups = Vec::new();
+    groups.extend(recorded.clone());
+    if state.load != "not-found" {
+        if !state.control_group.is_empty() {
+            if !login_cgroup(&state.control_group, uid, &service) {
+                return Err(io::Error::other("invalid host login cgroup"));
+            }
+            groups.push(state.control_group.clone());
+        }
+        if recorded.is_none() && state.main_pid > 0 {
+            let group = process_cgroup(state.main_pid)?;
+            if !login_cgroup(&group, uid, &service) {
+                return Err(io::Error::other("host login is in an unexpected cgroup"));
+            }
+            groups.push(group);
+        }
+    } else if recorded.is_none() {
+        if root.join(unit).exists() {
+            return Err(io::Error::other(
+                "host login has no unit and no recorded scope; cannot prove it ended",
+            ));
+        }
+        return Ok(());
+    }
+    groups.sort();
+    groups.dedup();
+    for group in &groups {
+        kill_cgroup(group)?;
+    }
+    if state.load != "not-found" {
+        let status = tokio::time::timeout(
+            UNIT_STOP_HANG,
+            systemctl()
+                .args(["stop", &service].as_slice())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        // Advisory only: once `cgroup.kill` has ended the unit's main process,
+        // systemd may collect the transient unit before this stop arrives, and
+        // `stop` then exits 5 (not loaded). The checks below decide: both
+        // cgroups shown empty, and the unit gone or inactive (#355).
+        let _ = status;
+    }
+    for session in groups.iter().filter_map(|group| {
+        group
+            .rsplit('/')
+            .next()
+            .and_then(|scope| scope.strip_prefix("session-"))
+            .and_then(|rest| rest.strip_suffix(".scope"))
+    }) {
+        // Belt and braces after the kill: logind retires the session record.
+        // A session that is already gone is not an error.
+        let _ = tokio::time::timeout(
+            SYSTEMD_QUERY_HANG,
+            loginctl()
+                .args(["terminate-session", session].as_slice())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await;
+    }
+    for group in &groups {
+        cgroup_emptied(group).await?;
     }
     let after = unit_state(&service).await?;
     if after.load != "not-found" && !matches!(after.active.as_str(), "inactive" | "failed") {
         return Err(io::Error::other("host login unit still running after stop"));
     }
-    Ok(())
+    match std::fs::remove_file(scope_record(root, unit)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 async fn acquire(root: &Path, name: &str) -> io::Result<nix::fcntl::Flock<std::fs::File>> {
@@ -1191,22 +1444,139 @@ mod tests {
     //! Person identity remains distinct even when the OS account is shared.
     use super::*;
 
-    /// A revoked account that freezes its own login worker (`kill -STOP`)
-    /// still loses its shell: with the system manager, revocation kills the
-    /// unit's cgroup and stops the unit through systemd without asking the
-    /// worker (J261 P1, #355). The worker here accepts and never answers, the
-    /// socket-level shape of a stopped process. systemd is a script that
-    /// records its calls and reports the unit stopped after `stop`.
-    #[tokio::test]
-    async fn frozen_login_worker_cannot_keep_a_revoked_shell() {
-        use std::os::unix::fs::PermissionsExt as _;
-        // Short, so the worker's socket path stays within SUN_LEN.
+    /// A scripted host for `stop_system_login`: a fake cgroupfs where login
+    /// `unit` of `uid` has an empty unit cgroup and its processes in
+    /// `session-7.scope`, as `PAMName=` places them on a real host (J291),
+    /// plus `systemctl`/`loginctl` scripts that record their calls. Like a
+    /// real host, `stop` finds the transient unit already collected after the
+    /// kill and exits 5 (not loaded).
+    struct ScriptedHost {
+        /// Root of the fake host files.
+        host: PathBuf,
+        /// The fake `session-7.scope` directory.
+        scope: PathBuf,
+        /// Stops the stand-in kernel thread.
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ScriptedHost {
+        /// Builds the host under `root`. With `dies`, a stand-in kernel empties
+        /// the scope once `cgroup.kill` is written; without it the scope stays
+        /// populated, like a process in uninterruptible sleep.
+        fn new(root: &Path, unit: &str, uid: u32, loaded: bool, dies: bool) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            let host = root.join("host");
+            let cgroups = host.join("cgroup");
+            let service = format!("{unit}.service");
+            let unit_group = cgroups.join("system.slice").join(&service);
+            let scope = cgroups
+                .join(format!("user.slice/user-{uid}.slice"))
+                .join("session-7.scope");
+            for (directory, populated) in [(&unit_group, "0"), (&scope, "1")] {
+                std::fs::create_dir_all(directory).unwrap();
+                std::fs::write(directory.join("cgroup.kill"), b"").unwrap();
+                std::fs::write(
+                    directory.join("cgroup.events"),
+                    format!("populated {populated}\n"),
+                )
+                .unwrap();
+            }
+            std::fs::write(
+                host.join("load"),
+                if loaded { "loaded" } else { "not-found" },
+            )
+            .unwrap();
+            std::fs::write(host.join("active"), "active").unwrap();
+            let script = |name: &str, body: &str| {
+                let staging = host.join(format!("{name}.staging"));
+                std::fs::write(
+                    &staging,
+                    format!(
+                        "#!/bin/sh\nd='{}'\necho \"{name} $*\" >> \"$d/calls\"\n{body}",
+                        host.display()
+                    ),
+                )
+                .unwrap();
+                std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let program = host.join(name);
+                // Published by a separate process so no forked sibling holds a writer (ETXTBSY).
+                assert!(
+                    std::process::Command::new("install")
+                        .args(["-m", "700", "--"])
+                        .args([&staging, &program])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                program
+            };
+            let systemctl = script(
+                "systemctl",
+                &format!(
+                    "case \"$1\" in\nshow) printf 'LoadState=%s\\nActiveState=%s\\nControlGroup=/system.slice/{service}\\nMainPID=0\\n' \"$(cat \"$d/load\")\" \"$(cat \"$d/active\")\" ;;\nstop) echo inactive > \"$d/active\"; echo not-found > \"$d/load\"; exit 5 ;;\nesac\n"
+                ),
+            );
+            let loginctl = script("loginctl", "exit 0\n");
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            if dies {
+                let (scope, stop) = (scope.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        if std::fs::read(scope.join("cgroup.kill")).is_ok_and(|kill| kill == b"1") {
+                            std::fs::write(scope.join("cgroup.events"), "populated 0\n").unwrap();
+                            return;
+                        }
+                        // sleep: the stand-in kernel polls for the kill write; the loop ends on it.
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                });
+            }
+            HOST_UNITS.with(|units| {
+                *units.borrow_mut() = Some(HostStandIn {
+                    systemctl,
+                    loginctl,
+                    cgroups,
+                    empty_hang: Duration::from_secs(2),
+                });
+            });
+            Self { host, scope, stop }
+        }
+
+        /// The scripted programs' calls so far.
+        fn calls(&self) -> String {
+            std::fs::read_to_string(self.host.join("calls")).unwrap_or_default()
+        }
+    }
+
+    impl Drop for ScriptedHost {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            HOST_UNITS.with(|units| *units.borrow_mut() = None);
+        }
+    }
+
+    /// A root revocation fixture: a short registry root, a synchronized
+    /// person and that person's unit lock for our uid.
+    async fn system_login_fixture() -> (PathBuf, uuid::Uuid, u32, String) {
+        // Short, so a worker socket path stays within SUN_LEN.
         let root = nix::unistd::mkdtemp("/tmp/rl-XXXXXX").unwrap();
         let person = uuid::Uuid::new_v4();
         let uid = Uid::effective().as_raw();
         let unit = name(person, uid);
         drop(acquire(&root, &unit).await.unwrap());
         synchronize_at(&root, person).unwrap();
+        (root, person, uid, unit)
+    }
+
+    /// A revoked account that kills (or freezes) its own login worker still
+    /// loses every process of its login. They live in the logind session
+    /// scope, not the unit's cgroup (J291), so revocation kills the scope
+    /// recorded at open, without asking the worker, and reports success only
+    /// once the kernel shows the scope empty (J261 P1, J291 P1). The worker
+    /// here is frozen: it accepts and never answers.
+    #[tokio::test]
+    async fn killed_or_frozen_worker_cannot_keep_its_session_scope() {
+        let (root, person, uid, unit) = system_login_fixture().await;
         let endpoint = root.join(&unit).join("login.sock");
         std::fs::create_dir(endpoint.parent().unwrap()).unwrap();
         let worker = tokio::net::UnixListener::bind(&endpoint).unwrap();
@@ -1217,33 +1587,14 @@ mod tests {
                 held.push(worker.accept().await.unwrap().0);
             }
         });
-        let host = root.join("host");
-        let group = format!("/system.slice/{unit}.service");
-        let cgroup = host.join("cgroup").join(group.trim_start_matches('/'));
-        std::fs::create_dir_all(&cgroup).unwrap();
-        std::fs::write(cgroup.join("cgroup.kill"), b"").unwrap();
-        std::fs::write(host.join("active"), "active\n").unwrap();
-        std::fs::write(host.join("group"), format!("{group}\n")).unwrap();
-        let script = format!(
-            "#!/bin/sh\nd='{}'\necho \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
-             show) printf 'LoadState=loaded\\nActiveState=%s\\nControlGroup=%s\\n' \"$(cat \"$d/active\")\" \"$(cat \"$d/group\")\" ;;\n\
-             stop) echo inactive > \"$d/active\"; : > \"$d/group\" ;;\nesac\n",
-            host.display()
-        );
-        let staging = host.join("systemctl.staging");
-        std::fs::write(&staging, script).unwrap();
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let systemctl = host.join("systemctl");
-        // Published by a separate process so no forked sibling holds a writer (ETXTBSY).
-        assert!(
-            std::process::Command::new("install")
-                .args(["-m", "700", "--"])
-                .args([&staging, &systemctl])
-                .status()
-                .unwrap()
-                .success()
-        );
-        HOST_UNITS.with(|units| *units.borrow_mut() = Some((systemctl, host.join("cgroup"))));
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
         // Hang guard only: a correct revocation never waits on the worker.
         let revoked = tokio::time::timeout(
             Duration::from_secs(300),
@@ -1251,25 +1602,82 @@ mod tests {
         )
         .await
         .expect("revocation hung");
-        HOST_UNITS.with(|units| *units.borrow_mut() = None);
         frozen.abort();
-        let calls = std::fs::read_to_string(host.join("calls")).unwrap_or_default();
-        let killed = std::fs::read(cgroup.join("cgroup.kill")).unwrap();
+        let calls = host.calls();
         assert!(
             revoked.is_ok(),
-            "a frozen worker refused the revocation: {revoked:?}; systemctl calls: {calls:?}"
+            "revocation failed: {revoked:?}; calls: {calls:?}"
         );
-        assert_eq!(killed, b"1", "the unit's cgroup was not killed");
+        assert_eq!(
+            std::fs::read(host.scope.join("cgroup.kill")).unwrap(),
+            b"1",
+            "the login's session scope was not killed; calls: {calls:?}"
+        );
         assert!(
             calls
                 .lines()
-                .any(|line| line == format!("stop {unit}.service")),
-            "the unit was not stopped: {calls:?}"
+                .any(|line| line == format!("systemctl stop {unit}.service")),
+            "{calls:?}"
         );
+        assert!(
+            calls
+                .lines()
+                .any(|line| line == "loginctl terminate-session 7"),
+            "{calls:?}"
+        );
+        assert!(
+            !scope_record(&root, &unit).exists(),
+            "the scope record outlived the login"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A session scope that stays populated after `cgroup.kill` (a process in
+    /// uninterruptible sleep) fails the revocation: success is reported only
+    /// for a login shown gone (J291).
+    #[tokio::test]
+    async fn revocation_fails_while_the_session_scope_stays_populated() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, true, false);
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
         assert_eq!(
-            permitted(&root, person).unwrap_err().kind(),
-            io::ErrorKind::PermissionDenied
+            revoked.as_ref().map_err(io::Error::kind),
+            Err(io::ErrorKind::TimedOut),
+            "{revoked:?}; calls: {:?}",
+            host.calls()
         );
+        assert!(
+            scope_record(&root, &unit).exists(),
+            "a failed revocation forgot the login"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A login that left its runtime directory but has neither a unit nor a
+    /// recorded scope (an `su` fallback launched when the manager probe timed
+    /// out, J291) cannot be shown ended, so revocation fails instead of
+    /// reporting success over a live shell.
+    #[tokio::test]
+    async fn revocation_fails_closed_for_a_login_it_cannot_account_for() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        std::fs::create_dir(root.join(&unit)).unwrap();
+        let host = ScriptedHost::new(&root, &unit, uid, false, true);
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
+        assert!(
+            revoked.is_err(),
+            "an unaccounted login was reported revoked; calls: {:?}",
+            host.calls()
+        );
+        drop(host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
