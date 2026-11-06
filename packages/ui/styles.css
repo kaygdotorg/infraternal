@@ -253,6 +253,10 @@
   .ui-toast-action { min-height: 2.75rem; padding: 0 0.625rem; }
   .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 }
+/* The card's right padding is smaller than its left because a close button or an action sits there with its own inner space. A
+   notice with none of them ends in text, which then ran to within 8px of the edge against a 12px left inset. Without a trailing
+   control the right inset equals the left, and the message wraps rather than touching it (phones, 375 and 393 px). */
+.ui-toast:not(:has(.ui-toast-close:not([hidden]), .ui-toast-actions:not([hidden]), .ui-toast-icons:not([hidden]))) { padding-right: 0.75rem; }
 
 @media (pointer: coarse) {
   /* The stack is the anchored element (a card sits at the stack's bottom edge): offsetting the card as well counted the tray twice. */
