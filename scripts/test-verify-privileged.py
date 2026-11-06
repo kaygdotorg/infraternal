@@ -282,13 +282,89 @@ class RealRootProof(unittest.TestCase):
                                   return_value=subprocess.CompletedProcess([], 3)) as run:
             self.assertEqual(slot_hold.hold(['cargo', 'build']), 3)
         argv, kwargs = popen.call_args
-        self.assertEqual(argv[0][:4], ['runuser', '-u', 'claude', '--'])
+        self.assertEqual(argv[0], slot_hold.waiter_command())
         self.assertIs(kwargs['stderr'], subprocess.DEVNULL)
         self.assertIs(kwargs['stdout'], subprocess.PIPE)
         self.assertIs(kwargs['stdin'], subprocess.PIPE)
         self.assertTrue(kwargs['close_fds'])
         self.assertEqual(run.call_args[0][0], ['nice', '-n', '10', 'cargo', 'build'])
         waiter.stdin.write.assert_called_once()
+
+    def test_slot_holder_reads_a_bounded_ready_line(self):
+        """The ready line is read with a size limit, so claude can't grow root's memory (J281 P3-1)."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = slot_hold.READY
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter), \
+                mock.patch.object(slot_hold.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            slot_hold.hold(['true'])
+        (limit,), _ = waiter.stdout.readline.call_args
+        self.assertEqual(limit, len(slot_hold.READY) + 1)
+
+    def test_slot_holder_refuses_an_endless_line_without_reading_it_all(self):
+        """A real pipe carrying a huge line without a newline is refused after a bounded read."""
+        import io
+        stream = io.BufferedReader(io.BytesIO(b'X' * (8 << 20)))
+        waiter = mock.MagicMock()
+        waiter.stdout = stream
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter), \
+                mock.patch.object(slot_hold.subprocess, 'run', side_effect=AssertionError('ran without a slot')):
+            self.assertEqual(slot_hold.hold(['true']), 1)
+        self.assertLessEqual(stream.tell(), len(slot_hold.READY) + 1 + io.DEFAULT_BUFFER_SIZE)
+
+    def test_root_command_holds_the_lock_fd(self):
+        """With --keep-fd 9, the root command really has fd 9 open: cmd-has-fd9: yes (J281 P3-3)."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = slot_hold.READY
+        real_popen = subprocess.Popen
+        seen = []
+
+        def popen(argv, *args, **kwargs):
+            """Fake only claude's waiter; let subprocess.run start the real root command."""
+            if argv[:1] == ['systemd-run']:
+                seen.append(kwargs)
+                return waiter
+            return real_popen(argv, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            lock, out = Path(directory) / 'lock', Path(directory) / 'out'
+            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT)
+            saved = os.dup(9) if os.path.exists('/proc/self/fd/9') else None
+            os.dup2(descriptor, 9, inheritable=False)
+            try:
+                probe = f'if [ -e /proc/self/fd/9 ]; then echo "cmd-has-fd9: yes"; else echo "cmd-has-fd9: no"; fi > {out}'
+                with mock.patch.object(slot_hold.subprocess, 'Popen', side_effect=popen):
+                    slot_hold.hold(['bash', '-c', probe], keep_fds=(9,))
+                self.assertEqual(out.read_text().strip(), 'cmd-has-fd9: yes')
+                with mock.patch.object(slot_hold.subprocess, 'Popen', side_effect=popen):
+                    slot_hold.hold(['bash', '-c', probe])
+                self.assertEqual(out.read_text().strip(), 'cmd-has-fd9: no')
+                # claude's waiter is never handed the kept descriptors.
+                self.assertTrue(all(kwargs.get('close_fds') and not kwargs.get('pass_fds') for kwargs in seen))
+            finally:
+                if saved is not None:
+                    os.dup2(saved, 9)
+                    os.close(saved)
+                else:
+                    os.close(9)
+                os.close(descriptor)
+
+    def test_keep_fd_is_parsed_and_proof_passes_the_lock(self):
+        """--keep-fd N reaches hold(); the proof passes fd 9 (its lock)."""
+        with mock.patch.object(slot_hold, 'hold', return_value=0) as hold, \
+                mock.patch.object(sys, 'argv', ['root-slot-hold', '--keep-fd', '9', 'cargo', 'build']):
+            self.assertEqual(slot_hold.main(), 0)
+        self.assertEqual(hold.call_args[0], (['cargo', 'build'], [9]))
+        self.assertIn('scripts/root-slot-hold" --keep-fd 9 nix develop', self.proof_code())
+
+    def test_claudes_side_runs_in_claudes_slice(self):
+        """The waiter is a transient unit as claude in claude's slice, killed as a whole (J281 P3-2)."""
+        argv = slot_hold.waiter_command()
+        self.assertEqual(argv[0], 'systemd-run')
+        for option in ('--uid=claude', '--gid=claude', '--slice=user-1500.slice', '--pipe', '--wait', '--collect'):
+            self.assertIn(option, argv)
+        self.assertIn('KillMode=control-group', argv)
+        self.assertEqual(argv[argv.index('--') + 1], slot_hold.BUILD_SLOT)
+        self.assertNotIn('runuser', argv)
 
     def test_slot_holder_runs_nothing_without_a_slot(self):
         """If claude's side never reports ready, root's command does not run."""
@@ -301,7 +377,7 @@ class RealRootProof(unittest.TestCase):
     def test_proof_uses_the_reviewed_slot_holder(self):
         """The proof runs the commit's own root-slot-hold, not a host-only helper, and escapes its log tail."""
         code = self.proof_code()
-        self.assertIn('/usr/bin/python3 "$work/src/scripts/root-slot-hold" nix develop', code)
+        self.assertIn('/usr/bin/python3 "$work/src/scripts/root-slot-hold" --keep-fd 9 nix develop', code)
         self.assertNotIn('/root/.cache/root-build-slot', code)
         self.assertIn('tail -20 "$work/build.log" | cat -v', code)
 
@@ -326,6 +402,13 @@ class RealRootProof(unittest.TestCase):
         self.assertNotIn('INFRATERNAL_SCCACHE_DIR', names)
         self.assertNotIn('RUSTC_WRAPPER', names)
         self.assertTrue({'PATH', 'HOME', 'LANG'} <= set(names))
+
+    def test_proof_build_keeps_its_scratch_in_roots_dir(self):
+        """TMPDIR points into $work before the build starts (J281 note)."""
+        code = self.proof_code()
+        self.assertIn('export TMPDIR=$work/tmp', code)
+        self.assertIn('mkdir -p "$CARGO_HOME" "$TMPDIR"', code)
+        self.assertLess(code.index('export TMPDIR=$work/tmp'), code.index('root-slot-hold"'))
 
     def test_proof_script_keeps_claude_out_of_roots_process(self):
         """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
