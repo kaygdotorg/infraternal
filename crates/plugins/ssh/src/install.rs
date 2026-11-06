@@ -1023,11 +1023,13 @@ fi
         } else {
             "700"
         };
+        // A base that is a link, not ours or not private was not made by setup:
+        // its refusal names the `foreign` cause for the server (Refusal, #394).
         // The shared routines read their control flags with defaults; a login
         // environment must never preset them (an inherited setup_check=yes would
         // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || {{ printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71; }}\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71 ;; esac\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
