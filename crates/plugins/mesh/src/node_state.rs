@@ -14,6 +14,7 @@ use std::{
     sync::Mutex,
 };
 use zeroize::{Zeroize, Zeroizing};
+/// The accepted public mesh snapshot saved for restart, with a firewall choice on Linux.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {

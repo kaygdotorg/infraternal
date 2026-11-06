@@ -881,6 +881,8 @@ struct RuntimeInfo {
     routes: BTreeSet<IpAddr>,
 }
 
+/// A serialized request for the Mac `GotaTun` worker. Each request has a reply channel so callers
+/// can wait for the device update before changing durable identity state.
 enum WorkerCommand {
     Apply {
         config: Config,
@@ -1126,6 +1128,7 @@ struct RuntimeState {
     port: u16,
 }
 
+/// Runs the Mac `GotaTun` device loop, applying requests in order and stopping when its queue closes.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     while let Some(command) = commands.recv().await {
         match command {
@@ -1304,6 +1307,7 @@ async fn rollback_device(device: &GotaDevice, interface: &str, config: Option<&C
     }
 }
 
+/// Owns a Mac node's `GotaTun` worker, accepted configuration and durable identity state.
 pub struct Node {
     enabled: bool,
     worker: Option<Worker>,
@@ -2111,6 +2115,7 @@ mod tests {
         }
     }
 
+    /// Verifies that a normal active peer gets host routes, an endpoint and a keepalive.
     #[test]
     fn peer_conversion_uses_host_routes_and_keepalive() {
         let config = config();
