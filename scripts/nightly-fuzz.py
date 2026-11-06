@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 import subprocess
 import time
@@ -171,14 +172,20 @@ def reproduces(fuzzer, state, name, crash):
     slow to start processes does not file a 0 ms input. Only a quick, clean
     run sets an input aside.
     The output goes to the target's log, after the fuzz run's own output.
+    Whatever the re-check writes as artifacts is a copy of an input already
+    on disk, so its directory starts empty and is removed afterwards.
     """
     recheck = state / 'recheck' / name
-    recheck.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(recheck, ignore_errors=True)
+    recheck.mkdir(parents=True)
     log_path = state / f'{name}.log'
     with log_path.open('a') as log:
         log.write(f'\n== re-check of {crash.name} in isolation\n')
     offset = log_path.stat().st_size
-    result = fuzzer.execute(fuzzer.command(name, crash, recheck_flags(recheck)), log_path, 'a')
+    try:
+        result = fuzzer.execute(fuzzer.command(name, crash, recheck_flags(recheck)), log_path, 'a')
+    finally:
+        shutil.rmtree(recheck, ignore_errors=True)
     with log_path.open('rb') as log:
         log.seek(offset)
         elapsed = executed_ms(log.read().decode(errors='replace'), crash)
@@ -219,8 +226,14 @@ def run_target(fuzzer, state, name, budget, report):
     # libFuzzer exits non-zero when it finds an input; that is a finding.
     # A non-zero exit that left no new input is a build or harness error.
     broken = result.returncode != 0 and not found
+    set_aside = set(before) - set(crashes)
+    # libFuzzer stops at the first input it writes, so a timeout ends this
+    # target's fuzzing for the night, even one that was then set aside. Saying
+    # so keeps the lost coverage visible when nothing is filed.
+    cut_short = any(path.name.startswith('timeout-') for path in found)
     return {'target': name, 'exit': result.returncode, 'seconds': round(time.monotonic() - started, 3),
-            'artifacts': len(crashes), 'new_inputs': len(found), 'unconfirmed': len(before) - len(crashes),
+            'artifacts': len(crashes), 'new_inputs': len([path for path in found if path not in set_aside]),
+            'unconfirmed': len(set_aside), 'cut_short_by_timeout': cut_short,
             'broken': broken, 'unreported': unreported}
 
 
@@ -370,8 +383,10 @@ def main():
         findings += entry['new_inputs']
         summary.append(entry)
         (state / 'last-run.json').write_text(json.dumps({'head': head, 'budget_seconds': args.budget_seconds, 'targets': summary}, indent=2) + '\n')
-        print(f"fuzz target={name} exit={entry['exit']} budget_s={budget} artifacts={entry['artifacts']}", flush=True)
-    print(f'FUZZ_DONE targets={len(summary)} new_inputs={findings} failed={failed} head={head}', flush=True)
+        cut = f" CUT_SHORT_BY_TIMEOUT after {entry['seconds']}s" if entry['cut_short_by_timeout'] else ''
+        print(f"fuzz target={name} exit={entry['exit']} budget_s={budget} artifacts={entry['artifacts']}{cut}", flush=True)
+    cut_short = sum(entry['cut_short_by_timeout'] for entry in summary)
+    print(f'FUZZ_DONE targets={len(summary)} new_inputs={findings} cut_short={cut_short} failed={failed} head={head}', flush=True)
     return int(failed)
 
 

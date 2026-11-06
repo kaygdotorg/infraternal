@@ -137,6 +137,9 @@ class FakeLibFuzzer:
                 path.write_bytes(data)
                 stdout.write(f"artifact_prefix='{prefix}'; Test unit written to {path}\n")
             return subprocess.CompletedProcess(command, 70 if self.writes else 0)
+        if self.recheck_exit:
+            # libFuzzer writes the failing input again under the re-check's own prefix.
+            (Path(prefix) / 'timeout-recheck').write_bytes(b'')
         if self.recheck_ms is not None:
             stdout.write(f"Executed {command[command.index('--') - 1]} in {self.recheck_ms} ms\n")
         return subprocess.CompletedProcess(command, self.recheck_exit)
@@ -330,6 +333,9 @@ class NightlyFuzz(unittest.TestCase):
                                 lambda _name, crash: filed.append(crash.name))
         self.assertEqual(filed, ['crash-2ca3ce74'])
         self.assertEqual(entry['unconfirmed'], 1)
+        # The set-aside timeout is not a new finding, but it did end the night's fuzzing for this target.
+        self.assertEqual(entry['new_inputs'], 1)
+        self.assertTrue(entry['cut_short_by_timeout'])
         self.assertTrue((self.state / 'unconfirmed/ssh_auth_once_decode/timeout-da39a3ee').exists())
         # One fuzz run plus one re-check, of the timeout only.
         self.assertEqual(len(fake.commands), 2)
@@ -342,6 +348,34 @@ class NightlyFuzz(unittest.TestCase):
                                 lambda _name, crash: filed.append(crash.name))
         self.assertEqual(filed, ['crash-2ca3ce74', 'timeout-da39a3ee'])
         self.assertEqual(entry['unconfirmed'], 0)
+        self.assertEqual(entry['new_inputs'], 2)
+        self.assertTrue(entry['cut_short_by_timeout'])
+        # The re-check's own artifacts are removed with its directory.
+        self.assertFalse((self.state / 'recheck' / 'ssh_auth_once_decode').exists())
+
+    def test_crash_only_run_is_not_cut_short_by_a_timeout(self):
+        """A night that ends on a crash files it and is not reported as cut short by a timeout."""
+        fake = FakeLibFuzzer(writes={'crash-2ca3ce74': b'0X.A-1'})
+        entry = fuzz.run_target(self.fuzzer(fake), self.state, 'host_name_parse', 5, lambda _name, _crash: None)
+        self.assertEqual((entry['new_inputs'], entry['cut_short_by_timeout']), (1, False))
+
+    def test_recheck_directory_starts_empty(self):
+        """Leftovers from an earlier night are cleared before a re-check and nothing remains after it."""
+        crash = self.crash('timeout-input', b'')
+        stale = self.state / 'recheck' / 'release_channel'
+        stale.mkdir(parents=True)
+        (stale / 'timeout-old').write_bytes(b'old')
+        seen = []
+        fake = FakeLibFuzzer(recheck_exit=70)
+
+        def run(command, **kwargs):
+            """Record what the re-check directory holds when libFuzzer starts."""
+            seen.extend(path.name for path in stale.iterdir())
+            return fake(command, **kwargs)
+
+        fuzz.reproduces(self.fuzzer(run), self.state, 'release_channel', crash)
+        self.assertEqual(seen, [])
+        self.assertFalse(stale.exists())
 
     def test_report_errors_are_caught_types(self):
         """HTTP and network failures are OSError subclasses, so the loop's catch covers them."""
