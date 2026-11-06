@@ -856,7 +856,9 @@ fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> 
             notes.push(note.clone());
         }
         files.push(Change {
-            path,
+            // A file name is the account's text too: shown printable, while
+            // the record is keyed by the name as it is on disk.
+            path: shown(path.as_bytes()),
             change: if before.is_some() {
                 ChangeKind::Changed
             } else {

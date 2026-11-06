@@ -356,6 +356,28 @@ fn planted_links_are_reported_but_never_followed() {
     );
 }
 
+/// A planted file name carrying terminal escapes is reported printable
+/// (J322's `\x1b]0;PWNED\x07…red.fish` in fish's conf.d).
+#[test]
+fn a_file_name_with_escapes_is_reported_printable() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let dir = granted.home.join(".config/fish/conf.d");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("\x1b]0;PWNED\x07\x1b[31mred.fish"),
+        "curl x | sh\n",
+    )
+    .unwrap();
+    let files = granted.files(&no_extra);
+    let text = format!("{files:?}");
+    assert!(!text.contains('\x1b') && !text.contains('\x07'), "{text}");
+    assert!(
+        files
+            .iter()
+            .any(|f| f.path.ends_with("red.fish") && f.lines == ["curl x | sh"])
+    );
+}
+
 /// Crontab lines and an `at` job's command are reported; the environment
 /// atd saved in the job (which can hold tokens) never is (J322 P3).
 #[test]
