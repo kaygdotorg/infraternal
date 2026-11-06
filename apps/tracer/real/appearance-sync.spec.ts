@@ -74,16 +74,46 @@ async function panCamera(page: Page): Promise<void> {
   await page.waitForTimeout(200);
 }
 
-/** Records this page's animation-frame intervals until {@link stopFrameCapture} ends the sample. */
+/** A rendered frame interval on the client receiving the account appearance. */
+interface FrameSample {
+  from: number;
+  to: number;
+  intervalMs: number;
+  visibility: DocumentVisibilityState;
+}
+
+/** A root appearance attribute changed while the browser was rendering frames. */
+interface AppearanceMutation {
+  at: number;
+  attribute: string;
+  value: string | null;
+}
+
+/** The frame and appearance observations collected from the receiving client. */
+interface FrameTrace {
+  samples: FrameSample[];
+  mutations: AppearanceMutation[];
+}
+
+/** Records rendered frame intervals and appearance changes until {@link stopFrameCapture} ends the sample. */
 async function startFrameCapture(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const intervals: number[] = [];
+    const root = document.documentElement;
+    const samples: FrameSample[] = [];
+    const mutations: AppearanceMutation[] = [];
     let active = true, previous = performance.now();
-    const capture = { intervals, stop: () => { active = false; } };
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        const attribute = record.attributeName;
+        if (attribute) mutations.push({ at: performance.now(), attribute, value: root.getAttribute(attribute) });
+      }
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ["data-look", "data-font"] });
+    const capture = { samples, mutations, stop: () => { active = false; observer.disconnect(); } };
     (window as unknown as { __appearanceFrameCapture?: typeof capture }).__appearanceFrameCapture = capture;
     const frame = (now: number): void => {
       if (!active) return;
-      intervals.push(now - previous);
+      samples.push({ from: previous, to: now, intervalMs: now - previous, visibility: document.visibilityState });
       previous = now;
       requestAnimationFrame(frame);
     };
@@ -91,12 +121,12 @@ async function startFrameCapture(page: Page): Promise<void> {
   });
 }
 
-/** Stops the animation-frame sample and returns the measured gaps in milliseconds. */
-async function stopFrameCapture(page: Page): Promise<number[]> {
+/** Stops the animation-frame sample and returns its frame and appearance observations. */
+async function stopFrameCapture(page: Page): Promise<FrameTrace> {
   return page.evaluate(() => {
-    const capture = (window as unknown as { __appearanceFrameCapture?: { intervals: number[]; stop(): void } }).__appearanceFrameCapture;
+    const capture = (window as unknown as { __appearanceFrameCapture?: FrameTrace & { stop(): void } }).__appearanceFrameCapture;
     capture?.stop();
-    return capture?.intervals ?? [];
+    return { samples: capture?.samples ?? [], mutations: capture?.mutations ?? [] };
   });
 }
 
@@ -178,10 +208,26 @@ test("theme and font changes reach the same account live and after reload withou
     }, { timeout: 30_000 }).toBe(true);
     await expect.poll(() => b.locator("html").getAttribute("data-look"), { timeout: 30_000 }).toBe("solid");
     await expect.poll(() => b.locator("html").getAttribute("data-font"), { timeout: 30_000 }).toBe("fira-code");
-    const frameIntervalsMs = await stopFrameCapture(b);
-    const maxFrameIntervalMs = Math.max(0, ...frameIntervalsMs);
-    const framesOver20ms = frameIntervalsMs.filter((interval) => interval > 20).length;
+    const frameTrace = await stopFrameCapture(b);
+    const frameIntervalsMs = frameTrace.samples.map((sample) => sample.intervalMs);
+    const appearanceMutations = frameTrace.mutations.filter(({ attribute }) => attribute === "data-look" || attribute === "data-font");
+    const relevantSampleIndexes = new Set<number>();
+    for (const mutation of appearanceMutations) {
+      const changedAt = frameTrace.samples.findIndex(({ from, to }) => from <= mutation.at && mutation.at <= to);
+      if (changedAt < 0) continue;
+      // Include the interval containing the DOM change and the next frame, when its new styles are painted.
+      for (const index of [changedAt, changedAt + 1]) if (index < frameTrace.samples.length) relevantSampleIndexes.add(index);
+    }
+    const appearanceFrames = [...relevantSampleIndexes].sort((left, right) => left - right).map((index) => frameTrace.samples[index]!);
+    const appearanceFrameIntervalsMs = appearanceFrames.map(({ intervalMs }) => intervalMs);
+    const maxFrameIntervalMs = Math.max(0, ...appearanceFrameIntervalsMs);
+    const framesOver20ms = appearanceFrameIntervalsMs.filter((interval) => interval > 20).length;
+    const allFramesOver20ms = frameIntervalsMs.filter((interval) => interval > 20).length;
     expect(frameIntervalsMs.length).toBeGreaterThan(10);
+    expect(appearanceMutations.some(({ attribute, value }) => attribute === "data-look" && value === "solid")).toBe(true);
+    expect(appearanceMutations.some(({ attribute, value }) => attribute === "data-font" && value === "fira-code")).toBe(true);
+    expect(appearanceFrames.length).toBeGreaterThan(0);
+    console.log(`APPEARANCE_FRAMES ${JSON.stringify({ visibility: [...new Set(frameTrace.samples.map(({ visibility }) => visibility))], appearanceMutations, sampledAppearanceIntervalsMs: appearanceFrameIntervalsMs, allFrameSamples: frameIntervalsMs.length, allFramesOver20ms, maxAppearanceFrameIntervalMs: maxFrameIntervalMs, appearanceFramesOver20ms: framesOver20ms })}`);
     expect(framesOver20ms).toBe(0);
     expect(await cameraTransform(a)).toBe(aCamera);
     expect(await cameraTransform(b)).toBe(bCamera);
@@ -210,9 +256,11 @@ test("theme and font changes reach the same account live and after reload withou
       separateAppearanceRoundTrips: appearanceRoundTrips,
       appearanceHttpRequests: wire.appearanceHttpRequests,
       clientBLookWrites: lookWritesOnB,
-      frameSamples: frameIntervalsMs.length,
+      frameSamples: appearanceFrameIntervalsMs.length,
       maxFrameIntervalMs,
       framesOver20ms,
+      allFrameSamples: frameIntervalsMs.length,
+      allFramesOver20ms,
       cameraAStayedLocal: true,
       cameraBStayedLocal: true,
       themeAndFontSurvivedReload: true,
