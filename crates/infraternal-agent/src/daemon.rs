@@ -377,6 +377,42 @@ fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) 
     });
 }
 
+/// Serialized size the revoke reply stays under, below the control-frame
+/// JSON limit with room for the envelope.
+const REVOKE_REPLY_BUDGET: usize = 30 * 1024;
+
+/// The revoke result for the server: `revoked`, D353's `warning` when
+/// background programs may remain, and D356's `changed` access files, which
+/// only the person revoking sees (never a log). If the report would not fit a
+/// control frame, its last lines are dropped and it says it is truncated.
+fn revoke_reply(revoked: &crate::logins::Revoked) -> Vec<u8> {
+    let mut changed = revoked.changed.clone();
+    loop {
+        let mut reply = serde_json::json!({ "revoked": true });
+        if revoked.background_may_remain {
+            // D353: others still share the account, or linger came back (J308).
+            reply["warning"] = "Background programs of this host account may still be running: other people still have access to it, or its own programs turned linger back on.".into();
+        }
+        if !changed.files.is_empty() {
+            reply["changed"] = serde_json::to_value(&changed).unwrap_or_default();
+        }
+        let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{\"revoked\":true}".to_vec());
+        if bytes.len() <= REVOKE_REPLY_BUDGET {
+            return bytes;
+        }
+        changed.truncated = true;
+        match changed.files.last_mut() {
+            Some(file) if !file.lines.is_empty() => {
+                file.lines.pop();
+            }
+            Some(_) => {
+                changed.files.pop();
+            }
+            None => return bytes,
+        }
+    }
+}
+
 /// Revoke or restore one person's terminals on its own task, after the first login operation has chosen a manager.
 #[cold]
 #[inline(never)]
@@ -397,14 +433,7 @@ fn spawn_revocation(
         } else {
             crate::logins::revoke(&state, manager, person)
                 .await
-                .map(|revoked| {
-                    if revoked.background_may_remain {
-                        // D353: others still share the account, or linger came back (J308).
-                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, or its own programs turned linger back on.\"}".to_vec()
-                    } else {
-                        b"{\"revoked\":true}".to_vec()
-                    }
-                })
+                .map(|revoked| revoke_reply(&revoked))
         }
         .map(|json| Opened {
             session: None,

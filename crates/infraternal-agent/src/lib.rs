@@ -23,6 +23,7 @@ mod lifecycle;
 mod login_auth;
 mod login_binary;
 mod login_records;
+pub mod access_files;
 pub mod logins;
 #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
 mod native_dispatch;

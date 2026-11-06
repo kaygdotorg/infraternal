@@ -234,6 +234,50 @@ pub async fn ensure(
     person: uuid::Uuid,
     user: &User,
 ) -> io::Result<Option<PathBuf>> {
+    let opened = ensure_login(exe, state, manager, person, user).await?;
+    // The first login of this person on this account is the grant (D356).
+    record_grant(runtime_root(state), person, user).await;
+    Ok(opened)
+}
+
+/// Records, once per person and account, a fingerprint of the account's
+/// access files, off the event loop. A failure only means that a later
+/// revocation says it has no record to compare with; it never refuses the
+/// login (D356).
+async fn record_grant(root: &Path, person: uuid::Uuid, user: &User) {
+    let store = crate::access_files::store(root);
+    let user = user.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::access_files::record_grant(&store, person, &user, &crate::access_files::host_spools)
+    })
+    .await;
+}
+
+/// What changed in account `uid`'s access files since `person`'s grant
+/// (D356), read off the event loop.
+async fn access_changes(root: &Path, person: uuid::Uuid, uid: u32) -> crate::access_files::Changes {
+    let store = crate::access_files::store(root);
+    tokio::task::spawn_blocking(move || match User::from_uid(Uid::from_raw(uid)) {
+        Ok(Some(user)) => crate::access_files::since_grant(
+            &store,
+            person,
+            &user,
+            &crate::access_files::host_spools,
+        ),
+        _ => crate::access_files::Changes::default(),
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// [`ensure`] without the grant record.
+async fn ensure_login(
+    exe: &Path,
+    state: &Path,
+    manager: Manager,
+    person: uuid::Uuid,
+    user: &User,
+) -> io::Result<Option<PathBuf>> {
     let name = name(person, user.uid.as_raw());
     let root = runtime_root(state);
     // Serialize every account for a person against revocation. The tombstone
@@ -832,13 +876,17 @@ async fn revoke_at(
 }
 
 /// What a completed revocation could not guarantee.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Revoked {
     /// Background programs of a host account the person used may still run:
     /// someone else still has access, so its services were left running
     /// (D353), or linger came back on after they were stopped, which only
     /// the account's own code outside the login does (J308 P3-2).
     pub background_may_remain: bool,
+    /// Access files of the person's accounts with lines that are new since
+    /// their grant, for the person revoking to review and remove (D356).
+    /// Never edited by infraternal.
+    pub changed: crate::access_files::Changes,
 }
 
 /// Try one reserved revocation; its owner retains denial and retries any failure.
@@ -864,9 +912,14 @@ async fn revoke_once(
     if rootless {
         // A rootless agent's user manager may be the agent's own (D18): D353
         // applies to root agents only.
-        return crate::rootless_sessions::revoke(root, person, Some(person_guard), admission)
-            .await
-            .map(|()| Revoked::default());
+        crate::rootless_sessions::revoke(root, person, Some(person_guard), admission).await?;
+        let uid = Uid::effective().as_raw();
+        let changed = access_changes(root, person, uid).await;
+        let _ = crate::access_files::forget(&crate::access_files::store(root), person, uid);
+        return Ok(Revoked {
+            changed,
+            ..Revoked::default()
+        });
     }
     // The refusal is durable above; now find how this host's logins run. A
     // probe that times out never means "no system manager": that would take
@@ -875,6 +928,7 @@ async fn revoke_once(
     let prefix = format!("infraternal-login-{}-", person.simple());
     let mut failure = None;
     let mut revoked = Revoked::default();
+    let mut accounts = Vec::new();
     for entry in std::fs::read_dir(&registry)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -890,7 +944,11 @@ async fn revoke_once(
         let uid = uid.parse::<u32>().map_err(io::Error::other)?;
         let unit = self::name(person, uid);
         let _account = acquire(root, &unit).await?;
-        match stop_login(root, manager, person, uid, &unit).await {
+        let stopped = stop_login(root, manager, person, uid, &unit).await;
+        if stopped.is_ok() {
+            accounts.push(uid);
+        }
+        match stopped {
             Err(error) => failure = Some(error),
             // D353: background services of the account go with its last
             // holder; while others share it, they stay and the result warns.
@@ -911,7 +969,18 @@ async fn revoke_once(
         }
     }
     crate::login_auth::forget(person);
-    failure.map_or(Ok(revoked), Err)
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    // D356: what each account's access files gained since this person's
+    // grant, reported, never edited. A retried attempt compares again.
+    for uid in accounts {
+        let changed = access_changes(root, person, uid).await;
+        revoked.changed.truncated |= changed.truncated;
+        revoked.changed.files.extend(changed.files);
+        let _ = crate::access_files::forget(&crate::access_files::store(root), person, uid);
+    }
+    Ok(revoked)
 }
 
 /// Whether another person still has access to host account `uid` here, as
@@ -2003,8 +2072,11 @@ mod tests {
         let revoked = revoke_at(&root, Manager::System, person, false).await;
         let calls = host.calls();
         assert_eq!(
-            revoked.as_ref().ok(),
-            Some(&Revoked::default()),
+            revoked
+                .as_ref()
+                .ok()
+                .map(|revoked| revoked.background_may_remain),
+            Some(false),
             "{revoked:?}; {calls:?}"
         );
         assert_eq!(
@@ -2084,8 +2156,11 @@ mod tests {
         let revoked = revoke_at(&root, Manager::System, person, false).await;
         let calls = host.calls();
         assert_eq!(
-            revoked.as_ref().ok(),
-            Some(&Revoked::default()),
+            revoked
+                .as_ref()
+                .ok()
+                .map(|revoked| revoked.background_may_remain),
+            Some(false),
             "{revoked:?}; {calls:?}"
         );
         assert!(
@@ -2118,10 +2193,11 @@ mod tests {
         let revoked = revoke_at(&root, Manager::System, person, false).await;
         let calls = host.calls();
         assert_eq!(
-            revoked.as_ref().ok(),
-            Some(&Revoked {
-                background_may_remain: true
-            }),
+            revoked
+                .as_ref()
+                .ok()
+                .map(|revoked| revoked.background_may_remain),
+            Some(true),
             "{revoked:?}; {calls:?}"
         );
         drop(host);
@@ -2154,10 +2230,11 @@ mod tests {
         let revoked = revoke_at(&root, Manager::System, person, false).await;
         let calls = host.calls();
         assert_eq!(
-            revoked.as_ref().ok(),
-            Some(&Revoked {
-                background_may_remain: true
-            }),
+            revoked
+                .as_ref()
+                .ok()
+                .map(|revoked| revoked.background_may_remain),
+            Some(true),
             "{revoked:?}; {calls:?}"
         );
         assert_eq!(
