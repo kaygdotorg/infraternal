@@ -418,8 +418,11 @@ def sandboxed(command, environment, cwd, scratch, target):
 
     `environment` is passed explicitly (`env -i`), so nothing else from the
     caller's environment leaks in. CARGO_TARGET_DIR points at the tmpfs view.
+    The namespace marker lets tests compare against the parent net namespace;
+    `/proc/1` inside the inner PID namespace names its own init process.
     """
-    environment = dict(environment, CARGO_TARGET_DIR='/tmp/ut', TMPDIR='/tmp')
+    environment = dict(environment, CARGO_TARGET_DIR='/tmp/ut', TMPDIR='/tmp',
+                       INFRATERNAL_VERIFY_OUTER_NETNS=os.readlink('/proc/self/ns/net'))
     pairs = [f'{key}={value}' for key, value in sorted(environment.items())
              if '\n' not in value and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)]
     return ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--fork', '--kill-child',

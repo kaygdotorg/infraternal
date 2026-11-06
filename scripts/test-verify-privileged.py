@@ -570,6 +570,16 @@ class SandboxShape(unittest.TestCase):
         self.assertNotIn('M=two\nlines', command)
         self.assertEqual(command[-3:], ['/t/debug/deps/x', '--exact', 'y'])
 
+    def test_outer_network_namespace_identity_reaches_inner_test(self):
+        """The inner PID namespace must compare its network namespace to the actual outer one."""
+        command, _ = self.command()
+        start = command.index('env') + 2
+        end = command.index('bash', start)
+        environment = dict(pair.split('=', 1) for pair in command[start:end])
+        marker = 'INFRATERNAL_VERIFY_OUTER_NETNS'
+        self.assertIn(marker, environment)
+        self.assertEqual(environment[marker], os.readlink('/proc/self/ns/net'))
+
     def test_test_runs_one_namespace_down(self):
         """The test runs in a nested user namespace, after pivot_root, with --kill-child (79752 P1)."""
         _, setup = self.command()

@@ -759,9 +759,16 @@ mod tests {
             },
         };
         assert_eq!(nix::unistd::geteuid().as_raw(), 0, "namespace owner");
+        // The privileged runner starts a new PID namespace, where /proc/1 is
+        // this sandbox's init process. Compare against its saved outer netns.
+        let outer_network_namespace = std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS")
+            .map_or_else(
+                || std::fs::read_link("/proc/1/ns/net").expect("host namespace"),
+                std::path::PathBuf::from,
+            );
         assert_ne!(
             std::fs::read_link("/proc/self/ns/net").expect("own namespace"),
-            std::fs::read_link("/proc/1/ns/net").expect("host namespace"),
+            outer_network_namespace,
             "kernel fixture requires a private network namespace"
         );
         let mut plugin = MeshNodePlugin::default();
