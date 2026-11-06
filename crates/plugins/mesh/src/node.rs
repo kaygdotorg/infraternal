@@ -22,6 +22,12 @@ pub use crate::dataplane::Chunk;
 #[cfg(feature = "test-support")]
 pub static BEFORE_KERNEL_KEY: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
+/// Test seam (#285 J284 P3-b): runs once in a rotation settle that moves this node to the candidate, after
+/// the marker and the recorded key and right before the journal save, so a namespace test can make that save
+/// fail.
+#[cfg(feature = "test-support")]
+pub static BEFORE_SETTLE_SAVE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 /// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
 /// shared-filter decision, so a namespace test can start another installation in that window.
 #[cfg(feature = "test-support")]
@@ -1081,10 +1087,24 @@ impl Node {
                 Some(owner) if owner == candidate_public => {}
                 _ => return Err(io::ErrorKind::InvalidData.into()),
             }
+            // The marker now names the candidate while the journal still holds both keys with commit
+            // intent: the proof accepts both, as a restart would compute from the journal, so a retry after
+            // a failed save below still proves this link (J284 P3-b).
+            *kernel_owner = KernelProof(vec![previous_public, candidate_public]);
             store.record_interface(&candidate_public)?;
+            #[cfg(feature = "test-support")]
+            if let Some(hook) = BEFORE_SETTLE_SAVE
+                .lock()
+                .ok()
+                .and_then(|mut hook| hook.take())
+            {
+                hook();
+            }
+            store.complete_rotation_secret(&existing.operation_id, existing.sequence)?;
+            // Only a durable completion makes the candidate the key this node presents.
             *kernel_owner = KernelProof::single(candidate_public);
             identity.public_key = candidate_public;
-            return store.complete_rotation_secret(&existing.operation_id, existing.sequence);
+            return Ok(());
         }
         if current != previous_public
             || link.owner != Some(previous_public)

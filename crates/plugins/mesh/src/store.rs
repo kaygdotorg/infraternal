@@ -600,6 +600,11 @@ pub struct Store {
 /// because a fresh server starts its listener only after its CA is set up.
 pub type ControlPlane = std::sync::Arc<dyn Fn() -> TrafficPolicy + Send + Sync>;
 
+/// The attach refusal for a node whose rotation support is unknown while its rotation is open (J262). It is the
+/// only refusal that clears up by itself once the node's probe answers again, so the coordinator retries it on a
+/// timer (J273 P3-2, J284 P3-a).
+pub(crate) const ROTATION_IN_PROGRESS: &str = "Mesh key rotation is in progress.";
+
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
@@ -1475,7 +1480,7 @@ impl Store {
                 .map_err(|_| "Mesh storage unavailable.")?
                 .is_some();
             if rotating && key_rotation.is_none() {
-                return Err("Mesh key rotation is in progress.");
+                return Err(ROTATION_IN_PROGRESS);
             }
             let public_key = Self::attached_public_key(&row, key, key_rotation_supported)?;
             let abandoned = rotating && key_rotation == Some(false);
