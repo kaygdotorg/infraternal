@@ -61,6 +61,36 @@ impl EnrollmentStore {
         self.commit_revocation(transaction, host, now).await
     }
 
+    /// Deny an abandoned setup's host found by a later add of the same address
+    /// (#305): the same ownership and open-intent checks as
+    /// [`retire_bootstrap`](EnrollmentStore::retire_bootstrap), then the denial is
+    /// committed without waiting for a receipt from the host's infraternal agent,
+    /// which is gone, exactly as Remove does for an offline host. The durable
+    /// login-cleanup outbox finishes the person's retirement if that agent ever
+    /// reconnects; until then its certificate is no longer admitted.
+    /// # Errors
+    /// Refuses a negative time, another owner's host, one created after `now` or
+    /// one without an open intent, and unavailable storage.
+    pub(crate) async fn deny_abandoned_bootstrap(
+        &self,
+        owner: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let mut transaction = self.0.begin().await?;
+        let matched = sqlx::query("UPDATE remote_hosts SET id=id WHERE id=? AND owner_id=? AND created_at<=? AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
+            .bind(host.as_bytes().as_slice()).bind(owner).bind(now)
+            .execute(&mut *transaction).await?.rows_affected();
+        if matched != 1 {
+            return Err(EnrollmentError::Denied);
+        }
+        self.commit_revocation_intent(transaction, host, now).await?;
+        Ok(())
+    }
+
     /// Startup owns no surviving provisioning batches. Persist pending denials
     /// before listeners start; person retirement awaits a cleanup-only receipt.
     /// Call only before transport admission starts; no live batches may exist.

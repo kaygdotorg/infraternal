@@ -109,7 +109,11 @@ async fn network_identity_connect_check_and_changed_key_refusal() {
             assert_eq!(authentication.network, provider);
             assert!(check.stdout.starts_with(b"INFRATERNAL_CHECK_V1\nLinux\n"));
             if index != 0 {
-                assert!(check.stdout.ends_with(b"INFRATERNAL_SETUP_CLEAR\n"));
+                // Both mean "no earlier setup"; ABSENT also proves no install (D355).
+                assert!(
+                    check.stdout.ends_with(b"INFRATERNAL_SETUP_CLEAR\n")
+                        || check.stdout.ends_with(b"INFRATERNAL_SETUP_ABSENT\n")
+                );
             }
             let again = session
                 .run("printf 'same-connection\n'", Input::Empty)

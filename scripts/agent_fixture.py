@@ -207,6 +207,11 @@ class Binary:
         self.credit_pending = 0
         self.credit_available = 0
         self.fence_nonce = 0
+        # The terminal stream this client uses, and the streams of terminals
+        # it already left (see select_terminal). Frames still arriving on a
+        # left stream are dropped by stream id.
+        self.stream = 1
+        self.retired = set()
         self.cpu_weight = fixture_cpu_weight()
         self.events = []
         self.inventory = None
@@ -258,7 +263,7 @@ class Binary:
 
     def send(self, stream, kind, body=b''):
         self.sock.sendall(varint(stream) + varint(1 + len(body)) + bytes([kind]) + body)
-        if stream == 1 and kind == 0x14:
+        if stream == self.stream and kind == 0x14:
             self.credit_available += struct.unpack('<I', body)[0]
 
     def read(self):
@@ -332,7 +337,7 @@ class Binary:
             if stream == 0:
                 self.process(frame=(stream, kind, body))
             else:
-                assert stream == 1
+                assert stream == self.stream or stream in self.retired, (stream, kind)
         assert (stream, kind) == (0, 0x31) and body[4] == 1, body
         self.id = uuid.UUID(json.loads(body[5:])['session_id'])
         self.benchmark_scope()
@@ -369,17 +374,17 @@ class Binary:
         weight_fixture_shim(self.state, self.id, self.cpu_weight, self.child.pid)
 
     def attach(self):
-        self.send(1, 0x16, self.id.bytes + struct.pack('<QQ', self.out, self.acked))
+        self.send(self.stream, 0x16, self.id.bytes + struct.pack('<QQ', self.out, self.acked))
         # Each new attachment owns a fresh explicit credit window. Old batched
         # refunds cannot fund a new connection; no grant is implicit in Attach.
         self.credit_pending = 0
         self.credit_available = 0
-        self.send(1, 0x14, struct.pack('<I', 1048576))
+        self.send(self.stream, 0x14, struct.pack('<I', 1048576))
         self.process()
 
     def input(self, data):
         seq = self.entered
-        self.send(1, 0x10, struct.pack('<Q', seq) + data)
+        self.send(self.stream, 0x10, struct.pack('<Q', seq) + data)
         self.entered += len(data)
         return seq
 
@@ -414,7 +419,13 @@ class Binary:
             assert body[:4] == bytes(4)
             self.inventory = json.loads(body[4:])
             return kind
-        assert stream == 1, (stream, kind)
+        if stream in self.retired:
+            # A frame of a terminal this client already left: the writer
+            # sends control replies (Pong) before queued terminal output, so
+            # output and acknowledgements of the old attachment can still
+            # arrive after detach's fence. Its own stream id names it (#347).
+            return kind
+        assert stream == self.stream, (stream, kind)
         if kind == 0x11:
             seq = struct.unpack('<Q', body[:8])[0]
             assert seq == self.out, (seq, self.out)
@@ -426,7 +437,7 @@ class Binary:
                 # tiny PTY read. Initial credit covers the unrefunded suffix.
                 self.credit_pending += len(body) - 8
                 if self.credit_pending >= self.credit_batch:
-                    self.send(1, 0x14, struct.pack('<I', self.credit_pending))
+                    self.send(self.stream, 0x14, struct.pack('<I', self.credit_pending))
                     self.credit_pending = 0
         elif kind == 0x13:
             ack = struct.unpack('<Q', body)[0]
@@ -479,7 +490,7 @@ class Binary:
 
     def wait_for_starvation_detach(self, cols=80, rows=24, timeout=5):
         """Prove a zero-credit relay detached by requiring Resize to relink and Ack."""
-        self.send(1, 0x14, struct.pack('<I', 1))
+        self.send(self.stream, 0x14, struct.pack('<I', 1))
         deadline = time.monotonic() + timeout
         while not self.data:
             self.process(credit=False)
@@ -489,7 +500,7 @@ class Binary:
         time.sleep(.35)
 
         prior_ack = self.acked
-        self.send(1, 0x12, struct.pack('<HHHH', cols, rows, 0, 0))
+        self.send(self.stream, 0x12, struct.pack('<HHHH', cols, rows, 0, 0))
         deadline = time.monotonic() + timeout
         while True:
             frame = self.read()
@@ -709,7 +720,16 @@ def with_login_grant(action, values):
 
 
 def select_terminal(client, session):
-    """Attach one fixture client to a returned session id with fresh cursors."""
+    """Attach one fixture client to a returned session id, on a fresh stream.
+
+    Output or acknowledgements the previous terminal had already queued may
+    still arrive after detach: Pong is not a drain barrier for terminal
+    output, and frame order alone cannot tell old from new. So each selected
+    terminal gets its own stream id; frames on a left stream are dropped by
+    id in process() (#347). Clients that never call this stay on stream 1.
+    """
+    client.retired.add(client.stream)
+    client.stream += 2
     client.id = uuid.UUID(session)
     client.out = client.entered = client.acked = 0
     client.credit_pending = client.credit_available = 0
@@ -719,7 +739,7 @@ def select_terminal(client, session):
 
 def detach(client):
     """Finish a fixture terminal writer through its normal acknowledged close."""
-    client.send(1, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
+    client.send(client.stream, 0x0f, struct.pack('<H', 0) + varint(4) + b'done')
     client.fence()
 
 

@@ -1817,12 +1817,29 @@ async fn await_launch(
     launcher: &mut tokio::process::Child,
     detached: bool,
 ) -> io::Result<Session> {
-    timeout(
-        launch_bound(),
-        wait_for_hello(path, id, watch, launcher, detached),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
+    let hello = wait_for_hello(path, id, watch, launcher, detached);
+    #[cfg(all(test, target_os = "linux"))]
+    let hello = {
+        let mut hello = Box::pin(hello);
+        if let Some(armed) = tests::LAUNCH_ARMED.with(std::cell::Cell::take) {
+            // Test-only: start the bound once `armed` exists, unless the launch finishes first.
+            let ready = async {
+                while !armed.exists() {
+                    // sleep: poll interval for the test's arming file; the loop ends on that condition.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut hello => return result,
+                // `LAUNCH` (the real hang bound) also bounds the arming wait.
+                _ = timeout(LAUNCH, ready) => {}
+            }
+        }
+        hello
+    };
+    timeout(launch_bound(), hello)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "shim socket readiness timed out"))?
 }
 
 /// Connect once per readiness event until the shim says Hello, or its

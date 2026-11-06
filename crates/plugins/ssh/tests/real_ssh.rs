@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Exercise strict authentication and progress-bounded uploads through a real SSH master.
 #[tokio::test]
 #[ignore = "run through research/ssh-client/measure.py with the synthetic rootless sshd fixture"]
 async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
@@ -79,6 +80,66 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         started.elapsed().as_micros(),
         check.uid
     );
+    // A buffered tail still moves remotely after the final local pipe write.
+    // This is J289's 40 KiB reader, with explicit consumption acknowledgements.
+    let tail = vec![42; 40 * 1024];
+    let output = session
+        .run(
+            r#"python3 -u -c '
+import os, time
+for index in range(40):
+    remaining = 1024
+    while remaining:
+        chunk = os.read(0, remaining)
+        assert chunk and all(byte == 42 for byte in chunk)
+        remaining -= len(chunk)
+    print("PROGRESS " + str((index + 1) * 1024), flush=True)
+    # sleep: reproduce the healthy buffered tail that exceeds the old deadline.
+    time.sleep(1)
+assert not os.read(0, 1)
+print("UPLOAD complete", flush=True)
+'"#,
+            Input::Transfer(infraternal_plugin_ssh::transport::PayloadInput::Bytes(
+                &tail,
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, b"UPLOAD complete\n");
+    println!("PROOF real_sshd buffered_tail bytes=40960 consumed_chunks=40 complete");
+
+    // Consume 256 chunks at a deliberately slow rate. This exceeds the old
+    // 30-second command clock without asserting speed on a shared build VM.
+    let upload = vec![42; 256 * 65536];
+    let script = r#"python3 -c '
+import os, time
+for index in range(256):
+    remaining = 65536
+    while remaining:
+        chunk = os.read(0, remaining)
+        assert chunk and all(byte == 42 for byte in chunk)
+        remaining -= len(chunk)
+    print("PROGRESS " + str((index + 1) * 65536), flush=True)
+    # sleep: throttle the synthetic upload beyond the former total command deadline.
+    time.sleep(.15)
+assert not os.read(0, 1)
+print("UPLOAD complete")
+'"#;
+    let output = session
+        .run(
+            script,
+            Input::Transfer(infraternal_plugin_ssh::transport::PayloadInput::Bytes(
+                &upload,
+            )),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, b"UPLOAD complete\n");
+    println!(
+        "PROOF real_sshd progressing_upload bytes={} chunks=256 complete",
+        upload.len()
+    );
+
     drop(session);
     assert!(
         std::fs::read_dir(&fixture).unwrap().all(|entry| !entry
@@ -162,6 +223,36 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         .unwrap();
     assert_eq!(error.kind, FailureKind::HostKey);
     assert_ne!(error.fingerprints.len(), 0);
+
+    // Observe a real TCP acceptance before advancing the contract clock. A
+    // listener that sends no SSH banner must still fail without any transfer.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent_port = listener.local_addr().unwrap().port();
+    let silent_adapter = OpenSsh {
+        ssh: "/usr/bin/ssh".into(),
+        ..adapter
+    };
+    let opening = silent_adapter.open(
+        Destination::parse(&format!("{user}@127.0.0.1:{silent_port}")).unwrap(),
+        Credentials::Network,
+        MeshEvidence::default(),
+    );
+    tokio::pin!(opening);
+    let (silent_socket, _) = tokio::select! {
+        _ = &mut opening => panic!("the SSH fixture ended before its TCP acceptance"),
+        accepted = listener.accept() => accepted.unwrap(),
+    };
+    tokio::time::pause();
+    let waiting = tokio::time::Instant::now();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    let failure = opening.await.err().unwrap();
+    assert_eq!(failure.kind, FailureKind::Unreachable);
+    assert_eq!(waiting.elapsed(), Duration::from_secs(31));
+    tokio::time::resume();
+    drop(silent_socket);
+    println!(
+        "PROOF real_sshd never_answering_host bounded_after_tcp_acceptance virtual_seconds=31"
+    );
 }
 
 fn rss(pid: u32) -> u64 {

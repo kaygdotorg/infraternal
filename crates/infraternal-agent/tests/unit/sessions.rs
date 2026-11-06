@@ -523,6 +523,11 @@ thread_local! {
     /// A per-thread shortening of the launch hang bound, so a test reaches the failure path in milliseconds.
     pub(super) static LAUNCH_BOUND: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
+    /// Arms the launch bound on an event: with a path set, the next launch's bound starts only once the path
+    /// exists, so a test can put "the launcher has reached this point" before the launch gives up. A Hello that
+    /// arrives before then still completes the launch. Taken by that launch.
+    pub(super) static LAUNCH_ARMED: std::cell::Cell<Option<std::path::PathBuf>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Whether `pid` is a live process; a zombie, which still answers `kill(0)`, counts as gone.
@@ -622,6 +627,25 @@ fn detached_fixture(
     tokio::task::JoinHandle<()>,
     tokio::sync::oneshot::Receiver<()>,
 ) {
+    // sleep: the stand-in shim binds late on purpose (`bind_delay`), to exercise a late bind
+    let bind = tokio::time::sleep(bind_delay);
+    detached_fixture_gated(state, root, bind, silent, retire, launcher_body)
+}
+
+/// [`detached_fixture`] whose stand-in shim binds when `bind` completes, once the launcher has
+/// named the session. A test passes an event here when the order of bind and launch failure matters.
+fn detached_fixture_gated(
+    state: &std::path::Path,
+    root: &std::path::Path,
+    bind: impl std::future::Future<Output = ()> + Send + 'static,
+    silent: usize,
+    retire: bool,
+    launcher_body: &str,
+) -> (
+    std::path::PathBuf,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
     use infraternal_shim::frame::{CLOSE_SESSION, Frame, SEQUENCED_INPUT};
     // The detaching launcher: record the session name it was given, then exit successfully, as the real one does.
     let name_file = root.join("session.name");
@@ -647,8 +671,7 @@ fn detached_fixture(
             // sleep: poll interval between checks; the loop ends on its condition and is bounded by its iteration limit
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         };
-        // sleep: the stand-in shim binds late on purpose (`bind_delay`), to exercise a late bind
-        tokio::time::sleep(bind_delay).await;
+        bind.await;
         let id = uuid::Uuid::parse_str(&name).unwrap();
         let path = sessions.join(format!("{name}.sock"));
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -694,12 +717,41 @@ fn detached_fixture(
 
 /// A launcher body that stands in for a detaching launcher whose shim lineage lives on: a background loop,
 /// orphaned when the launcher exits, that holds the launch's lifeline until the test's directory is removed.
-/// (The fixture shim itself is a task, not a process, so something else must hold the lifeline.)
+/// (The fixture shim itself is a task, not a process, so something else must hold the lifeline.) Once the loop
+/// is forked, the launcher writes `lifeline.held`; [`live_fixture`] binds its shim only after that.
 fn live_shim_body(root: &std::path::Path) -> String {
     format!(
-        "while [ -e '{}' ]; do sleep 0.2; done &\nexit 0",
-        root.display()
+        "while [ -e '{root}' ]; do sleep 0.2; done &\n: > '{root}/lifeline.held'\nexit 0",
+        root = root.display()
     )
+}
+
+/// [`detached_fixture`] with [`live_shim_body`], whose stand-in shim binds only once the lifeline holder exists,
+/// then after `bind_delay`. A real shim inherits the lifeline before it can bind, so a bound shim with nothing
+/// holding the lifeline cannot happen in the product. In this fixture it could: under load cleanup killed the
+/// launcher before it forked the holder, read end-of-file on the lifeline as proof that the shim had died, and
+/// never sent the close (#355).
+fn live_fixture(
+    state: &std::path::Path,
+    root: &std::path::Path,
+    bind_delay: std::time::Duration,
+    silent: usize,
+    retire: bool,
+) -> (
+    std::path::PathBuf,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let held = root.join("lifeline.held");
+    let bind = async move {
+        while !held.exists() {
+            // sleep: poll interval for the launcher's marker; the loop ends on that condition.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // sleep: the stand-in shim binds late on purpose (`bind_delay`), to exercise a late bind
+        tokio::time::sleep(bind_delay).await;
+    };
+    detached_fixture_gated(state, root, bind, silent, retire, &live_shim_body(root))
 }
 
 /// Launch with the fixtures' detached manager and a current server grant for
@@ -747,14 +799,7 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(
-        &state,
-        &root,
-        std::time::Duration::ZERO,
-        2,
-        true,
-        &live_shim_body(&root),
-    );
+    let (exe, shim, closed) = live_fixture(&state, &root, std::time::Duration::ZERO, 2, true);
     let error = launch_detached(&exe, &state, None)
         .await
         .err()
@@ -775,20 +820,23 @@ async fn cancelling_the_launch_does_not_cancel_its_cleanup() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(
-        &state,
-        &root,
-        std::time::Duration::ZERO,
-        1,
-        true,
-        &live_shim_body(&root),
+    let (exe, shim, closed) = live_fixture(&state, &root, std::time::Duration::ZERO, 1, true);
+    // The caller gives up once the shim lineage exists (its lifeline holder is forked), not after a fixed
+    // time: a launcher killed before it forks leaves no shim to close, which is a different case (#355).
+    let held = root.join("lifeline.held");
+    let launched = tokio::select! {
+        result = launch_detached(&exe, &state, None) => Some(result),
+        () = async {
+            while !held.exists() {
+                // sleep: poll interval for the launcher's marker; the loop ends on that condition.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        } => None,
+    };
+    assert!(
+        launched.is_none(),
+        "the caller's deadline must expire first"
     );
-    let launched = tokio::time::timeout(
-        std::time::Duration::from_millis(700),
-        launch_detached(&exe, &state, None),
-    )
-    .await;
-    assert!(launched.is_err(), "the caller's deadline must expire first");
     tokio::time::timeout(std::time::Duration::from_secs(20), closed)
         .await
         .expect("cancelling the launch left its detached session running")
@@ -803,17 +851,20 @@ async fn a_shim_that_binds_after_the_launch_gave_up_is_still_closed() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(
+    let (exe, shim, closed) = live_fixture(
         &state,
         &root,
         std::time::Duration::from_millis(1500),
         0,
         true,
-        &live_shim_body(&root),
     );
+    // The bound starts once the lifeline holder exists, as the shim's late bind does, so the launch gives up
+    // before the bind on the same runtime's timers, however slowly the launcher starts (#355).
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(root.join("lifeline.held"))));
     let result = launch_detached(&exe, &state, None).await;
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     let error = result
         .err()
         .expect("a shim that has not bound fails the launch");
@@ -990,26 +1041,36 @@ async fn a_forked_launcher_is_not_proof_the_live_terminal_is_dead() {
     let locks = person_locks(&state);
     let launcher_pid = root.join("launcher.pid");
     let descendant_pid = root.join("descendant.pid");
+    // Each pid file is renamed into place whole, the launcher's last, so its existence means both are
+    // complete and the launcher has forked its child and is waiting on it.
     let body = format!(
-        "sleep 300 &\necho $! > '{}'\necho $$ > '{}'\nwait",
-        descendant_pid.display(),
-        launcher_pid.display()
+        "sleep 300 &\necho $! > '{d}.tmp' && mv '{d}.tmp' '{d}'\necho $$ > '{l}.tmp' && mv '{l}.tmp' '{l}'\nwait",
+        d = descendant_pid.display(),
+        l = launcher_pid.display()
     );
-    let (exe, shim, closed) = detached_fixture(
+    // The shim binds only after the launch has given up, and the launch gives up only after the launcher has
+    // reached that point: both orders are events, so host load cannot reorder them (#355).
+    let (failed, launch_failed) = tokio::sync::oneshot::channel::<()>();
+    let (exe, shim, closed) = detached_fixture_gated(
         &state,
         &root,
-        std::time::Duration::from_millis(1000),
+        async {
+            let _ = launch_failed.await;
+        },
         0,
         false,
         &body,
     );
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(launcher_pid.clone())));
     let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     assert!(
         result.is_err(),
         "a shim that has not bound fails the launch"
     );
+    let _ = failed.send(());
     tokio::time::timeout(std::time::Duration::from_secs(20), closed)
         .await
         .expect("the late shim was never asked to close")
@@ -1061,17 +1122,19 @@ async fn the_shims_own_observed_exit_retires_the_person_record() {
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
     let locks = person_locks(&state);
-    let (exe, shim, closed) = detached_fixture(
+    let (exe, shim, closed) = live_fixture(
         &state,
         &root,
         std::time::Duration::from_millis(800),
         0,
         true,
-        &live_shim_body(&root),
     );
+    // Armed on the lifeline holder, like the late bind (see the test above).
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(root.join("lifeline.held"))));
     let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     assert!(
         result.is_err(),
         "a shim that has not bound fails the launch"

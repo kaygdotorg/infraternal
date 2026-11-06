@@ -166,36 +166,117 @@ impl RemoteBackend {
         }
         Ok(())
     }
-    /// Find active setup destinations; retained removal coordinates belong only to cleanup.
+    /// The owner's host already added at this address or SSH lookup, if any.
+    ///
+    /// Only a host whose setup finished, or whose infraternal agent is connected
+    /// now, counts as added: "already added" offers its terminal, which must be able
+    /// to open (#305, J241). A match whose setup never finished (its restart-
+    /// retirement intent is still open) is otherwise one of two things:
+    /// - an attempt in this server is still installing it: refused as "already
+    ///   being added", with no host to open;
+    /// - nothing is: an interrupted setup left it in this server's records. Startup
+    ///   cannot retire it once its first shell was published (an open terminal
+    ///   session keeps the obligation), so it survived every restart and turned each
+    ///   later add of the same host into "already added" with a terminal that never
+    ///   opened. Adding the host again asks for a working install there, so the
+    ///   record is retired, as a cancelled attempt is, and the search continues.
+    ///
+    /// With `retire` false nothing is changed: an abandoned record is only reported
+    /// as not added. The stuck-install check uses that, since it runs before the
+    /// person has confirmed anything (J247 P3); the add retires it later.
+    ///
+    /// Hosts with a pending removal are not active destinations: their retained
+    /// removal coordinates belong only to cleanup (#347). Nor are hosts whose
+    /// denial is committed but whose login cleanup awaits their agent's receipt:
+    /// they are no longer admitted.
     async fn existing_host(
         &self,
         owner: &str,
         address: &str,
         lookup: Option<&str>,
+        retire: bool,
     ) -> Result<Option<Uuid>, Failure> {
-        let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
-            .bind(owner)
-            .bind(address)
-            .bind(lookup)
-            .bind(lookup)
-            .bind(address)
-            .fetch_optional(&self.issuer.store().0)
-            .await
-            .map_err(|_| unavailable())?;
-        existing
-            .map(|host_id| Uuid::from_slice(&host_id).map_err(|_| unavailable()))
-            .transpose()
+        // Each pass retires at most one record; the bound only stops a storage
+        // fault that keeps refusing the retirement from looping forever.
+        for _ in 0..16 {
+            let existing: Option<(Vec<u8>, bool)> = sqlx::query_as("SELECT h.id, EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents i WHERE i.host_id=h.id) FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+                .bind(owner)
+                .bind(address)
+                .bind(lookup)
+                .bind(lookup)
+                .bind(address)
+                .fetch_optional(&self.issuer.store().0)
+                .await
+                .map_err(|_| unavailable())?;
+            let Some((host, unfinished)) = existing else {
+                return Ok(None);
+            };
+            let host = Uuid::from_slice(&host).map_err(|_| unavailable())?;
+            // Any connected infraternal agent keeps its host, even before it
+            // has reported its session inventory (J247 P3).
+            if !unfinished || self.hosts.actor(host).await.is_some() {
+                return Ok(Some(host));
+            }
+            let running = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .contains_key(&host);
+            if running {
+                return Err(being_added());
+            }
+            if !retire {
+                return Ok(None);
+            }
+            self.retire_abandoned_setup(owner, host).await?;
+        }
+        Err(unavailable())
+    }
+
+    /// Retire `host`, an unfinished setup record that no attempt here owns and whose
+    /// infraternal agent is not connected (see [`existing_host`](Self::existing_host)).
+    ///
+    /// This is the cancelled-attempt path: fence the host's transport first, then
+    /// revoke it and consume its intent in one writer transaction.
+    async fn retire_abandoned_setup(&self, owner: &str, host: Uuid) -> Result<(), Failure> {
+        let store = self.issuer.store();
+        let now = unix_now()?;
+        let _fence = store.1.cut(host).map_err(|_| unavailable())?;
+        // Deny without waiting for the gone agent's receipt (#305 round 4): a
+        // person's retirement otherwise waits for it, and the add hung to its
+        // deadline. The outbox keeps the login cleanup; the cut stays until it is
+        // confirmed, as for a removed offline host.
+        match store.deny_abandoned_bootstrap(owner, host, now).await {
+            Ok(()) => {}
+            // Another path consumed the intent first (a cancelled attempt's own
+            // retirement, or a completion): the caller's next lookup decides.
+            Err(crate::enrollment::EnrollmentError::Denied) => {
+                // Release this cut as a committed revocation does (J247 P3).
+                store.1.tombstoned(host);
+                return Ok(());
+            }
+            Err(_) => return Err(unavailable()),
+        }
+        tracing::info!(
+            host_id = %host,
+            outcome = "retired",
+            "host provisioning found an earlier setup that never finished"
+        );
+        Ok(())
     }
     fn already_added(host_id: Uuid) -> Failure {
         Failure::install("This host is already added. Open its terminal from Console.")
             .with_existing_host_id(host_id)
     }
     /// Find persisted duplicates before the installer needs the matching payload.
+    /// `retire` is passed to [`existing_host`](Self::existing_host): false only
+    /// where nothing has been confirmed yet.
     async fn ensure_not_already_added(
         &self,
         authority: &Authority,
         target: &Target,
         lookup: Option<&str>,
+        retire: bool,
     ) -> Result<(), Failure> {
         self.authorize(authority).await?;
         let infraternal_plugin_ssh::model::TargetAddress::Manual(address) = &target.address else {
@@ -207,7 +288,7 @@ impl RemoteBackend {
             ));
         }
         if let Some(host_id) = self
-            .existing_host(&authority.owner, address, lookup)
+            .existing_host(&authority.owner, address, lookup, retire)
             .await?
         {
             return Err(Self::already_added(host_id));
@@ -302,6 +383,122 @@ impl RemoteBackend {
             .map_err(|_| unavailable())
     }
 
+    /// The end of [`completed`](Backend::completed), after the login checks: mark the
+    /// setup of this batch's attempt for `host` finished, then release the attempt.
+    ///
+    /// A Replace never recorded a retirement intent of its own (the host stays
+    /// enrolled if it fails), so it may find none (#305); it still consumes one its
+    /// host carries from a first setup that never finished (J247 P2).
+    async fn finish_completion(&self, owner: &str, batch: Uuid, host: Uuid) -> Result<(), Failure> {
+        let replacement = self
+            .attempts
+            .lock()
+            .map_err(|_| unavailable())?
+            .get(&host)
+            .filter(|attempt| attempt.owner == owner && attempt.batch == batch)
+            .map(|attempt| attempt.replacement)
+            .ok_or_else(unavailable)?;
+        self.finish_setup_record(owner, host, replacement).await?;
+        self.attempts
+            .lock()
+            .map_err(|_| unavailable())?
+            .remove(&host);
+        Ok(())
+    }
+    /// Mark `host`'s setup finished by consuming its restart-retirement intent.
+    ///
+    /// A new install always has one. A Replace took on none of its own, but the
+    /// host it replaced may still carry its first setup's open intent, when that
+    /// setup never finished: consume it too, or the working host keeps reading as
+    /// an abandoned setup that a later re-add retires while its agent is offline
+    /// (#305, J247 P2). Only a Replace may find none.
+    async fn finish_setup_record(
+        &self,
+        owner: &str,
+        host: Uuid,
+        replacement: bool,
+    ) -> Result<(), Failure> {
+        match self.issuer.store().complete_bootstrap(owner, host).await {
+            Ok(()) => Ok(()),
+            Err(crate::enrollment::EnrollmentError::Denied) if replacement => Ok(()),
+            Err(_) => Err(unavailable()),
+        }
+    }
+    /// D355: Start fresh just proved it emptied this account's install base on the
+    /// host at `target`, or the add's check proved there is no install there at all
+    /// (one base per account and mode), so any install the same
+    /// person's stale entries had there is gone. Finish those entries now instead
+    /// of leaving them pending for a receipt their gone agent never sends: deny
+    /// the ones not yet denied, then complete their cleanup as that receipt would,
+    /// which retires them and removes them from Console (#305).
+    ///
+    /// Only rows that are this person's, at this address (or SSH lookup), for this
+    /// mode and execution account, unrevoked, and stale (an open setup intent or
+    /// an unconfirmed cleanup) qualify; one a running attempt here owns, or whose
+    /// infraternal agent is connected, is kept. Everything else stays as it is.
+    async fn drop_cleaned_stale_entries(
+        &self,
+        owner: &str,
+        target: &Target,
+        check: &Check,
+        lookup: Option<&str>,
+    ) -> Result<(), Failure> {
+        target.validate()?;
+        check.authorize_mode(target.mode)?;
+        let infraternal_plugin_ssh::model::TargetAddress::Manual(address) = &target.address else {
+            return Ok(());
+        };
+        let (mode, uid) = match target.mode {
+            InstallMode::Rootless => ("rootless", check.uid),
+            InstallMode::Root => ("rootful", 0),
+        };
+        let store = self.issuer.store();
+        let rows: Vec<(Vec<u8>, bool)> = sqlx::query_as("SELECT h.id, EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) FROM remote_hosts h JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND h.mode=? AND h.execution_uid=? AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) AND (EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents i WHERE i.host_id=h.id) OR EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)) ORDER BY h.id LIMIT 64")
+            .bind(owner)
+            .bind(mode)
+            .bind(i64::from(uid))
+            .bind(address)
+            .bind(lookup)
+            .bind(lookup)
+            .fetch_all(&store.0)
+            .await
+            .map_err(|_| unavailable())?;
+        let person = Uuid::parse_str(owner).ok();
+        for (host, pending) in rows {
+            let host = Uuid::from_slice(&host).map_err(|_| unavailable())?;
+            let running = self
+                .attempts
+                .lock()
+                .map_err(|_| unavailable())?
+                .contains_key(&host);
+            if running || self.hosts.actor(host).await.is_some() {
+                continue;
+            }
+            let now = unix_now()?;
+            let _fence = store.1.cut(host).map_err(|_| unavailable())?;
+            if !pending {
+                match store.deny_abandoned_bootstrap(owner, host, now).await {
+                    Ok(()) | Err(crate::enrollment::EnrollmentError::Denied) => {}
+                    Err(_) => return Err(unavailable()),
+                }
+            }
+            match person {
+                // The cleanup Start fresh proved stands in for the gone agent's receipt.
+                Some(person) => store
+                    .confirm_login_cleanup(host, person)
+                    .await
+                    .map_err(|_| unavailable())?,
+                // Legacy ledger owners are revoked directly by the denial.
+                None => store.1.tombstoned(host),
+            }
+            tracing::info!(
+                host_id = %host,
+                outcome = "dropped",
+                "host provisioning dropped an earlier entry whose install Start fresh removed"
+            );
+        }
+        Ok(())
+    }
     fn completed_record(&self, authority: &Authority, host: Uuid) -> Result<(), Failure> {
         self.uid(authority, host)?;
         self.attempts
@@ -331,9 +528,7 @@ impl RemoteBackend {
                             || lookup.is_some_and(|value| trust.as_deref() == Some(value))
                     })
         }) {
-            return Err(Failure::install(
-                "This host is already being added. Wait for its setup steps to finish.",
-            ));
+            return Err(being_added());
         }
         if attempts.len() >= 1600 {
             return Err(Failure::install(
@@ -394,7 +589,7 @@ impl RemoteBackend {
         // check after reserving the destination so another server process
         // cannot add the same host between preflight and invitation issuance.
         if let Some(existing_host) = self
-            .existing_host(&authority.owner, address, lookup.as_deref())
+            .existing_host(&authority.owner, address, lookup.as_deref(), true)
             .await?
         {
             return Err(Self::already_added(existing_host));
@@ -569,6 +764,29 @@ impl Backend for RemoteBackend {
             self.authorize(authority).await
         })
     }
+    fn install_base_proven_empty<'a>(
+        &'a self,
+        authority: &'a Authority,
+        target: &'a Target,
+        check: &'a Check,
+        lookup: Option<String>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.drop_cleaned_stale_entries(&authority.owner, target, check, lookup.as_deref())
+                .await
+        })
+    }
+    fn leftover_connected<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+    ) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            Ok(self.hosts.actor(host).await.is_some())
+        })
+    }
     fn owns_failed_setup<'a>(
         &'a self,
         authority: &'a Authority,
@@ -605,7 +823,7 @@ impl Backend for RemoteBackend {
         lookup: Option<String>,
     ) -> Operation<'a, ()> {
         Box::pin(async move {
-            self.ensure_not_already_added(authority, target, lookup.as_deref())
+            self.ensure_not_already_added(authority, target, lookup.as_deref(), true)
                 .await
         })
     }
@@ -687,7 +905,8 @@ impl Backend for RemoteBackend {
                 // This identity is unknown here or belongs to a removed installation.
                 // The machine may join as a new host after confirmation (D335),
                 // but only if this server will accept it right now.
-                self.ensure_not_already_added(authority, request.target, lookup)
+                // Before any confirmation: report only, retire nothing (J247 P3).
+                self.ensure_not_already_added(authority, request.target, lookup, false)
                     .await?;
                 return Ok(StuckInstall::Reenroll);
             };
@@ -960,24 +1179,8 @@ impl Backend for RemoteBackend {
                 confirm_preferred_login(&actor, person, account, grant).await?;
                 self.authorize(authority).await?;
             }
-            self.uid(authority, host)?;
-            // A Replace never recorded a retirement intent (the host stays
-            // enrolled if it fails); requiring one failed every Replace after
-            // its host had already committed (#305).
-            let replacement = self
-                .attempts
-                .lock()
-                .map_err(|_| unavailable())?
-                .get(&host)
-                .is_some_and(|attempt| attempt.replacement);
-            if !replacement {
-                self.issuer
-                    .store()
-                    .complete_bootstrap(&authority.owner, host)
-                    .await
-                    .map_err(|_| unavailable())?;
-            }
-            self.completed_record(authority, host)
+            self.finish_completion(&authority.owner, authority.batch, host)
+                .await
         })
     }
 }
@@ -1053,6 +1256,13 @@ fn decide_stuck_install(facts: &StuckFacts) -> Result<StuckInstall, Failure> {
         ));
     }
     Ok(StuckInstall::Replace)
+}
+
+/// Another attempt in this server is installing the same host now. Deliberately
+/// carries no host id: its infraternal agent has not finished setup, so there is no
+/// terminal to offer yet (#305, J241).
+fn being_added() -> Failure {
+    Failure::install("This host is already being added. Wait for its setup steps to finish.")
 }
 
 fn route_unavailable() -> Failure {
@@ -1620,12 +1830,9 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    mod breakit2_live {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/bootstrap_breakit2_tests.rs"
-        ));
-    }
+    /// Exercises real SSH setup against an explicitly selected disposable host.
+    #[path = "../bootstrap_breakit2_tests.rs"]
+    mod breakit2_live;
 
     #[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
     mod mesh_acceptance {
@@ -1647,6 +1854,9 @@ mod tests {
     /// Pending removals release setup coordinates without reviving their identity.
     mod pending_removal_tests;
 
+    /// D355: Start fresh's proven cleanup drops the person's stale entries.
+    mod drop_cleaned_stale_tests;
+
     mod already_added_breakit {
         //! Break-it review of the already-added host id (#189).
         include!(concat!(
@@ -1655,13 +1865,9 @@ mod tests {
         ));
     }
 
-    mod stuck_restore {
-        //! A failed Replace or Re-enroll puts the stuck install back as found (#305).
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/bootstrap_stuck_restore_tests.rs"
-        ));
-    }
+    /// A failed Replace or Re-enroll restores the stuck installation.
+    #[path = "../bootstrap_stuck_restore_tests.rs"]
+    mod stuck_restore;
 
     mod retirement_contention {
         //! A separate SQLite writer can outlive the connection's busy timeout.
@@ -1718,9 +1924,12 @@ mod tests {
                     if self.refuse_key_payload_upload
                         && (script.contains("zstd -dc > \"$stage/payload\"")
                             || script.contains("gzip -dc > \"$stage/payload\"")
-                            || script.contains("cat > \"$stage/payload\""))
+                            || script.contains("read_payload "))
                     {
-                        assert!(matches!(input, Input::Bytes(_) | Input::File(_)));
+                        assert!(matches!(
+                            input,
+                            Input::Bytes(_) | Input::File(_) | Input::Transfer(_)
+                        ));
                         return Err(Failure::install(
                             "The fixture refused the key-preparation payload upload.",
                         )
@@ -2109,6 +2318,247 @@ mod tests {
             1
         );
         assert!(f.backend.attempts.lock().unwrap().is_empty());
+    }
+
+    /// Gives the fixture's enrolled host the shape production kept for `code` after an
+    /// interrupted setup (#305, J241): its address, a setup that never finished (an open
+    /// retirement intent) and the first shell published before setup failed, still open.
+    /// That open session is what kept the row alive across every restart.
+    async fn unfinished_setup_with_a_ghost_shell(f: &Fixture) {
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)").bind(f.prior.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
+            .bind(f.prior.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) VALUES(?,'owner',100,100,?)")
+            .bind(Uuid::new_v4().as_bytes().as_slice()).bind(f.prior.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        // Startup keeps it: retirement skips hosts with an open session.
+        f.backend
+            .issuer
+            .store()
+            .retire_unfinished_bootstraps()
+            .await
+            .unwrap();
+    }
+
+    /// Production 8d3207cc8 (#305, J241): Start fresh cleaned the host, then Check found
+    /// this server's own half-finished row for the same address and said "already added",
+    /// offering a terminal whose infraternal agent never finished setup. A setup that never
+    /// finished, whose infraternal agent is not connected, is retired so setup continues.
+    #[tokio::test]
+    async fn readding_a_host_whose_setup_never_finished_retires_it_instead_of_already_added() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        let event = finished(&start(&f, "owner")).await;
+        let failure = event.failure.as_ref();
+        assert!(
+            !failure.is_some_and(|failure| failure.already_added),
+            "{failure:?}"
+        );
+        // Setup went past Check: it issued a new host's invitation (the fixture then refuses).
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM remote_hosts WHERE id<>?")
+                .bind(f.prior.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            1,
+            "{event:?}"
+        );
+        let (revoked, intents): (bool, i64) = sqlx::query_as("SELECT (SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?), (SELECT count(*) FROM remote_bootstrap_retirement_intents WHERE host_id=?)")
+            .bind(f.prior.as_bytes().as_slice()).bind(f.prior.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert!(revoked, "the unfinished host must no longer count as added");
+        assert_eq!(intents, 0);
+    }
+
+    /// J257 P3: P2 through its call site. A completed Replace (an attempt of this
+    /// batch marked `replacement`) of a host whose first setup never finished
+    /// consumes that intent and releases the attempt; another batch's attempt is
+    /// never completed by this one.
+    #[tokio::test]
+    async fn completing_a_replace_through_its_call_site_marks_the_host_finished() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        let batch = Uuid::new_v4();
+        f.backend.attempts.lock().unwrap().insert(
+            f.prior,
+            Attempt {
+                owner: "owner".into(),
+                batch,
+                uid: 1002,
+                link_round_trip: Duration::ZERO,
+                destination: Some(("user@fixture".into(), None)),
+                canary: None,
+                retirement: None,
+                replacement: true,
+            },
+        );
+        assert!(
+            f.backend
+                .finish_completion("owner", Uuid::new_v4(), f.prior)
+                .await
+                .is_err(),
+            "another batch must not complete this attempt"
+        );
+        f.backend
+            .finish_completion("owner", batch, f.prior)
+            .await
+            .unwrap();
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_bootstrap_retirement_intents WHERE host_id=?",
+        )
+        .bind(f.prior.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(open, 0, "the replaced host still reads as unfinished");
+        assert!(f.backend.attempts.lock().unwrap().is_empty());
+    }
+
+    /// #305 round 4: production owners are person UUIDs, whose host retirement waits
+    /// for a receipt from the host's infraternal agent. An abandoned setup's agent is
+    /// gone, so retiring it during the add must deny it without that wait (as Remove
+    /// does for an offline host), or every add of the address hangs to its deadline.
+    #[tokio::test]
+    async fn an_abandoned_setup_of_a_person_is_denied_without_waiting_for_its_gone_agent() {
+        let f = fixture(true).await;
+        let person = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,?,?,0,'test')")
+            .bind(&person).bind(&person).bind(&person).execute(&f.pool).await.unwrap();
+        let ghost = Uuid::new_v4();
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,100)")
+            .bind(ghost.as_bytes().as_slice()).bind(&person).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@ghost',NULL)")
+            .bind(ghost.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
+            .bind(ghost.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+        let found = tokio::time::timeout(
+            Duration::from_secs(10),
+            f.backend.existing_host(&person, "user@ghost", None, true),
+        )
+        .await
+        .expect("retiring an abandoned setup must not wait for its gone agent")
+        .unwrap();
+        assert_eq!(found, None);
+        // Denied durably: its certificate is no longer admitted, and the login
+        // cleanup stays queued for an agent that may still reconnect.
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_login_cleanup WHERE host_id=? AND confirmed=0",
+        )
+        .bind(ghost.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 1);
+        // And a second lookup does not find it again.
+        assert_eq!(
+            f.backend
+                .existing_host(&person, "user@ghost", None, true)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    /// J247 P3: the stuck-install check runs before the person confirms anything, so
+    /// its lookup reports an abandoned setup as not added and changes nothing.
+    #[tokio::test]
+    async fn the_check_before_confirmation_never_retires_an_abandoned_setup() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        assert_eq!(
+            f.backend
+                .existing_host("owner", "user@fixture", None, false)
+                .await
+                .unwrap(),
+            None
+        );
+        let (revoked, intents): (bool, i64) = sqlx::query_as("SELECT (SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?), (SELECT count(*) FROM remote_bootstrap_retirement_intents WHERE host_id=?)")
+            .bind(f.prior.as_bytes().as_slice()).bind(f.prior.as_bytes().as_slice()).fetch_one(&f.pool).await.unwrap();
+        assert!(!revoked);
+        assert_eq!(intents, 1);
+    }
+
+    /// #305, J247 P2: a Replace of a host whose first setup never finished must mark
+    /// it finished, or a later re-add while its agent is offline would retire a
+    /// working host. A Replace with nothing open stays fine; a new install with no
+    /// intent is still refused.
+    #[tokio::test]
+    async fn a_completed_replace_marks_an_unfinished_host_finished() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        f.backend
+            .finish_setup_record("owner", f.prior, true)
+            .await
+            .unwrap();
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_bootstrap_retirement_intents WHERE host_id=?",
+        )
+        .bind(f.prior.as_bytes().as_slice())
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(open, 0, "the replaced host still reads as unfinished");
+        // Now finished, so a re-add while it is offline names it, never retires it.
+        let event = finished(&start(&f, "owner")).await;
+        assert!(
+            event
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.already_added),
+            "{event:?}"
+        );
+        f.backend
+            .finish_setup_record("owner", f.prior, true)
+            .await
+            .unwrap();
+        assert!(
+            f.backend
+                .finish_setup_record("owner", f.prior, false)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The retirement above never reaches a setup still running in this server: a second
+    /// tab adding the same address while the first one installs keeps the first attempt,
+    /// and is told it is being added, never offered a terminal on a host still installing.
+    #[tokio::test]
+    async fn an_unfinished_setup_still_running_here_is_not_retired_by_another_add() {
+        let f = fixture(true).await;
+        unfinished_setup_with_a_ghost_shell(&f).await;
+        f.backend.attempts.lock().unwrap().insert(
+            f.prior,
+            Attempt {
+                owner: "owner".into(),
+                batch: Uuid::new_v4(),
+                uid: 1002,
+                link_round_trip: Duration::ZERO,
+                destination: Some(("user@fixture".into(), None)),
+                canary: None,
+                retirement: None,
+                replacement: false,
+            },
+        );
+        let event = finished(&start(&f, "owner")).await;
+        assert_eq!(event.step, Step::Failed);
+        let failure = event.failure.as_ref().unwrap();
+        assert!(!failure.already_added, "{failure:?}");
+        assert!(
+            serde_json::to_value(failure)
+                .unwrap()
+                .get("host_id")
+                .is_none()
+        );
+        assert!(event.message.contains("already being added"), "{event:?}");
+        let revoked: bool =
+            sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+                .bind(f.prior.as_bytes().as_slice())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert!(!revoked, "a running setup must keep its host");
     }
 
     #[tokio::test]

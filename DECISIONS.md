@@ -4109,3 +4109,60 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        noted".
      - **macOS "logged in" means a desktop login (#328, D335):** someone
        logged in only over SSH gets the plain shell ("yes").
+
+353. **Revoking access also ends background services when nobody else uses the
+     account (owner, 2026-11-06, #355; extends D347, D352):** a revoked person
+     could leave a program running through the host account's own systemd
+     user manager (`systemd-run --user` plus linger), and it survived every
+     revoke (J291). Infraternal can't tell which person started it when several
+     people share one host account (D347). The owner chose "Only when no one
+     else has it": if the revoked person was the last one with access to that
+     host account, the revoke stops the account's user services and turns
+     linger off. If others still share the account, those services stay
+     running, and the revoke result warns that background programs may
+     remain. The rejected options were stopping them on every revoke (this
+     also kills other people's jobs on a shared account) and leaving them as
+     the host owner's job.
+
+354. **Root logins need systemd (owner, 2026-11-06, #355; amends D247):** on a
+     Linux host without systemd (openrc, runit, s6), D247's `su` fallback let a
+     revoked person keep their shell alive. They deleted the login socket, the
+     revoke reported success, and typing still reached the shell (J291). Without
+     systemd's process groups, infraternal can't prove that every process of
+     that login is gone. The owner chose "Refuse root logins there": a root
+     infraternal agent on a host without systemd refuses person logins with a
+     clear message until revocation can be proven there. Rootless agents and
+     systemd hosts keep working. The rejected options were a root-owned cgroup
+     v2 leaf per login (larger, and it needs a real openrc VM; it may come later
+     if such hosts matter) and keeping `su` with a revoke that fails closed
+     (the shell could live until reboot).
+
+355. **Start fresh completes the old entry's cleanup (owner, 2026-11-06, #305):**
+     when Add host's Start fresh has removed the leftovers of an earlier
+     unfinished setup, which it proves before it continues, the server treats
+     that as the old entry's cleanup confirmation and drops the old entry at
+     once. Before this, Console showed a second offline "pending cleanup" host
+     with the same name forever, because the abandoned setup's infraternal
+     agent never confirms. The owner chose "Drop it when Start fresh cleaned
+     up". Entries whose machine was never cleaned keep showing as pending. The
+     rejected options were a Forget button and leaving the entry as it was.
+     **Widened the same day (owner):** an add whose own check proves that the
+     account has no infraternal install at all also counts as that proof
+     ("Yes, no install = proof"), so an already-clean machine such as `code`
+     does not keep a stale pending twin. It drops only the same person's own
+     unfinished or cleanup-pending entries for that machine and account; other
+     people's entries, other accounts and finished hosts are never touched.
+
+356. **A revoke shows the access a person left behind (owner, 2026-11-06,
+     #355; extends D353):** a person with a shell on a host account can
+     leave their own way back in, such as an SSH key in
+     `~/.ssh/authorized_keys`, a crontab entry or a systemd user unit, and a
+     revoke did not touch those files (J295). The owner chose "Warn and show
+     what changed": when access is granted, infraternal records a fingerprint
+     of the account's access files (authorized_keys, crontab, systemd user
+     units). On revoke it compares them, and if anything changed since the
+     grant, it tells the person revoking exactly which files and lines are
+     new, so they can remove them. It never edits those files itself. The
+     rejected options were restoring the files automatically (this can undo
+     legitimate changes by the host owner or others) and documenting the
+     limit only.

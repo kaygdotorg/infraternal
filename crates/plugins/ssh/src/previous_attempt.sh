@@ -199,6 +199,8 @@ validate_upgrade_stage() {
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   case "${entry##*/}" in
    transaction|kind|lease) :;;
+   transfer-chunk) private_file "$entry"; [ "$(stat -c '%s' "$entry")" -le 65536 ] || refuse size;;
+   transfer-progress|transfer-progress-next) private_file "$entry"; [ "$(stat -c '%s' "$entry")" -le 24 ] || refuse size;;
    activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested|creating-alias)
     private_file "$entry"
     [ "$(stat -c '%s' "$entry")" = 0 ] || refuse marker;;
@@ -340,13 +342,37 @@ inspect_upgrade() {
 upgrade_liveness() {
  if $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1; then printf 'live\n'; else printf 'idle\n'; fi
 }
+# Refuse (73) while setup runs here: another command holds the journal, a shim
+# serves a terminal, or any process of this user holds a file under $base.
+#
+# One holder is not "setup running": the infraternal agent unit that a fresh
+# setup started before it was interrupted (journal kind fresh, still marked
+# activating). Its setup is gone (the journal lock above is free), it serves no
+# terminal (a shim would still be a holder), and its journal never committed,
+# so no server finished enrolling it; it can only retry its server link. Left
+# counted, every later add said "Setup is already running" forever and Start
+# fresh was never offered (#305, J257). Rollback stops and removes it by the
+# journal's own markers.
 not_live() {
+ not_live_scan=all
  if [ -d "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ]; then
   exec 8< "$base/.bootstrap-lock"
   flock -n 8 || exit 73
   exec 8<&-
+  if [ -f "$base/.bootstrap-lock/activating" ] && [ ! -L "$base/.bootstrap-lock/activating" ] && [ -f "$base/.bootstrap-lock/kind" ] && [ ! -L "$base/.bootstrap-lock/kind" ] && [ "$(cat "$base/.bootstrap-lock/kind")" = fresh ]; then
+   not_live_scan=unit
+   # Only the unit's main process (the agent itself) is skipped; anything else
+   # in its cgroup, such as a terminal shim it started, still refuses (#305 J272).
+   agent_main_pid=$($manager show -p MainPID --value infraternal-agent.service 2>/dev/null || :)
+   case "$agent_main_pid" in ''|*[!0-9]*) agent_main_pid=0;; esac
+  fi
  fi
- # Non-dumpable shims: the helper asks the kernel by owner+inode, never by name.
+ live_session_sockets
+ scan_holders "$not_live_scan"
+}
+# Refuse (73) while a shim serves a session socket under $base. Non-dumpable
+# shims: the helper asks the kernel by owner+inode, never by name.
+live_session_sockets() {
  for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || continue
   [ "$entry" != "$base/sessions/plugins.sock" ] || continue
@@ -354,11 +380,59 @@ not_live() {
   "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions </dev/null || exit $?
   break
  done
+}
+# Start fresh, after confirmation: stop the agent an interrupted activation left
+# running (see not_live), then require that nothing holds a file under $base any
+# more. Without one, this does nothing.
+stop_activated_agent() {
+ [ "${not_live_scan:-all}" = unit ] || return 0
+ # Read the unit's cgroup while it runs; systemd may forget it once stopped.
+ agent_cgroup=$($manager show -p ControlGroup --value infraternal-agent.service 2>/dev/null || :)
+ $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
+ # KillMode=process leaves anything else the agent started running. A shim
+ # that started after the checks above, or never bound a socket, is still in
+ # the unit's cgroup: refuse while it lists any process (#305 J272).
+ case "$agent_cgroup" in
+  /*) agent_procs="${agent_cgroup_root:-/sys/fs/cgroup}$agent_cgroup/cgroup.procs"
+      if [ -e "$agent_procs" ]; then
+       [ -z "$(cat "$agent_procs" 2>/dev/null || echo unreadable)" ] || exit 73
+      fi;;
+ esac
+ live_session_sockets
  scan_holders all
+ for marker in "$base/sessions/sessions"/*.readiness; do
+  [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] || continue
+  rm -- "$marker"
+ done
+ not_live_scan=all
+}
+# Whether this fresh journal was interrupted during activation and carries the
+# rollback marker $1 for what activation created (see not_live).
+activated_marker() {
+ [ "${not_live_scan:-all}" = unit ] && [ -f "$base/.bootstrap-lock/$1" ] && [ ! -L "$base/.bootstrap-lock/$1" ]
+}
+# Whether this account provably has no infraternal install at all (D355): its
+# base, unit and launcher each fail to stat with "No such file or directory".
+# A permission error, a dangling link or any other answer is not proof.
+install_absent() {
+ for install_path in "$base" "$unit" "$launcher"; do
+  install_error=$(LC_ALL=C stat -c %i -- "$install_path" 2>&1 >/dev/null) && return 1
+  case "$install_error" in *": No such file or directory") :;; *) return 1;; esac
+ done
+ return 0
+}
+# Whether /proc entry $1 runs in the infraternal agent's own service unit.
+agent_unit_process() {
+ agent_unit=no
+ { while IFS= read -r scan_cgroup; do
+    case "$scan_cgroup" in */infraternal-agent.service|*/infraternal-agent.service/*) agent_unit=yes;; esac
+   done < "$1/cgroup"; } 2>/dev/null || :
+ [ "$agent_unit" = yes ]
 }
 # Refuse (73) while a process of this user runs from or holds a file under
 # $base. "service" skips the enrolled unit's own processes and the journaled
-# payload's shims, which a replacement is about to stop itself (#305).
+# payload's shims, which a replacement is about to stop itself (#305). "unit"
+# skips only the unit's own processes (see not_live).
 scan_holders() {
  scan_skip=$1
  if [ -e "$base" ] || [ -L "$base" ]; then
@@ -373,23 +447,80 @@ scan_holders() {
   [ -O "$process" ] || continue
   if [ "$scan_skip" = service ]; then
    [ ! "$base/.bootstrap-lock/payload" -ef "$process/exe" ] || continue
-   scan_unit=no
-   { while IFS= read -r scan_cgroup; do
-      case "$scan_cgroup" in */infraternal-agent.service|*/infraternal-agent.service/*) scan_unit=yes;; esac
-     done < "$process/cgroup"; } 2>/dev/null || :
-   [ "$scan_unit" = no ] || continue
+   ! agent_unit_process "$process" || continue
+  elif [ "$scan_skip" = unit ] && [ "${process##*/}" = "${agent_main_pid:-0}" ]; then
+   agent_unit_process "$process" && continue
+  fi
+  # A non-dumpable process (every infraternal agent and shim, and OpenSSH's own
+  # session process) hides its exe and fds even from its owner. Never read that
+  # as "holds nothing": decide from what stays readable (#305 J272).
+  if ! readlink "$process/exe" >/dev/null 2>&1 || ! ls "$process/fd" >/dev/null 2>&1; then
+   hidden_holder "$process" && exit 73
+   continue
   fi
   set -- "$@" "$process/exe" "$process/fd"
   [ "$#" -le 8192 ] || refuse size
  done
  [ "$#" -le 8192 ] || refuse size
  command -v find >/dev/null 2>&1 || refuse tool
- if live=$(find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>/dev/null); then
-  :
- else
-  [ "$?" = 1 ] || refuse tool
- fi
- [ -z "$live" ] || exit 73
+ # find's errors are kept, never read as "nothing found". An error about a
+ # process that has exited meanwhile is moot; a permission error about one that
+ # turned non-dumpable meanwhile (an ssh or a shim starting) is decided as
+ # above; any other error is unknown and refuses.
+ live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>&1 >&4 | sed 's/^/unreadable: /'; } 4>&1 )
+ # One line per entry; no here-document (compaction, see install.rs) and no
+ # pipeline, whose subshell would swallow exit 73.
+ scan_nl=$(printf '\n_'); scan_nl=${scan_nl%_}
+ scan_ifs=$IFS; IFS=$scan_nl; set -f
+ for scan_line in $live; do
+  case "$scan_line" in
+   '') continue;;
+   "unreadable: find: "?/proc/*)
+    scan_pid=${scan_line#*/proc/}
+    scan_pid=${scan_pid%%[!0-9]*}
+    [ -n "$scan_pid" ] || exit 73
+    [ -e "/proc/$scan_pid/stat" ] || continue
+    case "$scan_line" in
+     # The fd or process vanished while find read it: it holds nothing now.
+     *": No such file or directory"|*": No such process") continue;;
+     *": Permission denied") ! hidden_holder "/proc/$scan_pid" || exit 73;;
+     *) exit 73;;
+    esac;;
+   *) exit 73;;
+  esac
+ done
+ set +f; IFS=$scan_ifs
+}
+# Whether /proc entry $1, whose exe or fds are hidden (non-dumpable), may hold
+# this install. A process that has exited (or is a zombie) holds nothing.
+hidden_holder() {
+ [ -e "$1/stat" ] || return 1
+ hidden_state=$(sed 's/.*) //' "$1/stat" 2>/dev/null | cut -d' ' -f1) || return 1
+ case "$hidden_state" in Z|X|'') return 1;; esac
+ install_process "$1" || return 1
+ # The kept shims of a Replace (D337) are the only ones allowed to stay.
+ if [ "$scan_skip" = service ] && session_scope_process "$1"; then return 1; fi
+ return 0
+}
+# Whether /proc entry $1, whose exe and fds are hidden, is one of this
+# install's: in the agent unit's cgroup, in a terminal session scope, or started
+# from a path under $base. Other hidden processes of this account (its SSH
+# session processes, key agents) cannot be told apart by uid alone and are
+# not this install's: refusing on them would refuse every add over OpenSSH.
+install_process() {
+ agent_unit_process "$1" && return 0
+ session_scope_process "$1" && return 0
+ install_argv0=$({ tr '\0' '\n' < "$1/cmdline" | sed -n 1p; } 2>/dev/null || :)
+ case "$install_argv0" in "$base"/*|"$base_real"/*) return 0;; esac
+ return 1
+}
+# Whether /proc entry $1 runs in an infraternal terminal session scope.
+session_scope_process() {
+ session_scope=no
+ { while IFS= read -r scan_cgroup; do
+    case "$scan_cgroup" in */infraternal-session-*.scope|*/infraternal-session-*.scope/*) session_scope=yes;; esac
+   done < "$1/cgroup"; } 2>/dev/null || :
+ [ "$session_scope" = yes ]
 }
 no_redirect() {
  path=
@@ -495,7 +626,8 @@ inspect_previous() {
   fi
   if [ -e "$base" ] || [ -L "$base" ]; then discard_committed_set_aside; fi
   report_set_aside && return
-  printf 'INFRATERNAL_SETUP_CLEAR\n'
+  # D355: proven absence lets the server finish this person's stale entries.
+  if install_absent; then printf 'INFRATERNAL_SETUP_ABSENT\n'; else printf 'INFRATERNAL_SETUP_CLEAR\n'; fi
   return
  fi
  if [ -n "$receipt" ]; then
@@ -550,7 +682,9 @@ inspect_previous() {
   return
  fi
  not_live
- validate_control_socket
+ # The interrupted activation's agent holds the runtime lifetime lock; not_live
+ # proved it is the only holder, so the socket is checked after it is stopped.
+ [ "$not_live_scan" = unit ] || validate_control_socket
  if [ -n "$receipt" ]; then
   validate_retired_stage "$previous_transaction" "$previous_host"
  elif [ -e "$base/.bootstrap-lock" ] || [ -L "$base/.bootstrap-lock" ]; then
@@ -566,6 +700,8 @@ inspect_previous() {
     case "${entry##*/}" in
      transaction|kind) private_file "$entry";;
      lease) private_file "$entry";;
+     transfer-chunk) private_file "$entry"; [ "$(stat -c '%s' "$entry")" -le 65536 ] || refuse size;;
+     transfer-progress|transfer-progress-next) private_file "$entry"; [ "$(stat -c '%s' "$entry")" -le 24 ] || refuse size;;
      activating|failed|stopping|stop-refused|had-binary|had-state|had-launcher|was-active|was-enabled|replacing-binary|replacing-state|replacing-unit|replacing-launcher|linger-requested|creating-alias)
       private_file "$entry"
       [ "$(stat -c '%s' "$entry")" = 0 ] || refuse marker;;
@@ -599,8 +735,20 @@ inspect_previous() {
    bin)
     [ -d "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 700 ] || exit 71
     for child in "$entry"/* "$entry"/.[!.]* "$entry"/..?*; do
-     [ ! -e "$child" ] && [ ! -L "$child" ] || exit 71
+     [ -e "$child" ] || [ -L "$child" ] || continue
+     # An interrupted activation of this fresh journal installed its binary;
+     # rollback removes exactly these two by the replacing-binary marker.
+     activated_marker replacing-binary || exit 71
+     case "${child##*/}" in
+      live) [ -f "$child" ] && [ ! -L "$child" ] && [ -O "$child" ] && [ "$(stat -c '%a' "$child")" = 700 ] || exit 71;;
+      current) [ -L "$child" ] && [ "$(readlink "$child")" = "$base/bin/live" ] || exit 71;;
+      *) exit 71;;
+     esac
     done;;
+   state)
+    # Its enrolment state, removed by rollback under the replacing-state marker.
+    activated_marker replacing-state || exit 71
+    private_tree "$entry";;
    *) exit 71;;
   esac
  done
@@ -613,13 +761,21 @@ inspect_previous() {
    [ "$entry" != "$base/sessions/sessions" ] || continue
    [ "$entry" != "$base/sessions/.lifetime-lock" ] || continue
    if [ "$entry" = "$base/sessions/plugins.sock" ]; then
-    validate_control_socket
+    [ "$not_live_scan" = unit ] || validate_control_socket
     sockets=$((sockets + 1))
     [ "$sockets" -le 1024 ] || refuse size
     continue
    fi
-   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
    name=${entry##*/}
+   case "$name" in *.readiness)
+    # The readiness marker of the setup's own terminal probe, whose shim died
+    # with the setup; stop_activated_agent removes it (see not_live).
+    activated_marker activating || exit 71
+    [ -f "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
+    hex_id "${name%.readiness}"
+    continue;;
+   esac
+   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] && [ "$(stat -c '%a' "$entry")" = 600 ] || exit 71
    socket_id=${name%.sock}
    [ "$name" = "$socket_id.sock" ] || exit 71
    hex_id "$socket_id"

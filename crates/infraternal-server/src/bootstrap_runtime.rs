@@ -19,7 +19,9 @@ use infraternal_plugin_ssh::{
     transport::{Credentials, Operation, Secret},
     trust::TrustedOpenSsh,
 };
-use std::{path::Path, sync::Arc, time::Duration};
+#[cfg(test)]
+use std::time::Duration;
+use std::{path::Path, sync::Arc};
 
 #[cfg(feature = "remote")]
 #[path = "bootstrap_remote.rs"]
@@ -163,7 +165,7 @@ pub(crate) fn default_runner(
         ),
     };
     // Linux exposes the exact running inode even after its installation path is
-    // atomically replaced. Input::File opens this in the server process [225].
+    // atomically replaced. The public file source opens this in the server process [225].
     let payloads = crate::release_payload::ReleasePayload::new(
         "/proc/self/exe".into(),
         binaries.clone(),
@@ -180,7 +182,8 @@ pub(crate) fn default_runner(
                 askpass_binary: "/proc/self/exe".into(),
                 tcp_connector: Some(executable.clone()),
                 scratch: infraternal_plugin_ssh::credentials::runtime_root(),
-                command_timeout: Duration::from_secs(30),
+                // Byte receipts renew transfers; short commands keep this bound.
+                command_timeout: infraternal_plugin_ssh::transport::TRANSFER_IDLE,
             },
             data_dir.join("ssh-trust"),
         )))),

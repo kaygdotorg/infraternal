@@ -27,7 +27,7 @@ async fn pending_removal_does_not_reserve_address_or_key() {
     ] {
         assert_eq!(
             f.backend
-                .existing_host("owner", address, lookup)
+                .existing_host("owner", address, lookup, true)
                 .await
                 .unwrap(),
             None
@@ -119,4 +119,36 @@ async fn pending_removal_cannot_resume_the_old_stuck_install() {
         consumed.is_some(),
         "the removed host's invitation is never reissued"
     );
+}
+
+/// #305 round 4: an abandoned setup denied during a later add has a pending
+/// login cleanup but no removal row (its agent is gone, so no receipt comes).
+/// Like a removed host, it is denied and must not occupy its destination, or
+/// the add that denied it is refused its own new invitation.
+#[tokio::test]
+async fn a_denied_abandoned_setup_does_not_occupy_its_destination() {
+    let f = fixture(true).await;
+    sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@fixture',NULL)")
+        .bind(f.prior.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+    sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES(?,'owner',0)")
+        .bind(f.prior.as_bytes().as_slice())
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let host = Uuid::new_v4();
+    f.backend
+        .issuer
+        .issue_bootstrap(
+            &f.cookie,
+            crate::remote_http::InvitationRequest {
+                host_id: host,
+                mode: Mode::Rootless,
+                execution_uid: 1002,
+                expected_key_digest: Some([8; 32]),
+            },
+            "user@fixture",
+            None,
+        )
+        .await
+        .expect("a denied host must not occupy the address");
 }
