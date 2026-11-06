@@ -2699,6 +2699,10 @@ where
 }
 
 // Incoming wire cases share actor-owned sequence accounting and bounded output senders.
+/// Applies one frame from the infraternal agent to this connection's state:
+/// attachments and routes, and the reply to the pending call it answers
+/// (opens, actions, revocations). Returns whether the connection stays
+/// usable; a protocol error ends it.
 async fn process_incoming(
     incoming: Incoming,
     connection: &mut AgentConnection,
