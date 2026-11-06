@@ -222,7 +222,13 @@ fn shown(line: &[u8]) -> String {
 
 /// Lowercase hex of a digest, the form a baseline stores per line.
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 /// Every source of `account`, as (display path, content), bounded in count.
@@ -367,7 +373,6 @@ fn list_beneath(
     // resolved again, so nothing can be swapped in between.
     let Ok(mut listing) = fd
         .try_clone()
-        .map_err(io::Error::from)
         .and_then(|copy| nix::dir::Dir::from_fd(copy).map_err(io::Error::from))
     else {
         return;
@@ -594,7 +599,7 @@ mod tests {
         Vec::new()
     }
 
-    /// A key appended to authorized_keys and a new autostart entry are
+    /// A key appended to `authorized_keys` and a new autostart entry are
     /// reported with exactly their new lines; untouched files are not.
     #[test]
     fn new_access_lines_since_the_grant_are_reported_exactly() {
@@ -661,14 +666,14 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
-    /// The report is bounded: at most REPORTED_LINES lines, each shortened.
+    /// The report is bounded: at most `REPORTED_LINES` lines, each shortened.
     #[test]
     fn the_report_is_bounded() {
         let (user, home) = account();
         let base = capture(&user, &no_extra);
         let long = "x".repeat(LINE_CHARS * 2);
         let many: String = (0..REPORTED_LINES * 2)
-            .map(|i| format!("{long}{i}\n"))
+            .map(|i| [long.as_str(), &i.to_string(), "\n"].concat())
             .collect();
         std::fs::write(home.join(".zshrc"), many).unwrap();
         let report = changes(&base, &user, &no_extra);
