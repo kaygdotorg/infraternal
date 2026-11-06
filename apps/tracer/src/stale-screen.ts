@@ -1,5 +1,5 @@
 /**
- * Decides when a reattached terminal shows the "screen may be out of date" note (D309).
+ * Decides when a reattached terminal shows the "screen may be out of date" state (D309).
  *
  * After a terminal reattaches, the host replays the screen it kept. A program that can redraw (a
  * shell prompt, an editor) repaints at once because the attach carries a resize, so new output
@@ -20,7 +20,7 @@
  * nothing). A server that does not report the size leaves the wait as it always was.
  *
  * This module only owns the state machine; the timer is injected so the cases are tested
- * without waiting, and the note element lives in `packages/ui/src/terminal-note.ts`.
+ * without waiting, and the state is presented by the window as an icon in its machine pill (`packages/ui/src/stale-mark.ts`, via the terminal's `onStaleScreen` hook).
  */
 
 /** A terminal grid size in cells. */
