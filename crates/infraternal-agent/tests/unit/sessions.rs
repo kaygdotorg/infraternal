@@ -702,12 +702,23 @@ fn live_shim_body(root: &std::path::Path) -> String {
     )
 }
 
-/// Launch through the public path with a detached manager, for the fixtures above.
+/// Launch with the fixtures' detached manager and a current server grant for
+/// any attributed person. Transfer the real person fence into the reservation.
 async fn launch_detached(
     exe: &std::path::Path,
     state: &std::path::Path,
     person: Option<uuid::Uuid>,
 ) -> std::io::Result<super::Session> {
+    let person = match person {
+        Some(person) => {
+            crate::logins::synchronize_at(state, person)?;
+            Some((
+                person,
+                crate::logins::rootless_launch_guard(state, person).await?,
+            ))
+        }
+        None => None,
+    };
     super::launch_configured(
         exe,
         state,

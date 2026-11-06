@@ -47,28 +47,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         // The review or the result of the hosted action travels in `data`; the
         // sentence says which step the person is on.
         Ok(value) => {
-            let (state, message, next) = if finish {
-                (
-                    CommandState::Ready,
-                    value["message"]
-                        .as_str()
-                        .unwrap_or("The host was removed.")
-                        .to_owned(),
-                    "",
-                )
-            } else {
-                (
-                    CommandState::Pending,
-                    "Review what removing this host does.".to_owned(),
-                    "To remove it, pass the session and the review on standard input with --finish within two minutes.",
-                )
-            };
-            // The review is for scripts; a person at a terminal needs the sentence, not the capability.
-            let data = if machine { value } else { json!({}) };
-            let mut result = CommandResult::new("remove-host", state, message, data);
-            if !next.is_empty() {
-                result = result.with_next_step(next);
-            }
+            let result = command_result(value, finish, machine);
             emit(result, machine, Exit::Ok)
         }
         Err(_) => super::output::refuse(
@@ -79,6 +58,46 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             Exit::NotAllowed,
         ),
     }
+}
+/// Present the dry run or final response, keeping structured fields for scripts.
+/// Human output hides the private review but includes any manual uninstall command.
+fn command_result(value: Value, finish: bool, machine: bool) -> CommandResult<Value> {
+    let (state, message, next) = if finish {
+        (
+            if value["state"] == "pending" {
+                CommandState::Pending
+            } else {
+                CommandState::Ready
+            },
+            value["message"]
+                .as_str()
+                .unwrap_or("The host was removed.")
+                .to_owned(),
+            "",
+        )
+    } else {
+        (
+            CommandState::Pending,
+            "Review what removing this host does.".to_owned(),
+            "To remove it, pass the session and the review on standard input with --finish within two minutes.",
+        )
+    };
+    // A short pending status must not hide the separate ownership-checked
+    // uninstall command. Avoid repeating it when the sentence includes it.
+    let manual = value["manual"]
+        .as_str()
+        .filter(|command| finish && !machine && !command.is_empty() && !message.contains(*command))
+        .map(str::to_owned);
+    // The review is for scripts; a person at a terminal needs the sentence, not the capability.
+    let data = if machine { value } else { json!({}) };
+    let mut result = CommandResult::new("remove-host", state, message, data);
+    if !next.is_empty() {
+        result = result.with_next_step(next);
+    }
+    if let Some(manual) = manual {
+        result = result.with_next_step(manual);
+    }
+    result
 }
 /// The TLS client for the removal routes: the connector `sign-in` and the hosted actions use,
 /// so all of them trust the host's public CA bundle even when the linked OpenSSL's default paths
@@ -162,6 +181,33 @@ impl Drop for Connection {
 
 #[cfg(test)]
 mod tests {
+    //! Human rendering and transport regressions for reviewed host removal.
+    /// Human output must include the structured leftover-install command even
+    /// when a pending response has only a short status sentence.
+    #[test]
+    fn pending_removal_prints_manual_command_for_people() {
+        use crate::cli::output::{RenderOptions, render_pretty};
+        let command =
+            "/usr/local/bin/infraternal --bootstrap-uninstall 0123456789abcdef0123456789abcdef";
+        let value = serde_json::json!({"state":"pending", "message":"worker: revoked, cleanup pending.", "manual":command});
+        let result = super::command_result(value, true, false);
+        let output = render_pretty(
+            &result,
+            RenderOptions {
+                terminal: false,
+                color: false,
+                width: 100,
+            },
+        )
+        .unwrap();
+        assert!(
+            output.contains(command),
+            "manual uninstall missing from human output: {output}"
+        );
+        assert_eq!(result.state, crate::cli::output::CommandState::Pending);
+        assert_eq!(result.data, serde_json::json!({}));
+    }
+
     /// Found on the test server (#303, J94f): `remove-host` refused every step, its dry run
     /// included, while the same session's browser dry run succeeded. With `SSL_CERT_FILE` set to
     /// the system bundle the same binary removed the host. A vendored OpenSSL's default paths

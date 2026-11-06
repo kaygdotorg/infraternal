@@ -5,10 +5,11 @@ import type { HostEntry } from "./adapter";
 
 const id = "11111111-2222-3333-4444-555555555555";
 const row = { id, name: "worker", user: "operator", os: "Debian GNU/Linux", address: "operator@worker", online: false };
-function fixture() {
+/** Build a complete paged inventory connection with controlled invalidations. */
+function fixture(initial: Record<string, unknown> = row) {
   const hosts = new Map<string, HostEntry>();
   let ready = () => {}, event = (_value: Record<string, unknown>) => {};
-  let response: Record<string, unknown> = { hosts: [row], next: null };
+  let response: Record<string, unknown> = { hosts: [initial], next: null };
   let reads = 0, subs = 0;
   const stop = syncAdmittedHosts({
     call: async () => { reads++; return response; },
@@ -68,4 +69,15 @@ test("an invalidated read cannot enqueue an unsent call while the socket is down
   connected = false; rejectRead?.(new Error("drop")); await settle();
   expect(calls).toBe(2);
   connected = true; welcome(); await settle(); expect(entries).toHaveLength(0); stop();
+});
+
+/** Cleanup status must survive page validation, including reconnect after expiry. */
+test("pending removals retain their server cleanup status", async () => {
+  const f = fixture({ ...row, os: undefined }); await settle();
+  for (const state of ["pending", "retired-unreachable"]) {
+    f.set({ hosts: [{ ...row, os: undefined, state }], next: null }); f.event(); await settle();
+    expect(f.hosts.get(id)).toMatchObject({ id, state, online: false });
+  }
+  f.set({ hosts: [], next: null }); f.event(); await settle();
+  expect(f.hosts.size).toBe(0); f.stop();
 });

@@ -2,12 +2,17 @@
 
 use super::*;
 
+/// Enroll a unique TLS host so concurrent server fixtures cannot share a
+/// process-wide per-host cleanup claim. The legacy ledger fixture stays unused.
 pub(crate) async fn admitted_store(
     host: &Identity,
     root: &X509,
 ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid, [u8; 32]) {
     let fingerprint = openssl::sha::sha256(&host.certificate.to_der().unwrap());
-    let (store, pool, host_id) = crate::enrollment::authority::tests::enrolled().await;
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let host_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootless',1002,100)")
+        .bind(host_id.as_bytes().as_slice()).execute(&pool).await.unwrap();
     let instant = now().unwrap();
     let key_digest = openssl::sha::sha256(&host.key.raw_public_key().unwrap());
     let token = store
