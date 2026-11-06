@@ -54,11 +54,11 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
     actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
   }
   if (m.kind !== "node" && m.kind !== "settings" && m.kind !== "docs" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
-  // "Read about this window" comes first, before split, sessions and close, when the docs adapter has something to say about it (#304).
-  // Not in a terminal's header on a touch device: there the header holds Close alone, because "?" next to Close made the group fold
-  // into a "…" whose 44 px target overlapped its neighbours. It is reached from ⌘K ("Read about this window") instead. Other windows
-  // (a Settings window's header holds only "?") keep it on a phone.
-  if ((header || m.kind !== "terminal") && cx.adapters.docs?.for(m)) actions.unshift({ id: "docs", label: "Read about this window", icon: ICON.help, onSelect: (e) => { const source = e.detail === 0 ? "keyboard" : "pointer"; void onDemand(() => import("./docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, rec, source); }); } });
+  // "Read about this window" comes first when the docs adapter has something to say about the window (#304, D317: a Settings window's
+  // "?" lands on its heading). Never on a terminal, on any device (owner, 2026-11-06: "they're just terminals? don't blindly add
+  // elements where it does not make sense"; TASTE "every control earns its place"). A terminal's page is reached from ⌘K, in the
+  // Canvas group ("Read about this window"), and from its key.
+  if (m.kind !== "terminal" && cx.adapters.docs?.for(m)) actions.unshift({ id: "docs", label: "Read about this window", icon: ICON.help, onSelect: (e) => { const source = e.detail === 0 ? "keyboard" : "pointer"; void onDemand(() => import("./docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, rec, source); }); } });
   // An app window or a screen is named by what it shows ("Notebook · Today"); the machine it lives on is the quiet part that gives
   // way first in a narrow pill, with its OS mark in front (D208). A terminal is the other way round: the machine, then its session.
   const title = m.kind === "app" || m.kind === "screen" ? { host: m.session ?? m.host, session: m.host } : { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
