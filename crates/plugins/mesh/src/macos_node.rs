@@ -50,6 +50,20 @@ const UTUN_MTU: usize = 1280;
 const PUBLIC_STATE: &str = "mesh-public.json";
 const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Pause a Mac rotation child at a durable boundary so its parent can send SIGKILL.
+#[cfg(test)]
+fn rotation_crash_checkpoint(name: &str) {
+    if std::env::var("INFRATERNAL_MAC_ROTATION_CRASH_POINT").as_deref() != Ok(name) {
+        return;
+    }
+    let ready = std::env::var_os("INFRATERNAL_MAC_ROTATION_CRASH_READY")
+        .expect("the crash proof supplies a readiness path");
+    fs::write(ready, name).expect("publish the reached Mac rotation boundary");
+    loop {
+        std::thread::park();
+    }
+}
+
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, MacUtunTx, MacUtunRx)>;
 
 #[derive(Clone)]
@@ -1528,8 +1542,8 @@ mod tests {
     use super::{
         BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
         UdpTransportFactoryParams, parse_utun_payload, peers_for_config, read_public_state,
-        reconcile, route_addresses, stage_chunk, utun_family, valid_utun_name, validate_config,
-        validate_underlay_routes, write_public_state,
+        reconcile, rotation_crash_checkpoint, route_addresses, stage_chunk, utun_family,
+        valid_utun_name, validate_config, validate_underlay_routes, write_public_state,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -1543,13 +1557,18 @@ mod tests {
         collections::{BTreeMap, BTreeSet},
         fs,
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        os::unix::fs::{PermissionsExt, symlink},
+        os::unix::{
+            fs::{PermissionsExt, symlink},
+            process::ExitStatusExt,
+        },
         path::PathBuf,
+        process::{Command, Stdio},
         sync::{
             Arc, Barrier,
             atomic::{AtomicU64, Ordering},
         },
         thread,
+        time::{Duration, Instant},
     };
 
     /// A one-peer configuration for the macOS node tests.
@@ -1892,6 +1911,180 @@ mod tests {
         assert_eq!(persisted, candidate);
         node.finish_rotation(operation, 1).expect("finish rotation");
         node.down().expect("stop GotaTun");
+    }
+
+    /// Exercise the child side of [`macos_rotation_recovers_after_sigkill_at_each_durable_step`].
+    #[test]
+    #[ignore = "launched by the macOS GotaTun SIGKILL recovery proof"]
+    fn macos_rotation_crash_child() {
+        let state = std::env::var_os("INFRATERNAL_MAC_ROTATION_STATE")
+            .expect("the parent supplies an isolated Mac state directory");
+        let state = PathBuf::from(state);
+        let mut node = Node::restore(&state, None).expect("restore Mac rotation child");
+        let previous = node.up().expect("start the Mac GotaTun node");
+        assert!(previous.key_rotation, "macOS offers durable rotation");
+        fs::write(
+            state.join("rotation-crash-previous-public"),
+            previous.public_key.0,
+        )
+        .expect("save the public predecessor for the parent proof");
+        let operation = "00000000-0000-4000-8000-000000000367";
+        node.prepare_rotation(operation, 1)
+            .expect("prepare Mac key rotation");
+        rotation_crash_checkpoint("rotation_prepared");
+        node.commit_rotation(operation, 1)
+            .expect("commit Mac key rotation");
+        node.finish_rotation(operation, 1)
+            .expect("finish Mac key rotation");
+        rotation_crash_checkpoint("rotation_finished");
+        panic!("the requested Mac crash boundary was never reached");
+    }
+
+    /// SIGKILL at every Mac rotation write leaves a journal that restarts on an authorized key.
+    #[test]
+    #[ignore = "Run on the macOS VM with system service privileges."]
+    fn macos_rotation_recovers_after_sigkill_at_each_durable_step() {
+        let stages = [
+            "rotation_prepared",
+            "rotation_commit_requested",
+            "rotation_device_key_changed",
+            "rotation_interface_recorded",
+            "rotation_private_key_saved",
+            "rotation_finished",
+        ];
+        for stage in stages {
+            let directory = test_directory();
+            let ready = directory.join("rotation-crash-ready");
+            let mut child = Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--ignored", "macos_rotation_crash_child", "--nocapture"])
+                .env("INFRATERNAL_MAC_ROTATION_STATE", &directory.0)
+                .env("INFRATERNAL_MAC_ROTATION_CRASH_POINT", stage)
+                .env("INFRATERNAL_MAC_ROTATION_CRASH_READY", &ready)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start the Mac rotation child");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !ready.exists() {
+                if let Some(status) = child.try_wait().expect("check the Mac rotation child") {
+                    let output = child
+                        .wait_with_output()
+                        .expect("collect the Mac child's failure");
+                    panic!(
+                        "Mac child exited before {stage}: {status}\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                assert!(Instant::now() < deadline, "Mac child did not reach {stage}");
+                // sleep: let the child publish its next durable rotation boundary.
+                thread::sleep(Duration::from_millis(10));
+            }
+            child.kill().expect("send SIGKILL at the Mac boundary");
+            let status = child.wait().expect("reap the killed Mac child");
+            assert_eq!(status.signal(), Some(nix::libc::SIGKILL), "stage {stage}");
+
+            let previous: [u8; 32] = fs::read(directory.join("rotation-crash-previous-public"))
+                .expect("child recorded the predecessor")
+                .try_into()
+                .expect("public key length");
+            let journal = zeroize::Zeroizing::new(
+                fs::read(directory.join("mesh-key-rotation.bin"))
+                    .expect("prepared Mac journal survives SIGKILL"),
+            );
+            assert_eq!(journal.len(), 117, "stage {stage}");
+            assert_eq!(&journal[..8], b"IMKEYV1\0", "stage {stage}");
+            assert_eq!(
+                u64::from_le_bytes(journal[9..17].try_into().expect("sequence bytes")),
+                1,
+                "stage {stage}"
+            );
+            assert_eq!(
+                &journal[17..53],
+                b"00000000-0000-4000-8000-000000000367",
+                "stage {stage}"
+            );
+            let completed = stage == "rotation_finished";
+            assert_eq!(
+                journal[8],
+                if completed {
+                    2
+                } else if stage == "rotation_prepared" {
+                    0
+                } else {
+                    1
+                }
+            );
+            if completed {
+                assert_eq!(&journal[53..85], &[0; 32], "finish erases the predecessor");
+            }
+            let previous_public = if completed {
+                PublicKey(previous)
+            } else {
+                mac_private_public(&journal[53..85])
+            };
+            let candidate_public = mac_private_public(&journal[85..117]);
+            assert_eq!(previous_public.0, previous, "stage {stage}");
+
+            let key_file = zeroize::Zeroizing::new(
+                fs::read(directory.join(crate::macos_key::KEY_FILE))
+                    .expect("Mac key file survives SIGKILL"),
+            );
+            let expected_file =
+                if matches!(stage, "rotation_private_key_saved" | "rotation_finished") {
+                    candidate_public
+                } else {
+                    previous_public
+                };
+            assert_eq!(
+                mac_private_public(&key_file),
+                expected_file,
+                "key file at {stage}"
+            );
+            let recorded: PublicKey = serde_json::from_slice(
+                &fs::read(directory.join("mesh-interface.json")).expect("recorded Mac identity"),
+            )
+            .expect("valid recorded Mac identity");
+            let expected_record = if matches!(
+                stage,
+                "rotation_interface_recorded" | "rotation_private_key_saved" | "rotation_finished"
+            ) {
+                candidate_public
+            } else {
+                previous_public
+            };
+            assert_eq!(recorded, expected_record, "interface record at {stage}");
+
+            let expected_live = if stage == "rotation_prepared" {
+                previous_public
+            } else {
+                candidate_public
+            };
+            let mut restored =
+                Node::restore(&directory.0, None).expect("restore after Mac SIGKILL");
+            let identity = restored.up().expect("restart the Mac GotaTun node");
+            assert!(
+                identity.key_rotation,
+                "Mac rotation support survives restart"
+            );
+            assert_eq!(
+                identity.public_key, expected_live,
+                "recovered key at {stage}"
+            );
+            restored
+                .commit_rotation("00000000-0000-4000-8000-000000000367", 1)
+                .expect("retry Mac commit after restart");
+            restored
+                .finish_rotation("00000000-0000-4000-8000-000000000367", 1)
+                .expect("retry Mac finish after restart");
+            restored.down().expect("stop restored Mac node");
+        }
+    }
+
+    /// Derive a public identity from a private crash-fixture key without formatting its bytes.
+    fn mac_private_public(bytes: &[u8]) -> PublicKey {
+        let raw: [u8; 32] = bytes.try_into().expect("32-byte private key");
+        let secret = gotatun::x25519::StaticSecret::from(raw);
+        PublicKey(*X25519PublicKey::from(&secret).as_bytes())
     }
 
     fn enrolment(coordinator: &[u8]) -> Enrolment {
