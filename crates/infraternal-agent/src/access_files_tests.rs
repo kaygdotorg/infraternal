@@ -298,7 +298,7 @@ fn a_missing_record_reads_not_checked() {
     let none = since_grant(&store, person, &[], &lookup(&user), &no_extra, false);
     assert_eq!(none.state, State::NotChecked);
     assert_eq!(none.reason, Some(Reason::RecordMissing));
-    assert!(none.accounts.is_empty());
+    assert_eq!(none.accounts, []);
     std::fs::remove_dir_all(home).unwrap();
 }
 
@@ -431,7 +431,7 @@ fn a_cut_line_says_so_and_keeps_its_end() {
 fn the_report_is_bounded_and_says_so() {
     let granted = Granted::new(|_| {}, &no_extra);
     let many: String = (0..REPORTED_LINES * 2)
-        .map(|i| format!("alias a{i}=b\n"))
+        .map(|i| ["alias a", &i.to_string(), "=b\n"].concat())
         .collect();
     std::fs::write(granted.home.join(".zshrc"), many).unwrap();
     let access = granted.report(&no_extra);

@@ -343,7 +343,7 @@ impl<'a> Scan<'a> {
             scan.file(Path::new(rel), visit);
         }
         extra(account, &mut |path, content| {
-            scan.spool(path, content, visit)
+            scan.spool(path, content, visit);
         });
         scan.directory(Path::new(UNIT_DIRECTORY), true, visit);
         for rel in HOME_FILES {
@@ -473,13 +473,13 @@ impl<'a> Scan<'a> {
             ..Entry::default()
         };
         if !metadata.is_file() {
-            entry.kind = "other".to_owned();
+            "other".clone_into(&mut entry.kind);
             entry.size = 0;
             return (entry, None);
         }
         if metadata.uid() != self.account.uid.as_raw() {
             // Possibly a hard link to someone else's file: never read.
-            entry.kind = "foreign".to_owned();
+            "foreign".clone_into(&mut entry.kind);
             return (entry, None);
         }
         let limit = HASH_BYTES.min(ACCOUNT_HASH_BYTES.saturating_sub(self.hashed));
