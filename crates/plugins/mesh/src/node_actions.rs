@@ -747,9 +747,9 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// Keeps kernel setup, staged intent and explicit cleanup in one namespace owner.
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
-    /// Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
     fn applied_server_route_and_observed_link_survive_only_explicit_component_up() {
         use crate::{
             dataplane::{DefaultPolicy, Peer, PeerPolicy},
@@ -1009,6 +1009,7 @@ mod tests {
         assert!(parse_action("mesh.up", br#"{"enabled":false}"#).is_err());
         assert!(matches!(parse_action("mesh.up", b"{}"), Ok(Request::Up)));
     }
+    /// Preserves the stopping state after failed cleanup and explicit-off intent after reconnect.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off() {

@@ -360,6 +360,7 @@ impl Chunks {
             .len()
             <= infraternal_plugin_api::MAX_ACTION_BYTES - 64)
     }
+    /// Stores a completed chunk and advances the next part while retaining revision identity.
     fn flush(&mut self, previous: crate::dataplane::Chunk) -> Result<(), &'static str> {
         self.part.index = self
             .part

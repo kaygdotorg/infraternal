@@ -293,6 +293,8 @@ pub struct Node {
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
     // Only a newly accepted full snapshot replaces DNS names; coordinator loss keeps D166 state.
     dns_resolver: Option<crate::dns::Resolver>,
+    #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+    dns_integration: crate::dns_integration::DnsIntegration,
     #[cfg(feature = "cutoff-measure")]
     refusing_at_ns: Option<u64>,
 }
@@ -316,6 +318,8 @@ impl Default for Node {
             gotatun: None,
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             dns_resolver: None,
+            #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+            dns_integration: crate::dns_integration::DnsIntegration::default(),
             #[cfg(feature = "cutoff-measure")]
             refusing_at_ns: None,
         }
@@ -1226,6 +1230,7 @@ impl Node {
         self.enabled = false;
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         {
+            self.dns_integration.remove()?;
             self.dns_resolver = None;
         }
         let mut foreign_live_link = false;
@@ -1364,7 +1369,8 @@ impl Node {
         }
         Ok(())
     }
-    // Keep version/binding checks and complete staging visible before installation.
+    /// Validates and stages a coordinator chunk without applying a partial snapshot.
+    /// Version and identity binding checks run before any network state is installed.
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
         if !chunk.access_updates.is_empty()
             && (chunk.from_version.is_none()
@@ -1573,7 +1579,8 @@ impl Node {
             .apply_with_aliases(fence, &aliases, connections)?;
         Ok(())
     }
-    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
+    /// Applies a complete configuration through the route and firewall transaction.
+    /// The fence and rollback ordering keep the previously accepted state usable on failure.
     fn apply(&mut self, config: Config) -> io::Result<()> {
         #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_records = crate::dns::Records::from_config(&config)?;
@@ -1918,6 +1925,7 @@ impl Node {
     }
 
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+    /// Binds the DNS sockets after the mesh address exists and before names are published.
     fn ensure_dns_resolver(&mut self, address: std::net::Ipv4Addr) -> io::Result<()> {
         match &self.dns_resolver {
             Some(resolver) if resolver.address() == address => Ok(()),
@@ -1927,9 +1935,9 @@ impl Node {
             )),
             None => {
                 let resolver = if let Some(config) = &self.config {
-                    crate::dns::Resolver::bind(config)?
+                    crate::dns::Resolver::bind_for_node(config)?
                 } else {
-                    crate::dns::Resolver::bind_empty(address)?
+                    crate::dns::Resolver::bind_empty_for_node(address)?
                 };
                 if resolver.address() != address {
                     return Err(io::Error::new(
@@ -1944,11 +1952,20 @@ impl Node {
     }
 
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
-    fn publish_dns(&self, records: crate::dns::Records) -> io::Result<()> {
+    /// Routes the accepted suffixes through the host resolver, then swaps in their names.
+    fn publish_dns(&mut self, records: crate::dns::Records) -> io::Result<()> {
         let resolver = self
             .dns_resolver
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?;
+        if let Err(error) = self.dns_integration.configure(
+            crate::wireguard::INTERFACE,
+            &records,
+            nix::unistd::Uid::effective().as_raw(),
+            resolver.has_system_port(),
+        ) {
+            tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
+        }
         resolver.publish(records);
         Ok(())
     }

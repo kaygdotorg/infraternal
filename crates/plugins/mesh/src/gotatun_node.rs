@@ -129,9 +129,11 @@ pub(crate) struct RuntimeInfo {
     offloads_enabled: bool,
 }
 
+/// Commands sent to the dedicated `GotaTun` worker thread.
 enum WorkerCommand {
     Apply {
-        config: Config,
+        /// Keeps the larger snapshot out of the enum's inline command payload.
+        config: Box<Config>,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
     Counters(sync::SyncSender<io::Result<CounterMap>>),
@@ -319,7 +321,10 @@ impl Engine {
     pub(crate) fn apply(&self, config: Config) -> io::Result<RuntimeInfo> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
-            .send(WorkerCommand::Apply { config, reply })
+            .send(WorkerCommand::Apply {
+                config: Box::new(config),
+                reply,
+            })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
@@ -578,12 +583,13 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
+/// Applies tunnel commands on the dedicated worker and republishes its health.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     loop {
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
-                    let _ = reply.send(state.apply(config).await);
+                    let _ = reply.send(state.apply(*config).await);
                 }
                 Some(WorkerCommand::Counters(reply)) => {
                     let _ = reply.send(state.counters().await);
@@ -955,7 +961,7 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
     Ok((secret, PublicKey(*public.as_bytes())))
 }
 
-/// `GotaTun` engine selection and peer conversion checks.
+/// Checks engine selection, `GotaTun` peer conversion, and mesh-link lifecycle behavior.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]

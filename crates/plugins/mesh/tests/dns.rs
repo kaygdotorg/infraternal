@@ -8,7 +8,7 @@ use hickory_proto::{
 };
 use infraternal_plugin_mesh::{
     dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
-    dns::{self, DNS_PORT, Resolver},
+    dns::{self, DNS_PORT, DNS_SYSTEM_PORT, Resolver},
     policy::{
         model::{Addresses, NodeId, PublicKey},
         rules::TrafficPolicy,
@@ -341,6 +341,7 @@ fn edns0_opt_queries_still_receive_mesh_answers() {
 
 #[tokio::test]
 #[ignore = "Run as root inside a disposable network namespace; #266"]
+/// Checks high-port and standard-port DNS delivery on the isolated mesh address.
 async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
     let parent = std::env::var("INFRATERNAL_DNS_TEST_PARENT_NETNS")
         .expect("network test must be launched by the isolated namespace runner");
@@ -364,7 +365,7 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
     );
 
     let snapshot = config();
-    let resolver = Resolver::bind(&snapshot).unwrap();
+    let resolver = Resolver::bind_for_node(&snapshot).unwrap();
     let client = tokio::net::UdpSocket::bind("10.254.0.2:0").await.unwrap();
     let mut response = [0; 512];
     let (len, _) = exchange(&client, &snapshot, "build-01.internal", &mut response).await;
@@ -372,6 +373,26 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
         Message::from_vec(&response[..len]).unwrap().answers.len(),
         1,
         "the DNS socket must answer from the configured mesh address"
+    );
+
+    client
+        .send_to(
+            &query("build-01.internal", 1),
+            SocketAddr::from((snapshot.addresses.ipv4, DNS_SYSTEM_PORT)),
+        )
+        .await
+        .unwrap();
+    let (len, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.recv_from(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        Message::from_vec(&response[..len]).unwrap().answers.len(),
+        1,
+        "NetworkManager split DNS needs the standard DNS port on the mesh address"
     );
 
     let mut renamed = snapshot.clone();

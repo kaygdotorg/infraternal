@@ -20,6 +20,8 @@ use std::{
 /// The UDP port the resolver listens on. It is a high port so no privilege is
 /// needed; the host's split-DNS setup sends queries for the mesh suffix here.
 pub const DNS_PORT: u16 = 1053;
+/// The standard DNS port used by `NetworkManager`'s split-DNS forwarding.
+pub const DNS_SYSTEM_PORT: u16 = 53;
 /// Cache lifetime, in seconds, of answers that exist.
 const POSITIVE_TTL: u32 = 30;
 /// Cache lifetime, in seconds, of "no such name" and "no such record type"
@@ -51,6 +53,7 @@ pub(crate) struct Records {
 impl Records {
     /// No names yet, only the default suffix. Every query in the zone gets
     /// "no such name" until real records are published.
+    #[cfg(target_os = "linux")]
     fn empty(local_address: Ipv4Addr) -> Self {
         Self {
             local_address,
@@ -115,6 +118,16 @@ impl Records {
             return Err(invalid_config());
         }
         Ok(())
+    }
+
+    /// The node's local mesh address used by the DNS socket and host route.
+    pub(crate) const fn local_address(&self) -> Ipv4Addr {
+        self.local_address
+    }
+
+    /// The default and custom DNS zones this snapshot answers.
+    pub(crate) fn suffixes(&self) -> &[String] {
+        &self.suffixes
     }
 }
 
@@ -318,11 +331,13 @@ fn negative_soa(suffix: &str) -> io::Result<Record> {
 ///
 /// It listens on UDP port [`DNS_PORT`] of the node's mesh IPv4 address only,
 /// with a background thread named `mesh-dns`. Queries from any other source
-/// address are refused (see [`response`]). Names can be replaced while it runs
+/// receive the same NXDOMAIN as an absent name (see [`response`]). Names can be replaced while it runs
 /// ([`replace`](Resolver::replace)); each query sees a whole snapshot, never a
 /// half-updated one. Dropping the resolver stops the thread and waits for it.
 pub struct Resolver {
     address: Ipv4Addr,
+    #[cfg(target_os = "linux")]
+    system_port: bool,
     records: Arc<RwLock<Records>>,
     shutdown: UnixStream,
     worker: Option<JoinHandle<()>>,
@@ -336,18 +351,42 @@ impl Resolver {
     /// mesh address is not available on this host yet.
     pub fn bind(config: &Config) -> io::Result<Self> {
         let records = Records::from_config(config)?;
-        Self::bind_records(config.addresses.ipv4, records)
+        Self::bind_records(config.addresses.ipv4, records, false)
     }
 
-    /// Starts serving on `address` with no names, so the port is held before
-    /// the first snapshot arrives.
-    pub(crate) fn bind_empty(address: Ipv4Addr) -> io::Result<Self> {
-        Self::bind_records(address, Records::empty(address))
+    /// Starts serving one node snapshot and, on root Linux nodes, also claims port 53 when free.
+    ///
+    /// Port 53 is optional because systemd-resolved accepts the high port directly. The extra
+    /// listener is only needed by `NetworkManager`'s dnsmasq split-DNS forwarding.
+    /// # Errors
+    /// Fails if the high mesh DNS port cannot be bound or the snapshot is invalid.
+    pub fn bind_for_node(config: &Config) -> io::Result<Self> {
+        let records = Records::from_config(config)?;
+        #[cfg(target_os = "linux")]
+        {
+            Self::bind_records(config.addresses.ipv4, records, system_port_for_node())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::bind_records(config.addresses.ipv4, records, false)
+        }
+    }
+
+    /// Starts serving on `address` with no names, so both eligible ports are held before publish.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn bind_empty_for_node(address: Ipv4Addr) -> io::Result<Self> {
+        Self::bind_records(address, Records::empty(address), system_port_for_node())
     }
 
     /// The mesh address the resolver is bound to.
     pub(crate) const fn address(&self) -> Ipv4Addr {
         self.address
+    }
+
+    /// Reports whether the node also owns the standard DNS port on its mesh address.
+    #[cfg(target_os = "linux")]
+    pub(crate) const fn has_system_port(&self) -> bool {
+        self.system_port
     }
 
     /// Binds the socket and starts the worker thread.
@@ -356,9 +395,29 @@ impl Resolver {
     /// needs no timer to notice shutdown. Packets over the size limit,
     /// unparseable queries and queries outside the zone get no reply; send
     /// errors are ignored because UDP gives no delivery guarantee anyway.
-    fn bind_records(address: Ipv4Addr, initial: Records) -> io::Result<Self> {
+    fn bind_records(
+        address: Ipv4Addr,
+        initial: Records,
+        try_system_port: bool,
+    ) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::from((address, DNS_PORT)))?;
-        let worker_socket = socket.try_clone()?;
+        #[cfg(target_os = "linux")]
+        let system_socket = if try_system_port {
+            UdpSocket::bind(SocketAddr::from((address, DNS_SYSTEM_PORT))).ok()
+        } else {
+            None
+        };
+        #[cfg(target_os = "macos")]
+        let system_socket = {
+            let _ = try_system_port;
+            None::<UdpSocket>
+        };
+        #[cfg(target_os = "linux")]
+        let system_port = system_socket.is_some();
+        let mut worker_sockets = vec![socket];
+        if let Some(system_socket) = system_socket {
+            worker_sockets.push(system_socket);
+        }
         let (shutdown, shutdown_reader) = UnixStream::pair()?;
         let records = Arc::new(RwLock::new(initial));
         let worker_records = Arc::clone(&records);
@@ -367,46 +426,56 @@ impl Resolver {
             .spawn(move || {
                 // The sentinel byte exposes recv_from truncation at the protocol size limit.
                 let mut query = [0_u8; MAX_PACKET + 1];
-                let mut descriptors = [
-                    PollFd::new(worker_socket.as_fd(), PollFlags::POLLIN),
-                    PollFd::new(shutdown_reader.as_fd(), PollFlags::POLLIN),
-                ];
-                loop {
+                let mut descriptors = worker_sockets
+                    .iter()
+                    .map(|socket| PollFd::new(socket.as_fd(), PollFlags::POLLIN))
+                    .collect::<Vec<_>>();
+                let shutdown_index = descriptors.len();
+                descriptors.push(PollFd::new(shutdown_reader.as_fd(), PollFlags::POLLIN));
+                'worker: loop {
                     match poll(&mut descriptors, PollTimeout::NONE) {
                         Ok(_) => {}
                         Err(nix::errno::Errno::EINTR) => continue,
-                        Err(_) => break,
+                        Err(_) => break 'worker,
                     }
-                    let shutdown_ready = descriptors[1].revents().unwrap_or_else(PollFlags::empty);
+                    let shutdown_ready = descriptors[shutdown_index]
+                        .revents()
+                        .unwrap_or_else(PollFlags::empty);
                     if shutdown_ready
                         .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
                     {
                         break;
                     }
-                    let socket_ready = descriptors[0].revents().unwrap_or_else(PollFlags::empty);
-                    if !socket_ready.contains(PollFlags::POLLIN) {
-                        continue;
-                    }
-                    let (length, source) = match worker_socket.recv_from(&mut query) {
-                        Ok(result) => result,
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
-                    };
-                    if length > MAX_PACKET {
-                        continue;
-                    }
-                    let records = worker_records
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Ok(Some(reply)) =
-                        response_for_source(&query[..length], &records, source.ip())
-                    {
-                        let _ = worker_socket.send_to(&reply, source);
+                    for (index, worker_socket) in worker_sockets.iter().enumerate() {
+                        let socket_ready = descriptors[index]
+                            .revents()
+                            .unwrap_or_else(PollFlags::empty);
+                        if !socket_ready.contains(PollFlags::POLLIN) {
+                            continue;
+                        }
+                        let (length, source) = match worker_socket.recv_from(&mut query) {
+                            Ok(result) => result,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(_) => break 'worker,
+                        };
+                        if length > MAX_PACKET {
+                            continue;
+                        }
+                        let records = worker_records
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Ok(Some(reply)) =
+                            response_for_source(&query[..length], &records, source.ip())
+                        {
+                            let _ = worker_socket.send_to(&reply, source);
+                        }
                     }
                 }
             })?;
         Ok(Self {
             address,
+            #[cfg(target_os = "linux")]
+            system_port,
             records,
             shutdown,
             worker: Some(worker),
@@ -442,6 +511,12 @@ impl Resolver {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = records;
     }
+}
+
+/// Root Linux nodes try port 53 for `NetworkManager`; other nodes stay high-port-only.
+#[cfg(target_os = "linux")]
+fn system_port_for_node() -> bool {
+    nix::unistd::Uid::effective().is_root()
 }
 
 impl Drop for Resolver {

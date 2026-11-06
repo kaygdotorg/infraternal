@@ -236,7 +236,7 @@ fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
 /// A failed `GotaTun` replay keeps the accepted coordinator configuration.
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
-/// Keeps the accepted coordinator configuration when replay through GotaTun fails.
+/// Keeps the accepted coordinator configuration when replay through `GotaTun` fails.
 fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
     let state = std::env::temp_dir().join(format!("gotatun-replay-{}", std::process::id()));
     fs::create_dir(&state).unwrap();
@@ -253,7 +253,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
             #[cfg(feature = "mesh-dns")]
             name: None,
             #[cfg(feature = "mesh-dns")]
-            dns_suffix: infraternal_plugin_mesh::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            dns_suffix: "internal".to_owned(),
             from_version: None,
             version: 1,
             index: 0,

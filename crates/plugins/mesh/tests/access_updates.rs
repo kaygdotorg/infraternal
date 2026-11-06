@@ -254,6 +254,7 @@ fn uniform_changes_fit_one_frame_after_churn_with_distinct_kept_services() {
     );
 }
 
+/// Accepts the DNS capability probe only in builds that include mesh DNS support.
 #[test]
 fn compact_identity_support_requires_an_explicit_strict_probe() {
     let parse = infraternal_plugin_mesh::node_actions::parse_action;

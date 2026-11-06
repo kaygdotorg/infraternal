@@ -68,8 +68,20 @@ pub mod gotatun_node;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 mod gotatun_tun;
 
-#[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+#[cfg(all(
+    feature = "agent",
+    feature = "mesh-dns",
+    any(target_os = "linux", target_os = "macos")
+))]
 pub mod dns;
+
+#[cfg(all(
+    feature = "agent",
+    feature = "mesh-dns",
+    any(target_os = "linux", target_os = "macos")
+))]
+/// Routes mesh DNS suffixes through the host's per-link resolver configuration.
+mod dns_integration;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_actions;

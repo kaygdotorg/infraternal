@@ -25,6 +25,7 @@ fn coordinator() -> Coordinator {
 
 #[test]
 #[cfg(feature = "mesh-dns")]
+/// An explicitly configured mesh suffix takes precedence over the server origin.
 fn explicit_mesh_suffix_overrides_the_public_origin_default() {
     let node = |id| Node {
         id: NodeId(id),
@@ -41,6 +42,7 @@ fn explicit_mesh_suffix_overrides_the_public_origin_default() {
         DefaultPolicy::Deny,
         &BTreeMap::new(),
         "ssh.kayg.org",
+        &TrafficPolicy::None,
     )
     .unwrap();
 
@@ -571,6 +573,7 @@ fn name_renames_are_carried_by_the_existing_versioned_configuration_chunks() {
 
 #[test]
 #[cfg(feature = "mesh-dns")]
+/// An explicit `internal` choice remains authoritative over the origin-derived zone.
 fn review_j68b_explicit_internal_suffix_overrides_origin() {
     let mut coord = coordinator();
     coord.set_suffix("temporary.example".to_owned()).unwrap();
@@ -581,6 +584,7 @@ fn review_j68b_explicit_internal_suffix_overrides_origin() {
         DefaultPolicy::Deny,
         &BTreeMap::new(),
         "ssh.kayg.org",
+        &TrafficPolicy::None,
     )
     .unwrap();
     eprintln!(

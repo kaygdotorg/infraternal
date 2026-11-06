@@ -1784,7 +1784,8 @@ impl Store {
             })
             .await
     }
-    /// Keep one writer snapshot, allocation rebuild and public persistence boundary together.
+    /// Loads coordinator and node records in one write transaction.
+    /// The shared snapshot keeps allocation repair and public configuration reads consistent.
     async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await

@@ -622,6 +622,7 @@ struct Pending {
     config: Config,
 }
 
+/// Accumulates a versioned coordinator snapshot and returns it only after a valid final chunk.
 fn stage_chunk(
     pending: &mut Option<Pending>,
     current: Option<&Config>,
@@ -789,9 +790,11 @@ struct RuntimeInfo {
     routes: BTreeSet<IpAddr>,
 }
 
+/// Commands sent to the Mac `GotaTun` worker thread.
 enum WorkerCommand {
     Apply {
-        config: Config,
+        /// Keeps the larger snapshot out of the enum's inline command payload.
+        config: Box<Config>,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
     Counters(sync::SyncSender<CounterMap>),
@@ -812,6 +815,7 @@ struct PendingWorker {
 }
 
 impl PendingWorker {
+    /// Starts a worker behind a gate until its utun, peers, routes and DNS are ready.
     fn begin(
         open: OpenUtun,
         private_key: gotatun::x25519::StaticSecret,
@@ -870,6 +874,26 @@ impl PendingWorker {
                 }
                 let device = runtime.block_on(async {
                     configure_interface(&info.interface, config.as_ref())?;
+                    #[cfg(feature = "mesh-dns")]
+                    let mut dns_integration = crate::dns_integration::DnsIntegration::default();
+                    #[cfg(feature = "mesh-dns")]
+                    let mut dns_resolver = None;
+                    #[cfg(feature = "mesh-dns")]
+                    if let Some(config) = config.as_ref() {
+                        let records = crate::dns::Records::from_config(config)?;
+                        let resolver = crate::dns::Resolver::bind(config)?;
+                        if let Err(error) = dns_integration.configure(
+                            &info.interface,
+                            &records,
+                            nix::unistd::Uid::effective().as_raw(),
+                            false,
+                        ) {
+                            tracing::warn!(
+                                "mesh DNS host resolver integration could not be updated: {error}"
+                            );
+                        }
+                        dns_resolver = Some(resolver);
+                    }
                     let peers = config
                         .as_ref()
                         .map(peers_for_config)
@@ -893,7 +917,14 @@ impl PendingWorker {
                         }
                         installed.insert(*address);
                     }
-                    Ok(device)
+                    #[cfg(feature = "mesh-dns")]
+                    {
+                        Ok((device, dns_resolver, dns_integration))
+                    }
+                    #[cfg(not(feature = "mesh-dns"))]
+                    {
+                        Ok(device)
+                    }
                 });
                 let device = match device {
                     Ok(device) => device,
@@ -902,6 +933,8 @@ impl PendingWorker {
                         return;
                     }
                 };
+                #[cfg(feature = "mesh-dns")]
+                let (device, dns_resolver, dns_integration) = device;
                 if ready_tx.send(Ok(())).is_err() {
                     let _ = runtime.block_on(device.stop());
                     return;
@@ -912,6 +945,10 @@ impl PendingWorker {
                     config,
                     routes: info.routes,
                     port: info.port,
+                    #[cfg(feature = "mesh-dns")]
+                    dns_resolver,
+                    #[cfg(feature = "mesh-dns")]
+                    dns_integration,
                 };
                 runtime.block_on(run_worker(receiver, state));
             })?;
@@ -971,10 +1008,14 @@ impl Drop for PendingWorker {
 }
 
 impl Worker {
+    /// Sends a new mesh configuration to the worker and waits for its result.
     fn apply(&self, config: Config) -> io::Result<RuntimeInfo> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
-            .send(WorkerCommand::Apply { config, reply })
+            .send(WorkerCommand::Apply {
+                config: Box::new(config),
+                reply,
+            })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
@@ -1011,19 +1052,25 @@ impl Drop for Worker {
     }
 }
 
+/// Owns one live Mac mesh interface, accepted snapshot and resolver integration.
 struct RuntimeState {
     utun: Option<MacUtun>,
     device: Option<GotaDevice>,
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
     port: u16,
+    #[cfg(feature = "mesh-dns")]
+    dns_resolver: Option<crate::dns::Resolver>,
+    #[cfg(feature = "mesh-dns")]
+    dns_integration: crate::dns_integration::DnsIntegration,
 }
 
+/// Applies tunnel commands on the Mac worker and stops cleanly when it closes.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     while let Some(command) = commands.recv().await {
         match command {
             WorkerCommand::Apply { config, reply } => {
-                let result = state.apply(config).await;
+                let result = state.apply(*config).await;
                 let _ = reply.send(result);
             }
             WorkerCommand::Counters(reply) => {
@@ -1044,7 +1091,10 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
 }
 
 impl RuntimeState {
+    /// Applies one accepted snapshot and publishes its routes, peers and DNS names together.
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+        #[cfg(feature = "mesh-dns")]
+        let dns_records = crate::dns::Records::from_config(&config)?;
         let interface = self
             .utun
             .as_ref()
@@ -1057,6 +1107,18 @@ impl RuntimeState {
         let old_config = self.config.clone();
         let old_routes = self.routes.clone();
         configure_interface(&interface, Some(&config))?;
+        #[cfg(feature = "mesh-dns")]
+        let pending_dns_resolver = if self.dns_resolver.is_none() {
+            match crate::dns::Resolver::bind(&config) {
+                Ok(resolver) => Some(resolver),
+                Err(error) => {
+                    let _ = configure_interface(&interface, old_config.as_ref());
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         if let Err(error) = replace_peers(device, peers).await {
             if let Some(old) = old_config.as_ref() {
@@ -1088,6 +1150,26 @@ impl RuntimeState {
             removed.insert(*address);
         }
         self.routes.clone_from(&new_routes);
+        #[cfg(feature = "mesh-dns")]
+        {
+            let resolver = self
+                .dns_resolver
+                .as_ref()
+                .or(pending_dns_resolver.as_ref())
+                .ok_or(io::ErrorKind::NotConnected)?;
+            if let Err(error) = self.dns_integration.configure(
+                &interface,
+                &dns_records,
+                nix::unistd::Uid::effective().as_raw(),
+                false,
+            ) {
+                tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
+            }
+            resolver.publish(dns_records);
+            if self.dns_resolver.is_none() {
+                self.dns_resolver = pending_dns_resolver;
+            }
+        }
         self.config = Some(config);
         Ok(RuntimeInfo {
             interface,
@@ -1127,6 +1209,7 @@ impl RuntimeState {
         Ok(counters)
     }
 
+    /// Removes managed DNS files, peer routes and the owned device before stopping the utun.
     async fn stop(&mut self) -> io::Result<()> {
         let interface = self
             .utun
@@ -1134,6 +1217,8 @@ impl RuntimeState {
             .map(MacUtun::name)
             .ok_or(io::ErrorKind::NotConnected)?
             .to_owned();
+        #[cfg(feature = "mesh-dns")]
+        self.dns_integration.remove()?;
         remove_routes(&interface, &self.routes)?;
         if let Some(device) = self.device.take() {
             device.stop().await;
@@ -1141,6 +1226,8 @@ impl RuntimeState {
         self.utun.take();
         self.routes.clear();
         self.config = None;
+        #[cfg(feature = "mesh-dns")]
+        self.dns_resolver = None;
         Ok(())
     }
 }
@@ -1215,6 +1302,8 @@ impl Node {
     /// # Errors
     /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
     pub fn restore(state_directory: &Path, enrolment: Option<&Enrolment>) -> io::Result<Self> {
+        #[cfg(feature = "mesh-dns")]
+        crate::dns_integration::DnsIntegration::default().remove()?;
         let path = state_directory.join(PUBLIC_STATE);
         let (state, rotate) = match read_public_state(&path)? {
             Some(saved) => reconcile(saved, enrolment),
@@ -1353,7 +1442,7 @@ impl Node {
             port: self.port,
             compact_access: true,
             #[cfg(feature = "mesh-dns")]
-            dns_names: false,
+            dns_names: true,
             // Key rotation is not implemented on macOS yet, so the coordinator rotates no node (#285).
             key_rotation: false,
         };
@@ -1520,6 +1609,7 @@ fn validate_config(config: &Config, identity: crate::policy::model::PublicKey) -
     Ok(())
 }
 
+/// Checks Mac peer routing, configuration validation, and atomic snapshot staging.
 #[cfg(test)]
 mod tests {
     //! Checks that the Mac adapter maps authenticated peers to `WireGuard` host routes.
