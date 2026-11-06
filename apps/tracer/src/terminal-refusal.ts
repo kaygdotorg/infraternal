@@ -35,6 +35,8 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
       case "no_login": return { message: ROOTLESS, sessionList: false, action: "add-host" };
       // A root host without systemd cannot prove a revoked login is gone, so it opens none (D354). Name the two ways
       // that work; the action is a host that can.
+      // The host has systemd but was too busy to answer when the login started: asking again usually works.
+      case "probe_timeout": return { message: `${host} was too busy to start a shell just now. Try again in a moment.`, sessionList: false, action: "retry" };
       case "no_systemd": return {
         message: `${host} has no systemd, so infraternal can't open logins there as root. Reinstall infraternal there without root, or add a host with systemd.`,
         sessionList: false, action: "add-host",

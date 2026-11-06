@@ -36,6 +36,9 @@ pub enum OpenRefusal {
     /// A root host without systemd opens no person logins: it could not prove a revoked login's
     /// processes gone (D354). A rootless agent on that host, or a host with systemd, still can.
     NoSystemd,
+    /// A root host's service manager did not answer in time, so no login was started. The host is
+    /// busy; asking again may work.
+    ProbeTimeout,
     /// The terminal could not be opened for a reason the host does not detail.
     Unavailable,
     /// The host could not check or reserve the resources a terminal needs.
@@ -69,6 +72,20 @@ impl OpenRefusal {
 mod tests {
     //! Exercise additive compatibility and strict numeric refusal decoding.
     use super::*;
+
+    /// A silent manager probe is its own reason on the wire, so the browser can say "busy, try again".
+    #[test]
+    fn probe_timeout_refusal_has_its_own_reason() {
+        let json = OpenRefusal::ProbeTimeout.json().unwrap();
+        assert_eq!(
+            std::str::from_utf8(&json).unwrap(),
+            r#"{"error":"terminal unavailable","reason":"probe_timeout"}"#
+        );
+        assert_eq!(
+            serde_json::from_slice::<OpenRefusal>(&json).unwrap(),
+            OpenRefusal::ProbeTimeout
+        );
+    }
 
     /// D354's refusal is its own reason on the wire, so the browser can say why and what works instead.
     #[test]

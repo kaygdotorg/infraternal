@@ -66,6 +66,13 @@ test("a root host without systemd says why it opens no logins and what works ins
   });
 });
 
+test("a host too busy to start a shell says so and offers to try again", async () => {
+  const { terminalRefusal } = await import("../../terminal-refusal");
+  expect(terminalRefusal(await refusal({ error: "terminal unavailable", reason: "probe_timeout" }), "build-01")).toEqual({
+    message: "build-01 was too busy to start a shell just now. Try again in a moment.", sessionList: false, action: "retry",
+  });
+});
+
 test("a denied account is told so, with nothing to retry", async () => {
   const { terminalRefusal } = await import("../../terminal-refusal");
   for (const reason of ["forbidden", "denied"]) {
