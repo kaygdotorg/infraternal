@@ -26,7 +26,8 @@
 # including a build failure or a dropped ssh session. The build waits for a
 # shared build slot; only the slot's lock is held as `claude`, through the
 # commit's own scripts/root-slot-hold, which starts claude's build-slot script
-# with runuser and gives it no file of root's (stderr is /dev/null).
+# as a unit in claude's own slice (killed as a whole on release) and gives it
+# no file of root's (stderr is /dev/null).
 #
 # Usage, from `code` (which can ssh to root@compute01), with a full commit id:
 #   scripts/tun-real-root-proof <40-hex commit>
@@ -82,9 +83,13 @@ echo "root clone at $commit in $work"
 
 # 2. Build as root, root-owned cargo home and target, through a build slot.
 export CARGO_HOME=/root/.cache/tun-proof-cargo CARGO_TARGET_DIR=$work/target CARGO_BUILD_JOBS=4
-mkdir -p "$CARGO_HOME"
+# The build's scratch space stays in root's own dir: `nix develop` otherwise
+# leaves an empty /tmp/nix-develop-* and /tmp/nix-shell.* per run in the shared
+# /tmp (J281 counted 160 of each). Here the trap or the sweep removes them.
+export TMPDIR=$work/tmp
+mkdir -p "$CARGO_HOME" "$TMPDIR"
 cd "$work/src"
-/usr/bin/python3 "$work/src/scripts/root-slot-hold" nix develop -c cargo test --locked -p infraternal-plugin-mesh \
+/usr/bin/python3 "$work/src/scripts/root-slot-hold" --keep-fd 9 nix develop -c cargo test --locked -p infraternal-plugin-mesh \
     --features agent,server,relay,test-support --test gotatun_tun_owner --no-run --message-format=json \
     > "$work/build.json" 2> "$work/build.log" || { tail -20 "$work/build.log" | cat -v >&2; exit 1; }
 binary=$(python3 -c 'import json, sys

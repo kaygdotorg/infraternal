@@ -65,3 +65,18 @@ for New window remains designer work; this data path introduces no new surface.
 Palette rows stay synchronous. Canvas action dispatch is loaded on first
 selection from `palette-actions.on-demand.ts`, fenced by canvas disposal, so
 dispatch costs no sign-in transfer and remains within the unchanged D188 budgets.
+
+An undelivered host removal stays in this inventory with optional
+`state: "pending"` and `online: false`. A removal response acknowledges the
+committed denial as `state: "pending"` (“revoked, cleanup pending”); it does not
+claim the infraternal agent has persisted cleanup. Once that durable receipt
+commits, final retirement removes the host from inventory. When no individually
+unrevoked certificate has remaining validity, the next read instead exposes
+`state: "retired-unreachable"`. That terminal delivery status retains the
+unconfirmed denial, including after restart; it never grants access or invents a
+receipt. Other hosts omit `state`, preserving the existing inventory shape.
+
+Clients retain these status rows and show pending or retired-unreachable in the
+existing host list, without shell, removal or privilege actions. The CLI reports pending for an accepted removal whose cleanup has not completed. See
+`docs/operations/login-revocation-backpressure.md` for delivery bounds and the
+operator action when cleanup certificates expire.

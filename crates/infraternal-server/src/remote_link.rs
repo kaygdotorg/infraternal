@@ -738,6 +738,8 @@ impl RemoteLink {
             result = self.read_transport(target, scratch) => result,
         }
     }
+    /// Write under current transport authority. A cleanup-only reconnect may
+    /// send greeting/liveness and the fixed refusal action, never grant work.
     pub(crate) async fn write(
         &self,
         stream: u32,
@@ -749,6 +751,23 @@ impl RemoteLink {
         };
         if !authority.permits() {
             self.retire();
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        // A retired host's reconnect is a delivery capability for one cleanup,
+        // never a terminal/plugin/native-stream capability, even if misrouted.
+        if authority.cleanup_person().is_some()
+            && !(stream == 0
+                && matches!(
+                    frame,
+                    Frame::Hello { .. }
+                        | Frame::Ping { .. }
+                        | Frame::Pong { .. }
+                        | Frame::Call {
+                            action_id: "terminal.login.revoke",
+                            ..
+                        }
+                ))
+        {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let _permit = authority.write_permit().await?;

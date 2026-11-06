@@ -414,6 +414,7 @@ async fn abandon_rotation(
 ///
 /// The server is named after its own hostname; a remote machine after the name the owner typed when adding it,
 /// else its reported hostname. `server` is never a remote machine's automatic name.
+/// Coordinates kept for pending cleanup do not reserve a removed machine's name.
 async fn wanted_name(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     host: &str,
@@ -425,7 +426,7 @@ async fn wanted_name(
     let mut os = None;
     let mut records = Vec::new();
     for row in
-        sqlx::query("SELECT lower(hex(host_id)) AS host,address,os FROM remote_host_bootstrap")
+        sqlx::query("SELECT lower(hex(b.host_id)) AS host,b.address,b.os FROM remote_host_bootstrap b WHERE NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=b.host_id)")
             .fetch_all(&mut **tx)
             .await
             .map_err(|_| "Mesh storage unavailable.")?
@@ -599,6 +600,11 @@ pub struct Store {
 /// infraternal control-plane listeners (D215). Read again for each snapshot,
 /// because a fresh server starts its listener only after its CA is set up.
 pub type ControlPlane = std::sync::Arc<dyn Fn() -> TrafficPolicy + Send + Sync>;
+
+/// The attach refusal for a node whose rotation support is unknown while its rotation is open (J262). It is the
+/// only refusal that clears up by itself once the node's probe answers again, so the coordinator retries it on a
+/// timer (J273 P3-2, J284 P3-a).
+pub(crate) const ROTATION_IN_PROGRESS: &str = "Mesh key rotation is in progress.";
 
 impl Store {
     #[must_use]
@@ -1475,7 +1481,7 @@ impl Store {
                 .map_err(|_| "Mesh storage unavailable.")?
                 .is_some();
             if rotating && key_rotation.is_none() {
-                return Err("Mesh key rotation is in progress.");
+                return Err(ROTATION_IN_PROGRESS);
             }
             let public_key = Self::attached_public_key(&row, key, key_rotation_supported)?;
             let abandoned = rotating && key_rotation == Some(false);

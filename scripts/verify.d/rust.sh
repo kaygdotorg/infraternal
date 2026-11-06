@@ -2,12 +2,20 @@
 
 RUST_GATE_ROWS=()
 RUST_GATE_FAILED=0
+# Set by rust_run_gate_skippable for exactly one rust_run_gate call. A plain
+# shell variable, never exported: a `VAR=yes func` prefix would export it into
+# the row's command, and the gate's own self-tests (run inside the privileged
+# row) would then see every 77 as SKIP (J276, #378 81610).
+RUST_GATE_SKIP_NEXT=no
+export -n RUST_GATE_SKIP_NEXT
 
 rust_run_gate() {
     local name="$1"
     shift
     local result
     local started=$SECONDS
+    local skippable=$RUST_GATE_SKIP_NEXT
+    RUST_GATE_SKIP_NEXT=no
 
     printf '\n==> %s\n' "$name"
     if "$@"; then
@@ -15,7 +23,7 @@ rust_run_gate() {
     else
         local exit_code=$?
         # Exit 77 is SKIP only for rows started with rust_run_gate_skippable.
-        if [[ ${RUST_GATE_SKIPPABLE:-no} == yes ]] && ((exit_code == 77)); then
+        if [[ $skippable == yes ]] && ((exit_code == 77)); then
             result="SKIP"
         else
             result="FAIL (${exit_code})"
@@ -32,7 +40,8 @@ rust_run_gate() {
 # tool that happens to exit 77 can never read as skipped (J270, #344 81345).
 # It goes through rust_run_gate, so anything that stubs that stubs this too.
 rust_run_gate_skippable() {
-    RUST_GATE_SKIPPABLE=yes rust_run_gate "$@"
+    RUST_GATE_SKIP_NEXT=yes
+    rust_run_gate "$@"
 }
 
 # Doc-comment coverage may never go down (D345): scripts/doc-coverage compares every unit with

@@ -1021,6 +1021,7 @@ pub async fn launch_with_login(
     .await
 }
 
+/// Launch an attributed shell, transferring its person fence to the durable reservation.
 pub(crate) async fn launch_rootless_person(
     exe: &Path,
     state: &Path,
@@ -1029,6 +1030,7 @@ pub(crate) async fn launch_rootless_person(
     cols: u16,
     rows: u16,
     person: uuid::Uuid,
+    person_guard: crate::logins::PersonGuard,
 ) -> io::Result<Session> {
     launch_configured(
         exe,
@@ -1043,7 +1045,7 @@ pub(crate) async fn launch_rootless_person(
         None,
         None,
         false,
-        Some(person),
+        Some((person, person_guard)),
         false,
         &[],
     )
@@ -1053,6 +1055,7 @@ pub(crate) async fn launch_rootless_person(
 /// Launch one shim and return its first authenticated session. The ordered authentication, launch and
 /// handshake setup stays together; on Linux a failure or cancellation after the spawn hands the launch to
 /// its own cleanup (`Launch`).
+/// A rootless reservation retains its person fence through the readiness attempt.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn launch_configured(
     exe: &Path,
@@ -1067,7 +1070,7 @@ async fn launch_configured(
     login_worker_parent: Option<i32>,
     login_worker_proc: Option<&std::fs::File>,
     readiness: bool,
-    person: Option<uuid::Uuid>,
+    person: Option<(uuid::Uuid, crate::logins::PersonGuard)>,
     retain_output: bool,
     program: &[String],
 ) -> io::Result<Session> {
@@ -1089,9 +1092,12 @@ async fn launch_configured(
     let name = id.simple().to_string();
     let path = state.join("sessions").join(format!("{name}.sock"));
     #[cfg(target_os = "linux")]
-    let mut reservation = person
-        .map(|person| crate::rootless_sessions::reserve(state, person, id))
-        .transpose()?;
+    let mut reservation = match person {
+        Some((person, guard)) => {
+            Some(crate::rootless_sessions::reserve(state, person, id, guard).await?)
+        }
+        None => None,
+    };
     // Durable rootless person records belong to inherited host logins, which
     // are Linux-only (D247); a macOS person shell comes from the root agent.
     #[cfg(target_os = "macos")]

@@ -409,6 +409,98 @@ fn settling_an_abandoned_commit_moves_the_marker_the_stop_left_behind() {
     restored.down().unwrap();
 }
 
+/// J273 P3-3: a settle that moves this node's key to the candidate the link already holds (a commit that stopped
+/// between sending the key and moving the marker, then an abandoned operation) changes the identity the
+/// coordinator knows, so the prepare that settles it raises the change notice.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn a_settle_that_changes_the_key_raises_the_change_notice() {
+    use infraternal_plugin_api::AgentPlugin;
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000041";
+    let second = "00000000-0000-4000-8000-000000000042";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let previous = node.up().unwrap();
+    let candidate = node.prepare_rotation(first, 1).unwrap();
+    let (index, _, _) = kernel_link_identity();
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let mut rotation = store.rotation_secret().unwrap().unwrap();
+    rotation.commit_requested = true;
+    store.save_rotation_secret(&rotation).unwrap();
+    let (candidate_key, _) = Key::from_private(&rotation.candidate).unwrap();
+    Device::configure(index, previous.public_key, &candidate_key, previous.port).unwrap();
+    drop(rotation);
+    drop(store);
+
+    let mut plugin = crate::node_actions::MeshNodePlugin::from_node(node);
+    let _ = plugin.take_events();
+    let input = format!(r#"{{"operation_id":"{second}","sequence":3}}"#);
+    plugin
+        .call("mesh.rotation.prepare", input.as_bytes())
+        .unwrap();
+    assert_eq!(kernel_link_identity(), (index, Some(candidate), candidate));
+    assert_eq!(
+        plugin.take_events(),
+        vec![("mesh.changed", b"{}".to_vec())],
+        "the coordinator learns the key moved"
+    );
+    // A prepare that changes no key raises nothing.
+    plugin
+        .call("mesh.rotation.prepare", input.as_bytes())
+        .unwrap();
+    assert_eq!(
+        plugin.take_events(),
+        Vec::<(&str, Vec<u8>)>::new(),
+        "a prepare that changes no key raises nothing"
+    );
+    plugin.call("mesh.down", b"{}").unwrap();
+}
+
+/// J284 P3-b: when the settle's journal save fails after the marker moved, the node keeps presenting the
+/// predecessor (the journal still says the operation is open) while its proof accepts both of its keys, so a
+/// retry proves its own link and completes the settle.
+#[cfg(feature = "test-support")]
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn a_failed_settle_save_leaves_the_presented_key_unchanged_and_is_retryable() {
+    use std::os::unix::fs::PermissionsExt;
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000051";
+    let second = "00000000-0000-4000-8000-000000000052";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let previous = node.up().unwrap();
+    let candidate = node.prepare_rotation(first, 1).unwrap();
+    let (index, _, _) = kernel_link_identity();
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let mut rotation = store.rotation_secret().unwrap().unwrap();
+    rotation.commit_requested = true;
+    store.save_rotation_secret(&rotation).unwrap();
+    let (candidate_key, _) = Key::from_private(&rotation.candidate).unwrap();
+    Device::configure(index, previous.public_key, &candidate_key, previous.port).unwrap();
+    drop(rotation);
+    drop(store);
+
+    // An unsafe journal mode makes the save refuse, as any durable-write failure would.
+    let journal = state.0.join("mesh-key-rotation.bin");
+    let unsafe_journal = journal.clone();
+    *BEFORE_SETTLE_SAVE.lock().unwrap() = Some(Box::new(move || {
+        std::fs::set_permissions(&unsafe_journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }));
+    assert!(node.prepare_rotation(second, 3).is_err(), "the save fails");
+    assert_eq!(
+        node.interface_key(),
+        Some(previous.public_key),
+        "the presented key changes only after the journal records it"
+    );
+    assert_eq!(kernel_link_identity(), (index, Some(candidate), candidate));
+
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let next = node.prepare_rotation(second, 3).unwrap();
+    assert_ne!(next, candidate);
+    assert_eq!(node.interface_key(), Some(candidate));
+    node.down().unwrap();
+}
+
 /// `GotaTun` cannot rotate yet: it says so, and every rotation step refuses without touching the
 /// device or the state (D166, D352; #285).
 #[test]

@@ -5,9 +5,17 @@ What it is for: build slots belong to the `claude` build account (its
 `~/infraternal-ops/build-slot` script queues every heavy job on a VM). A root
 proof, such as `scripts/tun-real-root-proof`, must wait its turn like
 everyone else, but must not let anything `claude` controls into root's
-process. This helper starts claude's build-slot **as claude** (`runuser`),
-waits for one readiness line from it over a pipe, runs the given command as
-root, then releases the slot.
+process. This helper starts claude's build-slot **as claude**, as a
+transient systemd unit in claude's own slice (`user-1500.slice`), waits for
+one readiness line from it over a pipe, runs the given command as root, then
+releases the slot.
+
+Why a unit in claude's slice: with `runuser`, anything claude's script forked
+lived in root's ssh session, outside claude's MemoryMax and TasksMax, and
+outlived the proof (J281, 81509 P3-2). As a unit with KillMode=control-group,
+every process claude's side starts is in claude's slice, under claude's
+limits, and is killed when the waiter exits: when root releases the slot, or
+when root's side dies and the waiter's stdin pipe closes.
 
 What claude's side can and can't do: it controls only when the slot is
 granted (timing). It gets stdin and stdout pipes to this helper and nothing
@@ -19,12 +27,15 @@ the command root runs comes from root's own arguments.
 It replaces the host-only `/root/.cache/root-build-slot`, which passed root's
 stderr to claude's process. Run it from the reviewed clone root is building.
 
-Usage (as root): root-slot-hold <command> [args...]
+Usage (as root): root-slot-hold [--keep-fd N]... <command> [args...]
+`--keep-fd N` passes this process's open descriptor N on to the command
+(the TUN proof passes its lock, so every root child of a run holds it).
 """
 import subprocess
 import sys
 
 BUILD_SLOT = '/home/claude/infraternal-ops/build-slot'
+CLAUDE_SLICE = 'user-1500.slice'
 READY = b'ROOT_SLOT_READY\n'
 # The waiter runs as claude inside its slot: print one line, then block until
 # root writes a byte (or closes the pipe) to release the slot.
@@ -32,17 +43,33 @@ WAITER = ['/usr/bin/python3', '-c',
           'import sys; sys.stdout.buffer.write(%r); sys.stdout.flush(); sys.stdin.buffer.read(1)' % READY]
 
 
-def hold(command):
-    """Hold a slot as claude, run `command` as this process, release; return its exit code."""
+def waiter_command():
+    """The argv that starts claude's slot waiter as a unit in claude's slice.
+
+    --pipe hands the unit this process's stdin, stdout and stderr (the pipes
+    and /dev/null set by Popen) and nothing else.
+    """
+    return ['systemd-run', '--uid=claude', '--gid=claude', f'--slice={CLAUDE_SLICE}', '--pipe', '--wait',
+            '--collect', '--quiet', '-p', 'KillMode=control-group', '--', BUILD_SLOT, *WAITER]
+
+
+def hold(command, keep_fds=()):
+    """Hold a slot as claude, run `command` as root, release; return its exit code.
+
+    `keep_fds` are passed on to `command` only, never to claude's waiter.
+    """
     print('root-slot-hold: waiting for a build slot', file=sys.stderr, flush=True)
-    waiter = subprocess.Popen(['runuser', '-u', 'claude', '--', BUILD_SLOT, *WAITER],
+    waiter = subprocess.Popen(waiter_command(),
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               close_fds=True)
     try:
-        if waiter.stdout.readline() != READY:
+        # Bounded: claude's side controls this stream, and an unbounded
+        # readline() let it grow root's memory (J281 pushed it to 398 MiB with
+        # a 400 MB line, charged to root's session, not claude's slice).
+        if waiter.stdout.readline(len(READY) + 1) != READY:
             print('root-slot-hold: build slot admission failed', file=sys.stderr)
             return 1
-        return subprocess.run(['nice', '-n', '10', *command], check=False).returncode
+        return subprocess.run(['nice', '-n', '10', *command], check=False, pass_fds=tuple(keep_fds)).returncode
     finally:
         try:
             waiter.stdin.write(b'x')
@@ -54,9 +81,15 @@ def hold(command):
 
 def main():
     """Check the arguments and hold the slot around them."""
-    if len(sys.argv) < 2:
-        raise SystemExit('usage: root-slot-hold <command> [args...]')
-    return hold(sys.argv[1:])
+    args, keep = sys.argv[1:], []
+    while len(args) >= 2 and args[0] == '--keep-fd':
+        if not args[1].isdigit():
+            raise SystemExit('root-slot-hold: --keep-fd takes a descriptor number')
+        keep.append(int(args[1]))
+        args = args[2:]
+    if not args:
+        raise SystemExit('usage: root-slot-hold [--keep-fd N]... <command> [args...]')
+    return hold(args, keep)
 
 
 if __name__ == '__main__':
