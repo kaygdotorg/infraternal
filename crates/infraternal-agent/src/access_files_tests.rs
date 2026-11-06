@@ -446,9 +446,10 @@ fn a_file_flood_stays_bounded_and_keeps_the_crontab() {
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // The harness prints the test's name on the same line as its output.
     let line = stdout
         .lines()
-        .find(|line| line.starts_with("FLOOD "))
+        .find_map(|line| line.find("FLOOD ").map(|at| &line[at..]))
         .unwrap_or_else(|| panic!("{stdout}"));
     let peak_kb: u64 = line
         .split_whitespace()
