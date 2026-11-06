@@ -201,9 +201,10 @@ pub async fn run(
                         .await
                 };
                 // Unknown support is refused while a rotation is open (J262). Nothing else may wake this worker
-                // soon, so retry on a timer (J273 P3-2).
-                attach_retry =
-                    (attached.is_err() && key_rotation.is_none()).then_some(UNKNOWN_SUPPORT_RETRY);
+                // soon, so retry that refusal, and only that one, on a timer (J273 P3-2). Any other refusal, such
+                // as a removed membership, is final until an owner acts (J284 P3-a).
+                attach_retry = matches!(attached, Err(crate::store::ROTATION_IN_PROGRESS))
+                    .then_some(UNKNOWN_SUPPORT_RETRY);
                 if let Ok((node, updated)) = attached {
                     binding = Some(node);
                     if updated {
@@ -1763,6 +1764,46 @@ mod tests {
         assert_eq!(peer.key, PublicKey([2; 32]));
         assert_eq!(peer.previous_key, Some(PublicKey([3; 32])));
         assert!(!peer.previous_active);
+    }
+
+    /// J284 P3-a: only the rotation-in-progress refusal is retried on the timer. A removed membership is final
+    /// until an owner enrolls the host again, so the worker probes once and then waits for an event.
+    #[tokio::test]
+    async fn a_removed_membership_is_not_retried_on_the_timer() {
+        let service = service().await;
+        let pool = service.pool_for_tests();
+        let host = "00000000-0000-4000-8000-000000000001";
+        sqlx::query("INSERT INTO mesh_dataplane_removed(host) VALUES(?)")
+            .bind(host)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Support reads as unknown: only the legacy request answers, and it hides rotation.
+        let channel = Channel::candidate();
+        channel.legacy_hides_rotation.store(true, Ordering::Release);
+        let worker = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            channel.queried.notified(),
+        )
+        .await
+        .expect("the worker probes the node once");
+        assert!(
+            tokio::time::timeout(
+                UNKNOWN_SUPPORT_RETRY + std::time::Duration::from_secs(2),
+                channel.queried.notified(),
+            )
+            .await
+            .is_err(),
+            "a removed membership is not probed again on the timer"
+        );
+        worker.abort();
+        let _ = worker.await;
     }
 
     /// J273 P3-2: a node whose support is unknown is refused while its rotation is open. The worker retries on a
