@@ -156,6 +156,10 @@
   pointer-events: none;
 }
 .ui-toast-stack[hidden] { display: none !important; }
+/* On a desktop the canvas's windows end about 1.125rem above the viewport's bottom, and a toast 1rem from the bottom sat right on
+   that frame line, hiding the window's bottom edge. Lifting the stack to 2.5rem keeps the whole toast inside the window's
+   area with clear space under it, so a window's bottom edge is never covered (#377). Touch layouts size their own tray above. */
+@media (pointer: fine) { .ui-toast-stack { bottom: calc(max(2.5rem, env(safe-area-inset-bottom)) + var(--ui-toast-stack-offset, 0px)); } }
 /* Older toasts sit behind the newest, smaller and a little higher; while the stack is held they fan out to their own heights. */
 .ui-toast {
   --y: calc(var(--i, 0) * -0.5rem);
@@ -205,7 +209,7 @@
 .ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; padding-bottom: 0.3125rem; }
 .ui-toast[data-stacked="true"] .ui-toast-close { grid-column: 3; grid-row: 1; }
 .ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 2 / -1; grid-row: 2; justify-self: end; }
-.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
+.ui-toast-message { text-wrap: pretty; min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
@@ -249,6 +253,10 @@
   .ui-toast-action { min-height: 2.75rem; padding: 0 0.625rem; }
   .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 }
+/* The card's right padding is smaller than its left because a close button or an action sits there with its own inner space. A
+   notice with none of them ends in text, which then ran to within 8px of the edge against a 12px left inset. Without a trailing
+   control the right inset equals the left, and the message wraps rather than touching it (phones, 375 and 393 px). */
+.ui-toast:not(:has(.ui-toast-close:not([hidden]), .ui-toast-actions:not([hidden]), .ui-toast-icons:not([hidden]))) { padding-right: 0.75rem; }
 
 @media (pointer: coarse) {
   /* The stack is the anchored element (a card sits at the stack's bottom edge): offsetting the card as well counted the tray twice. */

@@ -153,11 +153,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       }
     }
   });
-  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive, delayed, capacity) => {
+  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive, _delayed, capacity) => {
     if (disposed) return;
     if (capacity) core.toast.show({ message: "This tab has too many unsaved layout changes. Connect before making more.", tone: "error", duration: 0 });
     else if (definitive) core.toast.show({ message: "That layout change was not saved. The saved layout is back.", tone: "error", duration: 5000 });
-    else if (delayed) core.toast.show({ message: "Your layout is waiting for the server. Keep this tab open.", icon: ICON_INFO, duration: 5000 });
+    // A delayed save (`_delayed`) gets no toast of its own: the persistent "Not saved" status below is shown for exactly as long as
+    // the layout is waiting and already says to keep the tab open. A second transient toast said the same and stacked on it (#377).
   }, options.onSessionRevoked);
   const pendingNotice = mountToast(core.stage, { aboveNotifications: true });
   let pendingShown = false;
