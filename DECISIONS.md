@@ -4176,3 +4176,12 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      now applies only when the shell was killed by a signal or crashed, or
      the host or infraternal agent went away. The rejected options were
      closing only on status 0 and a Settings choice.
+
+358. **"Not saved" waits a second before it shows (owner, 2026-11-06, #395;
+     amends D312):** the "Not saved — keep this tab open" notice used to
+     appear the moment any canvas edit was waiting, so it flashed on almost
+     every move or resize. The owner chose "Wait ~1 s before showing": it
+     appears only if an edit is still unsaved after about one second, so it
+     reports real trouble (a slow or lost connection), never a normal edit.
+     It still stays until every waiting edit is saved. The rejected option
+     was showing it at once (D312 as it was).
