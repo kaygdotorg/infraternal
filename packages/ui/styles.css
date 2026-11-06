@@ -209,7 +209,7 @@
 .ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; padding-bottom: 0.3125rem; }
 .ui-toast[data-stacked="true"] .ui-toast-close { grid-column: 3; grid-row: 1; }
 .ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 2 / -1; grid-row: 2; justify-self: end; }
-.ui-toast-message { min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
+.ui-toast-message { text-wrap: pretty; min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
 .ui-toast-marker { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
