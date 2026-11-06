@@ -89,6 +89,11 @@ impl Coordinator {
     pub fn names(&self) -> &NameTable {
         &self.names
     }
+    /// The server's own node.
+    #[must_use]
+    pub const fn server(&self) -> NodeId {
+        self.server
+    }
     #[must_use]
     pub fn view(&self, node: NodeId) -> Option<&PeerView> {
         self.views.get(&node)
@@ -162,6 +167,15 @@ impl Coordinator {
         if to == self.server {
             return TrafficPolicy::All;
         }
+        self.granted(from, to)
+    }
+    /// What explicit arrows grant `from` toward `to`: the union of their
+    /// ports, `None` when no arrow matches. Unlike the installed policy this
+    /// ignores the server's control-plane exemption (D164), so services on the
+    /// server's own host can follow Access like on any other node (mesh SSH,
+    /// owner decision on #221).
+    #[must_use]
+    pub fn granted(&self, from: NodeId, to: NodeId) -> TrafficPolicy {
         let mut policy = TrafficPolicy::None;
         if let Some(grants) = self.grants.get(&(from, to)) {
             for id in grants {
@@ -597,6 +611,94 @@ impl Coordinator {
             }
             member.retire_after = None;
         }
+        let mut change = self.refresh(
+            neighbours
+                .into_iter()
+                .map(|other| Self::canonical((id, other)))
+                .collect(),
+        );
+        if let Some(member) = self.members.get(&id) {
+            change.local_keys.insert(id, member.keys.clone());
+        }
+        Ok(change)
+    }
+
+    /// Retire the previous key after the minimum overlap and acknowledgements from every reachable peer.
+    /// Offline peers retain their last compiled view and receive the current key when they reconnect.
+    /// # Errors
+    /// Returns `UnknownNode` for a missing member or a generation exhaustion error before mutation.
+    pub fn finish_rotation_reachable(
+        &mut self,
+        id: NodeId,
+        now_secs: u64,
+        reachable: &BTreeSet<NodeId>,
+    ) -> Result<Change, MeshError> {
+        let member = self.members.get(&id).ok_or(MeshError::UnknownNode)?;
+        let Some(deadline) = member.retire_after else {
+            return Ok(Change::default());
+        };
+        let neighbours = self
+            .views
+            .get(&id)
+            .map(|view| view.peers.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if now_secs < deadline
+            || neighbours
+                .iter()
+                .filter(|peer| reachable.contains(peer))
+                .any(|peer| self.is_behind(*peer) != Some(false))
+        {
+            return Ok(Change::default());
+        }
+        self.ensure_generation()?;
+        if let Some(member) = self.members.get_mut(&id) {
+            if let Some(old) = member.keys.previous.take() {
+                self.keys.remove(&old);
+            }
+            member.retire_after = None;
+        }
+        let mut change = self.refresh(
+            neighbours
+                .into_iter()
+                .map(|other| Self::canonical((id, other)))
+                .collect(),
+        );
+        if let Some(member) = self.members.get(&id) {
+            change.local_keys.insert(id, member.keys.clone());
+        }
+        Ok(change)
+    }
+
+    /// Immediately replace a compromised key and discard every overlap reference to it.
+    /// # Errors
+    /// Rejects an unknown node, a duplicate replacement key, or generation exhaustion before mutation.
+    pub fn compromise_key(
+        &mut self,
+        id: NodeId,
+        replacement: PublicKey,
+    ) -> Result<Change, MeshError> {
+        let member = self.members.get(&id).ok_or(MeshError::UnknownNode)?;
+        if replacement == member.keys.current {
+            return Ok(Change::default());
+        }
+        if self.keys.contains_key(&replacement) {
+            return Err(MeshError::DuplicateKey);
+        }
+        self.ensure_generation()?;
+        let neighbours = self
+            .views
+            .get(&id)
+            .map(|view| view.peers.keys().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let member = self.members.get_mut(&id).ok_or(MeshError::UnknownNode)?;
+        self.keys.remove(&member.keys.current);
+        if let Some(previous) = member.keys.previous.take() {
+            self.keys.remove(&previous);
+        }
+        member.keys.current = replacement;
+        member.node.public_key = replacement;
+        member.retire_after = None;
+        self.keys.insert(replacement, id);
         let mut change = self.refresh(
             neighbours
                 .into_iter()

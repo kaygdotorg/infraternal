@@ -14,10 +14,12 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 use zeroize::Zeroizing;
 
+/// The CA HTTP API's shared state.
 #[derive(Clone)]
 struct Api {
     auth: Auth,
     administration: Arc<CaAdministration>,
+    clock_health: Arc<crate::clock_health::ClockHealth>,
     admission: Arc<Semaphore>,
     starts: Arc<Mutex<HashMap<String, crate::runtime::SourceBucket>>>,
 }
@@ -46,10 +48,15 @@ pub fn decode_unlock(input: &[u8]) -> Result<UnlockRequest, crate::ca::CaError> 
     Ok(request)
 }
 /// Mount only a configured private CA authority; no request can regenerate trust.
-pub fn router(auth: Auth, administration: Arc<CaAdministration>) -> Router {
+pub fn router(
+    auth: Auth,
+    administration: Arc<CaAdministration>,
+    clock_health: Arc<crate::clock_health::ClockHealth>,
+) -> Router {
     let api = Api {
         auth,
         administration,
+        clock_health,
         admission: Arc::new(Semaphore::new(8)),
         starts: Arc::default(),
     };
@@ -306,7 +313,11 @@ async fn finish_request(
     .await
     .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
 }
-async fn status(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+/// Return the CA's public lock and root expiry status to an administrator.
+async fn status(
+    State(api): State<Api>,
+    headers: HeaderMap,
+) -> Result<Json<crate::ca_status::CaStatus>, StatusCode> {
     let (token, now) = request(&api, &headers)?;
     api.administration
         .status(token, now)
@@ -321,11 +332,12 @@ async fn status(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value
         .status(token, now)
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    let initialized = api
+    let mut status = api
         .administration
-        .initialized()
+        .public_status(Some(&api.clock_health))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({"locked":locked,"initialized":initialized})))
+    status.locked = Some(locked);
+    Ok(Json(status))
 }
 
 /// Copy each transport chunk into protected pages immediately after admission.

@@ -339,8 +339,8 @@ async fn malformed_host_keeps_healthy_inventory_readable() {
     }
 }
 
+/// Storage failures report safe reasons and recover once storage is repaired.
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // Keep ordered failure/repair assertions under one real pool and capture.
 async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
     let fixture = Fixture::new().await;
     let (capture, _guard) = Capture::start();
@@ -360,7 +360,7 @@ async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
         .await
         .unwrap();
     let id = i64::try_from(enroll(&fixture.service, "public-row-marker", 17).await).unwrap();
-    sqlx::query("UPDATE mesh_nodes SET id=-1 WHERE id=?")
+    sqlx::query("UPDATE mesh_nodes SET name='' WHERE id=?")
         .bind(id)
         .execute(&fixture.pool)
         .await
@@ -371,7 +371,7 @@ async fn storage_failures_have_safe_reasons_and_recover_after_repair() {
         .await
         .unwrap();
     assert_eq!(snapshot.nodes.len(), 0);
-    sqlx::query("UPDATE mesh_nodes SET id=? WHERE id=-1")
+    sqlx::query("UPDATE mesh_nodes SET name='public-row-marker' WHERE id=?")
         .bind(id)
         .execute(&fixture.pool)
         .await

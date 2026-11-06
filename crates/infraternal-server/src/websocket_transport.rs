@@ -272,7 +272,6 @@ impl Drop for Transport {
 }
 
 impl Transport {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn start(
         writer: SplitSink<WebSocket, Message>,
         reader: SplitStream<WebSocket>,
@@ -470,7 +469,6 @@ fn visibility_notice(json: &[u8]) -> Option<bool> {
 }
 
 // Keep transport controls in one reader turn, ahead of bounded application admission.
-#[allow(clippy::too_many_lines)]
 async fn read(
     context: Arc<Context>,
     mut reader: SplitStream<WebSocket>,

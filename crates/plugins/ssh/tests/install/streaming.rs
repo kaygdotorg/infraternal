@@ -2,10 +2,7 @@
 use super::*;
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "The real pipeline fixture keeps its two bounded observers together."
-)]
+/// Reserve a compressed tail until both real downstream consumers advance.
 async fn decoded_image_and_hash_advance_before_the_transfer_tail_is_released() {
     let f = Fixture::new();
     executable(
@@ -46,47 +43,32 @@ sys.exit(child.wait())
         ),
     );
     executable(
-        &f.root.join("tools/head"),
+        &f.root.join("tools/dd"),
         &format!(
             r#"#!/usr/bin/python3
 """Hold a bounded compressed tail until both decode and hash advance."""
 import os, sys, time
 from pathlib import Path
-remaining = int(sys.argv[sys.argv.index('-c') + 1])
-total = remaining
-tail = min(16384, max(1, total // 8))
-prefix = total - tail
-sent = 0
-observed = False
+# The one-byte setup-script reader preserves its exact framing unchanged.
+block = int(next(arg[3:] for arg in sys.argv[1:] if arg.startswith('bs=')))
+if block == 1:
+    os.execv('/usr/bin/dd', ['dd', *sys.argv[1:]])
+# Each invocation reads at most one short chunk, just as production dd does.
 payload = Path({payload:?})
 hashed = Path({hashed:?})
 released = Path({released:?})
 input_progress = Path({input_progress:?})
-while remaining:
-    if not observed and sent == prefix:
-        # The Rust timeout bounds this wait; keep the reserved tail unread.
-        while not (hashed.exists() and payload.exists() and payload.stat().st_size > 0):
-            time.sleep(0.01)
-        observed = True
-        released.write_text("%d:%d" % (remaining, payload.stat().st_size))
-    limit = min(65536, remaining)
-    if not observed:
-        limit = min(limit, prefix - sent)
-    chunk = os.read(0, limit)
-    if not chunk:
-        sys.exit(3)
-    remaining -= len(chunk)
-    sent += len(chunk)
-    view = memoryview(chunk)
-    while view:
-        view = view[os.write(1, view):]
-    input_progress.write_text("%d/%d" % (sent, total))
-    # The decoder's block boundary varies with the encoded image. Check the
-    # real consumers after each bounded write, while the encoded tail remains.
-    if not observed and hashed.exists() and payload.exists() and payload.stat().st_size > 0:
-        if remaining > tail:
-            observed = True
-            released.write_text("%d:%d" % (remaining, payload.stat().st_size))
+sent = int(input_progress.read_text()) if input_progress.exists() else 0
+if block < 65536 and sent > 0 and not released.exists():
+    # sleep: reserve the final bounded chunk until the real decoder and hash advance.
+    while not (hashed.exists() and payload.exists() and payload.stat().st_size > 0):
+        time.sleep(0.01)
+    released.write_text("%d:%d" % (block, payload.stat().st_size))
+chunk = os.read(0, min(block, 8192))
+view = memoryview(chunk)
+while view:
+    view = view[os.write(1, view):]
+input_progress.write_text(str(sent + len(chunk)))
 "#,
             payload = f.base().join(".bootstrap-lock/payload").to_str().unwrap(),
             hashed = hashed.to_str().unwrap(),

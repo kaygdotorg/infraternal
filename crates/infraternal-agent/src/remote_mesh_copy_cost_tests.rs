@@ -587,7 +587,6 @@ impl Drop for OwnedServerRuntime {
 
 /// Retain the original same-cohort diagnostic and measure a separately labelled
 /// fresh cohort without changing its connections, windows, or health criteria.
-#[allow(clippy::too_many_lines)]
 async fn measure_mesh_probe_and_copy_cost(
     profiles: &[bool],
     fresh_copy: bool,

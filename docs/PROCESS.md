@@ -4,6 +4,9 @@
 Adopted by the owner on 2026-10-06 (P1). This file is the standing process.
 `CLAUDE.md` points here, and each job prompt includes the Definition of Done.
 
+The adopted [engineering practices](ENGINEERING.md) (D351) guide code and
+review; their checks complement this process.
+
 The principle: **machines enforce performance, people decide matters of
 judgment, and nothing waits on either.**
 
@@ -568,3 +571,165 @@ When a Codex implementation job finishes, an independent Codex reviewer starts a
 - Job and release branches are pushed as soon as they have commits. Unfinished
   job work that can't be committed yet is snapshotted to `wip/<job>` so it
   isn't lost.
+
+## 11. Privileged integration (D351, #344)
+
+**What it covers:** tests that need privileges inside a network: WireGuard and
+TUN links, nftables rules, routes, DNS on a mesh address. They are
+`#[ignore]`d with a reason such as "Run in a disposable user/network
+namespace". When a change touches install/bootstrap/removal, proxy, mesh or
+shim/host-login code (the path globs in `scripts/verify-privileged`, against
+the merge base `VERIFY_QUICK_BASE`, default `origin/dev`), the `privileged
+integration` row of `scripts/verify fast` runs those tests. A change inside
+any workspace crate those tests' binaries depend on also selects the area,
+from `cargo metadata` (for example `infraternal-linux-tun`, `relay`,
+`protocol` and `plugin-api` select mesh), so a dependency change can't skip
+the tests that cover it (J266, 80581). Shared build inputs (workspace
+manifest, lockfile, toolchain) select all four areas. Other changes skip the
+row, which exits 77 and shows as `SKIP` in the gate table, never as `PASS`.
+
+**Which tests:** every ignored test in the area's packages whose reason asks
+for root or a disposable namespace, each alone in a fresh sandbox. The reason
+text selects them, so a new namespace test joins without editing a list.
+Reasons that need the perf VM, Docker, a release binary or an sshd or Pebble
+fixture stay out. Binaries come from the `test` row's own `cargo test
+--workspace --no-run` build; mesh, and its default-off DNS test, are built
+again with the features their namespace tests need.
+
+**No silent skips:** every selected candidate either runs, is on the explicit
+`NOT_COVERED_TESTS` list, or fails the row by name ("selected but not in the
+test binary"). This catches a binary mix-up (an example once replaced the
+mesh lib test binary, #285) or a cfg/feature gap. An entry on the list whose
+test no longer exists also fails the row, so the list only shrinks.
+
+**What is contained, exactly:** only the test runs. Building the test
+binaries is not sandboxed: the branch's build scripts and proc macros run as
+the plain calling user, as in the ordinary `test` row, which also runs every
+non-ignored test as that user. Before review 79752 the test discovery call
+(`<binary> --list`) also ran unsandboxed; it now runs inside. For a hostile
+branch, the real boundary is the shared build account (`claude`), not this
+sandbox. Within that scope, nothing runs as host root and there is no sudo.
+Each test runs in two nested user namespaces:
+- the outer namespace builds the mounts: the host filesystem bind-mounted
+  read-only *recursively* (`ro=recursive`), `pivot_root`ed with the old root
+  detached; tmpfs with size caps at `/tmp` (512 MiB, which also holds the
+  build-output view `CARGO_TARGET_DIR=/tmp/ut`), `/run` (64 MiB), `/var/tmp`
+  and `/dev/shm` (256 MiB each); a minimal `/dev` (null, zero, full, random,
+  urandom, tty, `net/tun`, a private devpts); a tmpfs over the nix daemon
+  socket directory;
+- the inner namespace (`unshare --user --map-root-user --net --mount --pid
+  --kill-child`) runs the test. uid 0 there is the caller's uid outside, and
+  the kernel locks the inherited mounts, so the test cannot remount `/`
+  read-write or unmount `/run` or `/tmp`. The network namespace has only
+  loopback. The environment is passed explicitly (`env -i`).
+- Each run has a 900 s hang timeout (`VERIFY_PRIVILEGED_TEST_TIMEOUT`; a hang
+  guard, not a speed assertion), is SIGKILLed if the runner dies (parent-death
+  signal, then `--kill-child` takes the namespace), and runs in a systemd user
+  scope with `MemoryMax=4G` (`VERIFY_PRIVILEGED_MEMORY_MAX`) when the user
+  manager is reachable; otherwise the tmpfs caps are the only memory bound and
+  the row prints that.
+
+Before any test, the row plants escapes in the same sandbox and fails unless
+every one fails: writes in the home directory, the checkout, the target and
+`/etc`; superblock and bind remounts of `/` read-write; unmounting `/run` and
+`/tmp`; the host user bus; the nix daemon socket; a host pty; a route off
+loopback; the host network and the internet; a uid map onto host root; a file
+left in `/tmp`. These probes are negative checks only. The evidence that they
+are live is J233's manual breakout of the earlier single-level layout (review
+79752 on #344), which these probes reproduce. **Any change to the sandbox
+layout needs a fresh manual escape review before merge.**
+
+**Not covered:** behaviour that only differs as *real* host root (rootful
+proxy supervision and installation, installing for other accounts and system
+paths, host-login and PTY ownership as root). A user namespace cannot reach
+those paths without giving the branch real root, which this row refuses to do.
+`NOT_COVERED` in the script names them and the row prints them. A job that
+changes them still proves them as root by hand on a build VM, and its review
+checks that proof.
+
+Individual tests on `NOT_COVERED_TESTS` today:
+- `infraternal-plugin-mesh` `gotatun_tun_owner::an_unprivileged_user_cannot_attach_the_persisted_tun`:
+  it drops a child to uid 65534, and the sandbox maps exactly one uid, so the
+  kernel's refusal of a *different* uid can't be shown there. The row runs its
+  counterpart `a_fresh_persisted_tun_is_restricted_to_the_agent` instead: a
+  fresh persisted TUN is owned by the agent's own uid and gid (`ip -d link`)
+  and is reattached after a restart, which is the part our code controls
+  (#260, J213 P1). When TUN code changes (`TUN_PATHS`), the row prints
+  `REAL-ROOT PROOF REQUIRED`, and the job runs `scripts/tun-real-root-proof
+  <40-hex commit>` from `code` and records the output on its issue. The proof
+  trusts only that commit and the public repository: root clones it into a
+  fresh 0700 directory under `/root`, builds with a root-owned cargo home and
+  target, refuses the binary if its interpreter or RUNPATH points outside
+  `/nix/store` and that directory (`scripts/elf-runpath-guard`), runs the one
+  test in a throwaway network namespace, and deletes everything on any exit.
+  Nothing the shared `claude` account can write reaches root's process: no
+  claude-built binary, path, worktree, cache or library directory (J270,
+  81345). Root's side starts under `env -i` with only PATH, HOME and LANG; the
+  test gets a private tmpfs `/tmp`; the build slot is held through the
+  commit's own `scripts/root-slot-hold`, whose claude-side waiter gets no file
+  of root's; and the guard also checks `DT_NEEDED` libraries named by path.
+  Runs are serialised by a root-owned lock, and the run that holds it first
+  removes any proof directories a killed run left behind (J277, 81454). The gate itself never runs as root, and no
+  `newuidmap` is installed: a setuid-root helper on the shared VMs and a
+  second mapped uid would weaken the sandbox (J266, 80581).
+
+**Where it runs:** any Linux build VM that allows unprivileged user
+namespaces, inside the flake dev shell (for `ip`, `nft`, cargo). compute01
+and dev-02 both qualify.
+
+**How it differs from the test server:** https://test.ssh.kayg.org is the
+real-environment check for browser and passkey flows on a deployed build. It
+does not run each branch's namespace tests. This row does, on every such
+change, without deploying anything. Neither replaces the other.
+
+## 12. Nightly parser fuzzing (D351, #344)
+
+**Where it runs:** dev-02, as the `infraternal-fuzz` system account, not as
+`claude`. Every branch gated on dev-02 runs as `claude`, so anything `claude`
+can read, a branch can read (review 79752). The fuzz account's home,
+`/var/lib/infraternal-fuzz` (mode 0700), holds the Forgejo token
+(`forgejo-token`, 0600), the pinned checkout, the nightly toolchain and
+cargo-fuzz (`.local/share/infraternal-fuzz/`), corpora, logs, report records
+and `last-run.json` (`.local/state/infraternal-fuzz/`), and the build target.
+The account has no sudo and no login shell.
+
+**What runs as root:** only `/usr/local/libexec/infraternal-fuzz-service`, a
+fixed copy of `scripts/nightly-fuzz-service` started by the system unit. It
+takes one shared build slot by starting `claude`'s build-slot script through
+`runuser` (so that script runs as `claude`), then drops to the fuzz account
+with `setpriv` and runs the checkout's `scripts/nightly-fuzz.py` in the dev
+shell. No repository code runs as root.
+
+**Install or update** (as root; on dev-02, `sudo` from the meshtest account):
+`scripts/install-nightly-fuzz --ref <reviewed commit> [--token-from <file>]
+[--migrate-from <old home>]`. `--token-from` moves a token into place and
+deletes the source; it is never printed. The checkout is cloned from the
+public repository and pinned to `--ref`; moving it is an explicit reinstall,
+so the token is only ever exposed to reviewed code. The system timer runs at
+02:00 IST with up to fifteen minutes of jitter.
+
+**Budget and reports:** the 3,600-second budget is split across all 36
+targets (100 s each), serially at three build jobs; the first run also
+compiles. A failing input is filed on its target's open issue (found by a
+hidden marker, so a lost response cannot open a duplicate), with the exact
+bytes attached as a zip; a failed upload resumes on the next run. A known
+input found again counts as a finding, detected from libFuzzer's `Test unit
+written to` line, since artifacts are named by content hash. The unit exits 0
+when a night only found and filed inputs, and 1 for real errors (a target that
+failed without writing an input, or a report that could not be filed).
+
+**Operate:** `sudo systemctl start infraternal-fuzz.service` for a manual run,
+`journalctl -u infraternal-fuzz.service` for results (system unit, so both
+need root). A `--budget-seconds 36` run of `nightly-fuzz.py` exercises all
+targets for one second each; it is a smoke check, not an hour of fuzzing.
+
+## 13. Runtime responsiveness probes (D351, #344)
+
+`bench-probes` in `infraternal-agent` enables the D351 responsiveness driver:
+`cargo build --release -p infraternal-agent --features bench-probes --example
+runtime-responsiveness`. Copy that driver to the performance VM and execute it
+through `perf-run`. It reports correlated real-dispatcher Pong times while a
+file writer is held; functional tests assert ordering and completion only.
+The `probe release exclusion` row compiles release consumers with and without
+the explicit feature, proving the module is absent from the ordinary library.
+The product CLI has no feature that enables these probes.

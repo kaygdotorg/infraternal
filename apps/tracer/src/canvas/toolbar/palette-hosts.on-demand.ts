@@ -15,6 +15,10 @@ export function hostEntries(cx: Ctx): PaletteEntry[] {
   const out: PaletteEntry[] = [];
   const removal = cx.adapters.hostRemoval;
   for (const host of cx.adapters.sessions.hosts()) {
+    if (host.state) {
+      out.push({ group: "Hosts", glyph: "…", label: host.name, hint: host.state === "pending" ? "removal pending · access revoked" : "retired-unreachable · cleanup certificate expired" });
+      continue;
+    }
     if (host.id !== "embedded" && removal?.label()) out.push({ group: "Hosts", glyph: "×", label: `${removal.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });
     // The consent for full access: found by typing, like every action; it opens the machine's details on the row.
     if (cx.adapters.privilege && !cx.adapters.privilege.isFull(host.name)) out.push({ group: "Hosts", glyph: "✓", icon: ICON_KEY, label: `Allow full access on ${host.name}`, hint: "host · privileged access", action: `canvas:access:${encodeURIComponent(host.name)}`, queryOnly: true });

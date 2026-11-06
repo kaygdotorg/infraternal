@@ -6,7 +6,7 @@ use infraternal_plugin_mesh::{
     configuration,
     dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
     netlink::{Socket, attribute, attributes},
-    node::Node,
+    node::{EngineKind, Node},
     policy::{
         model::{Addresses, NodeId, PublicKey},
         rules::TrafficPolicy,
@@ -45,6 +45,7 @@ fn endpoint(key: PublicKey) -> SocketAddr {
     panic!("public peer endpoint absent");
 }
 
+/// A refused endpoint save keeps the kernel's endpoint.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
 fn refused_endpoint_persistence_preserves_kernel_endpoint() {
@@ -52,7 +53,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
     let directory = target.join(format!("review-endpoint-{}", std::process::id()));
     fs::create_dir(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut node = Node::restore(&directory).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     node.up().unwrap();
     let (_, key) = Key::generate().unwrap();
     let initial: SocketAddr = "192.0.2.1:51820".parse().unwrap();
@@ -76,6 +77,8 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
             PeerPolicy {
                 peer: Peer {
                     key,
+                    previous_key: None,
+                    previous_active: false,
                     addresses: Addresses {
                         ipv4: "10.254.0.2".parse().unwrap(),
                         ipv6: "fd01::2".parse().unwrap(),
@@ -84,6 +87,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,
+                access_ssh: None,
             },
         )]),
         #[cfg(feature = "mesh-dns-spike")]

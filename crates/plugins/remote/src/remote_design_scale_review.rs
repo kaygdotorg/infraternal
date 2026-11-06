@@ -11,7 +11,6 @@ use std::{future::Future, net::SocketAddr, time::Duration};
 const NODES: usize = 1000;
 
 // Keep admission, retained guard failures and cleanup in one lifecycle.
-#[allow(clippy::too_many_lines)]
 async fn healthy_cohort<P, F, Fut>(
     label: &str,
     fast: bool,

@@ -2,6 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 mod common;
+/// Remote-consumption and inactivity oracles for duplex setup.
+#[path = "install/progress.rs"]
+mod progress;
 #[path = "install/streaming.rs"]
 mod streaming;
 
@@ -13,6 +16,14 @@ use infraternal_plugin_ssh::{
 use std::fmt::Write as _;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 use tokio::{io::AsyncWriteExt, process::Command};
+
+/// Hang guard for this file's positive waits (#334 rule): the fixture's own
+/// run of a generated install script, and waits for an install batch to reach
+/// a state, a marker file to appear or a stage to finish. Each wait ends on
+/// its event; the bound only detects a hang. The former 60 s values failed
+/// three tests under gate load, where local shell work alone outlasted them
+/// (`exit_status: None` after the fixture timed the upload script out, #355).
+const INSTALL_HANG: std::time::Duration = std::time::Duration::from_secs(300);
 
 struct Local {
     root: PathBuf,
@@ -81,18 +92,24 @@ impl SshSession for Local {
     fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
         Box::pin(async move {
             let script = self.fixture_script(script, &input);
-            if matches!(&input, Input::Negotiated { .. }) {
-                let mut command = Command::new("/bin/sh");
+            if matches!(&input, Input::Negotiated { .. } | Input::Transfer(_)) {
+                // A real SSH client's process group excludes its remote lease.
+                // Keep the direct-transfer shell in a separate session too, so
+                // retiring the synthetic client cannot kill that remote lease.
+                let mut command = if matches!(&input, Input::Transfer(_)) {
+                    let mut command = Command::new("/usr/bin/setsid");
+                    command.args(["--fork", "--wait", "/bin/sh"]);
+                    command
+                } else {
+                    Command::new("/bin/sh")
+                };
                 command.args(["-c", &script]).env(
                     "PATH",
                     format!("{}:/usr/bin:/bin", self.root.join("tools").display()),
                 );
-                let output = infraternal_plugin_ssh::process::execute(
-                    &mut command,
-                    input,
-                    std::time::Duration::from_secs(60),
-                )
-                .await?;
+                let output =
+                    infraternal_plugin_ssh::process::execute(&mut command, input, INSTALL_HANG)
+                        .await?;
                 if !output.success {
                     let mut error = Failure::install("The synthetic remote command failed.");
                     error.exit_status = output.exit_status;
@@ -118,7 +135,7 @@ impl SshSession for Local {
             // A refusal may close stdin before consuming an upload. Inspect the
             // command status first; successful commands still require a full write.
             let written = match input {
-                Input::Negotiated { .. } => {
+                Input::Negotiated { .. } | Input::Transfer(_) => {
                     unreachable!("negotiation uses the bounded process helper")
                 }
                 Input::PayloadAndInvitation {
@@ -652,6 +669,9 @@ fn setup_receipts_require_exact_order_and_preserve_failure_boundaries() {
     assert!(interrupted_setup_step(b"STEP join\nprivate\n").is_none());
 }
 
+/// The commit step keeps the setup journal until the shell has proved it
+/// reached its blocking admission read, both when the commit is released and
+/// when it is cancelled.
 #[tokio::test]
 async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
     for permit in [false, true] {
@@ -672,7 +692,7 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
         tokio::pin!(pending);
         tokio::select! {
             result = &mut pending => panic!("commit preceded proof: {result:?}"),
-            result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            result = tokio::time::timeout(INSTALL_HANG, async {
                 while !fixture.root.join("commit-admitted").exists() {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
@@ -919,6 +939,11 @@ impl SshSession for TransferCount {
             if let Input::File(path) = input {
                 self.bytes.fetch_add(
                     usize::try_from(path.metadata().unwrap().len()).unwrap(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            } else if let Input::Transfer(PayloadInput::File { size, .. }) = &input {
+                self.bytes.fetch_add(
+                    usize::try_from(*size).unwrap(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
             }
@@ -2028,11 +2053,10 @@ enum CachedHelper {
     Earlier,
 }
 
-// Reuse one real-filesystem fixture for completion and component cancellation.
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep the real shell fixture and same-attempt admission assertions together."
-)]
+/// Runs one fresh install through the real bootstrap runner on a
+/// real-filesystem fixture: it completes (`turn_off` false) or is cancelled by
+/// turning the component off (`turn_off` true), with `automatic` choosing
+/// whether a known failed setup is retried without asking.
 async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHelper) {
     use infraternal_plugin_api::{ComponentPlugin, PluginState};
     use infraternal_plugin_ssh::{
@@ -2173,7 +2197,7 @@ async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHel
         .unwrap();
     let mut changes = batch.subscribe();
     if !automatic {
-        let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let challenge = tokio::time::timeout(INSTALL_HANG, async {
             loop {
                 let (_, events) = batch.events(0);
                 if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
@@ -2189,13 +2213,10 @@ async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHel
         assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
         assert!(backend.recoveries.lock().unwrap().is_empty());
         if turn_off {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                runner.set_enabled(false),
-            )
-            .await
-            .unwrap()
-            .unwrap();
+            tokio::time::timeout(INSTALL_HANG, runner.set_enabled(false))
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(runner.status().state, PluginState::Off);
             assert_eq!(runner.status().active_work, 0);
             assert!(fixture.receipt().exists());
@@ -2228,7 +2249,7 @@ async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHel
                 .is_err()
         );
     }
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    tokio::time::timeout(INSTALL_HANG, async {
         loop {
             let (_, events) = batch.events(0);
             if automatic {
@@ -2580,7 +2601,7 @@ def line():
 def quiet():
     return not select.select([0], [], [], 0.3)[0]
 def size(choice):
-    return int(re.search(choice.encode() + rb'\)[^\n]*?head -c (\d+)', script)[1])
+    return int(re.search(choice.encode() + rb'\)[^\n]*?read_payload (\d+)', script)[1])
 out.write(b'STEP connect\nINFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_CLEAR\n{caps}CHECK ready {reader}\n')
 out.flush()
 script = exact(int(line()))
@@ -2592,6 +2613,8 @@ os.execvp('cat', ['cat'])
     }
 }
 
+/// Stages the session image through a scripted remote, and fails the test if
+/// staging hangs (the payload and its receipts must not be serialized).
 async fn scripted_staging(
     f: &Fixture,
     remote: ScriptedRemote,
@@ -2602,7 +2625,7 @@ async fn scripted_staging(
         .unwrap();
     let transaction = Installation::new(session, &f.target, &f.join).unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(20),
+        INSTALL_HANG,
         transaction.stage_session_on(&f.binary, Some(checked)),
     )
     .await
@@ -2621,6 +2644,7 @@ fn large_fixture_binary(f: &Fixture, id: uuid::Uuid) {
 }
 
 #[tokio::test]
+/// Declared payloads flow before receipts while byte counts remain exact.
 async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
     let f = Fixture::new();
     let id = uuid::Uuid::new_v4();
@@ -2631,7 +2655,7 @@ async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
         "CAPS zstd gzip -\n",
         "dd",
         &format!(
-            "choice = re.search(rb'\\nchoice=(\\w+)\\n', script)[1].decode()\nassert choice in ('zstd', 'gzip', 'raw'), choice\npayload = exact(size(choice))\nout.write(b'STEP upload\\nTRANSFER ' + choice.encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
+            "choice = re.search(rb'\\nchoice=(\\w+)\\n', script)[1].decode()\nassert choice in ('zstd', 'gzip', 'raw'), choice\npayload = exact(size(choice))\nout.write(b'STEP upload\\nTRANSFER ' + choice.encode() + b'\\nPROGRESS ' + str(len(payload)).encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
         ),
     );
     let (session, bridge) = scripted_staging(&f, remote).await.unwrap();
@@ -2641,6 +2665,7 @@ async fn declared_transfer_sends_the_payload_before_any_selection_receipt() {
 }
 
 #[tokio::test]
+/// A buffering setup reader receives only its script until it selects the public payload.
 async fn buffering_setup_reader_receives_no_payload_until_selection() {
     let f = Fixture::new();
     let id = uuid::Uuid::new_v4();
@@ -2651,7 +2676,7 @@ async fn buffering_setup_reader_receives_no_payload_until_selection() {
         "CAPS zstd gzip -\n",
         "head",
         &format!(
-            "assert b'\\nchoice=raw\\nif ' in script\nassert quiet(), 'payload followed the setup script'\nout.write(b'STEP upload\\nTRANSFER raw\\n'); out.flush()\npayload = exact(size('raw'))\nout.write(b'STEP start\\nSESSION {id}\\n')"
+            "assert b'\\nchoice=raw\\nif ' in script\nassert quiet(), 'payload followed the setup script'\nout.write(b'STEP upload\\nTRANSFER raw\\n'); out.flush()\npayload = exact(size('raw'))\nout.write(b'PROGRESS ' + str(len(payload)).encode() + b'\\nSTEP start\\nSESSION {id}\\n')"
         ),
     );
     assert_eq!(scripted_staging(&f, remote).await.unwrap().0, id);
@@ -3886,5 +3911,183 @@ async fn infra_alias_replaced_after_install_survives_rollback() {
     assert_eq!(
         std::fs::read_link(alias).unwrap(),
         std::path::Path::new("foreign")
+    );
+}
+
+/// #305 F-B: issues one fresh host id per invitation, as the server does, and
+/// fails the completion of the first one only (production: the login check that
+/// runs after the host-side commit).
+struct LoginFailsOnce {
+    hosts: std::sync::Mutex<Vec<uuid::Uuid>>,
+    failing: uuid::Uuid,
+}
+impl infraternal_plugin_ssh::bootstrap::Backend for LoginFailsOnce {
+    fn resolve<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: &'a Target,
+        _: Option<&'a str>,
+    ) -> Operation<'a, infraternal_plugin_ssh::bootstrap::Resolved> {
+        Box::pin(async {
+            Ok(infraternal_plugin_ssh::bootstrap::Resolved {
+                destination: infraternal_plugin_ssh::model::Destination::parse("user@fixture")
+                    .unwrap(),
+                credentials: infraternal_plugin_ssh::transport::Credentials::Network,
+                mesh: infraternal_plugin_ssh::model::MeshEvidence::default(),
+            })
+        })
+    }
+    fn invitation<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: &'a Target,
+        _: &'a infraternal_plugin_ssh::probe::Check,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move {
+            let host = self.hosts.lock().unwrap().remove(0);
+            Ok(JoinMaterial {
+                host,
+                url: "https://fixture.invalid/join".into(),
+                stdin: Secret::new(b"synthetic-capability\n".to_vec()),
+            })
+        })
+    }
+    fn connected_facts<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn terminal_canary<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn completed<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        host: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            if host == self.failing {
+                Err(Failure::install(
+                    "The host connected, but its preferred account login could not open.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+    fn failed<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Opens every SSH session as the real-filesystem `Local` fixture under `root`.
+struct LocalTransport {
+    root: PathBuf,
+}
+impl infraternal_plugin_ssh::transport::SshTransport for LocalTransport {
+    fn open(
+        &self,
+        _: infraternal_plugin_ssh::model::Destination,
+        _: infraternal_plugin_ssh::transport::Credentials,
+        _: infraternal_plugin_ssh::model::MeshEvidence,
+    ) -> Operation<'_, Arc<dyn SshSession>> {
+        Box::pin(async move {
+            Ok(Arc::new(Local {
+                root: self.root.clone(),
+            }) as Arc<dyn SshSession>)
+        })
+    }
+}
+
+/// Gives the fixture's installed binary the real CLI's owner-scoped
+/// `--bootstrap-uninstall <host>` contract (see the comment inside).
+fn with_owner_scoped_uninstall(fixture: &Fixture) {
+    // The installed binary's owner-scoped uninstall contract, as the real CLI's
+    // `--bootstrap-uninstall <host>`: take the setup lock on the base's parent
+    // without waiting (the real one refuses after a short wait), and remove only
+    // when `.bootstrap-owner` names the host. It finds its install from its own
+    // path, never from $HOME.
+    let payload = std::fs::read_to_string(&fixture.binary).unwrap().replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\nif [ \"$1\" = --bootstrap-uninstall ]; then base=$(dirname \"$(dirname \"$0\")\"); exec 8< \"$(dirname \"$base\")\"; flock -n 8 || exit 75; [ \"$(cat \"$base/.bootstrap-owner\")\" = \"$2\" ] || exit 1; home=$(dirname \"$(dirname \"$(dirname \"$base\")\")\"); rm -rf \"$base\" \"$base.bootstrap-cache\" \"$home/.local/bin/infraternal\" \"$home/.config/systemd/user/infraternal-agent.service\"; exit 0; fi\n",
+        1,
+    );
+    executable(&fixture.binary, &payload);
+}
+
+/// The step (Done or Failed) and message `batch` ends with.
+async fn outcome(
+    batch: infraternal_plugin_ssh::bootstrap::Batch,
+) -> (infraternal_plugin_ssh::model::Step, String) {
+    use infraternal_plugin_ssh::model::Step;
+    let mut changes = batch.subscribe();
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let (_, events) = batch.events(0);
+            if let Some(event) = events
+                .iter()
+                .find(|event| matches!(event.step, Step::Done | Step::Failed))
+            {
+                return (event.step, event.message.to_owned());
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap()
+}
+
+/// #305 F-B: an attempt whose host-side commit succeeded but whose next step failed
+/// (production: the login check after commit) must not leave its install behind.
+/// Left in place, its agent keeps running for a host the server revokes, and its
+/// `.bootstrap-owner` makes every later add refuse to stage with exit 71, a
+/// permissions error with no Start fresh. The retry with a new host id must finish.
+#[tokio::test]
+async fn a_failure_after_commit_removes_its_install_so_the_retry_finishes() {
+    use infraternal_plugin_ssh::{bootstrap::Bootstrap, install::BinaryPaths, model::Step};
+    let fixture = Fixture::new();
+    with_owner_scoped_uninstall(&fixture);
+    let (first, second) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let runner = Bootstrap::new(
+        Arc::new(LocalTransport {
+            root: fixture.root.clone(),
+        }),
+        Arc::new(LoginFailsOnce {
+            hosts: std::sync::Mutex::new(vec![first, second]),
+            failing: first,
+        }),
+        BinaryPaths {
+            x86_64: fixture.binary.clone(),
+            aarch64: fixture.binary.clone(),
+        },
+    );
+    let start = || {
+        runner
+            .start("owner".into(), vec![fixture.target.clone()], None)
+            .unwrap()
+    };
+    let (step, message) = outcome(start()).await;
+    assert_eq!(step, Step::Failed, "{message}");
+    let owner = fixture.base().join(".bootstrap-owner");
+    assert!(
+        !owner.exists(),
+        "the failed attempt left its install owned by {:?}",
+        std::fs::read_to_string(&owner).ok()
+    );
+    let (step, message) = outcome(start()).await;
+    assert_eq!(step, Step::Done, "{message}");
+    assert_eq!(
+        std::fs::read_to_string(&owner).unwrap().trim(),
+        second.simple().to_string()
     );
 }

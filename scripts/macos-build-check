@@ -3,6 +3,8 @@
 #
 # Run on the Mac build machine from the repository's nix shell:
 #   nix develop -c scripts/macos-build-check
+# For a merge-time compile guard without release linking or portable tests:
+#   nix develop -c scripts/macos-build-check --check
 # It is not part of `scripts/verify fast`, which runs on the Linux build VMs.
 #
 # Checks, in order:
@@ -19,11 +21,33 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 [[ "$(uname -s)-$(uname -m)" == Darwin-arm64 ]] || {
     printf 'macos-build-check runs on macOS arm64 only\n' >&2; exit 2; }
+case "${1:-}" in
+    --check) [[ $# == 1 ]] || exit 2 ;;
+    '') [[ $# == 0 ]] || exit 2 ;;
+    *) printf 'usage: scripts/macos-build-check [--check]\n' >&2; exit 2 ;;
+esac
 
 target_root="${CARGO_TARGET_DIR:-$root/target}"
 [[ "$target_root" = /* ]] || target_root="$root/$target_root"
 # Some suites keep fixture state under the target directory, as in verify.
 export CARGO_TARGET_DIR="$target_root"
+# Run on the Mac: the CLI's native dependencies need its SDK even for cargo check.
+# Both feature selections must compile; a Linux-only credential call once broke both (#379).
+if [[ "${1:-}" == --check ]]; then
+    # Reuse the shipping native VT recipe and release cache. Build its archive
+    # with the development shell's SDK before selecting the system SDK for Swift.
+    cargo check --locked --release -p infraternal
+    # Swift requires the installed Apple toolchain/SDK rather than Nix's shims.
+    # Retain GNU utilities for the native recipe while exposing system Apple tools.
+    export PATH="$(dirname "$(command -v bash)"):$(dirname "$(command -v sed)"):$(dirname "$(command -v sha256sum)"):/usr/bin:$PATH"
+    unset DEVELOPER_DIR TOOLCHAINS
+    export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
+    cargo check --locked --release -p infraternal --features desktop
+    printf 'macos-build-check --check: PASS\n'
+    exit 0
+fi
+# /bin/bash is 3.2 on macOS even when the development shell supplies a newer Bash.
+python3 scripts/test-path-remap-flags.py
 scripts/auth-toolchain
 scripts/test-auth-toolchain-pin
 printf 'zig %s\n' "$("$target_root/auth-tools/zig/zig" version)"

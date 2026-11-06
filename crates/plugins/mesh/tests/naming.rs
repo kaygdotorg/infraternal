@@ -440,3 +440,32 @@ async fn legacy_unnamed_labels_are_replaced_and_a_real_unnamed_hostname_is_kept(
         ]
     );
 }
+
+/// Cleanup-only bootstrap history must not force a replacement machine to take a suffix.
+#[tokio::test]
+async fn pending_removal_releases_its_typed_machine_name() {
+    let pool = pool().await;
+    add_host(&pool, A, "root@minipc01").await;
+    let old = uuid::Uuid::parse_str(A).unwrap();
+    sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,'owner',100,1,'unreachable')")
+        .bind(old.as_bytes().as_slice()).execute(&pool).await.unwrap();
+    add_host(&pool, B, "root@10.69.69.6").await;
+    let service = MeshService::new(pool.clone());
+    let store = service.dataplane();
+    store
+        .attach_named("server", PublicKey([1; 32]), None, true, Some("monitor01"))
+        .await
+        .unwrap();
+    store
+        .attach_named(B, PublicKey([11; 32]), None, false, Some("minipc01"))
+        .await
+        .unwrap();
+    assert_eq!(names(&service, "owner").await, ["monitor01", "minipc01"]);
+    let retained: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap WHERE host_id=?")
+            .bind(old.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retained, 1);
+}

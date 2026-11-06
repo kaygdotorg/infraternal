@@ -151,6 +151,21 @@ export class AppStream {
    * the server; this remembers the intent so the next welcome asks again by itself (no click needed).
    */
   private keepControl = false;
+  /**
+   * The server lets only the controller change the machine's window size, so a canvas resize has to hold the lease.
+   * That is bookkeeping, not the person taking over: `leased` says the lease is held for the size alone. It is never
+   * announced (`control` stays "none", so no badge and no "controlled" word), it never sends input, and it ends with
+   * every event that ends control (`setControl("none")` clears it).
+   */
+  private leased = false;
+  /** A quiet lease request is on its way: a drag-resize asks once, and the answer pushes the latest size. */
+  private leasing = false;
+  /** Counts releases: a size-only lease that was asked for before a release and lands after it is withdrawn at once. */
+  private releaseEpoch = 0;
+  /** The size the machine was last told (Start's, or the last Size message): what a hand resize is compared against. */
+  private pushedSize: StreamSize | undefined;
+  /** When a size-only lease was last refused; throttles only size-only attempts, never the person's own control. */
+  private leaseRefusedAt = -Infinity;
   private shapeTimer = 0;
   private shapeBusy = false;
   private lastShape: number | undefined;
@@ -177,6 +192,8 @@ export class AppStream {
     this.o.events.state(next);
   }
   private setControl(next: ControlState): void {
+    // Every route that ends control (dropped link, retired viewer, release) also ends a size-only lease.
+    if (next.kind === "none") this.leased = false;
     if (this.control.kind === next.kind && JSON.stringify(this.control) === JSON.stringify(next)) return;
     this.control = next;
     this.o.events.control(next);
@@ -188,6 +205,7 @@ export class AppStream {
     this.started = true;
     this.hadPicture = false;
     this.size = chooseSize(css.width, css.height, css.density);
+    this.pushedSize = this.size;
     const support = streamingSupport();
     if (support !== "ok") { this.setState({ kind: "unsupported", reason: support }); return; }
     this.setState({ kind: "connecting" });
@@ -220,6 +238,9 @@ export class AppStream {
   private async start(generation: number, last: boolean): Promise<boolean> {
     try {
       if (!this.size) return true;
+      // What the machine is told here is what a later hand resize is compared with, even when the box moved (and was only
+      // looked at) while this start waited for the connection.
+      this.pushedSize = this.size;
       const start = {
         host_id: this.o.hostId,
         start: {
@@ -416,21 +437,54 @@ export class AppStream {
   }
 
   /**
-   * The window body's layout size changed: the machine's window follows it (A2). `byHand` is a resize by the person,
-   * an explicit control action; a change that only took the machine's own shape sends its size if control is already
-   * held and otherwise waits for it.
+   * The window body's layout size changed. The latest size is always remembered; whether the machine's window follows it
+   * (D208 A2) depends on who changed it:
+   * - `byHand` false is the card following what it was shown (the machine's own shape, a layout settling): looking,
+   *   which never takes a lease, never shows control and sends nothing (D208 A3).
+   * - `byHand` true is a person's resize or move settling: the machine's window follows, quietly, under a size-only
+   *   lease (`leased`) that nothing on the page announces. It is compared with the size the machine was last told, not
+   *   with the last size seen, so the sizes a drag passed through while looking do not hide the final one.
    */
   resize(css: { width: number; height: number; density: number }, byHand = true): void {
     const next = chooseSize(css.width, css.height, css.density);
-    if (!sizeChanged(this.size, next)) return;
+    const changed = sizeChanged(this.size, next);
     this.size = next;
-    // Merely attaching uses Start's size; taking control sends the latest size.
-    if (this.control.kind === "controlled" || this.control.kind === "paused") this.pushSize();
-    else if (byHand) void this.takeControl();
+    if (this.canPushSize()) { if (changed || (byHand && sizeChanged(this.pushedSize, next))) this.pushSize(); }
+    else if (byHand && sizeChanged(this.pushedSize, next)) void this.leaseForSize();
+  }
+
+  /** Whether a lease is held, for input (announced) or for the size alone (quiet). */
+  private canPushSize(): boolean { return this.leased || this.control.kind === "controlled" || this.control.kind === "paused"; }
+
+  /**
+   * Holds the controller lease for the size alone, and pushes the latest size once it is held. Silent by design: a
+   * refusal is not "view only" (nobody tried to control), it just leaves the machine's window as it is. Asked again no
+   * sooner than `CONTROL_RETRY_MS` after a refusal, like real control.
+   */
+  private async leaseForSize(): Promise<void> {
+    if (this.leasing || this.leased || this.streamId === undefined || !this.attached || !this.o.connection.isWelcomed) return;
+    if (this.control.kind === "requesting" || performance.now() - this.leaseRefusedAt < CONTROL_RETRY_MS) return;
+    const id = this.streamId;
+    const epoch = this.releaseEpoch;
+    this.leasing = true;
+    try {
+      await this.o.connection.call("desktop.session.control", { stream_id: id });
+      if (this.streamId !== id || this.disposed) return;
+      // The window was let go of while the call was in flight: the server now holds a lease nobody wants. Withdraw it the
+      // only way the server offers (retire this viewer, see `releaseControl`) instead of keeping it on a window that is no
+      // longer the active one.
+      if (epoch !== this.releaseEpoch) { this.retireViewer(); return; }
+      this.leased = true;
+      this.pushSize();
+    } catch {
+      // Its own clock: a refusal here (the viewer may not be registered yet) must never delay the person's real control.
+      if (this.streamId === id) this.leaseRefusedAt = performance.now();
+    } finally { this.leasing = false; }
   }
 
   private pushSize(): void {
-    if (!this.size || this.streamId === undefined || !this.attached || (this.control.kind !== "controlled" && this.control.kind !== "paused")) return;
+    if (!this.size || this.streamId === undefined || !this.attached || !this.canPushSize()) return;
+    this.pushedSize = this.size;
     this.o.connection.send(this.streamId, { type: "Desktop", message: { kind: "size", width: this.size.width, height: this.size.height, densityMilli: densityMilli(this.size) } });
   }
 
@@ -471,19 +525,26 @@ export class AppStream {
 
   /** The window lost focus: held keys and buttons are released on the machine, and the indicator goes quiet. */
   releaseControl(): void {
-    const held = this.control.kind === "controlled" || this.control.kind === "paused" || this.control.kind === "requesting";
+    const held = this.leased || this.control.kind === "controlled" || this.control.kind === "paused" || this.control.kind === "requesting";
     this.keepControl = false;
+    this.releaseEpoch++;
     this.setControl({ kind: "none" });
     window.clearTimeout(this.statusTimer);
     window.clearTimeout(this.pausedTimer);
     this.statusTimer = 0;
-    if (held) {
-      // Input::Release clears held keys but intentionally retains the native lease.
-      // Retire this viewer to withdraw the lease, then view the existing session
-      // under a new stream id so a late acquisition cannot regain control.
-      this.detach();
-      if (this.visible && this.session && !this.disposed) this.attach();
-    }
+    if (held) this.retireViewer();
+  }
+
+  /**
+   * Withdraws the controller lease. Input::Release clears held keys but intentionally retains the native lease, and the
+   * server has no message that gives only the lease back, so this viewer is retired and the existing session is viewed
+   * again under a new stream id (so a late acquisition cannot regain control). It costs one new keyframe, which is why it
+   * runs only when a lease, for input or for a size alone, was really held: a size-only lease needs it too, because
+   * leaving it would keep the machine's own control indicator up on a window the person has left.
+   */
+  private retireViewer(): void {
+    this.detach();
+    if (this.visible && this.session && !this.disposed) this.attach();
   }
 
   /** Whether the person may try to control again (the view-only state shows until the retry window passes). */

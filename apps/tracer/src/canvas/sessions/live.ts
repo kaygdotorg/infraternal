@@ -27,9 +27,11 @@ import { createStatusRelay } from "../status";
 import type { WindowModel } from "../model/types";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { onDemand, whenIdle } from "../../on-demand";
+import type { RefusalAction } from "../../terminal-refusal";
 import type { HostEntry, LinkInfo, SessionBinding, SessionService } from "./adapter";
 import type { ScreenCache } from "./screen-cache.on-demand";
 
+/** The product's sessions service: terminal windows bound to real sessions, plus the host list the palette and sidebar read. */
 export interface LiveSessionsOptions {
   core: CoreScreen;
   connection: MuxConnection;
@@ -68,6 +70,15 @@ export interface LiveSessions extends SessionService {
   dispose(): void;
 }
 
+/** How long a window may stay "connecting" before it says it cannot reach its host. Shorter than the server's own 60 s open wait, so the person hears first. */
+const CONNECT_SLOW_MS = 10_000;
+
+/** The sentence for a window that stayed connecting too long; it names the host and the quiet retry, and the strip adds the button. */
+function cannotReach(hostName: string): string {
+  return `Can't reach ${hostName.trim() || "this host"}. It keeps trying in the background.`;
+}
+
+/** Makes the sessions service for one signed-in page: it binds each terminal window to a terminal stream and keeps the admitted hosts. */
 export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
   const { core, connection, host, pool } = options;
   const listeners = new Set<() => void>();
@@ -111,12 +122,14 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private approximateAt: number | undefined;
     private heldKeys = 0;
     get link(): LinkInfo { return { everConnected: this.everConnected, resumedAt: this.resumedAt, approximateAt: this.approximateAt, heldKeys: this.heldKeys }; }
+    /** Notes that the host link missed a reply but is kept, so the pill reads reconnecting until it answers or retires. */
     private setDoubted(doubted: boolean): void {
       if (doubted === this.doubted) return;
       const before = this.connected;
       this.doubted = doubted;
-      if (before !== this.connected) this.connectionChanged?.();
+      if (before !== this.connected) this.linkChanged();
     }
+    /** Records whether this window's stream is attached. A resumed stream waits `settleMs` before it counts as live, so a failed retry never flashes green. */
     private setConnected(connected: boolean, settleMs = 0): void {
       if (!connected) {
         window.clearTimeout(this.connectionStabilityTimer);
@@ -138,13 +151,48 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       // A dropped or retargeted link replaces the doubt; a fresh attach starts undoubted.
       if (!connected) { this.doubted = false; this.approximateAt = undefined; this.resumedAt = undefined; }
       else { if (this.everConnected) this.resumedAt = performance.now(); this.everConnected = true; }
-      if (before !== this.connected) this.connectionChanged?.();
+      if (before !== this.connected) this.linkChanged();
+    }
+    /** Tells the window the link changed, and keeps the "Can't reach" watchdog in step: running while not connected, stopped once connected. */
+    private linkChanged(): void {
+      this.connectionChanged?.();
+      if (this.connected) this.endSlow(); else this.armSlow();
+    }
+    /** The pending "Can't reach" watchdog, or 0. */
+    private slowTimer = 0;
+    /** Whether the window has been told it cannot reach its host (so it can be told when that ends). */
+    private slow = false;
+    /**
+     * Starts the watchdog: a window that is still not connected after `CONNECT_SLOW_MS` stops looking like it is loading and
+     * says it cannot reach its host, with a retry. The terminal keeps retrying on its own meanwhile; nothing is sent here.
+     * A window that is already waiting keeps its running watchdog, so repeated link changes never push the deadline back.
+     */
+    private armSlow(): void {
+      if (this.slowTimer !== 0 || this.disposed) return;
+      this.slowTimer = window.setTimeout(() => {
+        this.slowTimer = 0;
+        // An ended session has its own state; a connected window has nothing to say.
+        if (this.disposed || this.connected || this.retired) return;
+        // A first window that never settles must not hold the host list back either (product.ts has its own fallback).
+        settle();
+        this.slow = true;
+        this.unreachable?.(cannotReach(this.model.host));
+      }, CONNECT_SLOW_MS);
+    }
+    /** Stops the watchdog, and takes the "Can't reach" notice down if it was showing. */
+    private endSlow(): void {
+      window.clearTimeout(this.slowTimer);
+      this.slowTimer = 0;
+      if (!this.slow) return;
+      this.slow = false;
+      this.unreachable?.(undefined);
     }
     /** Marks for the switch timeline (`sw:<n>:<step>`); a few microseconds each, read by the real specs. */
     private readonly n = ++serial;
     private mark(step: string): void { performance.mark(`sw:${this.n}:${step}`); }
 
-    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string) => boolean, private readonly connectionChanged?: () => void) {}
+    /** Binds one window's model to the callbacks the canvas gave it: saving, exit, the session picker, refusals, link changes and the unreachable notice. */
+    constructor(private readonly model: WindowModel, private readonly changed: () => void, private readonly exited: ((status: number) => void) | undefined, private readonly showSessions?: (event?: MouseEvent) => void, private readonly refused?: (message: string, action?: RefusalAction) => boolean, private readonly connectionChanged?: () => void, private readonly unreachable?: (message: string | undefined) => void) {}
 
     /** Keeps a picture of this terminal's screen as its session's last known one (only while it is drawn). */
     private keepScreen(): void {
@@ -176,6 +224,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       return true;
     }
 
+    /** Puts the terminal's host element in the window body, shows the last known screen, starts the unreachable watchdog and begins opening the terminal. */
     mount(body: HTMLElement): void {
       let hostEl: HTMLElement;
       if (!firstHostUsed) {
@@ -194,12 +243,14 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       body.append(hostEl);
       this.mark("mount");
       this.showGhost();
+      this.armSlow();
       void this.start();
     }
 
     /** The socket this window's terminal uses (taken from the pool, given back on dispose). */
     private conn: MuxConnection | undefined;
 
+    /** Opens the terminal client for this window (loading it on demand) and wires its hooks: attach, output, disconnects, exit, refusals and session ids. */
     private async start(): Promise<void> {
       const hostEl = this.hostEl;
       if (!hostEl) return;
@@ -217,11 +268,12 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },
         // The ghost of the last screen sits in the host element, which the ended state hides.
         onSessionGone: (status) => { if (first) settle(); options.onSessionGone?.(this.model.host, this.model.sessionId ?? "", status); },
-        onOpenRefused: (message, sessionList) => {
+        onOpenRefused: (message, sessionList, action) => {
           if (this.disposed) return true;
           if (first) settle();
-          // A window whose strip asked for this shell says why itself, where the person is looking.
-          if (this.refused?.(message)) return true;
+          // The refusal is an answer: the window is not "slow" any more, it says why in its own strip.
+          this.endSlow();
+          if (this.refused?.(message, action)) return true;
           // A refusal that names a way forward is long (about 150 characters); the default 4.2 s is too short to read it.
           core.toast.show({ message, tone: "error", duration: sessionList ? 0 : Math.max(4200, message.length * 70),
             ...(sessionList && this.showSessions ? { action: { label: "Sessions", onSelect: this.showSessions } } : {}),
@@ -323,16 +375,31 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
     wheelUse(deltaY: number): boolean | undefined { return this.client?.wheelUse(deltaY); }
 
+    /** Starts a new shell on the same host in this same window, after its session ended or a refusal; the renderer and layout stay. */
     openNew(): void {
       this.retired = undefined;
       this.setConnected(false);
       this.painted = false;
+      this.endSlow();
+      this.armSlow();
       this.client?.openNewSession();
     }
 
+    /** The "Can't reach" strip's retry: attaches afresh (or opens, with no session yet) and starts the watchdog over. */
+    retry(): void {
+      const client = this.client;
+      if (this.disposed || !client) return;
+      this.endSlow();
+      this.armSlow();
+      if (this.model.sessionId) client.retarget(this.model.sessionId); else client.openNewSession();
+    }
+
+    /** Closes the window's terminal and timers and gives its socket back. The session keeps running on the host (D178). */
     dispose(): void {
       this.keepScreen();
       this.endGhost();
+      window.clearTimeout(this.slowTimer);
+      this.slowTimer = 0;
       window.clearTimeout(this.connectionStabilityTimer);
       this.connectionStabilityTimer = 0;
       this.disposed = true;
@@ -350,7 +417,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
 
   return {
     bind(model, env): SessionBinding {
-      const b = new Binding(model, env.changed, env.exited, env.showSessions, env.refused, env.connectionChanged);
+      const b = new Binding(model, env.changed, env.exited, env.showSessions, env.refused, env.connectionChanged, env.unreachable);
       bindings.add(b);
       return b;
     },

@@ -7,6 +7,7 @@ type RemoteLink = ();
 use crate::liveness::{Liveness, TICK};
 use crate::stream_close::{CloseWho, safe_agent_close_reason};
 use bytes::{Buf, Bytes, BytesMut};
+pub use infraternal_plugin_api::login_access::LoginGrant;
 use infraternal_protocol::{
     DecodeError, Frame, MAX_FRAME_LEN, decode_muxed_frame, encode_muxed_frame_into,
 };
@@ -491,10 +492,24 @@ impl EmbeddedAgent {
         .map_err(|_| AgentError::Unavailable)?
     }
 
+    /// Close the old identity stream after its candidate certificate was durably acknowledged.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retire_connection(&self) -> Result<(), AgentError> {
+        let (reply, retired) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.commands
+                .send(Command::RetireConnection(reply))
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            retired.await.map_err(|_| AgentError::Unavailable)
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
+    }
     /// Open a terminal on the embedded infraternal agent's host (legacy fixtures).
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
-        self.open_metadata(size, None, None, false)
+        self.open_metadata(size, None, false)
             .await
             .map(|opened| opened.session_id)
     }
@@ -506,41 +521,52 @@ impl EmbeddedAgent {
         size: TerminalSize,
         person: uuid::Uuid,
         account: Option<String>,
+        grant: LoginGrant,
     ) -> Result<[u8; 16], AgentError> {
-        self.open_for_with_metadata(size, person, account)
+        self.open_for_with_metadata(size, person, account, grant)
             .await
             .map(|opened| opened.session_id)
     }
 
     /// Preserve the host's resolved account and fallback note for the terminal window.
+    /// `grant` is the person's login access on this host; the infraternal
+    /// agent opens nothing it does not allow (D235 Q14).
     pub async fn open_for_with_metadata(
         &self,
         size: TerminalSize,
         person: uuid::Uuid,
         account: Option<String>,
+        grant: LoginGrant,
     ) -> Result<TerminalOpened, AgentError> {
-        self.open_metadata(size, Some(person), account, false).await
+        self.open_metadata(
+            size,
+            Some(PersonLogin {
+                person,
+                account,
+                grant,
+            }),
+            false,
+        )
+        .await
     }
     /// Open a private fixed readiness command under the enrolled account.
     #[cfg(feature = "remote")]
     pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
-        self.open_metadata(size, None, None, true)
+        self.open_metadata(size, None, true)
             .await
             .map(|opened| opened.session_id)
     }
     async fn open_metadata(
         &self,
         size: TerminalSize,
-        person: Option<uuid::Uuid>,
-        account: Option<String>,
+        login: Option<PersonLogin>,
         readiness: bool,
     ) -> Result<TerminalOpened, AgentError> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::Open {
                 size,
-                person,
-                account,
+                login,
                 readiness,
                 reply,
             })
@@ -554,12 +580,16 @@ impl EmbeddedAgent {
         &self,
         person: uuid::Uuid,
         account: Option<String>,
+        grant: LoginGrant,
     ) -> Result<(), AgentError> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(Command::PrepareLogin {
-                person,
-                account,
+                login: PersonLogin {
+                    person,
+                    account,
+                    grant,
+                },
                 reply,
             })
             .await
@@ -696,6 +726,15 @@ impl EmbeddedAgent {
     }
 }
 
+/// One person's login on a host: the account the server prefers and the
+/// login access grant the host checks the opened account against.
+struct PersonLogin {
+    person: uuid::Uuid,
+    account: Option<String>,
+    grant: LoginGrant,
+}
+
+/// A request to the embedded agent actor, answered on its own reply channel.
 enum Command {
     #[cfg(all(feature = "remote", feature = "ssh"))]
     InstalledRoute(oneshot::Sender<bool>),
@@ -720,16 +759,16 @@ enum Command {
         json: Vec<u8>,
         reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
     },
+    #[cfg(feature = "remote")]
+    RetireConnection(oneshot::Sender<()>),
     Open {
         size: TerminalSize,
-        person: Option<uuid::Uuid>,
-        account: Option<String>,
+        login: Option<PersonLogin>,
         readiness: bool,
         reply: oneshot::Sender<Result<TerminalOpened, AgentError>>,
     },
     PrepareLogin {
-        person: uuid::Uuid,
-        account: Option<String>,
+        login: PersonLogin,
         reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
     },
     #[cfg(feature = "remote")]
@@ -1139,10 +1178,6 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep link loss, capability invalidation, census publication, fallback retirement, and route ownership ordered in the same actor turn."
-)]
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
@@ -1706,7 +1741,6 @@ async fn apply_cached_ack(
 
 /// One handler services the owned shadow whether the primary is live or gone.
 #[cfg(feature = "remote")]
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn process_priming(
     event: priming::Event,
     hot: &mut priming::State,
@@ -1900,8 +1934,7 @@ fn retain_owned_input(
     Some(true)
 }
 
-// The command variants mutate one shared route table in one bounded actor turn.
-#[allow(clippy::too_many_lines)]
+/// The command variants mutate one shared route table in one bounded actor turn.
 async fn process_command(
     command: Command,
     connection: &mut AgentConnection,
@@ -1975,7 +2008,18 @@ async fn process_command(
             if reply.is_closed() {
                 return true;
             }
-            if !matches!(&connection.peer, Peer::Remote(link) if link.supports_renewal()) {
+            let supported = match action {
+                "transport.csr" | "transport.certificate" => {
+                    matches!(&connection.peer, Peer::Remote(link) if link.supports_renewal())
+                }
+                "transport.csr.rotate"
+                | "transport.identity.rotate.certificate"
+                | "transport.identity.rotate.ack" => {
+                    matches!(&connection.peer, Peer::Remote(link) if link.supports_identity_rotation())
+                }
+                _ => false,
+            };
+            if !supported {
                 let _ = reply.send(Err(AgentError::Unsupported));
                 return true;
             }
@@ -2004,10 +2048,17 @@ async fn process_command(
             pending.insert(call_id, PendingCall::Control(reply));
             true
         }
+        #[cfg(feature = "remote")]
+        Command::RetireConnection(reply) => {
+            if let Peer::Remote(remote) = &connection.peer {
+                remote.retire();
+            }
+            let _ = reply.send(());
+            false
+        }
         Command::Open {
             size,
-            person,
-            account,
+            login,
             readiness,
             reply,
         } => {
@@ -2035,9 +2086,10 @@ async fn process_command(
                 "cols": size.cols,
                 "rows": size.rows,
             });
-            if let Some(person) = person {
-                request["person"] = serde_json::json!(person);
-                request["account"] = serde_json::json!(account);
+            if let Some(login) = login {
+                request["person"] = serde_json::json!(login.person);
+                request["account"] = serde_json::json!(login.account);
+                request["grant"] = serde_json::json!(login.grant);
             }
             if readiness {
                 request["readiness"] = serde_json::Value::Bool(true);
@@ -2058,11 +2110,7 @@ async fn process_command(
             pending.insert(call_id, PendingCall::Open(reply));
             true
         }
-        Command::PrepareLogin {
-            person,
-            account,
-            reply,
-        } => {
+        Command::PrepareLogin { login, reply } => {
             if reply.is_closed() {
                 return true;
             }
@@ -2087,7 +2135,7 @@ async fn process_command(
                 return true;
             };
             let Ok(json) = serde_json::to_vec(
-                &serde_json::json!({"uid":connection.execution_uid,"person":person,"account":account,"cols":80,"rows":24}),
+                &serde_json::json!({"uid":connection.execution_uid,"person":login.person,"account":login.account,"grant":login.grant,"cols":80,"rows":24}),
             ) else {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
@@ -2623,7 +2671,6 @@ where
 }
 
 // Incoming wire cases share actor-owned sequence accounting and bounded output senders.
-#[allow(clippy::too_many_lines)]
 async fn process_incoming(
     incoming: Incoming,
     connection: &mut AgentConnection,
@@ -3054,7 +3101,6 @@ fn decode_event(stream_id: u32, sub_id: u32, event_json: &[u8], wire: &Bytes) ->
     })
 }
 
-#[allow(clippy::too_many_lines)] // Keep shared codec validation and stream admission in one path.
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
     loop {
         match decode_muxed_frame(&connection.receive) {

@@ -11,7 +11,36 @@ read_lease_birth() {
 start_setup_lease() {
  exec 7< "$stage"
  flock -n 7 || exit 73
- (exec 9<&-; if [ "${lease_runtime:-no}" != yes ]; then exec 6<&-; fi; exec sleep 180) >/dev/null 2>&1 &
+ # The lease protects slow uploads for as long as the authored reader moves
+ # bytes. It checks consumption every 180 seconds, so an abandoned lease
+ # retires within two checks; the caller detects transfer inactivity after 30 seconds. Sleep children own no lock descriptors.
+ (
+  # Progress output belongs to the upload command, never its background lease.
+  exec 3>&-
+  exec 9<&-
+  if [ "${lease_runtime:-no}" != yes ]; then exec 6<&-; fi
+  lease_sleeper=
+  trap '[ -z "$lease_sleeper" ] || kill "$lease_sleeper" 2>/dev/null; exit 0' TERM INT HUP
+  lease_consumed=0
+  if [ -f "$stage/transfer-progress" ] && [ ! -L "$stage/transfer-progress" ]; then
+   IFS= read -r lease_consumed < "$stage/transfer-progress" || exit 0
+  fi
+  case "$lease_consumed" in ''|*[!0-9]*) exit 0;; esac
+  [ "${#lease_consumed}" -le 18 ] || exit 0
+  while :; do
+   (exec 7<&-; exec 6<&-; exec sleep 180) &
+   lease_sleeper=$!
+   wait "$lease_sleeper" || exit 0
+   lease_sleeper=
+   lease_next=0
+   if [ -f "$stage/transfer-progress" ] && [ ! -L "$stage/transfer-progress" ]; then
+    IFS= read -r lease_next < "$stage/transfer-progress" || exit 0
+   fi
+   case "$lease_next" in ''|*[!0-9]*) exit 0;; esac
+   [ "${#lease_next}" -le 18 ] && [ "$lease_next" -gt "$lease_consumed" ] || exit 0
+   lease_consumed=$lease_next
+  done
+ ) >/dev/null 2>&1 &
  lease_pid=$!
  read_lease_birth "$lease_pid" || exit 73
  lease_birth=$lease_actual_birth

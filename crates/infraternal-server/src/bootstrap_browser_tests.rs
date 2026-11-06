@@ -3,10 +3,7 @@
 use super::*;
 use tokio::io::AsyncWriteExt;
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Keep diagnostic fixture inputs explicit without production state."
-)]
+/// Run the browser fixture against the production bootstrap and socket routes.
 pub(super) async fn run(
     f: &Fixture,
     auth: Auth,
@@ -69,14 +66,15 @@ pub(super) async fn run(
         .fetch_one(&f.pool)
         .await
         .is_ok_and(|count| count == 1);
-        let session_present = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM sessions WHERE token_hash=?",
-        )
-        .bind(crate::auth::hash(&f.cookie))
-        .fetch_one(&f.pool)
-        .await
-        .is_ok_and(|count| count == 1);
-        eprintln!("FIXTURE schema_users_present={schema_present} session_present={session_present}");
+        let session_present =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sessions WHERE token_hash=?")
+                .bind(crate::auth::hash(&f.cookie))
+                .fetch_one(&f.pool)
+                .await
+                .is_ok_and(|count| count == 1);
+        eprintln!(
+            "FIXTURE schema_users_present={schema_present} session_present={session_present}"
+        );
     }
     server.abort();
     assert!(result.success(), "production-browser timeline failed");

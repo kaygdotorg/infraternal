@@ -6,75 +6,38 @@ mod deleted_path_review;
 
 use super::*;
 use crate::restart_binary::fixture::{
-    RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all, stripped_test_image,
+    ChildGuard, Directory, RESTART_TEST_HANG_BOUND as HANG_BOUND, Signed, strip_all,
+    stripped_test_image,
 };
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
-struct Directory(PathBuf, Option<PathBuf>);
-impl Directory {
-    fn new() -> Self {
-        const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
-        let socket_directory = format!("c{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        let default_root = PathBuf::from(std::env::var_os("HOME").unwrap())
-            .join(".cache/codex-scratch/infraternal");
-        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
-            .map_or_else(|| default_root.clone(), PathBuf::from);
-        let path = root.join("restart-tests").join(&socket_directory);
-        let needs_short_root = path
-            .join("restart/control.sock")
-            .as_os_str()
-            .as_encoded_bytes()
-            .len()
-            > MAX_UNIX_SOCKET_PATH_BYTES;
-        // Executable fixtures must retain trusted HOME ancestry and share the
-        // running image's filesystem for hard-link checks. Only sockets use /tmp.
-        let directory = if needs_short_root {
-            Self(
-                default_root.join("restart-tests").join(socket_directory),
-                Some(nix::unistd::mkdtemp("/tmp/ir-XXXXXX").unwrap()),
-            )
-        } else {
-            Self(path, None)
-        };
-        let socket = directory.state().join("restart/control.sock");
-        assert!(
-            socket.as_os_str().as_encoded_bytes().len() <= MAX_UNIX_SOCKET_PATH_BYTES,
-            "restart fixture socket path exceeds Linux sun_path: {} bytes",
-            socket.as_os_str().as_encoded_bytes().len()
-        );
-
-        // The running unit-test image is also used as a replacement fixture.
-        // A shared build umask can make it group-writable, which the production
-        // validator correctly refuses; keep this private test image executable.
-        std::fs::set_permissions(
-            std::env::current_exe().unwrap(),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&directory.0)
-            .unwrap();
-        directory
-    }
-
-    fn state(&self) -> &Path {
-        self.1.as_deref().unwrap_or(&self.0)
-    }
-}
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-        if let Some(root) = &self.1 {
-            let _ = std::fs::remove_dir_all(root);
-        }
-    }
-}
-
-/// Copies `source` to an owner-only executable at `target`, which tests then exec.
+/// Copy one executable into a private fixture path without inheriting a writable mode.
 fn copy_private_image(source: &Path, target: &Path) {
     crate::test_executable::copy(source, target, 0o700);
+}
+
+/// Run snapshot-dependent assertions in a compact image, keeping production admission unchanged.
+fn run_in_stripped_image(name: &str) -> bool {
+    let source = std::env::current_exe().unwrap();
+    if std::fs::metadata(&source).unwrap().len() <= crate::restart_image::MAX_IMAGE {
+        return false;
+    }
+    let child = std::process::Command::new(stripped_test_image(&source))
+        .args(["--exact", name, "--nocapture"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let output = bounded_output(child, HANG_BOUND, name);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
 }
 
 /// Sign a stripped byte copy at an owner-only path so admission exercises release verification.
@@ -84,21 +47,24 @@ fn copy_signed_private_image(source: &Path, target: &Path) -> Signed {
     Signed::new(target.to_owned(), &bytes)
 }
 
-fn bounded_output(
-    mut child: std::process::Child,
+/// Collect a private child with a hang bound, retaining cleanup ownership on every panic.
+pub(super) fn bounded_output(
+    child: std::process::Child,
     deadline: Duration,
     description: &str,
 ) -> std::process::Output {
+    let mut child = ChildGuard::new(child);
     let until = std::time::Instant::now() + deadline;
     loop {
-        if child.try_wait().unwrap().is_some() {
-            return child.wait_with_output().unwrap();
+        if child.process().try_wait().unwrap().is_some() {
+            return child.output();
         }
         if std::time::Instant::now() >= until {
-            let process_group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+            let process_group =
+                nix::unistd::Pid::from_raw(i32::try_from(child.process().id()).unwrap());
             let _ = nix::sys::signal::killpg(process_group, nix::sys::signal::Signal::SIGKILL);
-            let _ = child.kill();
-            let output = child.wait_with_output().unwrap();
+            let _ = child.process().kill();
+            let output = child.output();
             panic!(
                 "{description} exceeded {deadline:?}; status={}\nstdout:\n{}\nstderr:\n{}",
                 output.status,
@@ -110,6 +76,7 @@ fn bounded_output(
     }
 }
 
+/// A client can neither steal nor create the private control endpoint.
 #[tokio::test]
 async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     let directory = Directory::new();
@@ -133,8 +100,47 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     assert!(!directory.state().join("restart/control.sock").exists());
 }
 
+/// A same-user status request reads the CA lock, and an unavailable socket is reported as such.
+#[tokio::test]
+async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socket() {
+    let directory = Directory::new();
+    assert!(query_ca_status(directory.state()).is_err());
+
+    let mut control = Control::start(directory.state()).unwrap();
+    let source =
+        std::sync::Arc::new(infraternal_server::ca_memory::MemoryCaSource::unprovisioned(None));
+    let server = tokio::spawn(async move { control.requested(Some(source.as_ref())).await });
+    let state = directory.state().to_owned();
+    let status = tokio::task::spawn_blocking(move || query_ca_status(&state))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.available);
+    assert!(!status.initialized);
+    assert_eq!(status.locked, Some(true));
+    assert!(!status.clock_healthy);
+    assert!(status.roots.is_empty());
+    server.abort();
+    assert!(server.await.is_err_and(|error| error.is_cancelled()));
+}
+
+/// The control endpoint accepts a read-only status request frame.
+#[tokio::test]
+async fn private_control_endpoint_accepts_a_read_only_status_request_frame() {
+    let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    client.write_u16(0).await.unwrap();
+    client.write_u8(1).await.unwrap();
+    assert!(read_request(&mut server).await.is_ok());
+}
+
+/// Check default-path admission in a compact running image and refuse untrusted paths.
 #[tokio::test]
 async fn restart_requests_use_the_servers_binary_and_reject_untrusted_paths() {
+    if run_in_stripped_image(
+        "restart::tests::restart_requests_use_the_servers_binary_and_reject_untrusted_paths",
+    ) {
+        return;
+    }
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();
     let (received, requested) = tokio::time::timeout(HANG_BOUND, async {
@@ -218,8 +224,14 @@ fn replacement_never_exports_to_a_general_purpose_binary() {
     );
 }
 
+/// Check cold rootless replacement and recovery snapshots independently of debug information.
 #[test]
 fn rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode() {
+    if run_in_stripped_image(
+        "restart::tests::rootless_even_marked_replacement_is_cold_and_open_fd_pins_the_inode",
+    ) {
+        return;
+    }
     if nix::unistd::Uid::effective().is_root() {
         return;
     }
@@ -349,8 +361,14 @@ fn real_fd_exec_pins_replacement_and_cold_rollback_uses_null_stdin() {
     );
 }
 
+/// Keep control alive after invalid replies and test valid reloads in a compact image.
 #[tokio::test]
 async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
+    if run_in_stripped_image(
+        "restart::tests::closed_reply_and_missing_reload_target_do_not_end_restart_control",
+    ) {
+        return;
+    }
     let directory = Directory::new();
     let mut control = Control::start(directory.state()).unwrap();
     let path = control.path.clone();
@@ -383,6 +401,7 @@ async fn closed_reply_and_missing_reload_target_do_not_end_restart_control() {
     assert!(!requested.unwrap());
 }
 
+/// Reopen a replaced installation path using a compact executable rather than debug sections.
 #[test]
 fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
     const NAME: &str =
@@ -406,9 +425,8 @@ fn reload_reopens_install_path_when_the_running_inode_was_replaced() {
     }
     let directory = Directory::new();
     let installed = directory.0.join("installed");
-    // A hard link is an executable fixture without a write window after copy.
-    // The child unlinks only this name, leaving the cached image intact. The
-    // stripped image keeps the child's copy of /proc/self/exe small (#355).
+    // Link a compact image without a write window after publication.
+    // The child unlinks only this name, leaving the cargo test image intact.
     std::fs::hard_link(
         stripped_test_image(&std::env::current_exe().unwrap()),
         &installed,
@@ -475,6 +493,7 @@ async fn default_restart_opens_the_receiver_target_exactly_once() {
     );
 }
 
+/// Bound runtime shutdown in an owned compact child with a blocking waiter.
 #[test]
 fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
     const NAME: &str = "restart::tests::runtime_shutdown_never_waits_forever_on_a_blocking_waiter";
@@ -505,14 +524,15 @@ fn runtime_shutdown_never_waits_forever_on_a_blocking_waiter() {
         let _ = child.wait();
         return;
     }
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME, "--nocapture"])
-        .env("INFRATERNAL_RUNTIME_BOUND_TEST", "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .process_group(0)
-        .spawn()
-        .unwrap();
+    let mut child =
+        std::process::Command::new(stripped_test_image(&std::env::current_exe().unwrap()))
+            .args(["--exact", NAME, "--nocapture"])
+            .env("INFRATERNAL_RUNTIME_BOUND_TEST", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
     let deadline = std::time::Instant::now() + HANG_BOUND;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -573,6 +593,7 @@ fn early_hangup_is_queued_until_control_installs_its_handler() {
     );
 }
 
+/// Record authenticated request metadata from a compact restart fixture.
 #[test]
 fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
     const NAME: &str = "restart::tests::restart_request_logs_kernel_peer_target_and_cold_outcome";
@@ -621,6 +642,85 @@ fn restart_request_logs_kernel_peer_target_and_cold_outcome() {
     assert!(!logs.contains("seed") && !logs.contains("key_bytes") && !logs.contains("key_length"));
 }
 
+/// C source of the closed-stdin probe: it exits 0 only when its standard input
+/// is `/dev/null`, observed before any language runtime could repair it.
+const STDIN_PROBE_SOURCE: &str = r#"/* Tests null stdin at the actual exec boundary, before runtime repair [217], #154. */
+#include <sys/stat.h>
+#include <unistd.h>
+int main(void) {
+    struct stat input, expected;
+    return fstat(STDIN_FILENO, &input) != 0 || stat("/dev/null", &expected) != 0
+        || input.st_dev != expected.st_dev || input.st_ino != expected.st_ino;
+}
+"#;
+
+/// Returns the compiled, stripped closed-stdin probe, built once per test
+/// process and cached beside the stripped test image.
+///
+/// The test used to run `cc` and `strip` in each of its two stages. On a busy
+/// gate disk a single compile of these ten lines took more than 60 s (#355).
+/// The cache key is a hash of the source, so editing the probe rebuilds it.
+/// Each stage still signs its own private copy of these bytes.
+fn stdin_probe_image() -> PathBuf {
+    static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let cache = crate::restart_binary::fixture::scratch_root().join("restart-test-images");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&cache)
+        .unwrap();
+    let digest = openssl::sha::sha256(STDIN_PROBE_SOURCE.as_bytes());
+    let key = u64::from_be_bytes(digest[..8].try_into().unwrap());
+    let image = cache.join(format!("stdin-probe-{key:016x}"));
+    let _building = BUILDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if image.exists() {
+        return image;
+    }
+    let work = cache.join(format!(".stdin-probe-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&work)
+        .unwrap();
+    let source = work.join("stdin-probe.c");
+    let built = work.join("stdin-probe");
+    std::fs::write(&source, STDIN_PROBE_SOURCE).unwrap();
+    let compiled = std::process::Command::new("cc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&built)
+        .env("TMPDIR", &work)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let compiled = bounded_output(compiled, HANG_BOUND, "native stdin probe compiler");
+    assert!(
+        compiled.status.success(),
+        "native stdin probe compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    strip_all(&built);
+    // The inherited shared umask may make compiler output group-writable.
+    std::fs::set_permissions(&built, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Publish by hard link so no reader ever sees a partial image. The mutex
+    // covers this process only: another cold test process sharing this cache
+    // can publish first. `link` never replaces, so an existing name is a
+    // complete probe built from the same source; reuse it. The private work
+    // directory is removed on every path, including a failed link.
+    let published = std::fs::hard_link(&built, &image);
+    std::fs::remove_dir_all(&work).unwrap();
+    match published {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("could not publish the stdin probe: {error}"),
+    }
+    image
+}
+
 #[test]
 fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
     const NAME: &str =
@@ -643,46 +743,17 @@ fn cold_exec_with_closed_stdin_keeps_the_image_pinned_and_maps_null() {
         );
     }
     let mut failures = Vec::new();
-    // Each wait below has its own hang guard. One budget shared across both
-    // stages (two compiles, strips and child runs) was a wall-clock bound on
-    // the whole test, and a busy disk exhausted it before the second child
-    // could start (#355).
+    // Each child run has its own hang guard. One budget shared across both
+    // stages was a wall-clock bound on the whole test, and a busy disk
+    // exhausted it before the second child could start (#355). The probe is
+    // compiled once per test process (`stdin_probe_image`).
     for stage in ["before", "after"] {
         let directory = Directory::new();
         let target = directory.0.join("cold-exec-successor");
         // A native probe observes inherited descriptors before the Rust runtime
         // can repair closed standard input and mask the exec boundary failure.
-        let source = directory.0.join("stdin-probe.c");
-        std::fs::write(&source, r#"/* Tests null stdin at the actual exec boundary, before runtime repair [217], #154. */
-#include <sys/stat.h>
-#include <unistd.h>
-int main(void) {
-    struct stat input, expected;
-    return fstat(STDIN_FILENO, &input) != 0 || stat("/dev/null", &expected) != 0
-        || input.st_dev != expected.st_dev || input.st_ino != expected.st_ino;
-}
-"#).unwrap();
-        let compiled = std::process::Command::new("cc")
-            .arg(&source)
-            .arg("-o")
-            .arg(&target)
-            .env("TMPDIR", &directory.0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let compiled = bounded_output(compiled, HANG_BOUND, "native stdin probe compiler");
-        assert!(
-            compiled.status.success(),
-            "native stdin probe compile failed: {}",
-            String::from_utf8_lossy(&compiled.stderr)
-        );
-        strip_all(&target);
-        // The inherited shared umask may make compiler output group-writable.
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let _signed = Signed::new(target.clone(), &std::fs::read(&target).unwrap());
+        let probe = std::fs::read(stdin_probe_image()).unwrap();
+        let _signed = Signed::new(target.clone(), &probe);
         let child =
             std::process::Command::new(stripped_test_image(&std::env::current_exe().unwrap()))
                 .args(["--exact", NAME, "--nocapture"])
@@ -706,6 +777,7 @@ int main(void) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Refuse FIFO replacement from a compact child without waiting for a writer.
 #[test]
 fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
     const NAME: &str =
@@ -722,14 +794,15 @@ fn reviewer_fifo_replacement_is_refused_without_waiting_for_a_writer() {
         nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME])
-        .env("INFRATERNAL_REVIEW_FIFO", &fifo)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child =
+        std::process::Command::new(stripped_test_image(&std::env::current_exe().unwrap()))
+            .args(["--exact", NAME])
+            .env("INFRATERNAL_REVIEW_FIFO", &fifo)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
     // A separate process bounds a synchronous open; an async timeout on the
     // same runtime thread cannot fire while that thread waits inside open(2).
     let deadline = std::time::Instant::now() + HANG_BOUND;

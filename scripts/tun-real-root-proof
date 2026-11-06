@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Real-root proof that an unprivileged user cannot attach the agent's persisted TUN (#260, D351).
+#
+# Why this exists: the test drops a child to uid 65534 (nobody). The privileged
+# sandbox maps a single uid, so the kernel's refusal of a *different* uid can't
+# be shown there (#344, 80581); the gate runs the in-sandbox counterpart
+# `a_fresh_persisted_tun_is_restricted_to_the_agent` instead. When a change
+# touches TUN code, the privileged row prints that this proof is required, and
+# the job runs it and records the output on its issue (BRIEF: root-only paths
+# run as root, in a throwaway clone under /root).
+#
+# What it trusts: only the commit id you pass and the public repository it is
+# fetched from. Everything else is root's: root clones that commit into a fresh
+# 0700 directory under /root, builds there with a root-owned cargo home and
+# target, and runs the one test in a throwaway network, mount and PID
+# namespace. Nothing the shared `claude` build account can write is on the
+# path: no claude-built binary, no claude-printed path, no claude worktree,
+# cache or library directory (review 81345). Before running, the binary's
+# interpreter and RUNPATH are checked with the commit's own
+# `scripts/elf-runpath-guard`, which allows only /nix/store and root's
+# private build directory. Running a branch's test as real root still trusts
+# that commit: run this only for the commit under review.
+#
+# Concurrency and cleanup: runs are serialised by a root-owned lock, each run
+# uses its own mktemp directories, and a trap removes them on any exit,
+# including a build failure or a dropped ssh session. The build waits for a
+# shared build slot; only the slot's lock is held as `claude`, through the
+# commit's own scripts/root-slot-hold, which starts claude's build-slot script
+# as a unit in claude's own slice (killed as a whole on release) and gives it
+# no file of root's (stderr is /dev/null).
+#
+# Usage, from `code` (which can ssh to root@compute01), with a full commit id:
+#   scripts/tun-real-root-proof <40-hex commit>
+set -euo pipefail
+commit=${1:?usage: tun-real-root-proof <40-hex commit>}
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || { echo "pass the full 40-character commit id" >&2; exit 2; }
+host=infraternal-dev-01-compute01
+
+status=0
+# Root's side starts with an empty environment plus this allowlist, so nothing
+# set machine-wide or by sshd (a future INFRATERNAL_SCCACHE_DIR, RUSTC_WRAPPER,
+# LD_*, CARGO_*) can reach root's build (J277, 81454 P3-4).
+root_env=(env -i PATH=/nix/var/nix/profiles/default/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8)
+ssh "root@$host" "${root_env[@]}" bash -s -- "$commit" <<'ROOT' || status=$?
+set -euo pipefail
+commit=$1
+test=an_unprivileged_user_cannot_attach_the_persisted_tun
+repository=https://git.kayg.org/kayg/infraternal.git
+export PATH=/nix/var/nix/profiles/default/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+umask 077
+
+# One proof at a time; a second run waits instead of deleting the first one's files.
+mkdir -p /root/.cache
+exec 9>/root/.cache/tun-real-root-proof.lock
+flock 9
+
+# Holding the lock means no other proof is alive: every child of a run keeps
+# fd 9 open, even one orphaned by SIGKILL. So whatever proof dirs exist now
+# were left by a killed run (no trap runs on SIGKILL; J277 saw 965 MB left in
+# /root). Remove them before starting. /tmp/tun-proof-run.* is the old name.
+for stale in /root/tun-proof.* /var/lib/tun-proof-run.* /tmp/tun-proof-run.*; do
+    [[ -d $stale && ! -L $stale && $(stat -c %u "$stale") == 0 ]] || continue
+    echo "removing a killed run's leftover: $stale"
+    rm -rf -- "$stale"
+done
+
+work=$(mktemp -d /root/tun-proof.XXXXXX)
+# Not in /tmp: /tmp is shared with claude, and the test gets a private /tmp
+# below. /var/lib is root-owned 0755 on the root filesystem (exec allowed).
+run=$(mktemp -d /var/lib/tun-proof-run.XXXXXX)
+cleanup() { rm -rf -- "$work" "$run"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# 1. Root fetches the commit itself, from the public repository.
+git clone -q --no-checkout "$repository" "$work/src"
+git -C "$work/src" fetch -q origin "$commit"
+git -C "$work/src" checkout -q --detach "$commit"
+[[ $(git -C "$work/src" rev-parse HEAD) == "$commit" ]] || { echo "checkout is not $commit" >&2; exit 1; }
+echo "root clone at $commit in $work"
+
+# 2. Build as root, root-owned cargo home and target, through a build slot.
+export CARGO_HOME=/root/.cache/tun-proof-cargo CARGO_TARGET_DIR=$work/target CARGO_BUILD_JOBS=4
+# The build's scratch space stays in root's own dir: `nix develop` otherwise
+# leaves an empty /tmp/nix-develop-* and /tmp/nix-shell.* per run in the shared
+# /tmp (J281 counted 160 of each). Here the trap or the sweep removes them.
+export TMPDIR=$work/tmp
+mkdir -p "$CARGO_HOME" "$TMPDIR"
+cd "$work/src"
+/usr/bin/python3 "$work/src/scripts/root-slot-hold" --keep-fd 9 nix develop -c cargo test --locked -p infraternal-plugin-mesh \
+    --features agent,server,relay,test-support --test gotatun_tun_owner --no-run --message-format=json \
+    > "$work/build.json" 2> "$work/build.log" || { tail -20 "$work/build.log" | cat -v >&2; exit 1; }
+binary=$(python3 -c 'import json, sys
+for line in open(sys.argv[1]):
+    m = json.loads(line) if line.startswith("{") else {}
+    if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "gotatun_tun_owner":
+        print(m["executable"])' "$work/build.json")
+[[ -n $binary && $binary == "$work"/target/* ]] || { echo "no test binary inside root's build dir: '$binary'" >&2; exit 1; }
+
+# 3. Refuse a binary that could load code from outside /nix/store and root's own dir.
+python3 "$work/src/scripts/elf-runpath-guard" "$binary" --allow "$work"
+
+# 4. nobody must be able to exec the binary: copy it to a root-owned 0755 dir.
+chmod 755 "$run"; install -m 755 "$binary" "$run/gotatun_tun_owner"
+cd "$run"
+echo "running as $(id -un) (uid $(id -u)) in a fresh network namespace"
+# A private tmpfs on /tmp: the test's state dir is /tmp/gotatun-tun-owner-<pid>,
+# and as PID 1 in the namespace that name is predictable, so in the shared
+# /tmp claude could pre-create it and fail the proof (J277, 81454). unshare
+# --mount makes mounts private, so this tmpfs never reaches the host.
+timeout 300 unshare --net --mount --pid --fork --kill-child --mount-proc \
+    bash -c 'mount -t tmpfs -o mode=1777,size=256m tmpfs /tmp; ip link set lo up; "$@"' proof \
+    "$run/gotatun_tun_owner" --ignored --exact "$test" --nocapture --test-threads=1
+ROOT
+
+echo "TUN_REAL_ROOT_PROOF_EXIT=$status commit=$commit"
+exit $status

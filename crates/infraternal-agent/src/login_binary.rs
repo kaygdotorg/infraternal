@@ -12,14 +12,37 @@ use std::{
 /// Rootless workers already use their own executable and need no additional copy.
 /// # Errors
 /// Refuses arbitrary links, untrusted ownership, writable published images and changing sources.
-pub(crate) fn accessible(exe: &Path, root: &Path) -> io::Result<Published> {
-    if nix::unistd::Uid::effective().is_root() {
-        publish(exe, root)
-    } else {
-        Ok(Published {
-            path: exe.to_path_buf(),
-            _launch: None,
-        })
+/// Returns `WouldBlock` when the durable queue is full; flock contention waits cooperatively.
+pub(crate) async fn accessible(exe: &Path, root: &Path) -> io::Result<Published> {
+    let mut admission = crate::durable_io::admit()?;
+    let exe = exe.to_owned();
+    let root = root.to_owned();
+    loop {
+        let source = exe.clone();
+        let directory = root.clone();
+        // Publication attempts never wait for a flock on a shared worker. Only
+        // active contention retries, with no open descriptor between attempts.
+        let (result, returned) = admission
+            .run(move || {
+                #[cfg(test)]
+                crate::durable_tests::hold(&directory);
+                if nix::unistd::Uid::effective().is_root() {
+                    publication(&source, &directory, false)
+                } else {
+                    Ok(Published {
+                        path: source,
+                        _launch: None,
+                    })
+                }
+            })
+            .await?;
+        admission = returned;
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            result => return result,
+        }
     }
 }
 
@@ -163,12 +186,13 @@ fn image_lock(path: &Path, locks: &Path, uid: u32) -> io::Result<File> {
     Ok(file)
 }
 
+/// Retain a launch image without parking a worker behind another controller.
 fn retained(path: PathBuf, locks: &Path, uid: u32) -> io::Result<Published> {
     // Public executable inodes are readable by accounts, which can take flock
     // EX even on read-only FDs. Synchronize only on private controller inodes.
     let lock = nix::fcntl::Flock::lock(
         image_lock(&path, locks, uid)?,
-        nix::fcntl::FlockArg::LockShared,
+        nix::fcntl::FlockArg::LockSharedNonblock,
     )
     .map_err(|(_, error)| io::Error::from(error))?;
     Ok(Published {
@@ -304,7 +328,10 @@ fn prune(root: &Path, current: &Path, staging: &Path, locks: &Path, uid: u32) ->
     File::open(locks)?.sync_all()
 }
 
-fn publish(exe: &Path, root: &Path) -> io::Result<Published> {
+/// Publish under the private controller lock, retrying contention at the caller.
+/// Synchronous fixture callers may request blocking flock; runtime callers must
+/// use nonblocking mode so other durable writes can use the shared workers.
+fn publication(exe: &Path, root: &Path, blocking: bool) -> io::Result<Published> {
     let uid = nix::unistd::Uid::effective().as_raw();
     // Linux binds this exact magic link to the executing image, even after an
     // anonymous upgrade. It is not an arbitrary pathname alias. All sources
@@ -338,9 +365,13 @@ fn publish(exe: &Path, root: &Path) -> io::Result<Published> {
     let locks = lock_directory(root, uid)?;
     // Accounts can read the image directory. Only the private sibling can be
     // used as a controller lock without exposing dispatch to account-held flock.
-    let _publisher =
-        nix::fcntl::Flock::lock(File::open(&locks)?, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_, error)| io::Error::from(error))?;
+    let mode = if blocking {
+        nix::fcntl::FlockArg::LockExclusive
+    } else {
+        nix::fcntl::FlockArg::LockExclusiveNonblock
+    };
+    let _publisher = nix::fcntl::Flock::lock(File::open(&locks)?, mode)
+        .map_err(|(_, error)| io::Error::from(error))?;
     // Runtime filesystems are commonly mounted noexec. The host policy stays
     // intact: use an executable cache filesystem, or refuse before unit launch.
     executable_filesystem(root)?;
@@ -394,6 +425,12 @@ fn publish(exe: &Path, root: &Path) -> io::Result<Published> {
     validate_image(&candidate, uid, metadata.len())?;
     prune(root, &candidate, &temporary.0, &locks, uid)?;
     retained(candidate, &locks, uid)
+}
+
+/// Synchronous fixtures exercise publication without needing an async runtime.
+#[cfg(test)]
+fn publish(exe: &Path, root: &Path) -> io::Result<Published> {
+    publication(exe, root, true)
 }
 
 #[cfg(test)]
@@ -864,5 +901,33 @@ mod tests {
             result.is_ok(),
             "abandoned staging name refused a restarted publisher: {result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod durable_tests {
+    //! Binary publication cannot stall other reactor work during a cold login.
+    use super::*;
+
+    /// The publication path, including its directory locks, runs outside the reactor.
+    #[tokio::test]
+    async fn image_durable_write_leaves_the_reactor_responsive() {
+        let parent = crate::durable_tests::directory();
+        let root = parent.join("images");
+        let source = parent.join("source");
+        fs::copy(std::env::current_exe().unwrap(), &source).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        let image = crate::durable_tests::responsive(root.clone(), {
+            let root = root.clone();
+            async move { accessible(&source, &root).await }
+        })
+        .await
+        .unwrap();
+        assert!(image.path().exists());
+        if nix::unistd::Uid::effective().is_root() {
+            assert_eq!(image.path().parent(), Some(root.as_path()));
+        }
+        drop(image);
+        fs::remove_dir_all(parent).unwrap();
     }
 }

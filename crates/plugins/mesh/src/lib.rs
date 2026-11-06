@@ -62,6 +62,12 @@ pub mod node;
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub use macos_node as node;
 
+#[cfg(all(feature = "agent", target_os = "linux"))]
+pub mod gotatun_node;
+
+#[cfg(all(feature = "agent", target_os = "linux"))]
+mod gotatun_tun;
+
 #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
 pub mod dns;
 
@@ -88,6 +94,10 @@ pub mod settings;
 
 #[cfg(feature = "server")]
 pub mod node_coordination;
+
+/// The coordinator's durable `WireGuard` key rotation driver (D166, #285).
+#[cfg(feature = "server")]
+mod rotation;
 
 #[cfg(feature = "server")]
 pub mod presence;

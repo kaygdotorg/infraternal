@@ -4,7 +4,6 @@ use super::*;
 
 #[tokio::test]
 #[ignore = "scale measurement; run alone under CPUWeight=10000"]
-#[allow(clippy::too_many_lines)]
 async fn two_hundred_vanished_sessions_preserve_the_same_channel() {
     let base = crate::test_state_root().join("fds");
     std::fs::create_dir_all(&base).unwrap();

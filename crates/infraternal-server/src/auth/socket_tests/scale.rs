@@ -2,7 +2,6 @@
 use super::*;
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)] // Keep the complete headroom exchange on one real shared socket.
 async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let _guard = SERIAL.lock().await;
     // Pagination correctness must not spend runtime authority while real

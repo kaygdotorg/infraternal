@@ -78,9 +78,10 @@ pub async fn run_bound_terminal(channel: &impl Channel, _: Option<PathBuf>) -> i
         ),
     )?;
     drop(tx);
-    writer(channel, rx, None, false, false, 0).await
+    writer(channel, rx, None, false, false, false, 0).await
 }
 
+/// Dispatch the portable daemon's frames to the plugin registry and reply on `channel`.
 async fn dispatch(
     channel: &impl Channel,
     registry: crate::plugin_control::Registry,
@@ -152,7 +153,7 @@ async fn dispatch(
             }
         }
     };
-    tokio::select! { result = dispatch => result, result = writer(channel,rx,None,true,renewal.is_some(),wire_caps) => result }
+    tokio::select! { result = dispatch => result, result = writer(channel,rx,None,true,renewal.is_some(),crate::daemon_writer::supports_identity_rotation(renewal),wire_caps) => result }
 }
 
 // Native classification consumed AttachTerm while preserving its decoder;

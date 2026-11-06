@@ -314,7 +314,6 @@ async fn busy_revocation(mode: &str) {
 }
 
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review3_pending_routes_and_idle_expiry_recovery() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -483,7 +482,6 @@ async fn review3_busy_expiry() {
 
 /// A tab's completion and cleanup must leave the replacement cookie's pending row untouched.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review3_completion_and_cleanup_are_transaction_bound() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -553,8 +551,15 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        // A response may arrive after B replaces the shared cookie jar.
-        assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        // A delayed response may restore A's distinct cookie name, but B's
+        // higher login sequence still wins and only A's observed name is cleared.
+        let refreshed_a: Vec<_> = headers
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+        assert!(refreshed_a[0].starts_with("__Host-infraternal-session-"));
+        assert!(refreshed_a.iter().any(|value| value.contains("Max-Age=0")));
         assert_eq!(
             http_post_json_with_cookie(
                 &app,
@@ -582,7 +587,7 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
             let (status, headers, _) =
                 http_post_json_with_cookie(&app, "session", json!({}), cookie).await;
             assert_eq!(status, axum::http::StatusCode::OK);
-            assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+            assert!(headers.contains_key(axum::http::header::SET_COOKIE));
         }
         for action in ["unlock-finish", "logout"] {
             let (status, headers, _) =
@@ -599,7 +604,12 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        assert!(!headers.contains_key(axum::http::header::SET_COOKIE));
+        assert!(
+            headers
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .any(|value| value.to_str().unwrap().contains("Max-Age=0"))
+        );
         // B remains active even if cleanup's response is delivered after this read.
         assert_eq!(
             http_post_json_with_cookie(&app, "session", json!({}), b)
@@ -612,7 +622,6 @@ async fn review3_completion_and_cleanup_are_transaction_bound() {
 
 /// An unresponsive real Unix backend cannot monopolize a browser handler indefinitely.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review3_backend_reply_has_a_deadline() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -879,7 +888,6 @@ async fn review3_expired_handshake_must_not_welcome() {
 }
 /// A pending live open accepts its reply; committed revocation rejects a later reply.
 #[tokio::test(start_paused = true)]
-#[allow(clippy::too_many_lines)]
 async fn review4_open_reply_and_revocation_preserve_authority() {
     let _guard = SERIAL.lock().await;
     let _clock = FrozenSocketTime::new().await;
@@ -979,7 +987,6 @@ async fn review4_open_reply_and_revocation_preserve_authority() {
 /// Exercise slow connects at all 16 per-user sockets, with real SQLite and Unix replies.
 #[tokio::test]
 #[ignore = "release-only connect scale measurement; run without concurrent builds"]
-#[allow(clippy::too_many_lines)]
 async fn review4_slow_open_at_user_capacity() {
     let _guard = SERIAL.lock().await;
     for revoke in [false, true] {

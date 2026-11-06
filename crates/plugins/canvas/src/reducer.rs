@@ -278,7 +278,7 @@ fn prune(columns: &mut Vec<Value>) {
 /// Reduces against current state. The caller discards the working document on any error.
 /// # Errors
 /// Refuses invalid bounds, missing destinations and reuse of stable IDs.
-#[allow(clippy::result_unit_err, clippy::too_many_lines)]
+#[allow(clippy::result_unit_err)]
 pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(), ()> {
     if !doc.valid() {
         return Err(());

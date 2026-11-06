@@ -148,6 +148,17 @@ impl CaAdministration {
         Ok(self.source.retained_issuer()?.is_some())
     }
 
+    /// Return public-only issuer metadata after the caller has authorized a live administrator.
+    ///
+    /// # Errors
+    /// Fails if the public trust source cannot provide its retained issuer.
+    pub fn public_status(
+        &self,
+        clock: Option<&crate::clock_health::ClockHealth>,
+    ) -> Result<crate::ca_status::CaStatus, CaError> {
+        crate::ca_status::from_source(Some(self.source.as_ref()), clock)
+    }
+
     /// Wire the real auth verifier, database and private copy store to one cold signer.
     #[must_use]
     pub fn new(

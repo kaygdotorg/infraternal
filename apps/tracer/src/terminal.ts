@@ -4,7 +4,7 @@ import { mountToast, type ToastController } from "../../../packages/ui/src/toast
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
-import { terminalRefusal } from "./terminal-refusal";
+import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
@@ -71,9 +71,10 @@ interface GhosttyActivityControls {
   };
 }
 
+/** How a terminal reports to the window that shows it: attach, output, disconnects, exit, refusals and session ids. All optional. */
 export interface TerminalHooks {
   /** Return true when a product surface presents the refusal and its session-list action. */
-  onOpenRefused?: (message: string, sessionList: boolean) => boolean;
+  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction) => boolean;
   /** Only a public session id; writer/resume capabilities remain in memory. */
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
@@ -1170,6 +1171,7 @@ export class TerminalClient {
     this.streamRetryTimer = 0;
   }
 
+  /** Asks the server for a new session on this terminal's host. A refusal goes to the window's `onOpenRefused` (its strip), else to the status line. */
   private openSession(): void {
     if (this.openCallSent || this.closed) return;
     const hostId = this.config.hostId ?? new URLSearchParams(location.search).get("host");
@@ -1193,7 +1195,7 @@ export class TerminalClient {
       this.openCallSent = false;
       if (!this.closed && this.conn.isOpen) {
         const refusal = terminalRefusal(error, this.config.hostName);
-        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList)) this.setStatus(refusal.message);
+        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action)) this.setStatus(refusal.message);
       }
     });
   }

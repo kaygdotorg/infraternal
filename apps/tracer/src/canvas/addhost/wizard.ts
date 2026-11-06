@@ -100,6 +100,7 @@ export interface WizardDeps {
   onClosed(): void;
 }
 
+/** The add-host wizard: discovery, CA unlock when needed, then enrollment. */
 export class Wizard {
   private readonly surface: FlowSurface;
   private readonly root: HTMLElement;
@@ -523,6 +524,7 @@ export class Wizard {
     this.beginBatch(root);
   }
 
+  /** Check the CA before enrolling: unlock it when locked or unknown, otherwise start the batch. */
   private async prepareAuthority(root: boolean): Promise<void> {
     if (this.busy) return;
     this.setBusy(true);
@@ -531,7 +533,7 @@ export class Wizard {
       if (!this.alive || this.closing) return;
       this.authorityRoot = root;
       this.authorityInitialized = status.initialized;
-      if (status.locked) this.go("authority");
+      if (status.locked !== false) this.go("authority");
       else { this.authorityReady = true; this.beginBatch(root); }
     } catch (error: unknown) {
       if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Host connections could not be checked. Try again.");

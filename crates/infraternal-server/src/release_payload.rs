@@ -40,10 +40,13 @@ pub(crate) struct ReleasePayload {
     development: bool,
     origin: String,
     lock: Mutex<()>,
+    /// Actual saved release bytes renew callers waiting on this shared resolver.
+    progress: tokio::sync::watch::Sender<u64>,
     #[cfg(test)]
     trust: Option<String>,
 }
 impl ReleasePayload {
+    /// Create the version-scoped resolver and retire abandoned private downloads.
     pub(crate) fn new(
         executable: PathBuf,
         local: infraternal_plugin_ssh::install::BinaryPaths,
@@ -68,6 +71,7 @@ impl ReleasePayload {
             development: env!("INFRATERNAL_RELEASE_BUILD") != "1",
             origin: "https://builds.infraternal.com".into(),
             lock: Mutex::new(()),
+            progress: tokio::sync::watch::channel(0).0,
             #[cfg(test)]
             trust: None,
         })
@@ -80,7 +84,7 @@ impl ReleasePayload {
     async fn resolve_session(&self, arch: Architecture) -> Result<Option<PathBuf>, Failure> {
         self.resolve_artifact(arch, Artifact::Session).await
     }
-    #[allow(clippy::too_many_lines)] // Keep authenticated absence, bounded download and atomic publication ordered.
+    /// Acquire and authenticate one architecture image, reporting saved network bytes.
     async fn resolve_artifact(
         &self,
         arch: Architecture,
@@ -138,10 +142,11 @@ impl ReleasePayload {
         let staging =
             Staging::new(&version_dir).map_err(|_| fail("the release cache is unavailable."))?;
         let base = format!("{}/releases/{}", self.origin, self.version);
-        let result = crate::release_http::download(
+        let result = crate::release_http::download_progress(
             &format!("{base}/SHA256SUMS"),
             &staging.path.join("SHA256SUMS"),
             65_536,
+            Some(&self.progress),
         )
         .await;
         if matches!(result, Err(crate::release_http::DownloadError::Missing)) && self.development {
@@ -153,10 +158,11 @@ impl ReleasePayload {
         }
         result.map_err(|error| fail(error.reason()))?;
         for (file, limit) in [("SHA256SUMS.sig", 1024), ("VERSION", 128)] {
-            crate::release_http::download(
+            crate::release_http::download_progress(
                 &format!("{base}/{file}"),
                 &staging.path.join(file),
                 limit,
+                Some(&self.progress),
             )
             .await
             .map_err(|error| fail(error.reason()))?;
@@ -171,10 +177,11 @@ impl ReleasePayload {
             true
         };
         if present {
-            crate::release_http::download(
+            crate::release_http::download_progress(
                 &format!("{base}/{name}"),
                 &staging.path.join(&name),
                 128 * 1024 * 1024,
+                Some(&self.progress),
             )
             .await
             .map_err(|error| fail(error.reason()))?;
@@ -200,6 +207,10 @@ impl ReleasePayload {
     }
 }
 impl PayloadSource for ReleasePayload {
+    /// Observe only real body bytes saved by this resolver.
+    fn progress(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.progress.subscribe())
+    }
     fn get(&self, arch: Architecture) -> Operation<'_, PathBuf> {
         Box::pin(self.resolve(arch))
     }
@@ -319,7 +330,7 @@ fn private_directory(path: &Path) -> std::io::Result<()> {
 }
 impl ReleasePayload {
     // Conventional octal group/other permission masks make this audit explicit.
-    #[allow(clippy::verbose_bit_mask, clippy::too_many_lines)]
+    #[allow(clippy::verbose_bit_mask)]
     async fn verify_cached(
         &self,
         directory: &Path,

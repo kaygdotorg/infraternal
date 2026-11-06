@@ -21,6 +21,7 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// The host identity as stored on disk: its ID, account and certificate material.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredIdentity {
@@ -42,6 +43,67 @@ struct StoredIdentity {
     ca_der: String,
     certificate_der: String,
     key_der: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity_rotation: Option<StoredRotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completed_identity_rotation:
+        Option<infraternal_plugin_remote::identity_rotation::CompletedRotation>,
+}
+
+/// A pending host identity rotation as stored on disk: the challenge, the candidate private key and, once issued, its
+/// certificate. The key is held in a buffer that is wiped on drop.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredRotation {
+    challenge: infraternal_plugin_remote::identity_rotation::Challenge,
+    candidate_key_der: Zeroizing<String>,
+    certificate_der: Option<String>,
+}
+
+/// A fixed-capacity serializer target for identity documents containing private material.
+struct IdentityJsonWriter(Zeroizing<Vec<u8>>);
+
+impl std::io::Write for IdentityJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Some(end) = self.0.len().checked_add(bytes.len()) else {
+            return Err(io::ErrorKind::InvalidData.into());
+        };
+        if end > 8192 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialize identity state into wipe-on-drop storage without an intermediate JSON vector.
+fn serialize_identity_document(stored: &StoredIdentity) -> io::Result<Zeroizing<Vec<u8>>> {
+    let mut writer = IdentityJsonWriter(Zeroizing::new(Vec::with_capacity(8192)));
+    serde_json::to_writer(&mut writer, stored).map_err(|_| refused())?;
+    Ok(writer.0)
+}
+
+/// Encode directly into the zeroizing base64 string retained in the identity model.
+fn encode_candidate_key(key_pkcs8: &[u8]) -> Zeroizing<String> {
+    let capacity = key_pkcs8.len().saturating_add(2) / 3 * 4;
+    let mut encoded = Zeroizing::new(String::with_capacity(capacity));
+    B64.encode_string(key_pkcs8, &mut encoded);
+    encoded
+}
+
+/// Decode into a zeroizing allocation sized to avoid a secret-bearing reallocation.
+fn decode_candidate_key(encoded: &str) -> io::Result<Zeroizing<Vec<u8>>> {
+    if encoded.len() > 2048 {
+        return Err(refused());
+    }
+    let mut decoded = Zeroizing::new(Vec::with_capacity(encoded.len()));
+    B64.decode_vec(encoded, &mut decoded)
+        .map_err(|_| refused())?;
+    Ok(decoded)
 }
 
 const PENDING_JOIN_KEY: &str = "join-key.pk8";
@@ -120,6 +182,7 @@ pub(crate) async fn join_with_key(
     join_with_key_inner(url, data, invitation, Some(key_pkcs8)).await
 }
 
+/// Join a server with a join key and store the resulting identity under `data`.
 async fn join_with_key_inner(
     url: &str,
     data: &Path,
@@ -222,8 +285,10 @@ async fn join_with_key_inner(
         ca_der: invitation.ca_der,
         certificate_der: response.certificate_der,
         key_der: B64.encode(key.private_key_to_pkcs8().map_err(|_| refused())?),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
-    let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
+    let bytes = serialize_identity_document(&stored)?;
     match snapshot {
         Some(snapshot) => replace(data, &bytes, Some(&snapshot))?,
         None => publish(data, &bytes)?,
@@ -829,9 +894,11 @@ fn publish(data: &Path, bytes: &[u8]) -> io::Result<()> {
 struct Snapshot {
     device: u64,
     inode: u64,
-    bytes: Vec<u8>,
+    /// The identity document can include the pending candidate's base64 private key.
+    bytes: Zeroizing<Vec<u8>>,
 }
 
+/// Read the stored identity and its snapshot through checked, no-follow files.
 fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     use std::{
         io::Read,
@@ -849,7 +916,7 @@ fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     {
         return Err(refused());
     }
-    let mut bytes = Vec::with_capacity(8192);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(8192));
     file.take(8193).read_to_end(&mut bytes)?;
     if bytes.len() > 8192 {
         return Err(refused());
@@ -879,12 +946,13 @@ fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
         changed = true;
     }
     if changed {
-        let bytes = serde_json::to_vec(&stored).map_err(|_| refused())?;
+        let bytes = serialize_identity_document(&stored)?;
         replace(data, &bytes, Some(&snapshot))?;
     }
     Ok(stored)
 }
 
+/// Run the remote client from the stored identity in `data`.
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let stored = migrate_identity(data)?;
     let public_origin = stored.public_origin.clone().ok_or_else(refused)?;
@@ -944,27 +1012,144 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let installation = None;
     let publisher = std::sync::Arc::new(IdentityPublisher {
         data: data.to_owned(),
-        stored,
     });
-    remote_client::run_with_installation(&identity, state, publisher, installation.as_ref()).await
+    // Components' host state goes when the service ends, by return or SIGTERM
+    // (#221). Boxed once per service lifetime: the loop's future is large.
+    infraternal_agent::shutdown::run_then_stop(Box::pin(remote_client::run_with_identity_rotation(
+        &identity,
+        state,
+        publisher.clone(),
+        publisher,
+        installation.as_ref(),
+    )))
+    .await
 }
 
 /// The existing installation is the publication boundary; no new key is generated.
 struct IdentityPublisher {
     data: PathBuf,
-    stored: StoredIdentity,
 }
 impl infraternal_agent::remote_renewal::CertificatePublisher for IdentityPublisher {
     fn publish(&self, certificate: &X509) -> io::Result<()> {
-        let mut stored = serde_json::to_value(&self.stored).map_err(|_| refused())?;
-        stored["certificate_der"] = B64
-            .encode(certificate.to_der().map_err(|_| refused())?)
-            .into();
-        replace(
-            &self.data,
-            &serde_json::to_vec(&stored).map_err(|_| refused())?,
-            None,
-        )
+        let (mut stored, snapshot) = load_snapshot(&self.data)?;
+        let certificate_der = B64.encode(certificate.to_der().map_err(|_| refused())?);
+        if let Some(pending) = &mut stored.identity_rotation {
+            let candidate_der = decode_candidate_key(&pending.candidate_key_der)?;
+            let candidate = PKey::private_key_from_pkcs8(&candidate_der).map_err(|_| refused())?;
+            if certificate
+                .public_key()
+                .map_err(|_| refused())?
+                .public_eq(&candidate)
+            {
+                pending.certificate_der = Some(certificate_der);
+            } else {
+                stored.certificate_der = certificate_der;
+            }
+        } else {
+            stored.certificate_der = certificate_der;
+        }
+        let bytes = serialize_identity_document(&stored)?;
+        replace(&self.data, &bytes, Some(&snapshot))
+    }
+}
+
+impl infraternal_plugin_remote::identity_rotation::RotationPublisher for IdentityPublisher {
+    fn load(&self) -> io::Result<infraternal_plugin_remote::identity_rotation::RotationStorage> {
+        use infraternal_plugin_remote::identity_rotation::{PendingRotation, RotationStorage};
+        let (stored, _) = load_snapshot(&self.data)?;
+        let pending = stored
+            .identity_rotation
+            .map(|pending| -> io::Result<PendingRotation> {
+                Ok(PendingRotation {
+                    challenge: pending.challenge,
+                    candidate_key_pkcs8: decode_candidate_key(&pending.candidate_key_der)?,
+                    candidate_certificate_der: pending
+                        .certificate_der
+                        .map(|certificate| B64.decode(certificate).map_err(|_| refused()))
+                        .transpose()?,
+                })
+            })
+            .transpose()?;
+        Ok(RotationStorage {
+            pending,
+            completed: stored.completed_identity_rotation,
+        })
+    }
+
+    fn store_candidate(
+        &self,
+        challenge: &infraternal_plugin_remote::identity_rotation::Challenge,
+        key_pkcs8: &[u8],
+    ) -> io::Result<()> {
+        if key_pkcs8.is_empty() || key_pkcs8.len() > 1024 {
+            return Err(refused());
+        }
+        let key = PKey::private_key_from_pkcs8(key_pkcs8).map_err(|_| refused())?;
+        if key.id() != openssl::pkey::Id::ED25519 {
+            return Err(refused());
+        }
+        let (mut stored, snapshot) = load_snapshot(&self.data)?;
+        let current = X509::from_der(&B64.decode(&stored.certificate_der).map_err(|_| refused())?)
+            .map_err(|_| refused())?;
+        if stored.identity_rotation.is_some()
+            || current
+                .digest(MessageDigest::sha256())
+                .map_err(|_| refused())?
+                .as_ref()
+                != challenge.predecessor_fingerprint
+        {
+            return Err(refused());
+        }
+        stored.identity_rotation = Some(StoredRotation {
+            challenge: challenge.clone(),
+            candidate_key_der: encode_candidate_key(key_pkcs8),
+            certificate_der: None,
+        });
+        let bytes = serialize_identity_document(&stored)?;
+        replace(&self.data, &bytes, Some(&snapshot))
+    }
+
+    fn store_certificate(&self, operation_id: uuid::Uuid, der: &[u8]) -> io::Result<()> {
+        if der.is_empty() || der.len() > 8192 {
+            return Err(refused());
+        }
+        let (mut stored, snapshot) = load_snapshot(&self.data)?;
+        let pending = stored.identity_rotation.as_mut().ok_or_else(refused)?;
+        if pending.challenge.operation_id != operation_id {
+            return Err(refused());
+        }
+        pending.certificate_der = Some(B64.encode(der));
+        let bytes = serialize_identity_document(&stored)?;
+        replace(&self.data, &bytes, Some(&snapshot))
+    }
+
+    fn promote(
+        &self,
+        completed: &infraternal_plugin_remote::identity_rotation::CompletedRotation,
+    ) -> io::Result<()> {
+        let (mut stored, snapshot) = load_snapshot(&self.data)?;
+        let mut pending = stored.identity_rotation.take().ok_or_else(refused)?;
+        if pending.challenge.operation_id != completed.operation_id
+            || pending.challenge.sequence != completed.sequence
+        {
+            return Err(refused());
+        }
+        let certificate_der = pending.certificate_der.ok_or_else(refused)?;
+        let certificate = X509::from_der(&B64.decode(&certificate_der).map_err(|_| refused())?)
+            .map_err(|_| refused())?;
+        if certificate
+            .digest(MessageDigest::sha256())
+            .map_err(|_| refused())?
+            .as_ref()
+            != completed.certificate_fingerprint
+        {
+            return Err(refused());
+        }
+        stored.key_der = std::mem::take(&mut *pending.candidate_key_der);
+        stored.certificate_der = certificate_der;
+        stored.completed_identity_rotation = Some(completed.clone());
+        let bytes = serialize_identity_document(&stored)?;
+        replace(&self.data, &bytes, Some(&snapshot))
     }
 }
 
@@ -1004,7 +1189,7 @@ fn replace(data: &Path, bytes: &[u8], expected: Option<&Snapshot>) -> io::Result
             let (_, now) = load_snapshot(data)?;
             if now.device != expected.device
                 || now.inode != expected.inode
-                || now.bytes != expected.bytes
+                || now.bytes.as_slice() != expected.bytes.as_slice()
             {
                 return Err(refused());
             }

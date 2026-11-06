@@ -724,7 +724,6 @@ mod tests {
     /// Exercise acknowledged idle traffic and a lost NAT path using the same
     /// production configuration helper at accelerated transport-only intervals.
     // Keep relay ownership and failure proof together so every socket retires at the fixture boundary.
-    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn acknowledged_idle_survives_and_replayed_packets_cannot_mask_failure() {
         use std::sync::{
@@ -1035,6 +1034,8 @@ mod probe_tests;
 #[path = "remote_mtu_tests.rs"]
 mod mtu_tests;
 
-#[cfg(test)]
+// The design-scale controls build paths with `PathSocket::from_udp`, which
+// exists only with the `agent` feature.
+#[cfg(all(test, feature = "agent"))]
 #[path = "remote_design_scale_review.rs"]
 mod design_scale_review;

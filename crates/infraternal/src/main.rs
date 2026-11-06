@@ -96,6 +96,23 @@ fn main() -> ExitCode {
     run_invocation()
 }
 
+/// The mesh SSH node component for one infraternal agent state directory [D235], #221.
+#[cfg(all(feature = "ssh", feature = "plugin-mesh", target_os = "linux"))]
+fn mesh_ssh_service(state: &std::path::Path) -> Option<infraternal_agent::plugins::MeshService> {
+    let node = infraternal_plugin_ssh::mesh_node::MeshSshNode::new(
+        state.to_owned(),
+        infraternal_agent::logins::account_uid,
+    )
+    .ok()?;
+    let observer = node.mesh_observer();
+    let stop = node.stop_hook();
+    Some(infraternal_agent::plugins::MeshService {
+        plugin: Box::new(node),
+        observer,
+        stop,
+    })
+}
+
 /// Re-enter the same action dispatch if both replacement exec attempts are refused.
 fn run_invocation() -> ExitCode {
     if harden_startup().is_err() {
@@ -111,6 +128,10 @@ fn run_invocation() -> ExitCode {
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
         return ExitCode::FAILURE;
     }
+    // Mesh SSH lives in a crate that depends on the infraternal agent, so it
+    // joins every agent registry through this hook (#221).
+    #[cfg(all(feature = "ssh", feature = "plugin-mesh", target_os = "linux"))]
+    infraternal_agent::plugins::set_mesh_service(mesh_ssh_service);
     #[cfg(all(feature = "remote", target_os = "linux"))]
     if let Some(result) =
         infraternal_plugin_remote::runtime_lock::command(&mut std::env::args_os().skip(1))
@@ -197,7 +218,7 @@ fn dispatch_selected_action(
     dispatch_action(registry, registered.action, selected.matches, json_output)
 }
 
-#[allow(clippy::too_many_lines)] // Keep feature-gated command handlers beside their registry mappings.
+// Keep feature-gated command handlers beside their registry mappings.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -662,7 +683,13 @@ fn status_result(
         .filter(|plugin| plugin.id != "cli")
         .map(|plugin| plugin.id.clone())
         .collect();
-    let node = infraternal_status::probe_local(&infraternal_status::Roots::detect(), &ids);
+    let roots = infraternal_status::Roots::detect();
+    let node = infraternal_status::probe_local(&roots, &ids);
+    #[cfg(all(feature = "remote", feature = "plugin-server"))]
+    let ca_status = infraternal_status::server_data_directory(&roots).map(|data| {
+        crate::restart::query_ca_status(&data)
+            .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable())
+    });
     let (activity, message, next) = node.headline();
     let state = match activity {
         Activity::Active => CommandState::Running,
@@ -672,7 +699,7 @@ fn status_result(
         Activity::Unknown => CommandState::Unknown,
     };
     // A component without a runtime yet is not something this machine has.
-    let components: Vec<_> = node
+    let mut components: Vec<_> = node
         .components
         .iter()
         .filter(|c| c.state != "Not available yet")
@@ -680,12 +707,18 @@ fn status_result(
         .collect();
     // People get the components table; the role id is a scripting detail.
     let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
-    let rows: Vec<Vec<String>> = node
+    let mut rows: Vec<Vec<String>> = node
         .components
         .iter()
         .filter(|c| c.state != "Not available yet")
         .map(|c| vec![c.name.clone(), c.state.clone(), c.detail.clone()])
         .collect();
+    #[cfg(all(feature = "remote", feature = "plugin-server"))]
+    if let Some(status) = ca_status {
+        let (state, detail) = ca_status_display(&status);
+        components.push(json!({"name":"CA", "state":state, "state_detail":detail}));
+        rows.push(vec!["CA".to_owned(), state, detail]);
+    }
     let tint = |column: usize, text: &str| {
         (options.color && column == 1)
             .then(|| cli::output::state_tint(text))
@@ -709,6 +742,134 @@ fn status_result(
     }
     let down = node.confirmed_down_count();
     (result, down)
+}
+
+/// The CA line `infraternal status` prints: lock state, root generation and expiry warning, or why it is unknown.
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
+fn ca_status_display(status: &infraternal_server::ca_status::CaStatus) -> (String, String) {
+    if !status.available {
+        return (
+            "Unavailable".to_owned(),
+            "Running server CA status is unavailable.".to_owned(),
+        );
+    }
+    if !status.initialized {
+        return (
+            "Not initialized".to_owned(),
+            "No public CA root is retained.".to_owned(),
+        );
+    }
+    let Some(root) = status
+        .roots
+        .iter()
+        .min_by_key(|root| root.remaining_seconds)
+    else {
+        return (
+            "Unknown".to_owned(),
+            "The CA root expiry is unavailable.".to_owned(),
+        );
+    };
+    let Some(remaining) = root.remaining_seconds else {
+        let lock = match status.locked {
+            Some(true) => "CA signing is locked; ",
+            Some(false) => "CA signing is available; ",
+            None => "CA lock state is unavailable; ",
+        };
+        return (
+            if status.locked == Some(true) {
+                "Locked".to_owned()
+            } else {
+                "Unknown".to_owned()
+            },
+            format!(
+                "{lock}root generation {}; expiry and warning are unknown because the server clock is uncertain.",
+                root.generation
+            ),
+        );
+    };
+    let expiry = if remaining <= 0 {
+        "the public root has expired".to_owned()
+    } else {
+        let days = remaining.saturating_add(86_399) / 86_400;
+        format!("the public root expires in {days} days")
+    };
+    let warning = root.warning_level.as_str();
+    let lock = match status.locked {
+        Some(true) => "CA signing is locked; ",
+        Some(false) => "CA signing is available; ",
+        None => "CA lock state is unavailable; ",
+    };
+    let state = if status.locked == Some(true) {
+        "Locked"
+    } else if status.locked.is_none() {
+        "Unknown"
+    } else {
+        match warning {
+            "expired" => "Expired",
+            "7d" => "Expires within 7 days",
+            "30d" => "Expires within 30 days",
+            "90d" => "Expires within 90 days",
+            "365d" => "Expires within 365 days",
+            "none" => "Ready",
+            _ => "Unknown",
+        }
+    };
+    (
+        state.to_owned(),
+        format!(
+            "{lock}root generation {}; {expiry}; expiry warning {warning}.",
+            root.generation
+        ),
+    )
+}
+
+/// How `infraternal status` renders CA lock and expiry.
+#[cfg(all(test, feature = "remote", feature = "plugin-server"))]
+mod ca_status_tests {
+    use super::ca_status_display;
+    use infraternal_server::ca_status::{CaStatus, RootStatus};
+
+    /// A CA status with one root and the given lock state, time left and warning level.
+    fn status(locked: Option<bool>, remaining_seconds: Option<i64>, warning: &str) -> CaStatus {
+        CaStatus {
+            available: true,
+            initialized: true,
+            locked,
+            clock_healthy: remaining_seconds.is_some(),
+            roots: vec![RootStatus {
+                generation: 4,
+                fingerprint: "sha256:test".into(),
+                certificate_der: String::new(),
+                not_after: 2_000_000_000,
+                remaining_seconds,
+                warning_level: warning.into(),
+            }],
+        }
+    }
+
+    /// Status shows the root generation, the expiry warning and the lock state.
+    #[test]
+    fn status_reports_root_generation_expiry_warning_and_lock_state() {
+        let (state, detail) = ca_status_display(&status(Some(false), Some(90 * 86_400), "90d"));
+        assert_eq!(state, "Expires within 90 days");
+        assert!(detail.contains("root generation 4"));
+        assert!(detail.contains("expires in 90 days"));
+        assert!(detail.contains("expiry warning 90d"));
+
+        let (state, detail) = ca_status_display(&status(Some(true), Some(0), "expired"));
+        assert_eq!(state, "Locked");
+        assert!(detail.contains("CA signing is locked"));
+        assert!(detail.contains("expiry warning expired"));
+    }
+
+    /// An untrusted server clock prints no expiry countdown.
+    #[test]
+    fn unknown_server_clock_does_not_render_a_false_expiry_countdown() {
+        let (state, detail) = ca_status_display(&status(None, None, "unknown"));
+        assert_eq!(state, "Unknown");
+        assert!(detail.contains("root generation 4"));
+        assert!(detail.contains("expiry and warning are unknown"));
+    }
 }
 
 fn run_status(registry: &ActionRegistry, matches: &ArgMatches, json_output: bool) -> ExitCode {
@@ -1480,6 +1641,7 @@ fn prestarted_descriptors(matches: &ArgMatches) -> Result<Option<(i32, i32)>, Ex
     }
 }
 
+/// Run the hidden `__shim` command: decode its options and start the shim.
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
@@ -1506,6 +1668,15 @@ fn run_shim_command(matches: &ArgMatches) -> ExitCode {
             readiness: matches.get_flag("readiness"),
             command_stdin: matches.get_flag("command_stdin"),
             retain_output: matches.get_flag("retain_output"),
+            // Refuse a number that is not a descriptor, rather than dropping it: a shim must never
+            // start without the lifeline its launcher asked it to hold (contracts/shim.md §2).
+            lifeline_fd: matches
+                .get_one::<i64>("lifeline_fd")
+                .map(|descriptor| {
+                    i32::try_from(*descriptor)
+                        .map_err(|_| "--lifeline-fd is out of range".to_owned())
+                })
+                .transpose()?,
         })
     })() {
         Ok(options) => options,
@@ -2014,7 +2185,6 @@ mod setup_token_tests {
 }
 
 /// Validate identifiers before forking; clamp exited-screen retention inside the shim.
-#[allow(clippy::too_many_arguments)]
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
@@ -2251,7 +2421,6 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
 /// Startup reads an invitation once; reconnects use only the private local identity.
 #[cfg(feature = "remote")]
 // Keep enrollment and its ordered status reporting in one CLI lifecycle.
-#[allow(clippy::too_many_lines)]
 fn run_remote_agent(
     action: AgentAction,
     has_fd: bool,

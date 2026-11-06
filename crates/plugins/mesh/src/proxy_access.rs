@@ -67,6 +67,7 @@ pub fn sources<'a>(
         .filter(move |peer| !routes(peer, ingress).is_empty())
 }
 
+/// Proxy access derivation checks.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -79,10 +80,13 @@ mod tests {
 
     use crate::policy::rules::TrafficPolicy;
 
+    /// A peer with the given inbound policy.
     fn peer(inbound: TrafficPolicy) -> PeerPolicy {
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([1; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4: "10.254.0.3".parse().expect("IPv4"),
                     ipv6: "fd01::3".parse().expect("IPv6"),
@@ -91,6 +95,7 @@ mod tests {
             },
             inbound,
             outbound: TrafficPolicy::None,
+            access_ssh: None,
         }
     }
 

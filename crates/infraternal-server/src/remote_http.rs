@@ -341,7 +341,8 @@ async fn invite(
         .map(Json)
 }
 
-#[allow(clippy::too_many_lines)] // Keep session/key checks, host creation, and invitation issuance in one write transaction.
+/// Keep authority and invitation issuance in one writer transaction.
+/// Historical removal coordinates never reserve a live setup destination.
 async fn issue_invitation(
     api: Api,
     authority: IssueAuthority<'_>,
@@ -449,7 +450,9 @@ async fn issue_invitation(
     if let Some((address, lookup)) = destination {
         // The preceding host INSERT owns SQLite's writer slot. Repeat the
         // destination check here for independently constructed adapters too.
-        let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+        // A removed host, or one whose denial awaits its agent's cleanup receipt
+        // (an abandoned setup denied by this add, #305), no longer occupies it.
+        let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
             .bind(&person_id).bind(address).bind(lookup).bind(lookup)
             .fetch_one(&mut *transaction).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         if occupied {

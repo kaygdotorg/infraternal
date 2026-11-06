@@ -42,6 +42,14 @@ use tokio::{
 
 /// Most simultaneous session channels per connection; further opens are ignored.
 const MAX_CHANNELS: usize = 4;
+/// How long a connection may stay unauthenticated before it is closed
+/// (J181 M2). A certificate login over the mesh completes in well under a
+/// second; this bounds peers that connect and never try, so they cannot
+/// hold one of the per-source and total unauthenticated slots.
+pub const LOGIN_GRACE: Duration = Duration::from_secs(20);
+/// Keepalives detect a dead peer on an idle but authenticated session,
+/// instead of an inactivity timeout that would end an idle editor.
+const KEEPALIVE: Duration = Duration::from_secs(15);
 /// Longest accepted terminal type name, in bytes.
 const MAX_TERM_NAME: usize = 64;
 /// Most terminal mode entries accepted in one PTY request.
@@ -70,6 +78,9 @@ pub fn config(key: PrivateKey) -> server::Config {
         channel_buffer_size: 1,
         event_buffer_size: 4,
         nodelay: true,
+        inactivity_timeout: None,
+        keepalive_interval: Some(KEEPALIVE),
+        keepalive_max: 4,
         ..Default::default()
     }
 }
@@ -100,6 +111,44 @@ where
         Connection::new(authority, source, target_node),
     )
     .await
+}
+
+/// Serve one accepted stream with a login deadline. `pending` is the
+/// caller's unauthenticated-connection slot: it is released as soon as the
+/// peer authenticates, and a peer that has not authenticated within `grace`
+/// is disconnected.
+///
+/// # Errors
+/// Returns protocol/I/O errors, refuses incompatible receive-window settings
+/// and reports a missed login deadline as `ConnectionTimeout`.
+pub async fn serve_admitted<A, R, P>(
+    authority: Arc<A>,
+    source: IpAddr,
+    target_node: u64,
+    config: Arc<server::Config>,
+    stream: R,
+    grace: Duration,
+    pending: P,
+) -> Result<(), russh::Error>
+where
+    A: LoginAuthority,
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if !config.manual_receive_window || config.window_size != RECEIVE_WINDOW {
+        return Err(russh::Error::Inconsistent);
+    }
+    let (admitted, on_admitted) = tokio::sync::oneshot::channel();
+    let mut connection = Connection::new(authority, source, target_node);
+    connection.admitted = Some(admitted);
+    let serving = server::serve_stream(config, stream, connection);
+    tokio::pin!(serving);
+    tokio::select! {
+        result = &mut serving => return result,
+        () = tokio::time::sleep(grace) => return Err(russh::Error::ConnectionTimeout),
+        Ok(()) = on_admitted => {}
+    }
+    drop(pending);
+    serving.await
 }
 
 /// What a successful authentication remembers so later opens can recheck it.
@@ -151,6 +200,8 @@ pub struct Connection<A: LoginAuthority> {
     authenticated: Option<Authenticated>,
     /// Open session channels.
     channels: HashMap<ChannelId, ChannelState>,
+    /// Told once, when the peer first authenticates.
+    admitted: Option<tokio::sync::oneshot::Sender<()>>,
 }
 impl<A: LoginAuthority> Connection<A> {
     /// A connection handler for one accepted stream from `source` to `target_node`; not yet authenticated.
@@ -162,6 +213,7 @@ impl<A: LoginAuthority> Connection<A> {
             target_node,
             authenticated: None,
             channels: HashMap::new(),
+            admitted: None,
         }
     }
 
@@ -366,6 +418,9 @@ impl<A: LoginAuthority> server::Handler for Connection<A> {
                 account: account.to_owned(),
                 identity,
             });
+            if let Some(admitted) = self.admitted.take() {
+                let _ = admitted.send(());
+            }
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
@@ -714,3 +769,7 @@ fn dimensions(
         height_pixels: dimension(height, previous.height_pixels)?,
     })
 }
+
+#[cfg(test)]
+#[path = "mesh_server_tests.rs"]
+mod tests;

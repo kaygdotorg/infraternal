@@ -811,7 +811,7 @@ async fn recovery_session_delay_latency_at_capacity() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // One flow: sliding, tap freshness and key scoping.
+// One flow: sliding, tap freshness and key scoping.
 async fn sessions_slide_but_fresh_tap_does_not_and_device_keys_are_scoped() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -1190,18 +1190,18 @@ async fn device_join_code_allows_only_five_inspection_attempts() {
     }
 }
 
+/// The HTTP adapter's CSRF, cookie flags, body limit and latency hold together.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
     let router = router(f.auth.clone());
-    let request = |origin: &str| {
+    let request = |origin: &str, cookie: &str| {
         axum::http::Request::builder()
             .method("POST")
             .uri("/auth/session")
             .header("Origin", origin)
-            .header("Cookie", format!("__Host-infraternal={}", f.session))
+            .header("Cookie", cookie)
             .header("Content-Type", "application/json")
             .body(axum::body::Body::from("{}"))
             .unwrap()
@@ -1209,7 +1209,10 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     assert_eq!(
         router
             .clone()
-            .oneshot(request("https://evil.example.test"))
+            .oneshot(request(
+                "https://evil.example.test",
+                &format!("__Host-infraternal={}", f.session)
+            ))
             .await
             .unwrap()
             .status(),
@@ -1229,15 +1232,13 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
         .execute(&f.auth.pool)
         .await
         .unwrap();
-    let response = router.clone().oneshot(request(ORIGIN)).await.unwrap();
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    assert!(!response.headers().contains_key("set-cookie"));
-    // Cookie flags belong to explicit issuance; identity reads cannot refresh a stale jar.
+    // The name carries the server login sequence and sliding deadline, so delayed
+    // responses write a distinct cookie instead of replacing a newer login.
     let (_, binding, start) = http_post_json(&router, "login-start", json!({})).await;
     let mut proof = f.software.login(&start, ORIGIN, true);
     proof["response"]["userHandle"] =
         json!(B64.encode(Uuid::parse_str(&f.user).unwrap().as_bytes()));
-    let (status, headers, _) = http_post_json_with_cookie(
+    let (status, headers, login_body) = http_post_json_with_cookie(
         &router,
         "login-finish",
         json!({"ceremony":start["ceremony"],"proof":proof,"device":"flags"}),
@@ -1251,28 +1252,84 @@ async fn http_csrf_cookie_flags_body_limit_and_latency_evidence() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let cookie = headers["set-cookie"].to_str().unwrap();
+    assert!(cookie.starts_with("__Host-infraternal-session-"));
     for flag in [
         "Secure",
         "HttpOnly",
         "SameSite=Strict",
         "Path=/",
-        "Max-Age=2592000",
+        "Expires=",
     ] {
         assert!(cookie.contains(flag));
     }
     assert!(!cookie.contains("Domain="));
+    let (unlock_status, unlocked_headers, _) = http_post_json_with_cookie(
+        &router,
+        "unlock-finish",
+        json!({"pending_transaction":login_body["pending_transaction"]}),
+        cookie.split(';').next().unwrap(),
+    )
+    .await;
+    assert_eq!(unlock_status, axum::http::StatusCode::OK);
+    let current_cookie = unlocked_headers["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let response = router
+        .clone()
+        .oneshot(request(ORIGIN, current_cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let refreshed = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(refreshed.starts_with("__Host-infraternal-session-"));
+    assert!(refreshed.contains("Expires="));
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["device"], "flags");
+
+    // A response delayed from the older login may add its cookie back to the jar,
+    // but the new login's higher sequence still selects the right device.
+    let combined = format!("__Host-infraternal={}; {current_cookie}", f.session);
+    let switched = axum::http::Request::builder()
+        .method("POST")
+        .uri("/auth/session")
+        .header("Origin", ORIGIN)
+        .header("Cookie", combined)
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from("{}"))
+        .unwrap();
+    let switched = router.clone().oneshot(switched).await.unwrap();
+    assert_eq!(switched.status(), axum::http::StatusCode::OK);
+    let switched: Value = serde_json::from_slice(
+        &axum::body::to_bytes(switched.into_body(), 16 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(switched["device"], "flags");
+
     let wraps_request = axum::http::Request::builder()
         .method("POST")
         .uri("/auth/wraps")
         .header("Origin", ORIGIN)
-        .header("Cookie", format!("__Host-infraternal={}", f.session))
+        .header("Cookie", current_cookie)
         .header("Content-Type", "application/json")
         .body(axum::body::Body::from("{}"))
         .unwrap();
     let wraps_response = router.clone().oneshot(wraps_request).await.unwrap();
-    assert!(!wraps_response.headers().contains_key("set-cookie"));
+    assert!(wraps_response.headers().contains_key("set-cookie"));
 
-    assert_eq!(response.headers()["cache-control"], "no-store");
     let oversized = axum::http::Request::builder()
         .method("POST")
         .uri("/auth/device-start")
@@ -1593,7 +1650,6 @@ async fn review_invalid_device_polling_exhausts_browser_budget() {
 
 /// Drives setup, passkey registration, both wire legs, and a dropped/resumed browser connection.
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
     let _guard = SERIAL.lock().await;
     let data_dir = std::env::temp_dir().join(format!("infraternal-ws-{}", rand::random::<u64>()));
@@ -2229,7 +2285,6 @@ async fn wait_connection_inactive(pool: &sqlx::SqlitePool, id: &[u8; 16]) {
 }
 
 /// Test-only leg-B implementation: it returns one deterministic session and resumes a fixed PTY transcript.
-#[allow(clippy::too_many_lines)]
 async fn test_leg_b_agent(
     mut socket: UnixStream,
     input_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -2610,12 +2665,8 @@ async fn public_status_and_discoverable_http_login() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let cookie = headers[axum::http::header::SET_COOKIE].to_str().unwrap();
-    let token = cookie
-        .split(';')
-        .next()
-        .unwrap()
-        .strip_prefix("__Host-infraternal=")
-        .unwrap();
+    let (cookie_name, token) = cookie.split(';').next().unwrap().split_once('=').unwrap();
+    assert!(cookie_name.starts_with("__Host-infraternal-session-"));
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2871,7 +2922,6 @@ async fn account_identity_migration_backfills_legacy_users() {
 /// Release-only scale evidence; no authenticator signing cost is included in server finish latency.
 #[tokio::test]
 #[ignore = "run --release --ignored --nocapture without concurrent builds"]
-#[allow(clippy::too_many_lines)]
 async fn discoverable_latency_at_pending_capacity() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;

@@ -2,23 +2,46 @@
 
 RUST_GATE_ROWS=()
 RUST_GATE_FAILED=0
+# Set by rust_run_gate_skippable for exactly one rust_run_gate call. A plain
+# shell variable, never exported: a `VAR=yes func` prefix would export it into
+# the row's command, and the gate's own self-tests (run inside the privileged
+# row) would then see every 77 as SKIP (J276, #378 81610).
+RUST_GATE_SKIP_NEXT=no
+export -n RUST_GATE_SKIP_NEXT
 
 rust_run_gate() {
     local name="$1"
     shift
     local result
     local started=$SECONDS
+    local skippable=$RUST_GATE_SKIP_NEXT
+    RUST_GATE_SKIP_NEXT=no
 
     printf '\n==> %s\n' "$name"
     if "$@"; then
         result="PASS"
     else
         local exit_code=$?
-        result="FAIL (${exit_code})"
-        RUST_GATE_FAILED=1
+        # Exit 77 is SKIP only for rows started with rust_run_gate_skippable.
+        if [[ $skippable == yes ]] && ((exit_code == 77)); then
+            result="SKIP"
+        else
+            result="FAIL (${exit_code})"
+            RUST_GATE_FAILED=1
+        fi
     fi
     RUST_GATE_ROWS+=("${name}|${result}")
     printf '(%s: %ss)\n' "$name" "$((SECONDS - started))"
+}
+
+# Like rust_run_gate, but exit 77 records SKIP instead of a failure: for rows
+# whose command means "nothing to check here" by 77 (the privileged row exits
+# 77 when no area is selected). Every other row keeps 77 as FAIL (77), so a
+# tool that happens to exit 77 can never read as skipped (J270, #344 81345).
+# It goes through rust_run_gate, so anything that stubs that stubs this too.
+rust_run_gate_skippable() {
+    RUST_GATE_SKIP_NEXT=yes
+    rust_run_gate "$@"
 }
 
 # Doc-comment coverage may never go down (D345): scripts/doc-coverage compares every unit with
@@ -26,6 +49,19 @@ rust_run_gate() {
 # pass the ratchet by miscounting. Pure python, a few seconds, shared by `quick` and `fast`.
 verify_doc_coverage() {
     python3 scripts/test-doc-coverage.py && python3 scripts/doc-coverage --check
+}
+
+# Enforce D345 only on changed items; fixtures protect the shared lexer integration.
+verify_diff_docs() {
+    python3 scripts/test-diff-practices.py &&
+        python3 scripts/verify.d/diff-practices.py docs "${VERIFY_QUICK_BASE:-origin/dev}"
+}
+
+# Root-only paths complement browser/passkey coverage on the test server (D351).
+verify_privileged() {
+    python3 scripts/test-verify-privileged.py || return
+    # Exit 77 (nothing selected) passes through to rust_run_gate as SKIP.
+    scripts/verify-privileged
 }
 
 rust_print_summary() {
@@ -244,6 +280,7 @@ rust_static_build_check() {
     python3 scripts/test-musl-cc.py || return $?
     python3 scripts/test-native-metadata.py || return $?
     python3 scripts/test-rustc-paths.py || return $?
+    python3 scripts/test-path-remap-flags.py || return $?
     python3 scripts/release/production_trust_test.py || return $?
 
     for target in "${targets[@]}"; do
@@ -278,6 +315,7 @@ rust_verify_fast() {
     RUST_GATE_ROWS=()
     RUST_GATE_FAILED=0
 
+    rust_run_gate "Nix Cargo vendoring" scripts/check-nix-vendor
     rust_run_gate "fmt" cargo fmt --all --check
     rust_run_gate "migration names" python3 scripts/verify.d/migration-names.py
     rust_run_gate "migration tooling tests" python3 scripts/test-migration-names.py
@@ -296,7 +334,13 @@ rust_verify_fast() {
     rust_run_gate "cargo-deny" cargo deny check
     rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
     rust_run_gate "doc coverage ratchet" verify_doc_coverage
+    rust_run_gate "shape lints off (D351)" python3 scripts/test-shape-lints.py
+    rust_run_gate "doc comments on diff" verify_diff_docs
+    rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
+        rust_run_gate_skippable "privileged integration" verify_privileged
+        rust_run_gate "probe release exclusion" python3 scripts/test-runtime-probe-gating.py
+        rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
         rust_run_gate "static builds" rust_static_build_check
     fi
     rust_print_summary

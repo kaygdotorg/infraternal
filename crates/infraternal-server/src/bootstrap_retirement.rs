@@ -4,9 +4,9 @@ use crate::enrollment::{EnrollmentError, EnrollmentStore};
 use uuid::Uuid;
 
 impl EnrollmentStore {
-    /// Retire an exact cancelled attempt and consume its durable intent in the
-    /// same writer transaction. The caller fences transport before spawning
-    /// this owned operation, so waiting for SQLite never preserves access.
+    /// Persist denial for an exact cancelled attempt; person retirement and
+    /// intent removal wait for the durable host receipt. The caller fences
+    /// transport first, so waiting for SQLite never preserves remote access.
     /// # Errors
     /// Refuses changed ownership, invalid time or unavailable storage.
     pub(crate) async fn retire_bootstrap(
@@ -28,8 +28,8 @@ impl EnrollmentStore {
         }
     }
 
-    /// One attempt at [`retire_bootstrap`](EnrollmentStore::retire_bootstrap) in a single
-    /// transaction. Refuses a negative time or a host that exists but is not this
+    /// One serialized intent attempt, followed by a cancellable receipt wait.
+    /// Refuses a negative time or a host that exists but is not this
     /// owner's, was created later than `now`, or has no pending retirement intent.
     async fn retire_bootstrap_once(
         &self,
@@ -44,8 +44,8 @@ impl EnrollmentStore {
         // The first write serializes behind any invitation COMMIT. An absent
         // host after this barrier means issuance never committed; only the
         // caller's pre-registered random UUID can reach this operation.
-        let changed = sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, ?) WHERE id=? AND owner_id=? AND created_at<=? AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
-            .bind(now).bind(host.as_bytes().as_slice()).bind(owner).bind(now)
+        let changed = sqlx::query("UPDATE remote_hosts SET id=id WHERE id=? AND owner_id=? AND created_at<=? AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
+            .bind(host.as_bytes().as_slice()).bind(owner).bind(now)
             .execute(&mut *transaction).await?.rows_affected();
         if changed != 1
             && sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=?)")
@@ -58,18 +58,60 @@ impl EnrollmentStore {
         sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND owner_id=? AND revoked_at IS NOT NULL)")
             .bind(host.as_bytes().as_slice()).bind(owner)
             .execute(&mut *transaction).await?;
-        self.commit_revocation(transaction, host).await
+        self.commit_revocation(transaction, host, now).await
     }
 
-    /// Startup owns no surviving provisioning batches. Complete their durable
-    /// retirement obligations before exposing enrollment or remote listeners.
+    /// Deny an abandoned setup's host found by a later add of the same address
+    /// (#305): the same ownership and open-intent checks as
+    /// [`retire_bootstrap`](EnrollmentStore::retire_bootstrap), then the denial is
+    /// committed without waiting for a receipt from the host's infraternal agent,
+    /// which is gone, exactly as Remove does for an offline host. The durable
+    /// login-cleanup outbox finishes the person's retirement if that agent ever
+    /// reconnects; until then its certificate is no longer admitted.
+    /// # Errors
+    /// Refuses a negative time, another owner's host, one created after `now` or
+    /// one without an open intent, and unavailable storage.
+    pub(crate) async fn deny_abandoned_bootstrap(
+        &self,
+        owner: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let mut transaction = self.0.begin().await?;
+        let matched = sqlx::query("UPDATE remote_hosts SET id=id WHERE id=? AND owner_id=? AND created_at<=? AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
+            .bind(host.as_bytes().as_slice()).bind(owner).bind(now)
+            .execute(&mut *transaction).await?.rows_affected();
+        if matched != 1 {
+            return Err(EnrollmentError::Denied);
+        }
+        self.commit_revocation_intent(transaction, host, now).await?;
+        Ok(())
+    }
+
+    /// Startup owns no surviving provisioning batches. Persist pending denials
+    /// before listeners start; person retirement awaits a cleanup-only receipt.
     /// Call only before transport admission starts; no live batches may exist.
     /// # Errors
     /// Returns storage failure without partially retiring the intent journal.
     pub(crate) async fn retire_unfinished_bootstraps(&self) -> Result<(), sqlx::Error> {
         let mut transaction = self.0.begin().await?;
-        sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at, MAX(created_at, unixepoch())) WHERE id IN (SELECT host_id FROM remote_bootstrap_retirement_intents) AND NOT EXISTS(SELECT 1 FROM terminal_sessions s WHERE s.remote_host_id=remote_hosts.id AND s.user_id=remote_hosts.owner_id AND s.closed_at IS NULL)")
-            .execute(&mut *transaction).await?;
+        let unfinished: Vec<(Vec<u8>, String)> = sqlx::query_as("SELECT id,owner_id FROM remote_hosts WHERE id IN (SELECT host_id FROM remote_bootstrap_retirement_intents) AND NOT EXISTS(SELECT 1 FROM terminal_sessions s WHERE s.remote_host_id=remote_hosts.id AND s.user_id=remote_hosts.owner_id AND s.closed_at IS NULL)")
+            .fetch_all(&mut *transaction).await?;
+        for (host, owner) in unfinished {
+            if Uuid::parse_str(&owner).is_ok() {
+                // Startup has no live transport to drain. Persist denial before
+                // listeners start and let cleanup-only reconnect finalize it.
+                sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,?) ON CONFLICT(host_id) DO NOTHING")
+                    .bind(&host).bind(owner).execute(&mut *transaction).await?;
+            } else {
+                // Legacy ledger identities cannot own a daemon person login.
+                sqlx::query("UPDATE remote_hosts SET revoked_at=COALESCE(revoked_at,MAX(created_at,unixepoch())) WHERE id=?")
+                    .bind(&host).execute(&mut *transaction).await?;
+            }
+        }
         // A published session belongs to its person across server restart.
         // Keep its setup obligation; never apply unpublished-host retirement.
         sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id IN (SELECT id FROM remote_hosts WHERE revoked_at IS NOT NULL)")
@@ -86,7 +128,7 @@ impl EnrollmentStore {
         owner: &str,
         host: Uuid,
     ) -> Result<(), EnrollmentError> {
-        let removed = sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND owner_id=? AND revoked_at IS NULL)")
+        let removed = sqlx::query("DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND owner_id=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0))")
             .bind(host.as_bytes().as_slice()).bind(owner).execute(&self.0).await?.rows_affected();
         if removed != 1 {
             return Err(EnrollmentError::Denied);

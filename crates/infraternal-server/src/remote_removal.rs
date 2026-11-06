@@ -1,4 +1,4 @@
-//! Removes visible host inventory and owned SSH pins while retaining certificate denial tombstones [16][168][198], #87.
+//! Records host removal denial, retains pending cleanup details and forgets owned SSH pins [16][168][198], #87.
 //!
 //! A removal is a dry run, then the removal. In the browser both run inside the 15-minute
 //! admin window that a sign-in tap opens (D333, D339): the dry run returns a single-use review
@@ -206,7 +206,10 @@ impl Removal {
         .await
         .map_err(|_| crate::auth::Error::Denied)?
     }
-    #[allow(clippy::too_many_lines)] // Keep authority recheck, revocation, audit and cleanup inside one transaction.
+
+    /// Persist verified denial and return pending instead of retaining admission
+    /// until an offline host returns. Only its durable receipt completes retirement
+    /// and removes bootstrap coordinates needed for manual uninstall.
     async fn publish(
         &self,
         entry: Pending,
@@ -293,22 +296,30 @@ impl Removal {
         .execute(&mut *tx)
         .await?;
         if let Some(audit_id) = audit_id {
-            sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result='removed' WHERE id=? AND state='pending'")
+            sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result=? WHERE id=? AND state='pending'")
                 .bind(live)
+                .bind(if Uuid::parse_str(&entry.user).is_ok() { "revoked, cleanup pending" } else { "removed" })
                 .bind(audit_id)
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query("DELETE FROM remote_host_bootstrap WHERE host_id=?")
-            .bind(entry.host.as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await?;
+        // UUID owners need a durable person-cleanup receipt. Keep their install
+        // coordinates until that receipt; legacy identities retire immediately.
+        if Uuid::parse_str(&entry.user).is_err() {
+            sqlx::query("DELETE FROM remote_host_bootstrap WHERE host_id=?")
+                .bind(entry.host.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await?;
+        }
         #[cfg(feature = "ssh")]
         if let Some(lookup) = lookup {
+            // Retained pending removal coordinates are history, not another live user
+            // of this pin. They must not prevent forgetting the last live pin.
             let shared: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap WHERE trust_lookup=?)",
+                "SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b WHERE b.trust_lookup=? AND b.host_id<>? AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=b.host_id))",
             )
             .bind(&lookup)
+            .bind(entry.host.as_bytes().as_slice())
             .fetch_one(&mut *tx)
             .await?;
             if !shared {
@@ -323,13 +334,9 @@ impl Removal {
         }
         #[cfg(not(feature = "ssh"))]
         let _ = (&self.trust, lookup);
-        sqlx::query("UPDATE remote_hosts SET revoked_at=? WHERE id=?")
-            .bind(live)
-            .bind(entry.host.as_bytes().as_slice())
-            .execute(&mut *tx)
-            .await?;
-        self.store
-            .commit_revocation(tx, entry.host)
+        let pending = self
+            .store
+            .commit_revocation_intent(tx, entry.host, live)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         let installation = installed_by_setup.then(|| entry.host.simple().to_string());
@@ -339,13 +346,16 @@ impl Removal {
             display_name(&name),
             &left,
             installation.as_deref(),
+            pending,
         );
         Ok(
-            json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual}),
+            json!({"host_id":entry.host,"state":if pending { "pending" } else { "removed" },"host_cleanup":cleanup,"message":message,"manual":manual}),
         )
     }
 }
-/// What removal tells the person, and the commands for a leftover install.
+/// Describe removal once, distinguishing pending cleanup from completed retirement.
+/// Pending responses keep the ownership-checked manual command available.
+/// A command ends the text verbatim so copying it cannot include sentence punctuation.
 ///
 /// `installation` is the host id when infraternal setup installed the host:
 /// only then are there commands, because only then is there an installation
@@ -356,7 +366,36 @@ fn outcome(
     name: &str,
     left: &[&str],
     installation: Option<&str>,
+    pending: bool,
 ) -> (String, Option<String>) {
+    if pending {
+        let (detail, manual) = match cleanup {
+            "requested" => {
+                let mut detail = "its infraternal agent is uninstalling itself".to_owned();
+                for object in left {
+                    detail.push_str("; ");
+                    detail.push_str(object);
+                    detail.push_str(" stays because this installation did not create it");
+                }
+                (detail, None)
+            }
+            "retained" => ("its infraternal agent stays installed on it".to_owned(), None),
+            _ if installation.is_none() => (
+                "infraternal setup didn't install its infraternal agent, so remove it there the way it was installed".to_owned(),
+                None,
+            ),
+            _ => {
+                let commands = manual_uninstall(mode, installation.unwrap_or_default());
+                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                (format!("infraternal is still installed on it, so remove it there {account} with: {commands}"), Some(commands))
+            }
+        };
+        let punctuation = if manual.is_some() { "" } else { "." };
+        return (
+            format!("{name}: revoked, cleanup pending; {detail}{punctuation}"),
+            manual,
+        );
+    }
     match cleanup {
         "requested" => {
             let mut message =
@@ -380,7 +419,7 @@ fn outcome(
             None,
         ),
         // Say plainly that the machine still runs it, and how to remove it
-        // there; the record is gone, so nothing here can retry (#235).
+        // there while automatic cleanup remains unconfirmed (#235).
         _ => {
             let commands = manual_uninstall(mode, installation.unwrap_or_default());
             let account = if mode == "rootful" {

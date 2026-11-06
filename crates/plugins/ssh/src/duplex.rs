@@ -81,6 +81,13 @@ impl Duplex {
     /// # Errors
     /// Classifies a closed command channel as unreachable and refuses oversized receipts.
     pub async fn line(&self, limit: usize) -> Result<Vec<u8>, Failure> {
+        tokio::time::timeout(crate::transport::TRANSFER_IDLE, self.read_line(limit))
+            .await
+            .map_err(|_| Failure::install("The SSH operation timed out."))?
+    }
+
+    /// Read one protocol exchange; its caller gives each line a fresh bounded interval.
+    async fn read_line(&self, limit: usize) -> Result<Vec<u8>, Failure> {
         let mut line = Vec::new();
         let mut reader = self.read.lock().await;
         while line.len() < limit {

@@ -7,7 +7,6 @@ use infraternal_plugin_api::{
 
 pub(crate) const CONCURRENT_HOSTS: usize = 8;
 pub(crate) const CONCURRENT_BATCHES: usize = 16;
-pub(crate) const ATTEMPT_SECONDS: u64 = 180;
 
 const fn action(
     id: &'static str,
@@ -189,10 +188,6 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         SettingDefault {
             id: "concurrent-batches",
             value: DefaultValue::Unsigned(CONCURRENT_BATCHES as u64),
-        },
-        SettingDefault {
-            id: "attempt-seconds",
-            value: DefaultValue::Unsigned(ATTEMPT_SECONDS),
         },
         SettingDefault {
             id: "setup-mode",

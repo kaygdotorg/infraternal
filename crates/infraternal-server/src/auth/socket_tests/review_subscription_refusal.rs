@@ -24,7 +24,6 @@ enum Refusal {
     Saturated,
 }
 
-#[allow(clippy::too_many_lines)] // Keep each real socket's refusal, pending work and recovery in order.
 async fn refusal_ends_subscription(case: Refusal) {
     let _guard = SERIAL.lock().await;
     // WAL retains independent authority reads while the worker's writer waits.

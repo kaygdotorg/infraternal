@@ -82,7 +82,6 @@ struct State {
     pool: sqlx::SqlitePool,
 }
 // Keep migrated inventory, access setup and admitted channels together.
-#[allow(clippy::too_many_lines)]
 async fn initialize(
     identities: [Identity; 3],
     extra: u64,
@@ -196,7 +195,6 @@ async fn initialize(
     })
 }
 #[tokio::main(flavor = "current_thread")]
-#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Error> {
     let (frames, mut deliveries) = tokio::sync::mpsc::channel::<Apply>(32);
     let (input, mut lines) = tokio::sync::mpsc::channel(8);

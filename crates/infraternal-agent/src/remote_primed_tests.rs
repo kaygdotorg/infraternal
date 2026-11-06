@@ -107,10 +107,6 @@ async fn terminal(pair: &Pair) -> (NativeChannel, NativeChannel) {
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep priming and the ordered replay fence in one transport lifetime."
-)]
 async fn primed_writer_acknowledges_before_reading_credit_funded_cursor() {
     let pair = Pair::new().await;
     let (server, host) = terminal(&pair).await;

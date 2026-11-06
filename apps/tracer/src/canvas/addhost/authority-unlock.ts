@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The canvas's handle on the client's view of the certificate authority's lock (D168, D217, D234).
+ * The canvas's handle on the client's view of the certificate authority: its lock and its roots' expiry warnings
+ * (D168, D217, D234, #285).
  *
  * The control itself (the status check, the sign-in toast, the inbox card, the palette row) is
  * `authority-control.on-demand.ts`. Nothing about it is needed for the first screen or the first interaction: it learns
@@ -16,11 +17,19 @@ import type { ProvisioningService } from "./service";
 
 export type AuthorityState = "unknown" | "locked" | "unlocked";
 
+/** The canvas's view of the CA: its lock state, root expiry warnings and the unlock ceremony. */
 export interface AuthorityControl {
   /** What was last learned from the server. */
   state(): AuthorityState;
   /** False for a viewer who is not an administrator: the state is shown, nothing can be done about it. */
   canUnlock(): boolean;
+  /**
+   * One line per CA root inside a warning window (365/90/30/7 days, expired, or unknown time), already worded.
+   * Empty for viewers who are not administrators: the server is the authority on who may see root expiry.
+   */
+  expiryWarnings(): readonly string[];
+  /** Opens Settings → Hosts, where the warning is shown next to the lock. */
+  review(): void;
   /** Asks the server again; listeners hear it when the answer changes. */
   refresh(): Promise<void>;
   /** Runs the ceremony, tells the person the outcome, and refreshes. */
@@ -39,6 +48,7 @@ export interface AuthorityOptions {
 /** Waits at most this long for the browser to be idle: the real control's first check is due 1.2 s after the handle. */
 const WARM_WITHIN_MS = 600;
 
+/** Create the thin CA control handle; the real control loads on demand when the browser is idle. */
 export function createAuthorityControl(core: CoreScreen, options: AuthorityOptions): AuthorityControl {
   const createdAt = Date.now();
   const listeners = new Set<() => void>();
@@ -56,6 +66,8 @@ export function createAuthorityControl(core: CoreScreen, options: AuthorityOptio
   return {
     state: () => real?.state() ?? "unknown",
     canUnlock: () => real?.canUnlock() ?? options.canUnlock?.() ?? true,
+    expiryWarnings: () => real?.expiryWarnings() ?? [],
+    review: () => { void load().then((control) => control?.review(), () => undefined); },
     refresh: () => load().then((control) => control?.refresh(), () => undefined),
     unlock: () => load().then((control) => control?.unlock(), () => undefined),
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },

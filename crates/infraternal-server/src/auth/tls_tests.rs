@@ -123,7 +123,6 @@ async fn proxy_tls_registration_session_split_cookies() {
     registration_session(true).await;
 }
 
-#[allow(clippy::too_many_lines)]
 async fn registration_session(behind_proxy: bool) {
     let _serial = SERIAL.lock().await;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

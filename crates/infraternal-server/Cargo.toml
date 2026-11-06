@@ -42,6 +42,7 @@ hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
+httpdate = "1.0.3"
 infraternal-plugin-ssh = { path = "../plugins/ssh", version = "0.1.0", optional = true }
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }

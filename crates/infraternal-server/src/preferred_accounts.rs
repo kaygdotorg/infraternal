@@ -48,12 +48,26 @@ async fn authorize_host(
 fn host_key(host: Option<uuid::Uuid>) -> Vec<u8> {
     host.map_or_else(Vec::new, |host| host.as_bytes().to_vec())
 }
+/// The preference in force for `person` on `host` (or with no host).
+///
+/// `global_account` keeps its meaning (the explicit global choice, else the
+/// infraternal username). The account a login uses on a host is, in order:
+/// 1. the person's explicit choice for that host;
+/// 2. on a rootless host, the SSH account it was added with: its infraternal
+///    agent runs as that account and can open no other, so any other default
+///    fails the host's login check on every add (#305 F-A);
+/// 3. the explicit global choice;
+/// 4. the infraternal username.
+///
+/// A rootful host keeps the infraternal username as its default even when it was
+/// added as `root@…`: its infraternal agent can open any account, and the owner
+/// does not want to land in root by default (D336).
 async fn read(
     tx: &mut Transaction<'_, Sqlite>,
     person: &str,
     host: Option<uuid::Uuid>,
 ) -> Result<Preference, &'static str> {
-    let global_account: String = sqlx::query_scalar("SELECT COALESCE(p.account,u.username) FROM users u LEFT JOIN preferred_accounts p ON p.user_id=u.id WHERE u.id=?")
+    let (explicit_global, username): (Option<String>, String) = sqlx::query_as("SELECT p.account, u.username FROM users u LEFT JOIN preferred_accounts p ON p.user_id=u.id WHERE u.id=?")
         .bind(person).fetch_one(&mut **tx).await.map_err(|_| REFUSED)?;
     let host_account: Option<String> = sqlx::query_scalar(
         "SELECT account FROM preferred_host_accounts WHERE user_id=? AND host_id=?",
@@ -63,13 +77,36 @@ async fn read(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|_| REFUSED)?;
+    let added: Option<(String, Option<String>)> = match host {
+        Some(host) => sqlx::query_as("SELECT h.mode, b.address FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=?")
+            .bind(host.as_bytes().as_slice()).bind(person).fetch_optional(&mut **tx).await.map_err(|_| REFUSED)?,
+        None => None,
+    };
+    let rootless = added.as_ref().is_some_and(|(mode, _)| mode == "rootless");
+    let added_as = added
+        .and_then(|(_, address)| address)
+        .as_deref()
+        .and_then(added_account);
+    let global_account = explicit_global.clone().unwrap_or(username.clone());
+    let account = host_account
+        .clone()
+        .or_else(|| added_as.filter(|_| rootless))
+        .or(explicit_global)
+        .unwrap_or(username);
     Ok(Preference {
-        account: host_account
-            .clone()
-            .unwrap_or_else(|| global_account.clone()),
+        account,
         global_account,
         host_account,
     })
+}
+/// The SSH account in an add-host address (`user@host[:port]`), if it names one.
+/// Add-host validated the address when it was stored; anything else yields none.
+fn added_account(address: &str) -> Option<String> {
+    address
+        .split_once('@')
+        .map(|(user, _)| user)
+        .filter(|user| !user.is_empty())
+        .map(str::to_owned)
 }
 /// Resolve a preferred account for a real terminal open using the same durable state and authority.
 /// # Errors

@@ -222,12 +222,13 @@ impl Channel for Capture {
     }
 }
 
+/// A mux greeting does not repeat native provider capabilities cached from earlier.
 #[tokio::test]
 async fn mux_greeting_omits_cached_native_provider_capabilities() {
     let (bulk, bulk_rx) = mpsc::channel(1);
     drop(bulk);
     let (written, mut frames) = mpsc::unbounded_channel();
-    writer(&Capture(written), bulk_rx, None, true, false, 64)
+    writer(&Capture(written), bulk_rx, None, true, false, false, 64)
         .await
         .unwrap();
     let bytes = frames.recv().await.unwrap();
@@ -238,6 +239,7 @@ async fn mux_greeting_omits_cached_native_provider_capabilities() {
     );
 }
 
+/// Control replies overtake bulk output without reordering a snapshot notice.
 #[tokio::test]
 async fn control_precedes_bulk_without_reordering_snapshot_notice() {
     let (bulk, bulk_rx) = mpsc::channel(8);
@@ -263,6 +265,7 @@ async fn control_precedes_bulk_without_reordering_snapshot_notice() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            false,
             false,
             false,
             0,
@@ -380,6 +383,7 @@ async fn uninstall_handoff_runs_only_after_a_successful_real_socket_write() {
     }
 }
 
+/// A census and an open result keep their FIFO order on the wire.
 #[tokio::test]
 async fn census_and_open_result_share_fifo_order() {
     let (bulk, bulk_rx) = mpsc::channel(8);
@@ -400,6 +404,7 @@ async fn census_and_open_result_share_fifo_order() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            false,
             false,
             false,
             0,
@@ -614,4 +619,82 @@ async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
     let _ = tokio::join!(relay, shim);
     std::fs::remove_dir_all(state).unwrap();
     result.unwrap();
+}
+
+/// The agent fixture survives the writer's control-first order when it moves
+/// to another terminal (#347). The real writer sends Pong before the old
+/// terminal's already-queued frames: an old acknowledgement, then old output
+/// at seq 385 (J260's ordering, 80548). The new attachment's first output
+/// follows on the fixture's new stream. The detach fence returns at Pong; no
+/// old frame, acknowledgement or output, may be read as the new terminal's.
+/// Driven through the real `writer` and the real fixture code; no timing.
+#[tokio::test]
+async fn fixture_drops_output_left_over_from_the_previous_terminal() {
+    let (bulk, bulk_rx) = mpsc::channel(4);
+    let (control, control_rx) = mpsc::channel(2);
+    let queued = [
+        Message::Shim(1, Shim::InputAck(7)),
+        Message::Shim(1, Shim::Output(385, b"old terminal".to_vec())),
+        Message::Shim(3, Shim::Output(0, b"new terminal".to_vec())),
+    ];
+    for message in queued {
+        assert!(bulk.try_send(message).is_ok());
+    }
+    assert!(control.try_send(Message::Pong(0, 1, 0)).is_ok());
+    let (written, mut frames) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        writer(
+            &Capture(written),
+            bulk_rx,
+            Some(control_rx),
+            false,
+            false,
+            false,
+            0,
+        )
+        .await
+    });
+    let mut wire = String::new();
+    for _ in 0..4 {
+        let frame = frames.recv().await.unwrap();
+        wire.extend(frame.iter().map(|byte| format!("{byte:02x}")));
+    }
+    drop((bulk, control));
+    task.await.unwrap().unwrap();
+    let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+    let source = r#"
+import socket, sys, uuid
+sys.path.insert(0, sys.argv[1])
+from agent_fixture import Binary, select_terminal
+binary = object.__new__(Binary)
+binary.sock, peer = socket.socketpair()
+binary.sock.settimeout(30)
+binary.fence_nonce = 0
+binary.out, binary.entered, binary.acked = 385, 0, 0
+binary.credit_available, binary.credit_pending, binary.credit_batch = 1048576, 0, 65536
+binary.data, binary.events, binary.snapshots, binary.inventory = bytearray(), [], [], None
+binary.stream, binary.retired = 1, set()
+binary.stale, binary.stale_credit = None, 0
+peer.sendall(bytes.fromhex(sys.argv[2]))
+binary.fence()
+assert binary.out == 385
+select_terminal(binary, str(uuid.uuid4()))
+for _ in range(3):
+    if binary.out == 12:
+        break
+    binary.process()
+assert (binary.out, bytes(binary.data)) == (12, b"new terminal"), (binary.out, bytes(binary.data))
+"#;
+    let result = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(source)
+        .arg(scripts)
+        .arg(wire)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "fixture misread leftover output: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }

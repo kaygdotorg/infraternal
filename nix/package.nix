@@ -77,7 +77,11 @@ let
     outputHash = "sha256-BfU58ccEGY7L08XD3VPCr05VWHyDxQ+kb+LDQiCC2l0=";
     dontFixup = true;
   };
-  cargoDeps = rustPlatform.importCargoLock { lockFile = ../Cargo.lock; };
+  cargoDeps = rustPlatform.importCargoLock {
+    lockFile = ../Cargo.lock;
+    # Fixed source hash for the commit pinned in Cargo.lock; required in the sandbox.
+    outputHashes."gotatun-0.10.2" = "sha256-mS0CUgX9V/8z8GNYqnXzBaoaLOMGI/ffekINaWA4rks=";
+  };
   bunDeps = stdenv.mkDerivation {
     name = "infraternal-bun-deps";
     src = lib.fileset.toSource {
@@ -137,12 +141,10 @@ let
       mkdir -p "$CARGO_HOME/registry/src"
       cp -RL ${cargoDeps} "$CARGO_HOME/registry/src/vendor"
       chmod -R u+w "$CARGO_HOME/registry/src/vendor"
-      cat > "$CARGO_HOME/config.toml" <<EOF
-      [source.crates-io]
-      replace-with = "vendored-sources"
-      [source.vendored-sources]
-      directory = "$CARGO_HOME/registry/src/vendor"
-      EOF
+      # Preserve Git source replacements as well as crates.io's. Only the vendor
+      # location changes: Cargo must resolve every source offline in the sandbox.
+      sed "s|directory = \"cargo-vendor-dir\"|directory = \"$CARGO_HOME/registry/src/vendor\"|" \
+        ${cargoDeps}/.cargo/config.toml > "$CARGO_HOME/config.toml"
       # Keep the release scripts' one-Zig invariant without invoking a downloader.
       for target in "$CARGO_TARGET_DIR" "$CARGO_TARGET_DIR/bootstrap" "$CARGO_TARGET_DIR/session"; do
         mkdir -p "$target/auth-tools" "$target/vt-tools/zig-cache"

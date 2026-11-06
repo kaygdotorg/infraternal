@@ -1,4 +1,4 @@
-//! Proves active helper cancellation and bounded output using real child processes, including a descendant.
+//! Proves progress deadlines, helper cancellation and bounded output using real child processes.
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -326,7 +326,7 @@ out = sys.stdout.buffer
 payload = os.read(0, 12)
 assert payload == b'public-frame', payload
 assert not select.select([0], [], [], 0.05)[0], 'private input preceded verification'
-out.write(b'STEP upload\nTRANSFER raw\nPAYLOAD ready\n'); out.flush()
+out.write(b'STEP upload\nTRANSFER raw\nPROGRESS 12\nPAYLOAD ready\n'); out.flush()
 private = sys.stdin.buffer.read()
 assert private == b'synthetic-invitation', private
 out.write(b'STEP join\nSTEP install\nSTEP start\nSTEP linger\nyes\nDONE\n')
@@ -398,4 +398,253 @@ async fn declared_selection_mismatch_and_missing_verification_withhold_private_i
         );
         std::fs::remove_file(&path).ok();
     }
+}
+
+/// Advance a virtual clock while a real child consumes gated payload chunks.
+/// Restoring the total helper timeout makes this fail after the third advance.
+#[tokio::test]
+async fn progressing_upload_outlives_thirty_seconds() {
+    let scratch = common::scratch();
+    let root = scratch.join(format!("progress-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    let script = r"
+import os, pathlib, sys, time
+root = pathlib.Path(sys.argv[1])
+for index in range(24):
+    remaining = 65536
+    while remaining:
+        chunk = os.read(0, remaining)
+        assert chunk
+        remaining -= len(chunk)
+    print('PROGRESS ' + str((index + 1) * 65536), flush=True)
+    (root / str(index)).touch()
+    while not (root / ('release' + str(index))).exists():
+        # sleep: wait for the test to advance virtual time before accepting more bytes.
+        time.sleep(.001)
+assert not os.read(0, 1)
+";
+    let path = root.clone();
+    let running = tokio::spawn(async move {
+        let payload = vec![42; 24 * 65536];
+        let mut command = Command::new("/usr/bin/python3");
+        command.args(["-c", script]).arg(path);
+        execute(
+            &mut command,
+            Input::Transfer(infraternal_plugin_ssh::transport::PayloadInput::Bytes(
+                &payload,
+            )),
+            Duration::from_secs(30),
+        )
+        .await
+    });
+    tokio::time::pause();
+    // The product clock is virtual. This generous real-time guard only catches
+    // a wedged fixture while waiting for an external child's acknowledgment.
+    let hang_guard = std::time::Instant::now() + Duration::from_secs(600);
+    for index in 0..24 {
+        while !root.join(index.to_string()).exists() {
+            assert!(!running.is_finished(), "upload ended before chunk {index}");
+            assert!(
+                std::time::Instant::now() < hang_guard,
+                "the upload fixture stopped acknowledging chunks"
+            );
+            tokio::task::yield_now().await;
+        }
+        // The child's acknowledgment proves these bytes passed the input pipe.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        std::fs::write(root.join(format!("release{index}")), []).unwrap();
+    }
+    tokio::time::resume();
+    let result = running.await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(result.is_ok_and(|output| output.success));
+}
+
+/// A child that accepts no input must expire even when no wall time elapses.
+#[tokio::test]
+async fn stalled_upload_expires_under_virtual_time() {
+    let mut command = Command::new("/bin/sleep");
+    command.arg("600");
+    tokio::time::pause();
+    let bytes = vec![42; 1024 * 1024];
+    let result = execute(
+        &mut command,
+        Input::Transfer(infraternal_plugin_ssh::transport::PayloadInput::Bytes(
+            &bytes,
+        )),
+        Duration::from_secs(30),
+    )
+    .await;
+    tokio::time::resume();
+    assert_eq!(
+        result.err().unwrap().message,
+        "The SSH operation timed out."
+    );
+}
+
+/// A small upload fits in SSH buffers while the remote consumer stays busy.
+/// Local writes alone must not expire its acknowledged, steadily consumed tail.
+#[tokio::test]
+async fn buffered_tail_outlives_the_local_pipe_deadline() {
+    let scratch = common::scratch();
+    let root = scratch.join(format!("tail-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.clone();
+    let running = tokio::spawn(async move {
+        let mut command = Command::new("/usr/bin/python3");
+        command
+            .args([
+                "-u",
+                "-c",
+                r"
+import os, pathlib, sys, time
+root = pathlib.Path(sys.argv[1])
+for index in range(40):
+    remaining = 1024
+    while remaining:
+        chunk = os.read(0, remaining)
+        assert chunk
+        remaining -= len(chunk)
+    print('PROGRESS ' + str((index + 1) * 1024), flush=True)
+    (root / str(index)).touch()
+    while not (root / ('release' + str(index))).exists():
+        # sleep: wait for the virtual clock advancement before consuming another chunk.
+        time.sleep(.001)
+assert not os.read(0, 1)
+print('UPLOAD complete', flush=True)
+",
+            ])
+            .arg(path);
+        let payload = vec![42; 40 * 1024];
+        execute(
+            &mut command,
+            Input::Transfer(infraternal_plugin_ssh::transport::PayloadInput::Bytes(
+                &payload,
+            )),
+            Duration::from_secs(30),
+        )
+        .await
+    });
+    tokio::time::pause();
+    let guard = std::time::Instant::now() + Duration::from_secs(600);
+    for index in 0..40 {
+        while !root.join(index.to_string()).exists() {
+            assert!(
+                !running.is_finished(),
+                "buffered upload ended before receipt {index}"
+            );
+            assert!(
+                std::time::Instant::now() < guard,
+                "buffered-tail fixture wedged"
+            );
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        std::fs::write(root.join(format!("release{index}")), []).unwrap();
+    }
+    tokio::time::resume();
+    let result = running.await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(result.is_ok_and(|output| output.success));
+}
+
+/// Observe the real pipe draining before advancing the completion or silence clock.
+#[tokio::test]
+async fn completion_and_chatter_never_hide_a_stalled_transfer() {
+    for receipt in ["PROGRESS 1\n", "keepalive\n"] {
+        let root = common::scratch();
+        let marker = root.join(format!("completion-{}", uuid::Uuid::new_v4().simple()));
+        let path = marker.clone();
+        let running = tokio::spawn(async move {
+            let mut command = Command::new("/usr/bin/python3");
+            command
+                .args([
+                    "-c",
+                    r"
+import array, fcntl, os, pathlib, sys, termios, time
+assert os.read(0, 1) == b'x'
+os.write(1, sys.argv[2].encode())
+while True:
+    pending = array.array('i', [0])
+    fcntl.ioctl(1, termios.FIONREAD, pending, True)
+    if pending[0] == 0: break
+    # sleep: wait for the actual receipt pipe to drain into the product parser.
+    time.sleep(.001)
+pathlib.Path(sys.argv[1]).touch()
+os.write(1, b'unrelated output\n')
+# sleep: keep completion pending until the test's virtual deadline retires this child.
+time.sleep(600)
+",
+                ])
+                .arg(path)
+                .arg(receipt);
+            execute(
+                &mut command,
+                Input::Transfer(infraternal_plugin_ssh::transport::PayloadInput::Bytes(b"x")),
+                Duration::from_secs(30),
+            )
+            .await
+        });
+        let guard = std::time::Instant::now() + Duration::from_secs(600);
+        while !marker.exists() {
+            assert!(
+                !running.is_finished(),
+                "fixture ended before its receipt drained"
+            );
+            assert!(
+                std::time::Instant::now() < guard,
+                "completion fixture wedged"
+            );
+            tokio::task::yield_now().await;
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(!running.is_finished());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let result = running.await.unwrap();
+        tokio::time::resume();
+        assert_eq!(
+            result.err().unwrap().message,
+            "The SSH operation timed out."
+        );
+        std::fs::remove_file(marker).unwrap();
+    }
+}
+
+/// Duplicating readiness without consumption cannot open the private-input barrier.
+#[tokio::test]
+async fn readiness_without_consumption_never_releases_private_input() {
+    use infraternal_plugin_ssh::transport::{PayloadInput, TransferChoice};
+    let root = common::scratch();
+    let path = root.join(format!("private-barrier-{}", uuid::Uuid::new_v4().simple()));
+    let mut command = Command::new("/usr/bin/python3");
+    command
+        .args([
+            "-c",
+            r"
+import os, select, sys
+assert os.read(0, 12) == b'public-frame'
+os.write(1, b'STEP upload\nTRANSFER raw\nPAYLOAD ready\nPAYLOAD ready\n')
+# The bounded select observes actual input availability, without assuming scheduler speed.
+private = os.read(0, 128) if select.select([0], [], [], .1)[0] else b''
+open(sys.argv[1], 'wb').write(private)
+",
+        ])
+        .arg(&path);
+    let result = execute(
+        &mut command,
+        Input::Negotiated {
+            raw: PayloadInput::Bytes(b"public-frame"),
+            gzip: None,
+            zstd: None,
+            invitation: b"synthetic-invitation",
+            payload_ack: true,
+            declared: Some(TransferChoice::Raw),
+        },
+        Duration::from_secs(3),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), [] as [u8; 0]);
+    std::fs::remove_file(path).unwrap();
 }

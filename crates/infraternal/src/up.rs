@@ -1,5 +1,13 @@
 //! Enrolls a Linux machine through device approval and starts its system service (#263).
 
+/// Keep fresh-host preflight, installation and rollback in one transaction.
+#[path = "up_install.rs"]
+mod install;
+
+/// Route termination signals through enrollment cancellation and transaction cleanup.
+#[path = "up_termination.rs"]
+mod termination;
+
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
@@ -12,7 +20,7 @@ use serde_json::json;
 use std::{
     env, fs,
     io::{self, IsTerminal, Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, Instant},
@@ -66,9 +74,12 @@ enum Failure {
     SudoDenied,
     UntrustedTool,
     NoSystemd,
+    /// Local installation conflicts are distinct from a remote approval refusal.
+    InstallConflict,
 }
 
 impl Failure {
+    /// Classify a failure for the shared command result envelope.
     const fn state(self) -> CommandState {
         match self {
             Self::InvalidServer | Self::Permission | Self::Expired | Self::Unsupported => {
@@ -82,16 +93,19 @@ impl Failure {
             | Self::LocalState
             | Self::SudoUnavailable
             | Self::NoSystemd => CommandState::Failed,
-            Self::SudoDenied | Self::UntrustedTool => CommandState::Refused,
+            Self::SudoDenied | Self::UntrustedTool | Self::InstallConflict => CommandState::Refused,
         }
     }
 
+    /// Map failures to stable D303 process statuses.
     const fn exit(self) -> Exit {
         match self {
             Self::InvalidServer => Exit::Usage,
-            Self::Permission | Self::Expired | Self::SudoDenied | Self::UntrustedTool => {
-                Exit::NotAllowed
-            }
+            Self::Permission
+            | Self::Expired
+            | Self::SudoDenied
+            | Self::UntrustedTool
+            | Self::InstallConflict => Exit::NotAllowed,
             Self::Unsupported | Self::SudoUnavailable | Self::NoSystemd => Exit::NotFound,
             Self::Unreachable => Exit::Unreachable,
             Self::Partial => Exit::Partial,
@@ -99,6 +113,7 @@ impl Failure {
         }
     }
 
+    /// Give a concise recovery hint without including private enrollment data.
     const fn message(self) -> &'static str {
         match self {
             Self::InvalidServer => {
@@ -125,6 +140,9 @@ impl Failure {
             }
             Self::UntrustedTool => {
                 "sudo or systemctl can be changed by a user other than root. Give it and its directories back to root, then rerun infraternal up."
+            }
+            Self::InstallConflict => {
+                "The local installation was refused. Resolve the conflict reported above before retrying infraternal up."
             }
             Self::NoSystemd => {
                 "infraternal up installs a systemd system service, and systemctl is not installed in a system directory."
@@ -231,7 +249,6 @@ fn take_join_key(data: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
 }
 
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
     let server = match server_url(server_input) {
         Ok(server) => server,
@@ -254,6 +271,9 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Err(failure) => return fail(json_output, failure),
     };
     if let Err(failure) = trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd) {
+        return fail(json_output, failure);
+    }
+    if let Err(failure) = install_preflight() {
         return fail(json_output, failure);
     }
     let hostname = local_hostname();
@@ -336,12 +356,15 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
 /// Run only the privileged half requested by `sudo`; all credentials arrive on stdin.
 pub(crate) fn run_helper(server_input: &str, _json_output: bool) -> ExitCode {
     let result = run_helper_inner(server_input);
+    if result == Err(Failure::InstallConflict) {
+        println!("UP_PREFLIGHT_REFUSED");
+    }
     let code = result.map_or_else(Failure::exit_code, |()| 0);
     println!("UP_RESULT={code}");
     ExitCode::from(code)
 }
 
-#[allow(clippy::too_many_lines)]
+/// Validate private enrollment input and keep the local install under rollback until active.
 fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     if nix::unistd::Uid::effective().as_raw() != 0 {
         return Err(Failure::Permission);
@@ -362,25 +385,32 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         return Err(Failure::Permission);
     }
     invitation.wipe();
-    // Before enrollment creates `agent/`: its recursive create would otherwise
-    // make the shared base 0700 and the PATH link unusable (J134 P2-4).
-    prepare_system_layout(Path::new("/"), 0).map_err(|_| Failure::LocalState)?;
-    println!("UP_STAGE=enrollment");
+    install_preflight()?;
     let join_url = format!("{origin}/remote/join");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| Failure::Runtime)?;
-    runtime
-        .block_on(crate::remote::join_with_key(
+    termination::run(|interrupted| async move {
+        let install = install::Install::begin(Path::new("/"), 0, &systemctl)
+            .map_err(|error| {
+                eprintln!("{error}");
+                Failure::LocalState
+            })?
+            .interrupt_on(interrupted);
+        println!("UP_STAGE=enrollment");
+        crate::remote::join_with_key(
             &join_url,
             Path::new(SERVICE_DATA),
             &handoff.invitation,
             &handoff.key_pkcs8,
-        ))
+        )
+        .await
         .map_err(|error| map_remote_failure(&error))?;
-    install_system_service(Path::new("/"), Path::new(RUNNING_IMAGE), &systemctl, 0)
-        .map_err(|_| Failure::Partial)
+        install
+            .activate(Path::new(RUNNING_IMAGE))
+            .map_err(|_| Failure::Partial)
+    })
+    .map_err(|error| {
+        eprintln!("{error}");
+        Failure::Failed
+    })?
 }
 
 fn server_url(input: &str) -> Result<Url, Failure> {
@@ -851,6 +881,7 @@ fn protected_directory(directory: &Path, owner: u32) -> bool {
     })
 }
 
+/// Send enrollment input privately and preserve local preflight refusals from the helper.
 fn invoke_sudo(command: &mut Command, payload: &[u8]) -> Result<(), Failure> {
     let mut child = command
         .stdin(Stdio::piped())
@@ -862,6 +893,13 @@ fn invoke_sudo(command: &mut Command, payload: &[u8]) -> Result<(), Failure> {
     stdin.write_all(payload).map_err(|_| Failure::Partial)?;
     drop(stdin);
     let output = child.wait_with_output().map_err(|_| Failure::Partial)?;
+    if output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .any(|line| line == b"UP_PREFLIGHT_REFUSED")
+    {
+        return Err(Failure::InstallConflict);
+    }
     if let Some(code) = parse_result_marker(&output.stdout) {
         if code == 0 {
             Ok(())
@@ -884,8 +922,26 @@ fn parse_result_marker(output: &[u8]) -> Option<u8> {
         .find_map(|line| line.strip_prefix("UP_RESULT=")?.parse().ok())
 }
 
-/// Install the running binary and its systemd unit without replacing foreign PATH entries.
-#[allow(clippy::too_many_lines)]
+/// Check the host before approval and repeat as root before installing anything.
+fn install_preflight() -> Result<(), Failure> {
+    let result = install::preflight(Path::new("/"), 0).and_then(|()| {
+        if let Ok(data) = crate::remote::default_data() {
+            match fs::symlink_metadata(data.join("identity.json")) {
+                Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "An infraternal agent identity already exists for this user. Manage that installation instead of running infraternal up.")),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    });
+    result.map_err(|error| {
+        eprintln!("{error}");
+        Failure::InstallConflict
+    })
+}
+
+/// Exercise the same transaction as enrollment without contacting a server.
+#[cfg(test)]
 fn install_system_service(
     root: &Path,
     source: &Path,
@@ -895,142 +951,15 @@ fn install_system_service(
     if nix::unistd::Uid::effective().as_raw() != expected_uid {
         return Err(permission_error());
     }
-    // Again here: it also repairs a base that an earlier run left at 0700.
-    prepare_system_layout(root, expected_uid)?;
-    let binary =
-        ensure_directory(root, "var/lib/infraternal/bin", expected_uid)?.join("infraternal");
-    copy_executable(source, &binary, expected_uid)?;
-
-    let path_directory = ensure_directory(root, "usr/local/bin", expected_uid)?;
-    install_path_link(&path_directory.join("infraternal"), expected_uid)?;
-    if !infraternal_plugin_api::cli_alias::install(
-        &path_directory.join("infraternal"),
-        expected_uid,
-    )? {
-        eprintln!("infraternal: skipped infra; an existing path belongs to another command.");
-    }
-
-    let unit_directory = ensure_directory(root, "etc/systemd/system", expected_uid)?;
-    let unit_path = unit_directory.join("infraternal-agent.service");
-    let unit = systemd_unit();
-    install_owned_file(&unit_path, unit.as_bytes(), 0o644, expected_uid)?;
-
-    run_systemctl(systemctl, &["daemon-reload"], None)?;
-    run_systemctl(systemctl, &["enable", "--now", SERVICE_NAME], None)?;
-    run_systemctl(systemctl, &["is-active", SERVICE_NAME], Some("active"))
+    install::Install::begin(root, expected_uid, systemctl)?.activate(source)
 }
 
-/// Lay out `/var/lib/infraternal` so the invoking user can run the CLI
-/// through `/usr/local/bin/infraternal` while the state stays private
-/// (#263, J134 P2-4):
-///
-/// - `var/lib/infraternal` is 0711: anyone may pass through it, no one but
-///   root may list it. D17 keeps the binary out of `/usr`, so its directory
-///   has to be traversable. The SSH installer and uninstaller accept 0711 for
-///   the same base.
-/// - `bin/` is 0755 and holds only the released binary.
-/// - `agent/` is 0700, and everything enrollment writes in it is 0600.
-///
-/// The modes are set explicitly, because the umask sudo hands the helper can
-/// be 077. An existing base is narrowed or widened to exactly these modes,
-/// after the same ownership and no-group-write checks as every other
-/// installed path.
-fn prepare_system_layout(root: &Path, owner: u32) -> io::Result<()> {
-    let bin = ensure_directory(root, "var/lib/infraternal/bin", owner)?;
-    let base = bin.parent().ok_or_else(permission_error)?;
-    fs::set_permissions(base, fs::Permissions::from_mode(0o711))?;
-    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
-    let agent = base.join("agent");
-    match fs::symlink_metadata(&agent) {
-        Ok(metadata) => check_directory(&metadata, owner)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::DirBuilder::new().mode(0o700).create(&agent)?;
-            check_directory(&fs::symlink_metadata(&agent)?, owner)?;
-        }
-        Err(error) => return Err(error),
-    }
-    fs::set_permissions(&agent, fs::Permissions::from_mode(0o700))
-}
-
-fn ensure_directory(root: &Path, relative: &str, owner: u32) -> io::Result<PathBuf> {
-    let root_metadata = fs::symlink_metadata(root)?;
-    if !root_metadata.is_dir() || root_metadata.uid() != owner {
-        return Err(permission_error());
-    }
-    let mut current = root.to_path_buf();
-    for component in Path::new(relative).components() {
-        let std::path::Component::Normal(component) = component else {
-            return Err(permission_error());
-        };
-        current.push(component);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) => check_directory(&metadata, owner)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                fs::DirBuilder::new().mode(0o755).create(&current)?;
-                check_directory(&fs::symlink_metadata(&current)?, owner)?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(current)
-}
-
+/// Check directory ownership and replacement permissions without changing its mode.
 fn check_directory(metadata: &fs::Metadata, owner: u32) -> io::Result<()> {
     if !metadata.is_dir() || metadata.uid() != owner || metadata.permissions().mode() & 0o022 != 0 {
         return Err(permission_error());
     }
     Ok(())
-}
-
-fn copy_executable(source: &Path, destination: &Path, owner: u32) -> io::Result<()> {
-    match fs::symlink_metadata(destination) {
-        Ok(metadata)
-            if !metadata.is_file()
-                || metadata.uid() != owner
-                || metadata.permissions().mode() & 0o022 != 0 =>
-        {
-            return Err(permission_error());
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let temporary = destination.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
-    let result = (|| {
-        // Hash what is read, then hash what landed on disk, and publish only
-        // a byte-identical copy. The source is opened once, so a path that
-        // changes meanwhile cannot mix two files.
-        let mut input = fs::File::open(source)?;
-        if !input.metadata()?.is_file() {
-            return Err(permission_error());
-        }
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&temporary)?;
-        let read = hash_stream(&mut input, Some(&mut output))?;
-        output.set_permissions(fs::Permissions::from_mode(0o755))?;
-        output.sync_all()?;
-        drop(output);
-        let written = hash_stream(&mut fs::File::open(&temporary)?, None)?;
-        if written != read {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "installed binary differs from the running image",
-            ));
-        }
-        fs::rename(&temporary, destination)?;
-        if let Some(parent) = destination.parent() {
-            fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
 }
 
 /// SHA-256 of everything `input` yields, copying it to `output` on the way.
@@ -1051,76 +980,14 @@ fn hash_stream(input: &mut impl Read, mut output: Option<&mut fs::File>) -> io::
     }
 }
 
-fn install_path_link(path: &Path, owner: u32) -> io::Result<()> {
-    let target = Path::new(SERVICE_BINARY);
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            if metadata.uid() == owner && fs::read_link(path)? == target {
-                return Ok(());
-            }
-            return Err(permission_error());
-        }
-        Ok(_) => return Err(permission_error()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let temporary = path.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
-    std::os::unix::fs::symlink(target, &temporary)?;
-    let result = fs::rename(&temporary, path);
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    } else if let Some(parent) = path.parent() {
-        fs::File::open(parent)?.sync_all()?;
-    }
-    result
-}
-
-fn install_owned_file(path: &Path, contents: &[u8], mode: u32, owner: u32) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata)
-            if !metadata.is_file()
-                || metadata.uid() != owner
-                || metadata.permissions().mode() & 0o022 != 0 =>
-        {
-            return Err(permission_error());
-        }
-        Ok(_) => {
-            if fs::read(path)? != contents {
-                return Err(permission_error());
-            }
-            return Ok(());
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let temporary = path.with_extension(format!("{}.pending", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .custom_flags(nix::libc::O_NOFOLLOW)
-            .open(&temporary)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        if let Some(parent) = path.parent() {
-            fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
-    }
-    result
-}
-
+/// Render the single system service installed by a fresh machine join.
 fn systemd_unit() -> String {
     format!(
         "[Unit]\nDescription=Infraternal machine service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={SERVICE_BINARY} agent run --data {SERVICE_DATA}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
+/// Run a trusted service manager with a fixed environment and optional output check.
 fn run_systemctl(
     systemctl: &Path,
     arguments: &[&str],
@@ -1173,6 +1040,7 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
     }
 }
 
+/// Local enrollment, privilege, and transactional installation regressions.
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1184,7 +1052,7 @@ mod tests {
     use serde_json::json;
     use std::{
         fs,
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
         path::Path,
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -1483,23 +1351,78 @@ mod tests {
             fs::read_to_string(calls).unwrap(),
             "daemon-reload\nenable --now infraternal-agent.service\nis-active infraternal-agent.service\n"
         );
-        // A later foreign command wins even when this installation is repeated.
-        let alias = link.with_file_name("infra");
-        fs::remove_file(&alias).unwrap();
-        fs::write(&alias, b"foreign infra").unwrap();
-        install_system_service(
-            &temporary.0,
-            &source,
-            &systemctl,
-            nix::unistd::geteuid().as_raw(),
-        )
-        .unwrap();
-        assert_eq!(fs::read(alias).unwrap(), b"foreign infra");
     }
 
+    /// A late service failure retires only the alias inode created by this attempt.
+    #[test]
+    fn rollback_after_alias_creation_preserves_preexisting_aliases() {
+        for kind in ["absent", "file", "directory", "foreign-link", "owned-link"] {
+            let temporary = TemporaryDirectory::new();
+            let commands = temporary.0.join("usr/local/bin");
+            fs::create_dir_all(&commands).unwrap();
+            let alias = commands.join("infra");
+            match kind {
+                "file" => fs::write(&alias, b"foreign infra").unwrap(),
+                "directory" => fs::create_dir(&alias).unwrap(),
+                "foreign-link" => std::os::unix::fs::symlink("foreign-command", &alias).unwrap(),
+                "owned-link" => std::os::unix::fs::symlink("infraternal", &alias).unwrap(),
+                _ => {}
+            }
+            let before = fs::symlink_metadata(&alias).ok();
+            let source = temporary.0.join("source");
+            fs::write(&source, b"binary").unwrap();
+            let systemctl = temporary.0.join("systemctl");
+            let reached = temporary.0.join("activation-reached");
+            fs::write(
+                &systemctl,
+                format!(
+                    "#!/bin/sh\n[ \"$1\" != stop ] || exit 0\n[ -e '{}' ] || [ -L '{}' ] || exit 2\nprintf reached > '{}'\nexit 1\n",
+                    alias.display(), alias.display(), reached.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(install_system_service(&temporary.0, &source, &systemctl, me()).is_err());
+            assert_eq!(fs::read(&reached).unwrap(), b"reached", "{kind}");
+            match before {
+                None => assert!(
+                    alias.symlink_metadata().is_err(),
+                    "new infra survived rollback"
+                ),
+                Some(before) => {
+                    use std::os::unix::fs::MetadataExt;
+                    let after = fs::symlink_metadata(&alias).unwrap();
+                    assert_eq!(
+                        (after.dev(), after.ino()),
+                        (before.dev(), before.ino()),
+                        "{kind}"
+                    );
+                    match kind {
+                        "file" => assert_eq!(fs::read(&alias).unwrap(), b"foreign infra"),
+                        "directory" => assert_eq!(fs::read_dir(&alias).unwrap().count(), 0),
+                        "foreign-link" => {
+                            assert_eq!(
+                                fs::read_link(&alias).unwrap(),
+                                Path::new("foreign-command")
+                            );
+                        }
+                        "owned-link" => {
+                            assert_eq!(fs::read_link(&alias).unwrap(), Path::new("infraternal"));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            assert!(!temporary.0.join("var").exists(), "{kind}");
+            assert!(!temporary.0.join("etc").exists(), "{kind}");
+            assert!(!commands.join("infraternal").exists(), "{kind}");
+        }
+    }
+
+    /// A fresh install exposes its CLI while keeping enrollment state private.
     #[test]
     fn the_path_command_is_reachable_by_other_users_while_state_stays_private() {
-        // J134 P2-4: enrollment's recursive create made the base 0700.
+        // A fresh layout must remain traversable even with a private umask.
         let temporary = TemporaryDirectory::new();
         let source = temporary.0.join("running-infraternal");
         let systemctl = temporary.0.join("systemctl");
@@ -1511,11 +1434,6 @@ mod tests {
             0o755,
         );
         let base = temporary.0.join("var/lib/infraternal");
-        fs::create_dir_all(temporary.0.join("var/lib")).unwrap();
-        std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
-            .create(base.join("agent"))
-            .unwrap();
-        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
 
         install_system_service(
             &temporary.0,
@@ -1663,6 +1581,188 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A foreign command is refused before any data or service directories are created.
+    #[test]
+    fn foreign_cli_preflight_is_read_only() {
+        let temporary = TemporaryDirectory::new();
+        let path = temporary.0.join("usr/local/bin");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("infraternal"), b"foreign").unwrap();
+        let source = temporary.0.join("source");
+        fs::write(&source, b"binary").unwrap();
+        assert!(
+            install_system_service(&temporary.0, &source, Path::new("/bin/false"), me()).is_err()
+        );
+        assert!(!temporary.0.join("var").exists());
+        assert!(!temporary.0.join("etc").exists());
+        assert_eq!(fs::read(path.join("infraternal")).unwrap(), b"foreign");
+    }
+
+    /// Existing machine enrollment belongs to its original install even if startup failed.
+    #[test]
+    fn existing_machine_preflight_is_read_only() {
+        let temporary = TemporaryDirectory::new();
+        let base = temporary.0.join("var/lib/infraternal");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(base.join("agent"))
+            .unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(base.join("agent/keep"), b"existing enrollment").unwrap();
+        let source = temporary.0.join("source");
+        fs::write(&source, b"binary").unwrap();
+        assert!(
+            install_system_service(&temporary.0, &source, Path::new("/bin/false"), me()).is_err()
+        );
+        assert_eq!(
+            fs::metadata(&base).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(!base.join("bin").exists());
+        assert!(!temporary.0.join("usr").exists());
+        assert_eq!(
+            fs::read(base.join("agent/keep")).unwrap(),
+            b"existing enrollment"
+        );
+    }
+
+    /// An installed server with a custom data directory is still a server host.
+    #[test]
+    fn installed_server_preflight_is_read_only() {
+        let temporary = TemporaryDirectory::new();
+        let units = temporary.0.join("etc/systemd/system");
+        fs::create_dir_all(&units).unwrap();
+        let contents = b"[Service]\nExecStart=/opt/infraternal server --data /srv/private\n";
+        fs::write(units.join("custom-infraternal.service"), contents).unwrap();
+        let source = temporary.0.join("source");
+        fs::write(&source, b"binary").unwrap();
+        assert!(
+            install_system_service(&temporary.0, &source, Path::new("/bin/false"), me()).is_err()
+        );
+        assert!(!temporary.0.join("var").exists());
+        assert_eq!(
+            fs::read(units.join("custom-infraternal.service")).unwrap(),
+            contents
+        );
+    }
+
+    /// A refusal on a server host must preserve its private data byte for byte.
+    #[test]
+    fn server_preflight_preserves_modes_and_contents() {
+        let temporary = TemporaryDirectory::new();
+        let base = temporary.0.join("var/lib/infraternal");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(base.join("infraternal.sqlite"), b"server data").unwrap();
+        let path = temporary.0.join("usr/local/bin");
+        fs::create_dir_all(&path).unwrap();
+        std::os::unix::fs::symlink("/opt/infraternal/server", path.join("infraternal")).unwrap();
+        let source = temporary.0.join("source");
+        fs::write(&source, b"binary").unwrap();
+        println!(
+            "fake server before: mode={:o} entries={}",
+            fs::metadata(&base).unwrap().permissions().mode() & 0o777,
+            fs::read_dir(&base).unwrap().count()
+        );
+        assert!(
+            install_system_service(&temporary.0, &source, Path::new("/bin/false"), me()).is_err()
+        );
+        assert_eq!(
+            fs::metadata(&base).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(base.join("infraternal.sqlite")).unwrap(),
+            b"server data"
+        );
+        assert_eq!(
+            fs::read_link(path.join("infraternal")).unwrap(),
+            Path::new("/opt/infraternal/server")
+        );
+        println!(
+            "fake server after: mode={:o} entries={} contents=unchanged cli_link=unchanged",
+            fs::metadata(&base).unwrap().permissions().mode() & 0o777,
+            fs::read_dir(&base).unwrap().count()
+        );
+    }
+
+    /// Unwinding during enrollment preserves a pre-existing base and the CLI link.
+    #[test]
+    fn enrollment_unwind_preserves_existing_paths() {
+        let temporary = TemporaryDirectory::new();
+        let base = temporary.0.join("var/lib/infraternal");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o711)).unwrap();
+        let commands = temporary.0.join("usr/local/bin");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&commands)
+            .unwrap();
+        let link = commands.join("infraternal");
+        std::os::unix::fs::symlink(super::SERVICE_BINARY, &link).unwrap();
+        let before = fs::symlink_metadata(&link).unwrap();
+        let unwind = std::panic::catch_unwind(|| {
+            let _install =
+                super::install::Install::begin(&temporary.0, me(), Path::new("/bin/false"))
+                    .unwrap();
+            fs::write(base.join("agent/partial-join"), b"fixture enrollment").unwrap();
+            panic!("fixture enrollment failed");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(
+            fs::metadata(&base).unwrap().permissions().mode() & 0o777,
+            0o711
+        );
+        assert_eq!(fs::read_dir(&base).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new(super::SERVICE_BINARY)
+        );
+        assert_eq!(
+            std::os::unix::fs::MetadataExt::ino(&fs::symlink_metadata(&link).unwrap()),
+            std::os::unix::fs::MetadataExt::ino(&before)
+        );
+    }
+
+    /// A service-start failure removes install paths and retains only the empty private lock journal.
+    #[test]
+    fn failed_install_rolls_back_new_paths() {
+        let temporary = TemporaryDirectory::new();
+        let source = temporary.0.join("source");
+        fs::write(&source, b"binary").unwrap();
+        fs::write(temporary.0.join("keep"), b"existing").unwrap();
+        let manager = temporary.0.join("systemctl");
+        crate::test_executable::write(&manager, "#!/bin/sh\n[ \"$1\" != is-active ]\n", 0o755);
+        assert!(install_system_service(&temporary.0, &source, &manager, me()).is_err());
+        let mut names = fs::read_dir(&temporary.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [".infraternal-up.journal", "keep", "source", "systemctl"]
+        );
+        let journal = temporary.0.join(".infraternal-up.journal");
+        assert_eq!(fs::read(&journal).unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            fs::metadata(journal).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert_eq!(fs::read(temporary.0.join("keep")).unwrap(), b"existing");
     }
 
     #[test]

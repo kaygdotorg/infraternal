@@ -51,6 +51,9 @@ import { createProductRows } from "./settings-rows/product-source";
 
 import type { CanvasStore } from "./model/store";
 
+/** How long the host list waits for the first terminal to settle before it starts on its own. */
+const HOSTS_FALLBACK_MS = 2000;
+
 export interface ProductCanvasOptions {
   /** Isolated preview documents never use the production transport. */
   previewStore?: CanvasStore;
@@ -80,6 +83,7 @@ export interface ProductCanvas {
   dispose(): void;
 }
 
+/** Mounts the product canvas on the signed-in page: the live sessions, the host list, the layout and every window, and returns the handle that tears it all down. */
 export async function mountProductCanvas(core: CoreScreen, options: ProductCanvasOptions): Promise<ProductCanvas> {
   // The embedded host's system names the mark in its windows' pills. It is asked once, after the first welcome, with the
   // light read (no live figures); until it answers the pill shows the machine glyph.
@@ -150,11 +154,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       }
     }
   });
-  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive, delayed, capacity) => {
+  const store = options.previewStore ?? new ServerCanvasStore(connection, options.accountId, (definitive, _delayed, capacity) => {
     if (disposed) return;
     if (capacity) core.toast.show({ message: "This tab has too many unsaved layout changes. Connect before making more.", tone: "error", duration: 0 });
     else if (definitive) core.toast.show({ message: "That layout change was not saved. The saved layout is back.", tone: "error", duration: 5000 });
-    else if (delayed) core.toast.show({ message: "Your layout is waiting for the server. Keep this tab open.", icon: ICON_INFO, duration: 5000 });
+    // A delayed save (`_delayed`) gets no toast of its own: the persistent "Not saved" status below is shown for exactly as long as
+    // the layout is waiting and already says to keep the tab open. A second transient toast said the same and stacked on it (#377).
   }, options.onSessionRevoked);
   const pendingNotice = mountToast(core.stage, { aboveNotifications: true });
   let pendingShown = false;
@@ -330,6 +335,10 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     }, () => { hostsStarted = false; });
   };
   const offHostWelcome = connection.onWelcome(() => { if (hostsReady) startHosts(); });
+  // The first terminal settling is the usual cue (above), but a canvas with no terminal, or one whose terminal never settles
+  // (a refused or unreachable host), would then never learn its remote hosts and the palette would list none (#305). So the
+  // list also starts once the page has been quiet for a moment: after the first frame had its chance, never instead of it.
+  const hostsFallback = window.setTimeout(() => whenIdle(() => { hostsReady = true; startHosts(); }), HOSTS_FALLBACK_MS);
   // The version pill and its panel join the sidebar footer once the canvas is up (#216); the first screen carries none of it (D188).
   let versionArea: { dispose(): void } | undefined;
   const build = buildVersion();
@@ -380,6 +389,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       disposed = true;
       offHosts?.();
       offHostWelcome();
+      window.clearTimeout(hostsFallback);
       offSessionInventory();
       offAuthorityWelcome();
       authority.dispose();

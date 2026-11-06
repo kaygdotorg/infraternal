@@ -43,6 +43,9 @@ impl Drop for Fixture {
     }
 }
 
+/// The runtime lock exists before the endpoint is bound and stays held while
+/// any description of it is open: a second acquire fails until our last
+/// handle is closed and released, then succeeds.
 #[test]
 fn lifetime_precedes_bind_and_survives_until_last_description_closes() {
     let fixture = Fixture::new();
@@ -52,7 +55,9 @@ fn lifetime_precedes_bind_and_survives_until_last_description_closes() {
     drop(first);
     assert!(acquire(&fixture.state()).is_err());
     drop(duplicate);
-    assert!(acquire(&fixture.state()).is_ok());
+    // Our last description is closed; a child forked meanwhile by another test
+    // may still hold a copy until it execs. Wait for that release.
+    assert!(after_close(&false, || acquire(&fixture.state()).is_ok()));
 }
 #[test]
 fn cleanup_admission_prevents_starting_even_if_runtime_lock_was_removed() {
@@ -220,12 +225,19 @@ fn kernel_holds(path: &Path) -> Option<bool> {
     kernel_bound(&[(path.to_path_buf(), fs::metadata(path).unwrap())])
 }
 
-const AFTER_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Hang guard for waits on a closed descriptor's release (#334 rule).
+///
+/// Closing our last handle does not release a socket or lock at once: a
+/// process that another test thread forked in the meantime holds a copy of
+/// every open descriptor until it execs (close-on-exec acts only then), and a
+/// procfs or socket-dump snapshot can itself be slow under load. The release
+/// always happens; this bound only detects a descriptor that never goes away.
+/// The former 2 s deadline failed these tests under load (#355).
+const AFTER_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Waits up to two seconds for the kernel socket dump to forget a closed endpoint.
+/// Waits for `inspect` to stop reporting `live` after an endpoint closed, and
+/// returns the first other result (or the last one at the hang guard).
 fn after_close<T: PartialEq>(live: &T, mut inspect: impl FnMut() -> T) -> T {
-    // A procfs snapshot can itself take longer than the old 100 ms budget when
-    // several verification jobs run at once, leaving no poll to observe release.
     let deadline = std::time::Instant::now() + AFTER_CLOSE_TIMEOUT;
     loop {
         let result = inspect();
@@ -662,7 +674,7 @@ fn legacy_bound_endpoint_on_a_split_device_filesystem_is_kept() {
 }
 
 #[test]
-#[ignore = "runs inside the namespace prepared by the split-device test"]
+#[ignore = "Child-only fixture: started by the split-device test inside its namespace; does nothing alone."]
 fn split_device_inner() {
     use nix::sys::socket::bind;
     let Some(runtime) = std::env::var_os("RL230_SPLIT") else {
@@ -723,7 +735,7 @@ fn stale_session_endpoint_is_not_held_live_by_a_foreign_inode_twin() {
 }
 
 #[test]
-#[ignore = "runs inside the namespace prepared by the foreign-inode test"]
+#[ignore = "Child-only fixture: started by the foreign-inode test inside its namespace; does nothing alone."]
 fn foreign_inode_twin_inner() {
     let Some(root) = std::env::var_os("RL230_TWIN") else {
         return;

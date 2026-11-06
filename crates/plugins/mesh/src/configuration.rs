@@ -22,8 +22,38 @@ pub fn compile_with_dns_suffix(
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
     default_dns_suffix: &str,
+    control_plane: &TrafficPolicy,
 ) -> Result<Config, MeshError> {
-    compile_inner(coordinator, node, default, endpoints, default_dns_suffix)
+    compile_inner(
+        coordinator,
+        node,
+        default,
+        endpoints,
+        default_dns_suffix,
+        control_plane,
+    )
+}
+
+/// [`compile`] for a server whose infraternal control plane listens on
+/// `control_plane`: on the server's own node every peer is admitted to those
+/// ports, and to everything else only as Access allows (D352, #221).
+/// # Errors
+/// Returns unknown membership or invalid persisted address allocation.
+pub fn compile_with_control_plane(
+    coordinator: &Coordinator,
+    node: NodeId,
+    default: DefaultPolicy,
+    endpoints: &BTreeMap<NodeId, SocketAddr>,
+    control_plane: &TrafficPolicy,
+) -> Result<Config, MeshError> {
+    compile_inner(
+        coordinator,
+        node,
+        default,
+        endpoints,
+        "internal",
+        control_plane,
+    )
 }
 
 /// Compile one node at a time: open defaults need n(n−1) peer entries deployment-wide,
@@ -36,15 +66,57 @@ pub fn compile(
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
 ) -> Result<Config, MeshError> {
-    compile_inner(coordinator, node, default, endpoints, "internal")
+    compile_inner(
+        coordinator,
+        node,
+        default,
+        endpoints,
+        "internal",
+        &TrafficPolicy::None,
+    )
 }
 
+/// An explicit grant when there is one, else the default (`fallback`).
+fn granted_or(granted: Option<&TrafficPolicy>, fallback: &TrafficPolicy) -> TrafficPolicy {
+    granted
+        .filter(|policy| **policy != TrafficPolicy::None)
+        .unwrap_or(fallback)
+        .clone()
+}
+
+/// The server's node's inbound from `other`, and mesh SSH's answer for it.
+///
+/// Every member reaches the server's infraternal control plane (D164, D215):
+/// exactly the `control_plane` ports the server listens on. SSH and every
+/// other service on the server's host follow Access like on any node (D352,
+/// J236 P2-1, #221): the explicit arrows toward the server decide, or the
+/// default (`fallback`) when there are none. The kernel enforces the union,
+/// so this holds whether or not mesh SSH is serving there.
+fn server_inbound(
+    coordinator: &Coordinator,
+    server: NodeId,
+    other: NodeId,
+    fallback: &TrafficPolicy,
+    control_plane: &TrafficPolicy,
+) -> (TrafficPolicy, Option<bool>) {
+    let ssh = crate::policy::rules::Port {
+        protocol: crate::policy::rules::Protocol::Tcp,
+        number: 22,
+    };
+    let access = granted_or(Some(&coordinator.granted(other, server)), fallback);
+    let mut inbound = control_plane.clone();
+    inbound.union(&access);
+    (inbound, Some(access.allows(ssh)))
+}
+
+/// Compile one node's view of the mesh: its own addresses and key, then every other member as a peer with directional policy.
 fn compile_inner(
     coordinator: &Coordinator,
     node: NodeId,
     default: DefaultPolicy,
     endpoints: &BTreeMap<NodeId, SocketAddr>,
     default_dns_suffix: &str,
+    control_plane: &TrafficPolicy,
 ) -> Result<Config, MeshError> {
     let checkpoint = coordinator.checkpoint();
     let local = checkpoint
@@ -52,12 +124,13 @@ fn compile_inner(
         .get(node)
         .ok_or(MeshError::UnknownNode)?;
     let view = coordinator.view(node).ok_or(MeshError::UnknownNode)?;
-    #[cfg(feature = "mesh-dns-spike")]
-    let name = checkpoint
+    let local_member = checkpoint
         .members
         .iter()
         .find(|member| member.node.id == node)
-        .map(|member| member.node.host.clone());
+        .ok_or(MeshError::UnknownNode)?;
+    #[cfg(feature = "mesh-dns-spike")]
+    let name = Some(local_member.node.host.clone());
     #[cfg(feature = "mesh-dns-spike")]
     let dns_suffix = selected_dns_suffix(
         &checkpoint.settings.dns_suffix,
@@ -76,12 +149,7 @@ fn compile_inner(
     let mut peers = BTreeMap::new();
     #[cfg(feature = "mesh-dns-spike")]
     let mut peer_names = BTreeMap::new();
-    let machine_name = checkpoint
-        .members
-        .iter()
-        .find(|member| member.node.id == node)
-        .map(|member| member.node.host.clone())
-        .ok_or(MeshError::UnknownNode)?;
+    let machine_name = local_member.node.host.clone();
     for member in &checkpoint.members {
         let other = member.node.id;
         if other == node {
@@ -91,16 +159,15 @@ fn compile_inner(
         let outbound = if other == checkpoint.server {
             TrafficPolicy::All
         } else {
-            granted
-                .filter(|peer| peer.outbound != TrafficPolicy::None)
-                .map_or_else(|| fallback.clone(), |peer| peer.outbound.clone())
+            granted_or(granted.map(|peer| &peer.outbound), &fallback)
         };
-        let inbound = if node == checkpoint.server {
-            TrafficPolicy::All
+        let (inbound, access_ssh) = if node == checkpoint.server {
+            server_inbound(coordinator, node, other, &fallback, control_plane)
         } else {
-            granted
-                .filter(|peer| peer.inbound != TrafficPolicy::None)
-                .map_or_else(|| fallback.clone(), |peer| peer.inbound.clone())
+            (
+                granted_or(granted.map(|peer| &peer.inbound), &fallback),
+                None,
+            )
         };
         #[cfg(feature = "mesh-dns-spike")]
         if outbound != TrafficPolicy::None {
@@ -113,6 +180,8 @@ fn compile_inner(
             PeerPolicy {
                 peer: Peer {
                     key: member.keys.current,
+                    previous_key: member.keys.previous,
+                    previous_active: false,
                     addresses: checkpoint
                         .allocation
                         .get(other)
@@ -121,15 +190,12 @@ fn compile_inner(
                 },
                 inbound,
                 outbound,
+                access_ssh,
             },
         );
     }
     Ok(Config {
-        local_key: checkpoint
-            .members
-            .iter()
-            .find(|member| member.node.id == node)
-            .map(|member| member.keys.current),
+        local_key: Some(local_member.keys.current),
         server: Some(checkpoint.server),
         node,
         #[cfg(feature = "mesh-dns-spike")]
@@ -178,6 +244,7 @@ pub(crate) fn default_dns_suffix_from_origin(public_origin: &str) -> String {
         .filter(|host| crate::policy::model::validate_dns(host, false).is_ok());
     suffix.unwrap_or_else(|| "internal".to_owned())
 }
+
 /// List directed pairs that lose ANY new-connection reach. Port narrowing counts as a loss.
 /// # Errors
 /// Returns a configuration error before proposing a switch.
@@ -418,6 +485,8 @@ impl Chunks {
             peer: peer.peer.clone(),
             inbound: TrafficPolicy::None,
             outbound: TrafficPolicy::None,
+            // Port continuations only union ports; the base part carries it.
+            access_ssh: None,
         });
         let policy = if inbound {
             &mut partial.inbound
@@ -430,9 +499,13 @@ impl Chunks {
     }
 }
 
+/// Configuration compilation checks: DNS suffix choice and the rotating peer's previous key.
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::selected_dns_suffix;
+    use super::*;
+    use crate::policy::model::{MeshSettings, Node, PublicKey};
+    use std::collections::BTreeSet;
 
     #[test]
     fn server_dns_suffix_is_default_and_explicit_or_legacy_choices_win() {
@@ -448,5 +521,34 @@ mod tests {
             selected_dns_suffix("internal", true, "example.org"),
             "internal"
         );
+    }
+
+    /// A compiled peer entry carries the rotating peer's previous key next to its new one.
+    #[test]
+    fn compiled_peer_configuration_keeps_the_previous_rotation_key() {
+        let node = |id: u8| Node {
+            id: NodeId(u64::from(id)),
+            public_key: PublicKey([id; 32]),
+            host: format!("host-{id}"),
+            tags: BTreeSet::new(),
+        };
+        let old_key = PublicKey([1; 32]);
+        let new_key = PublicKey([9; 32]);
+        let mut coordinator = Coordinator::new(MeshSettings::new([7; 5]), &[], node(0)).unwrap();
+        coordinator.join(node(1)).unwrap();
+        coordinator.join(node(2)).unwrap();
+        coordinator.rotate_key(NodeId(1), new_key, 0).unwrap();
+
+        let config = compile(
+            &coordinator,
+            NodeId(2),
+            DefaultPolicy::Deny,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let peer = serde_json::to_value(&config.peers[&NodeId(1)].peer).unwrap();
+
+        assert_eq!(peer["key"], serde_json::to_value(new_key).unwrap());
+        assert_eq!(peer["previous_key"], serde_json::to_value(old_key).unwrap());
     }
 }

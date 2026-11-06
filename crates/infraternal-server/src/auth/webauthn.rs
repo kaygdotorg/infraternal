@@ -94,7 +94,6 @@ impl Auth {
     }
 
     /// Install only a browser authentication secret; recovery wrapping material stays local.
-    #[allow(clippy::too_many_arguments)]
     pub async fn registration_finish_with_verifier(
         &self,
         id: &str,
@@ -109,8 +108,6 @@ impl Auth {
     }
 
     // HTTP supplies live authority time; library callers keep deterministic clocks.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_lines)] // Keep all registration authority consumption in one writer transaction.
     pub(super) async fn registration_finish_clock(
         &self,
         id: &str,
@@ -184,6 +181,7 @@ impl Auth {
                     .bind(version).bind(version)
                     .execute(&mut *tx)
                     .await?;
+                crate::login_access::add_owner_defaults(&mut tx, &registration.user).await?;
             }
             Authority::Add(session) => {
                 // `add_start` spent this session's `passkey.add` tap; the new authenticator may

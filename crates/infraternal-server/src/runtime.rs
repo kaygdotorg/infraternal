@@ -418,16 +418,20 @@ fn ca_router(
     hosts: crate::remote_runtime::RemoteHosts,
     store: crate::enrollment::EnrollmentStore,
 ) -> Result<Router, ServerError> {
-    remote
-        .and_then(|service| service.ca_administration.as_ref())
-        .map(|configuration| {
-            configuration
-                .with_runtime(auth.clone(), pool.clone(), hosts, store)
-                .map(|authority| crate::ca_http::router(auth.clone(), authority))
-                .map_err(|_| ServerError::TlsConfiguration)
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
+    if let Some(service) = remote {
+        service.clock_health.start_monitor();
+    }
+    let Some(service) = remote else {
+        return Ok(Router::new());
+    };
+    let Some(configuration) = service.ca_administration.as_ref() else {
+        return Ok(Router::new());
+    };
+    let clock_health = service.clock_health.clone();
+    configuration
+        .with_runtime(auth.clone(), pool.clone(), hosts, store)
+        .map(|authority| crate::ca_http::router(auth.clone(), authority, clock_health))
+        .map_err(|_| ServerError::TlsConfiguration)
 }
 
 /// Build the optional plugin adapter and retain listener ownership for the serving lifetime.
@@ -469,13 +473,17 @@ async fn remote_router(
         enrollment_store.clone(),
     )?;
     let listeners = if let Some(remote) = remote.filter(|remote| remote.identity.is_some()) {
+        let source = remote.enrollment.source.clone();
+        let clock_health = remote.clock_health.clone();
         Some(
-            crate::remote_runtime::RemoteListeners::start(
+            crate::remote_runtime::RemoteListeners::start_with_recovery(
                 remote.enrollment.endpoint.endpoint,
                 &remote.identity.ok_or(ServerError::TlsConfiguration)?,
                 &remote.roots,
                 enrollment_store.clone(),
                 hosts.clone(),
+                source,
+                clock_health,
             )
             .await
             .map_err(ServerError::Listener)?,
@@ -539,9 +547,8 @@ async fn build_router_with_key_setup(
     Ok((app, setup))
 }
 
-// Keep startup ordering visible: persisted switches load before node workers
-// attach, and admitted transports exist before their dependent server features.
-#[allow(clippy::too_many_lines)]
+/// Keep startup ordering visible: persisted switches load before node workers
+/// attach, and admitted transports exist before their dependent server features.
 async fn build_router_core(
     config: ServerConfig,
     supplied_agent: Option<EmbeddedAgent>,
@@ -743,6 +750,7 @@ async fn build_router_core(
     let app = app.merge(crate::bootstrap_api::router_with_ssh_key(
         &auth, bootstrap, ssh_key,
     ));
+    let app = app.layer(from_fn_with_state(auth.clone(), auth::refresh_api_cookie));
     let app = if let Some(web_root) = config.web_root {
         app.fallback_service(crate::web_assets::router(web_root))
     } else {
@@ -1392,6 +1400,7 @@ mod tests {
     /// J137 P3-1: a well-formed bearer that is not a key learns nothing about the catalogue.
     /// Unknown, non-key-callable and key-callable ids all get the same 403; only a caller
     /// whose key authenticates can tell an unknown action (404) from an out-of-scope one.
+    #[cfg(feature = "remote")]
     #[tokio::test]
     async fn an_unknown_bearer_cannot_probe_action_ids() {
         let data_dir = temp_dir();
@@ -1586,7 +1595,7 @@ mod tests {
     /// another host, a replay and a token on a dry run are refused, and refusals are audited.
     #[cfg(feature = "remote")]
     #[tokio::test]
-    #[allow(clippy::too_many_lines)] // One real-router sequence: each refusal, then the removal, then the audit.
+    // One real-router sequence: each refusal, then the removal, then the audit.
     async fn a_removal_needs_its_own_dry_run_token_once() {
         use axum::http::StatusCode;
         use serde_json::json;
@@ -1710,6 +1719,7 @@ mod tests {
 
     /// J154 P2-1: reads by key are one summary row per key, action and minute, never one audit
     /// row per call.
+    #[cfg(feature = "remote")]
     #[tokio::test]
     async fn key_reads_are_counted_per_minute_not_written_per_call() {
         let data_dir = temp_dir();

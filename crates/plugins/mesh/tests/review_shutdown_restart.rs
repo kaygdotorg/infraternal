@@ -1,11 +1,13 @@
 //! Abrupt-stop proofs for disabled intent, bulk teardown and durable route retirement at 1,000 peers [166,170,198], #129.
 #![cfg(all(feature = "agent", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
+// These proofs read kernel WireGuard state directly, so every node here selects the kernel engine
+// explicitly; GotaTun is the default (D346).
 
 use infraternal_plugin_mesh::{
     dataplane::{Chunk, DefaultPolicy, Peer, PeerPolicy},
     firewall::{Backend, Firewall},
-    node::Node,
+    node::{EngineKind, Node},
     node_state::{State, Store},
     policy::{
         model::{Addresses, NodeId},
@@ -47,6 +49,7 @@ fn addresses(id: u32) -> Addresses {
     }
 }
 
+/// Configure `node` with 1000 peers.
 fn configure(node: &mut Node) {
     let peers: Vec<_> = (2..=1001)
         .map(|id| {
@@ -55,11 +58,14 @@ fn configure(node: &mut Node) {
                 PeerPolicy {
                     peer: Peer {
                         key: Key::generate().unwrap().1,
+                        previous_key: None,
+                        previous_active: false,
                         addresses: addresses(id),
                         endpoint: None,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
+                    access_ssh: None,
                 },
             )
         })
@@ -97,7 +103,7 @@ fn configure(node: &mut Node) {
 }
 
 #[test]
-#[ignore = "Child-only fixture for the weighted user/network namespace restart proof."]
+#[ignore = "Child-only fixture: started by the weighted restart proof inside its namespace; does nothing alone."]
 fn crash_child() {
     let Ok(boundary) = std::env::var("INFRATERNAL_MESH_DOWN_TEST_BOUNDARY") else {
         return;
@@ -119,7 +125,7 @@ fn crash_child() {
             backend: Some(backend),
         })
         .unwrap();
-    let mut node = Node::restore(&directory).unwrap();
+    let mut node = Node::restore_with_engine(&directory, EngineKind::Kernel).unwrap();
     node.up().unwrap();
     configure(&mut node);
     // Use the real persistence and kernel operations at the production down
@@ -210,7 +216,7 @@ fn restart_at(directory: &Path, boundary: &str, backend: &str) {
     assert!(!intent.enabled);
     assert!(intent.config.is_none());
     assert_eq!(store.route_inventory().unwrap().len(), 2000);
-    let node = Node::restore(directory).unwrap();
+    let node = Node::restore_with_engine(directory, EngineKind::Kernel).unwrap();
     assert!(!node.enabled());
     assert!(!node.active());
     assert!(!node.stopping());
@@ -225,7 +231,7 @@ fn restart_at(directory: &Path, boundary: &str, backend: &str) {
     let journal = directory.join("mesh-routes.json");
     let metadata = fs::metadata(&journal).unwrap();
     drop(node);
-    let node = Node::restore(directory).unwrap();
+    let node = Node::restore_with_engine(directory, EngineKind::Kernel).unwrap();
     assert!(!node.enabled());
     assert!(!node.active());
     // An already completed replay does not rewrite the empty inventory.
@@ -266,7 +272,7 @@ fn refused_journal_retirement_keeps_stopping_until_explicit_retry() {
     let directory = Directory(target.join(format!("shutdown-retry-{}", std::process::id())));
     fs::create_dir(&directory.0).unwrap();
     fs::set_permissions(&directory.0, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut node = Node::restore(&directory.0).unwrap();
+    let mut node = Node::restore_with_engine(&directory.0, EngineKind::Kernel).unwrap();
     node.up().unwrap();
     configure(&mut node);
     let journal = directory.0.join("mesh-routes.json");

@@ -29,6 +29,8 @@ struct Layout {
     unit: PathBuf,
     wanted: PathBuf,
     user: bool,
+    /// The account this installation runs as; selects its user service manager.
+    uid: u32,
 }
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -94,6 +96,7 @@ fn layout(context: &Context, home: &Path, uid: u32) -> io::Result<Layout> {
         unit,
         wanted,
         user,
+        uid,
     })
 }
 pub(crate) fn public_file(path: &Path, uid: u32, max: u64) -> io::Result<String> {
@@ -495,6 +498,31 @@ async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
         }
     }
 }
+/// The runtime directory `systemctl --user` needs to reach this account's
+/// service manager, when the caller's session did not provide one.
+///
+/// A login without a systemd user session (an SSH server that does not run
+/// `pam_systemd`, `su`, a cron job) has no `XDG_RUNTIME_DIR`, and `systemctl
+/// --user` then fails even though the account's manager runs (linger keeps it
+/// up for the installed service). The by-hand uninstall Remove hands out was
+/// refused there with a bare "permission denied" (#305 F-C). Only the
+/// account's own `/run/user/<uid>`, a real directory it owns, is used.
+fn user_manager_runtime(uid: u32, current: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    user_manager_runtime_in(Path::new("/run/user"), uid, current)
+}
+/// [`user_manager_runtime`] under `root` (`/run/user` outside tests).
+fn user_manager_runtime_in(
+    root: &Path,
+    uid: u32,
+    current: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if current.is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+    let runtime = root.join(uid.to_string());
+    let metadata = std::fs::symlink_metadata(&runtime).ok()?;
+    (metadata.is_dir() && metadata.uid() == uid).then_some(runtime)
+}
 async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
     // Unit tests build complete fixture installations under the build
     // account; they must never reach that account's real service manager.
@@ -505,6 +533,11 @@ async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
     infraternal_shim::prepare_child(command.as_std_mut());
     if paths.user {
         command.arg("--user");
+        if let Some(runtime) =
+            user_manager_runtime(paths.uid, std::env::var_os("XDG_RUNTIME_DIR").as_deref())
+        {
+            command.env("XDG_RUNTIME_DIR", runtime);
+        }
     }
     let status = command
         .args(args)
@@ -514,7 +547,12 @@ async fn manager(paths: &Layout, args: &[&str]) -> io::Result<()> {
         .status()
         .await?;
     if !status.success() {
-        return Err(denied());
+        // Say what failed: "permission denied" read as a refusal of ownership.
+        return Err(io::Error::other(format!(
+            "the service manager refused `systemctl{} {}`",
+            if paths.user { " --user" } else { "" },
+            args.join(" ")
+        )));
     }
     Ok(())
 }
@@ -570,6 +608,18 @@ pub async fn cleanup(
     infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
     std::fs::remove_file(&paths.launcher)?;
     manager(&paths, &["daemon-reload"]).await?;
+    // A rootful agent may have written mesh SSH's client files (#221); they
+    // go with it. Only files infraternal wrote are removed.
+    let mut report = report;
+    if !paths.user
+        && infraternal_plugin_api::mesh_ssh_files::remove_client_files(Path::new("/")).is_err()
+    {
+        report.push(format!(
+            "Left {} and {}; remove them by hand.",
+            infraternal_plugin_api::mesh_ssh_files::CONFIG_PATH,
+            infraternal_plugin_api::mesh_ssh_files::KNOWN_HOSTS_PATH
+        ));
+    }
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
 }
 /// Take the lock every infraternal setup command takes first (an exclusive
@@ -631,7 +681,48 @@ fn remove_files(base: &Path) -> io::Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    //! Uninstall decides ownership before it stops anything, removes only
+    //! what setup created, and retires every shell before it reports done.
     use super::*;
+
+    /// #305 F-C: the by-hand uninstall must reach the account's user manager from a
+    /// login with no systemd user session (no `XDG_RUNTIME_DIR`), using only that
+    /// account's own runtime directory, and must keep a session's own value. Runs
+    /// against a private root, so it asserts on every machine (J257 P3).
+    #[test]
+    fn a_login_without_a_user_session_still_reaches_its_own_service_manager() {
+        use std::os::unix::fs::symlink;
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("run-user-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        // No directory for this uid: nothing to point at.
+        assert_eq!(user_manager_runtime_in(&root, uid, None), None);
+        let own = root.join(uid.to_string());
+        std::fs::create_dir(&own).unwrap();
+        assert_eq!(user_manager_runtime_in(&root, uid, None), Some(own.clone()));
+        assert_eq!(
+            user_manager_runtime_in(&root, uid, Some(std::ffi::OsStr::new(""))),
+            Some(own.clone())
+        );
+        // A session that has its own value keeps it.
+        assert_eq!(
+            user_manager_runtime_in(&root, uid, Some(std::ffi::OsStr::new("/run/user/elsewhere"))),
+            None
+        );
+        // Never another account's directory, even one this account created.
+        let other = uid.wrapping_add(7919);
+        std::fs::create_dir(root.join(other.to_string())).unwrap();
+        assert_eq!(user_manager_runtime_in(&root, other, None), None);
+        // Never a link standing in for the directory.
+        std::fs::remove_dir(&own).unwrap();
+        symlink(root.join(other.to_string()), &own).unwrap();
+        assert_eq!(user_manager_runtime_in(&root, uid, None), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
     /// A complete rootless bootstrap layout under a private fixture home.
     fn installation(name: &str, locked: bool) -> Option<(PathBuf, Context, u32)> {
         use std::os::unix::fs::{PermissionsExt, symlink};
@@ -841,6 +932,19 @@ mod tests {
         assert_eq!(reached.unwrap_err().kind(), io::ErrorKind::Unsupported);
         assert!(intact, "a refused check changed the installation");
     }
+    /// Hang guard for retiring the fake shim below (#334 rule). The test's
+    /// claims are orders, enforced by the fake shim: the retirement signals
+    /// again after a foreground job exits, and a partly read exit frame
+    /// survives a signal tick. A retirement that stopped re-signalling would
+    /// hang here, not pass. The product's own numbers live elsewhere: the
+    /// 100 ms re-signal interval in `retire_shim` and the 2 s per-shim limit
+    /// in `cleanup`. A 1 s clock here asserted neither, and failed under a
+    /// loaded gate (#355).
+    const RETIREMENT_HANG: Duration = Duration::from_secs(60);
+
+    /// Retiring a shim whose foreground job exits first keeps signalling
+    /// until the restored shell has exited too, and it acknowledges that
+    /// exit even when the exit frame arrives in two parts across a tick.
     #[tokio::test]
     async fn retirement_signals_the_shell_after_its_foreground_job_exits() {
         use infraternal_shim::frame::Frame;
@@ -900,14 +1004,15 @@ mod tests {
             ));
         });
         let result = tokio::time::timeout(
-            Duration::from_secs(1),
+            RETIREMENT_HANG,
             retire_shim(&path, nix::unistd::Uid::effective().as_raw()),
         )
         .await;
         server.abort();
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
-        assert!(result.is_ok_and(|r| r.is_ok()));
+        let retired = result.expect("retirement hung: no exit acknowledged within the hang guard");
+        assert!(retired.is_ok(), "retirement failed: {retired:?}");
     }
     /// #235: the server's CA and a joined node's data can share the rootless
     /// base; uninstall removes only setup's own entries and keeps the rest.

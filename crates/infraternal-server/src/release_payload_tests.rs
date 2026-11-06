@@ -134,7 +134,6 @@ impl Release {
     fn with_sessions(version: &str) -> Self {
         Self::with_artifacts(1024, version, 0, true)
     }
-    #[allow(clippy::too_many_lines)] // Keep generated key, manifest, signature and bucket contents in one fixture.
     fn with_artifacts(size: usize, version: &str, extra: usize, sessions: bool) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;
@@ -213,6 +212,7 @@ impl Release {
             .collect();
         Self { root, files, trust }
     }
+    /// Build a release resolver against this test bucket and isolated cache.
     fn resolver(&self, origin: String, cache: &str, development: bool) -> ReleasePayload {
         let state = self.root.join(cache);
         std::fs::create_dir(&state).unwrap();
@@ -227,6 +227,7 @@ impl Release {
             development,
             origin,
             lock: Mutex::new(()),
+            progress: tokio::sync::watch::channel(0).0,
             trust: Some(self.trust.clone()),
         }
     }
@@ -434,6 +435,7 @@ async fn cache_symlinks_and_shared_files_are_refused() {
 // Staging::drop, matching abrupt server termination rather than cancellation.
 #[test]
 #[ignore = "subprocess helper for release-cache restart verification"]
+/// Run the isolated interrupted-download side of the restart fixture.
 fn partial_download_restart_child() {
     let Some(state) = std::env::var_os("REVIEW_RELEASE_STATE") else {
         return;
@@ -449,6 +451,7 @@ fn partial_download_restart_child() {
         development: false,
         origin: std::env::var("REVIEW_RELEASE_ORIGIN").unwrap(),
         lock: Mutex::new(()),
+        progress: tokio::sync::watch::channel(0).0,
         trust: Some(std::env::var("REVIEW_RELEASE_TRUST").unwrap()),
     };
     tokio::runtime::Runtime::new()
