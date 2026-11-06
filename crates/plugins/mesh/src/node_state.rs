@@ -660,22 +660,22 @@ pub(crate) mod tests {
         );
     }
 
-    /// Recording an engine other than kernel retires the rotation journal, even with no live link to switch, so a
-    /// later return to kernel cannot revive an old key of ours from it (#285, J252 P3-2). Recording kernel keeps it.
+    /// Both supported engines carry the open rotation journal when the node switches its data plane (#367).
     #[test]
-    fn leaving_kernel_retires_the_rotation_journal() {
+    fn switching_engines_keeps_the_rotation_journal() {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
         store
             .save_rotation_secret(&RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+                operation_id: operation_id.to_owned(),
                 sequence: 1,
-                previous: [0; 32],
+                previous: [0x11; 32],
                 candidate: [0x22; 32],
-                commit_requested: true,
-                completed: true,
+                commit_requested: false,
+                completed: false,
             })
-            .expect("completed journal");
+            .expect("prepared journal");
         store
             .record_engine(crate::gotatun_node::EngineKind::Kernel)
             .expect("record kernel");
@@ -686,11 +686,23 @@ pub(crate) mod tests {
         store
             .record_engine(crate::gotatun_node::EngineKind::GotaTun)
             .expect("record GotaTun");
-        assert!(store.rotation_secret().expect("read journal").is_none());
-        assert!(!store.rotation_path.exists());
+        let carried = store
+            .rotation_secret()
+            .expect("read journal after switching to GotaTun")
+            .expect("GotaTun keeps the pending operation");
+        assert_eq!(carried.operation_id, operation_id);
+        assert!(!carried.commit_requested);
+        drop(carried);
         store
-            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
-            .expect("recording again is harmless");
+            .record_engine(crate::gotatun_node::EngineKind::Kernel)
+            .expect("switching back to kernel");
+        assert!(
+            store
+                .rotation_secret()
+                .expect("read carried journal")
+                .is_some(),
+            "the same operation remains recoverable on either engine"
+        );
     }
 
     /// A stop inside `write_private` leaves `mesh-private-key.<pid>.new` holding the key. Opening
