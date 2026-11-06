@@ -1,5 +1,5 @@
 /**
- * Captures of every add-host wizard state at 1440x900 and 393x852 in ink and paper, for the TASTE review
+ * Captures of every add-host wizard state at 1440x900, 393x852 and 375x667 in ink and paper, for the TASTE review
  * (`ADDHOST_CAPTURE=1 TRACER_TEST_PORT=... bun x playwright test test/addhost-captures.spec.ts`). They are written to
  * the external job evidence directory. Skipped in ordinary runs: screenshots are for review, not assertions.
  */
@@ -8,7 +8,7 @@ import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
 const OUT = tracerEvidencePath("addhost-wizard");
-const SIZES = [{ name: "1440x900", width: 1440, height: 900, touch: false }, { name: "393x852", width: 393, height: 852, touch: true }];
+const SIZES = [{ name: "1440x900", width: 1440, height: 900, touch: false }, { name: "393x852", width: 393, height: 852, touch: true }, { name: "375x667", width: 375, height: 667, touch: true }];
 const THEMES = ["ink", "paper"];
 const port = process.env.TRACER_TEST_PORT ?? "4621";
 /** `ADDHOST_CAPTURE_ONLY=choose|hostkey` re-takes only the shots whose name matches. */
@@ -60,6 +60,7 @@ const shots: Shot[] = [
   { name: "choose-no-server-key", settings: { sshKey: "missing" }, setup: async (page) => { await openWizard(page); await typed(page, "needs-key.lab"); await expect(page.getByText("Use a key from your computer")).toBeVisible({ timeout: 15_000 }); await page.waitForTimeout(500); } },
   { name: "choose-error", setup: async (page) => { await openWizard(page); await typed(page, "needs-key.lab"); await expect(page.getByText("Use a key from your computer")).toBeVisible({ timeout: 15_000 }); await page.getByText("Use a key from your computer").click(); await inWizard(page, "Sign in").click(); await expect(page.locator(".ah-error")).toBeVisible(); } },
   { name: "hostkey", setup: async (page) => { await openWizard(page); await typed(page, "kayg@newkey.lab"); await expect(page.locator(".ah-keyblock")).toBeVisible({ timeout: 15_000 }); await page.waitForTimeout(500); } },
+  { name: "hostkey-changed", setup: async (page) => { await openWizard(page); await typed(page, "kayg@changedkey.lab"); await expect(page.locator(".ah-keyblock")).toBeVisible({ timeout: 15_000 }); await page.waitForTimeout(500); } },
   { name: "failure-unreachable", setup: async (page) => { await openWizard(page); await pick(page, "archive-01"); await inWizard(page, "Continue").click(); await expect(page.getByRole("heading", { name: /isn't answering/ })).toBeVisible({ timeout: 15_000 }); await page.waitForTimeout(500); } },
   { name: "failure-mesh-policy", setup: async (page) => { await openWizard(page); await pick(page, "pve01"); await inWizard(page, "Continue").click(); await expect(page.getByRole("heading", { name: /can't connect to/ })).toBeVisible({ timeout: 15_000 }); await page.waitForTimeout(500); } },
   { name: "failure-unsupported", setup: async (page) => { await openWizard(page); await typed(page, "unsupported.lab"); await expect(page.getByRole("heading", { name: /can't run the infraternal agent/ })).toBeVisible({ timeout: 15_000 }); await page.waitForTimeout(500); } },

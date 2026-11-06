@@ -21,6 +21,7 @@
  * - `needs-key*` / nix-cache: every automatic method refused (auth + choose_method) until a credential is given
  * - `refused*`: one refusal without `choose_method`; the retry signs in
  * - `newkey*`: unknown host key (host-key + fingerprint) until confirmed on the same bootstrap socket
+ * - `changedkey*`: the pinned key differs (host-key + fingerprint + `host_key_changed`) until confirmed
  * - `stale*`: an earlier setup left leftovers: the attempt pauses on a `check` event carrying
  *   `failure.kind: "stale_previous_attempt"` and `leftovers` (challenge, mode, findings); `start-fresh` with that challenge
  *   continues the same attempt to done. Closing the socket cancels the pause (contracts/ssh-bootstrap.md, #169)
@@ -66,7 +67,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
+  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -125,7 +126,7 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
   return known;
 }
 
-interface Failure { failed_step?: "connect" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; alreadyAdded?: boolean }
+interface Failure { failed_step?: "connect" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean }
 
 /** The existing host a duplicate (`added*`) names; the mock world maps it to a host it already has. */
 const ADDED_HOST_ID = "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30";
@@ -153,8 +154,8 @@ function failureOf(target: Target): Failure | undefined {
   const host = target.fixture;
   const name = target.name;
   if (/^unsupported/.test(name)) return { phase: 0, beforeLogin: false, kind: "unsupported", message: "This host does not run systemd as a user service.", evidence: "init: openrc\nuser systemd: unavailable" };
-  if (/^newkey/.test(name) && !trusted.has(name)) {
-    return { phase: 0, beforeLogin: true, kind: "host-key", message: "The SSH host key is not trusted.", evidence: "Checking SSH and host support.", fingerprints: [fingerprintOf(name)] };
+  if (/^(newkey|changedkey)/.test(name) && !trusted.has(name)) {
+    return { phase: 0, beforeLogin: true, kind: "host-key", message: "The SSH host key is not trusted.", evidence: "Checking SSH and host support.", fingerprints: [fingerprintOf(name)], ...(name.startsWith("changedkey") ? { keyChanged: true } : {}) };
   }
   if (target.fixed) return undefined;
   if (host?.reachability === "unreachable") return { phase: 0, beforeLogin: true, kind: "unreachable", message: "No SSH answer on port 22", evidence: host.evidence };
@@ -232,7 +233,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
       emit(target, "failed", failure.message, {
         ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? [failure.evidence] : [],
         ...(failure.alreadyAdded ? { already_added: true, host_id: ADDED_HOST_ID } : {}),
-        ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519" } : {}), ...(failure.choose ? { choose_method: true } : {}),
+        ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519", ...(failure.keyChanged ? { host_key_changed: true } : {}) } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });
       target.state = "failed";
       target.fixed = true;
