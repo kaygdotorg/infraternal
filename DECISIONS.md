@@ -4136,3 +4136,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      v2 leaf per login (larger, and it needs a real openrc VM; it may come later
      if such hosts matter) and keeping `su` with a revoke that fails closed
      (the shell could live until reboot).
+
+355. **Start fresh completes the old entry's cleanup (owner, 2026-11-06, #305):**
+     when Add host's Start fresh has removed the leftovers of an earlier
+     unfinished setup, which it proves before it continues, the server treats
+     that as the old entry's cleanup confirmation and drops the old entry at
+     once. Before this, Console showed a second offline "pending cleanup" host
+     with the same name forever, because the abandoned setup's infraternal
+     agent never confirms. The owner chose "Drop it when Start fresh cleaned
+     up". Entries whose machine was never cleaned keep showing as pending. The
+     rejected options were a Forget button and leaving the entry as it was.
