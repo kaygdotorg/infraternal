@@ -1917,6 +1917,37 @@ manager=kill_manager
             time.sleep(0.01)
         return holder
 
+    def test_a_real_finished_root_install_is_ready(self):
+        # J315, real root on compute01: a finished install's bin/live is the
+        # payload cache's own inode (setup reuses the verified payload), and
+        # the root agent keeps its mesh state in sessions/. Both are ours.
+        self.make_takeover_fixture()
+        live = self.base / 'bin/live'
+        cache = Path(f'{self.base}.bootstrap-cache/payload')
+        live.unlink()
+        os.link(cache, live)
+        for name in ('mesh-public.json', 'mesh-routes.json', 'mesh-interface.json', 'mesh-key-rotation.bin', 'mesh-engine.json', 'mesh-private-key'):
+            state = self.base / 'sessions' / name
+            state.write_text('{}\n')
+            state.chmod(0o600)
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        def other_link():
+            live.unlink()
+            shutil.copyfile(cache, live)
+            live.chmod(0o700)
+            os.link(live, Path(self.temp).resolve() / 'elsewhere')
+        def stray_state():
+            stray = self.base / 'sessions/mesh-private-key.4242.new'
+            stray.write_text('x')
+            stray.chmod(0o600)
+        for change in (other_link, stray_state):
+            with self.subTest(change=change.__name__):
+                change()
+                self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+                self.make_takeover_fixture()
+                live.unlink()
+                os.link(cache, live)
+
     def test_a_container_running_its_own_install_does_not_make_it_busy(self):
         # J315, real root on compute01: a container's own infraternal names
         # the same path, in its own mount namespace. Not a holder of this

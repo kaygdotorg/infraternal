@@ -176,6 +176,12 @@ validate_upgrade_sessions() {
    # The proxy plugin's owner-only credential store (crates/plugins/proxy,
    # custody.rs): 0700 directories and 0600 files, all this user's (#281).
    proxy-secrets) private_tree "$setup_runtime_entry";;
+   # A finished root install's mesh state (crates/plugins/mesh, node_state.rs):
+   # private files the agent wrote; Take over moves them, never reads them.
+   mesh-public.json|mesh-routes.json|mesh-interface.json|mesh-key-rotation.bin|mesh-engine.json|mesh-private-key)
+    [ "${validating_finished:-no}" = yes ] || exit 71
+    [ -f "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a:%h' "$setup_runtime_entry")" = 600:1 ] || exit 71
+    [ "$(stat -c '%s' "$setup_runtime_entry")" -le 65536 ] || exit 71;;
    *)
     [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71
     setup_runtime_name=${setup_runtime_entry##*/}
@@ -261,7 +267,12 @@ validate_upgrade_root() {
  hex_id "$previous_host"
  identity=$(stat -c '%d:%i' "$base")
  [ -d "$base/bin" ] && [ ! -L "$base/bin" ] && [ -O "$base/bin" ] && [ "$(stat -c '%a' "$base/bin")" = 700 ] || exit 71
- [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] && [ -O "$base/bin/live" ] && [ "$(stat -c '%a:%h' "$base/bin/live")" = 700:1 ] || exit 71
+ [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] && [ -O "$base/bin/live" ] || exit 71
+ case "$(stat -c '%a:%h' "$base/bin/live")" in
+  700:1) :;;
+  700:2) finished_cache_link || exit 71;;
+  *) exit 71;;
+ esac
  [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
  for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -297,6 +308,23 @@ validate_upgrade_root() {
   [ -L "$setup_wants" ] || exit 71
   case "$(readlink "$setup_wants")" in "$unit"|../infraternal-agent.service) :;; *) exit 71;; esac
  fi
+}
+# A finished install's binary is linked to the private payload cache setup
+# verified it from (bin/live and the cache payload are one inode). Only that
+# second link is accepted, and only when proving a finished install (D359).
+finished_cache_link() {
+ [ "${validating_finished:-no}" = yes ] || return 1
+ finished_cache="$base.bootstrap-cache"
+ [ -d "$finished_cache" ] && [ ! -L "$finished_cache" ] && [ -O "$finished_cache" ] && [ "$(stat -c '%a' "$finished_cache")" = 700 ] || return 1
+ [ -f "$finished_cache/payload" ] && [ ! -L "$finished_cache/payload" ] && [ -O "$finished_cache/payload" ] || return 1
+ [ "$base/bin/live" -ef "$finished_cache/payload" ]
+}
+# validate_upgrade_root for a finished install (D359): the same proof, plus
+# what a finished root install also holds (finished_cache_link, mesh state).
+validate_finished_install() {
+ validating_finished=yes
+ validate_upgrade_root
+ validating_finished=no
 }
 inspect_upgrade() {
  validate_upgrade_root
@@ -661,7 +689,7 @@ holders_beside_agent() {
 report_installed() {
  installed_takeover=unproven
  if [ "$base" = "$up_root_base" ]; then
-  probe validate_upgrade_root
+  probe validate_finished_install
   if [ "$probed" = 0 ]; then
    probe holders_beside_agent
    case "$probed" in
@@ -1185,7 +1213,7 @@ take_over_finished_install() {
  # Its agent started since the person confirmed an idle install: ask again.
  takeover_liveness=${takeover_observed% *}
  [ "$4" != idle ] || [ "${takeover_liveness##* }" != live ] || exit 75
- validate_upgrade_root
+ validate_finished_install
  aside="$base.bootstrap-takeover-$takeover_token"
  takeover_part="$base.bootstrap-taking-$takeover_token"
  for takeover_path in "$aside" "$takeover_part"; do
