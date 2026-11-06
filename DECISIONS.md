@@ -4152,3 +4152,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      does not keep a stale pending twin. It drops only the same person's own
      unfinished or cleanup-pending entries for that machine and account; other
      people's entries, other accounts and finished hosts are never touched.
+
+356. **A revoke shows the access a person left behind (owner, 2026-11-06,
+     #355; extends D353):** a person with a shell on a host account can
+     leave their own way back in, such as an SSH key in
+     `~/.ssh/authorized_keys`, a crontab entry or a systemd user unit, and a
+     revoke did not touch those files (J295). The owner chose "Warn and show
+     what changed": when access is granted, infraternal records a fingerprint
+     of the account's access files (authorized_keys, crontab, systemd user
+     units). On revoke it compares them, and if anything changed since the
+     grant, it tells the person revoking exactly which files and lines are
+     new, so they can remove them. It never edits those files itself. The
+     rejected options were restoring the files automatically (this can undo
+     legitimate changes by the host owner or others) and documenting the
+     limit only.
