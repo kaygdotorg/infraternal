@@ -1,5 +1,6 @@
 //! Proves Linux node recovery across ingress fences and journaled key-rotation stops [166,199], #173, #367.
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
 use super::*;
 use crate::{
     dataplane::DefaultPolicy,
