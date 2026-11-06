@@ -65,16 +65,16 @@ const STABLE_LINK: Duration = Duration::from_secs(10);
 /// again" (`ResourceUnavailable`), never "offline": the host answered (J308
 /// P3-3, #355). Anything else is a protocol error.
 fn refused_open(json: &[u8]) -> AgentError {
+    #[derive(serde::Deserialize)]
+    struct Envelope<'a> {
+        error: &'a str,
+        reason: &'a str,
+    }
     if json.len() > infraternal_plugin_api::channel::MAX_CONTROL_JSON {
         return AgentError::Rejected;
     }
     if let Ok(refusal) = serde_json::from_slice(json) {
         return AgentError::OpenRefused(refusal);
-    }
-    #[derive(serde::Deserialize)]
-    struct Envelope<'a> {
-        error: &'a str,
-        reason: &'a str,
     }
     match serde_json::from_slice::<Envelope<'_>>(json) {
         Ok(envelope) if envelope.error == "terminal unavailable" && !envelope.reason.is_empty() => {
