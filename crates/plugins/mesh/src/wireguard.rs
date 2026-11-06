@@ -746,6 +746,7 @@ impl Device {
     ) -> io::Result<()> {
         Self::retire_routes(inventory, addresses)
     }
+    /// Remove stale peer routes owned by this mesh while preserving foreign routes.
     fn retire_routes(inventory: &BTreeSet<IpAddr>, addresses: &[Addresses]) -> io::Result<()> {
         let desired: BTreeSet<IpAddr> = addresses
             .iter()
@@ -1425,12 +1426,7 @@ mod route_metric_tests {
     ) -> Vec<u8> {
         let mut inner = Vec::new();
         for (kind, nested, value) in metrics {
-            attribute(
-                &mut inner,
-                *kind | if *nested { NESTED } else { 0 },
-                value,
-            )
-            .unwrap();
+            attribute(&mut inner, *kind | if *nested { NESTED } else { 0 }, value).unwrap();
         }
         let mut outer = Vec::new();
         attribute(
@@ -1465,7 +1461,7 @@ mod route_metric_tests {
             assert!(owns_encoded_metrics(&encoded));
         }
 
-        for mtu in [0, 67, 65_536] {
+        for mtu in [0_u32, 67, 65_536] {
             let encoded = encoded_metrics(
                 RTA_METRICS,
                 true,
