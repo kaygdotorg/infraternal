@@ -76,6 +76,38 @@ impl NoSystemd {
     }
 }
 
+/// A login whose processes revocation cannot prove gone: an `su` login opened
+/// before D354 (or a unit with an account-owned runtime directory and no
+/// recorded scope). The person stays denied and the owner keeps retrying,
+/// but only the host's administrator can end it, so the revocation says so
+/// in plain words, once (J295, #355).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UnprovableLogin;
+
+impl std::fmt::Display for UnprovableLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "this person's host login was opened without systemd (by an older infraternal), so \
+             its processes can't be proven gone; the person stays denied, but stop that login's \
+             processes by hand or restart the host to end it",
+        )
+    }
+}
+
+impl std::error::Error for UnprovableLogin {}
+
+impl UnprovableLogin {
+    /// This refusal as an error.
+    fn error() -> io::Error {
+        io::Error::other(Self)
+    }
+
+    /// Whether `error` is this refusal.
+    pub(crate) fn of(error: &io::Error) -> bool {
+        matches!(error.get_ref(), Some(inner) if inner.is::<Self>())
+    }
+}
+
 /// Resolve account names on the host, where its account database is authoritative.
 /// # Errors
 /// Rootless hosts refuse account switching and absent fallback identities.
@@ -1113,9 +1145,7 @@ async fn stop_login(
     // closed (J291 P1, #355; how such hosts get a provable kill is open
     // under D247).
     if root.join(unit).exists() {
-        return Err(io::Error::other(
-            "host login without a system manager cannot be shown ended",
-        ));
+        return Err(UnprovableLogin::error());
     }
     Ok(())
 }
@@ -1493,9 +1523,7 @@ async fn stop_system_login(root: &Path, uid: u32, unit: &str) -> io::Result<()> 
         }
     } else if recorded.is_empty() {
         if account_owned_runtime(root, unit) {
-            return Err(io::Error::other(
-                "host login has no unit and no recorded scope; cannot prove it ended",
-            ));
+            return Err(UnprovableLogin::error());
         }
         return remove_runtime(root, unit);
     }
@@ -1656,6 +1684,12 @@ mod tests {
         let (root, person, _, unit) = system_login_fixture().await;
         std::fs::create_dir(root.join(&unit)).unwrap();
         let revoked = revoke_at(&root, Manager::Detached, person, false).await;
+        assert!(
+            revoked
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("can't be proven gone")),
+            "an unprovable login must say why: {revoked:?}"
+        );
         assert!(
             revoked.is_err(),
             "a login with a deleted socket was reported revoked"
@@ -2136,6 +2170,12 @@ mod tests {
         std::fs::create_dir(root.join(&unit)).unwrap();
         let host = ScriptedHost::new(&root, &unit, uid, false, true);
         let revoked = revoke_at(&root, Manager::System, person, false).await;
+        assert!(
+            revoked
+                .as_ref()
+                .is_err_and(|error| error.to_string().contains("can't be proven gone")),
+            "an unprovable login must say why: {revoked:?}"
+        );
         assert!(
             revoked.is_err(),
             "an unaccounted login was reported revoked; calls: {:?}",

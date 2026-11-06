@@ -40,6 +40,9 @@ struct State {
     queue: VecDeque<uuid::Uuid>,
     /// Submission starts exactly one owner before yielding to the runtime.
     running: bool,
+    /// People whose unprovable login was already reported in the log, so a
+    /// retry every 100 ms does not repeat it.
+    reported: std::collections::HashSet<uuid::Uuid>,
 }
 
 /// One configured state root, never a root supplied by a remote request.
@@ -172,8 +175,18 @@ async fn run(registry: Arc<Registry>) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if failed {
                 state.queue.push_back(person);
+                if result.as_ref().is_err_and(super::UnprovableLogin::of)
+                    && state.reported.insert(person)
+                {
+                    eprintln!(
+                        "Revoking host access for person {}: {}",
+                        person.simple(),
+                        super::UnprovableLogin
+                    );
+                }
             } else {
                 state.pending.remove(&person);
+                state.reported.remove(&person);
             }
         }
         intent.reply.send_replace(Some(
