@@ -31,6 +31,7 @@ def load(name):
 
 p = load('verify-privileged')
 guard = load('elf-runpath-guard')
+slot_hold = load('root-slot-hold')
 
 
 def userns_available():
@@ -211,6 +212,21 @@ class RealRootProof(unittest.TestCase):
             if os.geteuid() != 0:
                 self.assertTrue(guard.problems('/nix/store/x/ld.so', [str(mine)], [directory]))
 
+    def test_guard_refuses_a_needed_library_given_by_path(self):
+        """A DT_NEEDED entry with a `/` outside trusted dirs is refused; plain sonames are not (J277 nit)."""
+        store = '/nix/store/x/ld.so'
+        self.assertEqual(guard.problems(store, [], [], ['libc.so.6', 'libgcc_s.so.1']), [])
+        self.assertEqual(guard.problems(store, [], [], ['/nix/store/abc-glibc/lib/libc.so.6']), [])
+        reasons = guard.problems(store, [], [], ['/home/claude/evil.so'])
+        self.assertEqual(len(reasons), 1)
+        self.assertIn('/home/claude/evil.so', reasons[0])
+        self.assertTrue(guard.problems(store, [], [], ['./local.so']))
+
+    def test_guard_reads_needed_entries_of_a_real_binary(self):
+        """The ELF reader returns this interpreter's own DT_NEEDED names."""
+        _interpreter, _search, needed = guard.read_elf_full(os.path.realpath(sys.executable))
+        self.assertIsInstance(needed, list)
+
     def test_guard_reads_a_real_binary(self):
         """The ELF reader parses this interpreter's own executable."""
         interpreter, search = guard.read_elf(os.path.realpath(sys.executable))
@@ -233,6 +249,83 @@ class RealRootProof(unittest.TestCase):
             with mock.patch.object(sys, 'stderr', new=__import__('io').StringIO()) as err:
                 self.assertEqual(guard.main([str(binary)]), 1)
             self.assertIn('/home/claude/worktrees/x/outputs/out/lib', err.getvalue())
+
+    def proof_code(self):
+        """The proof script without its comment lines."""
+        script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()
+        return '\n'.join(line for line in script.splitlines() if not line.lstrip().startswith('#'))
+
+    def test_proof_runs_with_a_private_tmp(self):
+        """The test sees a fresh tmpfs /tmp, and its copy lives outside /tmp (J277 P3-1)."""
+        code = self.proof_code()
+        namespace = code[code.index('unshare --net'):]
+        self.assertIn("mount -t tmpfs -o mode=1777,size=256m tmpfs /tmp;", namespace)
+        self.assertLess(namespace.index('mount -t tmpfs'), namespace.index('"$@"'))
+        self.assertIn('run=$(mktemp -d /var/lib/tun-proof-run.', code)
+        self.assertNotIn('mktemp -d /tmp/', code)
+
+    def test_proof_sweeps_leftovers_only_under_the_lock(self):
+        """Stale proof dirs are removed after flock and before mktemp; only root-owned real dirs (J277 P3-2)."""
+        code = self.proof_code()
+        sweep = code.index('for stale in /root/tun-proof.* /var/lib/tun-proof-run.* /tmp/tun-proof-run.*')
+        self.assertLess(code.index('flock 9'), sweep)
+        self.assertLess(sweep, code.index('work=$(mktemp -d /root/tun-proof.'))
+        self.assertIn('! -L $stale', code)
+        self.assertIn('$(stat -c %u "$stale") == 0', code)
+
+    def test_slot_holder_gives_claude_no_file_of_roots(self):
+        """claude's waiter gets pipes only: stderr /dev/null, other fds closed (J277 P3-3)."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = slot_hold.READY
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter) as popen, \
+                mock.patch.object(slot_hold.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess([], 3)) as run:
+            self.assertEqual(slot_hold.hold(['cargo', 'build']), 3)
+        argv, kwargs = popen.call_args
+        self.assertEqual(argv[0][:4], ['runuser', '-u', 'claude', '--'])
+        self.assertIs(kwargs['stderr'], subprocess.DEVNULL)
+        self.assertIs(kwargs['stdout'], subprocess.PIPE)
+        self.assertIs(kwargs['stdin'], subprocess.PIPE)
+        self.assertTrue(kwargs['close_fds'])
+        self.assertEqual(run.call_args[0][0], ['nice', '-n', '10', 'cargo', 'build'])
+        waiter.stdin.write.assert_called_once()
+
+    def test_slot_holder_runs_nothing_without_a_slot(self):
+        """If claude's side never reports ready, root's command does not run."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = b''
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter), \
+                mock.patch.object(slot_hold.subprocess, 'run', side_effect=AssertionError('ran without a slot')):
+            self.assertEqual(slot_hold.hold(['true']), 1)
+
+    def test_proof_uses_the_reviewed_slot_holder(self):
+        """The proof runs the commit's own root-slot-hold, not a host-only helper, and escapes its log tail."""
+        code = self.proof_code()
+        self.assertIn('/usr/bin/python3 "$work/src/scripts/root-slot-hold" nix develop', code)
+        self.assertNotIn('/root/.cache/root-build-slot', code)
+        self.assertIn('tail -20 "$work/build.log" | cat -v', code)
+
+    def test_proof_scrubs_roots_environment(self):
+        """Root's side runs under env -i with exactly PATH, HOME and LANG (J277 P3-4)."""
+        code = self.proof_code()
+        line = next(line for line in code.splitlines() if line.startswith('root_env=('))
+        words = line[len('root_env=('):-1].split()
+        self.assertEqual(words[:2], ['env', '-i'])
+        self.assertEqual(sorted(word.split('=', 1)[0] for word in words[2:]), ['HOME', 'LANG', 'PATH'])
+        self.assertIn('ssh "root@$host" "${root_env[@]}" bash -s -- "$commit"', code)
+
+    def test_env_allowlist_really_clears_the_rest(self):
+        """The same env -i form, run here, drops a planted variable such as INFRATERNAL_SCCACHE_DIR."""
+        code = self.proof_code()
+        line = next(line for line in code.splitlines() if line.startswith('root_env=('))
+        words = line[len('root_env=('):-1].split()
+        out = subprocess.run([*words, '/bin/sh', '-c', 'env'], capture_output=True, text=True,
+                             env=dict(os.environ, INFRATERNAL_SCCACHE_DIR='/home/claude/cache',
+                                      RUSTC_WRAPPER='sccache')).stdout
+        names = sorted(entry.split('=', 1)[0] for entry in out.splitlines() if '=' in entry)
+        self.assertNotIn('INFRATERNAL_SCCACHE_DIR', names)
+        self.assertNotIn('RUSTC_WRAPPER', names)
+        self.assertTrue({'PATH', 'HOME', 'LANG'} <= set(names))
 
     def test_proof_script_keeps_claude_out_of_roots_process(self):
         """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""

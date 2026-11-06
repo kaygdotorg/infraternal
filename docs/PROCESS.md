@@ -664,7 +664,12 @@ Individual tests on `NOT_COVERED_TESTS` today:
   test in a throwaway network namespace, and deletes everything on any exit.
   Nothing the shared `claude` account can write reaches root's process: no
   claude-built binary, path, worktree, cache or library directory (J270,
-  81345). Runs are serialised by a root-owned lock. The gate itself never runs as root, and no
+  81345). Root's side starts under `env -i` with only PATH, HOME and LANG; the
+  test gets a private tmpfs `/tmp`; the build slot is held through the
+  commit's own `scripts/root-slot-hold`, whose claude-side waiter gets no file
+  of root's; and the guard also checks `DT_NEEDED` libraries named by path.
+  Runs are serialised by a root-owned lock, and the run that holds it first
+  removes any proof directories a killed run left behind (J277, 81454). The gate itself never runs as root, and no
   `newuidmap` is installed: a setuid-root helper on the shared VMs and a
   second mapped uid would weaken the sandbox (J266, 80581).
 
