@@ -2084,7 +2084,7 @@ mod tests {
     fn mac_private_public(bytes: &[u8]) -> PublicKey {
         let raw: [u8; 32] = bytes.try_into().expect("32-byte private key");
         let secret = gotatun::x25519::StaticSecret::from(raw);
-        PublicKey(*X25519PublicKey::from(&secret).as_bytes())
+        PublicKey(*gotatun::x25519::PublicKey::from(&secret).as_bytes())
     }
 
     fn enrolment(coordinator: &[u8]) -> Enrolment {
