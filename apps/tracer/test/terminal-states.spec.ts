@@ -16,6 +16,7 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type Locator, type Page } from "playwright/test";
 import { decodeMuxedFrame, encodeMuxedFrame } from "../../../packages/protocol/src/codec";
+import { ICON_INFO } from "../../../packages/ui/src/icons";
 import { tracerEvidencePath } from "./evidence-path";
 
 /** The three screens every state is checked on: a desktop, a large phone and a small phone. */
@@ -210,11 +211,12 @@ for (const viewport of VIEWPORTS) {
         const win = page.locator(".ui-window[data-kind='terminal']").first();
         await expect(win).toHaveAttribute("data-status", "live", { timeout: 20_000 });
         await page.waitForFunction(() => Boolean(Reflect.get(window, "__toast")));
-        await page.evaluate(() => {
+        // The same notice the canvas raises while the layout waits: the neutral info mark, never the green tick a bare toast gets.
+        await page.evaluate((icon) => {
           const toast = Reflect.get(window, "__toast") as { dismiss(): void; show(value: Record<string, unknown>): void };
           toast.dismiss();
-          toast.show({ message: "Not saved — keep this tab open", duration: 0 });
-        });
+          toast.show({ message: "Not saved — keep this tab open", icon, duration: 0 });
+        }, ICON_INFO);
         const card = page.locator('.ui-toast[data-open="true"]');
         await expect(card).toHaveCount(1);
         // The notice has stopped sliding in once its box stops moving.
