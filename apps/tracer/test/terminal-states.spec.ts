@@ -234,6 +234,17 @@ for (const viewport of VIEWPORTS) {
           return edges;
         });
         expect(covered, "no window's top or bottom edge lies under the notice").toEqual([]);
+        // Even inset: the message ends the same distance from the right edge as the mark starts from the left (±0.5 px).
+        const inset = await card.evaluate((node) => {
+          const c = node.getBoundingClientRect();
+          const mark = node.querySelector(".ui-toast-glyph")!.getBoundingClientRect();
+          const text = node.querySelector(".ui-toast-message")!;
+          const range = document.createRange();
+          range.selectNodeContents(text);
+          const lines = [...range.getClientRects()];
+          return { left: mark.left - c.left, right: c.right - Math.max(...lines.map((r) => r.right)) };
+        });
+        expect(inset.right, "the message does not run closer to the edge than the mark's own inset").toBeGreaterThanOrEqual(inset.left - 0.5);
         await shot(page, "notice");
       });
 
