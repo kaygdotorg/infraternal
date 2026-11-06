@@ -1343,6 +1343,156 @@ mod tests {
         assert_eq!(pending_count(&fixture).await, 0);
     }
 
+    /// A pending removal may recover only to deliver cleanup; ordinary authority stays denied
+    /// and the transport expires at exactly 300 seconds despite its new seven-day certificate.
+    #[tokio::test]
+    async fn recovered_pending_removal_has_only_cleanup_admission_for_three_hundred_seconds() {
+        use crate::remote_guard::AuthorityGuard;
+        let fixture = recovery_fixture().await;
+        let person = Uuid::new_v4();
+        sqlx::query("UPDATE users SET owner=0 WHERE id='owner'")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES(?,'cleanup-owner',1,'test','cleanup-owner','Cleanup Owner')")
+            .bind(person.to_string()).execute(&fixture.pool).await.unwrap();
+        sqlx::query("UPDATE remote_hosts SET owner_id=? WHERE id=?")
+            .bind(person.to_string())
+            .bind(fixture.host.as_bytes().as_slice())
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,1,'unreachable')")
+            .bind(fixture.host.as_bytes().as_slice()).bind(person.to_string()).bind(fixture.now)
+            .execute(&fixture.pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES(?,?,0)")
+            .bind(fixture.host.as_bytes().as_slice())
+            .bind(person.to_string())
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .service
+                .store
+                .admit_cleanup(&fixture.predecessor, fixture.now)
+                .await
+                .is_err()
+        );
+        let digest = csr_digest(&fixture.csr_der);
+        let input = challenge_input(&fixture, digest);
+        let response = accepted_challenge(&fixture.service, input.clone()).await;
+        let (challenge, issuer_fingerprint, issuer_generation, not_after) =
+            challenge_receipt(&response);
+        let public_key_fingerprint =
+            openssl::sha::sha256(&fixture.identity_key.raw_public_key().unwrap());
+        let proof_transcript = transcript(RecoveryTranscript {
+            host_id: fixture.host,
+            predecessor_fingerprint: &fixture.predecessor,
+            request_id: &input.request,
+            csr_digest: &digest,
+            challenge: &challenge,
+            public_key_fingerprint: &public_key_fingerprint,
+            issuer_fingerprint: &issuer_fingerprint,
+            issuer_generation,
+            not_after,
+        });
+        let signature = Signer::new_without_digest(&fixture.identity_key)
+            .unwrap()
+            .sign_oneshot_to_vec(&proof_transcript)
+            .unwrap();
+        let response = fixture
+            .service
+            .prove_at(
+                ProofRequest {
+                    host: fixture.host,
+                    predecessor: fixture.predecessor,
+                    request: input.request,
+                    challenge,
+                    csr_der: fixture.csr_der.clone(),
+                    signature,
+                },
+                fixture.now,
+            )
+            .await;
+        let Ok(RecoveryResponse::Certificate {
+            certificate_der, ..
+        }) = response
+        else {
+            panic!("pending cleanup must still recover its expired identity");
+        };
+        let certificate = openssl::x509::X509::from_der(&certificate_der).unwrap();
+        let fingerprint: [u8; 32] = certificate
+            .digest(MessageDigest::sha256())
+            .unwrap()
+            .as_ref()
+            .try_into()
+            .unwrap();
+        let (leaf_start, leaf_end): (i64, i64) = sqlx::query_as(
+            "SELECT not_before,not_after FROM remote_certificates WHERE fingerprint=?",
+        )
+        .bind(fingerprint.as_slice())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(leaf_end - leaf_start, 604_800);
+        let store = fixture.service.store.clone();
+        assert!(store.admit(&fingerprint, leaf_start).await.is_err());
+        assert!(
+            AuthorityGuard::admit(store.clone(), fingerprint)
+                .await
+                .is_err()
+        );
+        let (cleanup, cleanup_person) =
+            store.admit_cleanup(&fingerprint, leaf_start).await.unwrap();
+        assert_eq!(cleanup.host, fixture.host);
+        assert_eq!(cleanup_person, person);
+        let issuer = active_issuer(fixture.service.source.as_ref())
+            .unwrap_or_else(|_| panic!("test signer unlocked"));
+        let renewal = issuer
+            .authority
+            .sign_host(
+                fixture.host,
+                &ValidatedCsr::parse(&fixture.csr_der).unwrap(),
+                leaf_start + 1,
+            )
+            .unwrap();
+        assert!(
+            store
+                .renew(&fingerprint, &renewal.record, leaf_start + 1)
+                .await
+                .is_err()
+        );
+
+        tokio::time::pause();
+        let admitting = AuthorityGuard::admit_transport(store, fingerprint);
+        tokio::pin!(admitting);
+        // Keep the paused runtime runnable while SQLite responds: automatic timer
+        // advancement must not consume any part of the admission's exact budget.
+        let guard = loop {
+            tokio::select! {
+                biased;
+                result = &mut admitting => break result.unwrap(),
+                () = tokio::task::yield_now() => {},
+            }
+        };
+        assert_eq!(guard.cleanup_person(), Some(person));
+        assert!(guard.admit_operation().await.is_err());
+        assert!(guard.permits());
+        tokio::time::advance(Duration::from_secs(299)).await;
+        assert!(
+            guard.permits(),
+            "cleanup must retain its full bounded delivery window"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            !guard.permits(),
+            "seven-day recovery must not extend the cleanup cap"
+        );
+        assert!(guard.write_permit().await.is_err());
+        guard.cancelled().await;
+    }
+
     /// The recovery window uses server time and includes the exact 90-day boundary.
     #[test]
     fn recovery_uses_server_time_and_accepts_the_exact_ninety_day_boundary() {

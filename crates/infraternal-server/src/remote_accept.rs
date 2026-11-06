@@ -66,6 +66,7 @@ fn remember(known: &Mutex<HashSet<IpAddr>>, address: IpAddr) {
         known.insert(address);
     }
 }
+/// Accept bounded authenticated QUIC links, including pending-cleanup reconnects.
 pub(crate) async fn quic(
     quic: quinn::Endpoint,
     hosts: RemoteHosts,
@@ -100,7 +101,7 @@ pub(crate) async fn quic(
             );
             let Ok(Ok(authority)) = tokio::time::timeout(
                 Duration::from_secs(5),
-                AuthorityGuard::admit(store, fingerprint),
+                AuthorityGuard::admit_transport(store, fingerprint),
             )
             .await
             else {
@@ -117,6 +118,8 @@ pub(crate) async fn quic(
             let admitted = async {
                 let link =
                     RemoteLink::quic_admitted(connection.clone(), Some(&mut admission)).await?;
+                // Cleanup has its own bounded lane; release ordinary handshake capacity.
+                admission.release_cleanup_handshake();
                 #[cfg(all(test, feature = "mesh-transport-proof"))]
                 crate::remote_autoswitch_probe::record(
                     crate::remote_autoswitch_probe::Kind::ControlReady,
@@ -287,7 +290,7 @@ async fn handle_tcp_connection(
     probe::record(probe::Kind::TlsHandshake, diagnostic_peer, 0);
     let Ok(Ok(authority)) = tokio::time::timeout(
         Duration::from_secs(5),
-        AuthorityGuard::admit(context.store, connection.peer_fingerprint),
+        AuthorityGuard::admit_transport(context.store, connection.peer_fingerprint),
     )
     .await
     else {
@@ -300,6 +303,8 @@ async fn handle_tcp_connection(
     let Ok(link) = RemoteLink::tcp_admitted(connection.channel, Some(&mut admission)).await else {
         return;
     };
+    // Cleanup has its own bounded lane; release ordinary handshake capacity.
+    admission.release_cleanup_handshake();
     #[cfg(all(test, feature = "mesh-transport-proof"))]
     let link = {
         probe::record(probe::Kind::ControlReady, diagnostic_peer, 0);

@@ -268,8 +268,14 @@ pub(crate) fn query_ca_status(data: &Path) -> io::Result<infraternal_server::ca_
     let mut socket = std::os::unix::net::UnixStream::connect(data.join("restart/control.sock"))?;
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let peer = nix::sys::socket::getsockopt(&socket, nix::sys::socket::sockopt::PeerCredentials)?;
-    if peer.uid() != nix::unistd::Uid::effective().as_raw() {
+    // Authenticate the connected peer before sending a request. Both queries read
+    // kernel credentials; SO_PEERCRED is Linux-only (#379), getpeereid is macOS's equivalent.
+    #[cfg(target_os = "linux")]
+    let peer_uid =
+        nix::sys::socket::getsockopt(&socket, nix::sys::socket::sockopt::PeerCredentials)?.uid();
+    #[cfg(target_os = "macos")]
+    let peer_uid = nix::unistd::getpeereid(&socket)?.0.as_raw();
+    if peer_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     socket.write_all(&0_u16.to_be_bytes())?;

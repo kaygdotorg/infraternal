@@ -9,7 +9,15 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-type AdmittedHostRow = (Vec<u8>, String, Option<String>, Option<String>, String);
+/// Public host facts and an optional server-owned cleanup status, read together.
+type AdmittedHostRow = (
+    Vec<u8>,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+);
 
 #[cfg(test)]
 #[path = "remote_inventory_name_tests.rs"]
@@ -139,6 +147,7 @@ impl Inventory for Source {
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.hosts.5.subscribe()
     }
+    /// List account hosts, retaining undelivered denials as offline status rows.
     fn list<'a>(
         &'a self,
         account: &'a str,
@@ -158,7 +167,7 @@ impl Inventory for Source {
                 .transpose()?;
             // Same authority predicate as websocket::terminal_actor. Unredeemed invitations are not admitted hosts.
             let rows: Vec<AdmittedHostRow> = sqlx::query_as(
-                "SELECT h.id,COALESCE(b.address,''),b.os,h.hostname,h.mode FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
+                "SELECT h.id,COALESCE(b.address,''),b.os,h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
                 .bind(account).bind(after.map(|id| id.as_bytes().to_vec())).bind(after.map(|id| id.as_bytes().to_vec())).fetch_all(&self.pool).await.map_err(|_| ())?;
             let mut next = if rows.len() > 128 {
                 Some(Uuid::from_slice(&rows[127].0).map_err(|_| ())?.to_string())
@@ -167,7 +176,7 @@ impl Inventory for Source {
             };
             let mut hosts = Vec::with_capacity(rows.len().min(128));
             let mut bytes = 1024;
-            for (id, address, os, hostname, mode) in rows.into_iter().take(128) {
+            for (id, address, os, hostname, mode, cleanup) in rows.into_iter().take(128) {
                 let id = Uuid::from_slice(&id).map_err(|_| ())?;
                 let user = address.split_once('@').map(|(user, _)| user);
                 let name = machine_name(&address)
@@ -175,8 +184,14 @@ impl Inventory for Source {
                     .unwrap_or_else(|| {
                         fallback_machine_name(os.as_deref(), &id.simple().to_string())
                     });
-                let online = self.hosts.online(id).await;
-                let value = json!({"id":id,"name":name,"user":if mode == "rootful" {Some("root")} else {user},"os":os,"address":if address.is_empty(){None}else{Some(&address)},"online":online});
+                // A pending host may still have a draining actor, never usable
+                // authority. Expiry is derived from the ledger without a timer
+                // or a false durable receipt; renewal already refuses this row.
+                let online = cleanup.is_none() && self.hosts.online(id).await;
+                let mut value = json!({"id":id,"name":name,"user":if mode == "rootful" {Some("root")} else {user},"os":os,"address":if address.is_empty(){None}else{Some(&address)},"online":online});
+                if let Some(cleanup) = cleanup {
+                    value["state"] = cleanup.into();
+                }
                 let size = serde_json::to_vec(&value).map_err(|_| ())?.len();
                 if bytes + size > 60 * 1024 {
                     next = hosts
@@ -299,5 +314,59 @@ mod pagination_tests {
             }
         }
         assert_eq!(found.len(), 1001);
+    }
+}
+
+/// Pending denial remains visible without presenting a usable host. Certificate
+/// expiry makes delivery permanently unreachable, including after store restart.
+#[cfg(test)]
+mod cleanup_status_tests {
+    use super::*;
+
+    /// Inventory distinguishes delivery waiting from exhausted certificate authority.
+    #[tokio::test]
+    async fn pending_cleanup_exposes_pending_then_retired_unreachable() {
+        let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let now = crate::runtime::unix_seconds().unwrap();
+        sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=?")
+            .bind(now + 3600 - 604_800)
+            .bind(now + 3600)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,?)")
+            .bind(host.as_bytes().as_slice())
+            .bind(Uuid::new_v4().to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let source = Source {
+            pool: pool.clone(),
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        let inventory = source.list("owner", None).await.unwrap();
+        assert_eq!(inventory["hosts"][0]["state"], "pending");
+        assert_eq!(inventory["hosts"][0]["online"], false);
+        sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=?")
+            .bind(now - 604_800)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let inventory = source.list("owner", None).await.unwrap();
+        assert_eq!(inventory["hosts"][0]["state"], "retired-unreachable");
+        assert_eq!(inventory["hosts"][0]["online"], false);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT confirmed FROM remote_login_cleanup WHERE host_id=?"
+            )
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
     }
 }

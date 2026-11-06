@@ -8,8 +8,9 @@ use super::outcome;
 
 const HOST: &str = "0123456789abcdef0123456789abcdef";
 
+/// Extract the ownership-checked command from a completed removal response.
 fn manual(mode: &str) -> String {
-    outcome("unreachable", mode, "host.example", &[], Some(HOST))
+    outcome("unreachable", mode, "host.example", &[], Some(HOST), false)
         .1
         .unwrap()
 }
@@ -56,7 +57,7 @@ fn review_manual_commands_are_gated_on_this_hosts_bootstrap_owner() {
 /// no commands, and the message says so.
 #[test]
 fn no_commands_for_a_host_setup_did_not_install() {
-    let (message, manual) = outcome("unreachable", "rootless", "host.example", &[], None);
+    let (message, manual) = outcome("unreachable", "rootless", "host.example", &[], None, false);
     assert!(manual.is_none());
     assert!(
         message.contains("infraternal setup didn't install"),
@@ -88,6 +89,7 @@ fn accepted_uninstall_names_the_objects_it_leaves() {
         "host.example",
         &["infraternal0"],
         Some(HOST),
+        false,
     );
     assert_eq!(
         message,

@@ -72,7 +72,7 @@ export interface SessionBinding {
   dispose(): void;
 }
 
-/** A host the person can open shells on, as the session list knows it. */
+/** An admitted host or a denied host whose removal still needs a durable receipt. */
 export interface HostEntry {
   id: string;
   name: string;
@@ -81,6 +81,8 @@ export interface HostEntry {
   os?: HostPlatform;
   /** Last server-observed infraternal agent connectivity; offline hosts remain available in inventory. */
   online?: boolean;
+  /** Pending denial stays visible; expired cleanup credentials can never deliver it. */
+  state?: "pending" | "retired-unreachable";
 }
 
 /** What the canvas asks of the sessions: bind a window to a session, make a model for a new shell, and list hosts. Implemented by the live service and by the mock. */

@@ -4109,3 +4109,17 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        noted".
      - **macOS "logged in" means a desktop login (#328, D335):** someone
        logged in only over SSH gets the plain shell ("yes").
+
+353. **Revoking access also ends background services when nobody else uses the
+     account (owner, 2026-11-06, #355; extends D347, D352):** a revoked person
+     could leave a program running through the host account's own systemd
+     user manager (`systemd-run --user` plus linger), and it survived every
+     revoke (J291). Infraternal can't tell which person started it when several
+     people share one host account (D347). The owner chose "Only when no one
+     else has it": if the revoked person was the last one with access to that
+     host account, the revoke stops the account's user services and turns
+     linger off. If others still share the account, those services stay
+     running, and the revoke result warns that background programs may
+     remain. The rejected options were stopping them on every revoke (this
+     also kills other people's jobs on a shared account) and leaving them as
+     the host owner's job.

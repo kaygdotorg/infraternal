@@ -845,6 +845,50 @@ fn a_settle_that_changes_the_key_raises_the_change_notice() {
     plugin.call("mesh.down", b"{}").unwrap();
 }
 
+/// J284 P3-b: when the settle's journal save fails after the marker moved, the node keeps presenting the
+/// predecessor (the journal still says the operation is open) while its proof accepts both of its keys, so a
+/// retry proves its own link and completes the settle.
+#[cfg(feature = "test-support")]
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn a_failed_settle_save_leaves_the_presented_key_unchanged_and_is_retryable() {
+    use std::os::unix::fs::PermissionsExt;
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000051";
+    let second = "00000000-0000-4000-8000-000000000052";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let previous = node.up().unwrap();
+    let candidate = node.prepare_rotation(first, 1).unwrap();
+    let (index, _, _) = kernel_link_identity();
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let mut rotation = store.rotation_secret().unwrap().unwrap();
+    rotation.commit_requested = true;
+    store.save_rotation_secret(&rotation).unwrap();
+    let (candidate_key, _) = Key::from_private(&rotation.candidate).unwrap();
+    Device::configure(index, previous.public_key, &candidate_key, previous.port).unwrap();
+    drop(rotation);
+    drop(store);
+
+    // An unsafe journal mode makes the save refuse, as any durable-write failure would.
+    let journal = state.0.join("mesh-key-rotation.bin");
+    let unsafe_journal = journal.clone();
+    *BEFORE_SETTLE_SAVE.lock().unwrap() = Some(Box::new(move || {
+        std::fs::set_permissions(&unsafe_journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }));
+    assert!(node.prepare_rotation(second, 3).is_err(), "the save fails");
+    assert_eq!(
+        node.interface_key(),
+        Some(previous.public_key),
+        "the presented key changes only after the journal records it"
+    );
+    assert_eq!(kernel_link_identity(), (index, Some(candidate), candidate));
+
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let next = node.prepare_rotation(second, 3).unwrap();
+    assert_ne!(next, candidate);
+    assert_eq!(node.interface_key(), Some(candidate));
+    node.down().unwrap();
+}
 #[test]
 #[ignore = "Run in a disposable user/network namespace, #173."]
 fn nft_restart_fences_retained_replacement_address() {

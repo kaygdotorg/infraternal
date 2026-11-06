@@ -22,6 +22,12 @@ pub use crate::dataplane::Chunk;
 #[cfg(feature = "test-support")]
 pub static BEFORE_KERNEL_KEY: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
     std::sync::Mutex::new(None);
+/// Test seam (#285 J284 P3-b): runs once in a rotation settle that moves this node to the candidate, after
+/// the marker and the recorded key and right before the journal save, so a namespace test can make that save
+/// fail.
+#[cfg(feature = "test-support")]
+pub static BEFORE_SETTLE_SAVE: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> =
+    std::sync::Mutex::new(None);
 /// Test seam (#260 J143 P3-4): runs once in `down`, after this node's link is gone and before its
 /// shared-filter decision, so a namespace test can start another installation in that window.
 #[cfg(feature = "test-support")]
@@ -1257,6 +1263,9 @@ impl Node {
                 Some(owner) if owner == candidate_public => {}
                 _ => return Err(io::ErrorKind::InvalidData.into()),
             }
+            // The marker now names the candidate while the journal still holds both keys with commit
+            // intent: the proof accepts both, as a restart would compute from the journal, so a retry after
+            // a failed save below still proves this link (J284 P3-b).
             store.record_interface(&candidate_public)?;
             if self.engine_kind == EngineKind::GotaTun {
                 store.replace_private_key(&existing.candidate)?;
@@ -1267,6 +1276,14 @@ impl Node {
                 .as_mut()
                 .ok_or(io::ErrorKind::NotConnected)?
                 .public_key = candidate_public;
+            #[cfg(feature = "test-support")]
+            if let Some(hook) = BEFORE_SETTLE_SAVE
+                .lock()
+                .ok()
+                .and_then(|mut hook| hook.take())
+            {
+                hook();
+            }
             return store.complete_rotation_secret(&existing.operation_id, existing.sequence);
         }
         if current != previous_public
