@@ -580,9 +580,13 @@ TUN links, nftables rules, routes, DNS on a mesh address. They are
 namespace". When a change touches install/bootstrap/removal, proxy, mesh or
 shim/host-login code (the path globs in `scripts/verify-privileged`, against
 the merge base `VERIFY_QUICK_BASE`, default `origin/dev`), the `privileged
-integration` row of `scripts/verify fast` runs those tests. Shared build inputs
-(workspace manifest, lockfile, toolchain) select all four areas; other changes
-skip the row.
+integration` row of `scripts/verify fast` runs those tests. A change inside
+any workspace crate those tests' binaries depend on also selects the area,
+from `cargo metadata` (for example `infraternal-linux-tun`, `relay`,
+`protocol` and `plugin-api` select mesh), so a dependency change can't skip
+the tests that cover it (J266, 80581). Shared build inputs (workspace
+manifest, lockfile, toolchain) select all four areas. Other changes skip the
+row, which exits 77 and shows as `SKIP` in the gate table, never as `PASS`.
 
 **Which tests:** every ignored test in the area's packages whose reason asks
 for root or a disposable namespace, each alone in a fresh sandbox. The reason
@@ -645,11 +649,24 @@ checks that proof.
 
 Individual tests on `NOT_COVERED_TESTS` today:
 - `infraternal-plugin-mesh` `gotatun_tun_owner::an_unprivileged_user_cannot_attach_the_persisted_tun`:
-  it drops to uid 65534, but the sandbox maps exactly one uid, so
-  `setresuid` fails with EINVAL before the check. Mapping a second uid would
-  need a setuid-root `newuidmap` on the build VMs (not installed) and a new
-  sandbox layout, which needs a fresh manual escape review; it is the
-  owner's call.
+  it drops a child to uid 65534, and the sandbox maps exactly one uid, so the
+  kernel's refusal of a *different* uid can't be shown there. The row runs its
+  counterpart `a_fresh_persisted_tun_is_restricted_to_the_agent` instead: a
+  fresh persisted TUN is owned by the agent's own uid and gid (`ip -d link`)
+  and is reattached after a restart, which is the part our code controls
+  (#260, J213 P1). When TUN code changes (`TUN_PATHS`), the row prints
+  `REAL-ROOT PROOF REQUIRED`, and the job runs `scripts/tun-real-root-proof
+  <40-hex commit>` from `code` and records the output on its issue. The proof
+  trusts only that commit and the public repository: root clones it into a
+  fresh 0700 directory under `/root`, builds with a root-owned cargo home and
+  target, refuses the binary if its interpreter or RUNPATH points outside
+  `/nix/store` and that directory (`scripts/elf-runpath-guard`), runs the one
+  test in a throwaway network namespace, and deletes everything on any exit.
+  Nothing the shared `claude` account can write reaches root's process: no
+  claude-built binary, path, worktree, cache or library directory (J270,
+  81345). Runs are serialised by a root-owned lock. The gate itself never runs as root, and no
+  `newuidmap` is installed: a setuid-root helper on the shared VMs and a
+  second mapped uid would weaken the sandbox (J266, 80581).
 
 **Where it runs:** any Linux build VM that allows unprivileged user
 namespaces, inside the flake dev shell (for `ip`, `nft`, cargo). compute01

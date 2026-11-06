@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Real-root proof that an unprivileged user cannot attach the agent's persisted TUN (#260, D351).
+#
+# Why this exists: the test drops a child to uid 65534 (nobody). The privileged
+# sandbox maps a single uid, so the kernel's refusal of a *different* uid can't
+# be shown there (#344, 80581); the gate runs the in-sandbox counterpart
+# `a_fresh_persisted_tun_is_restricted_to_the_agent` instead. When a change
+# touches TUN code, the privileged row prints that this proof is required, and
+# the job runs it and records the output on its issue (BRIEF: root-only paths
+# run as root, in a throwaway clone under /root).
+#
+# What it trusts: only the commit id you pass and the public repository it is
+# fetched from. Everything else is root's: root clones that commit into a fresh
+# 0700 directory under /root, builds there with a root-owned cargo home and
+# target, and runs the one test in a throwaway network, mount and PID
+# namespace. Nothing the shared `claude` build account can write is on the
+# path: no claude-built binary, no claude-printed path, no claude worktree,
+# cache or library directory (review 81345). Before running, the binary's
+# interpreter and RUNPATH are checked with the commit's own
+# `scripts/elf-runpath-guard`, which allows only /nix/store and root's
+# private build directory. Running a branch's test as real root still trusts
+# that commit: run this only for the commit under review.
+#
+# Concurrency and cleanup: runs are serialised by a root-owned lock, each run
+# uses its own mktemp directories, and a trap removes them on any exit,
+# including a build failure or a dropped ssh session. The build waits for a
+# shared build slot; only the slot's lock is held as `claude`, through the
+# root-owned /root/.cache/root-build-slot helper, which starts claude's
+# build-slot script with runuser.
+#
+# Usage, from `code` (which can ssh to root@compute01), with a full commit id:
+#   scripts/tun-real-root-proof <40-hex commit>
+set -euo pipefail
+commit=${1:?usage: tun-real-root-proof <40-hex commit>}
+[[ $commit =~ ^[0-9a-f]{40}$ ]] || { echo "pass the full 40-character commit id" >&2; exit 2; }
+host=infraternal-dev-01-compute01
+
+status=0
+ssh "root@$host" bash -s -- "$commit" <<'ROOT' || status=$?
+set -euo pipefail
+commit=$1
+test=an_unprivileged_user_cannot_attach_the_persisted_tun
+repository=https://git.kayg.org/kayg/infraternal.git
+export PATH=/nix/var/nix/profiles/default/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+umask 077
+
+# One proof at a time; a second run waits instead of deleting the first one's files.
+mkdir -p /root/.cache
+exec 9>/root/.cache/tun-real-root-proof.lock
+flock 9
+
+work=$(mktemp -d /root/tun-proof.XXXXXX)
+run=$(mktemp -d /tmp/tun-proof-run.XXXXXX)
+cleanup() { rm -rf -- "$work" "$run"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# 1. Root fetches the commit itself, from the public repository.
+git clone -q --no-checkout "$repository" "$work/src"
+git -C "$work/src" fetch -q origin "$commit"
+git -C "$work/src" checkout -q --detach "$commit"
+[[ $(git -C "$work/src" rev-parse HEAD) == "$commit" ]] || { echo "checkout is not $commit" >&2; exit 1; }
+echo "root clone at $commit in $work"
+
+# 2. Build as root, root-owned cargo home and target, through a build slot.
+export CARGO_HOME=/root/.cache/tun-proof-cargo CARGO_TARGET_DIR=$work/target CARGO_BUILD_JOBS=4
+mkdir -p "$CARGO_HOME"
+cd "$work/src"
+/usr/bin/python3 /root/.cache/root-build-slot nix develop -c cargo test --locked -p infraternal-plugin-mesh \
+    --features agent,server,relay,test-support --test gotatun_tun_owner --no-run --message-format=json \
+    > "$work/build.json" 2> "$work/build.log" || { tail -20 "$work/build.log" >&2; exit 1; }
+binary=$(python3 -c 'import json, sys
+for line in open(sys.argv[1]):
+    m = json.loads(line) if line.startswith("{") else {}
+    if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "gotatun_tun_owner":
+        print(m["executable"])' "$work/build.json")
+[[ -n $binary && $binary == "$work"/target/* ]] || { echo "no test binary inside root's build dir: '$binary'" >&2; exit 1; }
+
+# 3. Refuse a binary that could load code from outside /nix/store and root's own dir.
+python3 "$work/src/scripts/elf-runpath-guard" "$binary" --allow "$work"
+
+# 4. nobody must be able to exec the binary: copy it to a root-owned 0755 dir.
+chmod 755 "$run"; install -m 755 "$binary" "$run/gotatun_tun_owner"
+cd "$run"
+echo "running as $(id -un) (uid $(id -u)) in a fresh network namespace"
+timeout 300 unshare --net --mount --pid --fork --kill-child --mount-proc \
+    bash -c 'ip link set lo up; "$@"' proof \
+    "$run/gotatun_tun_owner" --ignored --exact "$test" --nocapture --test-threads=1
+ROOT
+
+echo "TUN_REAL_ROOT_PROOF_EXIT=$status commit=$commit"
+exit $status
