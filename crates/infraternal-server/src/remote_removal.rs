@@ -372,7 +372,9 @@ fn outcome(
             "requested" => {
                 let mut detail = "its infraternal agent is uninstalling itself".to_owned();
                 for object in left {
-                    detail.push_str(&format!("; {object} stays because this installation did not create it"));
+                    detail.push_str("; ");
+                    detail.push_str(object);
+                    detail.push_str(" stays because this installation did not create it");
                 }
                 (detail, None)
             }

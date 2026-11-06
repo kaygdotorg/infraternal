@@ -482,7 +482,7 @@ async fn pending_removal_does_not_claim_a_reconnect_is_required() {
 }
 
 /// J269 reproducer: after a pending removal, the production duplicate-address
-/// queries (bootstrap_remote.rs `existing_host`, remote_http.rs `occupied`,
+/// queries (`bootstrap_remote.rs` `existing_host`, `remote_http.rs` `occupied`,
 /// and `check_stuck_install`'s ownership row) are evaluated verbatim.
 #[tokio::test]
 async fn pending_removal_releases_its_bootstrap_coordinates() {
