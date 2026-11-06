@@ -332,6 +332,7 @@ impl EnrollmentStore {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(crate) mod tests {
+    //! Real SQLite enrollment, retirement, and pending-cleanup authority boundaries.
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -464,5 +465,61 @@ pub(crate) mod tests {
             store.admit(&[1; 32], 203).await,
             Err(EnrollmentError::Denied)
         ));
+    }
+    /// An undelivered denial refuses fresh join authority even before final retirement.
+    #[tokio::test]
+    async fn pending_cleanup_refuses_join_token_issuance() {
+        let (store, pool, host) = enrolled().await;
+        sqlx::query(
+            "INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES(?,'owner',0)",
+        )
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let digest = openssl::sha::sha256(&[3u8; 32]);
+        assert!(matches!(
+            store
+                .issue_authorized("owner", host, Mode::Rootless, 200, None, Some(&digest))
+                .await,
+            Err(EnrollmentError::Denied)
+        ));
+    }
+
+    /// A pre-existing invitation cannot revive a pending-removed identity or be consumed.
+    #[tokio::test]
+    async fn pending_cleanup_refuses_join_token_redemption() {
+        let (store, pool, host) = enrolled().await;
+        let digest = openssl::sha::sha256(&[3u8; 32]);
+        let token = store
+            .issue("owner", host, Mode::Rootless, 200, &digest)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES(?,'owner',0)",
+        )
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            store
+                .redeem(
+                    token.secret(),
+                    host,
+                    Mode::Rootless,
+                    200,
+                    &certificate(2, 200)
+                )
+                .await,
+            Err(EnrollmentError::Denied)
+        ));
+        let consumed: Option<i64> =
+            sqlx::query_scalar("SELECT consumed_at FROM remote_join_tokens WHERE host_id=?")
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(consumed, None);
     }
 }

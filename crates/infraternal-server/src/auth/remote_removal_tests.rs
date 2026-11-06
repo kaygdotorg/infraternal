@@ -480,3 +480,42 @@ async fn pending_removal_does_not_claim_a_reconnect_is_required() {
             .contains("stays installed")
     );
 }
+
+/// J269 reproducer: after a pending removal, the production duplicate-address
+/// queries (bootstrap_remote.rs `existing_host`, remote_http.rs `occupied`,
+/// and `check_stuck_install`'s ownership row) are evaluated verbatim.
+#[tokio::test]
+async fn pending_removal_releases_its_bootstrap_coordinates() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let start = service.start(&f.session, host, true, NOW).await.unwrap();
+    let result = service
+        .finish_host(&f.session, host, str_field(&start, "review"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "pending");
+    let lookup: Option<&str> = None;
+    let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+        .bind(&f.user).bind("root@host.example").bind(lookup).bind(lookup).bind("root@host.example")
+        .fetch_optional(&f.auth.pool).await.unwrap();
+    let occupied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+        .bind(&f.user).bind("root@host.example").bind(lookup).bind(lookup)
+        .fetch_one(&f.auth.pool).await.unwrap();
+    let row: Option<(String, bool, bool)> = sqlx::query_as("SELECT h.owner_id, h.revoked_at IS NOT NULL, EXISTS(SELECT 1 FROM remote_host_bootstrap b WHERE b.host_id=h.id AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?))) FROM remote_hosts h WHERE h.id=? AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id)")
+        .bind("root@host.example").bind(lookup).bind(lookup).bind(host.as_bytes().as_slice())
+        .fetch_optional(&f.auth.pool).await.unwrap();
+    let stuck_ours =
+        row.is_some_and(|(owner, revoked, matches)| owner == f.user && !revoked && matches);
+    let message = result["message"].as_str().unwrap();
+    eprintln!(
+        "J269 pending removal: already_added_host={} issue_occupied={occupied} stuck_install_ours={stuck_ours} message={message:?}",
+        existing.is_some()
+    );
+    assert_eq!(
+        (existing.is_some(), occupied, stuck_ours),
+        (false, false, false),
+        "pending removal still owns bootstrap coordinates"
+    );
+}
+
