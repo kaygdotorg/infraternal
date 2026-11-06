@@ -556,7 +556,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     const failure = wizard(page).locator(".ah-page[data-page='failure']");
     await expect(failure.locator(".ah-lede")).toContainText("nothing was changed");
     // What the page says outside the collapsed Details: no path, no "didn't finish".
-    for (const visible of [page.getByRole("heading", { name: /installed\.lab/ }), failure.locator(".ah-lede")]) {
+    for (const visible of [failure.locator(".ah-title"), failure.locator(".ah-lede")]) {
       await expect(visible).not.toContainText("/var/lib/infraternal");
       await expect(visible).not.toContainText("didn't finish");
     }
