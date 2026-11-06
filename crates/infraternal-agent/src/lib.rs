@@ -10,6 +10,7 @@ pub mod cli;
 pub mod daemon;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use control as daemon;
+pub mod access_files;
 #[path = "daemon_portable.rs"]
 pub mod control;
 mod daemon_writer;
@@ -23,7 +24,6 @@ mod lifecycle;
 mod login_auth;
 mod login_binary;
 mod login_records;
-pub mod access_files;
 pub mod logins;
 #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
 mod native_dispatch;
