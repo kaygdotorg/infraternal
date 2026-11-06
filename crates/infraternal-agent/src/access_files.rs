@@ -36,7 +36,7 @@ use std::{
 };
 
 /// Bytes of one access file that are compared; the rest is reported as such.
-const FILE_BYTES: u64 = 64 * 1024;
+const FILE_BYTES: usize = 64 * 1024;
 /// Access files and directory entries fingerprinted per account.
 const FILES: usize = 64;
 /// Changed lines reported per revocation, across all files.
@@ -130,12 +130,12 @@ pub(crate) fn changes(base: &Fingerprint, account: &User, extra: &Extra) -> Chan
             continue;
         }
         let mut seen: HashMap<&str, usize> = HashMap::new();
-        for hash in before.map_or(&[][..], |source| &source.lines) {
+        for hash in before.map_or(&[][..], |source| source.lines.as_slice()) {
             *seen.entry(hash.as_str()).or_default() += 1;
         }
         let mut lines = Vec::new();
         if let Ok(Content::Bytes(bytes)) = &content {
-            let compared = &bytes[..bytes.len().min(FILE_BYTES as usize)];
+            let compared = &bytes[..bytes.len().min(FILE_BYTES)];
             for (line, hash) in split(compared).zip(now.lines.iter()) {
                 match seen.get_mut(hash.as_str()) {
                     Some(count) if *count > 0 => *count -= 1,
@@ -171,13 +171,13 @@ fn fingerprint(content: &io::Result<Content>) -> Source {
     match content {
         Ok(Content::Bytes(bytes)) => {
             let mut note = None;
-            if bytes.len() as u64 > FILE_BYTES {
+            if bytes.len() > FILE_BYTES {
                 note = Some(format!(
                     "larger than {} KiB; only the start was compared",
                     FILE_BYTES / 1024
                 ));
             }
-            let bytes = &bytes[..bytes.len().min(FILE_BYTES as usize)];
+            let bytes = &bytes[..bytes.len().min(FILE_BYTES)];
             Source {
                 lines: split(bytes)
                     .map(|line| hex(&Sha256::digest(line)))
@@ -332,7 +332,8 @@ fn read_owned(file: std::fs::File, account: &User) -> io::Result<Content> {
         ));
     }
     let mut bytes = Vec::new();
-    file.take(FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    file.take(u64::try_from(FILE_BYTES + 1).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)?;
     Ok(Content::Bytes(bytes))
 }
 
@@ -481,7 +482,7 @@ fn command_output(program: &str, args: &[&str]) -> io::Result<Vec<u8>> {
         return Err(io::ErrorKind::NotFound.into());
     }
     let mut bytes = output.stdout;
-    bytes.truncate(FILE_BYTES as usize + 1);
+    bytes.truncate(FILE_BYTES + 1);
     Ok(bytes)
 }
 
