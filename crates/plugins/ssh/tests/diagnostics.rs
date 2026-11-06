@@ -204,7 +204,9 @@ fn bootstrap_status_mapping_covers_each_step_and_approved_mode() {
                     }
                     71 => {
                         // One finding, no folder chore, no path in the sentence (#394, TASTE).
-                        assert_eq!(failure.kind, FailureKind::UnrecognizedInstall);
+                        // A refusal the host did not name has the plain sentence,
+                        // never "set up elsewhere" (J314 P2-1).
+                        assert_eq!(failure.kind, FailureKind::UnprovenFiles);
                         assert_eq!(failure.message, UNPROVEN_FILES);
                         assert!(!failure.message.contains(path));
                         assert!(!failure.message.contains("Check"));

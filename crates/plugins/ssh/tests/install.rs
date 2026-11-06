@@ -76,6 +76,16 @@ impl Local {
         format!("{script}\nbootstrap_test_status=$?\nexit \"$bootstrap_test_status\"")
     }
 }
+/// As the real transport does: on exit 71 keep only the host's fixed cause line (#394).
+fn refusal_of(failure: Failure, stderr: &[u8]) -> Failure {
+    if failure.exit_status != Some(71) {
+        return failure;
+    }
+    failure.with_refusal(infraternal_plugin_ssh::model::Refusal::from_stderr(
+        &String::from_utf8_lossy(stderr),
+    ))
+}
+
 impl SshSession for Local {
     fn stream<'a>(
         &'a self,
@@ -113,7 +123,7 @@ impl SshSession for Local {
                 if !output.success {
                     let mut error = Failure::install("The synthetic remote command failed.");
                     error.exit_status = output.exit_status;
-                    return Err(error);
+                    return Err(refusal_of(error, &output.stderr));
                 }
                 return Ok(CommandOutput {
                     stdout: output.stdout,
@@ -127,7 +137,7 @@ impl SshSession for Local {
                 )
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
                 .unwrap();
@@ -171,7 +181,7 @@ impl SshSession for Local {
                     .status
                     .code()
                     .and_then(|code| u8::try_from(code).ok());
-                return Err(failure);
+                return Err(refusal_of(failure, &output.stderr));
             }
             Ok(CommandOutput {
                 stdout: output.stdout,
@@ -1783,7 +1793,8 @@ async fn command_failure_names_upload_join_install_and_start_separately() {
 }
 
 /// A setup directory without our owner record refuses staging with exit 71,
-/// as kind `unrecognized_install` with the location in Details (#394).
+/// as kind `unproven_files` naming that cause, with the location in Details
+/// (#394, J314 P2-1): it is not "set up elsewhere".
 #[tokio::test]
 async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
     let fixture = Fixture::new();
@@ -1798,14 +1809,48 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
     // One plain finding; the location is in Details, never in the sentence (#394).
     assert_eq!(
         failure.kind,
-        infraternal_plugin_ssh::model::FailureKind::UnrecognizedInstall
+        infraternal_plugin_ssh::model::FailureKind::UnprovenFiles
     );
+    assert_eq!(
+        failure.refusal(),
+        Some(infraternal_plugin_ssh::model::Refusal::Foreign)
+    );
+    assert_eq!(failure.message, infraternal_plugin_ssh::model::UNPROVEN_FOREIGN);
+    assert_eq!(serde_json::to_value(&failure).unwrap()["refusal"], "foreign");
     assert!(!failure.message.contains("~/.local/share/infraternal"));
     assert!(
         failure
             .log_tail
             .contains(&"Setup location: ~/.local/share/infraternal")
     );
+}
+
+/// Only an owner record for another host is "set up elsewhere" at staging
+/// (J314 P2-1); its sentence stays true whoever enrolled it.
+#[tokio::test]
+async fn an_owner_record_for_another_host_is_set_up_elsewhere() {
+    let fixture = Fixture::new();
+    let base = fixture.root.join(".local/share/infraternal");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let owner = base.join(".bootstrap-owner");
+    std::fs::write(&owner, format!("{}\n", "6".repeat(32))).unwrap();
+    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let failure = fixture
+        .transaction()
+        .stage(&fixture.binary)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.exit_status, Some(71));
+    assert_eq!(
+        failure.kind,
+        infraternal_plugin_ssh::model::FailureKind::UnrecognizedInstall
+    );
+    assert_eq!(
+        failure.message,
+        infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE
+    );
+    assert_eq!(std::fs::read_to_string(&owner).unwrap(), format!("{}\n", "6".repeat(32)));
 }
 
 #[tokio::test]

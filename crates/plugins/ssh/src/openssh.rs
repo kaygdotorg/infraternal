@@ -427,8 +427,7 @@ impl SshSession for Session {
             {
                 return Err(capture_setup_stderr(error, script, &result.stderr));
             }
-            let mut failure = classify(&result.stderr, false, MeshEvidence::default());
-            failure.exit_status = result.exit_status;
+            let mut failure = command_failure(&result.stderr, result.exit_status);
             failure = capture_setup_stderr(failure, script, &result.stderr);
             if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n") {
                 failure.failed_step = crate::install::interrupted_setup_step(&result.stdout);
@@ -438,6 +437,21 @@ impl SshSession for Session {
             Err(failure).map_err(|error: Failure| error.at_ssh_boundary(true))
         })
     }
+}
+
+/// The failure of a command that ran after sign-in, from its bounded stderr and
+/// its exit status. On exit 71 the fixed cause line names which staging check
+/// refused ([`crate::model::Refusal`]); the rest of stderr stays withheld.
+fn command_failure(stderr: &[u8], exit_status: Option<u8>) -> Failure {
+    let mut failure = classify(stderr, false, MeshEvidence::default());
+    failure.exit_status = exit_status;
+    if exit_status == Some(71) {
+        let stderr = &stderr[..stderr.len().min(8192)];
+        failure = failure.with_refusal(crate::model::Refusal::from_stderr(
+            &String::from_utf8_lossy(stderr),
+        ));
+    }
+    failure
 }
 
 /// Keep remote stderr only for the trusted setup script families sent by this adapter.
@@ -553,6 +567,18 @@ mod tests {
             MeshEvidence::default(),
         );
         assert_eq!(other.kind, FailureKind::Install);
+    }
+
+    /// J314 P2-1: an exit 71 carries the cause its host named, and only that.
+    #[test]
+    fn a_command_failure_reads_only_its_fixed_cause_line() {
+        let refused = command_failure(b"noise\nINFRATERNAL_REFUSED cache\n", Some(71));
+        assert_eq!(refused.refusal(), Some(crate::model::Refusal::Cache));
+        assert_eq!(command_failure(b"INFRATERNAL_REFUSED cache\n", Some(72)).refusal(), None);
+        assert_eq!(command_failure(b"INFRATERNAL_REFUSED other\n", Some(71)).refusal(), None);
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(json["refusal"], "cache");
+        assert!(!json.to_string().contains("noise"), "other stderr stays withheld");
     }
 
     #[test]

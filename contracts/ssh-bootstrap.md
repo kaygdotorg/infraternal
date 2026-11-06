@@ -409,9 +409,14 @@ the default server supplies the verified source through the same SSH plugin.
 
 Failure adds optional `exit_status` from the authenticated command process (a
 signal or unavailable status omits it). Fixed installer code 71 outside the
-check and join retains `failed_step`, becomes kind `unrecognized_install` (setup
-found files it cannot prove are its own and changed nothing) and names the
-root/rootless setup location in `log_tail` only (#394). An unfinished transaction (72) directs the
+check and join retains `failed_step` and names the root/rootless setup location
+in `log_tail` only (#394). The refusing check may name itself with one fixed
+stderr line, `INFRATERNAL_REFUSED <cache|prepared|foreign|owner>`, right
+before its exit; nothing else of stderr is read. `owner` (an owner record for
+another host) becomes kind `unrecognized_install`; every other 71 becomes kind
+`unproven_files` (setup found files it cannot prove are its own and changed
+nothing), with `refusal: "cache" | "prepared" | "foreign"` when named. Neither
+is retried: a retry would meet the same files. An unfinished transaction (72) directs the
 person back to cleanup; a live setup (73) offers to wait. A retry with retained
 coordinates actually finishes the original cleanup before continuing. A returned
 script status is a setup failure, including status 255 after authentication;
@@ -627,7 +632,8 @@ A base with no journal is a finished install owned by the host id in its
 every new attempt carries a new host id, and staging refuses (71) a base whose
 owner names another host. After the existing already-added preflight, the
 server answers `unrecognized_install` at the `connect` step before any write.
-Taking such an install over (D337) is not offered by this slice.
+Taking such an install over is D359's Take over, a separate slice on
+`addhost-takeover-d359`.
 
 When the NetBird SSH server accepts a network sign-in and then ends the session
 with exactly `User authentication failed` (status 1), the login name is no
