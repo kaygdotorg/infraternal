@@ -10,6 +10,7 @@ pub mod cli;
 pub mod daemon;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use control as daemon;
+/// Fingerprints of an account's access files at grant, compared on revoke (D356).
 pub mod access_files;
 #[path = "daemon_portable.rs"]
 pub mod control;

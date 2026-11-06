@@ -220,6 +220,7 @@ fn shown(line: &[u8]) -> String {
     }
 }
 
+/// Lowercase hex of a digest, the form a baseline stores per line.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -588,6 +589,7 @@ mod tests {
         (user, home)
     }
 
+    /// No host spool sources, so a test reads only files beneath the fake home.
     fn no_extra(_: &User) -> Vec<(String, io::Result<Vec<u8>>)> {
         Vec::new()
     }
