@@ -39,8 +39,8 @@ class LossAwareLatencyTests(unittest.TestCase):
         self.assertEqual(report["p50_ms"], 5.0)
         self.assertEqual(report["p99_loss_aware_ms"], 9.9)
 
-    def test_any_lost_probe_makes_the_loss_aware_p99_infinite(self):
-        """Never publish a finite p99 for a window with a missing reply."""
+    def test_one_percent_loss_keeps_the_nearest_rank_p99_finite(self):
+        """Count a lost probe as infinity without moving p99 before its rank."""
         replies = [(sequence, float(sequence) / 10) for sequence in range(1, 100)]
 
         report = summarize_latency(range(1, 101), replies)
@@ -48,6 +48,20 @@ class LossAwareLatencyTests(unittest.TestCase):
         self.assertEqual(report["sent"], 100)
         self.assertEqual(report["received"], 99)
         self.assertEqual(report["lost"], 1)
+        self.assertEqual(report["loss_pct"], 1.0)
+        self.assertEqual(report["p99_loss_aware_ms"], 9.9)
+        self.assertEqual(report["p99_state"], "finite")
+
+    def test_loss_above_one_percent_makes_the_nearest_rank_p99_infinite(self):
+        """Mark p99 infinite when lost probes occupy its nearest-rank position."""
+        replies = [(sequence, float(sequence) / 10) for sequence in range(1, 99)]
+
+        report = summarize_latency(range(1, 101), replies)
+
+        self.assertEqual(report["sent"], 100)
+        self.assertEqual(report["received"], 98)
+        self.assertEqual(report["lost"], 2)
+        self.assertEqual(report["loss_pct"], 2.0)
         self.assertIsNone(report["p99_loss_aware_ms"])
         self.assertEqual(report["p99_state"], "infinite_due_to_loss")
 

@@ -61,15 +61,22 @@ def summarize_latency(
     sent = len(expected)
     received = len(ordered)
     lost = sent - received
-    p99 = _nearest_rank(ordered, 0.99) if lost == 0 and ordered else None
-    p99_state = "finite" if p99 is not None else "infinite_due_to_loss" if sent else "no_probes"
+    loss_aware = [*ordered, *([math.inf] * lost)]
+    p99_rank = _nearest_rank(loss_aware, 0.99) if loss_aware else None
+    p99_state = (
+        "no_probes"
+        if p99_rank is None
+        else "finite"
+        if math.isfinite(p99_rank)
+        else "infinite_due_to_loss"
+    )
     return {
         "sent": sent,
         "received": received,
         "lost": lost,
         "loss_pct": round(lost * 100 / sent, 4) if sent else 0.0,
         "p50_ms": _nearest_rank(ordered, 0.50) if ordered else None,
-        "p99_loss_aware_ms": p99,
+        "p99_loss_aware_ms": p99_rank if p99_state == "finite" else None,
         "p99_state": p99_state,
     }
 

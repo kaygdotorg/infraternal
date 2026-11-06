@@ -729,7 +729,10 @@ def inner(binary, report_path=None):
             "traffic": "one paced 128 MiB relayed TCP stream",
             "before_rotation_under_load": rotation_latency["before"],
             "after_rotation_under_load": rotation_latency["after"],
-            "loss_rule": "any lost probe makes the loss-aware p99 infinite",
+            "loss_rule": (
+                "each lost probe contributes infinite RTT before nearest-rank p99; "
+                "37 or more losses of 3600 makes p99 infinite"
+            ),
         }
 
         # 6. Relay 1 killed mid-stream: capture link state and counters on relay 2.
