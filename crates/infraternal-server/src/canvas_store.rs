@@ -643,4 +643,53 @@ mod tests {
         assert_eq!(store.apply("a", close).await.unwrap(), 2);
         assert_eq!(store.events("a", Some(1)).await.unwrap()[0]["revision"], 2);
     }
+
+    /// A real look edit survives reload in its account's canvas and is absent from another account.
+    #[tokio::test]
+    async fn appearance_edits_are_persisted_for_only_the_authorized_account() {
+        let store = fixture().await;
+        let init = serde_json::to_vec(&json!({"op_id":"init-a","document":Document::default()}))
+            .unwrap();
+        assert_eq!(store.initialize("a", &init).await.unwrap(), 1);
+
+        let look = json!({
+            "v": 1,
+            "selected": "solid",
+            "basics": {"colors": "ink", "font": "geist-mono", "uiSize": 110},
+            "uiFont": "sans",
+            "windowSizes": {"phone": "full", "desktop": "wide"},
+            "extendedInfo": true,
+            "themes": [{
+                "id": "solid", "name": "Solid", "tint": 100, "blur": 0, "grain": 0,
+                "font": "geist-mono", "colors": "ink", "uiSize": 110,
+                "background": "solid", "customSolid": "#3b4252",
+                "custom": {"stops": ["#7a9cff", "#cba6f7"], "angle": 135}
+            }]
+        });
+        let edit = serde_json::to_vec(&json!({
+            "op_id": "look-a",
+            "base_revision": 1,
+            "intent": {"type": "look.set", "look": look}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &edit).await.unwrap(), 2);
+
+        let mut later_look = look.clone();
+        later_look["themes"][0]["font"] = json!("fira-code");
+        later_look["basics"]["font"] = json!("fira-code");
+        let stale_edit = serde_json::to_vec(&json!({
+            "op_id": "look-b",
+            "base_revision": 1,
+            "intent": {"type": "look.set", "look": later_look}
+        }))
+        .unwrap();
+        assert_eq!(store.apply("a", &stale_edit).await.unwrap(), 3);
+
+        let reloaded_a = store.events("a", None).await.unwrap();
+        assert_eq!(reloaded_a[0]["revision"], 3);
+        assert_eq!(reloaded_a[0]["document"]["look"], later_look);
+        let account_b = store.events("b", None).await.unwrap();
+        assert_eq!(account_b[0]["revision"], 0);
+        assert!(account_b[0]["document"].get("look").is_none());
+    }
 }
