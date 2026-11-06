@@ -448,13 +448,38 @@ async fn shim_frame(
     peer.read_exact(&mut body).await?;
     infraternal_shim::frame::Frame::decode(&body)
 }
+/// Hang guard for each step of retiring one shim: connecting, its Hello, and
+/// the wait for each next frame while it is signalled. The shim is
+/// infraternal's own process under the installation's account, so its
+/// silence is a hang, not a slow host. A slow but progressing host never
+/// refuses an uninstall, and a stuck shim still fails it (D352, #334, #355).
+const RETIRE_STEP_HANG: Duration = Duration::from_secs(60);
+
+/// Runs one step of a shim retirement under [`RETIRE_STEP_HANG`].
+async fn retire_step<T>(work: impl std::future::Future<Output = io::Result<T>>) -> io::Result<T> {
+    tokio::time::timeout(RETIRE_STEP_HANG, work)
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
+/// Retires one session's shim for [`cleanup`]. No clock covers the whole
+/// retirement: each of its steps is bounded by [`RETIRE_STEP_HANG`], so a
+/// slow but progressing host never refuses an uninstall (D352, #355).
+async fn retire_session(path: &Path, uid: u32) -> io::Result<()> {
+    retire_shim(path, uid).await
+}
+
+/// Retires the shim at `path`, owned by `uid`: authenticates its Hello, kills
+/// its foreground job and then its restored shell (signalling every 100 ms),
+/// and acknowledges its exit. Each step is hang-bounded; nothing bounds the
+/// whole retirement, which ends when the shim has exited.
 async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
     use infraternal_shim::frame::Frame;
-    let mut peer = UnixStream::connect(path).await?;
+    let mut peer = retire_step(UnixStream::connect(path)).await?;
     if peer.peer_cred()?.uid() != uid {
         return Err(denied());
     }
-    let Frame::Hello { head, session, .. } = shim_frame(&mut peer).await? else {
+    let Frame::Hello { head, session, .. } = retire_step(shim_frame(&mut peer)).await? else {
         return Err(denied());
     };
     let mut expected = String::with_capacity(32);
@@ -479,12 +504,16 @@ async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
         tokio::pin!(pending);
         // Keep the same read future across ticks: cancelling a partial frame
         // would discard bytes and corrupt the authenticated socket decoder.
-        let frame = loop {
-            tokio::select! {
-                frame = &mut pending => break frame?,
-                _ = signals.tick() => writer.write_all(&Frame::Signal(9).encode()?).await?,
+        // Each frame is progress; only a shim silent for a whole step hangs.
+        let frame = retire_step(async {
+            loop {
+                tokio::select! {
+                    frame = &mut pending => break frame,
+                    _ = signals.tick() => writer.write_all(&Frame::Signal(9).encode()?).await?,
+                }
             }
-        };
+        })
+        .await?;
         match frame {
             Frame::Exited(..) => {
                 writer.write_all(&Frame::ExitAck.encode()?).await?;
@@ -591,9 +620,7 @@ pub async fn cleanup(
         for entry in entries {
             let path = entry.path();
             if path.extension().is_some_and(|s| s == "sock") {
-                tokio::time::timeout(Duration::from_secs(2), retire_shim(&path, uid))
-                    .await
-                    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+                retire_session(&path, uid).await?;
             }
         }
     }
@@ -710,7 +737,11 @@ mod tests {
         );
         // A session that has its own value keeps it.
         assert_eq!(
-            user_manager_runtime_in(&root, uid, Some(std::ffi::OsStr::new("/run/user/elsewhere"))),
+            user_manager_runtime_in(
+                &root,
+                uid,
+                Some(std::ffi::OsStr::new("/run/user/elsewhere"))
+            ),
             None
         );
         // Never another account's directory, even one this account created.
@@ -932,14 +963,101 @@ mod tests {
         assert_eq!(reached.unwrap_err().kind(), io::ErrorKind::Unsupported);
         assert!(intact, "a refused check changed the installation");
     }
+    /// A fake shim on a short socket path: answers Hello after `hello`, then
+    /// Exited after `exit`, draining the retirement's signals meanwhile.
+    fn slow_shim(
+        hello: Option<Duration>,
+        exit: Duration,
+    ) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        use infraternal_shim::frame::Frame;
+        let directory = nix::unistd::mkdtemp("/tmp/rs-XXXXXX").unwrap();
+        let path = directory.join("00000000000000000000000000000001.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            let Some(hello) = hello else {
+                // A stuck shim: it accepted and never says anything.
+                std::future::pending::<()>().await;
+                return;
+            };
+            // sleep: a slow shim on purpose (paused time); retirement must wait it out.
+            tokio::time::sleep(hello).await;
+            let mut session = [0; 16];
+            session[15] = 1;
+            let frame = Frame::Hello {
+                version: 1,
+                caps: 0,
+                session,
+                pid: 1,
+                cols: 80,
+                rows: 24,
+                created: 0,
+                head: 0,
+                start: 0,
+            };
+            peer.write_all(&frame.encode().unwrap()).await.unwrap();
+            let (mut reader, mut writer) = peer.into_split();
+            let exited = tokio::spawn(async move {
+                // sleep: a slow exit on purpose (paused time), while signals keep arriving.
+                tokio::time::sleep(exit).await;
+                writer
+                    .write_all(&Frame::Exited(0, 0).encode().unwrap())
+                    .await
+                    .unwrap();
+            });
+            while let Ok(frame) = shim_frame(&mut reader).await {
+                if matches!(frame, Frame::ExitAck) {
+                    break;
+                }
+            }
+            exited.await.unwrap();
+        });
+        (path, server)
+    }
+
+    /// A slow but progressing shim (Hello after 3 s, exit 3 s later) is still
+    /// retired: no clock covers the whole retirement, so a loaded host never
+    /// refuses an uninstall (D352, #355). The 2 s whole-retirement limit
+    /// refused it.
+    #[tokio::test(start_paused = true)]
+    async fn slow_but_progressing_shim_retirement_still_completes() {
+        let (path, server) = slow_shim(Some(Duration::from_secs(3)), Duration::from_secs(3));
+        let retired = retire_shims_at(&path).await;
+        server.abort();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert!(
+            retired.is_ok(),
+            "a slow shim refused the uninstall: {retired:?}"
+        );
+    }
+
+    /// A shim that accepts and never says Hello still fails the retirement,
+    /// at the step's hang guard.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_shim_still_fails_retirement() {
+        let (path, server) = slow_shim(None, Duration::ZERO);
+        let retired = retire_shims_at(&path).await;
+        server.abort();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert_eq!(
+            retired.map_err(|error| error.kind()).err(),
+            Some(io::ErrorKind::TimedOut)
+        );
+    }
+
+    /// Retires one shim the way `cleanup` does for each session socket.
+    async fn retire_shims_at(path: &Path) -> io::Result<()> {
+        retire_session(path, nix::unistd::Uid::effective().as_raw()).await
+    }
+
     /// Hang guard for retiring the fake shim below (#334 rule). The test's
     /// claims are orders, enforced by the fake shim: the retirement signals
     /// again after a foreground job exits, and a partly read exit frame
     /// survives a signal tick. A retirement that stopped re-signalling would
     /// hang here, not pass. The product's own numbers live elsewhere: the
-    /// 100 ms re-signal interval in `retire_shim` and the 2 s per-shim limit
-    /// in `cleanup`. A 1 s clock here asserted neither, and failed under a
-    /// loaded gate (#355).
+    /// 100 ms re-signal interval in `retire_shim` and its per-step hang bound
+    /// `RETIRE_STEP_HANG`. A 1 s clock here asserted neither, and failed
+    /// under a loaded gate (#355).
     const RETIREMENT_HANG: Duration = Duration::from_secs(60);
 
     /// Retiring a shim whose foreground job exits first keeps signalling
