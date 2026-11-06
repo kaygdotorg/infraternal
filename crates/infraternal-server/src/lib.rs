@@ -59,6 +59,9 @@ pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]
 pub use infraternal_plugin_mesh::api as mesh_api;
+/// D356: the access report a host returns when it revokes a login (#355).
+#[cfg(feature = "remote")]
+mod access_report;
 #[cfg(feature = "remote")]
 mod api_actions;
 #[cfg(feature = "remote")]

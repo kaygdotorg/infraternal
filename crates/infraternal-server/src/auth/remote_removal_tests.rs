@@ -546,3 +546,92 @@ async fn pending_removal_describes_one_host_without_claiming_completion() {
         }
     }
 }
+
+/// D356: after a removal, the owner reads the access files the host reported
+/// with its revocation: pending until the host confirms, then the report.
+/// Another host is not found, a foreign receipt stores nothing, and a
+/// signed-out request is refused.
+#[tokio::test]
+async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
+    use crate::access_report::{AccessFile, AccessReport};
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let state = |value: Option<serde_json::Value>| value.unwrap()["state"].clone();
+    assert_eq!(
+        state(service.access_report(&f.session, host, NOW).await.unwrap()),
+        "none"
+    );
+    let start = service.start(&f.session, host, true, NOW).await.unwrap();
+    let review = str_field(&start, "review").to_owned();
+    service
+        .finish_host(&f.session, host, &review, NOW)
+        .await
+        .unwrap();
+    assert_eq!(
+        state(service.access_report(&f.session, host, NOW).await.unwrap()),
+        "pending"
+    );
+    let person = Uuid::parse_str(&f.user).unwrap();
+    let report = |line: &str| AccessReport {
+        files: vec![AccessFile {
+            path: "~/.ssh/authorized_keys".to_owned(),
+            lines: vec![line.to_owned()],
+            note: None,
+        }],
+        truncated: false,
+    };
+    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
+    store
+        .confirm_login_cleanup_with_report(host, Uuid::new_v4(), Some(&report("foreign")))
+        .await
+        .unwrap();
+    assert_eq!(
+        state(service.access_report(&f.session, host, NOW).await.unwrap()),
+        "pending",
+        "a foreign receipt confirmed the cleanup"
+    );
+    store
+        .confirm_login_cleanup_with_report(host, person, Some(&report("ssh-ed25519 AAAAleft left")))
+        .await
+        .unwrap();
+    let value = service
+        .access_report(&f.session, host, NOW)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value,
+        json!({"host_id": host, "state": "ready", "reports": [{
+            "person_id": person,
+            "files": [{"path": "~/.ssh/authorized_keys", "lines": ["ssh-ed25519 AAAAleft left"]}],
+            "truncated": false,
+        }]})
+    );
+    store
+        .confirm_login_cleanup_with_report(host, person, Some(&report("replayed")))
+        .await
+        .unwrap();
+    assert_eq!(
+        service
+            .access_report(&f.session, host, NOW)
+            .await
+            .unwrap()
+            .unwrap(),
+        value,
+        "a duplicate receipt replaced the report"
+    );
+    assert!(
+        service
+            .access_report(&f.session, Uuid::new_v4(), NOW)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .access_report("signed-out", host, NOW)
+            .await
+            .is_err()
+    );
+}

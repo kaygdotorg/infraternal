@@ -307,14 +307,26 @@ pub(crate) struct WeakEmbeddedAgent {
     cleanup: mpsc::WeakUnboundedSender<Retirement>,
 }
 
+/// One login revocation for the actor's cleanup lane, and where its result goes.
 #[cfg(feature = "remote")]
 struct Retirement {
     person: uuid::Uuid,
-    reply: oneshot::Sender<Result<(), AgentError>>,
+    reply: oneshot::Sender<Result<Revoked, AgentError>>,
+}
+
+/// A confirmed login revocation, with D356's report of the access files that
+/// changed since the grant when the host returned one (already bounded).
+#[cfg(feature = "remote")]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Revoked {
+    /// The host's report; `None` from an agent that predates D356.
+    pub(crate) report: Option<crate::access_report::AccessReport>,
 }
 #[cfg(feature = "remote")]
 impl WeakEmbeddedAgent {
-    pub(crate) async fn revoke_login(&self, person: uuid::Uuid) -> Result<(), AgentError> {
+    /// Revoke `person`'s login on this host through the cleanup lane, and
+    /// return the host's confirmation with its D356 report.
+    pub(crate) async fn revoke_login(&self, person: uuid::Uuid) -> Result<Revoked, AgentError> {
         // Retain actor lifetime, but never acquire ordinary queue capacity.
         let _lifetime = self.commands.upgrade().ok_or(AgentError::Unavailable)?;
         let sender = self.cleanup.upgrade().ok_or(AgentError::Unavailable)?;
@@ -802,7 +814,7 @@ enum Command {
     #[cfg(feature = "remote")]
     RevokeLogin {
         person: uuid::Uuid,
-        reply: oneshot::Sender<Result<(), AgentError>>,
+        reply: oneshot::Sender<Result<Revoked, AgentError>>,
     },
     Call {
         action_id: String,
@@ -1127,9 +1139,10 @@ enum Incoming {
     Disconnected,
 }
 
+/// A call sent to the infraternal agent and waiting for its result, by kind.
 enum PendingCall {
     #[cfg(feature = "remote")]
-    Revoke(oneshot::Sender<Result<(), AgentError>>),
+    Revoke(oneshot::Sender<Result<Revoked, AgentError>>),
     Preparation(oneshot::Sender<Result<Vec<u8>, AgentError>>),
     Action(oneshot::Sender<Result<Vec<u8>, AgentError>>),
     Open(oneshot::Sender<Result<TerminalOpened, AgentError>>),
@@ -2752,13 +2765,11 @@ async fn process_incoming(
                         revoked: bool,
                         #[serde(default, rename = "warning")]
                         _warning: Option<String>,
-                        // D356: what the infraternal agent found in the person's
-                        // access files, always sent by a D356 agent. Accepted
-                        // so the revocation is confirmed; it is not kept
-                        // here, so its shape is not checked here either.
-                        // Never logged.
-                        #[serde(default, rename = "access")]
-                        _access: Option<serde::de::IgnoredAny>,
+                        // D356: access files changed since the grant, for the
+                        // owner. Bounded and cleaned again here, because the
+                        // host is less trusted than the server. Never logged.
+                        #[serde(default)]
+                        changed: Option<crate::access_report::AccessReport>,
                     }
                     // Serde structs also accept positional arrays. Cleanup
                     // acknowledgements declare an object, so reject that shape.
@@ -2768,7 +2779,11 @@ async fn process_incoming(
                                 .map_err(|_| AgentError::Protocol)
                                 .and_then(|result| {
                                     if result.revoked {
-                                        Ok(())
+                                        Ok(Revoked {
+                                            report: result
+                                                .changed
+                                                .map(crate::access_report::AccessReport::bounded),
+                                        })
                                     } else {
                                         Err(AgentError::Rejected)
                                     }

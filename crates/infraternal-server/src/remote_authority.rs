@@ -97,12 +97,40 @@ impl EnrollmentStore {
 
     /// Finalize retirement only on a durable daemon reply; lost replies stay pending.
     /// A removal keeps bootstrap coordinates for manual cleanup until this receipt.
+    /// For a confirmation that carries no D356 report (a host that is gone).
     pub(crate) async fn confirm_login_cleanup(
         &self,
         host: Uuid,
         person: Uuid,
     ) -> Result<(), EnrollmentError> {
+        self.confirm_login_cleanup_with_report(host, person, None)
+            .await
+    }
+
+    /// [`Self::confirm_login_cleanup`] with the host's D356 report of access
+    /// files changed since the grant. The report is kept in the same
+    /// transaction as the receipt, and only for a receipt that matches a
+    /// pending cleanup: a foreign or duplicate receipt stores nothing.
+    pub(crate) async fn confirm_login_cleanup_with_report(
+        &self,
+        host: Uuid,
+        person: Uuid,
+        report: Option<&crate::access_report::AccessReport>,
+    ) -> Result<(), EnrollmentError> {
         let mut transaction = self.0.begin().await?;
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND person_id=? AND confirmed=0)")
+            .bind(host.as_bytes().as_slice())
+            .bind(person.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if pending {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+                });
+            crate::access_report::store(&mut transaction, host, person, report, now).await?;
+        }
         // Keep tombstoning and its trigger effects in the same transaction as
         // the durable receipt. A foreign or duplicate receipt changes nothing.
         sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,unixepoch()) WHERE id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.person_id=? AND q.confirmed=0)")

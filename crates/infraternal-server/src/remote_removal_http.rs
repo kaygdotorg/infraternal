@@ -1,5 +1,6 @@
 //! Bounded same-origin adapters for the remote plugin's removal action: a dry run, then the
-//! removal, inside the browser's admin window [16][168], #87, D339.
+//! removal, inside the browser's admin window [16][168], #87, D339. Also the owner's read-only
+//! view of the access files a removal's revocation reported (D356).
 use crate::{auth::Auth, remote_removal::Removal};
 use axum::{
     Json, Router,
@@ -36,11 +37,14 @@ pub struct Finish {
     host_id: Uuid,
     review: String,
 }
+/// The removal routes and the owner's read-only access report, bounded in body
+/// size, time and concurrency.
 pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
     Router::new()
         .route("/remote/hosts/actions", post(actions))
         .route("/remote/hosts/remove/start", post(start))
         .route("/remote/hosts/remove/finish", post(finish))
+        .route("/remote/hosts/access-report", post(access_report))
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(axum::middleware::from_fn(deadline))
         .with_state(Api {
@@ -113,6 +117,39 @@ async fn finish(
         .await
         .map(Json)
         .map_err(|_| StatusCode::FORBIDDEN)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+/// The host whose D356 access report the owner reads.
+pub struct ReportRequest {
+    /// The host to read.
+    host_id: Uuid,
+}
+
+/// D356: read-only. POST like the other removal routes, so that the browser
+/// always sends the Origin this checks; it changes nothing.
+async fn access_report(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    let (parts, body) = incoming.into_parts();
+    let (token, now) = authority(&api, &parts.headers)?;
+    let _permit = api
+        .admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    let bytes = axum::body::to_bytes(body, 1024)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    let input: ReportRequest = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    match api.removal.access_report(token, input.host_id, now).await {
+        Ok(Some(report)) => Ok(Json(report)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(crate::auth::Error::Storage(_)) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        Err(_) => Err(StatusCode::FORBIDDEN),
+    }
 }
 
 async fn actions(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {

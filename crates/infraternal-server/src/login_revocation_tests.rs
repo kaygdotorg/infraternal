@@ -289,7 +289,7 @@ async fn cleanup_remains_admitted_beyond_the_former_reserve_limit() {
             tokio::time::timeout(Duration::from_secs(5), weak.revoke_login(Uuid::new_v4()))
                 .await
                 .unwrap(),
-            Ok(())
+            Ok(crate::embedded::Revoked::default())
         );
     }
     for task in held {

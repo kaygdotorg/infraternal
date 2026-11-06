@@ -99,6 +99,52 @@ impl Removal {
         );
         Ok(start)
     }
+    /// D356: what the owner can read about access files that changed on
+    /// `host`'s accounts since their logins were granted, as the host reported
+    /// them when it revoked those logins. Read-only. Only the server owner's
+    /// session reads it; `None` is a host they do not own, answered like an
+    /// unknown one. The report holds file paths and line text only.
+    pub(crate) async fn access_report(
+        &self,
+        token: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<Option<Value>, crate::auth::Error> {
+        let session = self.auth.session(token, now).await?;
+        let owner: bool = sqlx::query_scalar("SELECT owner=1 FROM users WHERE id=?")
+            .bind(&session.user_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or(false);
+        if !owner {
+            return Err(crate::auth::Error::Denied);
+        }
+        let Some(reading) = crate::access_report::read(&self.pool, &session.user_id, host).await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(match reading {
+            crate::access_report::Reading::Pending => {
+                json!({"host_id": host, "state": "pending", "reports": []})
+            }
+            crate::access_report::Reading::None => {
+                json!({"host_id": host, "state": "none", "reports": []})
+            }
+            crate::access_report::Reading::Ready(reports) => json!({
+                "host_id": host,
+                "state": "ready",
+                "reports": reports
+                    .into_iter()
+                    .map(|(person, report)| json!({
+                        "person_id": person,
+                        "files": report.files,
+                        "truncated": report.truncated,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        }))
+    }
+
     /// Remove the host a review from this session's dry run named. A review for another host
     /// is refused without spending it.
     pub(crate) async fn finish_host(

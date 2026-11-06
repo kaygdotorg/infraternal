@@ -103,6 +103,8 @@ async fn bridge(front: UnixStream, back: UnixStream, full: oneshot::Sender<()>) 
     }
 }
 
+/// With the command queue, the pending table and the owner links all full, a
+/// login revocation still reaches the real host and is confirmed.
 #[tokio::test]
 #[ignore = "requires INFRATERNAL_TEST_BINARY; real host combined limits gate"]
 async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup() {
@@ -211,7 +213,7 @@ async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup(
         )
         .await
         .unwrap(),
-        Ok(())
+        Ok(crate::embedded::Revoked::default())
     );
     let mut exited = [nix::poll::PollFd::new(
         pin.as_fd(),

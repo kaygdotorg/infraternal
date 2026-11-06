@@ -111,14 +111,14 @@ async fn deliver_login_cleanup(
                 // This private actor owns one transport. After a busy reply,
                 // disconnect can precede the next retry; its unavailable census
                 // ends that attempt instead of awaiting an impossible replacement.
-                _ = inventory.wait_for(|state| matches!(state, crate::embedded::SessionInventoryState::Unavailable)) => false,
+                _ = inventory.wait_for(|state| matches!(state, crate::embedded::SessionInventoryState::Unavailable)) => None,
             }
         },
     )
     .await;
-    if matches!(result, Ok(true)) {
+    if let Ok(Some(revoked)) = result {
         store
-            .confirm_login_cleanup(host, person)
+            .confirm_login_cleanup_with_report(host, person, revoked.report.as_ref())
             .await
             .map_err(io::Error::other)?;
     }

