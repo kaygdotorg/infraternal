@@ -359,9 +359,18 @@ not_live() {
   exec 8<&-
   if [ -f "$base/.bootstrap-lock/activating" ] && [ ! -L "$base/.bootstrap-lock/activating" ] && [ -f "$base/.bootstrap-lock/kind" ] && [ ! -L "$base/.bootstrap-lock/kind" ] && [ "$(cat "$base/.bootstrap-lock/kind")" = fresh ]; then
    not_live_scan=unit
+   # Only the unit's main process (the agent itself) is skipped; anything else
+   # in its cgroup, such as a terminal shim it started, still refuses (#305 J272).
+   agent_main_pid=$($manager show -p MainPID --value infraternal-agent.service 2>/dev/null || :)
+   case "$agent_main_pid" in ''|*[!0-9]*) agent_main_pid=0;; esac
   fi
  fi
- # Non-dumpable shims: the helper asks the kernel by owner+inode, never by name.
+ live_session_sockets
+ scan_holders "$not_live_scan"
+}
+# Refuse (73) while a shim serves a session socket under $base. Non-dumpable
+# shims: the helper asks the kernel by owner+inode, never by name.
+live_session_sockets() {
  for entry in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
   [ -S "$entry" ] && [ ! -L "$entry" ] && [ -O "$entry" ] || continue
   [ "$entry" != "$base/sessions/plugins.sock" ] || continue
@@ -369,14 +378,25 @@ not_live() {
   "$helper" --bootstrap-runtime "$base" "$(stat -c '%d:%i' "$base")" sessions </dev/null || exit $?
   break
  done
- scan_holders "$not_live_scan"
 }
 # Start fresh, after confirmation: stop the agent an interrupted activation left
 # running (see not_live), then require that nothing holds a file under $base any
 # more. Without one, this does nothing.
 stop_activated_agent() {
  [ "${not_live_scan:-all}" = unit ] || return 0
+ # Read the unit's cgroup while it runs; systemd may forget it once stopped.
+ agent_cgroup=$($manager show -p ControlGroup --value infraternal-agent.service 2>/dev/null || :)
  $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
+ # KillMode=process leaves anything else the agent started running. A shim
+ # that started after the checks above, or never bound a socket, is still in
+ # the unit's cgroup: refuse while it lists any process (#305 J272).
+ case "$agent_cgroup" in
+  /*) agent_procs="${agent_cgroup_root:-/sys/fs/cgroup}$agent_cgroup/cgroup.procs"
+      if [ -e "$agent_procs" ]; then
+       [ -z "$(cat "$agent_procs" 2>/dev/null || echo unreadable)" ] || exit 73
+      fi;;
+ esac
+ live_session_sockets
  scan_holders all
  for marker in "$base/sessions/sessions"/*.readiness; do
   [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ] || continue
@@ -416,20 +436,70 @@ scan_holders() {
   if [ "$scan_skip" = service ]; then
    [ ! "$base/.bootstrap-lock/payload" -ef "$process/exe" ] || continue
    ! agent_unit_process "$process" || continue
-  elif [ "$scan_skip" = unit ]; then
-   ! agent_unit_process "$process" || continue
+  elif [ "$scan_skip" = unit ] && [ "${process##*/}" = "${agent_main_pid:-0}" ]; then
+   agent_unit_process "$process" && continue
+  fi
+  # A non-dumpable process (every infraternal agent and shim, and OpenSSH's own
+  # session process) hides its exe and fds even from its owner. Never read that
+  # as "holds nothing": decide from what stays readable (#305 J272).
+  if ! readlink "$process/exe" >/dev/null 2>&1 || ! ls "$process/fd" >/dev/null 2>&1; then
+   hidden_holder "$process" && exit 73
+   continue
   fi
   set -- "$@" "$process/exe" "$process/fd"
   [ "$#" -le 8192 ] || refuse size
  done
  [ "$#" -le 8192 ] || refuse size
  command -v find >/dev/null 2>&1 || refuse tool
- if live=$(find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>/dev/null); then
-  :
- else
-  [ "$?" = 1 ] || refuse tool
- fi
- [ -z "$live" ] || exit 73
+ # find's errors are kept, never read as "nothing found": a process that exited
+ # meanwhile is gone; one that turned non-dumpable meanwhile (an ssh or a shim
+ # starting) is decided as above; anything else is unknown and refuses.
+ live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>&1 >&4 | { grep -v 'No such file or directory' || :; } | sed 's/^/unreadable: /'; } 4>&1 )
+ while IFS= read -r scan_line; do
+  case "$scan_line" in
+   '') continue;;
+   "unreadable: find: '/proc/"*"': Permission denied"|"unreadable: find: ‘/proc/"*"’: Permission denied")
+    scan_pid=${scan_line#*/proc/}
+    scan_pid=${scan_pid%%/*}
+    case "$scan_pid" in ''|*[!0-9]*) exit 73;; esac
+    ! hidden_holder "/proc/$scan_pid" || exit 73;;
+   unreadable:*) exit 73;;
+   *) exit 73;;
+  esac
+ done <<SCAN
+$live
+SCAN
+}
+# Whether /proc entry $1, whose exe or fds are hidden (non-dumpable), may hold
+# this install. A process that has exited (or is a zombie) holds nothing.
+hidden_holder() {
+ [ -e "$1/stat" ] || return 1
+ hidden_state=$(sed 's/.*) //' "$1/stat" 2>/dev/null | cut -d' ' -f1) || return 1
+ case "$hidden_state" in Z|X|'') return 1;; esac
+ install_process "$1" || return 1
+ # The kept shims of a Replace (D337) are the only ones allowed to stay.
+ if [ "$scan_skip" = service ] && session_scope_process "$1"; then return 1; fi
+ return 0
+}
+# Whether /proc entry $1, whose exe and fds are hidden, is one of this
+# install's: in the agent unit's cgroup, in a terminal session scope, or started
+# from a path under $base. Other hidden processes of this account (its SSH
+# session processes, key agents) cannot be told apart by uid alone and are
+# not this install's: refusing on them would refuse every add over OpenSSH.
+install_process() {
+ agent_unit_process "$1" && return 0
+ session_scope_process "$1" && return 0
+ install_argv0=$({ tr '\0' '\n' < "$1/cmdline" | sed -n 1p; } 2>/dev/null || :)
+ case "$install_argv0" in "$base"/*|"$base_real"/*) return 0;; esac
+ return 1
+}
+# Whether /proc entry $1 runs in an infraternal terminal session scope.
+session_scope_process() {
+ session_scope=no
+ { while IFS= read -r scan_cgroup; do
+    case "$scan_cgroup" in */infraternal-session-*.scope|*/infraternal-session-*.scope/*) session_scope=yes;; esac
+   done < "$1/cgroup"; } 2>/dev/null || :
+ [ "$session_scope" = yes ]
 }
 no_redirect() {
  path=

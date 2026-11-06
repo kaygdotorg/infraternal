@@ -236,7 +236,10 @@ transaction={TRANSACTION}
         binary_dir = self.base / 'bin'
         binary_dir.mkdir(mode=0o700)
         live = binary_dir / 'live'
-        shutil.copyfile('/usr/bin/sleep', live)
+        # The stand-in agent is one process running from bin/live and holding the
+        # lifetime lock, as the real one: a copy of flock (its sleep child closes
+        # the lock with -o and holds nothing of the install).
+        shutil.copyfile(shutil.which('flock'), live)
         live.chmod(0o700)
         (binary_dir / 'current').symlink_to(live)
         self.launcher.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -272,7 +275,7 @@ transaction={TRANSACTION}
         readiness.chmod(0o600)
         self.manager_log.unlink(missing_ok=True)
         self.manager_active.touch()
-        agent = subprocess.Popen(['flock', str(lifetime), str(live), '60'])
+        agent = subprocess.Popen([str(live), '-o', str(lifetime), 'sleep', '60'])
         self.children.append(agent)
         for _ in range(100):
             children = Path(f'/proc/{agent.pid}/task/{agent.pid}/children')
@@ -281,25 +284,67 @@ transaction={TRANSACTION}
                 break
             time.sleep(0.05)
         self.assertTrue(pids, 'the stand-in agent did not start')
+        self.agent_main = str(agent.pid)
         return stage, [str(agent.pid)] + pids
 
-    def as_agent_unit(self, pids):
-        """Shell prefix: these processes are the agent unit's, and stopping the
-        unit ends them, as systemd's cgroup and `stop` would."""
+    def hidden_process(self, cwd):
+        """A non-dumpable stand-in shim: exec'ing a file its owner cannot read
+        leaves the process non-dumpable, so its exe and fds are hidden from its
+        own user, as for every real infraternal shim (#305, J272)."""
+        standin = Path.cwd() / self.temp / 'hidden-shim'
+        if not standin.exists():
+            shutil.copyfile('/usr/bin/sleep', standin)
+            standin.chmod(0o111)
+        child = subprocess.Popen([str(standin), '60'], cwd=cwd)
+        self.children.append(child)
+        # Until exec, the child is still a (dumpable) copy of this interpreter.
+        for _ in range(250):
+            if Path(f'/proc/{child.pid}/cmdline').read_bytes().startswith(str(standin).encode()):
+                break
+            time.sleep(0.02)
+        with self.assertRaises(PermissionError, msg='precondition: the stand-in must hide its exe'):
+            os.readlink(f'/proc/{child.pid}/exe')
+        return child, standin
+
+    def as_agent_unit(self, pids, spawn_on_stop=None):
+        """Shell prefix: these processes are the agent unit's (its main process
+        is the stand-in agent), and stopping the unit ends them, as systemd's
+        cgroup and `stop` would. With `spawn_on_stop` (a hidden stand-in path),
+        `stop` also starts that process in the unit, as a shim the agent
+        started in that window, and lists it in the unit's cgroup.procs."""
         names = ' '.join(pids)
+        cgroup = Path.cwd() / self.temp / 'cgroup'
+        procs = cgroup / 'app.slice/infraternal-agent.service/cgroup.procs'
+        procs.parent.mkdir(parents=True, exist_ok=True)
+        procs.write_text('\n'.join(pids) + '\n')
+        self.spawned_pid_file = Path.cwd() / self.temp / 'spawned.pid'
+        spawn = ''
+        marker = ''
+        if spawn_on_stop:
+            spawn = f'"{spawn_on_stop}" 60 </dev/null >/dev/null 2>&1 & printf "%s\\n" "$!" >| "{self.spawned_pid_file}"; printf "%s\\n" "$!" >| "{procs}"; '
+            marker = f'case "$(tr "\\0" " " < "$1/cmdline" 2>/dev/null)" in "{spawn_on_stop} "*) return 0;; esac; '
         return f'''
-agent_unit_process() {{ case " {names} " in *" ${{1##*/}} "*) return 0;; esac; return 1; }}
+agent_cgroup_root="{cgroup}"
+agent_unit_process() {{ {marker}case " {names} " in *" ${{1##*/}} "*) return 0;; esac; return 1; }}
 mock_manager() {{
  printf '%s\\n' "$*" >> "$manager_log"
  mock_wants="${{unit%/*}}/default.target.wants/infraternal-agent.service"
  case "$1" in
   is-enabled) [ -L "$mock_wants" ];;
   is-active) [ -e "$manager_active" ];;
+  show) case "$3" in MainPID) printf '%s\\n' {self.agent_main};; ControlGroup) printf '/app.slice/infraternal-agent.service\\n';; esac;;
   disable) rm -f "$mock_wants";;
-  stop) kill {names} 2>/dev/null || :; for p in {names}; do while [ -e /proc/$p/exe ] && [ "$(cat /proc/$p/stat 2>/dev/null | cut -d" " -f3)" != Z ]; do sleep 0.05; done; done; rm -f "$manager_active";;
+  stop) kill {names} 2>/dev/null || :; for p in {names}; do while [ -e /proc/$p/exe ] && [ "$(cut -d" " -f3 /proc/$p/stat 2>/dev/null)" != Z ]; do sleep 0.05; done; done; : >| "{procs}"; {spawn}rm -f "$manager_active";;
  esac
 }}
 '''
+
+    def kill_spawned(self):
+        if self.spawned_pid_file.exists():
+            try:
+                os.kill(int(self.spawned_pid_file.read_text()), 9)
+            except ProcessLookupError:
+                pass
 
     def test_an_interrupted_activation_whose_agent_is_its_only_holder_is_offered_and_cleaned(self):
         # #305 (J257): before, every add exited 73 ("Setup is already running") forever.
@@ -337,12 +382,58 @@ mock_manager() {{
     def test_an_interrupted_activation_still_refuses_a_process_outside_its_unit(self):
         # A terminal shim (or anything else) running from or holding the install.
         stage, pids = self.make_activated_fresh_fixture()
-        other = subprocess.Popen([str(self.base / 'bin/live'), '60'])
+        outside = Path.cwd() / self.temp / 'outside.lock'
+        outside.touch()
+        other = subprocess.Popen([str(self.base / 'bin/live'), '-o', str(outside), 'sleep', '60'])
         self.children.append(other)
         result = self.run_shell(self.as_agent_unit(pids) + '\ninspect_previous')
         self.assertEqual(result.returncode, 73, result.stdout.decode())
         self.assertTrue(stage.exists())
         self.assertEqual(self.mutating_calls(), [])
+
+    def test_an_interrupted_activation_refuses_a_hidden_shim_in_its_unit_before_stopping_anything(self):
+        # J272 (#305): a non-dumpable shim the agent started sits in the agent's
+        # cgroup with no socket. Skipping the whole cgroup let Start fresh delete
+        # the install it runs from; only the unit's main process may be skipped.
+        stage, pids = self.make_activated_fresh_fixture()
+        shim, _ = self.hidden_process(self.base / 'sessions')
+        prefix = self.as_agent_unit(pids + [str(shim.pid)])
+        inspected = self.run_shell(prefix + '\ninspect_previous')
+        self.assertEqual(inspected.returncode, 73, inspected.stdout.decode())
+        self.assertEqual(self.recover(prefix=prefix).returncode, 73)
+        self.assertEqual(self.mutating_calls(), [], 'nothing may be stopped before the refusal')
+        self.assertTrue((self.base / 'bin/live').exists())
+        self.assertIsNone(shim.poll())
+
+    def test_start_fresh_refuses_a_shim_that_appears_while_the_agent_stops(self):
+        # J272 (#305): KillMode=process leaves anything else in the unit running.
+        # A shim started after the checks before the stop must still refuse, and
+        # the install it runs from stays.
+        stage, pids = self.make_activated_fresh_fixture()
+        _, standin = self.hidden_process(self.temp)
+        self.children[-1].kill()
+        prefix = self.as_agent_unit(pids, spawn_on_stop=standin)
+        try:
+            inspected = self.run_shell(prefix + '\ninspect_previous')
+            self.assertEqual(inspected.returncode, 0, inspected.stderr.decode())
+            result = self.recover(prefix=prefix)
+            self.assertEqual(result.returncode, 73, result.stdout.decode() + result.stderr.decode())
+            self.assertIn('stop infraternal-agent.service', self.mutating_calls())
+            self.assertTrue((self.base / 'bin/live').exists(), 'the install was removed under a live shim')
+            self.assertTrue(stage.exists())
+        finally:
+            self.kill_spawned()
+
+    def test_a_hidden_process_unrelated_to_the_install_does_not_block_it(self):
+        # Non-dumpable processes of the same account that are not this install's
+        # (its SSH session process, key agents) cannot be read either; they are
+        # neither in the unit nor started from the install, and never block.
+        stage, pids = self.make_activated_fresh_fixture()
+        self.hidden_process(self.temp)
+        prefix = self.as_agent_unit(pids)
+        result = self.recover(prefix=prefix)
+        self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
+        self.assertFalse(self.base.exists())
 
     def test_retired_owner_with_nonempty_root_is_refused(self):
         self.listener.close()
