@@ -7,7 +7,8 @@ use tokio::{
     net::UnixStream,
 };
 
-async fn cleanup_peer(mut socket: UnixStream, refuse_first: bool) {
+/// A bounded protocol fixture refuses the requested number of cleanup attempts, then acknowledges.
+async fn cleanup_peer(mut socket: UnixStream, refusals: usize) {
     let mut input = BytesMut::new();
     let mut output = Vec::new();
     let mut calls = 0;
@@ -42,13 +43,13 @@ async fn cleanup_peer(mut socket: UnixStream, refuse_first: bool) {
                 );
                 calls += 1;
                 // This is a functional delayed-ack fixture, not a latency measurement.
-                if !refuse_first && calls == 1 {
+                if refusals == 0 && calls == 1 {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
                 Frame::Result {
                     call_id,
                     ok: true,
-                    json: if refuse_first && calls == 1 {
+                    json: if calls <= refusals {
                         br#"{"revoked":false}"#
                     } else {
                         br#"{"revoked":true}"#
@@ -65,9 +66,10 @@ async fn cleanup_peer(mut socket: UnixStream, refuse_first: bool) {
     }
 }
 
-async fn confirmed_cleanup(refuse_first: bool) {
+/// Route a retained cleanup through the production receipt helper and require eventual acknowledgement.
+async fn confirmed_cleanup(refusals: usize) {
     let (socket, peer) = UnixStream::pair().unwrap();
-    let task = tokio::spawn(cleanup_peer(peer, refuse_first));
+    let task = tokio::spawn(cleanup_peer(peer, refusals));
     let actor = crate::embedded::EmbeddedAgent::from_test_socket(socket);
     let revocations = Revocations::default();
     let host = Uuid::new_v4();
@@ -87,14 +89,21 @@ async fn confirmed_cleanup(refuse_first: bool) {
     let _ = task.await;
 }
 
+/// A delayed durable receipt must keep host removal waiting.
 #[tokio::test]
 async fn host_removal_waits_for_delayed_cleanup_acknowledgement() {
-    confirmed_cleanup(false).await;
+    confirmed_cleanup(0).await;
 }
 
+/// A retryable refusal does not abandon the server's retained intent.
 #[tokio::test]
 async fn host_removal_retries_a_refused_cleanup() {
-    confirmed_cleanup(true).await;
+    confirmed_cleanup(1).await;
+}
+/// Busy replies retain backpressure instead of exhausting a finite retry budget.
+#[tokio::test]
+async fn host_removal_keeps_backpressure_beyond_three_busy_replies() {
+    confirmed_cleanup(4).await;
 }
 /// Answers Hello, holds every `review.pending` call unanswered, and signals
 /// once `ordinary` of them arrived. Cleanup calls are acknowledged unless

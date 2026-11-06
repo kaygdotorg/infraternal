@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     net::{IpAddr, Ipv4Addr},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -20,6 +20,10 @@ mod account_summary_tests;
 #[cfg(test)]
 #[path = "http_hostname_tests.rs"]
 mod hostname_tests;
+/// Logout scope, replay and cookie-cap checks.
+#[cfg(test)]
+#[path = "http_logout_tests.rs"]
+mod logout_tests;
 
 /// Mount the POST-only `/auth/{action}` API. TLS terminates at the configured public origin.
 pub fn router(auth: Auth) -> Router {
@@ -154,8 +158,11 @@ struct Revoke {
     id: String,
 }
 
+/// The selected session bearer, or `Denied` when there is none.
 pub(crate) fn cookie(headers: &HeaderMap) -> super::Result<&str> {
-    super::cookies::capability(headers, "__Host-infraternal=").ok_or(Error::Denied)
+    super::cookies::session(headers)
+        .map(|cookie| cookie.token)
+        .ok_or(Error::Denied)
 }
 fn body<T: serde::de::DeserializeOwned>(value: Value) -> super::Result<T> {
     serde_json::from_value(value).map_err(|_| Error::Invalid)
@@ -179,19 +186,111 @@ fn authenticated_session(session: super::Session) -> AuthenticatedSession {
     }
 }
 
-fn session_cookie(token: &str) -> super::Result<HeaderValue> {
+/// The `Set-Cookie` value for a versioned session cookie with its absolute expiry.
+fn session_cookie(token: &str, login_sequence: i64, expires: i64) -> super::Result<HeaderValue> {
+    let expires_at = SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(
+            u64::try_from(expires).map_err(|_| Error::Invalid)?,
+        ))
+        .ok_or(Error::Invalid)?;
+    let expires_text = httpdate::fmt_http_date(expires_at);
     HeaderValue::from_str(&format!(
-        "__Host-infraternal={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
+        "__Host-infraternal-session-{login_sequence}-{expires}={token}; Expires={expires_text}; Secure; HttpOnly; SameSite=Strict; Path=/"
     ))
     .map_err(|_| Error::Invalid)
 }
-fn session_response(token: &str) -> super::Result<Response> {
+/// A `Set-Cookie` value that deletes the named session cookie in the browser.
+fn expired_session_cookie(name: &str) -> super::Result<HeaderValue> {
+    HeaderValue::from_str(&format!(
+        "{name}=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict; Path=/"
+    ))
+    .map_err(|_| Error::Invalid)
+}
+/// A success response that sets the session's current versioned cookie.
+async fn session_response(auth: &Auth, token: &str, now: i64) -> super::Result<Response> {
+    let state = auth.cookie_state(token, now).await?.ok_or(Error::Denied)?;
     let mut response = Json(json!({"ok":true})).into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, session_cookie(token)?);
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        session_cookie(token, state.login_sequence, state.expires)?,
+    );
     Ok(response)
 }
+
+/// Refresh only after a successful auth action. Per-login names make a late response harmless:
+/// it can restore an older cookie, but the server still selects the newer login sequence.
+async fn refresh_session_cookie(
+    auth: &Auth,
+    action: &str,
+    headers: &HeaderMap,
+    mut response: Response,
+) -> Response {
+    if !response.status().is_success() {
+        return response;
+    }
+    let observed = super::cookies::observed_session_names(headers);
+    if matches!(action, "registration-finish" | "login-finish" | "logout") {
+        retire_observed(&mut response, observed);
+        return response;
+    }
+    let Some(cookie) = super::cookies::session(headers) else {
+        return response;
+    };
+    let Ok(now) = current_time(auth) else {
+        return response;
+    };
+    match auth.cookie_state(cookie.token, now).await {
+        Ok(Some(state)) => {
+            let name = format!(
+                "__Host-infraternal-session-{}-{}",
+                state.login_sequence, state.expires
+            );
+            if let Ok(value) = session_cookie(cookie.token, state.login_sequence, state.expires) {
+                response.headers_mut().append(header::SET_COOKIE, value);
+                retire_observed_cookies(&mut response, observed, &name);
+            }
+        }
+        Ok(None) => retire_observed(&mut response, observed),
+        Err(error) => {
+            tracing::warn!(error = %error, "session cookie deadline refresh failed");
+        }
+    }
+    response
+}
+
+/// Expire every observed session cookie name except `keep`, the one this response sets.
+fn retire_observed_cookies(response: &mut Response, names: Vec<&str>, keep: &str) {
+    for name in names {
+        if name == keep {
+            continue;
+        }
+        if let Ok(value) = expired_session_cookie(name) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+}
+
+/// Expire every observed session cookie name.
+fn retire_observed(response: &mut Response, names: Vec<&str>) {
+    retire_observed_cookies(response, names, "");
+}
+
+/// Refresh cookies on the other authenticated HTTP adapters that share the same browser session.
+/// Static assets and WebSocket handshakes are excluded; they do not slide an HTTP session row.
+pub(crate) async fn refresh_api_cookie(
+    State(auth): State<Auth>,
+    incoming: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = incoming.uri().path().to_owned();
+    if !path.starts_with("/remote/") && !path.starts_with("/v1/") {
+        return next.run(incoming).await;
+    }
+    let headers = incoming.headers().clone();
+    let response = next.run(incoming).await;
+    refresh_session_cookie(&auth, &path, &headers, response).await
+}
+
 async fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
@@ -199,6 +298,7 @@ async fn no_store(mut response: Response) -> Response {
     response
 }
 
+/// Run one `/auth/{action}` request and map its errors to HTTP responses, refreshing the cookie.
 async fn dispatch(
     State(state): State<HttpState>,
     Path(action): Path<String>,
@@ -259,9 +359,7 @@ async fn dispatch(
         )
             .into_response(),
     };
-    // Only explicit login/registration issuance writes the auth cookie. Delayed
-    // authenticated replies cannot know which login the shared jar holds now.
-    response
+    refresh_session_cookie(&state.auth, &action, &headers, response).await
 }
 
 // Recovery authority needs a new sample after expensive verification and writer-lock waits.
@@ -282,7 +380,7 @@ pub(super) fn current_time(auth: &Auth) -> super::Result<i64> {
     .map_err(|_| Error::Invalid)
 }
 
-// Keep typed action dispatch together so capability and response rules can be reviewed in one place.
+/// Keep typed action dispatch together so capability and response rules can be reviewed in one place.
 async fn execute(
     auth: &Auth,
     #[cfg(feature = "remote")] invitation_issuer: Option<&crate::remote_http::InvitationIssuer>,
@@ -304,18 +402,17 @@ async fn execute(
         "registration-finish" => {
             let b: Register = body(value)?;
             auth.require_ceremony_binding(&b.ceremony, headers).await?;
-            return session_response(
-                &auth
-                    .registration_finish_clock(
-                        &b.ceremony,
-                        b.proof,
-                        b.passkey_wrap,
-                        b.recovery_wrap,
-                        b.recovery_verifier,
-                        || current_time(auth),
-                    )
-                    .await?,
-            );
+            let token = auth
+                .registration_finish_clock(
+                    &b.ceremony,
+                    b.proof,
+                    b.passkey_wrap,
+                    b.recovery_wrap,
+                    b.recovery_verifier,
+                    || current_time(auth),
+                )
+                .await?;
+            return session_response(auth, &token, now).await;
         }
         "login-start" => login_start(auth, headers, source, value, now).await?,
         "login-finish" => {
@@ -324,7 +421,7 @@ async fn execute(
             let token = auth
                 .pending_login_finish(&b.ceremony, b.proof, &b.device, now)
                 .await?;
-            let mut response = session_response(&token)?;
+            let mut response = session_response(auth, &token, now).await?;
             *response.body_mut() = axum::body::Body::from(serde_json::to_vec(&json!({
                 "ok": true, "pending_transaction": super::sessions::pending_transaction(&token)
             }))?);
@@ -481,7 +578,18 @@ async fn execute(
                 // A delayed cleanup reply must not clear a later login's cookie.
                 return Ok(Json(json!({"ok":true})).into_response());
             }
-            auth.logout(cookie(headers)?).await?;
+            // The browser may hold several login generations while old requests
+            // are still in flight. Revoke every valid presented capability of the
+            // signed-in account so those replies cannot refresh an older session
+            // after logout; another account's cookie in the same browser is left alone.
+            // More bearers than a browser can hold is not a real logout; refuse it
+            // before any database work (see `MAX_LOGOUT_SESSIONS`).
+            let tokens = super::cookies::session_tokens(headers).ok_or(Error::Invalid)?;
+            if tokens.is_empty() {
+                return Err(Error::Denied);
+            }
+            let selected = super::cookies::session(headers).map(|cookie| cookie.token);
+            auth.logout_presented(selected, &tokens).await?;
             return Ok(Json(json!({"ok":true})).into_response());
         }
         _ => return Err(Error::Invalid),

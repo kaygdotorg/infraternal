@@ -109,6 +109,7 @@ fn server_inbound(
     (inbound, Some(access.allows(ssh)))
 }
 
+/// Compile one node's view of the mesh: its own addresses and key, then every other member as a peer with directional policy.
 fn compile_inner(
     coordinator: &Coordinator,
     node: NodeId,
@@ -123,12 +124,13 @@ fn compile_inner(
         .get(node)
         .ok_or(MeshError::UnknownNode)?;
     let view = coordinator.view(node).ok_or(MeshError::UnknownNode)?;
-    #[cfg(feature = "mesh-dns-spike")]
-    let name = checkpoint
+    let local_member = checkpoint
         .members
         .iter()
         .find(|member| member.node.id == node)
-        .map(|member| member.node.host.clone());
+        .ok_or(MeshError::UnknownNode)?;
+    #[cfg(feature = "mesh-dns-spike")]
+    let name = Some(local_member.node.host.clone());
     #[cfg(feature = "mesh-dns-spike")]
     let dns_suffix = selected_dns_suffix(
         &checkpoint.settings.dns_suffix,
@@ -147,12 +149,7 @@ fn compile_inner(
     let mut peers = BTreeMap::new();
     #[cfg(feature = "mesh-dns-spike")]
     let mut peer_names = BTreeMap::new();
-    let machine_name = checkpoint
-        .members
-        .iter()
-        .find(|member| member.node.id == node)
-        .map(|member| member.node.host.clone())
-        .ok_or(MeshError::UnknownNode)?;
+    let machine_name = local_member.node.host.clone();
     for member in &checkpoint.members {
         let other = member.node.id;
         if other == node {
@@ -183,6 +180,8 @@ fn compile_inner(
             PeerPolicy {
                 peer: Peer {
                     key: member.keys.current,
+                    previous_key: member.keys.previous,
+                    previous_active: false,
                     addresses: checkpoint
                         .allocation
                         .get(other)
@@ -196,11 +195,7 @@ fn compile_inner(
         );
     }
     Ok(Config {
-        local_key: checkpoint
-            .members
-            .iter()
-            .find(|member| member.node.id == node)
-            .map(|member| member.keys.current),
+        local_key: Some(local_member.keys.current),
         server: Some(checkpoint.server),
         node,
         #[cfg(feature = "mesh-dns-spike")]
@@ -249,6 +244,7 @@ pub(crate) fn default_dns_suffix_from_origin(public_origin: &str) -> String {
         .filter(|host| crate::policy::model::validate_dns(host, false).is_ok());
     suffix.unwrap_or_else(|| "internal".to_owned())
 }
+
 /// List directed pairs that lose ANY new-connection reach. Port narrowing counts as a loss.
 /// # Errors
 /// Returns a configuration error before proposing a switch.
@@ -503,9 +499,13 @@ impl Chunks {
     }
 }
 
+/// Configuration compilation checks: DNS suffix choice and the rotating peer's previous key.
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
-    use super::selected_dns_suffix;
+    use super::*;
+    use crate::policy::model::{MeshSettings, Node, PublicKey};
+    use std::collections::BTreeSet;
 
     #[test]
     fn server_dns_suffix_is_default_and_explicit_or_legacy_choices_win() {
@@ -521,5 +521,34 @@ mod tests {
             selected_dns_suffix("internal", true, "example.org"),
             "internal"
         );
+    }
+
+    /// A compiled peer entry carries the rotating peer's previous key next to its new one.
+    #[test]
+    fn compiled_peer_configuration_keeps_the_previous_rotation_key() {
+        let node = |id: u8| Node {
+            id: NodeId(u64::from(id)),
+            public_key: PublicKey([id; 32]),
+            host: format!("host-{id}"),
+            tags: BTreeSet::new(),
+        };
+        let old_key = PublicKey([1; 32]);
+        let new_key = PublicKey([9; 32]);
+        let mut coordinator = Coordinator::new(MeshSettings::new([7; 5]), &[], node(0)).unwrap();
+        coordinator.join(node(1)).unwrap();
+        coordinator.join(node(2)).unwrap();
+        coordinator.rotate_key(NodeId(1), new_key, 0).unwrap();
+
+        let config = compile(
+            &coordinator,
+            NodeId(2),
+            DefaultPolicy::Deny,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let peer = serde_json::to_value(&config.peers[&NodeId(1)].peer).unwrap();
+
+        assert_eq!(peer["key"], serde_json::to_value(new_key).unwrap());
+        assert_eq!(peer["previous_key"], serde_json::to_value(old_key).unwrap());
     }
 }

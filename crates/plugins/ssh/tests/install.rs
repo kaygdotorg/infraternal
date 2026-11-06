@@ -14,6 +14,14 @@ use std::fmt::Write as _;
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 use tokio::{io::AsyncWriteExt, process::Command};
 
+/// Hang guard for this file's positive waits (#334 rule): the fixture's own
+/// run of a generated install script, and waits for an install batch to reach
+/// a state, a marker file to appear or a stage to finish. Each wait ends on
+/// its event; the bound only detects a hang. The former 60 s values failed
+/// three tests under gate load, where local shell work alone outlasted them
+/// (`exit_status: None` after the fixture timed the upload script out, #355).
+const INSTALL_HANG: std::time::Duration = std::time::Duration::from_secs(300);
+
 struct Local {
     root: PathBuf,
 }
@@ -87,12 +95,9 @@ impl SshSession for Local {
                     "PATH",
                     format!("{}:/usr/bin:/bin", self.root.join("tools").display()),
                 );
-                let output = infraternal_plugin_ssh::process::execute(
-                    &mut command,
-                    input,
-                    std::time::Duration::from_secs(60),
-                )
-                .await?;
+                let output =
+                    infraternal_plugin_ssh::process::execute(&mut command, input, INSTALL_HANG)
+                        .await?;
                 if !output.success {
                     let mut error = Failure::install("The synthetic remote command failed.");
                     error.exit_status = output.exit_status;
@@ -652,6 +657,9 @@ fn setup_receipts_require_exact_order_and_preserve_failure_boundaries() {
     assert!(interrupted_setup_step(b"STEP join\nprivate\n").is_none());
 }
 
+/// The commit step keeps the setup journal until the shell has proved it
+/// reached its blocking admission read, both when the commit is released and
+/// when it is cancelled.
 #[tokio::test]
 async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
     for permit in [false, true] {
@@ -672,7 +680,7 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
         tokio::pin!(pending);
         tokio::select! {
             result = &mut pending => panic!("commit preceded proof: {result:?}"),
-            result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            result = tokio::time::timeout(INSTALL_HANG, async {
                 while !fixture.root.join("commit-admitted").exists() {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
@@ -2028,7 +2036,10 @@ enum CachedHelper {
     Earlier,
 }
 
-// Reuse one real-filesystem fixture for completion and component cancellation.
+/// Runs one fresh install through the real bootstrap runner on a
+/// real-filesystem fixture: it completes (`turn_off` false) or is cancelled by
+/// turning the component off (`turn_off` true), with `automatic` choosing
+/// whether a known failed setup is retried without asking.
 async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHelper) {
     use infraternal_plugin_api::{ComponentPlugin, PluginState};
     use infraternal_plugin_ssh::{
@@ -2169,7 +2180,7 @@ async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHel
         .unwrap();
     let mut changes = batch.subscribe();
     if !automatic {
-        let challenge = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let challenge = tokio::time::timeout(INSTALL_HANG, async {
             loop {
                 let (_, events) = batch.events(0);
                 if let Some(event) = events.iter().find(|event| event.leftovers.is_some()) {
@@ -2185,13 +2196,10 @@ async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHel
         assert_eq!(backend.invitations.load(Ordering::SeqCst), 0);
         assert!(backend.recoveries.lock().unwrap().is_empty());
         if turn_off {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                runner.set_enabled(false),
-            )
-            .await
-            .unwrap()
-            .unwrap();
+            tokio::time::timeout(INSTALL_HANG, runner.set_enabled(false))
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(runner.status().state, PluginState::Off);
             assert_eq!(runner.status().active_work, 0);
             assert!(fixture.receipt().exists());
@@ -2224,7 +2232,7 @@ async fn exercise_start_fresh(turn_off: bool, automatic: bool, helper: CachedHel
                 .is_err()
         );
     }
-    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+    tokio::time::timeout(INSTALL_HANG, async {
         loop {
             let (_, events) = batch.events(0);
             if automatic {
@@ -2588,6 +2596,8 @@ os.execvp('cat', ['cat'])
     }
 }
 
+/// Stages the session image through a scripted remote, and fails the test if
+/// staging hangs (the payload and its receipts must not be serialized).
 async fn scripted_staging(
     f: &Fixture,
     remote: ScriptedRemote,
@@ -2598,7 +2608,7 @@ async fn scripted_staging(
         .unwrap();
     let transaction = Installation::new(session, &f.target, &f.join).unwrap();
     tokio::time::timeout(
-        std::time::Duration::from_secs(20),
+        INSTALL_HANG,
         transaction.stage_session_on(&f.binary, Some(checked)),
     )
     .await

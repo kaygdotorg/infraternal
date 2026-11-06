@@ -11,7 +11,7 @@ bench-probes = []
 # Generic plugin media lanes stay absent from terminal-only builds (#146).
 native-streams = ["infraternal-plugin-api/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
 desktop = ["native-streams", "dep:infraternal-plugin-desktop"]
-remote = ["infraternal-plugin-api/native-wire", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:url"]
+remote = ["infraternal-plugin-api/native-wire", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:url", "dep:zeroize"]
 default = ["plugin-host-facts"]
 plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
 
@@ -45,6 +45,7 @@ tokio-tungstenite = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Host-login workers are systemd/PAM units (D247). On macOS the shim's D335

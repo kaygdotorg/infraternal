@@ -114,6 +114,7 @@ fn concurrent_workers_serialize_revision_check_and_publication() {
     }
 }
 
+/// Persisting an accepted snapshot with 1000 peers stays within budget.
 #[test]
 #[ignore = "Run release on the locked performance VM; public-state persistence at 1000 peers."]
 fn accepted_snapshot_persistence_at_1000_peers() {
@@ -134,6 +135,8 @@ fn accepted_snapshot_persistence_at_1000_peers() {
                 PeerPolicy {
                     peer: Peer {
                         key: PublicKey(key),
+                        previous_key: None,
+                        previous_active: false,
                         addresses: Addresses {
                             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
                             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),

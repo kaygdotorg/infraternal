@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
@@ -32,6 +32,7 @@ impl Default for State {
         }
     }
 }
+/// This node's durable local state: the public snapshot, routes, interface key, engine, private key and rotation journal.
 pub struct Store {
     path: PathBuf,
     route_path: PathBuf,
@@ -39,11 +40,49 @@ pub struct Store {
     // its own file so the accepted snapshot keeps the format older binaries
     // read; a rollback never meets an unknown field.
     interface_path: PathBuf,
+    // Pending local rotation keys are separate from the public snapshot and are
+    // readable only by this installation's effective UID.
+    rotation_path: PathBuf,
     engine_path: PathBuf,
     key_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
+}
+
+/// A locally retained old/candidate pair makes an interrupted key switch retryable.
+/// The fixed-size binary record never enters diagnostics or the public snapshot.
+pub(crate) struct RotationSecret {
+    pub(crate) operation_id: String,
+    pub(crate) sequence: u64,
+    pub(crate) previous: [u8; 32],
+    pub(crate) candidate: [u8; 32],
+    pub(crate) commit_requested: bool,
+    /// The candidate is now the retained interface key and the predecessor is erased.
+    pub(crate) completed: bool,
+}
+impl Drop for RotationSecret {
+    fn drop(&mut self) {
+        self.previous.zeroize();
+        self.candidate.zeroize();
+    }
+}
+
+/// Marks the private rotation-secret file format, version 1.
+const ROTATION_MAGIC: &[u8; 8] = b"IMKEYV1\0";
+/// Exact size of that file: magic, phase, sequence, operation ID, previous and candidate private keys.
+const ROTATION_FIXED_BYTES: usize = 8 + 1 + 8 + 36 + 32 + 32;
+
+/// A canonical hyphenated UUID text, the only operation ID the secret file accepts.
+fn valid_operation_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
 }
 impl Store {
     /// Read an owned private directory's public snapshot without following symlinks.
@@ -60,6 +99,7 @@ impl Store {
         let path = parent.join("mesh-public.json");
         let route_path = parent.join("mesh-routes.json");
         let interface_path = parent.join("mesh-interface.json");
+        let rotation_path = parent.join("mesh-key-rotation.bin");
         let engine_path = parent.join("mesh-engine.json");
         let key_path = parent.join("mesh-private-key");
         sweep_private_temporaries(&key_path)?;
@@ -71,6 +111,7 @@ impl Store {
                 path,
                 route_path,
                 interface_path,
+                rotation_path,
                 engine_path,
                 key_path,
                 route_body: Mutex::new(route_body),
@@ -85,13 +126,14 @@ impl Store {
         let body = self.route_body.lock().map_err(|_| io::ErrorKind::Other)?;
         serde_json::from_slice(&body).map_err(io::Error::other)
     }
-    /// Record the public key of the interface this installation is about to create.
+    /// Record the public key this installation owns or is about to create.
     ///
-    /// Written before the kernel object exists, so every interface this
-    /// installation made is named here. The fixed interface name and the
-    /// component marker are shared by every infraternal agent on a machine
-    /// (the server's embedded one joins the same mesh); only this random key
-    /// tells this installation's interface apart (#235).
+    /// Initial creation writes before the kernel object exists, so every
+    /// interface this installation made is named here. Rotation updates this
+    /// marker only after the kernel accepts the candidate key. The fixed
+    /// interface name and component marker are shared by every infraternal
+    /// agent on a machine (the server's embedded one joins the same mesh);
+    /// only this random key tells this installation's interface apart (#235).
     /// # Errors
     /// Uses the same private-file checks and atomic durable writer as `save`.
     pub fn record_interface(&self, key: &crate::policy::model::PublicKey) -> io::Result<()> {
@@ -106,14 +148,172 @@ impl Store {
     pub fn recorded_interface(&self) -> io::Result<Option<crate::policy::model::PublicKey>> {
         read_public(&self.interface_path)
     }
+    /// Read a pending key pair or completed-operation marker from a private, no-follow file.
+    /// # Errors
+    /// Refuses unsafe ownership, modes, lengths, operation IDs or key-state encodings.
+    pub(crate) fn rotation_secret(&self) -> io::Result<Option<RotationSecret>> {
+        use std::os::unix::fs::MetadataExt;
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&self.rotation_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.len() != u64::try_from(ROTATION_FIXED_BYTES).unwrap_or(u64::MAX)
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(ROTATION_FIXED_BYTES));
+        file.read_to_end(&mut bytes)?;
+        if bytes.len() != ROTATION_FIXED_BYTES || &bytes[..8] != ROTATION_MAGIC {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let phase = bytes[8];
+        let sequence = u64::from_le_bytes(
+            bytes[9..17]
+                .try_into()
+                .map_err(|_| io::ErrorKind::InvalidData)?,
+        );
+        let operation_id = std::str::from_utf8(&bytes[17..53])
+            .map_err(|_| io::ErrorKind::InvalidData)?
+            .to_owned();
+        if phase > 2 || sequence == 0 || !valid_operation_id(&operation_id) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let previous = bytes[53..85]
+            .try_into()
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        let candidate = bytes[85..117]
+            .try_into()
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        if phase == 2 && previous != [0; 32] {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(Some(RotationSecret {
+            operation_id,
+            sequence,
+            previous,
+            candidate,
+            commit_requested: phase >= 1,
+            completed: phase == 2,
+        }))
+    }
+    /// Durably replace the pending key pair before a server can publish its candidate.
+    /// # Errors
+    /// Refuses malformed state, unsafe paths or failed fsync/rename.
+    pub(crate) fn save_rotation_secret(&self, state: &RotationSecret) -> io::Result<()> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        if state.sequence == 0
+            || !valid_operation_id(&state.operation_id)
+            || (state.completed && (!state.commit_requested || state.previous != [0; 32]))
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&self.rotation_path)
+            && (!metadata.is_file()
+                || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                || metadata.mode() & 0o777 != 0o600)
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(ROTATION_FIXED_BYTES));
+        bytes.extend_from_slice(ROTATION_MAGIC);
+        bytes.push(if state.completed {
+            2
+        } else {
+            u8::from(state.commit_requested)
+        });
+        bytes.extend_from_slice(&state.sequence.to_le_bytes());
+        bytes.extend_from_slice(state.operation_id.as_bytes());
+        bytes.extend_from_slice(&state.previous);
+        bytes.extend_from_slice(&state.candidate);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let temporary = self.rotation_path.with_extension(format!(
+            "{}.{}.{}.new",
+            std::process::id(),
+            nonce,
+            ROTATION_MAGIC[6]
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &self.rotation_path)?;
+            fs::File::open(
+                self.rotation_path
+                    .parent()
+                    .ok_or(io::ErrorKind::InvalidInput)?,
+            )?
+            .sync_all()
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
+    }
+    /// Retire the predecessor and keep a small retry marker after server acknowledgement.
+    /// # Errors
+    /// Refuses a stale operation or a failed atomic durable replacement.
+    pub(crate) fn complete_rotation_secret(
+        &self,
+        operation_id: &str,
+        sequence: u64,
+    ) -> io::Result<()> {
+        let mut state = self.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
+        if state.operation_id != operation_id || state.sequence != sequence {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if state.completed {
+            return Ok(());
+        }
+        if !state.commit_requested {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        state.previous.zeroize();
+        state.completed = true;
+        self.save_rotation_secret(&state)
+    }
+    /// Remove the rotation journal, its keys included, when the engine that rotated is retired.
+    /// # Errors
+    /// Refuses an unsafe journal file and reports durable directory failures.
+    pub(crate) fn discard_rotation_secret(&self) -> io::Result<()> {
+        if self.rotation_secret()?.is_none() {
+            return Ok(());
+        }
+        fs::remove_file(&self.rotation_path)?;
+        FileSync::parent(&self.rotation_path)
+    }
     /// Persist the selected engine separately from the legacy accepted snapshot.
+    ///
+    /// Only kernel `WireGuard` rotates (D166, D352), so recording any other engine also retires the rotation
+    /// journal: whether or not a live link was switched, a later return to kernel must start from the key the
+    /// node now uses, never from a journal key (#285, J252 P3-2). The engine is written first; a stop between the
+    /// two leaves a journal that the kernel ownership proof already ignores, and the next recording removes it.
     /// # Errors
     /// Refuses unsafe state files and reports durable-write failures.
     pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
         write_public(
             &self.engine_path,
             &serde_json::to_vec(&engine).map_err(io::Error::other)?,
-        )
+        )?;
+        if engine == crate::gotatun_node::EngineKind::Kernel {
+            return Ok(());
+        }
+        self.discard_rotation_secret()
     }
     /// Read the selected engine, if this node has recorded one.
     /// # Errors
@@ -418,6 +618,79 @@ pub(crate) mod tests {
             fs::metadata(&store.path).expect("mode").mode() & 0o777,
             0o600
         );
+    }
+    /// Finishing a rotation removes only the predecessor key, and finishing it again is harmless.
+    #[test]
+    fn completed_rotation_retires_only_the_predecessor_and_is_retryable() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000001";
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: operation_id.to_owned(),
+                sequence: 1,
+                previous: [0x11; 32],
+                candidate: [0x22; 32],
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("candidate already active");
+
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("retire predecessor");
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("retry lost completion response");
+        let completed = store
+            .rotation_secret()
+            .expect("read completed marker")
+            .expect("completion marker retained");
+        assert!(completed.completed);
+        assert_eq!(completed.previous, [0; 32]);
+        assert_eq!(completed.candidate, [0x22; 32]);
+        let bytes = fs::read(&store.rotation_path).expect("private rotation record");
+        assert!(!bytes.windows(32).any(|window| window == [0x11; 32]));
+        assert_eq!(
+            fs::metadata(&store.rotation_path)
+                .expect("private record mode")
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    /// Recording an engine other than kernel retires the rotation journal, even with no live link to switch, so a
+    /// later return to kernel cannot revive an old key of ours from it (#285, J252 P3-2). Recording kernel keeps it.
+    #[test]
+    fn leaving_kernel_retires_the_rotation_journal() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+                sequence: 1,
+                previous: [0; 32],
+                candidate: [0x22; 32],
+                commit_requested: true,
+                completed: true,
+            })
+            .expect("completed journal");
+        store
+            .record_engine(crate::gotatun_node::EngineKind::Kernel)
+            .expect("record kernel");
+        assert!(
+            store.rotation_secret().expect("read journal").is_some(),
+            "kernel keeps its own journal"
+        );
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record GotaTun");
+        assert!(store.rotation_secret().expect("read journal").is_none());
+        assert!(!store.rotation_path.exists());
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("recording again is harmless");
     }
 
     /// A stop inside `write_private` leaves `mesh-private-key.<pid>.new` holding the key. Opening

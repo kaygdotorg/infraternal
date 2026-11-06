@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Refuse an ELF binary that would load code from a path a non-root user can write (#344).
+
+What it is for: `scripts/tun-real-root-proof` runs one test binary as real
+root. The dynamic loader honours a binary's RUNPATH/RPATH and its program
+interpreter, so if any of those points into a directory another account can
+write, that account can run code as root (review 81345: the flake dev shell
+links test binaries with a RUNPATH into the build tree's `outputs/out/lib`).
+This guard reads those fields straight from the ELF file and allows only:
+- entries under /nix/store/ (immutable, root-owned), and
+- the same for any DT_NEEDED library named by path (a name with a `/`);
+- entries under a directory given with --allow, which must itself, and every
+  parent up to /, be owned by root and not writable by group or others.
+`$ORIGIN`, relative entries and empty entries are always refused, because
+they resolve against wherever the binary sits.
+
+Usage: elf-runpath-guard <binary> [--allow DIR]...
+Exit 0 when safe; 1 with one line per reason otherwise.
+"""
+import argparse
+import os
+from pathlib import Path
+import stat
+import struct
+import sys
+
+PT_LOAD, PT_DYNAMIC, PT_INTERP = 1, 2, 3
+DT_NULL, DT_NEEDED, DT_STRTAB, DT_RPATH, DT_RUNPATH = 0, 1, 5, 15, 29
+
+
+def read_elf(path):
+    """Return (interpreter or None, [RPATH and RUNPATH strings]) for a 64-bit little-endian ELF."""
+    interpreter, search, _needed = read_elf_full(path)
+    return interpreter, search
+
+
+def read_elf_full(path):
+    """Return (interpreter or None, [RPATH/RUNPATH strings], [DT_NEEDED names]) for a 64-bit LE ELF."""
+    data = Path(path).read_bytes()
+    if data[:4] != b'\x7fELF' or data[4] != 2 or data[5] != 1:
+        raise ValueError(f'{path}: not a 64-bit little-endian ELF file')
+    phoff, = struct.unpack_from('<Q', data, 0x20)
+    phentsize, phnum = struct.unpack_from('<HH', data, 0x36)
+    headers = [struct.unpack_from('<IIQQQQQQ', data, phoff + index * phentsize) for index in range(phnum)]
+    interpreter = None
+    loads, dynamic = [], None
+    for kind, _flags, offset, vaddr, _paddr, filesz, _memsz, _align in headers:
+        if kind == PT_INTERP:
+            interpreter = data[offset:offset + filesz].split(b'\0', 1)[0].decode()
+        elif kind == PT_LOAD:
+            loads.append((vaddr, offset, filesz))
+        elif kind == PT_DYNAMIC:
+            dynamic = (offset, filesz)
+    if dynamic is None:
+        return interpreter, [], []
+    entries, needed, strtab = [], [], None
+    for index in range(dynamic[1] // 16):
+        tag, value = struct.unpack_from('<qQ', data, dynamic[0] + index * 16)
+        if tag == DT_NULL:
+            break
+        if tag == DT_STRTAB:
+            strtab = value
+        elif tag in (DT_RPATH, DT_RUNPATH):
+            entries.append(value)
+        elif tag == DT_NEEDED:
+            needed.append(value)
+    if not entries and not needed:
+        return interpreter, [], []
+    # DT_STRTAB is a virtual address; map it back to a file offset.
+    base = next((offset + strtab - vaddr for vaddr, offset, size in loads if vaddr <= strtab < vaddr + size), None)
+    if base is None:
+        raise ValueError(f'{path}: string table outside any loaded segment')
+    string = lambda offset: data[base + offset:].split(b'\0', 1)[0].decode()
+    return interpreter, [string(entry) for entry in entries], [string(entry) for entry in needed]
+
+
+def owned_by_root_chain(directory):
+    """True when `directory` and every parent are root-owned and not group- or world-writable."""
+    path = Path(directory)
+    while True:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return False
+        if path == path.parent:
+            return True
+        path = path.parent
+
+
+def problems(interpreter, search_paths, allowed, needed=()):
+    """Every reason the interpreter, a library search path or a needed library is unsafe to load as root.
+
+    A DT_NEEDED name without a `/` is looked up along the search path, which
+    is checked above. A name with a `/` is loaded from exactly that path, so
+    it gets the same check as a search path entry (J277, 81454).
+    """
+    reasons = []
+    allowed = [os.path.normpath(directory) for directory in allowed]
+
+    def safe(entry):
+        """True when one path resolves only through trusted, root-owned places."""
+        if not entry.startswith('/') or '$' in entry:
+            return False
+        entry = os.path.normpath(entry)
+        if entry.startswith('/nix/store/'):
+            return True
+        return any(entry == root or entry.startswith(root + '/') for root in allowed
+                   if owned_by_root_chain(root))
+
+    if interpreter is not None and not safe(interpreter):
+        reasons.append(f'interpreter {interpreter!r} is outside /nix/store and the allowed root-owned dirs')
+    for search in search_paths:
+        for entry in search.split(':'):
+            if not safe(entry):
+                reasons.append(f'library search path entry {entry!r} is outside /nix/store and the '
+                               'allowed root-owned dirs')
+    for name in needed:
+        if '/' in name and not safe(name):
+            reasons.append(f'needed library {name!r} is a path outside /nix/store and the allowed root-owned dirs')
+    return reasons
+
+
+def main(argv=None):
+    """Check one binary and report every unsafe entry."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('binary')
+    parser.add_argument('--allow', action='append', default=[], help='root-owned directory whose subpaths are trusted')
+    args = parser.parse_args(argv)
+    interpreter, search_paths, needed = read_elf_full(args.binary)
+    reasons = problems(interpreter, search_paths, args.allow, needed)
+    for reason in reasons:
+        print(f'elf-runpath-guard: refusing {args.binary}: {reason}', file=sys.stderr)
+    if not reasons:
+        print(f'elf-runpath-guard: {args.binary}: interpreter and {len(search_paths)} search path(s) are root-safe')
+    return 1 if reasons else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

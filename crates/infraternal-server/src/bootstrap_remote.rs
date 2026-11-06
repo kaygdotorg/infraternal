@@ -184,6 +184,9 @@ impl RemoteBackend {
     /// With `retire` false nothing is changed: an abandoned record is only reported
     /// as not added. The stuck-install check uses that, since it runs before the
     /// person has confirmed anything (J247 P3); the add retires it later.
+    ///
+    /// Hosts with a pending removal are not active destinations: their retained
+    /// removal coordinates belong only to cleanup (#347).
     async fn existing_host(
         &self,
         owner: &str,
@@ -194,7 +197,7 @@ impl RemoteBackend {
         // Each pass retires at most one record; the bound only stops a storage
         // fault that keeps refusing the retirement from looping forever.
         for _ in 0..16 {
-            let existing: Option<(Vec<u8>, bool)> = sqlx::query_as("SELECT h.id, EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents i WHERE i.host_id=h.id) FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
+            let existing: Option<(Vec<u8>, bool)> = sqlx::query_as("SELECT h.id, EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents i WHERE i.host_id=h.id) FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)) ORDER BY (b.address=?) DESC, h.id LIMIT 1")
                 .bind(owner)
                 .bind(address)
                 .bind(lookup)
@@ -781,6 +784,7 @@ impl Backend for RemoteBackend {
                 .await
         })
     }
+    /// Reenroll removed identities as new hosts instead of reviving their interrupted install.
     fn check_stuck_install<'a>(
         &'a self,
         authority: &'a Authority,
@@ -795,7 +799,7 @@ impl Backend for RemoteBackend {
             };
             let lookup = request.lookup.as_deref();
             // (owner, revoked, matches this destination) for the journal's host id.
-            let row: Option<(String, bool, bool)> = sqlx::query_as("SELECT h.owner_id, h.revoked_at IS NOT NULL, EXISTS(SELECT 1 FROM remote_host_bootstrap b WHERE b.host_id=h.id AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?))) FROM remote_hosts h WHERE h.id=?")
+            let row: Option<(String, bool, bool)> = sqlx::query_as("SELECT h.owner_id, h.revoked_at IS NOT NULL, EXISTS(SELECT 1 FROM remote_host_bootstrap b WHERE b.host_id=h.id AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?))) FROM remote_hosts h WHERE h.id=? AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id)")
                 .bind(address)
                 .bind(lookup)
                 .bind(lookup)
@@ -804,7 +808,7 @@ impl Backend for RemoteBackend {
                 .await
                 .map_err(|_| unavailable())?;
             let Some((owner, revoked, matches)) = row else {
-                // No server enrolled this host id here: another server did.
+                // This identity is unknown here or belongs to a removed installation.
                 // The machine may join as a new host after confirmation (D335),
                 // but only if this server will accept it right now.
                 // Before any confirmation: report only, retire nothing (J247 P3).
@@ -831,6 +835,7 @@ impl Backend for RemoteBackend {
             })
         })
     }
+    /// Reissue only an active installation whose recorded identity still owns this destination.
     fn reissue_stuck_install<'a>(
         &'a self,
         authority: &'a Authority,
@@ -858,7 +863,7 @@ impl Backend for RemoteBackend {
                 }
             };
             let lookup = lookup.as_deref();
-            let registered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
+            let registered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_bootstrap b JOIN remote_hosts h ON h.id=b.host_id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id) AND (b.address=? OR (? IS NOT NULL AND b.trust_lookup=?)))")
                 .bind(host.as_bytes().as_slice())
                 .bind(&authority.owner)
                 .bind(address)
@@ -1754,6 +1759,9 @@ mod tests {
             "/src/bootstrap_review_cleanup_tests.rs"
         ));
     }
+
+    /// Pending removals release setup coordinates without reviving their identity.
+    mod pending_removal_tests;
 
     mod already_added_breakit {
         //! Break-it review of the already-added host id (#189).

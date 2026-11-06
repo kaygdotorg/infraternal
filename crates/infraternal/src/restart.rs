@@ -3,7 +3,7 @@
 use crate::cli::output::Exit;
 use std::{
     ffi::CString,
-    io,
+    io::{self, Read, Write},
     os::unix::{
         ffi::OsStrExt,
         fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
@@ -26,13 +26,28 @@ pub(crate) struct Options {
 
 const MAX_PATH: usize = 4096;
 
+/// The private control endpoint: its socket, path and reload signal.
 pub(crate) struct Control {
     listener: UnixListener,
     path: PathBuf,
     reload: tokio::signal::unix::Signal,
+    clock_health: std::sync::Arc<infraternal_server::clock_health::ClockHealth>,
 }
 impl Control {
+    /// Start the control endpoint with a fresh clock-health signal, for tests.
+    #[cfg(test)]
     pub(crate) fn start(data: &Path) -> io::Result<Self> {
+        Self::start_with_clock(
+            data,
+            std::sync::Arc::new(infraternal_server::clock_health::ClockHealth::default()),
+        )
+    }
+
+    /// Start the control endpoint with a shared clock-health signal, so status can report CA expiry.
+    pub(crate) fn start_with_clock(
+        data: &Path,
+        clock_health: std::sync::Arc<infraternal_server::clock_health::ClockHealth>,
+    ) -> io::Result<Self> {
         let reload = signal(SignalKind::hangup())?;
         let mut mask = nix::sys::signal::SigSet::empty();
         mask.add(nix::sys::signal::Signal::SIGHUP);
@@ -86,8 +101,10 @@ impl Control {
             listener,
             path,
             reload,
+            clock_health,
         })
     }
+    /// Wait for the next control request and answer it: status, or a restart into a verified replacement.
     pub(crate) async fn requested(
         &mut self,
         source: Option<&dyn infraternal_server::ca::CaKeySource>,
@@ -130,8 +147,17 @@ impl Control {
             }
             let request =
                 tokio::time::timeout(Duration::from_secs(2), read_request(&mut socket)).await;
-            let Ok(Ok((binary, reload))) = request else {
+            let Ok(Ok(request)) = request else {
                 record_request("socket", peer.as_ref(), None, "refused");
+                continue;
+            };
+            let ControlRequest::Restart { binary, reload } = request else {
+                let sent = send_status(&mut socket, source, &self.clock_health).await;
+                if sent.is_ok() {
+                    record_request("status", peer.as_ref(), None, "replied");
+                } else {
+                    record_request("status", peer.as_ref(), None, "reply_failed");
+                }
                 continue;
             };
             let opened = if reload {
@@ -180,21 +206,83 @@ impl Drop for Control {
     }
 }
 
-async fn read_request(socket: &mut UnixStream) -> io::Result<(PathBuf, bool)> {
+/// Send the clock-aware trust snapshot through the private owner socket.
+async fn send_status(
+    socket: &mut UnixStream,
+    source: Option<&dyn infraternal_server::ca::CaKeySource>,
+    clock_health: &infraternal_server::clock_health::ClockHealth,
+) -> io::Result<()> {
+    let status = infraternal_server::ca_status::from_source(source, Some(clock_health))
+        .unwrap_or_else(|_| infraternal_server::ca_status::CaStatus::unavailable());
+    let payload = serde_json::to_vec(&status).map_err(io::Error::other)?;
+    if payload.len() > 16 * 1024 {
+        return Err(io::Error::other("status response too large"));
+    }
+    let length =
+        u16::try_from(payload.len()).map_err(|_| io::Error::other("status response too large"))?;
+    socket.write_u16(length).await?;
+    socket.write_all(&payload).await
+}
+
+/// What the private control endpoint can be asked: status, or a restart into a binary.
+enum ControlRequest {
+    Status,
+    Restart { binary: PathBuf, reload: bool },
+}
+
+/// Read one length-prefixed control request from `socket`.
+async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
     let length = usize::from(socket.read_u16().await?);
-    if length == 0 || length > MAX_PATH {
+    if length == 0 {
+        return match socket.read_u8().await? {
+            1 => Ok(ControlRequest::Status),
+            _ => Err(io::ErrorKind::InvalidInput.into()),
+        };
+    }
+    if length > MAX_PATH {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     let mut bytes = vec![0; length];
     socket.read_exact(&mut bytes).await?;
     let path = PathBuf::from(String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidInput)?);
     if path == Path::new(".") {
-        return current_binary().map(|path| (path, true));
+        return current_binary().map(|binary| ControlRequest::Restart {
+            binary,
+            reload: true,
+        });
     }
     if !path.is_absolute() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    Ok((path, false))
+    Ok(ControlRequest::Restart {
+        binary: path,
+        reload: false,
+    })
+}
+
+/// Ask the running server for public-only CA status over the same-UID control socket.
+///
+/// # Errors
+/// Returns unavailable socket, peer-UID, framing, timeout or decode failures to the caller.
+pub(crate) fn query_ca_status(data: &Path) -> io::Result<infraternal_server::ca_status::CaStatus> {
+    let mut socket = std::os::unix::net::UnixStream::connect(data.join("restart/control.sock"))?;
+    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let peer = nix::sys::socket::getsockopt(&socket, nix::sys::socket::sockopt::PeerCredentials)?;
+    if peer.uid() != nix::unistd::Uid::effective().as_raw() {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    socket.write_all(&0_u16.to_be_bytes())?;
+    socket.write_all(&[1])?;
+    let mut length = [0; 2];
+    socket.read_exact(&mut length)?;
+    let length = usize::from(u16::from_be_bytes(length));
+    if length == 0 || length > 16 * 1024 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut payload = vec![0; length];
+    socket.read_exact(&mut payload)?;
+    serde_json::from_slice(&payload).map_err(io::Error::other)
 }
 
 fn current_binary() -> io::Result<PathBuf> {

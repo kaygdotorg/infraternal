@@ -158,6 +158,7 @@ fn addresses(id: u32) -> Addresses {
     }
 }
 
+/// Install a deny-all policy with one peer on `node`.
 fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result<()> {
     let (_, peer_key) = Key::generate()?;
     let chunk = Chunk {
@@ -180,6 +181,8 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
             PeerPolicy {
                 peer: Peer {
                     key: peer_key,
+                    previous_key: None,
+                    previous_active: false,
                     addresses: addresses(1),
                     endpoint: None,
                 },

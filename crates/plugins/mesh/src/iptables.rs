@@ -622,6 +622,7 @@ fn render_connection_checks(script: &mut String, config: &Config, ipv6: bool, gr
     }
 }
 
+/// iptables backend compilation and ownership checks.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -630,6 +631,7 @@ mod tests {
         dataplane::{DefaultPolicy, Peer, PeerPolicy},
         policy::model::{Addresses, NodeId, PublicKey},
     };
+    /// A configuration with one peer per id in `ids`.
     fn config(ids: &[u32]) -> Config {
         let address = |id| Addresses {
             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
@@ -655,6 +657,8 @@ mod tests {
                         PeerPolicy {
                             peer: Peer {
                                 key: PublicKey([1; 32]),
+                                previous_key: None,
+                                previous_active: false,
                                 addresses: address(*id),
                                 endpoint: None,
                             },

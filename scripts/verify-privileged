@@ -68,6 +68,15 @@ TEST_TIMEOUT_SECONDS = int(os.environ.get('VERIFY_PRIVILEGED_TEST_TIMEOUT', '900
 # systemd user scope when the user manager is reachable from this runner.
 SANDBOX_MEMORY_MAX = os.environ.get('VERIFY_PRIVILEGED_MEMORY_MAX', '4G')
 
+# Paths whose change needs the real-root TUN proof (the one TUN check the
+# one-uid sandbox cannot make). The row prints the requirement; the job runs
+# scripts/tun-real-root-proof and records it (#344, 80581).
+TUN_PATHS = ('crates/infraternal-linux-tun/**', 'crates/plugins/mesh/src/gotatun_tun*',
+             'crates/plugins/mesh/tests/gotatun_tun_owner.rs')
+
+# Exit status for "nothing to run": rust_run_gate prints SKIP for it.
+SKIP_EXIT = 77
+
 # Path globs that put a change in an area. fnmatch's `*` already crosses
 # directories; `**` only reads clearer.
 GLOBS = {
@@ -118,7 +127,9 @@ NOT_COVERED_TESTS = {
     # Mapping a second uid needs a setuid-root newuidmap on the build VMs.
     ('infraternal-plugin-mesh', 'test:gotatun_tun_owner',
      'an_unprivileged_user_cannot_attach_the_persisted_tun'):
-        'needs a second real uid (setresuid 65534); the sandbox maps one uid',
+        'needs a second real uid (child as nobody); the sandbox maps one uid. Its in-sandbox '
+        'counterpart a_fresh_persisted_tun_is_restricted_to_the_agent runs here; the refusal itself '
+        'is proven as real root by scripts/tun-real-root-proof when TUN code changes',
 }
 
 
@@ -126,6 +137,11 @@ NOT_COVERED_TESTS = {
 PRIVILEGED_REASON = re.compile(r'namespace|as root|CAP_NET_ADMIN|unshare', re.I)
 # ...unless it also needs something this row does not provide.
 OTHER_NEEDS = re.compile(r'perf VM|CPUWeight|MESH_REVIEW_PROBE|release binary|static release|Docker|Pebble|sshd|research/', re.I)
+# Child halves of a test: started by their parent with a marker set, they
+# return at once when run alone, so selecting them would count a pass that
+# tested nothing (J266, 80581 P2-1). Their parents run them. Every child half
+# uses this one reason prefix, so the rule is explicit rather than accidental.
+CHILD_ONLY = re.compile(r'^Child-only fixture:')
 IGNORED_TEST = re.compile(r'#\[ignore\s*=\s*"([^"]*)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)')
 
 # The sandbox is built in two user namespaces. The OUTER one (where this
@@ -194,18 +210,69 @@ exec unshare --user --map-root-user --net --mount --pid --fork --kill-child --mo
 '''
 
 
-def areas(paths):
-    """Return the areas whose globs match any changed path.
+def areas(paths, dependency_dirs=None):
+    """Return the areas a set of changed paths can affect.
 
-    Shared build inputs (workspace manifest, lockfile, toolchain, cargo config)
-    and this script itself select every area, because they can change any
-    area's behaviour.
+    An area is selected when a path matches its globs, or when it lies inside
+    a workspace crate that the area's test binaries depend on
+    (`dependency_dirs`, from `dependency_directories()`). Without the second
+    rule, a change only to e.g. `infraternal-linux-tun` skipped the mesh area
+    that tests it (J266, #344 80581 P2-2). Shared build inputs (workspace
+    manifest, lockfile, toolchain, cargo config) and this script select every
+    area, because they can change any area's behaviour.
     """
     shared = ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify-privileged')
     if any(path in shared or path.startswith('.cargo/') for path in paths):
         return set(GLOBS)
-    return {area for area, patterns in GLOBS.items()
-            if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)}
+    selected = {area for area, patterns in GLOBS.items()
+                if any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)}
+    for area, directories in (dependency_dirs or {}).items():
+        if any(path.startswith(directory.rstrip('/') + '/') for path in paths for directory in directories):
+            selected.add(area)
+    return selected
+
+
+def needs_tun_proof(paths):
+    """True when a changed path is TUN code, whose kernel-side owner check only real root can show."""
+    return any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in TUN_PATHS)
+
+
+def workspace_graph(root):
+    """Map each workspace package to (its directory, the workspace packages it depends on).
+
+    Read from `cargo metadata --no-deps`, so it follows Cargo.toml and cannot go
+    stale the way a list of globs can. Every dependency kind counts: a dev- or
+    build-dependency also changes what a test binary does.
+    """
+    output = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1', '--offline'],
+                            cwd=root, capture_output=True, text=True, check=True).stdout
+    packages = json.loads(output)['packages']
+    names = {package['name'] for package in packages}
+    return {package['name']: (str(Path(package['manifest_path']).parent.relative_to(root)),
+                              {dependency['name'] for dependency in package['dependencies']
+                               if dependency.get('path') and dependency['name'] in names})
+            for package in packages}
+
+
+def dependency_directories(root, graph):
+    """For each area, the directories of every workspace crate its candidate test binaries depend on.
+
+    Only packages that hold at least one candidate count: an area whose
+    packages have no namespace tests has nothing a dependency change could
+    break here, and is still selected by its own globs.
+    """
+    result = {}
+    for area, packages in PACKAGES.items():
+        todo = [package for package, directory, _ in packages
+                if package in graph and privileged_ignored(root, package, directory)]
+        seen = set()
+        while todo:
+            name = todo.pop()
+            if name not in seen:
+                seen.add(name)
+                todo.extend(graph[name][1])
+        result[area] = sorted(graph[name][0] for name in seen)
+    return result
 
 
 def target_of(relative, src_target):
@@ -236,7 +303,7 @@ def privileged_ignored(root, package, directory):
             continue
         for match in IGNORED_TEST.finditer(path.read_text()):
             reason, name = match.groups()
-            if PRIVILEGED_REASON.search(reason) and not OTHER_NEEDS.search(reason):
+            if PRIVILEGED_REASON.search(reason) and not OTHER_NEEDS.search(reason) and not CHILD_ONLY.search(reason):
                 found.setdefault(target, {})[name] = reason
     return found
 
@@ -554,18 +621,22 @@ def main():
         scratch = Path(tempfile.mkdtemp(prefix='privileged-', dir=Path.home() / '.cache'))
         try:
             (scratch / 'root').mkdir()
-            escaped = self_check(scratch, target, root)
+            escaped = self_check(scratch, target, root, memory_scope())
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         raise SystemExit('\n'.join(escaped) if escaped else 0)
     base = subprocess.check_output(['git', 'merge-base', 'HEAD', args.base], cwd=root, text=True).strip()
     paths = subprocess.check_output(['git', 'diff', '--name-only', '-z', base], cwd=root).decode().split('\0')
     paths += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z'], cwd=root).decode().split('\0')
-    selected = areas([path for path in paths if path])
+    selected = areas([path for path in paths if path], dependency_directories(root, workspace_graph(root)))
     if not selected:
-        print('privileged integration: SKIP (no install, proxy, mesh or shim changes)')
-        return
+        print('privileged integration: SKIP (no change to install, proxy, mesh or shim code, or a crate they depend on)')
+        # 77 is the gate's "skipped" code, so the summary reads SKIP, not PASS.
+        raise SystemExit(SKIP_EXIT)
     print(f'privileged integration: areas={",".join(sorted(selected))}', flush=True)
+    if needs_tun_proof(paths):
+        print('privileged integration: REAL-ROOT PROOF REQUIRED: TUN code changed; run '
+              '`scripts/tun-real-root-proof <commit>` from code and record it on the issue', flush=True)
     for area in sorted(selected & set(NOT_COVERED)):
         print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
     areas_packages = {package for area in selected for package, _, _ in PACKAGES[area]}

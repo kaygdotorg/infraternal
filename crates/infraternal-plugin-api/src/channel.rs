@@ -29,6 +29,8 @@ pub trait Channel: Send + Sync {
 pub const REMOTE_WRITER_BINDING: u64 = 1 << 1;
 /// Live certificate renewal capability on the authenticated control channel.
 pub const LIVE_RENEWAL: u64 = 1 << 2;
+/// Durable candidate-key and reconnect-acknowledgment capability [285].
+pub const LIVE_IDENTITY_ROTATION: u64 = 1 << 8;
 /// Bound for a single decoded control reply or renewal proof.
 pub const MAX_CONTROL_JSON: usize = 32_768;
 /// Per-connection relay metadata reserve, independent of host session admission.

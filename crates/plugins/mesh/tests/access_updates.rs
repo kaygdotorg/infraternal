@@ -14,6 +14,7 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr},
 };
 
+/// A configuration with one peer for access update tests.
 fn config() -> Config {
     Config {
         local_key: Some(PublicKey([1; 32])),
@@ -37,6 +38,8 @@ fn config() -> Config {
                     PeerPolicy {
                         peer: Peer {
                             key: PublicKey([3; 32]),
+                            previous_key: None,
+                            previous_active: false,
                             addresses: Addresses {
                                 ipv4: Ipv4Addr::from(0x0afe_0000 + id),
                                 ipv6: Ipv6Addr::from((0xfd02_u128 << 112) + u128::from(id)),

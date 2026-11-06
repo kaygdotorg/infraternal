@@ -132,6 +132,7 @@ fn restart_preserves_unrecorded_direct_host_routes() {
         "restart claimed routes outside its peer inventory"
     );
 }
+/// A refused inventory save during recovery retires no kernel peer or route.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
 fn refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes() {
@@ -139,6 +140,8 @@ fn refused_recovery_inventory_save_does_not_retire_kernel_peers_or_routes() {
     let (_, key) = Key::generate().unwrap();
     let peer = Peer {
         key,
+        previous_key: None,
+        previous_active: false,
         addresses: Addresses {
             ipv4: "10.254.0.2".parse().unwrap(),
             ipv6: "fd01::2".parse().unwrap(),

@@ -2137,6 +2137,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2382,6 +2383,7 @@ dependencies = [
  "h2",
  "hkdf 0.12.4",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-util",
  "infraternal-agent",

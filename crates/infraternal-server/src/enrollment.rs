@@ -257,6 +257,7 @@ impl EnrollmentStore {
 
     /// Issue on the caller's transaction so host metadata and its invitation
     /// either publish together or roll back together, including cancellation.
+    /// An undelivered revocation refuses new authority before final retirement.
     pub(crate) async fn issue_authorized_in(
         &self,
         owner: &str,
@@ -278,6 +279,7 @@ impl EnrollmentStore {
             "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at, expected_key_digest) \
              SELECT id, mode, ?, ?, ?, ? FROM remote_hosts \
              WHERE id = ? AND owner_id = ? AND mode = ? AND revoked_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0) \
              AND (? IS NULL OR EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
              WHERE s.token_hash=? AND s.user_id=remote_hosts.owner_id AND s.unlocked=1 \
              AND s.expires>unixepoch() AND u.owner=1)) \
@@ -372,6 +374,7 @@ impl EnrollmentStore {
     /// Refuses invalid capability/host/mode/time, concurrent redemption and
     /// revocation. An insert failure rolls back consumption rather than burning
     /// an invitation whose certificate was not durably recorded.
+    /// Pending cleanup also refuses redemption without consuming the invitation.
     pub async fn redeem(
         &self,
         secret: &str,
@@ -407,7 +410,8 @@ impl EnrollmentStore {
              AND consumed_at IS NULL \
              AND issued_at <= ? AND expires_at > ? \
              AND EXISTS (SELECT 1 FROM remote_hosts h WHERE h.id = host_id \
-             AND h.mode = remote_join_tokens.mode AND h.revoked_at IS NULL)",
+             AND h.mode = remote_join_tokens.mode AND h.revoked_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0))",
         )
         .bind(now)
         .bind(host.as_bytes().as_slice())
