@@ -20,7 +20,7 @@
  * nothing). A server that does not report the size leaves the wait as it always was.
  *
  * This module only owns the state machine; the timer is injected so the cases are tested
- * without waiting, and the state is presented by the window as an icon in its machine pill (`packages/ui/src/stale-mark.ts`, via the terminal's `onStaleScreen` hook).
+ * without waiting, and the state is presented by the window as the "stale" state of its machine pill's connection indicator (`setStale`, via the terminal's `onStaleScreen` hook).
  */
 
 /** A terminal grid size in cells. */
