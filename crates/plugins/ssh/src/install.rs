@@ -1510,6 +1510,9 @@ pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 // Cache records contain only public executable content. Every lookup repeats
 // ownership, link, private-parent and fixed-marker checks before any content read.
 // cache_refused names the refusal for the server (Refusal::Cache, #394).
+/// Shell routines for the private payload cache beside the setup location
+/// (`$base.bootstrap-cache`): `validate_cache` proves it is setup's own before
+/// any read, and `cache_refused` refuses (71) with the `cache` cause line.
 const PAYLOAD_CACHE: &str = r#"
 cache="$base.bootstrap-cache"
 cache_refused() { printf 'INFRATERNAL_REFUSED cache\n' >&2; exit 71; }
@@ -1537,6 +1540,10 @@ validate_cache() {
 // Admit no replacement until its receipt is removed after successful cleanup.
 // The private acquisition journal precedes mkdir. It proves this attempt's
 // empty lock if the command stops before the lock's ordinary receipts exist.
+/// The upload step's staging prologue: under the setup guard it admits only a
+/// missing setup location or one whose owner record names this attempt's host,
+/// then opens this attempt's journal. Its 71s name their cause (`foreign`,
+/// `owner`) for the server (Refusal, #394).
 const STAGE_TRANSACTION: &str = r#"
 parent=$(dirname "$base")
 if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi

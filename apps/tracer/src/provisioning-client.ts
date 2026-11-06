@@ -47,6 +47,7 @@ export type AuthMethod = "network" | "server-key" | "user-key" | "password";
 export type NetworkProvider = "netbird" | "tailscale" | "twingate" | "other";
 export interface AuthenticationInfo { method: AuthMethod; network?: NetworkProvider }
 
+/** A failed or paused step as the server describes it: the public failure fields the add-host pages read. */
 export interface FailureDetail {
   kind: FailureKind;
   message: string;
@@ -189,6 +190,7 @@ function parseSetupLock(value: unknown): FailureDetail["setup_lock"] | undefined
   return lock;
 }
 
+/** Keeps only the known, well-formed fields of a server failure; anything else is dropped, never shown. */
 function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
