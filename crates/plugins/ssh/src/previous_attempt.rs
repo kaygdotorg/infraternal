@@ -120,6 +120,17 @@ pub fn check_script(mode: InstallMode) -> String {
 /// # Errors
 /// Refuses unknown output, invalid identifiers and unsupported ownership formats.
 pub fn parse_check(bytes: &[u8]) -> Result<(Check, Option<PreviousAttempt>), Failure> {
+    parse_check_with_absence(bytes).map(|(check, previous, _)| (check, previous))
+}
+
+/// [`parse_check`], plus whether the check proved that the account has no
+/// infraternal install at all (`INFRATERNAL_SETUP_ABSENT`, D355): its base, unit
+/// and launcher each do not exist. "Clear" or anything else proves nothing.
+/// # Errors
+/// As [`parse_check`].
+pub fn parse_check_with_absence(
+    bytes: &[u8],
+) -> Result<(Check, Option<PreviousAttempt>, bool), Failure> {
     // The check lines plus an upgrade record with two host names stay below 1 KiB.
     if bytes.len() > 1024 {
         return Err(refused());
@@ -132,8 +143,11 @@ pub fn parse_check(bytes: &[u8]) -> Result<(Check, Option<PreviousAttempt>), Fai
         .map(|(index, _)| index + 1)
         .ok_or_else(refused)?;
     let check = Check::parse(&bytes[..end])?;
+    if &bytes[end..] == b"INFRATERNAL_SETUP_ABSENT\n" {
+        return Ok((check, None, true));
+    }
     let previous = parse(&bytes[end..])?;
-    Ok((check, previous))
+    Ok((check, previous, false))
 }
 
 fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
@@ -416,9 +430,15 @@ impl PreviousAttempt {
     /// Preserve lease coordinates when presenting the explicit stuck-upgrade action.
     #[must_use]
     pub(crate) fn stuck_failure(&self, reenroll: bool) -> Failure {
+        // Only an upgrade journal (it has a lease owner) was replacing an agent;
+        // a fresh setup that stopped had nothing to replace (#305, J272).
         let failure = Failure::new(
             FailureKind::StalePreviousAttempt,
-            "An earlier install stopped while replacing this infraternal agent.",
+            if self.lease_owner.is_some() {
+                "An earlier install stopped while replacing this infraternal agent."
+            } else {
+                "An earlier setup of this host stopped before it finished."
+            },
         );
         if let Some(owner) = &self.lease_owner {
             failure
@@ -729,7 +749,7 @@ impl PreviousAttempt {
         // The exact observed record already contains the root identity; reuse its
         // penultimate field rather than allocating another formatted shell argument.
         let body = format!(
-            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\nidentity=${{observed% *}}\nidentity=${{identity##* }}\nnot_live\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\nidentity=${{observed% *}}\nidentity=${{identity##* }}\nnot_live\nstop_activated_agent\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
             crate::install::RUNTIME_CLEANUP,
             crate::transport::shell_quote(&expected),
             crate::install::FRESH_CLEANUP,

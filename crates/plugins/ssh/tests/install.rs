@@ -3913,3 +3913,181 @@ async fn infra_alias_replaced_after_install_survives_rollback() {
         std::path::Path::new("foreign")
     );
 }
+
+/// #305 F-B: issues one fresh host id per invitation, as the server does, and
+/// fails the completion of the first one only (production: the login check that
+/// runs after the host-side commit).
+struct LoginFailsOnce {
+    hosts: std::sync::Mutex<Vec<uuid::Uuid>>,
+    failing: uuid::Uuid,
+}
+impl infraternal_plugin_ssh::bootstrap::Backend for LoginFailsOnce {
+    fn resolve<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: &'a Target,
+        _: Option<&'a str>,
+    ) -> Operation<'a, infraternal_plugin_ssh::bootstrap::Resolved> {
+        Box::pin(async {
+            Ok(infraternal_plugin_ssh::bootstrap::Resolved {
+                destination: infraternal_plugin_ssh::model::Destination::parse("user@fixture")
+                    .unwrap(),
+                credentials: infraternal_plugin_ssh::transport::Credentials::Network,
+                mesh: infraternal_plugin_ssh::model::MeshEvidence::default(),
+            })
+        })
+    }
+    fn invitation<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: &'a Target,
+        _: &'a infraternal_plugin_ssh::probe::Check,
+    ) -> Operation<'a, JoinMaterial> {
+        Box::pin(async move {
+            let host = self.hosts.lock().unwrap().remove(0);
+            Ok(JoinMaterial {
+                host,
+                url: "https://fixture.invalid/join".into(),
+                stdin: Secret::new(b"synthetic-capability\n".to_vec()),
+            })
+        })
+    }
+    fn connected_facts<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn terminal_canary<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn completed<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        host: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async move {
+            if host == self.failing {
+                Err(Failure::install(
+                    "The host connected, but its preferred account login could not open.",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    }
+    fn failed<'a>(
+        &'a self,
+        _: &'a infraternal_plugin_ssh::bootstrap::Authority,
+        _: uuid::Uuid,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Opens every SSH session as the real-filesystem `Local` fixture under `root`.
+struct LocalTransport {
+    root: PathBuf,
+}
+impl infraternal_plugin_ssh::transport::SshTransport for LocalTransport {
+    fn open(
+        &self,
+        _: infraternal_plugin_ssh::model::Destination,
+        _: infraternal_plugin_ssh::transport::Credentials,
+        _: infraternal_plugin_ssh::model::MeshEvidence,
+    ) -> Operation<'_, Arc<dyn SshSession>> {
+        Box::pin(async move {
+            Ok(Arc::new(Local {
+                root: self.root.clone(),
+            }) as Arc<dyn SshSession>)
+        })
+    }
+}
+
+/// Gives the fixture's installed binary the real CLI's owner-scoped
+/// `--bootstrap-uninstall <host>` contract (see the comment inside).
+fn with_owner_scoped_uninstall(fixture: &Fixture) {
+    // The installed binary's owner-scoped uninstall contract, as the real CLI's
+    // `--bootstrap-uninstall <host>`: take the setup lock on the base's parent
+    // without waiting (the real one refuses after a short wait), and remove only
+    // when `.bootstrap-owner` names the host. It finds its install from its own
+    // path, never from $HOME.
+    let payload = std::fs::read_to_string(&fixture.binary).unwrap().replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\nif [ \"$1\" = --bootstrap-uninstall ]; then base=$(dirname \"$(dirname \"$0\")\"); exec 8< \"$(dirname \"$base\")\"; flock -n 8 || exit 75; [ \"$(cat \"$base/.bootstrap-owner\")\" = \"$2\" ] || exit 1; home=$(dirname \"$(dirname \"$(dirname \"$base\")\")\"); rm -rf \"$base\" \"$base.bootstrap-cache\" \"$home/.local/bin/infraternal\" \"$home/.config/systemd/user/infraternal-agent.service\"; exit 0; fi\n",
+        1,
+    );
+    executable(&fixture.binary, &payload);
+}
+
+/// The step (Done or Failed) and message `batch` ends with.
+async fn outcome(
+    batch: infraternal_plugin_ssh::bootstrap::Batch,
+) -> (infraternal_plugin_ssh::model::Step, String) {
+    use infraternal_plugin_ssh::model::Step;
+    let mut changes = batch.subscribe();
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let (_, events) = batch.events(0);
+            if let Some(event) = events
+                .iter()
+                .find(|event| matches!(event.step, Step::Done | Step::Failed))
+            {
+                return (event.step, event.message.to_owned());
+            }
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap()
+}
+
+/// #305 F-B: an attempt whose host-side commit succeeded but whose next step failed
+/// (production: the login check after commit) must not leave its install behind.
+/// Left in place, its agent keeps running for a host the server revokes, and its
+/// `.bootstrap-owner` makes every later add refuse to stage with exit 71, a
+/// permissions error with no Start fresh. The retry with a new host id must finish.
+#[tokio::test]
+async fn a_failure_after_commit_removes_its_install_so_the_retry_finishes() {
+    use infraternal_plugin_ssh::{bootstrap::Bootstrap, install::BinaryPaths, model::Step};
+    let fixture = Fixture::new();
+    with_owner_scoped_uninstall(&fixture);
+    let (first, second) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let runner = Bootstrap::new(
+        Arc::new(LocalTransport {
+            root: fixture.root.clone(),
+        }),
+        Arc::new(LoginFailsOnce {
+            hosts: std::sync::Mutex::new(vec![first, second]),
+            failing: first,
+        }),
+        BinaryPaths {
+            x86_64: fixture.binary.clone(),
+            aarch64: fixture.binary.clone(),
+        },
+    );
+    let start = || {
+        runner
+            .start("owner".into(), vec![fixture.target.clone()], None)
+            .unwrap()
+    };
+    let (step, message) = outcome(start()).await;
+    assert_eq!(step, Step::Failed, "{message}");
+    let owner = fixture.base().join(".bootstrap-owner");
+    assert!(
+        !owner.exists(),
+        "the failed attempt left its install owned by {:?}",
+        std::fs::read_to_string(&owner).ok()
+    );
+    let (step, message) = outcome(start()).await;
+    assert_eq!(step, Step::Done, "{message}");
+    assert_eq!(
+        std::fs::read_to_string(&owner).unwrap().trim(),
+        second.simple().to_string()
+    );
+}
