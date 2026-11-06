@@ -129,19 +129,19 @@ impl Removal {
             crate::access_report::Reading::Pending => {
                 json!({"host_id": host, "state": "pending", "reports": []})
             }
-            crate::access_report::Reading::None => {
-                json!({"host_id": host, "state": "none", "reports": []})
+            crate::access_report::Reading::NotRevoked => {
+                json!({"host_id": host, "state": "not_revoked", "reports": []})
             }
-            crate::access_report::Reading::Ready(reports) => json!({
+            crate::access_report::Reading::Reported(reports) => json!({
                 "host_id": host,
-                "state": "ready",
+                "state": "reported",
                 "reports": reports
                     .into_iter()
-                    .map(|(person, report)| json!({
-                        "person_id": person,
-                        "files": report.files,
-                        "truncated": report.truncated,
-                    }))
+                    .map(|(person, report)| {
+                        let mut entry = serde_json::to_value(report).unwrap_or_default();
+                        entry["person_id"] = json!(person);
+                        entry
+                    })
                     .collect::<Vec<_>>(),
             }),
         }))

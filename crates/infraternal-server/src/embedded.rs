@@ -314,12 +314,13 @@ struct Retirement {
     reply: oneshot::Sender<Result<Revoked, AgentError>>,
 }
 
-/// A confirmed login revocation, with D356's report of the access files that
-/// changed since the grant when the host returned one (already bounded).
+/// A confirmed login revocation, with D356's report of the person's access
+/// files (already bounded). A reply without one is an agent older than D356.
 #[cfg(feature = "remote")]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Revoked {
-    /// The host's report; `None` from an agent that predates D356.
+    /// The host's report; every decoded reply has one (an older agent's says
+    /// so). `None` only in test fixtures that confirm without a reply.
     pub(crate) report: Option<crate::access_report::AccessReport>,
 }
 #[cfg(feature = "remote")]
@@ -2763,13 +2764,14 @@ async fn process_incoming(
                     #[serde(deny_unknown_fields)]
                     struct RevokeReply {
                         revoked: bool,
-                        #[serde(default, rename = "warning")]
-                        _warning: Option<String>,
-                        // D356: access files changed since the grant, for the
-                        // owner. Bounded and cleaned again here, because the
-                        // host is less trusted than the server. Never logged.
                         #[serde(default)]
-                        changed: Option<crate::access_report::AccessReport>,
+                        warning: Option<String>,
+                        // D356: what the agent found in the person's access
+                        // files, for the owner. Bounded and cleaned again
+                        // here, because the host is less trusted than the
+                        // server. Never logged.
+                        #[serde(default)]
+                        access: Option<crate::access_report::AccessReport>,
                     }
                     // Serde structs also accept positional arrays. Cleanup
                     // acknowledgements declare an object, so reject that shape.
@@ -2779,10 +2781,17 @@ async fn process_incoming(
                                 .map_err(|_| AgentError::Protocol)
                                 .and_then(|result| {
                                     if result.revoked {
+                                        // An agent older than D356 sends no
+                                        // report: say so, never "unchanged".
+                                        let mut report = result.access.unwrap_or_else(|| {
+                                            crate::access_report::AccessReport::not_checked(
+                                                crate::access_report::Reason::OlderAgent,
+                                            )
+                                        });
+                                        // D353's warning is kept for the owner.
+                                        report.warning = result.warning;
                                         Ok(Revoked {
-                                            report: result
-                                                .changed
-                                                .map(crate::access_report::AccessReport::bounded),
+                                            report: Some(report.bounded()),
                                         })
                                     } else {
                                         Err(AgentError::Rejected)

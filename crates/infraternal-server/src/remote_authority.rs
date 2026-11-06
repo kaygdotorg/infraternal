@@ -97,7 +97,8 @@ impl EnrollmentStore {
 
     /// Finalize retirement only on a durable daemon reply; lost replies stay pending.
     /// A removal keeps bootstrap coordinates for manual cleanup until this receipt.
-    /// For a confirmation that carries no D356 report (a host that is gone).
+    /// For a confirmation that carries no D356 report (the agent is gone): the
+    /// kept report says it was not checked.
     pub(crate) async fn confirm_login_cleanup(
         &self,
         host: Uuid,
@@ -129,6 +130,12 @@ impl EnrollmentStore {
                 .map_or(0, |elapsed| {
                     i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
                 });
+            // Every confirmed revocation keeps a report. Without a host
+            // reply (the agent was removed), it says that nothing was checked.
+            let removed = crate::access_report::AccessReport::not_checked(
+                crate::access_report::Reason::AgentRemoved,
+            );
+            let report = report.unwrap_or(&removed);
             crate::access_report::store(&mut transaction, host, person, report, now).await?;
         }
         // Keep tombstoning and its trigger effects in the same transaction as

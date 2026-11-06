@@ -553,14 +553,14 @@ async fn pending_removal_describes_one_host_without_claiming_completion() {
 /// signed-out request is refused.
 #[tokio::test]
 async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
-    use crate::access_report::{AccessFile, AccessReport};
+    use crate::access_report::{AccessFile, AccessReport, AccountReport, ChangeKind, State};
     let f = fixture().await;
     let host = owned_host(&f).await;
     let service = removal(&f);
     let state = |value: Option<serde_json::Value>| value.unwrap()["state"].clone();
     assert_eq!(
         state(service.access_report(&f.session, host, NOW).await.unwrap()),
-        "none"
+        "not_revoked"
     );
     let start = service.start(&f.session, host, true, NOW).await.unwrap();
     let review = str_field(&start, "review").to_owned();
@@ -574,12 +574,23 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
     );
     let person = Uuid::parse_str(&f.user).unwrap();
     let report = |line: &str| AccessReport {
-        files: vec![AccessFile {
-            path: "~/.ssh/authorized_keys".to_owned(),
-            lines: vec![line.to_owned()],
-            note: None,
+        state: State::Changed,
+        reason: None,
+        accounts: vec![AccountReport {
+            account: "deploy".to_owned(),
+            state: State::Changed,
+            reason: None,
+            files: vec![AccessFile {
+                path: "~/.ssh/authorized_keys".to_owned(),
+                change: ChangeKind::Changed,
+                lines: vec![line.to_owned()],
+                note: None,
+            }],
+            truncated: false,
+            unscanned: Vec::new(),
+            omitted_files: 0,
         }],
-        truncated: false,
+        warning: None,
     };
     let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
     store
@@ -602,10 +613,17 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
         .unwrap();
     assert_eq!(
         value,
-        json!({"host_id": host, "state": "ready", "reports": [{
+        json!({"host_id": host, "state": "reported", "reports": [{
             "person_id": person,
-            "files": [{"path": "~/.ssh/authorized_keys", "lines": ["ssh-ed25519 AAAAleft left"]}],
-            "truncated": false,
+            "state": "changed",
+            "accounts": [{
+                "account": "deploy",
+                "state": "changed",
+                "files": [{"path": "~/.ssh/authorized_keys", "change": "changed", "lines": ["ssh-ed25519 AAAAleft left"]}],
+                "truncated": false,
+                "unscanned": [],
+                "omitted_files": 0,
+            }],
         }]})
     );
     store
