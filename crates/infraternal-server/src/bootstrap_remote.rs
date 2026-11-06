@@ -1644,13 +1644,8 @@ mod tests {
         ));
     }
 
-    mod pending_removal_tests {
-        //! Pending removals release setup coordinates without reviving their identity.
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/bootstrap_pending_removal_tests.rs"
-        ));
-    }
+    /// Pending removals release setup coordinates without reviving their identity.
+    mod pending_removal_tests;
 
     mod already_added_breakit {
         //! Break-it review of the already-added host id (#189).
