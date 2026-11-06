@@ -717,12 +717,41 @@ fn detached_fixture_gated(
 
 /// A launcher body that stands in for a detaching launcher whose shim lineage lives on: a background loop,
 /// orphaned when the launcher exits, that holds the launch's lifeline until the test's directory is removed.
-/// (The fixture shim itself is a task, not a process, so something else must hold the lifeline.)
+/// (The fixture shim itself is a task, not a process, so something else must hold the lifeline.) Once the loop
+/// is forked, the launcher writes `lifeline.held`; [`live_fixture`] binds its shim only after that.
 fn live_shim_body(root: &std::path::Path) -> String {
     format!(
-        "while [ -e '{}' ]; do sleep 0.2; done &\nexit 0",
-        root.display()
+        "while [ -e '{root}' ]; do sleep 0.2; done &\n: > '{root}/lifeline.held'\nexit 0",
+        root = root.display()
     )
+}
+
+/// [`detached_fixture`] with [`live_shim_body`], whose stand-in shim binds only once the lifeline holder exists,
+/// then after `bind_delay`. A real shim inherits the lifeline before it can bind, so a bound shim with nothing
+/// holding the lifeline cannot happen in the product. In this fixture it could: under load cleanup killed the
+/// launcher before it forked the holder, read end-of-file on the lifeline as proof that the shim had died, and
+/// never sent the close (#355).
+fn live_fixture(
+    state: &std::path::Path,
+    root: &std::path::Path,
+    bind_delay: std::time::Duration,
+    silent: usize,
+    retire: bool,
+) -> (
+    std::path::PathBuf,
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+) {
+    let held = root.join("lifeline.held");
+    let bind = async move {
+        while !held.exists() {
+            // sleep: poll interval for the launcher's marker; the loop ends on that condition.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // sleep: the stand-in shim binds late on purpose (`bind_delay`), to exercise a late bind
+        tokio::time::sleep(bind_delay).await;
+    };
+    detached_fixture_gated(state, root, bind, silent, retire, &live_shim_body(root))
 }
 
 /// Launch with the fixtures' detached manager and a current server grant for
@@ -770,14 +799,7 @@ async fn slow_hello_failure_still_closes_the_detached_session_it_started() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(
-        &state,
-        &root,
-        std::time::Duration::ZERO,
-        2,
-        true,
-        &live_shim_body(&root),
-    );
+    let (exe, shim, closed) = live_fixture(&state, &root, std::time::Duration::ZERO, 2, true);
     let error = launch_detached(&exe, &state, None)
         .await
         .err()
@@ -798,14 +820,7 @@ async fn cancelling_the_launch_does_not_cancel_its_cleanup() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(
-        &state,
-        &root,
-        std::time::Duration::ZERO,
-        1,
-        true,
-        &live_shim_body(&root),
-    );
+    let (exe, shim, closed) = live_fixture(&state, &root, std::time::Duration::ZERO, 1, true);
     let launched = tokio::time::timeout(
         std::time::Duration::from_millis(700),
         launch_detached(&exe, &state, None),
@@ -826,13 +841,12 @@ async fn a_shim_that_binds_after_the_launch_gave_up_is_still_closed() {
     let directory = Directory::new();
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
-    let (exe, shim, closed) = detached_fixture(
+    let (exe, shim, closed) = live_fixture(
         &state,
         &root,
         std::time::Duration::from_millis(1500),
         0,
         true,
-        &live_shim_body(&root),
     );
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
     let result = launch_detached(&exe, &state, None).await;
@@ -1094,13 +1108,12 @@ async fn the_shims_own_observed_exit_retires_the_person_record() {
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
     let locks = person_locks(&state);
-    let (exe, shim, closed) = detached_fixture(
+    let (exe, shim, closed) = live_fixture(
         &state,
         &root,
         std::time::Duration::from_millis(800),
         0,
         true,
-        &live_shim_body(&root),
     );
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
     let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
