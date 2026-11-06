@@ -40,13 +40,15 @@ use std::{
 use tokio::io::unix::AsyncFd;
 use tokio::{
     runtime::Builder as RuntimeBuilder,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        watch,
+    },
 };
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
 const UTUN_CONTROL: &str = "com.apple.net.utun_control";
-const UTUN_MTU: usize = 1280;
 const PUBLIC_STATE: &str = "mesh-public.json";
 const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -145,6 +147,7 @@ fn utun_setup_error(stage: &str, error: nix::errno::Errno) -> io::Error {
 struct MacUtun {
     fd: Arc<AsyncFd<OwnedFd>>,
     name: Arc<str>,
+    mtu: watch::Sender<u16>,
 }
 
 impl MacUtun {
@@ -156,9 +159,11 @@ impl MacUtun {
         // the replacement requires unsafe code, which this crate forbids.
         #[allow(deprecated)]
         let fd = AsyncFd::new(open.fd)?;
+        let (mtu, _) = watch::channel(crate::mesh_mtu::IPV6_MINIMUM_MTU);
         Ok(Self {
             fd: Arc::new(fd),
             name: Arc::from(open.name),
+            mtu,
         })
     }
 
@@ -166,23 +171,33 @@ impl MacUtun {
         &self.name
     }
 
+    /// Build the send adapter with a watcher for this utun's current shared interface MTU.
     fn sender(&self) -> MacUtunTx {
         MacUtunTx {
             fd: self.fd.clone(),
-            frame: Vec::with_capacity(UTUN_MTU + 4),
+            mtu: self.mtu.subscribe().into(),
+            frame: Vec::with_capacity(usize::from(crate::mesh_mtu::IPV6_MINIMUM_MTU) + 4),
         }
     }
 
+    /// Build the receive adapter with a watcher for this utun's current shared interface MTU.
     fn receiver(&self) -> MacUtunRx {
         MacUtunRx {
             fd: self.fd.clone(),
-            mtu: MtuWatcher::new(UTUN_MTU as u16),
+            mtu: self.mtu.subscribe().into(),
         }
+    }
+
+    /// Publish an MTU change to the utun send and receive packet workers.
+    fn set_mtu(&self, mtu: u16) {
+        self.mtu.send_replace(mtu);
     }
 }
 
+/// Sends packets from GotaTun to one owned utun using its live interface MTU.
 struct MacUtunTx {
     fd: Arc<AsyncFd<OwnedFd>>,
+    mtu: MtuWatcher,
     frame: Vec<u8>,
 }
 
@@ -190,7 +205,7 @@ impl IpSend for MacUtunTx {
     async fn send(&mut self, packet: Packet<Ip>) -> io::Result<()> {
         let packet = packet.into_bytes();
         let family = utun_family(packet.as_ref())?;
-        if packet.len() > UTUN_MTU {
+        if packet.len() > usize::from(self.mtu.get()) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         self.frame.clear();
@@ -208,6 +223,7 @@ impl IpSend for MacUtunTx {
     }
 }
 
+/// Receives packets from one owned utun and rejects frames above its live interface MTU.
 struct MacUtunRx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
@@ -229,10 +245,7 @@ impl IpRecv for MacUtunRx {
                 Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(Ok(length)) => {
                     packet.truncate(length);
-                    let payload = parse_utun_payload(packet.as_ref())?;
-                    if payload.len() > UTUN_MTU {
-                        return Err(io::ErrorKind::InvalidData.into());
-                    }
+                    parse_utun_payload(packet.as_ref(), self.mtu.get())?;
                     packet.buf_mut().advance(4);
                     let packet = packet
                         .try_into_ip()
@@ -248,14 +261,27 @@ impl IpRecv for MacUtunRx {
     }
 }
 
-/// Add or remove one exact peer host route through our allocated utun.
-fn route(interface: &str, address: IpAddr, operation: &str) -> io::Result<()> {
+/// Add, change or remove one peer host route through our allocated utun.
+///
+/// Add and change operations carry an unlocked route MTU so the system can refine it with later
+/// PMTU information. Deletes carry no MTU.
+/// # Errors
+/// Reports invalid operation arguments, routing command failures, or an unexpected missing route.
+fn route(interface: &str, address: IpAddr, operation: &str, mtu: Option<u16>) -> io::Result<()> {
+    if operation != "delete" && mtu.is_none() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     let family = if address.is_ipv4() { "-inet" } else { "-inet6" };
-    let output = Command::new("/sbin/route")
+    let mut command = Command::new("/sbin/route");
+    command
         .args(["-n", operation, family, "-host"])
         .arg(address.to_string())
-        .args(["-interface", interface])
-        .output()?;
+        .args(["-interface", interface]);
+    let mtu_argument = mtu.map(|mtu| mtu.to_string());
+    if let Some(mtu) = mtu_argument.as_deref() {
+        command.args(["-mtu", mtu]);
+    }
+    let output = command.output()?;
     if output.status.success() {
         Ok(())
     } else if operation == "delete"
@@ -274,19 +300,25 @@ fn valid_utun_name(name: &str) -> bool {
         .is_some_and(|unit| !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+/// Delete only peer host routes installed through the validated utun interface.
+/// # Errors
+/// Rejects a malformed utun name or reports a route deletion failure.
 fn remove_routes(interface: &str, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
     if !valid_utun_name(interface) {
         return Err(io::ErrorKind::InvalidData.into());
     }
     for address in routes {
-        route(interface, *address, "delete")?;
+        route(interface, *address, "delete", None)?;
     }
     Ok(())
 }
 
-/// Configure only this owned utun interface; no other tunnel or resolver is changed.
-fn configure_interface(interface: &str, config: Option<&Config>) -> io::Result<()> {
-    run_ifconfig([interface, "mtu", &UTUN_MTU.to_string(), "up"])?;
+/// Configure this owned utun at an IPv6-safe MTU and install its local addresses.
+///
+/// Callers pass a staging MTU no smaller than either the old or new peer budget until route
+/// metrics have been updated. No other tunnel or resolver is changed.
+fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io::Result<()> {
+    run_ifconfig([interface, "mtu", &mtu.to_string(), "up"])?;
     if let Some(config) = config {
         run_ifconfig([
             interface,
@@ -306,6 +338,13 @@ fn configure_interface(interface: &str, config: Option<&Config>) -> io::Result<(
         ])?;
     }
     Ok(())
+}
+
+/// Change the packet size on the already-owned utun interface.
+/// # Errors
+/// Reports a rejected `ifconfig` request.
+fn set_interface_mtu(interface: &str, mtu: u16) -> io::Result<()> {
+    run_ifconfig([interface, "mtu", &mtu.to_string()])
 }
 
 fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
@@ -473,6 +512,17 @@ fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
         .collect()
 }
 
+/// Derive each installed peer host route's MTU from that peer's underlay endpoint route.
+fn route_mtus(config: &Config) -> BTreeMap<IpAddr, u16> {
+    let mut routes = BTreeMap::new();
+    for policy in installed_peers(config) {
+        let mtu = crate::mesh_mtu::for_endpoint(policy.peer.endpoint);
+        routes.insert(IpAddr::V4(policy.peer.addresses.ipv4), mtu);
+        routes.insert(IpAddr::V6(policy.peer.addresses.ipv6), mtu);
+    }
+    routes
+}
+
 /// Refuse an endpoint that a host route would send back into this tunnel.
 fn validate_underlay_routes(config: &Config, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
     if config.peers.values().any(|policy| {
@@ -577,9 +627,11 @@ fn utun_family(packet: &[u8]) -> io::Result<u32> {
 }
 
 /// Validate and strip the network-order address-family header from one utun frame.
+///
+/// `mtu` is the live shared interface limit reported to the GotaTun packet workers.
 /// # Errors
-/// Rejects truncated, unsupported or family-mismatched frames.
-fn parse_utun_payload(frame: &[u8]) -> io::Result<&[u8]> {
+/// Rejects truncated, unsupported, oversized or family-mismatched frames.
+fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
     let prefix: [u8; 4] = frame
         .get(..4)
         .ok_or(io::ErrorKind::InvalidData)?
@@ -587,7 +639,7 @@ fn parse_utun_payload(frame: &[u8]) -> io::Result<&[u8]> {
         .map_err(|_| io::ErrorKind::InvalidData)?;
     let payload = frame.get(4..).ok_or(io::ErrorKind::InvalidData)?;
     let family = u32::from_be_bytes(prefix);
-    if payload.is_empty() || payload.len() > UTUN_MTU || utun_family(payload)? != family {
+    if payload.is_empty() || payload.len() > usize::from(mtu) || utun_family(payload)? != family {
         return Err(io::ErrorKind::InvalidData.into());
     }
     Ok(payload)
@@ -812,6 +864,9 @@ struct PendingWorker {
 }
 
 impl PendingWorker {
+    /// Start the worker and return when its allocated utun details are ready for approval.
+    /// # Errors
+    /// Reports utun allocation, worker startup, or initial route setup failures.
     fn begin(
         open: OpenUtun,
         private_key: gotatun::x25519::StaticSecret,
@@ -865,11 +920,17 @@ impl PendingWorker {
                         return;
                     }
                 };
+                let initial_route_mtus = config.as_ref().map(route_mtus).unwrap_or_default();
                 if info_tx.send(Ok(info.clone())).is_err() || !gate_rx.recv().unwrap_or(false) {
                     return;
                 }
                 let device = runtime.block_on(async {
-                    configure_interface(&info.interface, config.as_ref())?;
+                    let mtu = config
+                        .as_ref()
+                        .map(|config| crate::mesh_mtu::for_config(Some(config)))
+                        .unwrap_or(crate::mesh_mtu::IPV6_MINIMUM_MTU);
+                    configure_interface(&info.interface, config.as_ref(), mtu)?;
+                    utun.set_mtu(mtu);
                     let peers = config
                         .as_ref()
                         .map(peers_for_config)
@@ -886,7 +947,11 @@ impl PendingWorker {
                         .map_err(|_| io::Error::other("WireGuard device could not start."))?;
                     let mut installed = BTreeSet::new();
                     for address in &info.routes {
-                        if let Err(error) = route(&info.interface, *address, "add") {
+                        let mtu = initial_route_mtus
+                            .get(address)
+                            .copied()
+                            .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
+                        if let Err(error) = route(&info.interface, *address, "add", Some(mtu)) {
                             let _ = remove_routes(&info.interface, &installed);
                             device.stop().await;
                             return Err(error);
@@ -911,6 +976,7 @@ impl PendingWorker {
                     device: Some(device),
                     config,
                     routes: info.routes,
+                    route_mtus: initial_route_mtus,
                     port: info.port,
                 };
                 runtime.block_on(run_worker(receiver, state));
@@ -1011,11 +1077,14 @@ impl Drop for Worker {
     }
 }
 
+/// Owns the live utun, GotaTun device, and route state used for transactional updates.
+/// `route_mtus` mirrors the installed peer metrics so a failed update can restore them.
 struct RuntimeState {
     utun: Option<MacUtun>,
     device: Option<GotaDevice>,
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
+    route_mtus: BTreeMap<IpAddr, u16>,
     port: u16,
 }
 
@@ -1044,50 +1113,86 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
 }
 
 impl RuntimeState {
+    /// Apply peers and endpoint-derived host-route MTUs while preserving the IPv6 link floor.
+    /// # Errors
+    /// Restores the old peer, route and interface MTU state when one update fails.
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
-        let interface = self
-            .utun
-            .as_ref()
-            .map(MacUtun::name)
-            .ok_or(io::ErrorKind::NotConnected)?
-            .to_owned();
+        let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let interface = utun.name().to_owned();
         let new_routes = route_addresses(&config);
         validate_underlay_routes(&config, &new_routes)?;
         let peers = peers_for_config(&config)?;
         let old_config = self.config.clone();
         let old_routes = self.routes.clone();
-        configure_interface(&interface, Some(&config))?;
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let new_route_mtus = route_mtus(&config);
+        let old_route_mtus = self.route_mtus.clone();
+        let old_mtu = old_config
+            .as_ref()
+            .map(|old| crate::mesh_mtu::for_config(Some(old)))
+            .unwrap_or(crate::mesh_mtu::IPV6_MINIMUM_MTU);
+        let new_mtu = crate::mesh_mtu::for_config(Some(&config));
+        let staging_mtu = old_mtu.max(new_mtu).max(crate::mesh_mtu::IPV6_MINIMUM_MTU);
+        if let Err(error) = configure_interface(&interface, Some(&config), staging_mtu) {
+            rollback_device(device, &interface, old_config.as_ref(), utun).await;
+            return Err(error);
+        }
+        utun.set_mtu(staging_mtu);
         if let Err(error) = replace_peers(device, peers).await {
-            if let Some(old) = old_config.as_ref() {
-                let _ = configure_interface(&interface, Some(old));
-                let old_peers = peers_for_config(old).unwrap_or_default();
-                let _ = replace_peers(device, old_peers).await;
-            }
+            rollback_device(device, &interface, old_config.as_ref(), utun).await;
             return Err(error);
         }
         let mut added = BTreeSet::new();
-        for address in new_routes.difference(&old_routes) {
-            if let Err(error) = route(&interface, *address, "add") {
-                let _ = remove_routes(&interface, &added);
-                rollback_device(device, &interface, old_config.as_ref()).await;
-                return Err(error);
-            }
-            added.insert(*address);
-        }
+        let mut changed = BTreeSet::new();
         let mut removed = BTreeSet::new();
-        for address in old_routes.difference(&new_routes) {
-            if let Err(error) = route(&interface, *address, "delete") {
-                let _ = remove_routes(&interface, &added);
-                for restored in &removed {
-                    let _ = route(&interface, *restored, "add");
-                }
-                rollback_device(device, &interface, old_config.as_ref()).await;
-                return Err(error);
+        let routes_applied = (|| {
+            for address in new_routes.difference(&old_routes) {
+                let mtu = new_route_mtus
+                    .get(address)
+                    .copied()
+                    .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
+                route(&interface, *address, "add", Some(mtu))?;
+                added.insert(*address);
             }
-            removed.insert(*address);
+            for address in old_routes.intersection(&new_routes) {
+                let new_mtu = new_route_mtus
+                    .get(address)
+                    .copied()
+                    .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
+                if old_route_mtus.get(address).copied() != Some(new_mtu) {
+                    route(&interface, *address, "change", Some(new_mtu))?;
+                    changed.insert(*address);
+                }
+            }
+            for address in old_routes.difference(&new_routes) {
+                route(&interface, *address, "delete", None)?;
+                removed.insert(*address);
+            }
+            set_interface_mtu(&interface, new_mtu)?;
+            utun.set_mtu(new_mtu);
+            Ok(())
+        })();
+        if let Err(error) = routes_applied {
+            let _ = remove_routes(&interface, &added);
+            for address in &changed {
+                let mtu = old_route_mtus
+                    .get(address)
+                    .copied()
+                    .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
+                let _ = route(&interface, *address, "change", Some(mtu));
+            }
+            for address in &removed {
+                let mtu = old_route_mtus
+                    .get(address)
+                    .copied()
+                    .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
+                let _ = route(&interface, *address, "add", Some(mtu));
+            }
+            rollback_device(device, &interface, old_config.as_ref(), utun).await;
+            return Err(error);
         }
         self.routes.clone_from(&new_routes);
+        self.route_mtus = new_route_mtus;
         self.config = Some(config);
         Ok(RuntimeInfo {
             interface,
@@ -1127,6 +1232,9 @@ impl RuntimeState {
         Ok(counters)
     }
 
+    /// Remove owned peer routes and stop GotaTun before dropping the utun descriptor.
+    /// # Errors
+    /// Reports missing utun state or a failed route removal.
     async fn stop(&mut self) -> io::Result<()> {
         let interface = self
             .utun
@@ -1140,6 +1248,7 @@ impl RuntimeState {
         }
         self.utun.take();
         self.routes.clear();
+        self.route_mtus.clear();
         self.config = None;
         Ok(())
     }
@@ -1169,13 +1278,25 @@ async fn replace_peers(device: &GotaDevice, peers: Vec<WireGuardPeer>) -> io::Re
     result.and(resumed)
 }
 
-async fn rollback_device(device: &GotaDevice, interface: &str, config: Option<&Config>) {
+/// Restore the old peers and a safe interface MTU after a failed configuration transaction.
+async fn rollback_device(
+    device: &GotaDevice,
+    interface: &str,
+    config: Option<&Config>,
+    utun: &MacUtun,
+) {
+    let mtu = config
+        .map(|config| crate::mesh_mtu::for_config(Some(config)))
+        .unwrap_or(crate::mesh_mtu::IPV6_MINIMUM_MTU);
     if let Some(config) = config {
-        let _ = configure_interface(interface, Some(config));
+        let _ = configure_interface(interface, Some(config), mtu);
         if let Ok(peers) = peers_for_config(config) {
             let _ = replace_peers(device, peers).await;
         }
+    } else {
+        let _ = set_interface_mtu(interface, mtu);
     }
+    utun.set_mtu(mtu);
 }
 
 pub struct Node {
@@ -1754,6 +1875,7 @@ mod tests {
         );
     }
 
+    /// The Mac utun parser follows the current peer route budget, including a larger normal path.
     #[test]
     fn utun_frame_uses_kernel_family_prefix_and_checks_ip_version() {
         let ipv4 = [0, 0, 0, 2, 0x45];
@@ -1761,21 +1883,32 @@ mod tests {
 
         assert_eq!(utun_family(&ipv4[4..]).expect("IPv4 family"), 2);
         assert_eq!(utun_family(&ipv6[4..]).expect("IPv6 family"), 30);
-        assert_eq!(parse_utun_payload(&ipv4).expect("IPv4 payload"), &ipv4[4..]);
-        assert_eq!(parse_utun_payload(&ipv6).expect("IPv6 payload"), &ipv6[4..]);
+        assert_eq!(
+            parse_utun_payload(&ipv4, crate::mesh_mtu::IPV6_MINIMUM_MTU).expect("IPv4 payload"),
+            &ipv4[4..]
+        );
+        assert_eq!(
+            parse_utun_payload(&ipv6, crate::mesh_mtu::IPV6_MINIMUM_MTU).expect("IPv6 payload"),
+            &ipv6[4..]
+        );
+        let mut normal_path = vec![0, 0, 0, 2];
+        normal_path.resize(4 + 1420, 0);
+        normal_path[4] = 0x45;
+        assert!(parse_utun_payload(&normal_path, 1420).is_ok());
     }
 
+    /// Rejects malformed utun family prefixes and packets above the current route budget.
     #[test]
     fn utun_frame_rejects_truncation_unknown_family_and_mismatch() {
-        assert!(parse_utun_payload(&[0, 0, 0]).is_err());
-        assert!(parse_utun_payload(&[0, 0, 0, 99, 0x45]).is_err());
-        assert!(parse_utun_payload(&[0, 0, 0, 2, 0x60]).is_err());
+        assert!(parse_utun_payload(&[0, 0, 0], 1280).is_err());
+        assert!(parse_utun_payload(&[0, 0, 0, 99, 0x45], 1280).is_err());
+        assert!(parse_utun_payload(&[0, 0, 0, 2, 0x60], 1280).is_err());
         assert!(utun_family(&[]).is_err());
         assert!(utun_family(&[0x75]).is_err());
         let mut oversized = vec![0, 0, 0, 2];
         oversized.resize(4 + 1281, 0);
         oversized[4] = 0x45;
-        assert!(parse_utun_payload(&oversized).is_err());
+        assert!(parse_utun_payload(&oversized, 1280).is_err());
     }
 
     #[test]

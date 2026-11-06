@@ -955,9 +955,10 @@ impl Node {
             }
         }
     }
-    /// The proven kernel link every rotation step addresses by its index (#285). Only kernel
-    /// `WireGuard` rotates; `GotaTun` refuses before any state is read (D166, D352).
-    fn rotation_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
+    /// Return the proven kernel link by index for owner-only changes such as rotation and MTU.
+    /// # Errors
+    /// Refuses non-kernel engines, inactive links, and links whose owner marker changed.
+    fn owned_kernel_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
         if self.engine_kind != EngineKind::Kernel {
             return Err(io::ErrorKind::Unsupported.into());
         }
@@ -968,6 +969,43 @@ impl Node {
             return Err(io::ErrorKind::InvalidData.into());
         }
         Ok(link)
+    }
+
+    /// Return this node's live `GotaTun` link after matching its marker to the in-memory identity.
+    /// # Errors
+    /// Refuses non-`GotaTun` engines, inactive links, and links whose owner changed.
+    fn owned_gotatun_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
+        if self.engine_kind != EngineKind::GotaTun {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
+        let owner = self
+            .identity
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .public_key;
+        if !self.owned || link.engine != EngineKind::GotaTun || link.owner != Some(owner) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(link)
+    }
+
+    /// Set the MTU on this node's proven interface and keep `GotaTun`'s packet watcher in step.
+    /// # Errors
+    /// Refuses a changed interface index or reports a link update failure.
+    fn set_mesh_mtu(&self, ifindex: u32, mtu: u16) -> io::Result<()> {
+        match self.engine_kind {
+            EngineKind::Kernel => Device::set_mtu(ifindex, mtu),
+            EngineKind::GotaTun => {
+                if self.owned_gotatun_link()?.ifindex != ifindex {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.gotatun
+                    .as_ref()
+                    .ok_or(io::ErrorKind::NotConnected)?
+                    .set_mtu(mtu)
+            }
+        }
     }
 
     /// Prepare a new local `WireGuard` identity without changing the live interface.
@@ -999,7 +1037,7 @@ impl Node {
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let link = self.rotation_link()?;
+        let link = self.owned_kernel_link()?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let identity = self.identity.as_mut().ok_or(io::ErrorKind::NotConnected)?;
         // A strictly higher sequence from the authenticated coordinator proves the open operation
@@ -1138,7 +1176,7 @@ impl Node {
         operation_id: &str,
         sequence: u64,
     ) -> io::Result<Identity> {
-        let link = self.rotation_link()?;
+        let link = self.owned_kernel_link()?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let mut state = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
         if state.operation_id != operation_id || state.sequence != sequence {
@@ -1195,7 +1233,7 @@ impl Node {
     /// # Errors
     /// Refuses `GotaTun`, a stale or not-yet-committed operation.
     pub(crate) fn finish_rotation(&mut self, operation_id: &str, sequence: u64) -> io::Result<()> {
-        let link = self.rotation_link()?;
+        let link = self.owned_kernel_link()?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let state = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
         if state.operation_id != operation_id || state.sequence != sequence {
@@ -1640,6 +1678,15 @@ impl Node {
                     })
                 });
             if endpoints_only {
+                let mesh_link = match self.engine_kind {
+                    EngineKind::Kernel => self.owned_kernel_link()?,
+                    EngineKind::GotaTun => self.owned_gotatun_link()?,
+                };
+                let mesh_mtu = (
+                    mesh_link.ifindex,
+                    Device::mtu(mesh_link.ifindex)?,
+                    crate::mesh_mtu::for_config(Some(&config)),
+                );
                 let mut updates = Vec::new();
                 for (id, peer) in &config.peers {
                     let previous = &old.peers[id].peer;
@@ -1661,20 +1708,31 @@ impl Node {
                 // Persist intent before installing endpoints. Restore replays it
                 // if the process stops between the save and kernel installation.
                 self.save(Some(&config), true)?;
-                let installed = match self.engine_kind {
-                    EngineKind::Kernel => {
-                        let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
-                        updates.iter().try_for_each(|(previous, endpoint)| {
-                            client.endpoint(previous.key, *endpoint)
-                        })
+                self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.1.max(mesh_mtu.2))?;
+                let installed: io::Result<()> = (|| {
+                    match self.engine_kind {
+                        EngineKind::Kernel => {
+                            let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+                            updates.iter().try_for_each(|(previous, endpoint)| {
+                                client.endpoint(previous.key, *endpoint)
+                            })?;
+                        }
+                        EngineKind::GotaTun => {
+                            self.gotatun
+                                .as_ref()
+                                .ok_or(io::ErrorKind::NotConnected)?
+                                .apply(config.clone())?;
+                        }
                     }
-                    EngineKind::GotaTun => self
-                        .gotatun
-                        .as_ref()
-                        .ok_or(io::ErrorKind::NotConnected)?
-                        .apply(config.clone())
-                        .map(|_| ()),
-                };
+                    let peers: Vec<_> = config
+                        .peers
+                        .values()
+                        .map(|policy| policy.peer.clone())
+                        .collect();
+                    Device::routes(&peers, false)
+                })();
+                // Release the engine-field borrow before updating the shared interface MTU.
+                let installed = installed.and_then(|()| self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.2));
                 if let Err(error) = installed {
                     match self.engine_kind {
                         EngineKind::Kernel => {
@@ -1697,6 +1755,16 @@ impl Node {
                                 .apply(old.clone())?;
                         }
                     }
+                    let restore: Vec<_> = old
+                        .peers
+                        .values()
+                        .map(|policy| policy.peer.clone())
+                        .collect();
+                    Device::routes(&restore, false)?;
+                    self.set_mesh_mtu(
+                        mesh_mtu.0,
+                        mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+                    )?;
                     // Keep the newer durable desired endpoints for recovery.
                     // No revision is acknowledged on failure; the server may
                     // retry it after this kernel-only rollback. Publishing old
@@ -1812,6 +1880,15 @@ impl Node {
             peer.inbound = crate::policy::rules::TrafficPolicy::None;
             peer.outbound = crate::policy::rules::TrafficPolicy::None;
         }
+        let mesh_link = match self.engine_kind {
+            EngineKind::Kernel => self.owned_kernel_link()?,
+            EngineKind::GotaTun => self.owned_gotatun_link()?,
+        };
+        let mesh_mtu = (
+            mesh_link.ifindex,
+            Device::mtu(mesh_link.ifindex)?,
+            crate::mesh_mtu::for_config(Some(&config)),
+        );
         self.apply_fence(&fence, &config)?;
         #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
@@ -1825,6 +1902,10 @@ impl Node {
             }
             #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
+            let (ifindex, previous_mtu, requested_mtu) = mesh_mtu;
+            // Keep the larger interface until per-peer route metrics are installed. The shared
+            // link stays IPv6-safe; its final size follows the largest peer budget.
+            self.set_mesh_mtu(ifindex, previous_mtu.max(requested_mtu))?;
             self.apply_peer_changes(&config, &changed, &retired_keys)?;
             Device::routes(&changed, false)?;
             if self.config.is_none()
@@ -1835,6 +1916,7 @@ impl Node {
             {
                 Device::retain_recorded_routes(&self.routes, &proposed)?;
             }
+            self.set_mesh_mtu(ifindex, requested_mtu)?;
             self.firewall.install_pending(&config)?;
             #[cfg(feature = "cutoff-measure")]
             {
@@ -1883,11 +1965,19 @@ impl Node {
                         .ok_or(io::ErrorKind::NotConnected)?
                         .apply(old.clone())?;
                 }
+                self.set_mesh_mtu(
+                    mesh_mtu.0,
+                    mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+                )?;
                 Device::routes(&restore, false)?;
                 let retained: Vec<_> = std::iter::once(old.addresses)
                     .chain(restore.iter().map(|peer| peer.addresses))
                     .collect();
                 Device::retain_recorded_routes(&self.routes, &retained)?;
+                self.set_mesh_mtu(
+                    mesh_mtu.0,
+                    mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+                )?;
                 self.firewall.apply(old)?;
             } else {
                 if self.engine_kind == EngineKind::Kernel {
@@ -1908,6 +1998,10 @@ impl Node {
                 }
                 Device::retain_recorded_routes(&self.routes, &[])?;
             }
+            self.set_mesh_mtu(
+                mesh_mtu.0,
+                mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
+            )?;
             return Err(error);
         }
         self.config = Some(config);
