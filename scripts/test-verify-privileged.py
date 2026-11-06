@@ -393,6 +393,13 @@ class RealRootProof(unittest.TestCase):
         self.assertNotIn('RUSTC_WRAPPER', names)
         self.assertTrue({'PATH', 'HOME', 'LANG'} <= set(names))
 
+    def test_proof_build_keeps_its_scratch_in_roots_dir(self):
+        """TMPDIR points into $work before the build starts (J281 note)."""
+        code = self.proof_code()
+        self.assertIn('export TMPDIR=$work/tmp', code)
+        self.assertIn('mkdir -p "$CARGO_HOME" "$TMPDIR"', code)
+        self.assertLess(code.index('export TMPDIR=$work/tmp'), code.index('root-slot-hold"'))
+
     def test_proof_script_keeps_claude_out_of_roots_process(self):
         """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
         script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()

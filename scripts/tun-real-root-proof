@@ -82,7 +82,11 @@ echo "root clone at $commit in $work"
 
 # 2. Build as root, root-owned cargo home and target, through a build slot.
 export CARGO_HOME=/root/.cache/tun-proof-cargo CARGO_TARGET_DIR=$work/target CARGO_BUILD_JOBS=4
-mkdir -p "$CARGO_HOME"
+# The build's scratch space stays in root's own dir: `nix develop` otherwise
+# leaves an empty /tmp/nix-develop-* and /tmp/nix-shell.* per run in the shared
+# /tmp (J281 counted 160 of each). Here the trap or the sweep removes them.
+export TMPDIR=$work/tmp
+mkdir -p "$CARGO_HOME" "$TMPDIR"
 cd "$work/src"
 /usr/bin/python3 "$work/src/scripts/root-slot-hold" --keep-fd 9 nix develop -c cargo test --locked -p infraternal-plugin-mesh \
     --features agent,server,relay,test-support --test gotatun_tun_owner --no-run --message-format=json \
