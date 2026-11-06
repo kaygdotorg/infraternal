@@ -116,5 +116,13 @@ test("a Take over offer reaches the wizard only in its exact shape", () => {
     offers.forEach(([kind, takeover], index) => socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: index + 1, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
       failure: { kind, message: "x", log_tail: [], takeover } }) })));
     expect(events.map((event) => event.failure?.takeover)).toEqual([{ install, live: true }, undefined, undefined, undefined, undefined]);
+    // The offer pauses its attempt like leftovers do: its challenge reaches the wizard (D359).
+    const leftovers = { challenge: "1b4e28ba-2fa1-41d2-883f-0016d3cca427", mode: "root", findings: ["x"] };
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 9, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
+      failure: { kind: "unrecognized_install", message: "x", log_tail: [], takeover: { install, live: false } }, leftovers }) }));
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 10, target: "host", attempt: 1, step: "check", message: "plain", elapsed_ms: 1,
+      failure: { kind: "unrecognized_install", message: "x", log_tail: [] }, leftovers }) }));
+    expect(events.at(-2)?.leftovers?.challenge).toBe(leftovers.challenge);
+    expect(events.at(-1)?.leftovers).toBeUndefined();
   } finally { globalThis.WebSocket = original; }
 });

@@ -243,7 +243,7 @@ function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined 
   if (failure) event.failure = failure;
   const leftovers = parseLeftovers(value.leftovers);
   // Leftovers without the matching failure kind would offer a cleanup nobody proved; ignore them.
-  if (leftovers && failure?.kind === "stale_previous_attempt") event.leftovers = leftovers;
+  if (leftovers && pausesForConfirmation(failure)) event.leftovers = leftovers;
   const authentication = parseAuthentication(value.authentication);
   if (authentication) event.authentication = authentication;
   return event;
@@ -385,6 +385,14 @@ export interface TargetView {
  */
 export const awaitingKey = (view: TargetView): boolean =>
   view.state === "failed" && view.failure?.kind === "host-key" && view.failure.host_key_changed !== true && !!view.failure.fingerprints?.length;
+/**
+ * Whether a failure pauses its attempt for the person's confirmation: earlier-setup leftovers (#169), or a finished
+ * install of another server offered for Take over (D359). Only these carry `leftovers` and its challenge.
+ */
+function pausesForConfirmation(failure: FailureDetail | undefined): boolean {
+  return failure?.kind === "stale_previous_attempt" || (failure?.kind === "unrecognized_install" && !!failure.takeover);
+}
+
 /** True while the attempt is paused on earlier-setup leftovers: it waits for the person, nothing is running. */
 export const awaitingFresh = (view: TargetView): boolean => view.state === "running" && !!view.leftovers;
 
@@ -402,7 +410,7 @@ export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
   if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, leftovers: event.leftovers, elapsedMs: event.elapsed_ms };
   // Earlier-setup leftovers are a pause inside the open attempt (a `check` event, #169): the attempt stays running and
   // waits for `startFresh`. The next event of the attempt clears the pause.
-  const paused = event.failure?.kind === "stale_previous_attempt" && !!event.leftovers;
+  const paused = pausesForConfirmation(event.failure) && !!event.leftovers;
   // Rollback and warnings may emit extra install events; the phase never moves backwards.
   return { ...base, state: "running", phase: Math.max(base.phase, phase), message: event.message, failure: paused ? event.failure : undefined, leftovers: paused ? event.leftovers : undefined, elapsedMs: event.elapsed_ms };
 }
