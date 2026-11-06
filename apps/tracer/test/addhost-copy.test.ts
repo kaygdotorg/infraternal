@@ -185,3 +185,20 @@ test("the progress row's line for every install step is one short phrase, never 
     expect(line).not.toContain("failure status");
   }
 });
+
+// J314 P2-1: the other staging refusals are not "set up elsewhere". Each cause the host named gets its own title,
+// and none offers a retry that would only meet the same files.
+test("each staging refusal has its own title and no retry", () => {
+  const titles = new Set<string>();
+  for (const refusal of ["cache", "prepared", "foreign", undefined] as const) {
+    const failure: FailureDetail = { kind: "unproven_files", message: "x", log_tail: ["Setup location: /var/lib/infraternal"], ...(refusal ? { refusal } : {}) };
+    const guide = guideFor("minipc01", failure);
+    expect(guide.title).not.toContain("set up elsewhere");
+    expect(guide.title).toContain("minipc01");
+    expect(guide.fix).toBe("none");
+    expect(guide.tone).toBe("info");
+    titles.add(guide.title);
+  }
+  expect(titles.size).toBe(4);
+});
+

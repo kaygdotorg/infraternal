@@ -21,7 +21,7 @@ import { isCanonicalUuid } from "./identifiers";
 
 export type BootstrapStep = "check" | "install" | "facts" | "connect" | "done" | "failed";
 /** Public failure categories from the server (contracts/ssh-bootstrap.md); the page for each lives in addhost/model.ts. */
-export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "no_account";
+export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account";
 export type BootstrapMode = "rootless" | "root";
 
 /** Phases a target passes through in order, before `done` (or `failed` at any point). */
@@ -67,6 +67,8 @@ export interface FailureDetail {
     /** Another server's install runs with open terminals and may be in use there: refused, not offered (D337). */
     in_use?: boolean;
   };
+  /** Which staging check refused, only on `unproven_files`, when the host named it (#394). */
+  refusal?: "cache" | "prepared" | "foreign";
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -139,7 +141,7 @@ export interface OneUseAuth { key?: string; passphrase?: string; password?: stri
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 const STEPS: readonly string[] = ["check", "install", "facts", "connect", "done", "failed"];
 /** Every failure kind the server may send; anything else is dropped rather than shown (see {@link FailureKind}). */
-const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running", "unrecognized_install", "no_account"];
+const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running", "unrecognized_install", "unproven_files", "no_account"];
 
 /** Turns a host label into a valid request-local id (`[A-Za-z0-9._-]{1,128}`). */
 export function targetIdFor(label: string): string {
@@ -188,6 +190,7 @@ function parseFailure(value: unknown): FailureDetail | undefined {
     const setupLock = parseSetupLock(value.setup_lock);
     if (setupLock) failure.setup_lock = setupLock;
   }
+  if (value.kind === "unproven_files" && (value.refusal === "cache" || value.refusal === "prepared" || value.refusal === "foreign")) failure.refusal = value.refusal;
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
   if (["get-arm64-binary", "get-x86-64-binary", "connect", "upload", "install", "join", "start", "readiness"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;

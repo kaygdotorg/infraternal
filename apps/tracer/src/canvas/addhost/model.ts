@@ -44,6 +44,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
     case "unrecognized_install": return "Already set up elsewhere";
+    case "unproven_files": return "Setup files it can't vouch for";
     case "no_account": return "Couldn't find that account on this host";
     case "install":
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
@@ -278,6 +279,18 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       happened: failure.message,
       next: "",
       fix: "retry", tone: "info",
+    };
+    // #394, J314 P2-1: a staging step met files it can't prove are infraternal's. Each check the host named has its
+    // own title; none of them is "set up elsewhere", and trying again would only meet the same files, so there is no
+    // retry. The server's sentence says what was found; the location is in Details.
+    case "unproven_files": return {
+      title: failure.refusal === "cache" ? `${name}'s download cache isn't setup's own`
+        : failure.refusal === "prepared" ? `An earlier copy of the agent is in the way on ${name}`
+        : failure.refusal === "foreign" ? `${name}'s setup folder has files setup didn't make`
+        : `Setup can't vouch for files on ${name}`,
+      happened: failure.message,
+      next: "",
+      fix: "none", tone: "info",
     };
     // #394: the login name is no account on the host (kayg on a Proxmox host). No sign-in method can help.
     // `user` is the login name the person gave; without one the server chose it. The SSH server's answer also

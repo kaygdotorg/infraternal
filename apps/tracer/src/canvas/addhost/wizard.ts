@@ -750,7 +750,8 @@ export class Wizard {
     // "Fix" opens the page that can mend this failure; plain retries and dead ends have only the retry button.
     // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
     const fix = state === "failed" ? guideFor(job.entry.label, job.view.failure).fix : "none";
-    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install";
+    // A dead end ("none") has no retry either: it would only meet the same refusal (J314 P2-1).
+    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.

@@ -562,9 +562,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     }
     await expect(failure.locator(".ah-text")).toHaveCount(0);
     await expect(inWizard(page, "Try again")).toBeVisible();
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await failure.locator(".ah-details summary").click();
     await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
-    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-failure-${viewport.width}.png`) });
   });
 
@@ -613,3 +613,25 @@ test("a failure with nothing beyond the summary shows no Details at all", async 
   await expect(failure.locator(".ah-lede")).toHaveText("Setup stopped before this host was ready.");
   await expect(failure.locator(".ah-details")).toHaveCount(0);
 });
+
+// J314 P2-1: the other staging refusals each say what was found, and offer no retry that would meet the same files.
+for (const [host, title] of [
+  ["unproven-cache.lab", "unproven-cache.lab's download cache isn't setup's own"],
+  ["unproven-prepared.lab", "An earlier copy of the agent is in the way on unproven-prepared.lab"],
+  ["unproven-foreign.lab", "unproven-foreign.lab's setup folder has files setup didn't make"],
+] as const) {
+  test(`a staging refusal is named by its cause, with no retry: ${host}`, async ({ page }) => {
+    await open(page);
+    await openWizard(page);
+    await addTyped(page, host);
+    await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(wizard(page).getByText("set up elsewhere", { exact: false })).toHaveCount(0);
+    await expect(inWizard(page, "Try again")).toHaveCount(0);
+    await expect(inWizard(page, "Retry")).toHaveCount(0);
+    await inWizard(page, "Back").click();
+    await expect(page.locator(".ah-job-retry")).toBeHidden();
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `refusal-${host.split(".")[0]}-1440.png`) });
+  });
+}
+
