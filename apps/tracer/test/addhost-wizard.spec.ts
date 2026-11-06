@@ -737,7 +737,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(inWizard(page, "Start fresh")).toHaveCount(0);
     await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `offer-${viewport.width}.png`) });
 
-    await inWizard(page, "Take over").click();
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
     const confirm = wizard(page).locator(".ah-page[data-page='takeover']");
     await expect(confirm.getByRole("heading", { name: "Take over takeover.lab?", exact: true })).toBeVisible();
     await expect(confirm.locator(".ah-lede")).toHaveText("Its old infraternal agent is stopped and set aside, and a new one is installed for this server.");
@@ -749,8 +749,10 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     // One left edge: title, lede, the key and the text line up; the value ends on the list's right edge.
     const edges = await confirm.evaluate((page) => {
       const left = (selector: string) => page.querySelector(selector)!.getBoundingClientRect().left;
-      const text = page.querySelector(".ui-kv-key .ui-kv-text")!.getBoundingClientRect();
-      const value = page.querySelector(".ui-kv-value .ui-kv-text")!.getBoundingClientRect();
+      // Marks are the glyphs (TASTE), not the text run's padded highlight box.
+      const glyphs = (selector: string) => { const range = document.createRange(); range.selectNodeContents(page.querySelector(selector)!); return range.getBoundingClientRect(); };
+      const text = glyphs(".ui-kv-key .ui-kv-text");
+      const value = glyphs(".ui-kv-value .ui-kv-text");
       const list = page.querySelector(".ui-kv")!.getBoundingClientRect();
       return { title: left(".ah-title"), lede: left(".ah-lede"), text: left(".ah-text"), key: text.left, valueRight: value.right, listRight: list.right, inside: value.left >= list.left - 0.5 };
     });
@@ -760,7 +762,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     expect(edges.valueRight).toBeLessThanOrEqual(edges.listRight + 0.5);
     await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `confirm-${viewport.width}.png`) });
 
-    await inWizard(page, "Take over").click();
+    await wizard(page).locator('[data-ah="take-over"]').click();
     await expect.poll(() => sent.filter((command) => command.action === "start-fresh").length).toBe(1);
     await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
   });
@@ -770,7 +772,7 @@ test("root: Back from the Take over confirmation changes nothing, and the row as
   await open(page);
   await openWizard(page);
   const sent = await addTakeoverAsRoot(page);
-  await inWizard(page, "Take over").click();
+  await wizard(page).locator('[data-ah="review-take-over"]').click();
   await expect(wizard(page).locator(".ah-page[data-page='takeover']")).toBeVisible();
   await inWizard(page, "Back").click();
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
@@ -790,7 +792,7 @@ test("rootless: a finished install of another server offers no Take over", async
   await addTyped(page, "takeover.lab");
   await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
-  await expect(inWizard(page, "Take over")).toHaveCount(0);
+  await expect(wizard(page).locator('[data-ah="review-take-over"], [data-ah="take-over"]')).toHaveCount(0);
   await expect(inWizard(page, "Try again")).toBeVisible();
   await page.screenshot({ path: tracerEvidencePath("addhost-takeover", "rootless-1440.png") });
 });
