@@ -25,8 +25,8 @@
 # uses its own mktemp directories, and a trap removes them on any exit,
 # including a build failure or a dropped ssh session. The build waits for a
 # shared build slot; only the slot's lock is held as `claude`, through the
-# root-owned /root/.cache/root-build-slot helper, which starts claude's
-# build-slot script with runuser.
+# commit's own scripts/root-slot-hold, which starts claude's build-slot script
+# with runuser and gives it no file of root's (stderr is /dev/null).
 #
 # Usage, from `code` (which can ssh to root@compute01), with a full commit id:
 #   scripts/tun-real-root-proof <40-hex commit>
@@ -80,9 +80,9 @@ echo "root clone at $commit in $work"
 export CARGO_HOME=/root/.cache/tun-proof-cargo CARGO_TARGET_DIR=$work/target CARGO_BUILD_JOBS=4
 mkdir -p "$CARGO_HOME"
 cd "$work/src"
-/usr/bin/python3 /root/.cache/root-build-slot nix develop -c cargo test --locked -p infraternal-plugin-mesh \
+/usr/bin/python3 "$work/src/scripts/root-slot-hold" nix develop -c cargo test --locked -p infraternal-plugin-mesh \
     --features agent,server,relay,test-support --test gotatun_tun_owner --no-run --message-format=json \
-    > "$work/build.json" 2> "$work/build.log" || { tail -20 "$work/build.log" >&2; exit 1; }
+    > "$work/build.json" 2> "$work/build.log" || { tail -20 "$work/build.log" | cat -v >&2; exit 1; }
 binary=$(python3 -c 'import json, sys
 for line in open(sys.argv[1]):
     m = json.loads(line) if line.startswith("{") else {}

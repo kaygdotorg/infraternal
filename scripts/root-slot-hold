@@ -1,0 +1,63 @@
+#!/usr/bin/python3
+"""Run one root command while holding a shared build slot as `claude` (#344, D351).
+
+What it is for: build slots belong to the `claude` build account (its
+`~/infraternal-ops/build-slot` script queues every heavy job on a VM). A root
+proof, such as `scripts/tun-real-root-proof`, must wait its turn like
+everyone else, but must not let anything `claude` controls into root's
+process. This helper starts claude's build-slot **as claude** (`runuser`),
+waits for one readiness line from it over a pipe, runs the given command as
+root, then releases the slot.
+
+What claude's side can and can't do: it controls only when the slot is
+granted (timing). It gets stdin and stdout pipes to this helper and nothing
+else. Its stderr is /dev/null, so it can't write into root's build log
+(J277, 81454 P3-3), and every other descriptor is closed (`close_fds`), so it
+can't hold root's proof lock either. Root never executes claude's script;
+the command root runs comes from root's own arguments.
+
+It replaces the host-only `/root/.cache/root-build-slot`, which passed root's
+stderr to claude's process. Run it from the reviewed clone root is building.
+
+Usage (as root): root-slot-hold <command> [args...]
+"""
+import subprocess
+import sys
+
+BUILD_SLOT = '/home/claude/infraternal-ops/build-slot'
+READY = b'ROOT_SLOT_READY\n'
+# The waiter runs as claude inside its slot: print one line, then block until
+# root writes a byte (or closes the pipe) to release the slot.
+WAITER = ['/usr/bin/python3', '-c',
+          'import sys; sys.stdout.buffer.write(%r); sys.stdout.flush(); sys.stdin.buffer.read(1)' % READY]
+
+
+def hold(command):
+    """Hold a slot as claude, run `command` as this process, release; return its exit code."""
+    print('root-slot-hold: waiting for a build slot', file=sys.stderr, flush=True)
+    waiter = subprocess.Popen(['runuser', '-u', 'claude', '--', BUILD_SLOT, *WAITER],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              close_fds=True)
+    try:
+        if waiter.stdout.readline() != READY:
+            print('root-slot-hold: build slot admission failed', file=sys.stderr)
+            return 1
+        return subprocess.run(['nice', '-n', '10', *command], check=False).returncode
+    finally:
+        try:
+            waiter.stdin.write(b'x')
+            waiter.stdin.close()
+        except BrokenPipeError:
+            pass
+        waiter.wait()
+
+
+def main():
+    """Check the arguments and hold the slot around them."""
+    if len(sys.argv) < 2:
+        raise SystemExit('usage: root-slot-hold <command> [args...]')
+    return hold(sys.argv[1:])
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

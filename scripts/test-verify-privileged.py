@@ -31,6 +31,7 @@ def load(name):
 
 p = load('verify-privileged')
 guard = load('elf-runpath-guard')
+slot_hold = load('root-slot-hold')
 
 
 def userns_available():
@@ -256,6 +257,38 @@ class RealRootProof(unittest.TestCase):
         self.assertLess(sweep, code.index('work=$(mktemp -d /root/tun-proof.'))
         self.assertIn('! -L $stale', code)
         self.assertIn('$(stat -c %u "$stale") == 0', code)
+
+    def test_slot_holder_gives_claude_no_file_of_roots(self):
+        """claude's waiter gets pipes only: stderr /dev/null, other fds closed (J277 P3-3)."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = slot_hold.READY
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter) as popen, \
+                mock.patch.object(slot_hold.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess([], 3)) as run:
+            self.assertEqual(slot_hold.hold(['cargo', 'build']), 3)
+        argv, kwargs = popen.call_args
+        self.assertEqual(argv[0][:4], ['runuser', '-u', 'claude', '--'])
+        self.assertIs(kwargs['stderr'], subprocess.DEVNULL)
+        self.assertIs(kwargs['stdout'], subprocess.PIPE)
+        self.assertIs(kwargs['stdin'], subprocess.PIPE)
+        self.assertTrue(kwargs['close_fds'])
+        self.assertEqual(run.call_args[0][0], ['nice', '-n', '10', 'cargo', 'build'])
+        waiter.stdin.write.assert_called_once()
+
+    def test_slot_holder_runs_nothing_without_a_slot(self):
+        """If claude's side never reports ready, root's command does not run."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = b''
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter), \
+                mock.patch.object(slot_hold.subprocess, 'run', side_effect=AssertionError('ran without a slot')):
+            self.assertEqual(slot_hold.hold(['true']), 1)
+
+    def test_proof_uses_the_reviewed_slot_holder(self):
+        """The proof runs the commit's own root-slot-hold, not a host-only helper, and escapes its log tail."""
+        code = self.proof_code()
+        self.assertIn('/usr/bin/python3 "$work/src/scripts/root-slot-hold" nix develop', code)
+        self.assertNotIn('/root/.cache/root-build-slot', code)
+        self.assertIn('tail -20 "$work/build.log" | cat -v', code)
 
     def test_proof_script_keeps_claude_out_of_roots_process(self):
         """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
