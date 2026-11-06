@@ -95,6 +95,29 @@ interface FrameTrace {
   mutations: AppearanceMutation[];
 }
 
+/** The look window spans the changed frame and twenty following frames, enough to cover the page's short appearance transition. */
+const APPEARANCE_FRAME_WINDOW = 20;
+
+/** Waits for a fixed number of rendered frames without tying the spec to a wall-clock sleep. */
+async function waitForFrames(page: Page, count: number): Promise<void> {
+  await page.evaluate((frames) => new Promise<void>((resolve) => {
+    const next = (): void => { if (frames-- <= 1) resolve(); else requestAnimationFrame(next); };
+    requestAnimationFrame(next);
+  }), count);
+}
+
+/** Selects the changed frame and its following transition frames for one visible appearance update. */
+function measureAppearanceFrames(trace: FrameTrace, attribute: string, value: string): { mutations: AppearanceMutation[]; samples: FrameSample[] } {
+  const mutations = trace.mutations.filter((item) => item.attribute === attribute && item.value === value);
+  const indexes = new Set<number>();
+  for (const mutation of mutations) {
+    const changedAt = trace.samples.findIndex(({ from, to }) => from <= mutation.at && mutation.at <= to);
+    if (changedAt < 0) continue;
+    for (let index = changedAt; index <= changedAt + APPEARANCE_FRAME_WINDOW && index < trace.samples.length; index++) indexes.add(index);
+  }
+  return { mutations, samples: [...indexes].sort((left, right) => left - right).map((index) => trace.samples[index]!) };
+}
+
 /** Records rendered frame intervals and appearance changes until {@link stopFrameCapture} ends the sample. */
 async function startFrameCapture(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -201,33 +224,40 @@ test("theme and font changes reach the same account live and after reload withou
 
     await startFrameCapture(b);
     await choosePaletteValue(a, "Theme: Solid");
+    await expect.poll(async () => {
+      const look = (await cache(b)).canonical.look;
+      return look?.selected === "solid";
+    }, { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => b.locator("html").getAttribute("data-look"), { timeout: 30_000 }).toBe("solid");
+    await waitForFrames(b, APPEARANCE_FRAME_WINDOW);
+    const themeTrace = await stopFrameCapture(b);
+
+    await startFrameCapture(b);
     await choosePaletteValue(a, "Fira Code");
     await expect.poll(async () => {
       const look = (await cache(b)).canonical.look;
       return look?.selected === "solid" && look.themes.find((theme) => theme.id === "solid")?.font === "fira-code";
     }, { timeout: 30_000 }).toBe(true);
-    await expect.poll(() => b.locator("html").getAttribute("data-look"), { timeout: 30_000 }).toBe("solid");
     await expect.poll(() => b.locator("html").getAttribute("data-font"), { timeout: 30_000 }).toBe("fira-code");
-    const frameTrace = await stopFrameCapture(b);
-    const frameIntervalsMs = frameTrace.samples.map((sample) => sample.intervalMs);
-    const appearanceMutations = frameTrace.mutations.filter(({ attribute }) => attribute === "data-look" || attribute === "data-font");
-    const relevantSampleIndexes = new Set<number>();
-    for (const mutation of appearanceMutations) {
-      const changedAt = frameTrace.samples.findIndex(({ from, to }) => from <= mutation.at && mutation.at <= to);
-      if (changedAt < 0) continue;
-      // Include the interval containing the DOM change and the next frame, when its new styles are painted.
-      for (const index of [changedAt, changedAt + 1]) if (index < frameTrace.samples.length) relevantSampleIndexes.add(index);
-    }
-    const appearanceFrames = [...relevantSampleIndexes].sort((left, right) => left - right).map((index) => frameTrace.samples[index]!);
+    await waitForFrames(b, APPEARANCE_FRAME_WINDOW);
+    const fontTrace = await stopFrameCapture(b);
+    const themeFrames = measureAppearanceFrames(themeTrace, "data-look", "solid");
+    const fontFrames = measureAppearanceFrames(fontTrace, "data-font", "fira-code");
+    const frameTraces = [themeTrace, fontTrace];
+    const appearanceFrames = [...themeFrames.samples, ...fontFrames.samples];
+    const frameIntervalsMs = frameTraces.flatMap((trace) => trace.samples.map(({ intervalMs }) => intervalMs));
     const appearanceFrameIntervalsMs = appearanceFrames.map(({ intervalMs }) => intervalMs);
     const maxFrameIntervalMs = Math.max(0, ...appearanceFrameIntervalsMs);
     const framesOver20ms = appearanceFrameIntervalsMs.filter((interval) => interval > 20).length;
     const allFramesOver20ms = frameIntervalsMs.filter((interval) => interval > 20).length;
     expect(frameIntervalsMs.length).toBeGreaterThan(10);
-    expect(appearanceMutations.some(({ attribute, value }) => attribute === "data-look" && value === "solid")).toBe(true);
-    expect(appearanceMutations.some(({ attribute, value }) => attribute === "data-font" && value === "fira-code")).toBe(true);
-    expect(appearanceFrames.length).toBeGreaterThan(0);
-    console.log(`APPEARANCE_FRAMES ${JSON.stringify({ visibility: [...new Set(frameTrace.samples.map(({ visibility }) => visibility))], appearanceMutations, sampledAppearanceIntervalsMs: appearanceFrameIntervalsMs, allFrameSamples: frameIntervalsMs.length, allFramesOver20ms, maxAppearanceFrameIntervalMs: maxFrameIntervalMs, appearanceFramesOver20ms: framesOver20ms })}`);
+    expect(themeFrames.mutations.length).toBeGreaterThan(0);
+    expect(fontFrames.mutations.length).toBeGreaterThan(0);
+    expect(themeFrames.samples.length).toBeGreaterThan(0);
+    expect(fontFrames.samples.length).toBeGreaterThan(0);
+    console.log(`APPEARANCE_FRAMES ${JSON.stringify({ visibility: [...new Set(frameTraces.flatMap((trace) => trace.samples.map(({ visibility }) => visibility)))], theme: { mutations: themeFrames.mutations, intervalsMs: themeFrames.samples.map(({ intervalMs }) => intervalMs) }, font: { mutations: fontFrames.mutations, intervalsMs: fontFrames.samples.map(({ intervalMs }) => intervalMs) }, allFrameSamples: frameIntervalsMs.length, allFramesOver20ms, maxAppearanceFrameIntervalMs: maxFrameIntervalMs, appearanceFramesOver20ms: framesOver20ms })}`);
+    expect(themeFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote theme application and its 20 following frames stay within budget").toBe(0);
+    expect(fontFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote font application and its 20 following frames stay within budget").toBe(0);
     expect(framesOver20ms).toBe(0);
     expect(await cameraTransform(a)).toBe(aCamera);
     expect(await cameraTransform(b)).toBe(bCamera);
