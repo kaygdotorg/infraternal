@@ -35,8 +35,14 @@ import select
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from mesh_rotation_latency import (
+    cpu_mask_for_namespace,
+    parse_ping_reply,
+    summarize_latency,
+)
 
 HOSTS = {
     "A": "0a000000-0000-4000-8000-00000000000a",
@@ -47,7 +53,8 @@ RELAYS = ["relay-1.mesh.test", "relay-2.mesh.test"]
 RELAY_ADDRESSES = ["198.51.100.11:3478", "198.51.100.12:3478"]
 MESH = {"A": ("10.254.0.1", "fd00:220::1"), "B": ("10.254.0.2", "fd00:220::2"),
         "C": ("10.254.0.3", "fd00:220::3")}
-LABEL = f"build host, {platform.machine()}, not perf evidence"
+LABEL = os.environ.get("RELAY_PROOF_LABEL", f"build host, {platform.machine()}, not perf evidence")
+CPU_SCOPE_RECEIPTS = []
 # ip, nft, sysctl and rmmod live in the system directories even when a
 # toolchain environment trimmed PATH.
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/sbin:/sbin:/usr/bin:/bin"
@@ -61,8 +68,113 @@ def run(*args, check=True, data=None):
     return result.stdout
 
 
+def namespace_scope(namespace):
+    """Return this namespace's D348 mask and transient scope name when pinning is enabled."""
+    if os.environ.get("H2H_CPUSET_PIN") != "1":
+        return None
+    mask = cpu_mask_for_namespace(
+        namespace,
+        os.environ.get("H2H_CPUSET_A", "1-2"),
+        os.environ.get("H2H_CPUSET_B", "3-4"),
+        os.environ.get("H2H_CPUSET_HOUSEKEEPING", "0,5"),
+    )
+    unit = f"j279-{namespace}-{os.getpid()}-{random.randrange(1 << 24)}.scope"
+    return {"mask": mask, "unit": unit, "namespace": namespace}
+
+
+def namespace_command(namespace, *args):
+    """Build a namespace command in its D348 cpuset, or leave ordinary proofs unscoped."""
+    command = ["ip", "netns", "exec", namespace, *args]
+    scope = namespace_scope(namespace)
+    if scope is None:
+        return command
+    return [
+        "systemd-run", "--scope", "--quiet", "--collect", "--slice=perf.slice",
+        f"--unit={scope['unit']}", f"--property=AllowedCPUs={scope['mask']}",
+        "--", "taskset", "-c", scope["mask"], *command,
+    ]
+
+
+def spawn_namespace_process(namespace, *args, **kwargs):
+    """Start a fixture, load or probe process and verify its live D348 scope when pinned."""
+    scope = namespace_scope(namespace)
+    command = ["ip", "netns", "exec", namespace, *args]
+    if scope is None:
+        process = subprocess.Popen(command, **kwargs)
+        return process, process.pid
+
+    descriptor, pid_path = tempfile.mkstemp(prefix="j279-scope-pid-")
+    os.close(descriptor)
+    wrapper = [
+        "/bin/bash", "-c",
+        'pidfile=$1; shift; printf "%s\\n" "$$" > "$pidfile"; exec "$@"',
+        "j279-scope", pid_path, "taskset", "-c", scope["mask"], *command,
+    ]
+    launcher = [
+        "systemd-run", "--scope", "--quiet", "--collect", "--slice=perf.slice",
+        f"--unit={scope['unit']}", f"--property=AllowedCPUs={scope['mask']}", "--", *wrapper,
+    ]
+    process = subprocess.Popen(launcher, **kwargs)
+    try:
+        deadline = time.monotonic() + 10
+        process_pid = None
+        while time.monotonic() < deadline:
+            try:
+                with open(pid_path, encoding="utf-8") as pid_file:
+                    contents = pid_file.read().strip()
+                if contents:
+                    process_pid = int(contents)
+                    break
+            except FileNotFoundError:
+                pass
+            if process.poll() is not None:
+                raise RuntimeError(f"D348 scope {scope['unit']} exited before publishing its command PID")
+            # sleep: give the transient scope time to publish the process ID.
+            time.sleep(0.01)
+        if process_pid is None:
+            raise RuntimeError(f"D348 scope {scope['unit']} did not publish its command PID")
+
+        status = open(f"/proc/{process_pid}/status", encoding="utf-8").read()
+        allowed = next(
+            line.split(":", 1)[1].strip()
+            for line in status.splitlines()
+            if line.startswith("Cpus_allowed_list:")
+        )
+        cgroup = next(
+            line.split("::", 1)[1].strip()
+            for line in open(f"/proc/{process_pid}/cgroup", encoding="utf-8").read().splitlines()
+            if line.startswith("0::")
+        )
+        effective_path = f"/sys/fs/cgroup{cgroup}/cpuset.cpus.effective"
+        with open(effective_path, encoding="utf-8") as effective_file:
+            effective = effective_file.read().strip()
+        if allowed != scope["mask"] or effective != scope["mask"]:
+            raise RuntimeError(
+                f"D348 scope {scope['unit']} placement mismatch: "
+                f"allowed={allowed}, cpuset={effective}, expected={scope['mask']}"
+            )
+        CPU_SCOPE_RECEIPTS.append({
+            "namespace": namespace,
+            "pid": process_pid,
+            "unit": scope["unit"],
+            "cpus_allowed_list": allowed,
+            "cpuset_cpus_effective": effective,
+        })
+        return process, process_pid
+    except BaseException:
+        subprocess.run(["systemctl", "stop", scope["unit"]], capture_output=True)
+        if process.poll() is None:
+            process.wait(timeout=5)
+        raise
+    finally:
+        try:
+            os.unlink(pid_path)
+        except FileNotFoundError:
+            pass
+
+
 def ns(name, *args, **kwargs):
-    return run("ip", "netns", "exec", name, *args, **kwargs)
+    return run(*namespace_command(name, *args), **kwargs)
 
 
 def snapshot():
@@ -89,8 +201,8 @@ class Fixture:
 
     def __init__(self, namespace, binary, mode, config=None):
         self.name = f"{mode}@{namespace}"
-        self.process = subprocess.Popen(
-            ["ip", "netns", "exec", namespace, binary, mode],
+        self.process, self.cpu_pid = spawn_namespace_process(
+            namespace, binary, mode,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.lines = queue.Queue()
         self.events = []
@@ -218,8 +330,7 @@ print(json.dumps({"bytes": sent, "sha256": h.hexdigest(), "seconds": time.monoto
 
 def stream(sender_ns, receiver_ns, address, port, size, during=None, pace_seconds=0.0, gate_after=0):
     """Send `size` deterministic random bytes over TCP; returns both ends' reports."""
-    receiver_args = ["ip", "netns", "exec", receiver_ns, sys.executable, "-c", RECEIVER,
-                     address, str(port)]
+    receiver_args = [sys.executable, "-c", RECEIVER, address, str(port)]
     gate_read = gate_write = resume_read = resume_write = None
     if gate_after:
         if not during:
@@ -227,18 +338,18 @@ def stream(sender_ns, receiver_ns, address, port, size, during=None, pace_second
         gate_read, gate_write = os.pipe()
         resume_read, resume_write = os.pipe()
         receiver_args.extend([str(gate_after), str(gate_write), str(resume_read)])
-    receiver = subprocess.Popen(receiver_args, stdout=subprocess.PIPE, text=True,
-                                pass_fds=tuple(fd for fd in (gate_write, resume_read) if fd is not None))
+    receiver, _ = spawn_namespace_process(
+        receiver_ns, *receiver_args, stdout=subprocess.PIPE, text=True,
+        pass_fds=tuple(fd for fd in (gate_write, resume_read) if fd is not None))
     if gate_after:
         os.close(gate_write); os.close(resume_read)
     if receiver.stdout.readline().strip() != "ready":
         raise RuntimeError("receiver failed")
-    sender_args = ["ip", "netns", "exec", sender_ns, sys.executable, "-c", SENDER,
-                   address, str(port), str(size)]
+    sender_args = [sys.executable, "-c", SENDER, address, str(port), str(size)]
     if pace_seconds:
         sender_args.append(str(pace_seconds))
-    sender = subprocess.Popen(sender_args,
-                              stdout=subprocess.PIPE, text=True)
+    sender, _ = spawn_namespace_process(sender_ns, *sender_args,
+                                        stdout=subprocess.PIPE, text=True)
     try:
         if during:
             if gate_after:
@@ -278,9 +389,54 @@ def ping(namespace, address, count=20):
             "rtt_min_avg_max_ms": [float(x) for x in match.groups()[:3]] if match else None}
 
 
+def start_latency_probe(namespace, address, count=3600, interval_seconds=0.01):
+    """Start one fixed-rate D348 probe window and drain replies without stalling ping."""
+    args = ["ping", "-n", "-D", "-i", str(interval_seconds), "-c", str(count), "-W", "1", address]
+    process, cpu_pid = spawn_namespace_process(
+        namespace, *args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines = []
+
+    def drain():
+        for line in process.stdout:
+            lines.append(line)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+    return {"count": count, "interval_seconds": interval_seconds, "lines": lines,
+            "cpu_pid": cpu_pid, "process": process, "reader": reader}
+
+
+def finish_latency_probe(probe):
+    """Return loss-aware p50/p99 for a completed probe window without hiding packet loss."""
+    process = probe["process"]
+    process.wait(timeout=probe["count"] * probe["interval_seconds"] + 15)
+    probe["reader"].join(timeout=5)
+    if probe["reader"].is_alive():
+        raise RuntimeError("the latency probe output reader did not finish")
+    output = "".join(probe["lines"])
+    summary = re.search(
+        r"(?m)^(\d+) packets transmitted, (\d+) received, ([0-9.]+)% packet loss",
+        output,
+    )
+    if process.returncode not in (0, 1) or summary is None:
+        raise RuntimeError(f"ping probe failed: exit={process.returncode}; output={output[-2000:]}")
+    sent, received = int(summary.group(1)), int(summary.group(2))
+    replies = [sample for line in probe["lines"] if (sample := parse_ping_reply(line)) is not None]
+    if sent != probe["count"] or received != len(replies):
+        raise RuntimeError(
+            f"ping probe summary mismatch: sent={sent}/{probe['count']}, "
+            f"received={received}/{len(replies)}"
+        )
+    report = summarize_latency(range(1, sent + 1), [(sequence, rtt) for _, sequence, rtt in replies])
+    return {"interval_seconds": probe["interval_seconds"], **report}
+
+
 def topology():
-    run("mount", "-t", "tmpfs", "none", "/run")
-    os.makedirs("/run/netns", exist_ok=True)
+    if os.environ.get("H2H_CPUSET_PIN") == "1":
+        run("mount", "-t", "tmpfs", "-o", "mode=0700", "tmpfs", "/run/netns")
+    else:
+        run("mount", "-t", "tmpfs", "none", "/run")
+        os.makedirs("/run/netns", exist_ok=True)
     names = ["inet", "relay1", "relay2", "natA", "natB", "natA2", "nodeA", "nodeB", "nodeC"]
     for name in names:
         run("ip", "netns", "add", name)
@@ -327,8 +483,16 @@ def full_cone(port):
        f"add rule ip nat pre iifname pub udp dport {port} dnat to 10.1.0.2")
 
 
-def inner(binary):
+def inner(binary, report_path=None):
     results = {"label": LABEL, "kernel": os.uname().release, "cores": os.cpu_count()}
+    if os.environ.get("H2H_CPUSET_PIN") == "1":
+        CPU_SCOPE_RECEIPTS.clear()
+        results["cpu_placement"] = {
+            "side_a": os.environ.get("H2H_CPUSET_A", "1-2"),
+            "side_b": os.environ.get("H2H_CPUSET_B", "3-4"),
+            "housekeeping": os.environ.get("H2H_CPUSET_HOUSEKEEPING", "0,5"),
+            "scope": "systemd AllowedCPUs plus matching task affinity",
+        }
     fixtures = []
     try:
         topology()
@@ -472,9 +636,9 @@ def inner(binary):
         results["ping_relayed"] = ping("nodeA", MESH["B"][0])
         results["ping_direct"] = ping("nodeA", MESH["C"][0])
         before = a.ask("\"stats\"", "stats")
-        cpu_a, cpu_b = cpu_seconds(a.process.pid), cpu_seconds(b.process.pid)
+        cpu_a, cpu_b = cpu_seconds(a.cpu_pid), cpu_seconds(b.cpu_pid)
         sent, got = stream("nodeA", "nodeB", MESH["B"][0], 5201, 32 << 20)
-        cpu_a, cpu_b = cpu_seconds(a.process.pid) - cpu_a, cpu_seconds(b.process.pid) - cpu_b
+        cpu_a, cpu_b = cpu_seconds(a.cpu_pid) - cpu_a, cpu_seconds(b.cpu_pid) - cpu_b
         after_relayed = a.ask("\"stats\"", "stats")
         assert sent["sha256"] == got["sha256"] and got["bytes"] == 32 << 20, (sent, got)
         packets_a = (after_relayed["sent"] + after_relayed["received"]) - (before["sent"] + before["received"])
@@ -501,12 +665,19 @@ def inner(binary):
         # 5. The same relayed TCP stream survives a live GotaTun key rotation.
         rotation = {"operation_id": "00000000-0000-4000-8000-000000003679", "sequence": 1}
         rotation_state = {}
+        rotation_latency = {
+            "before_probe": start_latency_probe("nodeA", MESH["B"][0]),
+            "before": None,
+            "after_probe": None,
+            "after": None,
+        }
 
         def rotate_during_stream(sender, gate_read, resume_write):
             """Rotate B while the receiver holds the same relayed TCP stream open."""
-            ready, _, _ = select.select([gate_read], [], [], 30)
+            ready, _, _ = select.select([gate_read], [], [], 60)
             assert ready and os.read(gate_read, 1) == b"G", "receiver did not reach the rotation gate"
             assert sender.poll() is None, "the rotation stream finished before the key switch"
+            rotation_latency["before"] = finish_latency_probe(rotation_latency["before_probe"])
             started_rotation = time.monotonic()
             prepared = b.ask({"rotation_prepare": rotation}, "rotation_prepared")
             candidate = prepared["public_key"]
@@ -514,7 +685,7 @@ def inner(binary):
             a.ask({"peers": [
                 peer("B", f"10.2.0.2:{identity['B']['port']}", key=candidate,
                      previous_key=identity["B"]["public_key"], previous_active=True),
-                peer("C", f"198.51.100.31:{identity['C']['port']}")], "peers")
+                peer("C", f"198.51.100.31:{identity['C']['port']}")]}, "peers")
             overlap = a.ask("\"stats\"", "stats")
             assert identity["B"]["public_key"] in overlap["peer_keys"] and candidate in overlap["peer_keys"], overlap
 
@@ -523,10 +694,10 @@ def inner(binary):
             a.ask({"peers": [
                 peer("B", f"10.2.0.2:{identity['B']['port']}", key=candidate,
                      previous_key=identity["B"]["public_key"], previous_active=False),
-                peer("C", f"198.51.100.31:{identity['C']['port']}")], "peers")
+                peer("C", f"198.51.100.31:{identity['C']['port']}")]}, "peers")
             a.ask({"peers": [
                 peer("B", f"10.2.0.2:{identity['B']['port']}", key=candidate),
-                peer("C", f"198.51.100.31:{identity['C']['port']}")], "peers")
+                peer("C", f"198.51.100.31:{identity['C']['port']}")]}, "peers")
             b.ask({"rotation_finish": rotation}, "rotation_finished")
             rotation_state.update({
                 "old_key": identity["B"]["public_key"],
@@ -534,12 +705,14 @@ def inner(binary):
                 "overlap_had_both_keys": True,
                 "stream_gate_rotation_ms": round((time.monotonic() - started_rotation) * 1000, 1),
             })
+            rotation_latency["after_probe"] = start_latency_probe("nodeA", MESH["B"][0])
             os.write(resume_write, b"R")
 
         a.drain()
         b.drain()
         sent, got = stream("nodeA", "nodeB", MESH["B"][0], 5205, 128 << 20,
-                           during=rotate_during_stream, gate_after=1 << 20)
+                           during=rotate_during_stream, pace_seconds=0.036, gate_after=64 << 20)
+        rotation_latency["after"] = finish_latency_probe(rotation_latency["after_probe"])
         assert sent["sha256"] == got["sha256"] and got["bytes"] == 128 << 20, (sent, got)
         results["rotation_during_relayed_stream"] = {
             **rotation_state,
@@ -547,6 +720,15 @@ def inner(binary):
             "mbit_s": round(got["bytes"] * 8 / got["seconds"] / 1e6, 1),
             "max_gap_ms": round(got["max_gap_ms"], 1),
             "stream_seconds": round(got["seconds"], 2),
+        }
+        results["rotation_packet_latency"] = {
+            "probe_count_per_window": 3600,
+            "probe_interval_seconds": 0.01,
+            "flow_count": 1,
+            "traffic": "one paced 128 MiB relayed TCP stream",
+            "before_rotation_under_load": rotation_latency["before"],
+            "after_rotation_under_load": rotation_latency["after"],
+            "loss_rule": "any lost probe makes the loss-aware p99 infinite",
         }
 
         # 6. Relay 1 killed mid-stream: capture link state and counters on relay 2.
@@ -648,7 +830,13 @@ def inner(binary):
             with open(os.environ["RELAY_PROOF_STDERR"], "w") as out:
                 for fixture in fixtures:
                     out.write(f"== {fixture.name}\n{''.join(fixture.errors)}\n")
-    print(json.dumps(results, indent=2), flush=True)
+    if os.environ.get("H2H_CPUSET_PIN") == "1":
+        results["cpu_scope_receipts"] = CPU_SCOPE_RECEIPTS
+    report = json.dumps(results, indent=2)
+    if report_path:
+        with open(report_path, "w", encoding="utf-8") as output:
+            output.write(report + "\n")
+    print(report, flush=True)
 
 
 # Modules the topology can make the kernel load. Only these are ever unloaded,
@@ -671,10 +859,18 @@ def unload(added):
     return sorted(added)
 
 
-def outer(binary):
+def outer(binary, report_path=None):
     before = snapshot()
-    status = subprocess.run(["unshare", "-Urnm", "--propagation", "private", sys.executable,
-                             os.path.abspath(__file__), "--inner", binary]).returncode
+    pinned = os.environ.get("H2H_CPUSET_PIN") == "1"
+    if pinned and os.geteuid() != 0:
+        raise RuntimeError("D348 cpuset scopes require the root perf-run wrapper")
+    namespaces = ["-mn"] if pinned else ["-Urnm"]
+    command = ["unshare", *namespaces, "--propagation", "private", sys.executable,
+               os.path.abspath(__file__), "--inner"]
+    if report_path:
+        command.extend(["--report", report_path])
+    command.append(binary)
+    status = subprocess.run(command).returncode
     added = [m for m in snapshot()["modules"] if m not in before["modules"]]
     print(json.dumps({"modules_loaded_by_run": added, "still_loaded": unload(added)}), flush=True)
     after = snapshot()
@@ -694,8 +890,11 @@ def outer(binary):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--report", help="write the inner run's JSON report to this path")
     parser.add_argument("fixture", help="absolute path of the relay_fixture example")
     args = parser.parse_args()
     if not os.path.isabs(args.fixture):
         parser.error("fixture path must be absolute")
-    (inner if args.inner else outer)(args.fixture)
+    if args.report and not os.path.isabs(args.report):
+        parser.error("report path must be absolute")
+    (inner if args.inner else outer)(args.fixture, args.report)
