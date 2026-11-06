@@ -626,14 +626,23 @@ impl RuntimeState {
         let policy = self
             .config
             .as_ref()
-            .and_then(|config| config.peers.values().find(|peer| peer.peer.key == key))
+            .and_then(|config| {
+                config
+                    .peers
+                    .values()
+                    .find(|policy| active_peer_key(&policy.peer) == key)
+            })
             .ok_or(io::ErrorKind::NotFound)?;
-        let mut peer = peer_for_policy(policy)?;
-        peer.endpoint = Some(endpoint);
+        let mut peers = peer_for_policy(policy)?;
+        let active = peers
+            .iter_mut()
+            .find(|peer| peer.public_key.as_bytes() == &key.0)
+            .ok_or(io::ErrorKind::NotFound)?;
+        active.endpoint = Some(endpoint);
         self.device
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
-            .write(async |device| device.add_or_update_peers([peer]).await)
+            .write(async |device| device.add_or_update_peers(peers).await)
             .await
             .map_err(|_| io::Error::other("GotaTun relay endpoint could not be installed."))
     }
@@ -650,23 +659,29 @@ impl RuntimeState {
         if has_session {
             return self.set_endpoint(key, endpoint).await;
         }
-        let policy = self
-            .config
-            .as_ref()
-            .and_then(|config| config.peers.values().find(|peer| peer.peer.key == key))
-            .ok_or(io::ErrorKind::NotFound)?;
-        let mut peer = peer_for_policy(policy)?;
+        let policy =
+            self.config
+                .as_ref()
+                .and_then(|config| {
+                    config.peers.values().find(|policy| {
+                        policy.peer.key == key || policy.peer.previous_key == Some(key)
+                    })
+                })
+                .ok_or(io::ErrorKind::NotFound)?;
+        let mut peers = peer_for_policy(policy)?;
         // Drop the direct-path attempt still in flight: GotaTun's forced handshake would wait
         // for it rather than send a fresh initiation. An endpoint-less responder learns the
         // relay shim's address from the authenticated initiation, so only one side initiates.
-        peer.endpoint = None;
+        if let Some(active) = peers.iter_mut().find(|peer| !peer.allowed_ips.is_empty()) {
+            active.endpoint = None;
+        }
         let public_key = X25519PublicKey::from(key.0);
         self.device
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
             .write(async |device| {
                 device.remove_peer(&public_key).await;
-                device.add_or_update_peers([peer]).await;
+                device.add_or_update_peers(peers).await;
             })
             .await
             .map_err(|_| io::Error::other("GotaTun relay peer could not be reset."))
@@ -745,13 +760,9 @@ impl RuntimeState {
             self.config = Some(config);
             return Ok(self.info.clone());
         }
-        let desired: BTreeSet<_> = config
-            .peers
-            .values()
-            .map(|policy| policy.peer.key)
-            .collect();
+        let desired: BTreeSet<_> = config.peers.values().flat_map(policy_keys).collect();
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let changed = config
+        let changed_policies = config
             .peers
             .iter()
             .filter(|(id, policy)| {
@@ -762,12 +773,16 @@ impl RuntimeState {
             })
             .map(|(_, policy)| peer_for_policy(policy))
             .collect::<io::Result<Vec<_>>>()?;
-        let retired: Vec<_> = self
+        let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
+        let previous_keys: BTreeSet<_> = self
             .config
             .iter()
             .flat_map(|old| old.peers.values())
-            .map(|policy| policy.peer.key)
-            .filter(|key| !desired.contains(key))
+            .flat_map(policy_keys)
+            .collect();
+        let retired: Vec<_> = previous_keys
+            .difference(&desired)
+            .copied()
             .map(|key| X25519PublicKey::from(key.0))
             .collect();
         if !changed.is_empty() || !retired.is_empty() {
@@ -929,22 +944,67 @@ impl IpRecv for LinuxPacketIo {
 }
 
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
-    config.peers.values().map(peer_for_policy).collect()
+    let peers = config
+        .peers
+        .values()
+        .map(peer_for_policy)
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(peers.into_iter().flatten().collect())
 }
 
-fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<WireGuardPeer> {
+/// Return both identities during rotation and assign routes only to the active identity.
+fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
-    let addresses = [
+    let addresses = vec![
         IpNetwork::new(IpAddr::V4(peer.addresses.ipv4), 32)
             .map_err(|_| io::ErrorKind::InvalidData)?,
         IpNetwork::new(IpAddr::V6(peer.addresses.ipv6), 128)
             .map_err(|_| io::ErrorKind::InvalidData)?,
     ];
-    let mut wireguard_peer =
-        WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
-    wireguard_peer.endpoint = peer.endpoint;
-    wireguard_peer.keepalive = Some(25);
-    Ok(wireguard_peer)
+    let Some(previous) = peer.previous_key.filter(|key| *key != peer.key) else {
+        let mut current =
+            WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
+        current.endpoint = peer.endpoint;
+        current.keepalive = Some(25);
+        return Ok(vec![current]);
+    };
+    let previous_active = peer.previous_active;
+    let mut previous_peer = WireGuardPeer::new(X25519PublicKey::from(previous.0)).with_allowed_ips(
+        if previous_active {
+            addresses.clone()
+        } else {
+            Vec::new()
+        },
+    );
+    let mut current_peer = WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(
+        if previous_active {
+            Vec::new()
+        } else {
+            addresses
+        },
+    );
+    let active = if previous_active {
+        &mut previous_peer
+    } else {
+        &mut current_peer
+    };
+    active.endpoint = peer.endpoint;
+    active.keepalive = Some(25);
+    Ok(vec![previous_peer, current_peer])
+}
+
+/// Select the identity that currently owns this peer's host routes.
+fn active_peer_key(peer: &crate::dataplane::Peer) -> PublicKey {
+    if peer.previous_active {
+        peer.previous_key.unwrap_or(peer.key)
+    } else {
+        peer.key
+    }
+}
+
+/// Include every configured identity so cleanup removes only keys no longer in overlap.
+fn policy_keys(policy: &crate::dataplane::PeerPolicy) -> impl Iterator<Item = PublicKey> {
+    std::iter::once(policy.peer.key).chain(policy.peer.previous_key)
 }
 
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {
