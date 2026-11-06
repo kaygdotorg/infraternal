@@ -1209,6 +1209,20 @@ impl RuntimeState {
         Ok(counters)
     }
 
+    /// Removes the host resolver route and listener before the Mac mesh device stops.
+    #[cfg(feature = "mesh-dns")]
+    fn stop_dns(&mut self) -> io::Result<()> {
+        self.dns_integration.remove()?;
+        self.dns_resolver = None;
+        Ok(())
+    }
+
+    /// Keeps Mac node cleanup available when this build omits mesh DNS.
+    #[cfg(not(feature = "mesh-dns"))]
+    fn stop_dns(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Removes managed DNS files, peer routes and the owned device before stopping the utun.
     async fn stop(&mut self) -> io::Result<()> {
         let interface = self
@@ -1217,8 +1231,7 @@ impl RuntimeState {
             .map(MacUtun::name)
             .ok_or(io::ErrorKind::NotConnected)?
             .to_owned();
-        #[cfg(feature = "mesh-dns")]
-        self.dns_integration.remove()?;
+        self.stop_dns()?;
         remove_routes(&interface, &self.routes)?;
         if let Some(device) = self.device.take() {
             device.stop().await;
@@ -1226,8 +1239,6 @@ impl RuntimeState {
         self.utun.take();
         self.routes.clear();
         self.config = None;
-        #[cfg(feature = "mesh-dns")]
-        self.dns_resolver = None;
         Ok(())
     }
 }

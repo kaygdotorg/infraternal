@@ -378,7 +378,8 @@ impl Resolver {
         Self::bind_records(address, Records::empty(address), system_port_for_node())
     }
 
-    /// The mesh address the resolver is bound to.
+    /// The mesh address the resolver is bound to on Linux.
+    #[cfg(target_os = "linux")]
     pub(crate) const fn address(&self) -> Ipv4Addr {
         self.address
     }

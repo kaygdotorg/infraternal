@@ -1,5 +1,5 @@
 //! Regressions for negotiated bounded access deltas and refusal before mutation [242,252], #173.
-#![cfg(feature = "agent")]
+#![cfg(all(feature = "agent", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 use infraternal_plugin_mesh::{
     configuration,

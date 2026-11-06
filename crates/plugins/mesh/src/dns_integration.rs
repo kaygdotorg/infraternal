@@ -7,6 +7,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Write as _,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
 use std::{fs, io, net::Ipv4Addr, os::unix::fs::MetadataExt, path::Path};
@@ -72,9 +73,9 @@ struct NetworkManagerSupport {
     standard_listener: bool,
 }
 
+#[cfg(target_os = "linux")]
 impl NetworkManagerSupport {
     /// Reports whether every `NetworkManager` requirement for per-link routing is present.
-    #[cfg(target_os = "linux")]
     const fn usable(self) -> bool {
         self.dnsmasq_enabled && self.manages_link && self.standard_listener
     }
@@ -154,7 +155,8 @@ impl DnsIntegration {
         }
         #[cfg(target_os = "macos")]
         if current_process_is_root() {
-            remove_macos_files()?;
+            let had_install = self.macos.is_some();
+            remove_macos_files(had_install)?;
             self.macos = None;
         }
         Ok(())
@@ -258,6 +260,7 @@ impl DnsIntegration {
             return Ok(());
         }
         write_macos_files(address, &desired)?;
+        refresh_macos_resolver()?;
         self.macos = Some(MacosInstall {
             address,
             suffixes: desired,
@@ -599,15 +602,17 @@ fn remove_stale_macos_files(desired: &BTreeSet<String>) -> io::Result<()> {
 
 /// Removes every resolver file with our ownership marker during stop or uninstall.
 #[cfg(target_os = "macos")]
-fn remove_macos_files() -> io::Result<()> {
+fn remove_macos_files(force_refresh: bool) -> io::Result<()> {
     let directory = Path::new(MACOS_RESOLVER_DIRECTORY);
-    let metadata = match fs::symlink_metadata(directory) {
+    match fs::symlink_metadata(directory) {
         Ok(metadata)
-            if metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0 =>
-        {
-            metadata
+            if metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0 => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if force_refresh {
+                refresh_macos_resolver()?;
+            }
+            return Ok(());
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
         Ok(_) => {
             return Err(io::Error::new(
@@ -615,9 +620,12 @@ fn remove_macos_files() -> io::Result<()> {
                 "macOS resolver directory is not root-owned",
             ));
         }
-    };
-    let _ = metadata;
-    remove_managed_macos_files(directory, 0)
+    }
+    let removed = remove_managed_macos_files(directory, 0)?;
+    if force_refresh || removed {
+        refresh_macos_resolver()?;
+    }
+    Ok(())
 }
 
 /// Identifies a regular root-owned resolver file as ours by its first line.
@@ -628,14 +636,16 @@ fn is_managed_file(path: &Path) -> io::Result<bool> {
 
 /// Removes marked regular files owned by `owner_uid`, preserving other resolver entries.
 #[cfg(target_os = "macos")]
-fn remove_managed_macos_files(directory: &Path, owner_uid: u32) -> io::Result<()> {
+fn remove_managed_macos_files(directory: &Path, owner_uid: u32) -> io::Result<bool> {
+    let mut removed = false;
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         if is_managed_file_owned_by(&path, owner_uid)? {
             fs::remove_file(path)?;
+            removed = true;
         }
     }
-    Ok(())
+    Ok(removed)
 }
 
 /// Identifies a regular resolver file with our marker and the expected owner.
@@ -659,16 +669,54 @@ fn validate_suffix(suffix: &str) -> io::Result<()> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid mesh DNS suffix"))
 }
 
+/// Refreshes macOS's cached resolver configuration after installing or removing routes.
+///
+/// Atomic file renames are not enough for a newly created `/etc/resolver` entry;
+/// a resolver refresh makes the final suffix filename visible to system lookups.
+#[cfg(target_os = "macos")]
+fn refresh_macos_resolver() -> io::Result<()> {
+    let status = Command::new("/usr/bin/killall")
+        .args(["-HUP", "mDNSResponder"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("macOS DNS resolver refresh failed"))
+    }
+}
+
+/// Chooses a staging directory that macOS does not scan as a resolver directory.
+///
+/// Every file inside `/etc/resolver` is interpreted as a live route, including
+/// hidden temporary files, so resolver updates stage in `/etc` before rename.
+#[cfg(target_os = "macos")]
+fn macos_staging_directory(path: &Path) -> io::Result<&Path> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    if parent == Path::new(MACOS_RESOLVER_DIRECTORY) {
+        parent
+            .parent()
+            .ok_or_else(|| io::ErrorKind::InvalidInput.into())
+    } else {
+        Ok(parent)
+    }
+}
+
 /// Atomically replaces one root-owned resolver file while preserving its mode.
+/// Its temporary file stays outside `/etc/resolver`, where macOS treats every file as a route.
 #[cfg(target_os = "macos")]
 fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
     let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let staging_directory = macos_staging_directory(path)?;
     let name = path
         .file_name()
         .ok_or(io::ErrorKind::InvalidInput)?
         .to_string_lossy();
     let unique = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
+    let temporary = staging_directory.join(format!(
         ".{name}.infraternal-{}-{unique}.tmp",
         std::process::id()
     ));
@@ -682,6 +730,9 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
         file.write_all(contents)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
+        if staging_directory != parent {
+            File::open(staging_directory)?.sync_all()?;
+        }
         File::open(parent)?.sync_all()
     })();
     if result.is_err() {
@@ -701,7 +752,10 @@ mod tests {
         networkmanager_route_commands, resolved_route_commands, select_linux_mode,
     };
     #[cfg(target_os = "macos")]
-    use super::{macos_resolver_write_allowed, render_macos_resolver};
+    use super::{
+        MACOS_RESOLVER_DIRECTORY, macos_resolver_write_allowed, macos_staging_directory,
+        render_macos_resolver,
+    };
     use std::net::Ipv4Addr;
 
     /// The systemd-resolved route stays on the mesh interface and includes both DNS aliases.
@@ -869,6 +923,18 @@ mod tests {
         );
     }
 
+    /// Keeps staging files outside `/etc/resolver`, where macOS treats every file as a route.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_resolver_staging_stays_outside_the_active_resolver_directory() {
+        let destination = std::path::Path::new(MACOS_RESOLVER_DIRECTORY).join("internal");
+
+        let staging = macos_staging_directory(&destination).expect("resolver staging directory");
+
+        assert_eq!(staging, std::path::Path::new("/etc"));
+        assert!(!staging.starts_with(std::path::Path::new(MACOS_RESOLVER_DIRECTORY)));
+    }
+
     /// A userspace Mac process leaves system resolver files alone unless it has root authority.
     #[cfg(target_os = "macos")]
     #[test]
@@ -899,7 +965,9 @@ mod tests {
         fs::write(&unrelated, "nameserver 192.0.2.1\n").expect("unrelated resolver file");
         let owner = fs::metadata(&managed).expect("managed file metadata").uid();
 
-        super::remove_managed_macos_files(&directory, owner).expect("remove managed resolver");
+        assert!(
+            super::remove_managed_macos_files(&directory, owner).expect("remove managed resolver")
+        );
 
         assert!(!managed.exists(), "the owned suffix file is removed");
         assert!(unrelated.exists(), "a file without our marker is preserved");
