@@ -573,7 +573,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await page.setViewportSize(viewport);
     await openWizard(page);
     await addTyped(page, "kayg@noacct.lab");
-    await expect(page.getByRole("heading", { name: "There is no account named kayg on noacct.lab" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: "noacct.lab couldn't find an account named kayg" })).toBeVisible({ timeout: 15_000 });
     await expect(wizard(page).locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("Use an account that exists there, or add it as root.");
     await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });

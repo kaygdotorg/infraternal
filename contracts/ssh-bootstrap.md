@@ -635,7 +635,11 @@ server answers `unrecognized_install` at the `connect` step before any write.
 Taking such an install over is D359's Take over, a separate slice on
 `addhost-takeover-d359`.
 
-When the NetBird SSH server accepts a network sign-in and then ends the session
-with exactly `User authentication failed` (status 1), the login name is no
-account on the host. That is kind `no_account`, never a setup failure; no other
-sign-in method is tried.
+When the NetBird SSH server accepts a network sign-in and then ends a command
+session with exactly `User authentication failed` and status 1, the host could
+not find the login name's account. That is kind `no_account`, never a setup
+failure; no other sign-in method is tried. The same line with any other command
+status is the command's own failure. The master connection has no command
+status and matches on the line alone. The answer also covers a directory lookup
+that failed, so the wording says the host couldn't find the account, not that
+it has none.

@@ -44,7 +44,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
     case "unrecognized_install": return "Already set up elsewhere";
-    case "no_account": return "No account with that name on this host";
+    case "no_account": return "Couldn't find that account on this host";
     case "install":
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
         return `Download infraternal (${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"}): ${failure.message}`;
@@ -280,9 +280,10 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       fix: "retry", tone: "info",
     };
     // #394: the login name is no account on the host (kayg on a Proxmox host). No sign-in method can help.
-    // `user` is the login name the person gave; without one the server chose it.
+    // `user` is the login name the person gave; without one the server chose it. The SSH server's answer also
+    // covers a directory lookup that failed, so the title says what the host couldn't do (J314 P2-2).
     case "no_account": return {
-      title: user ? `There is no account named ${user} on ${name}` : `${name} has no account with the name used to sign in`,
+      title: user ? `${name} couldn't find an account named ${user}` : `${name} couldn't find the account used to sign in`,
       happened: "Use an account that exists there, or add it as root.",
       next: "",
       fix: "none", tone: "danger",

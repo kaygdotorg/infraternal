@@ -440,10 +440,16 @@ impl SshSession for Session {
 }
 
 /// The failure of a command that ran after sign-in, from its bounded stderr and
-/// its exit status. On exit 71 the fixed cause line names which staging check
-/// refused ([`crate::model::Refusal`]); the rest of stderr stays withheld.
+/// its exit status. `NetBird` ends a session for a missing account with status
+/// 1 (#394); the same line with any other status is a command's own failure.
+/// (The master connection has no command status and matches on the line
+/// alone.) On exit 71 the fixed cause line names which staging check refused
+/// ([`crate::model::Refusal`]); the rest of stderr stays withheld.
 fn command_failure(stderr: &[u8], exit_status: Option<u8>) -> Failure {
     let mut failure = classify(stderr, false, MeshEvidence::default());
+    if failure.kind == FailureKind::NoAccount && exit_status != Some(1) {
+        failure = classify(b"", false, MeshEvidence::default());
+    }
     failure.exit_status = exit_status;
     if exit_status == Some(71) {
         let stderr = &stderr[..stderr.len().min(8192)];
@@ -569,9 +575,15 @@ mod tests {
         assert_eq!(other.kind, FailureKind::Install);
     }
 
+    /// J314 P2-2: `no_account` needs `NetBird`'s status 1 on a command session.
     /// J314 P2-1: an exit 71 carries the cause its host named, and only that.
     #[test]
-    fn a_command_failure_reads_only_its_fixed_cause_line() {
+    fn a_command_failure_reads_only_its_status_and_fixed_cause_line() {
+        let missing = b"User authentication failed\n";
+        assert_eq!(command_failure(missing, Some(1)).kind, FailureKind::NoAccount);
+        for status in [Some(2), Some(71), None] {
+            assert_eq!(command_failure(missing, status).kind, FailureKind::Install, "{status:?}");
+        }
         let refused = command_failure(b"noise\nINFRATERNAL_REFUSED cache\n", Some(71));
         assert_eq!(refused.refusal(), Some(crate::model::Refusal::Cache));
         assert_eq!(command_failure(b"INFRATERNAL_REFUSED cache\n", Some(72)).refusal(), None);
