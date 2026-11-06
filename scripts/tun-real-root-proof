@@ -49,6 +49,16 @@ mkdir -p /root/.cache
 exec 9>/root/.cache/tun-real-root-proof.lock
 flock 9
 
+# Holding the lock means no other proof is alive: every child of a run keeps
+# fd 9 open, even one orphaned by SIGKILL. So whatever proof dirs exist now
+# were left by a killed run (no trap runs on SIGKILL; J277 saw 965 MB left in
+# /root). Remove them before starting. /tmp/tun-proof-run.* is the old name.
+for stale in /root/tun-proof.* /var/lib/tun-proof-run.* /tmp/tun-proof-run.*; do
+    [[ -d $stale && ! -L $stale && $(stat -c %u "$stale") == 0 ]] || continue
+    echo "removing a killed run's leftover: $stale"
+    rm -rf -- "$stale"
+done
+
 work=$(mktemp -d /root/tun-proof.XXXXXX)
 # Not in /tmp: /tmp is shared with claude, and the test gets a private /tmp
 # below. /var/lib is root-owned 0755 on the root filesystem (exec allowed).

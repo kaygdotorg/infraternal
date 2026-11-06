@@ -248,6 +248,15 @@ class RealRootProof(unittest.TestCase):
         self.assertIn('run=$(mktemp -d /var/lib/tun-proof-run.', code)
         self.assertNotIn('mktemp -d /tmp/', code)
 
+    def test_proof_sweeps_leftovers_only_under_the_lock(self):
+        """Stale proof dirs are removed after flock and before mktemp; only root-owned real dirs (J277 P3-2)."""
+        code = self.proof_code()
+        sweep = code.index('for stale in /root/tun-proof.* /var/lib/tun-proof-run.* /tmp/tun-proof-run.*')
+        self.assertLess(code.index('flock 9'), sweep)
+        self.assertLess(sweep, code.index('work=$(mktemp -d /root/tun-proof.'))
+        self.assertIn('! -L $stale', code)
+        self.assertIn('$(stat -c %u "$stale") == 0', code)
+
     def test_proof_script_keeps_claude_out_of_roots_process(self):
         """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
         script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()
