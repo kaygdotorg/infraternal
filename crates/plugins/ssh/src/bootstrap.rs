@@ -1447,11 +1447,7 @@ impl Bootstrap {
                         .leftover_connected(&batch.authority, previous.host)
                         .await?
                     {
-                        let mut failure = Failure::install(
-                            "Setup is already running on this host. Wait for it to finish, then try again.",
-                        );
-                        failure.kind = crate::model::FailureKind::SetupRunning;
-                        return Err(failure);
+                        return Err(leftover_in_use());
                     }
                     // Only this server's durable failed-host binding finishes the
                     // earlier setup without asking (#230).
@@ -1989,6 +1985,15 @@ impl Bootstrap {
     ) -> Result<(), Failure> {
         self.confirm_start_fresh(batch, target, attempt, started, previous, mode, resources)
             .await?;
+        // The person may have waited: an agent that connected here meanwhile
+        // makes the leftovers in use again (#305, J272).
+        if self
+            .backend
+            .leftover_connected(&batch.authority, previous.host)
+            .await?
+        {
+            return Err(leftover_in_use());
+        }
         self.act_start_fresh(batch, target, attempt, started, session, previous, mode)
             .await
     }
@@ -2329,6 +2334,16 @@ impl Drop for Batch {
     fn drop(&mut self) {
         self.inner.socket_closed.send_replace(true);
     }
+}
+
+/// An earlier setup's infraternal agent is connected to this server: its
+/// leftovers are in use, so nothing is offered or removed (#305, J257).
+fn leftover_in_use() -> Failure {
+    let mut failure = Failure::install(
+        "Setup is already running on this host. Wait for it to finish, then try again.",
+    );
+    failure.kind = crate::model::FailureKind::SetupRunning;
+    failure
 }
 
 fn emit(
