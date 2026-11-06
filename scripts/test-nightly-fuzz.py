@@ -11,6 +11,7 @@ import io
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -111,6 +112,35 @@ class FakeForgejo:
         self.server.server_close()
 
 
+class FakeLibFuzzer:
+    """Stands in for `subprocess.run` of cargo-fuzz, so the runner's real fuzz/re-check/file path runs in tests.
+
+    A fuzz run (it has `-max_total_time`) writes `writes` into the artifact
+    prefix and prints libFuzzer's `Test unit written to` line for each. A
+    re-check (one input, no budget) prints `Executed <input> in <ms> ms` and
+    exits with `recheck_exit`. Every command is recorded in `commands`.
+    """
+
+    def __init__(self, writes=None, recheck_exit=0, recheck_ms=0):
+        """Configure what the fuzz run leaves behind and how re-checks end."""
+        self.writes, self.recheck_exit, self.recheck_ms = writes or {}, recheck_exit, recheck_ms
+        self.commands = []
+
+    def __call__(self, command, cwd, env, stdout, stderr):
+        """Play one cargo-fuzz invocation, writing its output to the runner's log."""
+        self.commands.append(command)
+        flags = command[command.index('--') + 1:]
+        prefix = next(flag for flag in flags if flag.startswith('-artifact_prefix='))[len('-artifact_prefix='):]
+        if any(flag.startswith('-max_total_time=') for flag in flags):
+            for name, data in self.writes.items():
+                path = Path(prefix) / name
+                path.write_bytes(data)
+                stdout.write(f"artifact_prefix='{prefix}'; Test unit written to {path}\n")
+            return subprocess.CompletedProcess(command, 70 if self.writes else 0)
+        stdout.write(f"Executed {command[command.index('--') - 1]} in {self.recheck_ms} ms\n")
+        return subprocess.CompletedProcess(command, self.recheck_exit)
+
+
 class NightlyFuzz(unittest.TestCase):
     """Keep bounded scheduling and authenticated crash attachments working."""
 
@@ -118,7 +148,7 @@ class NightlyFuzz(unittest.TestCase):
         """A fresh fake API, state directory and synthetic token per test."""
         self.fake = FakeForgejo()
         self.directory = tempfile.TemporaryDirectory()
-        self.state = Path(self.directory.name)
+        self.state = Path(self.directory.name).resolve()
         self.token = self.state / 'token'
         self.token.write_text('synthetic-test-token\n')
 
@@ -244,6 +274,50 @@ class NightlyFuzz(unittest.TestCase):
         kept = fuzz.confirmed_inputs(sorted(artifacts.iterdir()), self.state / 'unconfirmed', lambda _path: True)
         self.assertEqual(kept, [crash, timeout])
         self.assertTrue(timeout.exists())
+
+    def fuzzer(self, fake):
+        """A Fuzzer over an empty checkout whose processes are played by `fake`."""
+        checkout = self.state / 'checkout'
+        checkout.mkdir(exist_ok=True)
+        return fuzz.Fuzzer(checkout, 'rustup', ('--features', 'mesh-node'), {}, run=fake)
+
+    def test_recheck_exit_rule(self):
+        """Only a clean exit sets a timeout aside; a second timeout (70), a crash (77) or a tool error (1) files it."""
+        crash = self.crash('timeout-input', b'')
+        for code, expected in [(0, False), (70, True), (77, True), (1, True)]:
+            fake = FakeLibFuzzer(recheck_exit=code)
+            self.assertEqual(fuzz.reproduces(self.fuzzer(fake), self.state, 'release_channel', crash), expected, code)
+
+    def test_recheck_runs_the_input_alone_under_the_time_limit(self):
+        """The re-check carries the fuzz run's -timeout and the input path, and no fuzzing budget."""
+        crash = self.crash('timeout-input', b'')
+        fake = FakeLibFuzzer()
+        fuzz.reproduces(self.fuzzer(fake), self.state, 'release_channel', crash)
+        (command,) = fake.commands
+        self.assertIn(f'-timeout={fuzz.TIMEOUT_SECONDS}', command)
+        self.assertIn(str(crash), command)
+        self.assertFalse([flag for flag in command if flag.startswith('-max_total_time')])
+
+    def test_run_target_sets_aside_a_timeout_that_passes_alone(self):
+        """#370 end to end: the fuzz run leaves a timeout and a crash; only the crash is filed."""
+        fake = FakeLibFuzzer(writes={'timeout-da39a3ee': b'', 'crash-2ca3ce74': b'0X.A-1'}, recheck_exit=0)
+        filed = []
+        entry = fuzz.run_target(self.fuzzer(fake), self.state, 'ssh_auth_once_decode', 5,
+                                lambda _name, crash: filed.append(crash.name))
+        self.assertEqual(filed, ['crash-2ca3ce74'])
+        self.assertEqual(entry['unconfirmed'], 1)
+        self.assertTrue((self.state / 'unconfirmed/ssh_auth_once_decode/timeout-da39a3ee').exists())
+        # One fuzz run plus one re-check, of the timeout only.
+        self.assertEqual(len(fake.commands), 2)
+
+    def test_run_target_files_a_timeout_that_recurs(self):
+        """A timeout that happens again alone is filed with the crash."""
+        fake = FakeLibFuzzer(writes={'timeout-da39a3ee': b'', 'crash-2ca3ce74': b'0X.A-1'}, recheck_exit=70)
+        filed = []
+        entry = fuzz.run_target(self.fuzzer(fake), self.state, 'ssh_auth_once_decode', 5,
+                                lambda _name, crash: filed.append(crash.name))
+        self.assertEqual(filed, ['crash-2ca3ce74', 'timeout-da39a3ee'])
+        self.assertEqual(entry['unconfirmed'], 0)
 
     def test_report_errors_are_caught_types(self):
         """HTTP and network failures are OSError subclasses, so the loop's catch covers them."""

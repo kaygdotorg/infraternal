@@ -15,6 +15,7 @@ Timeouts are checked before they are filed: a `timeout-*` input is run again
 on its own and filed only if it times out again (#370).
 """
 import argparse
+from dataclasses import dataclass
 import base64
 import hashlib
 import io
@@ -111,6 +112,96 @@ def confirmed_inputs(crashes, unconfirmed, reproduces):
             continue
         kept.append(crash)
     return kept
+
+
+@dataclass(frozen=True)
+class Fuzzer:
+    """How this checkout starts cargo-fuzz: the toolchain, the shared feature set and the process runner.
+
+    `run` defaults to `subprocess.run`. Tests pass a stand-in that plays
+    libFuzzer, so the fuzz, re-check and filing path is exercised without a
+    compiler.
+    """
+
+    root: Path
+    rustup: str
+    features: tuple
+    environment: dict
+    run: object = subprocess.run
+
+    def command(self, name, inputs, flags):
+        """`cargo fuzz run` for one harness on a corpus directory or a single input, with libFuzzer flags."""
+        return [self.rustup, 'run', 'nightly', 'cargo', 'fuzz', 'run', '--fuzz-dir', 'fuzz', *self.features, name, str(inputs), '--', *flags]
+
+    def execute(self, command, log_path, mode):
+        """Run `command` in the checkout with output appended (`a`) or written (`w`) to `log_path`."""
+        with log_path.open(mode) as log:
+            return self.run(command, cwd=self.root, env=self.environment, stdout=log, stderr=subprocess.STDOUT)
+
+
+def recheck_flags(recheck):
+    """libFuzzer flags for running one input alone: the fuzz run's own time and memory limits, no fuzzing budget.
+
+    The separate artifact prefix keeps the re-check from writing into the
+    artifact directory it is judging.
+    """
+    return [f'-timeout={TIMEOUT_SECONDS}', '-rss_limit_mb=2048', f'-artifact_prefix={recheck}/']
+
+
+def reproduces(fuzzer, state, name, crash):
+    """Run one timeout input alone and say whether it failed again.
+
+    Any non-zero exit counts as reproduced: a second timeout (libFuzzer exits
+    70), a crash, or a re-check that could not run at all. Only a clean exit
+    sets an input aside, so a tool error never drops a real hang.
+    The output goes to the target's log, after the fuzz run's own output.
+    """
+    recheck = state / 'recheck' / name
+    recheck.mkdir(parents=True, exist_ok=True)
+    log_path = state / f'{name}.log'
+    with log_path.open('a') as log:
+        log.write(f'\n== re-check of {crash.name} in isolation\n')
+    result = fuzzer.execute(fuzzer.command(name, crash, recheck_flags(recheck)), log_path, 'a')
+    return result.returncode != 0
+
+
+def run_target(fuzzer, state, name, budget, report):
+    """Fuzz one harness for `budget` seconds, re-check its timeouts, file what remains and summarise the run.
+
+    `report(name, crash)` files one input and raises OSError, ValueError or
+    KeyError when it cannot. Such a failure is counted, not raised, so it
+    does not cost the remaining targets their fuzzing time; the record on
+    disk resumes the report next run.
+    """
+    corpus = state / 'corpus' / name
+    artifacts = state / 'artifacts' / name
+    corpus.mkdir(parents=True, exist_ok=True)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    # Keep the repository's synthetic seeds without changing tracked files.
+    for seed in (fuzzer.root / 'fuzz/corpus' / name).glob('*'):
+        destination = corpus / seed.name
+        if seed.is_file() and not destination.exists():
+            destination.write_bytes(seed.read_bytes())
+    flags = [f'-max_total_time={budget}', f'-timeout={TIMEOUT_SECONDS}', '-rss_limit_mb=2048', '-max_len=1048580',
+             f'-artifact_prefix={artifacts}/']
+    started = time.monotonic()
+    result = fuzzer.execute(fuzzer.command(name, corpus, flags), state / f'{name}.log', 'w')
+    found = written_inputs((state / f'{name}.log').read_text(errors='replace'), artifacts.resolve())
+    before = sorted(path for path in artifacts.iterdir() if path.is_file())
+    crashes = confirmed_inputs(before, state / 'unconfirmed' / name, lambda crash: reproduces(fuzzer, state, name, crash))
+    unreported = 0
+    for crash in crashes:
+        try:
+            report(name, crash)
+        except (OSError, ValueError, KeyError) as error:
+            unreported += 1
+            print(f'fuzz report FAILED target={name} input={crash.name}: {type(error).__name__}: {error}', flush=True)
+    # libFuzzer exits non-zero when it finds an input; that is a finding.
+    # A non-zero exit that left no new input is a build or harness error.
+    broken = result.returncode != 0 and not found
+    return {'target': name, 'exit': result.returncode, 'seconds': round(time.monotonic() - started, 3),
+            'artifacts': len(crashes), 'new_inputs': len(found), 'unconfirmed': len(before) - len(crashes),
+            'broken': broken, 'unreported': unreported}
 
 
 def issue_marker(name):
@@ -247,57 +338,19 @@ def main():
     failed = False
     findings = 0
     summary = []
+    fuzzer = Fuzzer(root, rustup, tuple(features), environment)
+
+    def report(name, crash):
+        """File one input on the target's issue, from this run's checkout."""
+        report_crash(args.api, args.repo, args.token_file, state, name, crash, head)
+
     for name in names:
-        corpus = state / 'corpus' / name
-        artifacts = state / 'artifacts' / name
-        corpus.mkdir(parents=True, exist_ok=True)
-        artifacts.mkdir(parents=True, exist_ok=True)
-        # Keep the repository's synthetic seeds without changing tracked files.
-        for seed in (root / 'fuzz/corpus' / name).glob('*'):
-            destination = corpus / seed.name
-            if seed.is_file() and not destination.exists():
-                destination.write_bytes(seed.read_bytes())
-        command = [rustup, 'run', 'nightly', 'cargo', 'fuzz', 'run', '--fuzz-dir', 'fuzz', *features, name, str(corpus), '--',
-                   f'-max_total_time={budget}', f'-timeout={TIMEOUT_SECONDS}', '-rss_limit_mb=2048', '-max_len=1048580', f'-artifact_prefix={artifacts}/']
-        started = time.monotonic()
-        with (state / f'{name}.log').open('w') as log:
-            result = subprocess.run(command, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT)
-        found = written_inputs((state / f'{name}.log').read_text(errors='replace'), artifacts.resolve())
-
-        def reproduces(crash, name=name):
-            """Run one input alone; any non-zero exit (timeout, crash, tool error) counts as reproduced."""
-            # A separate prefix keeps the re-check from writing into the artifacts it is judging.
-            recheck = state / 'recheck' / name
-            recheck.mkdir(parents=True, exist_ok=True)
-            rerun = [rustup, 'run', 'nightly', 'cargo', 'fuzz', 'run', '--fuzz-dir', 'fuzz', *features, name, str(crash), '--',
-                     f'-timeout={TIMEOUT_SECONDS}', '-rss_limit_mb=2048', f'-artifact_prefix={recheck}/']
-            with (state / f'{name}.log').open('a') as log:
-                log.write(f'\n== re-check of {crash.name} in isolation\n')
-                log.flush()
-                return subprocess.run(rerun, cwd=root, env=environment, stdout=log, stderr=subprocess.STDOUT).returncode != 0
-
-        before = sorted(path for path in artifacts.iterdir() if path.is_file())
-        crashes = confirmed_inputs(before, state / 'unconfirmed' / name, reproduces)
-        unconfirmed = len(before) - len(crashes)
-        unreported = 0
-        for crash in crashes:
-            # A reporting failure must not cost the remaining targets their
-            # fuzzing time. The record on disk resumes the report next run.
-            try:
-                report_crash(args.api, args.repo, args.token_file, state, name, crash, head)
-            except (OSError, ValueError, KeyError) as error:
-                unreported += 1
-                print(f'fuzz report FAILED target={name} input={crash.name}: {type(error).__name__}: {error}', flush=True)
-        # libFuzzer exits non-zero when it finds an input; that is a finding.
-        # A non-zero exit that left no new input is a build or harness error.
-        broken = result.returncode != 0 and not found
-        failed |= broken or unreported > 0
-        findings += len(found)
-        summary.append({'target': name, 'exit': result.returncode, 'seconds': round(time.monotonic() - started, 3),
-                        'artifacts': len(crashes), 'new_inputs': len(found), 'unconfirmed': unconfirmed,
-                        'broken': broken, 'unreported': unreported})
+        entry = run_target(fuzzer, state, name, budget, report)
+        failed |= entry['broken'] or entry['unreported'] > 0
+        findings += entry['new_inputs']
+        summary.append(entry)
         (state / 'last-run.json').write_text(json.dumps({'head': head, 'budget_seconds': args.budget_seconds, 'targets': summary}, indent=2) + '\n')
-        print(f'fuzz target={name} exit={result.returncode} budget_s={budget} artifacts={len(crashes)}', flush=True)
+        print(f"fuzz target={name} exit={entry['exit']} budget_s={budget} artifacts={entry['artifacts']}", flush=True)
     print(f'FUZZ_DONE targets={len(summary)} new_inputs={findings} failed={failed} head={head}', flush=True)
     return int(failed)
 
