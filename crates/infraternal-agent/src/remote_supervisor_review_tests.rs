@@ -130,7 +130,15 @@ fn enrolled(
     ))
 }
 
-#[tokio::test]
+/// While local path discovery stalls offline, the supervisor's watchdog keeps
+/// at most one synchronous worker alive, and every worker is cleaned up once
+/// the service is cancelled.
+///
+/// The test waits on std channels, which blocks the thread it runs on.
+/// Startup awaits runtime-lock acquisition on a blocking thread (#355), so a
+/// current-thread runtime would be stuck here: nothing could poll startup
+/// until the wait timed out. A second worker thread keeps startup running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watchdog_bounds_workers_when_local_path_discovery_stalls() {
     let directory = StateDirectory::new();
     let release = Arc::new(Release::default());
@@ -307,7 +315,11 @@ mod durable_state {
     /// is paused mid-restore must survive that worker's late completion: once
     /// the change is acknowledged, the persisted state keeps the newer revision
     /// (version 2, Deny), never the superseded worker's older snapshot.
-    #[tokio::test]
+    ///
+    /// It blocks its thread on std channels while startup awaits runtime-lock
+    /// acquisition on a blocking thread (#355), so it needs a second worker
+    /// thread to keep startup running, as the watchdog test does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn acknowledged_network_access_survives_superseded_worker_completion() {
         let directory = StateDirectory::new();
         let (store, _) = Store::open(&directory.0).unwrap();
