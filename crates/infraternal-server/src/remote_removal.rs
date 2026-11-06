@@ -102,15 +102,17 @@ impl Removal {
     /// D356: what the owner can read about access files that changed on
     /// `host`'s accounts since their logins were granted, as the host reported
     /// them when it revoked those logins. Read-only. Only the server owner's
-    /// session reads it; `None` is a host they do not own, answered like an
-    /// unknown one. The report holds file paths and line text only.
+    /// session reads it, inside the admin window (D339) like the removal: line
+    /// text from shell startup files can hold a pasted token. `None` is a host
+    /// they do not own, answered like an unknown one. The report holds file
+    /// paths and line text only.
     pub(crate) async fn access_report(
         &self,
         token: &str,
         host: Uuid,
         now: i64,
     ) -> Result<Option<Value>, crate::auth::Error> {
-        let session = self.auth.session(token, now).await?;
+        let session = self.auth.fresh_session(token, now).await?;
         let owner: bool = sqlx::query_scalar("SELECT owner=1 FROM users WHERE id=?")
             .bind(&session.user_id)
             .fetch_optional(&self.pool)

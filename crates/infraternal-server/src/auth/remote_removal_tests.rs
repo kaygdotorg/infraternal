@@ -635,3 +635,29 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
             .is_err()
     );
 }
+
+/// D356 (owner decision, #355): line text from shell startup files can hold a
+/// pasted token, so reading the access report is gated like removal: inside
+/// the 15-minute admin window of a fresh session (D339). A stale session is
+/// refused; the same session while fresh reads it.
+#[tokio::test]
+async fn the_access_report_needs_the_admin_window() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    assert!(
+        service
+            .access_report(&f.session, host, NOW + 899)
+            .await
+            .unwrap()
+            .is_some(),
+        "a fresh session could not read the report"
+    );
+    assert!(
+        matches!(
+            service.access_report(&f.session, host, NOW + 900).await,
+            Err(crate::auth::Error::Denied)
+        ),
+        "a stale session read the report"
+    );
+}
