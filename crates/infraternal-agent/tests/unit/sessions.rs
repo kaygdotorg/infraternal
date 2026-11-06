@@ -821,12 +821,22 @@ async fn cancelling_the_launch_does_not_cancel_its_cleanup() {
     let state = state(Some(directory.0.clone())).unwrap();
     let root = fs::canonicalize(&directory.0).unwrap();
     let (exe, shim, closed) = live_fixture(&state, &root, std::time::Duration::ZERO, 1, true);
-    let launched = tokio::time::timeout(
-        std::time::Duration::from_millis(700),
-        launch_detached(&exe, &state, None),
-    )
-    .await;
-    assert!(launched.is_err(), "the caller's deadline must expire first");
+    // The caller gives up once the shim lineage exists (its lifeline holder is forked), not after a fixed
+    // time: a launcher killed before it forks leaves no shim to close, which is a different case (#355).
+    let held = root.join("lifeline.held");
+    let launched = tokio::select! {
+        result = launch_detached(&exe, &state, None) => Some(result),
+        () = async {
+            while !held.exists() {
+                // sleep: poll interval for the launcher's marker; the loop ends on that condition.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        } => None,
+    };
+    assert!(
+        launched.is_none(),
+        "the caller's deadline must expire first"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(20), closed)
         .await
         .expect("cancelling the launch left its detached session running")
@@ -848,9 +858,13 @@ async fn a_shim_that_binds_after_the_launch_gave_up_is_still_closed() {
         0,
         true,
     );
+    // The bound starts once the lifeline holder exists, as the shim's late bind does, so the launch gives up
+    // before the bind on the same runtime's timers, however slowly the launcher starts (#355).
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(root.join("lifeline.held"))));
     let result = launch_detached(&exe, &state, None).await;
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     let error = result
         .err()
         .expect("a shim that has not bound fails the launch");
@@ -1115,9 +1129,12 @@ async fn the_shims_own_observed_exit_retires_the_person_record() {
         0,
         true,
     );
+    // Armed on the lifeline holder, like the late bind (see the test above).
     LAUNCH_BOUND.with(|bound| bound.set(Some(std::time::Duration::from_millis(300))));
+    LAUNCH_ARMED.with(|armed| armed.set(Some(root.join("lifeline.held"))));
     let result = launch_detached(&exe, &state, Some(uuid::Uuid::new_v4())).await;
     LAUNCH_BOUND.with(|bound| bound.set(None));
+    LAUNCH_ARMED.with(|armed| armed.set(None));
     assert!(
         result.is_err(),
         "a shim that has not bound fails the launch"
