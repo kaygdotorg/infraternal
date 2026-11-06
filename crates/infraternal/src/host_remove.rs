@@ -1,6 +1,8 @@
 //! Adapts the remote plugin's removal action to private-stdin HTTPS requests and organized CLI
 //! results [16][168][202], #87. The start is the dry run; the finish sends its review, inside the
-//! session's admin window (D339).
+//! session's admin window (D339). The access report (D356) lists the access files the host
+//! reported as changed since its logins were granted; the finish shows it when the host has
+//! already confirmed, and `--access-report` reads it later. Reading it changes nothing.
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -17,8 +19,36 @@ struct Input {
     #[serde(default)]
     review: Option<String>,
 }
+/// Which removal request one run sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// The dry run.
+    Start,
+    /// The removal, with the review from the dry run.
+    Finish,
+    /// The read-only access report (D356).
+    Report,
+}
+impl Step {
+    /// `--access-report` reads; otherwise `--finish` removes and its absence is the dry run.
+    pub(crate) fn from_flags(finish: bool, report: bool) -> Self {
+        match (report, finish) {
+            (true, _) => Self::Report,
+            (false, true) => Self::Finish,
+            (false, false) => Self::Start,
+        }
+    }
+    /// The server route this step posts to.
+    fn path(self) -> &'static str {
+        match self {
+            Self::Start => "/remote/hosts/remove/start",
+            Self::Finish => "/remote/hosts/remove/finish",
+            Self::Report => "/remote/hosts/access-report",
+        }
+    }
+}
 /// Session cookies and reviews enter only through bounded private stdin.
-pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine: bool) -> ExitCode {
+pub(crate) fn run(server: &str, host: Uuid, step: Step, retain: bool, machine: bool) -> ExitCode {
     let operation = || -> io::Result<Value> {
         let mut bytes = Vec::new();
         io::stdin().take(32769).read_to_end(&mut bytes)?;
@@ -26,28 +56,49 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             return Err(denied());
         }
         let input: Input = serde_json::from_slice(&bytes).map_err(|_| denied())?;
-        let body = if finish {
-            json!({"host_id":host,"review":input.review.ok_or_else(denied)?})
-        } else {
-            json!({"host_id":host,"uninstall":!retain})
+        let body = match step {
+            Step::Finish => json!({"host_id":host,"review":input.review.ok_or_else(denied)?}),
+            Step::Start => json!({"host_id":host,"uninstall":!retain}),
+            Step::Report => json!({"host_id":host}),
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         crate::block_on(&runtime, async {
-            tokio::time::timeout(
+            let mut value = tokio::time::timeout(
                 std::time::Duration::from_secs(20),
-                request(server, &input.session, finish, body),
+                request(server, &input.session, step.path(), body),
             )
             .await
-            .map_err(|_| denied())?
+            .map_err(|_| denied())??;
+            if step == Step::Finish {
+                // The removal is done; a report the host already returned is
+                // shown with it. Failing to read it never fails the removal.
+                let report = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    request(
+                        server,
+                        &input.session,
+                        Step::Report.path(),
+                        json!({"host_id":host}),
+                    ),
+                )
+                .await;
+                if let Ok(Ok(report)) = report {
+                    value["access_report"] = report;
+                }
+            }
+            Ok(value)
         })
     };
     match operation() {
         // The review or the result of the hosted action travels in `data`; the
         // sentence says which step the person is on.
         Ok(value) => {
-            let result = command_result(value, finish, machine);
+            let result = match step {
+                Step::Report => report_result(host, &value, machine),
+                _ => command_result(host, value, step == Step::Finish, machine),
+            };
             emit(result, machine, Exit::Ok)
         }
         Err(_) => super::output::refuse(
@@ -60,8 +111,9 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
     }
 }
 /// Present the dry run or final response, keeping structured fields for scripts.
-/// Human output hides the private review but includes any manual uninstall command.
-fn command_result(value: Value, finish: bool, machine: bool) -> CommandResult<Value> {
+/// Human output hides the private review but includes any manual uninstall command,
+/// and any access report the host returned (D356).
+fn command_result(host: Uuid, value: Value, finish: bool, machine: bool) -> CommandResult<Value> {
     let (state, message, next) = if finish {
         (
             if value["state"] == "pending" {
@@ -88,6 +140,7 @@ fn command_result(value: Value, finish: bool, machine: bool) -> CommandResult<Va
         .as_str()
         .filter(|command| finish && !machine && !command.is_empty() && !message.contains(*command))
         .map(str::to_owned);
+    let report = finish.then(|| value["access_report"].clone());
     // The review is for scripts; a person at a terminal needs the sentence, not the capability.
     let data = if machine { value } else { json!({}) };
     let mut result = CommandResult::new("remove-host", state, message, data);
@@ -97,7 +150,82 @@ fn command_result(value: Value, finish: bool, machine: bool) -> CommandResult<Va
     if let Some(manual) = manual {
         result = result.with_next_step(manual);
     }
+    match report.as_ref().map(|report| &report["state"]) {
+        Some(state) if state == "ready" && !machine => {
+            if let Some(body) = report.as_ref().and_then(report_body) {
+                result = result.with_body(body);
+            }
+        }
+        Some(state) if state == "pending" && !machine => {
+            result = result.with_next_step(format!(
+                "When the host confirms, see the access files it reports as changed: infraternal remove-host {host} --access-report"
+            ));
+        }
+        _ => {}
+    }
     result
+}
+
+/// Present the access report on its own (D356). Scripts get the server's
+/// object in `data`; people get the files and lines.
+fn report_result(host: Uuid, value: &Value, machine: bool) -> CommandResult<Value> {
+    let (state, message) = match value["state"].as_str() {
+        Some("ready") => (
+            CommandState::Ready,
+            "These access files changed on the host since its logins were granted.",
+        ),
+        Some("pending") => (
+            CommandState::Pending,
+            "The host has not confirmed the revocation yet, so it has not reported its access files.",
+        ),
+        _ => (
+            CommandState::Ready,
+            "No access file on the host changed since its logins were granted.",
+        ),
+    };
+    let data = if machine { value.clone() } else { json!({}) };
+    let mut result = CommandResult::new("remove-host", state, message, data);
+    if machine {
+        return result;
+    }
+    if let Some(body) = report_body(value) {
+        result = result.with_body(body);
+    }
+    if value["state"] == "pending" {
+        result = result.with_next_step(format!(
+            "Run infraternal remove-host {host} --access-report again once the host is back online."
+        ));
+    }
+    result
+}
+
+/// The files and lines of a ready report, for people. infraternal never
+/// changes these files; the text says so and leaves the removal to the reader.
+fn report_body(report: &Value) -> Option<String> {
+    let reports = report["reports"]
+        .as_array()
+        .filter(|reports| !reports.is_empty())?;
+    let mut lines = vec![
+        "Remove what you do not recognise. infraternal did not change these files.".to_owned(),
+    ];
+    let mut truncated = false;
+    for entry in reports {
+        truncated |= entry["truncated"].as_bool().unwrap_or(false);
+        for file in entry["files"].as_array().into_iter().flatten() {
+            let path = file["path"].as_str().unwrap_or("?");
+            lines.push(match file["note"].as_str() {
+                Some(note) => format!("{path} ({note})"),
+                None => path.to_owned(),
+            });
+            for line in file["lines"].as_array().into_iter().flatten() {
+                lines.push(format!("  + {}", line.as_str().unwrap_or("")));
+            }
+        }
+    }
+    if truncated {
+        lines.push("Some changes were left out; check the host's access files there.".to_owned());
+    }
+    Some(lines.join("\n"))
 }
 /// The TLS client for the removal routes: the connector `sign-in` and the hosted actions use,
 /// so all of them trust the host's public CA bundle even when the linked OpenSSL's default paths
@@ -109,7 +237,9 @@ fn removal_tls_connector() -> io::Result<openssl::ssl::SslConnector> {
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
-async fn request(server: &str, cookie: &str, finish: bool, body: Value) -> io::Result<Value> {
+/// Post `body` to `path` on `server` over verified TLS with the session cookie,
+/// and read a bounded JSON answer. Anything but 200 is refused.
+async fn request(server: &str, cookie: &str, path: &str, body: Value) -> io::Result<Value> {
     use http_body_util::BodyExt;
     let url = url::Url::parse(server).map_err(|_| denied())?;
     if url.scheme() != "https"
@@ -144,11 +274,7 @@ async fn request(server: &str, cookie: &str, finish: bool, body: Value) -> io::R
     }));
     let request = hyper::Request::builder()
         .method("POST")
-        .uri(if finish {
-            "/remote/hosts/remove/finish"
-        } else {
-            "/remote/hosts/remove/start"
-        })
+        .uri(path)
         .header(
             "host",
             url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
@@ -190,7 +316,7 @@ mod tests {
         let command =
             "/usr/local/bin/infraternal --bootstrap-uninstall 0123456789abcdef0123456789abcdef";
         let value = serde_json::json!({"state":"pending", "message":"worker: revoked, cleanup pending.", "manual":command});
-        let result = super::command_result(value, true, false);
+        let result = super::command_result(uuid::Uuid::nil(), value, true, false);
         let output = render_pretty(
             &result,
             RenderOptions {
@@ -206,6 +332,62 @@ mod tests {
         );
         assert_eq!(result.state, crate::cli::output::CommandState::Pending);
         assert_eq!(result.data, serde_json::json!({}));
+    }
+
+    /// D356: people see each reported file and its new lines after a removal,
+    /// with the reminder that infraternal did not change them; scripts get the
+    /// server's object. A report still pending points at `--access-report`.
+    #[test]
+    fn removal_shows_the_access_files_the_host_reported() {
+        use crate::cli::output::{RenderOptions, render_pretty};
+        let host = uuid::Uuid::from_u128(7);
+        let report = serde_json::json!({"host_id": host, "state": "ready", "reports": [{
+            "person_id": uuid::Uuid::from_u128(9),
+            "files": [
+                {"path": "~/.ssh/authorized_keys", "lines": ["ssh-ed25519 AAAAleft left-behind"]},
+                {"path": "~/.profile", "lines": [], "note": "a symbolic link; not followed"}
+            ],
+            "truncated": true,
+        }]});
+        let finished = serde_json::json!({"state": "ready", "message": "The host was removed.", "access_report": report});
+        let options = RenderOptions {
+            terminal: false,
+            color: false,
+            width: 100,
+        };
+        let output = render_pretty(
+            &super::command_result(host, finished.clone(), true, false),
+            options,
+        )
+        .unwrap();
+        for expected in [
+            "~/.ssh/authorized_keys",
+            "  + ssh-ed25519 AAAAleft left-behind",
+            "~/.profile (a symbolic link; not followed)",
+            "infraternal did not change these files",
+            "Some changes were left out",
+        ] {
+            assert!(
+                output.contains(expected),
+                "{expected:?} missing from: {output}"
+            );
+        }
+        let machine = super::command_result(host, finished, true, true);
+        assert_eq!(machine.data["access_report"], report);
+        let pending = serde_json::json!({"state": "pending", "message": "worker: revoked, cleanup pending.", "access_report": {"host_id": host, "state": "pending", "reports": []}});
+        let output =
+            render_pretty(&super::command_result(host, pending, true, false), options).unwrap();
+        // Next steps wrap at the layout width; compare words, not lines.
+        let words = output.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains(&format!("infraternal remove-host {host} --access-report")),
+            "pending report has no way to read it later: {output}"
+        );
+        let later = render_pretty(&super::report_result(host, &report, false), options).unwrap();
+        assert!(
+            later.contains("  + ssh-ed25519 AAAAleft left-behind"),
+            "{later}"
+        );
     }
 
     /// Found on the test server (#303, J94f): `remove-host` refused every step, its dry run
