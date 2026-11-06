@@ -1,5 +1,6 @@
 //! Drives Linux kernel `WireGuard` through checked generic and route netlink [163,165,169], #129.
 use crate::{
+    mesh_mtu,
     netlink::{self, NESTED, Socket, attribute},
     policy::model::{Addresses, PublicKey},
 };
@@ -774,6 +775,7 @@ impl Device {
             let mut destination = None;
             let mut table = 254;
             let mut exact_shape = true;
+            let mut route_mtu_seen = false;
             for field in netlink::attributes(&reply[12..])? {
                 match field.kind {
                     1 => destination = Some(field.payload),
@@ -782,6 +784,9 @@ impl Device {
                     6 if header[0] == 10 && field.payload == 1024_u32.to_ne_bytes() => {}
                     12 if header[0] == 10 && field.payload.len() == 32 => {}
                     20 if header[0] == 10 && field.payload == [0] => {}
+                    8 if !route_mtu_seen && mesh_route_metrics_are_owned(field) => {
+                        route_mtu_seen = true;
+                    }
                     _ => exact_shape = false,
                 }
             }
@@ -933,6 +938,30 @@ impl Device {
         }
         Ok(counters)
     }
+}
+
+/// Recognize only the single MTU metric this mesh writes on a peer host route.
+///
+/// Routes from before per-peer MTUs may have no metrics at all; callers accept
+/// that legacy shape separately. Extra, repeated, malformed or out-of-range
+/// metrics stay foreign so restart cleanup cannot delete an operator route.
+fn mesh_route_metrics_are_owned(field: netlink::Attribute<'_>) -> bool {
+    if field.kind != RTA_METRICS || !field.nested {
+        return false;
+    }
+    let Ok(metrics) = netlink::attributes(field.payload) else {
+        return false;
+    };
+    let [metric] = metrics.as_slice() else {
+        return false;
+    };
+    if metric.kind != RTAX_MTU || metric.nested || metric.payload.len() != 4 {
+        return false;
+    }
+    let Ok(mtu) = netlink::u32_at(metric.payload, 0) else {
+        return false;
+    };
+    (u32::from(mesh_mtu::MIN_MESH_MTU)..=u32::from(u16::MAX)).contains(&mtu)
 }
 
 /// `RTA_METRICS`: nested per-route metrics accepted by rtnetlink.
@@ -1379,5 +1408,95 @@ mod endpoint_tests {
         let mut unknown = v4;
         unknown[..2].copy_from_slice(&1_u16.to_ne_bytes());
         assert!(decode_sockaddr(&unknown).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod route_metric_tests {
+    //! Route retirement accepts its one valid mesh MTU metric and preserves other metric shapes.
+    use super::*;
+
+    /// Encode route metrics in the same nested format used by rtnetlink route dumps.
+    fn encoded_metrics(
+        outer_kind: u16,
+        outer_nested: bool,
+        metrics: &[(u16, bool, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut inner = Vec::new();
+        for (kind, nested, value) in metrics {
+            attribute(
+                &mut inner,
+                *kind | if *nested { NESTED } else { 0 },
+                value,
+            )
+            .unwrap();
+        }
+        let mut outer = Vec::new();
+        attribute(
+            &mut outer,
+            outer_kind | if outer_nested { NESTED } else { 0 },
+            &inner,
+        )
+        .unwrap();
+        outer
+    }
+
+    /// Decode one top-level attribute and check whether it is an owned MTU metric.
+    fn owns_encoded_metrics(bytes: &[u8]) -> bool {
+        let Ok(fields) = netlink::attributes(bytes) else {
+            return false;
+        };
+        let [field] = fields.as_slice() else {
+            return false;
+        };
+        mesh_route_metrics_are_owned(*field)
+    }
+
+    /// Route cleanup recognizes exactly one nested MTU in the range the mesh can install.
+    #[test]
+    fn route_retirement_accepts_only_our_exact_mtu_metric() {
+        for mtu in [u32::from(mesh_mtu::MIN_MESH_MTU), u32::from(u16::MAX), 1200] {
+            let encoded = encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[(RTAX_MTU, false, mtu.to_ne_bytes().to_vec())],
+            );
+            assert!(owns_encoded_metrics(&encoded));
+        }
+
+        for mtu in [0, 67, 65_536] {
+            let encoded = encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[(RTAX_MTU, false, mtu.to_ne_bytes().to_vec())],
+            );
+            assert!(!owns_encoded_metrics(&encoded));
+        }
+
+        let valid_mtu = (1200_u32).to_ne_bytes().to_vec();
+        for foreign in [
+            encoded_metrics(7, true, &[(RTAX_MTU, false, valid_mtu.clone())]),
+            encoded_metrics(RTA_METRICS, false, &[(RTAX_MTU, false, valid_mtu.clone())]),
+            encoded_metrics(RTA_METRICS, true, &[(1, false, valid_mtu.clone())]),
+            encoded_metrics(RTA_METRICS, true, &[(RTAX_MTU, true, valid_mtu.clone())]),
+            encoded_metrics(RTA_METRICS, true, &[(RTAX_MTU, false, vec![0; 3])]),
+            encoded_metrics(RTA_METRICS, true, &[]),
+            encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[
+                    (RTAX_MTU, false, valid_mtu.clone()),
+                    (RTAX_MTU, false, valid_mtu.clone()),
+                ],
+            ),
+            encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[(RTAX_MTU, false, valid_mtu.clone()), (3, false, vec![1])],
+            ),
+        ] {
+            assert!(!owns_encoded_metrics(&foreign));
+        }
     }
 }

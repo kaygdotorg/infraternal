@@ -20,8 +20,8 @@ pub(crate) const FALLBACK_MESH_MTU: u16 = 1200;
 pub(crate) const IPV6_MINIMUM_MTU: u16 = 1280;
 /// The largest `WireGuard` UDP overhead for an outer IPv6 packet.
 const OUTER_OVERHEAD: u32 = 80;
-/// The smallest IPv4 packet size a tunnel interface can usefully advertise.
-const MIN_MESH_MTU: u16 = 68;
+/// The lowest useful interface MTU and the minimum MTU we accept on an owned peer route.
+pub(crate) const MIN_MESH_MTU: u16 = 68;
 
 /// Derive the shared interface MTU from the largest configured peer route budget.
 ///
