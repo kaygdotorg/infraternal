@@ -475,7 +475,7 @@ async fn retire_session(path: &Path, uid: u32) -> io::Result<()> {
 /// whole retirement, which ends when the shim has exited.
 async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
     use infraternal_shim::frame::Frame;
-    let mut peer = retire_step(async { Ok(UnixStream::connect(path).await?) }).await?;
+    let mut peer = retire_step(UnixStream::connect(path)).await?;
     if peer.peer_cred()?.uid() != uid {
         return Err(denied());
     }
@@ -961,7 +961,7 @@ mod tests {
     }
     /// A fake shim on a short socket path: answers Hello after `hello`, then
     /// Exited after `exit`, draining the retirement's signals meanwhile.
-    async fn slow_shim(
+    fn slow_shim(
         hello: Option<Duration>,
         exit: Duration,
     ) -> (PathBuf, tokio::task::JoinHandle<()>) {
@@ -1017,7 +1017,7 @@ mod tests {
     /// refused it.
     #[tokio::test(start_paused = true)]
     async fn slow_but_progressing_shim_retirement_still_completes() {
-        let (path, server) = slow_shim(Some(Duration::from_secs(3)), Duration::from_secs(3)).await;
+        let (path, server) = slow_shim(Some(Duration::from_secs(3)), Duration::from_secs(3));
         let retired = retire_shims_at(&path).await;
         server.abort();
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
@@ -1031,7 +1031,7 @@ mod tests {
     /// at the step's hang guard.
     #[tokio::test(start_paused = true)]
     async fn a_silent_shim_still_fails_retirement() {
-        let (path, server) = slow_shim(None, Duration::ZERO).await;
+        let (path, server) = slow_shim(None, Duration::ZERO);
         let retired = retire_shims_at(&path).await;
         server.abort();
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
