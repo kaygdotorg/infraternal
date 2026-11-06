@@ -110,10 +110,10 @@ const STYLE = `
 /* Two named actions sit side by side and share the row; the dismissal is a real button with a quiet flat fill, not loose text. */
 .ui-confirm-tip[data-named]:not([data-stack]) .ui-confirm-tip-actions { flex-wrap: nowrap; }
 .ui-confirm-tip[data-named] .ui-confirm-no { background: color-mix(in oklab, var(--fg) 10%, transparent); color: var(--fg); }
-/* The question is a decision, so the material behind it must never show readable text: the blur is at least 1.5x a terminal
-   line, at every transparency level (a level's own blur is lower than that at the "clear" end). The :where level rules
-   have zero specificity, so this wins; the solid level has no backdrop at all and is opaque anyway. */
-.ui-confirm-tip { --ui-overlay-blur: 32px; }
+/* A confirmation is a decision, so it is a solid card in the theme's surface colour at every transparency setting, never glass.
+   A backdrop blur does not reliably reach a terminal's own drawing layer (the text stayed readable through blur(32px) in a
+   production build), so no blur value can promise that nothing behind is legible. The arrow inherits this fill. */
+.ui-confirm-tip.ui-overlay-surface { --ui-overlay-background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
 .ui-confirm-tip[data-side="center"] .ui-confirm-tip-arrow { display: none; }
 .ui-confirm-tip-message { overflow-wrap: anywhere; }
 @media (pointer: coarse) {
