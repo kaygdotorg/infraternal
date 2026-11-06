@@ -580,17 +580,33 @@ mod tests {
     #[test]
     fn a_command_failure_reads_only_its_status_and_fixed_cause_line() {
         let missing = b"User authentication failed\n";
-        assert_eq!(command_failure(missing, Some(1)).kind, FailureKind::NoAccount);
+        assert_eq!(
+            command_failure(missing, Some(1)).kind,
+            FailureKind::NoAccount
+        );
         for status in [Some(2), Some(71), None] {
-            assert_eq!(command_failure(missing, status).kind, FailureKind::Install, "{status:?}");
+            assert_eq!(
+                command_failure(missing, status).kind,
+                FailureKind::Install,
+                "{status:?}"
+            );
         }
         let refused = command_failure(b"noise\nINFRATERNAL_REFUSED cache\n", Some(71));
         assert_eq!(refused.refusal(), Some(crate::model::Refusal::Cache));
-        assert_eq!(command_failure(b"INFRATERNAL_REFUSED cache\n", Some(72)).refusal(), None);
-        assert_eq!(command_failure(b"INFRATERNAL_REFUSED other\n", Some(71)).refusal(), None);
+        assert_eq!(
+            command_failure(b"INFRATERNAL_REFUSED cache\n", Some(72)).refusal(),
+            None
+        );
+        assert_eq!(
+            command_failure(b"INFRATERNAL_REFUSED other\n", Some(71)).refusal(),
+            None
+        );
         let json = serde_json::to_value(&refused).unwrap();
         assert_eq!(json["refusal"], "cache");
-        assert!(!json.to_string().contains("noise"), "other stderr stays withheld");
+        assert!(
+            !json.to_string().contains("noise"),
+            "other stderr stays withheld"
+        );
     }
 
     #[test]

@@ -1815,8 +1815,14 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
         failure.refusal(),
         Some(infraternal_plugin_ssh::model::Refusal::Foreign)
     );
-    assert_eq!(failure.message, infraternal_plugin_ssh::model::UNPROVEN_FOREIGN);
-    assert_eq!(serde_json::to_value(&failure).unwrap()["refusal"], "foreign");
+    assert_eq!(
+        failure.message,
+        infraternal_plugin_ssh::model::UNPROVEN_FOREIGN
+    );
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap()["refusal"],
+        "foreign"
+    );
     assert!(!failure.message.contains("~/.local/share/infraternal"));
     assert!(
         failure
@@ -1850,7 +1856,10 @@ async fn an_owner_record_for_another_host_is_set_up_elsewhere() {
         failure.message,
         infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE
     );
-    assert_eq!(std::fs::read_to_string(&owner).unwrap(), format!("{}\n", "6".repeat(32)));
+    assert_eq!(
+        std::fs::read_to_string(&owner).unwrap(),
+        format!("{}\n", "6".repeat(32))
+    );
 }
 
 #[tokio::test]
