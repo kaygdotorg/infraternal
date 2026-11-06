@@ -1653,14 +1653,14 @@ async fn a_revocation_with_the_d353_warning_confirms_cleanup() {
     );
 }
 
-/// A revocation carrying D356's report of changed access files is confirmed
-/// like any other; a malformed report is still a protocol error.
+/// A revocation carrying D356's `access` report is confirmed like any
+/// other; an unknown field (the old `changed`) is still a protocol error.
 #[cfg(feature = "remote")]
 #[tokio::test]
 async fn a_revocation_with_changed_access_files_confirms_cleanup() {
     for (json, confirmed) in [
-        (br#"{"revoked":true,"changed":{"files":[{"path":"~/.ssh/authorized_keys","lines":["ssh-ed25519 AAAA left"]}],"truncated":false}}"#.as_slice(), true),
-        (br#"{"revoked":true,"changed":{"files":"nope","truncated":false}}"#.as_slice(), false),
+        (br#"{"revoked":true,"access":{"state":"changed","accounts":[{"account":"deploy","state":"changed","files":[{"path":"~/.ssh/authorized_keys","change":"changed","lines":["ssh-ed25519 AAAA left"]}],"truncated":false,"unscanned":[],"omitted_files":0}]}}"#.as_slice(), true),
+        (br#"{"revoked":true,"changed":{"files":[],"truncated":false}}"#.as_slice(), false),
     ] {
         let (mut link, _peer) = connection();
         let (reply, result) = oneshot::channel();

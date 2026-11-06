@@ -58,31 +58,6 @@ const RECONNECT_FLOOR: Duration = Duration::from_millis(200);
 const RECONNECT_CEILING: Duration = Duration::from_secs(30);
 const STABLE_LINK: Duration = Duration::from_secs(10);
 
-/// D356's report in a revoke result: files whose access lines are new since
-/// the grant. Only its shape is checked; the lines are never logged.
-#[cfg(feature = "remote")]
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RevokedChanges {
-    #[serde(rename = "files")]
-    _files: Vec<RevokedChange>,
-    #[serde(rename = "truncated")]
-    _truncated: bool,
-}
-
-/// One changed access file in [`RevokedChanges`].
-#[cfg(feature = "remote")]
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RevokedChange {
-    #[serde(rename = "path")]
-    _path: String,
-    #[serde(rename = "lines")]
-    _lines: Vec<String>,
-    #[serde(default, rename = "note")]
-    _note: Option<String>,
-}
-
 /// The error for a refused terminal open from the agent's reply `json`. A
 /// known refusal reason passes through. A refusal envelope
 /// (`"error":"terminal unavailable"`) whose reason this server does not know,
@@ -2777,12 +2752,13 @@ async fn process_incoming(
                         revoked: bool,
                         #[serde(default, rename = "warning")]
                         _warning: Option<String>,
-                        // D356: access files changed since the grant, for the
-                        // person revoking. Accepted here so that a revocation
-                        // carrying them is confirmed; showing them is its own
-                        // slice. Never logged.
-                        #[serde(default, rename = "changed")]
-                        _changed: Option<RevokedChanges>,
+                        // D356: what the infraternal agent found in the person's
+                        // access files, always sent by a D356 agent. Accepted
+                        // so the revocation is confirmed; it is not kept
+                        // here, so its shape is not checked here either.
+                        // Never logged.
+                        #[serde(default, rename = "access")]
+                        _access: Option<serde::de::IgnoredAny>,
                     }
                     // Serde structs also accept positional arrays. Cleanup
                     // acknowledgements declare an object, so reject that shape.
