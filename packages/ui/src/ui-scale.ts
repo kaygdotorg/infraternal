@@ -9,7 +9,8 @@
  * - `--ui-base` is the interface's base size: 1.1 on a desktop (owner, 2026-11-01: "110% should be the new 100% and default"),
  *   1 on a touch screen (a phone already has larger text and 44 px rows of its own).
  * - `--ui-scale` is the slider, relative to that base: 100 % is the standard and the default, and then the property is removed.
- * - The choice is remembered in this browser (`readLocal`), applied before the first paint (`applyStoredUiSize` in main.ts).
+ * - On signed-in pages, the canvas look owns the account's choice; the small local cache is used only before its document arrives. Auth and isolated
+ *   previews keep the guarded browser preference and apply it before their first paint (`applyStoredUiSize` in main.ts).
  * - The terminal's own font size is a separate setting (it is measured in device pixels for the cell grid) and does not follow.
  * - Code that reads a length from a CSS custom property must resolve it to pixels (`cssPx`), because the property holds rem.
  * - Code that sets a length in pixels from a constant (a popover's widest width, a window's default width) multiplies it by
@@ -28,6 +29,16 @@ export const UI_BASE = 1.1;
 const KEY = "tracer.ui-size.v2";
 const LEGACY_KEY = "tracer.ui-size";
 
+/** The signed-in canvas supplies and records the account's size without a second local source of truth. */
+export interface UiSizePreference { read(): number; write(percent: number): void }
+let accountPreference: UiSizePreference | undefined;
+
+/** Uses the active account's canvas look until its owning page is disposed. */
+export function bindUiSizePreference(preference: UiSizePreference): () => void {
+  accountPreference = preference;
+  return () => { if (accountPreference === preference) accountPreference = undefined; };
+}
+
 /** A size snapped to the slider's steps and kept in range. */
 export const clampUiSize = (percent: number): number => Math.min(UI_SIZE.max, Math.max(UI_SIZE.min, Math.round(percent / UI_SIZE.step) * UI_SIZE.step));
 
@@ -35,6 +46,7 @@ export const clampUiSize = (percent: number): number => Math.min(UI_SIZE.max, Ma
 export const migrateLegacy = (legacy: number): number => legacy === UI_SIZE.standard ? UI_SIZE.standard : clampUiSize(legacy / UI_BASE);
 
 export function readUiSize(): number {
+  if (accountPreference) return accountPreference.read();
   const stored = Number(readLocal(KEY));
   if (readLocal(KEY) !== null && Number.isFinite(stored) && stored > 0) return clampUiSize(stored);
   const legacy = Number(readLocal(LEGACY_KEY));
@@ -74,7 +86,8 @@ export function applyStoredUiSize(): void { paint(readUiSize()); }
 /** Sets, remembers and applies a size; returns the size actually used. */
 export function setUiSize(percent: number): number {
   const size = clampUiSize(percent);
-  writeLocal(KEY, String(size));
+  if (accountPreference) accountPreference.write(size);
+  else writeLocal(KEY, String(size));
   paint(size);
   factor = undefined;
   window.dispatchEvent(new Event(UI_SIZE_EVENT));

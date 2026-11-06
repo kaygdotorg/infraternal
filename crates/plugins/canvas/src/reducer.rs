@@ -716,7 +716,7 @@ mod tests {
 
     fn look() -> Value {
         let theme = |id: &str| json!({"id":id,"name":id,"tint":75,"blur":25,"grain":0,"font":"maple-mono-nf","colors":"mocha","uiSize":100,"background":"aurora","customSolid":"#3b4252","custom":{"stops":["#7a9cff","#cba6f7"],"angle":135}});
-        json!({"v":1,"selected":"tinted","basics":{"colors":"mocha","font":"maple-mono-nf","uiSize":100},"themes":[theme("solid"),theme("tinted"),theme("custom-1")]})
+        json!({"v":1,"selected":"tinted","basics":{"colors":"mocha","font":"maple-mono-nf","uiSize":100},"themes":[theme("solid"),theme("tinted"),theme("custom-1")],"windowSizes":{"phone":"edge","desktop":"comfortable"},"extendedInfo":false})
     }
     #[test]
     fn the_accounts_look_is_set_whole_validated_and_part_of_the_document() {
@@ -765,6 +765,11 @@ mod tests {
             bad(&|v| v["themes"][0]["extra"] = json!(1)),
             bad(&|v| v["themes"][1]["id"] = json!("solid")),
             bad(&|v| v["v"] = json!(2)),
+            bad(&|v| v["uiFont"] = json!("serif")),
+            bad(&|v| v["windowSizes"]["phone"] = json!("tablet")),
+            bad(&|v| v["windowSizes"]["desktop"] = json!("compact")),
+            bad(&|v| v["extendedInfo"] = json!("yes")),
+            bad(&|v| v["windowSizes"]["extra"] = json!(true)),
             bad(&|v| {
                 let t = v["themes"][0].clone();
                 for n in 0..16 {

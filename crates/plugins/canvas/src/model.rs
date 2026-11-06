@@ -179,7 +179,17 @@ fn theme(value: &Value) -> bool {
 /// The account's look (D322): the list of themes, which one is selected, and the starting Colour, font and size the built-in themes were made from.
 /// It lives in the canvas document so every device of the account shows the same look; only the camera stays per device (D178).
 pub(crate) fn look(value: &Value) -> bool {
-    shape(value, &["v", "selected", "basics", "themes"])
+    shape(
+        value,
+        &[
+            "v",
+            "selected",
+            "basics",
+            "themes",
+            "windowSizes",
+            "extendedInfo",
+        ],
+    )
         && value.get("v").and_then(Value::as_u64) == Some(1)
         && string(value, "selected").is_some()
         && value.get("basics").is_some_and(|basics| {
@@ -200,6 +210,20 @@ pub(crate) fn look(value: &Value) -> bool {
                             .any(|seen| seen.get("id") == t.get("id"))
                     })
             })
+        && value.get("windowSizes").is_none_or(|sizes| {
+            shape(sizes, &["phone", "desktop"])
+                && matches!(
+                    sizes.get("phone").and_then(Value::as_str),
+                    Some("full" | "edge" | "comfortable")
+                )
+                && matches!(
+                    sizes.get("desktop").and_then(Value::as_str),
+                    Some("comfortable" | "wide" | "full")
+                )
+        })
+        && value
+            .get("extendedInfo")
+            .is_none_or(Value::is_boolean)
 }
 pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
     doc.get("views")

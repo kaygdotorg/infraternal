@@ -52,6 +52,25 @@ async function cameraTransform(page: Page): Promise<string> {
   return page.locator(".cl-world").evaluate((world) => (world as HTMLElement).style.transform);
 }
 
+/** Turns canvas lock off and pans through the same wheel path used by trackpads. */
+async function panCamera(page: Page): Promise<void> {
+  await page.keyboard.press("Control+Shift+G");
+  await page.evaluate(() => new Promise<void>((done) => {
+    const target = document.querySelector(".cl-viewport")!;
+    const start = performance.now();
+    const step = (now: number): void => {
+      if (now - start >= 300) { done(); return; }
+      target.dispatchEvent(new WheelEvent("wheel", {
+        deltaX: 24, deltaY: 9, clientX: 640, clientY: 400, bubbles: true, cancelable: true,
+      }));
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }));
+  // sleep: let the camera's final spring settle after the last trackpad wheel event.
+  await page.waitForTimeout(200);
+}
+
 /** Records this page's animation-frame intervals until {@link stopFrameCapture} ends the sample. */
 async function startFrameCapture(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -79,9 +98,15 @@ async function stopFrameCapture(page: Page): Promise<number[]> {
 }
 
 /** Captures the canvas requests and snapshots used by this page for first-paint evidence. */
-function observeCanvasWire(page: Page) {
+function observeCanvasWire(page: Page, serverOrigin: string) {
   const calls: Array<{ actionId: string; input: Record<string, unknown> }> = [];
   const snapshots: Array<{ revision: number; carriesLook: boolean; receivedAt: number }> = [];
+  const appearanceHttpRequests: string[] = [];
+  const origin = new URL(serverOrigin).origin;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin === origin && /appearance|look/i.test(url.pathname)) appearanceHttpRequests.push(`${request.method()} ${url.pathname}`);
+  });
   page.on("websocket", (socket) => {
     const sent = new WebSocketFrameDecoder(), received = new WebSocketFrameDecoder();
     socket.on("framesent", ({ payload }) => {
@@ -105,7 +130,7 @@ function observeCanvasWire(page: Page) {
       });
     });
   });
-  return { calls, snapshots };
+  return { calls, snapshots, appearanceHttpRequests };
 }
 
 /** Produces the old first-paint cache shape with values that conflict with newer standalone preferences. */
@@ -119,28 +144,27 @@ test("theme and font changes reach the same account live and after reload withou
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
   const evidence = tracerEvidencePath("appearance-sync");
   await mkdir(evidence, { recursive: true });
-  const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
-  const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
+  const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
   try {
     const a = watchLayout(await first.newPage());
     await enrol(a, server); await settled(a);
     await second.addCookies(await first.cookies());
     const b = watchLayout(await second.newPage());
-    const wire = observeCanvasWire(b);
+    const wire = observeCanvasWire(b, server.origin);
     const navigationStartedAt = Date.now();
     await b.goto(server.origin + "/");
     await expect(windows(b)).toHaveCount(1); await settled(b);
-    const snapshot = wire.snapshots.find((event) => event.carriesLook);
+    const snapshot = wire.snapshots[0];
     expect(snapshot).toBeDefined();
+    const aCameraBefore = await cameraTransform(a);
     const bCamera = await cameraTransform(b);
     const firstContentfulPaintMs = await b.evaluate(() => performance.getEntriesByType("paint").find((entry) => entry.name === "first-contentful-paint")?.startTime ?? null);
 
-    await a.keyboard.down("Control");
-    await a.mouse.move(640, 400);
-    await a.mouse.wheel(0, -500);
-    await a.keyboard.up("Control");
-    await expect.poll(() => cameraTransform(a)).not.toBe(bCamera);
+    await panCamera(a);
+    await expect.poll(() => cameraTransform(a)).not.toBe(aCameraBefore);
     const aCamera = await cameraTransform(a);
+    expect(await cameraTransform(b)).toBe(bCamera);
 
     await startFrameCapture(b);
     await choosePaletteValue(a, "Theme: Solid");
@@ -149,6 +173,8 @@ test("theme and font changes reach the same account live and after reload withou
       const look = (await cache(b)).canonical.look;
       return look?.selected === "solid" && look.themes.find((theme) => theme.id === "solid")?.font === "fira-code";
     }, { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => b.locator("html").getAttribute("data-look"), { timeout: 30_000 }).toBe("solid");
+    await expect.poll(() => b.locator("html").getAttribute("data-font"), { timeout: 30_000 }).toBe("fira-code");
     const frameIntervalsMs = await stopFrameCapture(b);
     const maxFrameIntervalMs = Math.max(0, ...frameIntervalsMs);
     const framesOver50ms = frameIntervalsMs.filter((interval) => interval > 50).length;
@@ -161,21 +187,25 @@ test("theme and font changes reach the same account live and after reload withou
     await b.reload(); await settled(b);
     const afterReload = (await cache(b)).canonical.look;
     expect(afterReload).toEqual(beforeReload);
+    await expect(b.locator("html")).toHaveAttribute("data-look", "solid");
+    await expect(b.locator("html")).toHaveAttribute("data-font", "fira-code");
     expect(await cameraTransform(a)).toBe(aCamera);
     expect(await cameraTransform(b)).toBe(bCamera);
 
     const appearanceCalls = wire.calls.filter(({ actionId }) => /appearance|look/i.test(actionId)).length;
+    const appearanceRoundTrips = appearanceCalls + wire.appearanceHttpRequests.length;
     const lookWritesOnB = wire.calls.filter(({ actionId, input }) => actionId === "canvas.layout.apply" && (input.intent as { type?: string } | undefined)?.type === "look.set").length;
     expect(snapshot?.carriesLook).toBe(true);
     expect(firstContentfulPaintMs).not.toBeNull();
-    expect(appearanceCalls).toBe(0);
+    expect(appearanceRoundTrips).toBe(0);
     expect(lookWritesOnB).toBe(0);
     const measurement = {
       initialSnapshotRevision: snapshot?.revision,
       initialSnapshotElapsedMs: snapshot ? snapshot.receivedAt - navigationStartedAt : null,
       initialSnapshotCarriedLook: snapshot?.carriesLook,
       firstContentfulPaintMs,
-      separateAppearanceRoundTrips: appearanceCalls,
+      separateAppearanceRoundTrips: appearanceRoundTrips,
+      appearanceHttpRequests: wire.appearanceHttpRequests,
       clientBLookWrites: lookWritesOnB,
       frameSamples: frameIntervalsMs.length,
       maxFrameIntervalMs,
@@ -216,8 +246,7 @@ test("legacy appearance values migrate once into the new account document", asyn
     const document = (await cache(page)).canonical;
     const look = document.look as unknown as {
       selected: string;
-      themes: Array<{ id: string; font: string; colors: string; uiSize: number }>;
-      uiFont?: string;
+      themes: Array<{ id: string; font: string; colors: string; uiSize: number; tint: number; blur: number; background: string }>;
       windowSizes?: { phone: string; desktop: string };
       extendedInfo?: boolean;
     };
@@ -227,11 +256,49 @@ test("legacy appearance values migrate once into the new account document", asyn
     expect(selected.colors).toBe("latte");
     expect(selected.font).toBe("geist-mono");
     expect(selected.uiSize).toBe(125);
-    expect(look.uiFont).toBe("sans");
+    expect(selected).toMatchObject({ tint: 75, blur: 25, background: "aurora" });
+    expect(look).not.toHaveProperty("uiFont");
     expect(look.windowSizes).toEqual({ phone: "full", desktop: "wide" });
     expect(look.extendedInfo).toBe(true);
     expect(remaining).toEqual([]);
     await writeFile(`${evidence}/legacy-migration.json`, JSON.stringify({ accountId, look, remainingLegacyKeys: remaining }, null, 2));
     console.log(`APPEARANCE_MIGRATION ${JSON.stringify({ accountId, selected: look.selected, font: selected.font, uiSize: selected.uiSize, windowSizes: look.windowSizes, extendedInfo: look.extendedInfo, remainingLegacyKeys: remaining })}`);
+  } finally { await context.close(); await server.dispose(); }
+});
+
+test("superseded appearance levels seed one fresh theme only when there is no saved look", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
+  const evidence = tracerEvidencePath("appearance-sync");
+  await mkdir(evidence, { recursive: true });
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  try {
+    await context.addInitScript(() => {
+      localStorage.setItem("tracer.theme", "latte");
+      localStorage.setItem("tracer.font", "geist-mono");
+      localStorage.setItem("tracer.ui-size", "110");
+      localStorage.setItem("tracer.card", "3");
+      localStorage.setItem("tracer.windows", "4");
+      localStorage.setItem("tracer.background", "none");
+      localStorage.setItem("tracer.window-size.phone", "full");
+      localStorage.setItem("tracer.extended-info", "0");
+    });
+    const page = watchLayout(await context.newPage());
+    await enrol(page, server); await settled(page);
+    const document = (await cache(page)).canonical;
+    const look = document.look as unknown as {
+      selected: string;
+      themes: Array<{ id: string; font: string; colors: string; uiSize: number; tint: number; blur: number; background: string }>;
+      windowSizes?: { phone: string; desktop: string };
+      extendedInfo?: boolean;
+    };
+    const selected = look.themes.find((theme) => theme.id === look.selected)!;
+    const legacyKeys = ["tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size", "tracer.card", "tracer.windows", "tracer.background", "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info"];
+    const remaining = await page.evaluate((keys) => keys.filter((key) => localStorage.getItem(key) !== null), legacyKeys);
+    expect(selected).toMatchObject({ colors: "latte", font: "geist-mono", uiSize: 100, tint: 50, blur: 50, background: "solid" });
+    expect(look.windowSizes).toEqual({ phone: "full", desktop: "comfortable" });
+    expect(look.extendedInfo).toBe(false);
+    expect(remaining).toEqual([]);
+    await writeFile(`${evidence}/legacy-standalone-migration.json`, JSON.stringify({ look, remainingLegacyKeys: remaining }, null, 2));
+    console.log(`APPEARANCE_LEGACY_SEED ${JSON.stringify({ selected: look.selected, colors: selected.colors, tint: selected.tint, blur: selected.blur, background: selected.background, windowSizes: look.windowSizes, remainingLegacyKeys: remaining })}`);
   } finally { await context.close(); await server.dispose(); }
 });

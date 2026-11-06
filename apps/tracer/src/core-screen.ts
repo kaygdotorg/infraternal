@@ -20,6 +20,7 @@ import { aboutSection, createSettingsOverlay, type SettingsSection } from "../..
 import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
 import { startThemes } from "./canvas/themes/controller";
+import { readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
 import { initialFont, rememberFont } from "./font-preference";
@@ -46,6 +47,8 @@ export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
   probeMode: boolean;
+  /** Signed-in account whose appearance is carried by its canvas document. */
+  accountId?: string;
   /** The canvas chrome: sidebar footer, the shortcuts list, Settings as a view and the actions the canvas handles. */
   canvas?: boolean;
   /** Offers "Add hosts" in the palette (the add-host flow exists). */
@@ -380,23 +383,28 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const validLevel = (n: number): boolean => Number.isInteger(n) && n >= 1 && n <= 4;
   const levelFrom = (param: string, saved: string, fallback: number): number => {
     const q = Number(params.get(param)), v = Number(readLocal(saved));
-    return validLevel(q) ? q : validLevel(v) ? v : fallback;
+    return validLevel(q) ? q : !options.accountId && validLevel(v) ? v : fallback;
   };
   let cardLevel = levelFrom("card", "tracer.card", DEFAULT_CARD);
   let windowLevel = levelFrom("windows", "tracer.windows", DEFAULT_WINDOW);
   const systemDark = matchMedia("(prefers-color-scheme: dark)");
-  let currentThemeId = themeId(params.get("theme")) ?? themeId(readLocal("tracer.theme")) ?? (systemDark.matches ? "mocha" : "latte");
+  const legacyAppearance = options.accountId ? readLegacyAppearance(options.accountId) : undefined;
+  const cachedLook = options.accountId ? readCachedLook(options.accountId) : undefined;
+  const cachedTheme = cachedLook?.themes.find((theme) => theme.id === cachedLook.selected);
+  const savedThemeId = themeId(legacyAppearance?.theme) ?? themeId(cachedTheme?.colors)
+    ?? (!options.accountId ? themeId(readLocal("tracer.theme")) : undefined);
+  let currentThemeId = themeId(params.get("theme")) ?? savedThemeId ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
   // `committedFont` is what the person chose; `shownFont` is what is on screen, which differs
   // only while a palette row previews another font.
-  let committedFont = initialFont();
+  let committedFont = initialFont(options.accountId);
   let shownFont = committedFont;
   let fontRequest = 0;
   // Plain (`none`): one solid colour with subtle dots. Soft: the theme's gentle gradient. Plain is the default (D191); a saved choice stays. Mesh: the full
   // theme mesh. The dots sit on all three. `themed` (D322, #323) is a Theme's own background: it looks like mesh to the stylesheets, but the image is
   // CSS written by `setBackdrop`, so the mesh painter (WebGL) never runs for it.
   const validBackground = (v: string | null): v is "none" | "soft" | "mesh" | "themed" => v === "none" || v === "soft" || v === "mesh" || v === "themed";
-  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "none";
+  let background: string = validBackground(params.get("bg")) ? params.get("bg")! : !options.accountId && validBackground(readLocal("tracer.background")) ? readLocal("tracer.background")! : "none";
   /** The terminal paints no background of its own where a window shows the canvas through it (and over the mesh). */
   const translucentTerminal = (): boolean => background === "mesh" || background === "themed" || windowLevel > 1;
   /** Every terminal on the screen (they share the look), and the one that takes the keys. */
@@ -853,7 +861,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }, 250);
   };
   const systemThemeChange = (): void => {
-    if (!themeId(params.get("theme")) && !themeId(readLocal("tracer.theme"))) {
+    if (!themeId(params.get("theme")) && !savedThemeId) {
       currentThemeId = systemDark.matches ? "mocha" : "latte";
       void applyLook();
     }
@@ -1449,28 +1457,28 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return true;
     } else if (kind === "theme" && themeId(value ?? null)) {
       currentThemeId = value!;
-      writeLocal("tracer.theme", currentThemeId);
+      if (!options.accountId) writeLocal("tracer.theme", currentThemeId);
       swapLook();
       return true;
     } else if (kind === "font" && fontById(value)) {
       committedFont = fontById(value)!;
-      rememberFont(committedFont);
+      if (!options.accountId) rememberFont(committedFont);
       showFont(committedFont);
       window.dispatchEvent(new CustomEvent("tracer:appearance"));
       return false;
     } else if (kind === "card" && validLevel(Number(value))) {
       cardLevel = Number(value);
-      writeLocal("tracer.card", value!);
+      if (!options.accountId) writeLocal("tracer.card", value!);
       swapLook();
       return true;
     } else if (kind === "windows" && validLevel(Number(value))) {
       windowLevel = Number(value);
-      writeLocal("tracer.windows", value!);
+      if (!options.accountId) writeLocal("tracer.windows", value!);
       swapLook();
       return true;
     } else if (kind === "bg" && validBackground(value ?? null)) {
       background = value!;
-      writeLocal("tracer.background", value!);
+      if (!options.accountId) writeLocal("tracer.background", value!);
       swapLook();
       return true;
     } else if (kind === "themes") {
@@ -1672,6 +1680,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // The person's Themes (D322): the page shows the selected one from now on. Only the product's screens have Settings windows to edit them in.
   // `?look=<theme id>` previews a theme for this page load only (tests and screenshots, like `?theme=`): honoured on the test double alone, so a link sent to a person of
   // a real server cannot change their look, and a preview never saves (see `startThemes`).
-  const stopThemes = options.settingsView ? startThemes(api, options.mockMode ? new URLSearchParams(location.search).get("look") ?? undefined : undefined) : undefined;
+  const stopThemes = options.settingsView ? startThemes(api, {
+    ...(options.accountId ? { accountId: options.accountId } : {}),
+    ...(options.mockMode ? { preview: new URLSearchParams(location.search).get("look") ?? undefined } : {}),
+  }) : undefined;
   return api;
 }

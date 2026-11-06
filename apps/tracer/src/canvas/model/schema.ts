@@ -38,11 +38,22 @@ export interface DocTheme {
   id: string; name: string; tint: number; blur: number; grain: number; font: string; colors: string; uiSize: number; background: string; customSolid: string;
   custom: { stops: string[]; angle: number };
 }
+/** The product font families and per-device-size defaults that belong to one account's appearance. */
+export interface DocWindowSizes { phone: "full" | "edge" | "comfortable"; desktop: "comfortable" | "wide" | "full" }
 /**
- * The account's look (D322): its themes, which one is selected, and the Colour, font and size the built-in themes started from. It is part of the
- * canvas document so every device of the account shows the same look; only the camera stays per device (D178).
+ * The account's look (D322): its themes, selected theme, starting Colour/font/size, and other appearance defaults. It is part of the canvas document
+ * so every device of the account shows the same look; only the camera stays per device (D178). New optional fields keep older v1 documents readable.
  */
-export interface DocLook { v: 1; selected: string; basics: { colors: string; font: string; uiSize: number }; themes: DocTheme[] }
+export interface DocLook {
+  v: 1;
+  selected: string;
+  basics: { colors: string; font: string; uiSize: number };
+  themes: DocTheme[];
+  /** Defaults for windows that still follow their device-size setting; absent in older documents. */
+  windowSizes?: DocWindowSizes;
+  /** Whether machine details include extended technical facts; absent in older documents. */
+  extendedInfo?: boolean;
+}
 
 export { MAX_THEMES };
 
@@ -63,6 +74,8 @@ export function documentWindows(document: CanvasDocument): DocWindow[] {
 const MAX_VIEWS = 64, MAX_COLUMNS = 64, MAX_WINDOWS = 256, MAX_TEXT = 200, MAX_BANDS = 64;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+/** Accepts an exact set of object keys so the shared document has one canonical shape. */
+const shape = (v: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(v).every((key) => keys.includes(key));
 const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= MAX_TEXT;
 const finite = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
@@ -79,17 +92,27 @@ const hex = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]
 
 /** Checks an untrusted look with the server's bounds (text up to 200 characters, percentages 0 to 100, size 50 to 150, hex colours, at most 16 distinct themes). */
 export function parseLook(input: unknown): DocLook | undefined {
-  if (!isObject(input) || input.v !== 1 || !text(input.selected) || !isObject(input.basics) || !Array.isArray(input.themes) || input.themes.length > MAX_THEMES) return undefined;
+  if (!isObject(input) || !shape(input, ["v", "selected", "basics", "themes", "windowSizes", "extendedInfo"]) || input.v !== 1 || !text(input.selected) || !isObject(input.basics) || !shape(input.basics, ["colors", "font", "uiSize"]) || !Array.isArray(input.themes) || input.themes.length > MAX_THEMES) return undefined;
+  if (input.extendedInfo !== undefined && typeof input.extendedInfo !== "boolean") return undefined;
+  let windowSizes: DocWindowSizes | undefined;
+  if (input.windowSizes !== undefined) {
+    if (!isObject(input.windowSizes) || !shape(input.windowSizes, ["phone", "desktop"]) || !["full", "edge", "comfortable"].includes(String(input.windowSizes.phone)) || !["comfortable", "wide", "full"].includes(String(input.windowSizes.desktop))) return undefined;
+    windowSizes = { phone: input.windowSizes.phone as DocWindowSizes["phone"], desktop: input.windowSizes.desktop as DocWindowSizes["desktop"] };
+  }
   const b = input.basics;
   if (!text(b.colors) || !text(b.font) || !whole(b.uiSize, 50, 150)) return undefined;
   const themes: DocTheme[] = [];
   for (const t of input.themes) {
-    if (!isObject(t) || !text(t.id) || !text(t.name) || !text(t.font) || !text(t.colors) || !text(t.background) || !whole(t.tint, 0, 100) || !whole(t.blur, 0, 100) || !whole(t.grain, 0, 100) || !whole(t.uiSize, 50, 150) || !hex(t.customSolid) || !isObject(t.custom)) return undefined;
+    if (!isObject(t) || !shape(t, ["id", "name", "tint", "blur", "grain", "font", "colors", "uiSize", "background", "customSolid", "custom"]) || !text(t.id) || !text(t.name) || !text(t.font) || !text(t.colors) || !text(t.background) || !whole(t.tint, 0, 100) || !whole(t.blur, 0, 100) || !whole(t.grain, 0, 100) || !whole(t.uiSize, 50, 150) || !hex(t.customSolid) || !isObject(t.custom) || !shape(t.custom, ["stops", "angle"])) return undefined;
     const c = t.custom;
     if (!Array.isArray(c.stops) || c.stops.length < 2 || c.stops.length > 4 || !c.stops.every(hex) || !whole(c.angle, 0, 360) || themes.some((seen) => seen.id === t.id)) return undefined;
     themes.push({ id: t.id, name: t.name, tint: t.tint, blur: t.blur, grain: t.grain, font: t.font, colors: t.colors, uiSize: t.uiSize, background: t.background, customSolid: t.customSolid, custom: { stops: [...c.stops as string[]], angle: c.angle } });
   }
-  return { v: 1, selected: input.selected, basics: { colors: b.colors, font: b.font, uiSize: b.uiSize }, themes };
+  return {
+    v: 1, selected: input.selected, basics: { colors: b.colors, font: b.font, uiSize: b.uiSize }, themes,
+    ...(windowSizes ? { windowSizes } : {}),
+    ...(input.extendedInfo === undefined ? {} : { extendedInfo: input.extendedInfo }),
+  };
 }
 
 /** Checks untrusted JSON and returns a document, or nothing. */

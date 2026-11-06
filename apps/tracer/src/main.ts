@@ -104,8 +104,8 @@ let deviceApprovalLink: ApprovalLink = consumeDeviceApprovalLink();
 let deviceApprovalComplete = false;
 type UiFont = "sans" | "mono";
 
-const uiFont = uiFontPreference();
-document.documentElement.dataset.uiFont = uiFont;
+const authUiFont = uiFontPreference();
+document.documentElement.dataset.uiFont = authUiFont;
 
 let activeUserId: string | undefined;
 let checkingResume = false;
@@ -449,6 +449,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   coreScreen = undefined;
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
+  const uiFont = uiFontPreference();
   const mockMode = query.get("mock") === "1";
   // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
@@ -470,11 +471,12 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
     // fallback and keeping the mobile layout stable while the font loads.
-    await (uiFont === "mono" ? loadFont(initialFont()) : document.fonts.load('450 14px "Geist Sans"'));
+    await (uiFont === "mono" ? loadFont(initialFont(activeUserId)) : document.fonts.load('450 14px "Geist Sans"'));
     if (generation !== sessionGeneration) return;
-    // Auth keeps its existing monospace tooltips; this preference owns the core screen only.
+    // Geist Mono is the product face (TASTE §2); `?ui=` is a page-only preview and is never stored.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
+      ...(activeUserId ? { accountId: activeUserId } : {}),
       canvas: canvasMode || clustersMode || useCanvas,
       // The clusters canvas and the product canvas register their own "Add hosts" row with the wizard (canvas/addhost).
       addHostEntry: canvasMode,
@@ -689,22 +691,14 @@ async function showRecovery(): Promise<void> {
   scheduleBackdrop();
 }
 
-/** URL choices win and are remembered when storage is available; private mode still works. */
+/** The product face stays monospace; `?ui=` can preview another face on this page only. */
 function uiFontPreference(): UiFont {
   // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
   const proto = new URLSearchParams(location.search).get("proto");
   if (proto === "windows" || proto === "addhost" || proto === "clusters") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
-  if (requested === "sans" || requested === "mono") {
-    try { window.localStorage.setItem("tracer.ui-font", requested); } catch { /* The URL remains the preference without storage. */ }
-    return requested;
-  }
-  try {
-    // Monospace is the product face (TASTE.md section 2); sans stays an explicit opt-in.
-    return window.localStorage.getItem("tracer.ui-font") === "sans" ? "sans" : "mono";
-  } catch {
-    return "mono";
-  }
+  if (requested === "sans" || requested === "mono") return requested;
+  return "mono";
 }
 
 function testScrollbackLimit(value: string | null): number | undefined {

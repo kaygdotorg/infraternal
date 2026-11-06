@@ -656,7 +656,6 @@ mod tests {
             "v": 1,
             "selected": "solid",
             "basics": {"colors": "ink", "font": "geist-mono", "uiSize": 110},
-            "uiFont": "sans",
             "windowSizes": {"phone": "full", "desktop": "wide"},
             "extendedInfo": true,
             "themes": [{

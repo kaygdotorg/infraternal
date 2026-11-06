@@ -1,6 +1,6 @@
 /** Exercises the authenticated core screen and saves the requested production-build views. */
 import { tracerEvidencePath } from "./evidence-path";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
@@ -18,35 +18,6 @@ async function saveScreenshot(page: Page, testInfo: TestInfo, name: string): Pro
   await mkdir(resolve(path, ".."), { recursive: true });
   await page.screenshot({ path, animations: "disabled" });
   await testInfo.attach(name, { path, contentType: "image/png" });
-  return path;
-}
-
-async function saveFontComparison(
-  page: Page,
-  testInfo: TestInfo,
-  name: string,
-  sansPath: string,
-  monoPath: string,
-  width: number,
-  height: number,
-): Promise<string> {
-  const [sans, mono] = await Promise.all([readFile(sansPath), readFile(monoPath)]);
-  const headingHeight = 30;
-  await page.setViewportSize({ width: width * 2, height: height + headingHeight });
-  await page.setContent(`<!doctype html><html><head><style>
-    *{box-sizing:border-box}html,body{margin:0;background:#101113;color:#e6e7e9;font:12px/30px ui-monospace,monospace}
-    main{display:grid;grid-template-columns:${width}px ${width}px;width:${width * 2}px}
-    figure{margin:0;width:${width}px;height:${height + headingHeight}px;overflow:hidden}
-    figcaption{height:${headingHeight}px;padding:0 12px;background:#191a1d}
-    img{display:block;width:${width}px;height:${height}px}
-  </style></head><body><main>
-    <figure><figcaption>Geist Sans · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${sans.toString("base64")}"></figure>
-    <figure><figcaption>Maple Mono NF · ${name.replaceAll("-", " ")}</figcaption><img src="data:image/png;base64,${mono.toString("base64")}"></figure>
-  </main></body></html>`);
-  await page.locator("img").evaluateAll((images) => Promise.all(images.map((image) => (image as HTMLImageElement).decode())));
-  const path = tracerEvidencePath("playwright", "core-screen", `${name}-comparison.png`);
-  await page.screenshot({ path, animations: "disabled", fullPage: true });
-  await testInfo.attach(`${name}-comparison`, { path, contentType: "image/png" });
   return path;
 }
 
@@ -251,7 +222,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   console.log(`Core-screen screenshots (production build):\n${screenshotPaths.join("\n")}`);
 });
 
-test("UI font choice persists and captures ink screenshots at phone and desktop sizes", async ({ browser, page }, testInfo) => {
+test("the UI stays monospace and a URL font preview never becomes a preference", async ({ browser, page }, testInfo) => {
   test.setTimeout(180_000);
   await page.context().request.post("/__mock/reset");
   await page.context().request.post("/__mock/open-terminal");
@@ -262,11 +233,11 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
     { width: 393, height: 852 },
   ];
 
-  async function capture(pageToUse: Page, width: number, height: number, font: "sans" | "mono", state: "sidebar-open" | "palette-open"): Promise<void> {
+  async function capture(pageToUse: Page, width: number, height: number, state: "sidebar-open" | "palette-open"): Promise<void> {
     await pageToUse.setViewportSize({ width, height });
-    await pageToUse.goto(`/?mock=1&theme=ink&bg=none&ui=${font}`);
+    await pageToUse.goto("/?mock=1&theme=ink&bg=none&ui=mono");
     await waitForAttached(pageToUse);
-    await expect(pageToUse.locator("html")).toHaveAttribute("data-ui-font", font);
+    await expect(pageToUse.locator("html")).toHaveAttribute("data-ui-font", "mono");
     const typography = await pageToUse.evaluate(() => {
       const stage = document.querySelector<HTMLElement>("#terminal-screen")!;
       return {
@@ -275,9 +246,9 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
         stored: localStorage.getItem("tracer.ui-font"),
       };
     });
-    expect(typography.family).toContain(font === "mono" ? "Maple Mono NF" : "Geist Sans");
+    expect(typography.family).toContain("Maple Mono NF");
     expect(typography.selectedFaceLoaded).toBe(true);
-    expect(typography.stored).toBe(font);
+    expect(typography.stored).toBeNull();
 
     if (width === 393) {
       await expect(pageToUse.locator(".tabs")).toBeHidden();
@@ -322,7 +293,7 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
       await pageToUse.keyboard.press("Control+Shift+K");
       await expect(pageToUse.getByRole("dialog", { name: "Go to anything" })).toBeVisible();
     }
-    const name = `ui-${width}x${height}-${state}-${font}`;
+    const name = `ui-${width}x${height}-${state}`;
     captures.set(name, await saveScreenshot(pageToUse, testInfo, name));
   }
 
@@ -338,36 +309,35 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
       try {
         await mobileContext.request.post("/__mock/open-terminal");
         const mobilePage = await mobileContext.newPage();
-        for (const font of ["sans", "mono"] as const) {
-          await capture(mobilePage, size.width, size.height, font, "sidebar-open");
-          await mobilePage.keyboard.press("Escape");
-          await capture(mobilePage, size.width, size.height, font, "palette-open");
-          await mobilePage.keyboard.press("Escape");
-        }
+        await capture(mobilePage, size.width, size.height, "sidebar-open");
+        await mobilePage.keyboard.press("Escape");
+        await capture(mobilePage, size.width, size.height, "palette-open");
+        await mobilePage.keyboard.press("Escape");
       } finally {
         await mobileContext.close();
       }
     } else {
-      for (const font of ["sans", "mono"] as const) {
-        await capture(page, size.width, size.height, font, "sidebar-open");
-        await page.keyboard.press("Escape");
-        await capture(page, size.width, size.height, font, "palette-open");
-        await page.keyboard.press("Escape");
-      }
+      await capture(page, size.width, size.height, "sidebar-open");
+      await page.keyboard.press("Escape");
+      await capture(page, size.width, size.height, "palette-open");
+      await page.keyboard.press("Escape");
     }
   }
 
-  // A query choice overrides storage; a later visit without `ui` uses the saved choice.
+  // A query choice is this page's preview only; later visits keep the product's monospace face.
   await page.goto("/?mock=1&theme=ink&bg=none&ui=mono");
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBe("mono");
+  await expect(page.locator("html")).toHaveAttribute("data-ui-font", "mono");
+  expect(await page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBeNull();
   await page.goto("/?mock=1&theme=ink&bg=none");
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBe("mono");
+  await expect(page.locator("html")).toHaveAttribute("data-ui-font", "mono");
+  expect(await page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBeNull();
   await page.goto("/?mock=1&theme=ink&bg=none&ui=sans");
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBe("sans");
+  await expect(page.locator("html")).toHaveAttribute("data-ui-font", "sans");
+  expect(await page.evaluate(() => localStorage.getItem("tracer.ui-font"))).toBeNull();
 
   const storedPreferenceContext = await browser.newContext({ baseURL: new URL(page.url()).origin });
   try {
-    await storedPreferenceContext.addInitScript(() => localStorage.setItem("tracer.ui-font", "mono"));
+    await storedPreferenceContext.addInitScript(() => localStorage.setItem("tracer.ui-font", "sans"));
     await storedPreferenceContext.request.post("/__mock/open-terminal");
     const storedPreferencePage = await storedPreferenceContext.newPage();
     await storedPreferencePage.goto("/?mock=1&theme=ink&bg=none");
@@ -399,20 +369,5 @@ test("UI font choice persists and captures ink screenshots at phone and desktop 
     await blockedStorageContext.close();
   }
 
-  for (const size of sizes) {
-    for (const state of ["sidebar-open", "palette-open"] as const) {
-      const base = `ui-${size.width}x${size.height}-${state}`;
-      const composite = await saveFontComparison(
-        page,
-        testInfo,
-        base,
-        captures.get(`${base}-sans`)!,
-        captures.get(`${base}-mono`)!,
-        size.width,
-        size.height,
-      );
-      console.log(`UI font comparison (production build): ${composite}`);
-    }
-  }
-  expect(captures.size).toBe(8);
+  expect(captures.size).toBe(4);
 });

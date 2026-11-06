@@ -11,7 +11,11 @@ import { createThemeStore } from "../themes/model";
 
 const basics = { colors: "mocha", font: "maple-mono-nf", uiSize: 100 };
 const empty = (): CanvasDocument => ({ format: FORMAT, version: VERSION, revision: 1, views: [] });
-const look = (): DocLook => structuredClone(createThemeStore(basics).snapshot());
+const look = (): DocLook => ({
+  ...structuredClone(createThemeStore(basics).snapshot()),
+  windowSizes: { phone: "edge", desktop: "comfortable" },
+  extendedInfo: false,
+});
 
 test("a document with a look is read whole, and one without a look is still a document", () => {
   expect(parseDocument(empty())).toEqual(empty());
@@ -32,8 +36,14 @@ test("a look out of the server's bounds makes the document unreadable, field by 
   expect(bad((l) => { l.themes[0]!.name = "x".repeat(201); })).toBeUndefined();
   expect(bad((l) => { l.themes[1]!.id = l.themes[0]!.id; })).toBeUndefined();
   expect(bad((l) => { (l as { v: number }).v = 2; })).toBeUndefined();
+  expect(bad((l) => { l.windowSizes!.phone = "tablet" as NonNullable<DocLook["windowSizes"]>["phone"]; })).toBeUndefined();
+  expect(bad((l) => { l.windowSizes!.desktop = "compact" as NonNullable<DocLook["windowSizes"]>["desktop"]; })).toBeUndefined();
+  expect(bad((l) => { l.extendedInfo = "yes" as unknown as boolean; })).toBeUndefined();
+  expect(parseLook({ ...look(), uiFont: "sans" })).toBeUndefined();
   expect(bad((l) => { while (l.themes.length <= MAX_THEMES) l.themes.push({ ...structuredClone(l.themes[0]!), id: `n${l.themes.length}` }); })).toBeUndefined();
   expect(parseLook(null)).toBeUndefined();
+  const earlier = look(); delete earlier.windowSizes; delete earlier.extendedInfo;
+  expect(parseLook(earlier)).toEqual(earlier);
 });
 
 test("a changed look is one look.set edit, an unchanged one is none, and the reducer replaces the look whole", () => {

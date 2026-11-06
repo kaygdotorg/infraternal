@@ -17,6 +17,7 @@ beforeEach(() => { g.localStorage = new FakeStorage(); g.sessionStorage = new Fa
 
 function fill(account: string): void {
   g.localStorage.setItem(canvasKey(account), "{}");
+  g.localStorage.setItem(`tracer.look.account.${encodeURIComponent(account)}`, "{}");
   g.localStorage.setItem(drawingIdentityKey(account), "{}");
   g.localStorage.setItem(inventoryKey(account), "[]");
   g.sessionStorage.setItem(tabSessionKey(account), "s1");
@@ -27,7 +28,7 @@ test("clearing one account leaves a second account and device preferences alone"
   g.localStorage.setItem("tracer.theme", "mocha");
   g.localStorage.setItem(lastAccountKey, "a");
   clearAccountStorage("a");
-  expect(g.localStorage.keys()).toEqual([canvasKey("b"), drawingIdentityKey("b"), inventoryKey("b"), "tracer.theme"].sort());
+  expect(g.localStorage.keys()).toEqual([canvasKey("b"), `tracer.look.account.${encodeURIComponent("b")}`, drawingIdentityKey("b"), inventoryKey("b"), "tracer.theme"].sort());
   expect(g.sessionStorage.keys()).toEqual([tabSessionKey("b")]);
 });
 

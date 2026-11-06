@@ -294,6 +294,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   // The account's look (D322) comes with the document: the one this account saved replaces what this page started with, and an account with none yet is offered this page's.
   const bridge = lookBridge();
   bridge?.apply(saved?.look);
+  if (store.pending !== true) bridge?.confirmed(saved?.look);
   // Capture initial structure once; subsequent server paints reset the comparison baseline.
   if (saved?.views.some((view) => view.id === "console")) canvas.cx.store.reset(); else canvas.cx.store.changed();
   let paintRevision = 0, paintAfterDrop = false;
@@ -310,7 +311,11 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   window.addEventListener("pointerup", dropped);
   window.addEventListener("pointercancel", dropped);
   // A look another device saved arrives with the document, through the same subscription as the layout.
-  const offLook = store.current && bridge ? store.subscribe(() => bridge.apply(store.current!().look)) : () => {};
+  const offLook = store.current && bridge ? store.subscribe(() => {
+    const document = store.current!();
+    bridge.apply(document.look);
+    if (store.pending !== true) bridge.confirmed(document.look);
+  }) : () => {};
   const offLayout = store.current ? store.subscribe(paintLayout) : () => {};
   // Changes can arrive while grouped-layout code loads during mount.
   if (store.current) paintLayout();

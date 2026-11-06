@@ -1,32 +1,108 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * What this browser keeps of the look (D322, D178, D312, #323): a first-paint cache of the selected theme, and nothing else.
- *
- * The person's themes belong to the account, like the canvas: they live in the canvas document (`look`), the server is the only saved copy, and every device of
- * the account shows the same look (the controller's bridge, `controller.ts`, carries it in and out; only the camera stays per device). The browser keeps one
- * small thing for itself: the theme that was selected when the page last changed, so the first frame after a reload is painted with the right tint, blur and
- * Colour before the document arrives, the way the Colour and font already are (`tracer.theme`, `tracer.font`). It is read once at start and used to start the
- * page's store, so the page and its themes agree from the first frame; the document then replaces it. It never goes to the server on its own: what the account
- * holds is what the account's own pages saved.
- *
- * It is written as the same shape the document carries (`SavedThemes`) with only the selected theme in the list; `restore` in `model.ts` mends anything read back,
- * so a damaged or hand-edited copy can never put a theme out of range.
+ * Reads and writes the appearance cache (D352, D178, D312, #323). The canvas document is the saved account copy; this module keeps only a derived
+ * first-paint cache, scoped by account, and reads old device-wide preferences once for migration. A cache can make the first frame immediate but never
+ * wins over the server document.
  */
 import { readLocal, writeLocal } from "../../../../../packages/ui/src/local-pref";
-import type { SavedThemes } from "./model";
+import { clampUiSize, migrateLegacy, UI_SIZE } from "../../../../../packages/ui/src/ui-scale";
+import { lastAccountKey } from "../../account-storage";
+import { parseLook, type DocLook } from "../model/schema";
 
-/** The browser-local key under which the selected theme is cached for the first paint. */
+/** The unscoped keys written by earlier releases; they are removed after the server confirms a full account look. */
+export const LEGACY_KEYS = [
+  "tracer.look", "tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size", "tracer.ui-font",
+  "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info", "tracer.card", "tracer.windows", "tracer.background",
+] as const;
+/** The old theme cache key, kept only to read previous releases and isolated mock pages. */
 export const CACHE_KEY = "tracer.look";
+const ACCOUNT_CACHE_PREFIX = "tracer.look.account.";
+const LEGACY_OWNER_KEY = "tracer.look.legacy-owner";
 
-/** The cached look, still unchecked (give it to `createThemeStore`), or undefined when none is cached. */
-export function readCache(): unknown {
+/** The old browser preferences, returned raw so the caller can validate each value against its own model. */
+export interface LegacyAppearance {
+  look: unknown;
+  theme: string | null;
+  font: string | null;
+  uiSizeV2: string | null;
+  uiSizeLegacy: string | null;
+  phoneSize: string | null;
+  desktopSize: string | null;
+  extendedInfo: string | null;
+  card: string | null;
+  windows: string | null;
+  background: string | null;
+}
+
+/** The account's cache key; the suffix can never collide with a legacy device-wide key. */
+export function accountCacheKey(accountId: string): string { return `${ACCOUNT_CACHE_PREFIX}${encodeURIComponent(accountId)}`; }
+
+/** Whether a cache already belongs to this account. Even an unreadable cache prevents another account's old values becoming its fallback. */
+export function hasAccountCache(accountId: string): boolean { return readLocal(accountCacheKey(accountId)) !== null; }
+
+/** Claims legacy device-wide preferences for the last account that used them, or the first signed-in account during the upgrade. */
+function ownsLegacyValues(accountId: string): boolean {
+  const owner = readLocal(LEGACY_OWNER_KEY);
+  if (owner !== null) return owner === accountId;
+  const priorAccount = readLocal(lastAccountKey);
+  const claimed = priorAccount ?? accountId;
+  writeLocal(LEGACY_OWNER_KEY, claimed);
+  return claimed === accountId;
+}
+
+/** Reads older local values only for their one-time migration owner and only when no account cache exists. */
+export function readLegacyAppearance(accountId: string): LegacyAppearance | undefined {
+  if (hasAccountCache(accountId) || !ownsLegacyValues(accountId)) return undefined;
+  const look = readLocal(CACHE_KEY);
+  const theme = readLocal("tracer.theme"), font = readLocal("tracer.font");
+  const uiSizeV2 = readLocal("tracer.ui-size.v2"), uiSizeLegacy = readLocal("tracer.ui-size");
+  const phoneSize = readLocal("tracer.window-size.phone"), desktopSize = readLocal("tracer.window-size.desktop");
+  const extendedInfo = readLocal("tracer.extended-info");
+  const card = readLocal("tracer.card"), windows = readLocal("tracer.windows"), background = readLocal("tracer.background");
+  if ([look, theme, font, uiSizeV2, uiSizeLegacy, phoneSize, desktopSize, extendedInfo, card, windows, background].every((value) => value === null)) return undefined;
+  let parsedLook: unknown;
+  try { parsedLook = look === null ? undefined : JSON.parse(look) as unknown; } catch { parsedLook = undefined; }
+  return { look: parsedLook, theme, font, uiSizeV2, uiSizeLegacy, phoneSize, desktopSize, extendedInfo, card, windows, background };
+}
+
+/** The cached look, still unchecked for the theme store, or undefined when none belongs to this account. */
+export function readCache(accountId?: string): unknown {
+  if (accountId) {
+    const scoped = readLocal(accountCacheKey(accountId));
+    if (scoped !== null) {
+      try { return JSON.parse(scoped) as unknown; } catch { return undefined; }
+    }
+    return readLegacyAppearance(accountId)?.look;
+  }
   const raw = readLocal(CACHE_KEY);
   if (raw === null) return undefined;
   try { return JSON.parse(raw) as unknown; } catch { return undefined; }
 }
 
-/** Caches the selected theme of `saved` (and the starting point the built-in themes were made from) for the next first paint. */
-export function writeCache(saved: SavedThemes): void {
-  const selected = saved.themes.find((theme) => theme.id === saved.selected);
-  if (selected) writeLocal(CACHE_KEY, JSON.stringify({ ...saved, themes: [selected] }));
+/** Validates the cache before first-paint callers use its selected theme. */
+export function readCachedLook(accountId?: string): DocLook | undefined { return parseLook(readCache(accountId)); }
+
+/** The newest usable old UI-size choice, converted without rewriting or clearing its source before server confirmation. */
+export function readLegacyUiSize(legacy: LegacyAppearance | undefined): number | undefined {
+  if (!legacy) return undefined;
+  const current = Number(legacy.uiSizeV2);
+  if (legacy.uiSizeV2 !== null && Number.isFinite(current) && current > 0) return clampUiSize(current);
+  const older = Number(legacy.uiSizeLegacy);
+  if (legacy.uiSizeLegacy !== null && Number.isFinite(older) && older > 0) return older === UI_SIZE.standard ? UI_SIZE.standard : migrateLegacy(older);
+  return undefined;
+}
+
+/** Caches only the selected theme and account settings, so theme application does not wait for the document or a second request. */
+export function writeCache(accountId: string | undefined, look: DocLook): void {
+  const selected = look.themes.find((theme) => theme.id === look.selected);
+  if (!selected) return;
+  const value = JSON.stringify({ ...look, themes: [selected] });
+  writeLocal(accountId ? accountCacheKey(accountId) : CACHE_KEY, value);
+}
+
+/** Erases all old device-wide appearance values after a complete look is confirmed by the canvas document. */
+export function clearLegacyAppearance(accountId: string): boolean {
+  if (!ownsLegacyValues(accountId)) return true;
+  try { for (const key of LEGACY_KEYS) localStorage.removeItem(key); return true; }
+  catch { return false; }
 }
