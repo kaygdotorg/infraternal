@@ -4146,3 +4146,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      agent never confirms. The owner chose "Drop it when Start fresh cleaned
      up". Entries whose machine was never cleaned keep showing as pending. The
      rejected options were a Forget button and leaving the entry as it was.
+     **Widened the same day (owner):** an add whose own check proves that the
+     account has no infraternal install at all also counts as that proof
+     ("Yes, no install = proof"), so an already-clean machine such as `code`
+     does not keep a stale pending twin. It drops only the same person's own
+     unfinished or cleanup-pending entries for that machine and account; other
+     people's entries, other accounts and finished hosts are never touched.
