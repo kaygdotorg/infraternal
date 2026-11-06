@@ -16,7 +16,7 @@ use tokio::sync::watch;
 /// Bound security intent metadata independently of the ordinary disk queue.
 pub(super) const CAPACITY: usize = 18;
 /// Errors are copied for finite callers while the original intent keeps retrying.
-type Reply = Result<(), (io::ErrorKind, String)>;
+type Reply = Result<super::Revoked, (io::ErrorKind, String)>;
 /// A shared receipt completes on durability or reports an error without dropping intent.
 type Receipt = watch::Sender<Option<Reply>>;
 
@@ -78,7 +78,7 @@ pub(super) async fn submit(
     manager: Manager,
     person: uuid::Uuid,
     rootless: bool,
-) -> io::Result<()> {
+) -> io::Result<super::Revoked> {
     let registry = {
         let mut registries = REGISTRIES
             .lock()

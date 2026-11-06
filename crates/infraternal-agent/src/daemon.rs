@@ -363,17 +363,24 @@ fn spawn_revocation(
     tokio::spawn(async move {
         let manager = Manager::resolve(&manager).await;
         let result = if restore {
-            crate::logins::restore(&state, person).await
+            crate::logins::restore(&state, person)
+                .await
+                .map(|()| b"{\"restored\":true}".to_vec())
         } else {
-            crate::logins::revoke(&state, manager, person).await
+            crate::logins::revoke(&state, manager, person)
+                .await
+                .map(|revoked| {
+                    if revoked.background_may_remain {
+                        // D353: others still share the account, so its own services stayed.
+                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, so its services were not stopped.\"}".to_vec()
+                    } else {
+                        b"{\"revoked\":true}".to_vec()
+                    }
+                })
         }
-        .map(|()| Opened {
+        .map(|json| Opened {
             session: None,
-            json: if restore {
-                b"{\"restored\":true}".to_vec()
-            } else {
-                b"{\"revoked\":true}".to_vec()
-            },
+            json,
         })
         .map_err(|error| match error.kind() {
             io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => OpenRefusal::Invalid,

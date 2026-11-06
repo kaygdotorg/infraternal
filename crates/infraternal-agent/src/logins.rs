@@ -631,7 +631,7 @@ fn restore_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// Refuses unsafe registry paths or workers, and reports host cleanup failures.
 /// Denies access in memory before waiting for disk. Errors reach the caller while
 /// a bounded owner retries independently of caller lifetime and ordinary saves.
-pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::Result<()> {
+pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::Result<Revoked> {
     revoke_at(
         runtime_root(state),
         manager,
@@ -647,8 +647,16 @@ async fn revoke_at(
     manager: Manager,
     person: uuid::Uuid,
     rootless: bool,
-) -> io::Result<()> {
+) -> io::Result<Revoked> {
     revocations::submit(root, manager, person, rootless).await
+}
+
+/// What a completed revocation could not guarantee.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Revoked {
+    /// Someone else still has access to a host account the person used, so
+    /// that account's own background services were left running (D353).
+    pub background_may_remain: bool,
 }
 
 /// Try one reserved revocation; its owner retains denial and retries any failure.
@@ -657,7 +665,7 @@ async fn revoke_once(
     manager: Manager,
     person: uuid::Uuid,
     rootless: bool,
-) -> io::Result<()> {
+) -> io::Result<Revoked> {
     let admission = crate::durable_io::security().await?;
     let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
     let state = root.to_owned();
@@ -672,10 +680,15 @@ async fn revoke_once(
     let person_guard = person_guard?;
     let registry = root.join("infraternal-login-locks");
     if rootless {
-        return crate::rootless_sessions::revoke(root, person, Some(person_guard), admission).await;
+        // A rootless agent's user manager may be the agent's own (D18): D353
+        // applies to root agents only.
+        return crate::rootless_sessions::revoke(root, person, Some(person_guard), admission)
+            .await
+            .map(|()| Revoked::default());
     }
     let prefix = format!("infraternal-login-{}-", person.simple());
     let mut failure = None;
+    let mut revoked = Revoked::default();
     for entry in std::fs::read_dir(&registry)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -691,12 +704,100 @@ async fn revoke_once(
         let uid = uid.parse::<u32>().map_err(io::Error::other)?;
         let unit = self::name(person, uid);
         let _account = acquire(root, &unit).await?;
-        if let Err(error) = stop_login(root, manager, person, uid, &unit).await {
-            failure = Some(error);
+        match stop_login(root, manager, person, uid, &unit).await {
+            Err(error) => failure = Some(error),
+            // D353: background services of the account go with its last
+            // holder; while others share it, they stay and the result warns.
+            Ok(()) if matches!(manager, Manager::System) => {
+                if others_share(root, person, uid)? {
+                    revoked.background_may_remain = true;
+                } else if let Err(error) = stop_user_services(uid).await {
+                    failure = Some(error);
+                }
+            }
+            Ok(()) => {}
         }
     }
     crate::login_auth::forget(person);
-    failure.map_or(Ok(()), Err)
+    failure.map_or(Ok(revoked), Err)
+}
+
+/// Whether another person still has access to host account `uid` here, as
+/// far as this host can tell from its durable, root-only state: a login lock
+/// for that account, without a revocation marker or a pending revocation.
+/// The agent never sees other people's grants, and the in-memory grants are
+/// empty after a restart, so this errs towards "shared", which stops nothing
+/// (D353). Root's account (D231's fallback) is always shared: its user
+/// manager belongs to the host's administrator.
+fn others_share(root: &Path, person: uuid::Uuid, uid: u32) -> io::Result<bool> {
+    if uid == 0 {
+        return Ok(true);
+    }
+    let registry = root.join("infraternal-login-locks");
+    let suffix = format!("-{uid}.lock");
+    for entry in std::fs::read_dir(&registry)? {
+        let name = entry?.file_name();
+        let Some(other) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("infraternal-login-"))
+            .and_then(|rest| rest.strip_suffix(&suffix))
+            .and_then(|other| uuid::Uuid::parse_str(other).ok())
+        else {
+            continue;
+        };
+        if other == person
+            || revocations::denied(root, other)
+            || registry
+                .join(format!("{}.revoked", other.simple()))
+                .exists()
+        {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Ends host account `uid`'s own background services, once its last holder
+/// is revoked (D353): turns linger off so nothing restarts them, kills the
+/// user manager's cgroup (`user@<uid>.service`, which holds every
+/// `systemd-run --user` unit), stops the manager, and requires that cgroup to
+/// be empty. The account's other, non-infraternal sessions are not touched.
+async fn stop_user_services(uid: u32) -> io::Result<()> {
+    let linger = tokio::time::timeout(
+        SYSTEMD_QUERY_HANG,
+        loginctl()
+            .args(["disable-linger", &uid.to_string()].as_slice())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    if !linger.success() {
+        return Err(io::Error::other(
+            "host account linger could not be turned off",
+        ));
+    }
+    let manager = format!("/user.slice/user-{uid}.slice/user@{uid}.service");
+    kill_cgroup(&manager)?;
+    // The cgroup check below decides; a manager that is already gone may
+    // make `stop` report failure.
+    let _ = tokio::time::timeout(
+        UNIT_STOP_HANG,
+        systemctl()
+            .args(["stop", &format!("user@{uid}.service")].as_slice())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+    cgroup_emptied(&manager).await
 }
 
 /// Validate and durably publish a person's refusal before any shell is stopped.
@@ -1534,6 +1635,8 @@ mod tests {
         host: PathBuf,
         /// The fake `session-7.scope` directory.
         scope: PathBuf,
+        /// The fake `user@<uid>.service` directory.
+        services: PathBuf,
         /// Stops the stand-in kernel thread.
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
@@ -1551,7 +1654,10 @@ mod tests {
             let scope = cgroups
                 .join(format!("user.slice/user-{uid}.slice"))
                 .join("session-7.scope");
-            for (directory, populated) in [(&unit_group, "0"), (&scope, "1")] {
+            let services = cgroups
+                .join(format!("user.slice/user-{uid}.slice"))
+                .join(format!("user@{uid}.service"));
+            for (directory, populated) in [(&unit_group, "0"), (&scope, "1"), (&services, "1")] {
                 std::fs::create_dir_all(directory).unwrap();
                 std::fs::write(directory.join("cgroup.kill"), b"").unwrap();
                 std::fs::write(
@@ -1598,12 +1704,16 @@ mod tests {
             let loginctl = script("loginctl", "exit 0\n");
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             if dies {
-                let (scope, stop) = (scope.clone(), stop.clone());
+                let (groups, stop) = (vec![scope.clone(), services.clone()], stop.clone());
                 std::thread::spawn(move || {
                     while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                        if std::fs::read(scope.join("cgroup.kill")).is_ok_and(|kill| kill == b"1") {
-                            std::fs::write(scope.join("cgroup.events"), "populated 0\n").unwrap();
-                            return;
+                        for group in &groups {
+                            if std::fs::read(group.join("cgroup.kill"))
+                                .is_ok_and(|kill| kill == b"1")
+                            {
+                                std::fs::write(group.join("cgroup.events"), "populated 0\n")
+                                    .unwrap();
+                            }
                         }
                         // sleep: the stand-in kernel polls for the kill write; the loop ends on it.
                         std::thread::sleep(Duration::from_millis(5));
@@ -1618,7 +1728,12 @@ mod tests {
                     empty_hang: Duration::from_secs(2),
                 });
             });
-            Self { host, scope, stop }
+            Self {
+                host,
+                scope,
+                services,
+                stop,
+            }
         }
 
         /// The scripted programs' calls so far.
@@ -1712,6 +1827,88 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// D353: revoking an account's last holder also ends the account's own
+    /// background services (`systemd-run --user` with linger, J291 P2): linger
+    /// off, the user manager's cgroup killed and stopped, and shown empty.
+    #[tokio::test]
+    async fn revoking_the_last_holder_ends_the_accounts_user_services() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
+        let calls = host.calls();
+        assert_eq!(
+            revoked.as_ref().ok(),
+            Some(&Revoked::default()),
+            "{revoked:?}; {calls:?}"
+        );
+        assert_eq!(
+            std::fs::read(host.services.join("cgroup.kill")).unwrap(),
+            b"1",
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .lines()
+                .any(|line| line == format!("loginctl disable-linger {uid}")),
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .lines()
+                .any(|line| line == format!("systemctl stop user@{uid}.service")),
+            "{calls:?}"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// D353: while another person still has the account, its background
+    /// services stay, and the revocation says so.
+    #[tokio::test]
+    async fn revoking_one_of_several_holders_leaves_user_services_and_warns() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        drop(
+            acquire(&root, &name(uuid::Uuid::new_v4(), uid))
+                .await
+                .unwrap(),
+        );
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
+        let calls = host.calls();
+        assert_eq!(
+            revoked.as_ref().ok(),
+            Some(&Revoked {
+                background_may_remain: true
+            }),
+            "{revoked:?}; {calls:?}"
+        );
+        assert_eq!(
+            std::fs::read(host.services.join("cgroup.kill")).unwrap(),
+            b"",
+            "{calls:?}"
+        );
+        assert!(
+            !calls.contains("user@"),
+            "a shared account's services were stopped: {calls:?}"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A session scope that stays populated after `cgroup.kill` (a process in
     /// uninterruptible sleep) fails the revocation: success is reported only
     /// for a login shown gone (J291).
@@ -1736,6 +1933,12 @@ mod tests {
         assert!(
             scope_record(&root, &unit).exists(),
             "a failed revocation forgot the login"
+        );
+        // It failed at the populated scope, before going on to the account.
+        assert_eq!(
+            std::fs::read(host.services.join("cgroup.kill")).unwrap(),
+            b"",
+            "the revocation went on past a populated session scope"
         );
         drop(host);
         std::fs::remove_dir_all(root).unwrap();
