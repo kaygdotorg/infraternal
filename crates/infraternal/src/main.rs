@@ -2481,6 +2481,9 @@ fn run_remote_agent(
             Exit::Failed,
         );
     };
+    // D356: access records persist beside the identity, inside the install
+    // (an installed root agent's data directory is under /var/lib/infraternal).
+    infraternal_agent::access_files::keep_records_in(&data.join("access-records"));
     if let AgentAction::PrepareJoinKey { origin } = &action {
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()

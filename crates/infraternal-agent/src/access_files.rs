@@ -16,10 +16,11 @@
 //! and, when small enough, its new lines), or not checked with the reason.
 //! It never says "unchanged" for something it did not check.
 //!
-//! Where the record lives decides what it is worth. As root it is kept under
-//! the install's own `/var/lib/infraternal`, root-only, one directory per
-//! account, and the accounts to report are found there, so a reboot that
-//! empties `/run` loses nothing. Rootless, the agent runs as the account the
+//! Where the record lives decides what it is worth. A remote agent keeps it
+//! beside its identity in its private, persistent data directory (an
+//! installed root agent's is under `/var/lib/infraternal`, root-only), one
+//! directory per account, and the accounts to report are found there, so a
+//! reboot that empties `/run` loses nothing. Rootless, the agent runs as the account the
 //! person had a shell on (D18), so the person could have rewritten the
 //! record: those reports are always "not checked: unverified", with what was
 //! found shown as a hint, never as a clean result.
@@ -1055,16 +1056,33 @@ fn command_output(program: &str, args: &[&str]) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Where records are kept: persistent (a grant outlives a reboot) and, as
-/// root, inside the install's root-only `/var/lib/infraternal`, which its
-/// uninstall removes. Rootless, in the account's own state, which the
-/// account can change: such reports are never vouched for.
+/// Where this agent keeps access records, set once when it starts.
+static RECORDS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Keeps this agent's access records in `dir`: the remote agent passes a
+/// directory beside its identity in its private, persistent data directory.
+pub fn keep_records_in(dir: &Path) {
+    let _ = RECORDS.set(dir.to_owned());
+}
+
+/// Where records are kept. A remote agent keeps them beside its identity in
+/// its private data directory (`--data`), which is persistent: an installed
+/// root agent's is under `/var/lib/infraternal` (`state` for a setup
+/// install, `agent` for `up`), root-only and removed by its uninstall with
+/// the rest of the install. Without one (an embedded agent), rootless
+/// records go to the account's own state, and root's to its runtime root,
+/// which a reboot empties: the report then says "not checked: no record",
+/// never "unchanged". Rootless records are in a place the account can
+/// change, so rootless reports are never vouched for.
 pub(crate) fn store(runtime_root: &Path) -> PathBuf {
     if cfg!(test) {
         return runtime_root.join("access-records");
     }
+    if let Some(dir) = RECORDS.get() {
+        return dir.clone();
+    }
     if nix::unistd::Uid::effective().is_root() {
-        PathBuf::from("/var/lib/infraternal/access-records")
+        runtime_root.join("infraternal-access-records")
     } else {
         let home = std::env::var_os("HOME").map_or_else(|| runtime_root.to_owned(), PathBuf::from);
         home.join(".local/state/infraternal/access-records")
