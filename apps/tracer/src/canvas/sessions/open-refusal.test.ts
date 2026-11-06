@@ -58,6 +58,14 @@ test("a rootless server says why it cannot open a shell and what to do (#327)", 
   expect(terminalRefusal(await refusal({ reason: "invalid" })).message).toBe("This terminal request is not valid. Try opening a new window.");
 });
 
+test("a root host without systemd says why it opens no logins and what works instead (D354)", async () => {
+  const { terminalRefusal } = await import("../../terminal-refusal");
+  expect(terminalRefusal(await refusal({ error: "terminal unavailable", reason: "no_systemd" }), "build-01")).toEqual({
+    message: "build-01 has no systemd, so infraternal can't open logins there as root. Reinstall infraternal there without root, or add a host with systemd.",
+    sessionList: false, action: "add-host",
+  });
+});
+
 test("a denied account is told so, with nothing to retry", async () => {
   const { terminalRefusal } = await import("../../terminal-refusal");
   for (const reason of ["forbidden", "denied"]) {
