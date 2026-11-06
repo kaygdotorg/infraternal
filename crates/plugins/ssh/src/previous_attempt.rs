@@ -416,9 +416,15 @@ impl PreviousAttempt {
     /// Preserve lease coordinates when presenting the explicit stuck-upgrade action.
     #[must_use]
     pub(crate) fn stuck_failure(&self, reenroll: bool) -> Failure {
+        // Only an upgrade journal (it has a lease owner) was replacing an agent;
+        // a fresh setup that stopped had nothing to replace (#305, J272).
         let failure = Failure::new(
             FailureKind::StalePreviousAttempt,
-            "An earlier install stopped while replacing this infraternal agent.",
+            if self.lease_owner.is_some() {
+                "An earlier install stopped while replacing this infraternal agent."
+            } else {
+                "An earlier setup of this host stopped before it finished."
+            },
         );
         if let Some(owner) = &self.lease_owner {
             failure
