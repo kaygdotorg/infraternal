@@ -1440,7 +1440,10 @@ mod tests {
         });
     }
 
-    /// A held person fence delays disk work but cannot delay in-memory denial.
+    /// A held person fence delays disk work but cannot delay in-memory denial:
+    /// while revocation waits for the lock, the marker is not on disk yet, and
+    /// an authorized person's opens are still refused. Opens therefore cannot
+    /// win the lock race and pass the check during the wait (J261 P3, #355).
     #[test]
     fn revoke_waits_for_person_lock_and_refuses_linked_tombstones() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1454,6 +1457,9 @@ mod tests {
             ));
             std::fs::create_dir_all(&root).unwrap();
             let person = uuid::Uuid::new_v4();
+            // Authorized, so a refusal below can only come from the revocation.
+            synchronize_at(&root, person).unwrap();
+            permitted(&root, person).unwrap();
             let lock = acquire(&root, &format!("{}.person", person.simple()))
                 .await
                 .unwrap();
@@ -1465,7 +1471,17 @@ mod tests {
                 )
                 .is_pending()
             );
-            assert!(permitted(&root, person).is_err());
+            assert!(
+                !root
+                    .join("infraternal-login-locks")
+                    .join(format!("{}.revoked", person.simple()))
+                    .exists(),
+                "the marker is written only under the person lock"
+            );
+            assert_eq!(
+                permitted(&root, person).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
             drop(lock);
             task.await.unwrap();
             assert!(permitted(&root, person).is_err());
