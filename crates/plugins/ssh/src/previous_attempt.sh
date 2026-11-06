@@ -451,19 +451,25 @@ scan_holders() {
  done
  [ "$#" -le 8192 ] || refuse size
  command -v find >/dev/null 2>&1 || refuse tool
- # find's errors are kept, never read as "nothing found": a process that exited
- # meanwhile is gone; one that turned non-dumpable meanwhile (an ssh or a shim
- # starting) is decided as above; anything else is unknown and refuses.
- live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>&1 >&4 | { grep -v 'No such file or directory' || :; } | sed 's/^/unreadable: /'; } 4>&1 )
+ # find's errors are kept, never read as "nothing found". An error about a
+ # process that has exited meanwhile is moot; a permission error about one that
+ # turned non-dumpable meanwhile (an ssh or a shim starting) is decided as
+ # above; any other error is unknown and refuses.
+ live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>&1 >&4 | sed 's/^/unreadable: /'; } 4>&1 )
  while IFS= read -r scan_line; do
   case "$scan_line" in
    '') continue;;
-   "unreadable: find: '/proc/"*"': Permission denied"|"unreadable: find: ‘/proc/"*"’: Permission denied")
+   "unreadable: find: '/proc/"*)
     scan_pid=${scan_line#*/proc/}
-    scan_pid=${scan_pid%%/*}
-    case "$scan_pid" in ''|*[!0-9]*) exit 73;; esac
-    ! hidden_holder "/proc/$scan_pid" || exit 73;;
-   unreadable:*) exit 73;;
+    scan_pid=${scan_pid%%[!0-9]*}
+    [ -n "$scan_pid" ] || exit 73
+    [ -e "/proc/$scan_pid/stat" ] || continue
+    case "$scan_line" in
+     # The fd or process vanished while find read it: it holds nothing now.
+     *": No such file or directory"|*": No such process") continue;;
+     *": Permission denied") ! hidden_holder "/proc/$scan_pid" || exit 73;;
+     *) exit 73;;
+    esac;;
    *) exit 73;;
   esac
  done <<SCAN
