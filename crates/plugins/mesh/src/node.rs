@@ -254,9 +254,8 @@ fn switch_engine(
         }
         // Retire peers before the link deletion removes all routes, as `down` does.
         Client::new()?.clear_peers()?;
-        // The caller then records the new engine, which retires an open kernel rotation's
-        // journal: `GotaTun` does not rotate (D166, D352), and its identity is the key carried
-        // above (#285).
+        // The caller records the selected Linux engine after this key carry. Both engines use the
+        // same journal, so an open operation remains recoverable after the data plane changes.
     }
     Device::delete_ifindex(link.ifindex)
 }

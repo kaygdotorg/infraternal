@@ -287,16 +287,6 @@ impl Store {
         state.completed = true;
         self.save_rotation_secret(&state)
     }
-    /// Remove the rotation journal, its keys included, when the engine that rotated is retired.
-    /// # Errors
-    /// Refuses an unsafe journal file and reports durable directory failures.
-    pub(crate) fn discard_rotation_secret(&self) -> io::Result<()> {
-        if self.rotation_secret()?.is_none() {
-            return Ok(());
-        }
-        fs::remove_file(&self.rotation_path)?;
-        FileSync::parent(&self.rotation_path)
-    }
     /// Persist the selected engine separately from the legacy accepted snapshot.
     ///
     /// Both supported Linux engines use the same journal, so an engine switch must keep it with

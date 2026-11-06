@@ -130,6 +130,20 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
             stage == "rotation_finished",
             "stage {stage}"
         );
+        let bytes = store
+            .read_private_key()
+            .expect("read the key left by the child")
+            .expect("the GotaTun key file survives the crash");
+        let file_key_at_crash = if matches!(stage, "rotation_private_key_saved" | "rotation_finished") {
+            candidate_public
+        } else {
+            previous_public
+        };
+        assert_eq!(
+            crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
+            file_key_at_crash,
+            "private-key file at the crash boundary {stage}"
+        );
         drop(journal);
         drop(store);
 
@@ -156,15 +170,10 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
         );
         let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
         let bytes = store.read_private_key().unwrap().unwrap();
-        let saved_key = if matches!(stage, "rotation_private_key_saved" | "rotation_finished") {
-            candidate_public
-        } else {
-            previous_public
-        };
         assert_eq!(
             crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
-            saved_key,
-            "private-key file at {stage}"
+            expected,
+            "journal recovery selects the live identity at {stage}"
         );
         restored
             .commit_rotation("00000000-0000-4000-8000-000000000367", 1)
@@ -296,13 +305,18 @@ fn gotatun_owner_proof_rejects_a_candidate_before_commit_intent() {
             completed: false,
         })
         .unwrap();
-    store
-        .replace_private_key(candidate_key.private_bytes())
-        .unwrap();
-
     let proof = gotatun_owner_proof(&store, Some(previous)).unwrap();
     assert!(proof.accepts(previous));
     assert!(!proof.accepts(candidate));
+
+    store
+        .replace_private_key(candidate_key.private_bytes())
+        .unwrap();
+    let inconsistent = gotatun_owner_proof(&store, Some(previous)).unwrap();
+    assert!(
+        inconsistent.is_empty(),
+        "a candidate file without durable commit intent cannot prove either owner"
+    );
 }
 
 // Keep the retained address, recovery fence and packet observation in one scenario.
