@@ -1034,6 +1034,8 @@ mod probe_tests;
 #[path = "remote_mtu_tests.rs"]
 mod mtu_tests;
 
-#[cfg(test)]
+// The design-scale controls build paths with `PathSocket::from_udp`, which
+// exists only with the `agent` feature.
+#[cfg(all(test, feature = "agent"))]
 #[path = "remote_design_scale_review.rs"]
 mod design_scale_review;
