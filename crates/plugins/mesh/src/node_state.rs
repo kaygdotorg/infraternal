@@ -812,6 +812,14 @@ pub(crate) mod tests {
         let previous = [0x31; 32];
         let candidate = [0x42; 32];
         store.write_private_key(&previous).expect("initial key");
+        let abandoned = store.key_path.with_extension("4242.new");
+        fs::write(&abandoned, [0x77; 32]).expect("simulate a stop before the replacement rename");
+        drop(store);
+        let (store, _) = Store::open(&directory.0).expect("reopen after the interrupted replacement");
+        assert!(
+            !abandoned.exists(),
+            "restart removes the private temporary left by a stopped replacement"
+        );
         store
             .replace_private_key(&candidate)
             .expect("replace with the journaled key");

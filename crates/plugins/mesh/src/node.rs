@@ -110,6 +110,58 @@ fn proven_gotatun_link(link: &crate::wireguard::ActiveLink, proof: &GotatunProof
     link.engine == EngineKind::GotaTun && link.owner.is_some_and(|owner| proof.accepts(owner))
 }
 
+/// Recreate the GotaTun private-key file only from the durable rotation journal.
+///
+/// A clean stop removes that file after stopping the userspace engine. During an open commit, a
+/// restart must select the candidate even if the old file survived; before commit intent, only
+/// the predecessor is authorized. The recorded public key bounds both states so an unrelated or
+/// incomplete journal can never replace the local key.
+fn recover_gotatun_private_key_from_journal(
+    store: &crate::node_state::Store,
+) -> io::Result<()> {
+    let Some(rotation) = store.rotation_secret()? else {
+        return Ok(());
+    };
+    let candidate_public = Key::from_private(&rotation.candidate)?.1;
+    let previous_public = if rotation.completed {
+        None
+    } else {
+        Some(Key::from_private(&rotation.previous)?.1)
+    };
+    let recorded = store
+        .recorded_interface()?
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let recorded_is_authorized = if rotation.completed {
+        recorded == candidate_public
+    } else if rotation.commit_requested {
+        Some(recorded) == previous_public || recorded == candidate_public
+    } else {
+        Some(recorded) == previous_public
+    };
+    if !recorded_is_authorized {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+
+    let selected = if rotation.completed || rotation.commit_requested {
+        &rotation.candidate
+    } else {
+        &rotation.previous
+    };
+    if let Some(saved) = store.read_private_key()? {
+        if saved.as_slice() == selected.as_slice() {
+            return Ok(());
+        }
+        if rotation.commit_requested
+            && !rotation.completed
+            && saved.as_slice() == rotation.previous.as_slice()
+        {
+            return store.replace_private_key(&rotation.candidate);
+        }
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    store.replace_private_key(selected)
+}
+
 /// The keys that prove a live kernel link is this installation's (D340, #285).
 ///
 /// Normally exactly one: the interface key this node recorded, or for older state the key the
@@ -238,30 +290,65 @@ fn carry_kernel_key(
     store.write_private_key(&key[..])
 }
 
+/// Whether a saved GotaTun snapshot key is still supported by the private records and rotation journal.
+fn gotatun_snapshot_binding_is_authorized(
+    store: &crate::node_state::Store,
+    bound: crate::policy::model::PublicKey,
+) -> io::Result<bool> {
+    let Some(private) = store.read_private_key()? else {
+        return Ok(false);
+    };
+    let private_public = crate::gotatun_node::secret_from_bytes(&private)?.1;
+    let Some(rotation) = store.rotation_secret()? else {
+        return Ok(private_public == bound);
+    };
+    let candidate_public = Key::from_private(&rotation.candidate)?.1;
+    let recorded = store.recorded_interface()?;
+    if rotation.completed {
+        // Finish erased the predecessor secret. The candidate's private file and public record
+        // now prove the new identity; the accepted snapshot can still name its old predecessor.
+        return Ok(private_public == candidate_public && recorded == Some(candidate_public));
+    }
+    let previous_public = Key::from_private(&rotation.previous)?.1;
+    let candidate_is_authorized = rotation.commit_requested;
+    let bound_is_authorized =
+        bound == previous_public || (candidate_is_authorized && bound == candidate_public);
+    let private_is_authorized = private_public == previous_public
+        || (candidate_is_authorized && private_public == candidate_public);
+    let record_is_authorized = recorded.is_none_or(|key| {
+        key == previous_public || (candidate_is_authorized && key == candidate_public)
+    });
+    Ok(bound_is_authorized && private_is_authorized && record_is_authorized)
+}
+
+/// Restore accepted GotaTun configuration while allowing only a journal-proven commit transition.
 fn restore_gotatun(node: &mut Node, saved_config: Option<Config>) -> io::Result<()> {
-    if let Some(bound) = saved_config.as_ref().and_then(|config| config.local_key) {
-        let bytes = node
-            .store
-            .as_ref()
-            .ok_or(io::ErrorKind::NotFound)?
-            .read_private_key()?
-            .ok_or(io::ErrorKind::InvalidData)?;
-        let (_, public_key) = crate::gotatun_node::secret_from_bytes(&bytes)?;
-        if public_key != bound {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
+    let store = node.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+    recover_gotatun_private_key_from_journal(store)?;
+    if let Some(bound) = saved_config.as_ref().and_then(|config| config.local_key)
+        && !gotatun_snapshot_binding_is_authorized(store, bound)?
+    {
+        return Err(io::ErrorKind::InvalidData.into());
     }
     // Keep accepted public intent through startup, then clear only the in-memory
     // applied view so replay sends the full snapshot to the newly empty device.
     node.config.clone_from(&saved_config);
     let identity = node.up()?;
-    if let Some(config) = saved_config {
-        if config
-            .local_key
-            .is_some_and(|key| key != identity.public_key)
+    let mut config = saved_config;
+    if let Some(config) = config.as_mut() {
+        if let Some(bound) = config.local_key
+            && bound != identity.public_key
         {
-            return Err(io::ErrorKind::InvalidData.into());
+            let store = node.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+            if !gotatun_snapshot_binding_is_authorized(store, bound)? {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            // Commit intent selects the candidate for reattach; normalize the replayed snapshot
+            // so a later restart cannot mistake its older local-key field for the active identity.
+            config.local_key = Some(identity.public_key);
         }
+    }
+    if let Some(config) = config {
         node.config = None;
         node.apply(config)?;
     }
@@ -402,6 +489,12 @@ impl Node {
         let engine_kind = requested_engine.unwrap_or_default();
         let snapshot_key = state.config.as_ref().and_then(|c| c.local_key);
         let mut active_link = Device::active_link()?;
+        if active_link
+            .as_ref()
+            .is_some_and(|link| link.engine == EngineKind::GotaTun)
+        {
+            recover_gotatun_private_key_from_journal(&store)?;
+        }
         if let Some(link) = active_link.filter(|link| link.engine != engine_kind) {
             // A link of the other engine: ours moves to the selected engine, another node's is
             // left alone and keeps the name (D340).
@@ -804,15 +897,10 @@ impl Node {
         self.routes.clear();
         Ok(())
     }
-    /// The key an interrupted kernel rotation left as this node's identity (#285): the candidate
-    /// once commit intent is durable (the kernel may already hold it), the predecessor before.
-    /// `GotaTun` keeps no rotation journal, so it always uses [`Self::local_key`].
+    /// The key an interrupted Linux rotation left as this node's identity: the candidate once
+    /// commit intent is durable, and the predecessor before. Both Linux engines share the journal.
     fn rotation_key(&self) -> io::Result<Option<(Key, crate::policy::model::PublicKey)>> {
-        let Some(store) = self
-            .store
-            .as_ref()
-            .filter(|_| self.engine_kind == EngineKind::Kernel)
-        else {
+        let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
         let Some(rotation) = store.rotation_secret()? else {
@@ -849,7 +937,10 @@ impl Node {
     /// A proven TUN that any local user could attach (one persisted before #260 J213 P1) is not
     /// trusted: its queue may have been read or held while the agent was down. It is deleted by
     /// its index and the engine starts a fresh, restricted one; routes added by hand to it go.
-    fn persisted_tun_to_adopt(&self) -> io::Result<Option<u32>> {
+    fn persisted_tun_to_adopt(
+        &self,
+        local_public_key: crate::policy::model::PublicKey,
+    ) -> io::Result<Option<u32>> {
         let (Some(store), Some(link)) = (&self.store, Device::active_link()?) else {
             return Ok(None);
         };
@@ -860,6 +951,18 @@ impl Node {
         let restricted = link.tun_owner == Some(nix::unistd::geteuid().as_raw())
             && link.tun_group == Some(nix::unistd::getegid().as_raw());
         if restricted {
+            if link.owner != Some(local_public_key) {
+                // Commit intent authorizes moving a predecessor marker to the candidate before
+                // reattach. Rechecking by ifindex makes this safe if the shared name was replaced.
+                if !proof.accepts(local_public_key) {
+                    return Ok(None);
+                }
+                Device::remark(
+                    link.ifindex,
+                    link.owner.ok_or(io::ErrorKind::InvalidData)?,
+                    local_public_key,
+                )?;
+            }
             return Ok(Some(link.ifindex));
         }
         Device::delete_ifindex(link.ifindex)?;
@@ -876,6 +979,11 @@ impl Node {
         }
         if let Some(identity) = &self.identity {
             return Ok(identity.clone());
+        }
+        if self.engine_kind == EngineKind::GotaTun
+            && let Some(store) = &self.store
+        {
+            recover_gotatun_private_key_from_journal(store)?;
         }
         // The engine was settled when this node was made: by `Node::restore`, the infraternal
         // agent's path, which alone reads `INFRATERNAL_MESH_ENGINE`, or by code (#260 J220 P3).
@@ -943,7 +1051,7 @@ impl Node {
                 }
             }
             EngineKind::GotaTun => {
-                let adopt = self.persisted_tun_to_adopt()?;
+                let adopt = self.persisted_tun_to_adopt(public_key)?;
                 let engine = Engine::start(key.gotatun_secret()?, public_key, 0, None, adopt)?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
@@ -971,44 +1079,69 @@ impl Node {
                     compact_access: true,
                     #[cfg(feature = "mesh-dns-spike")]
                     dns_names: cfg!(target_os = "linux"),
-                    // `GotaTun` cannot rotate its key yet, so it says so and the coordinator
-                    // rotates no node in its mesh (D166, D352; #285 follow-up).
-                    key_rotation: false,
+                    // Linux GotaTun uses the durable journal and live reconfigure command (#367).
+                    key_rotation: true,
                 };
                 self.identity = Some(identity.clone());
                 Ok(identity)
             }
         }
     }
-    /// The proven kernel link every rotation step addresses by its index (#285). Only kernel
-    /// `WireGuard` rotates; `GotaTun` refuses before any state is read (D166, D352).
+    /// The proven Linux link every rotation step addresses by its index (#285, #367).
     fn rotation_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
-        if self.engine_kind != EngineKind::Kernel {
-            return Err(io::ErrorKind::Unsupported.into());
+        if !self.owned {
+            return Err(io::ErrorKind::NotConnected.into());
         }
         let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
-        // Rotation moves the owner marker with the key, so only a link whose marker names its
-        // owner (every link since D340) can rotate.
-        if !self.owned || link.owner.is_none() || !proven_kernel_link(&link, &self.kernel_owner) {
+        if link.engine != self.engine_kind || link.owner.is_none() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let proven = match self.engine_kind {
+            EngineKind::Kernel => proven_kernel_link(&link, &self.kernel_owner),
+            EngineKind::GotaTun => {
+                let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+                let proof = gotatun_owner_proof(
+                    store,
+                    self.config.as_ref().and_then(|config| config.local_key),
+                )?;
+                proven_gotatun_link(&link, &proof)
+            }
+        };
+        if !proven {
             return Err(io::ErrorKind::InvalidData.into());
         }
         Ok(link)
     }
 
-    /// Prepare a new local `WireGuard` identity without changing the live interface.
-    /// The old and candidate secrets reach the root-only journal before the public key returns.
-    /// The predecessor is read from our proven link by its index, never by the shared name.
+    /// Read the identity the selected live engine currently presents for a proven link.
+    /// Kernel WireGuard reports it by ifindex; GotaTun keeps the accepted live identity in memory.
+    fn rotation_public_key(
+        &self,
+        link: &crate::wireguard::ActiveLink,
+    ) -> io::Result<crate::policy::model::PublicKey> {
+        if link.engine != self.engine_kind {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        match self.engine_kind {
+            EngineKind::Kernel => Ok(Device::identity_at(link.ifindex)?.0),
+            EngineKind::GotaTun => self
+                .identity
+                .as_ref()
+                .map(|identity| identity.public_key)
+                .ok_or(io::ErrorKind::NotConnected.into()),
+        }
+    }
+
+    /// Prepare a local Linux identity without changing the live interface.
+    /// Both engines persist the predecessor and candidate before returning the candidate key.
     /// # Errors
-    /// Refuses `GotaTun`, an inactive node, unsafe state, a conflicting pending operation or a
-    /// kernel failure.
+    /// Refuses an inactive or unproven node, invalid request, unsafe state, conflicting operation
+    /// or failed durable write.
     pub(crate) fn prepare_rotation(
         &mut self,
         operation_id: &str,
         sequence: u64,
     ) -> io::Result<crate::policy::model::PublicKey> {
-        if self.engine_kind != EngineKind::Kernel {
-            return Err(io::ErrorKind::Unsupported.into());
-        }
         if self.identity.is_none() || self.store.is_none() {
             return Err(io::ErrorKind::NotConnected.into());
         }
@@ -1024,33 +1157,31 @@ impl Node {
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let link = self.rotation_link()?;
-        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let identity = self.identity.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+        let mut link = self.rotation_link()?;
         // A strictly higher sequence from the authenticated coordinator proves the open operation
         // ended there (J262): it was abandoned, for example after a probe that could not show
-        // support or a binary downgrade, while this journal stayed open. Settle the journal on the
-        // key the link holds, then prepare the new operation on top of it.
-        if let Some(existing) = store.rotation_secret()?
-            && !existing.completed
-            && existing.operation_id != operation_id
-            && sequence > existing.sequence
+        // support or a binary downgrade, while this journal stayed open. Settle on the held key
+        // before preparing the new operation.
         {
-            Self::settle_superseded_rotation(
-                store,
-                identity,
-                &mut self.kernel_owner,
-                &link,
-                &existing,
-            )?;
+            let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+            if let Some(existing) = store.rotation_secret()?
+                && !existing.completed
+                && existing.operation_id != operation_id
+                && sequence > existing.sequence
+            {
+                self.settle_superseded_rotation(&link, &existing)?;
+                link = self.rotation_link()?;
+            }
         }
-        let identity = &*identity;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         if let Some(existing) = store.rotation_secret()? {
             let (_, existing_public) = Key::from_private(&existing.candidate)?;
             if existing.completed {
-                let current = crate::wireguard::identity_at(link.ifindex)?.0;
+                let current = self.rotation_public_key(&link)?;
                 if current != existing_public
                     || identity.public_key != existing_public
+                    || link.owner != Some(existing_public)
                     || existing.operation_id == operation_id
                     || sequence <= existing.sequence
                 {
@@ -1062,9 +1193,21 @@ impl Node {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
         }
-        let previous = Device::private_key_at(link.ifindex)?;
+        let previous = match self.engine_kind {
+            EngineKind::Kernel => *Device::private_key_at(link.ifindex)?,
+            EngineKind::GotaTun => {
+                let bytes = store
+                    .read_private_key()?
+                    .ok_or(io::ErrorKind::InvalidData)?;
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| io::ErrorKind::InvalidData)?
+            }
+        };
+        let previous = zeroize::Zeroizing::new(previous);
         let (_, previous_public) = Key::from_private(&previous[..])?;
-        if previous_public != identity.public_key {
+        if previous_public != identity.public_key || link.owner != Some(previous_public) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let (candidate, candidate_public) = Key::generate()?;
@@ -1080,13 +1223,17 @@ impl Node {
             completed: false,
         };
         store.save_rotation_secret(&state)?;
+        #[cfg(test)]
+        if self.engine_kind == EngineKind::GotaTun {
+            rotation_tests::crash_checkpoint("rotation_prepared");
+        }
         Ok(candidate_public)
     }
 
-    /// Settle an open journal whose operation the coordinator has ended, by the key the link holds.
+    /// Settle an open journal whose operation the coordinator has ended, by its active engine key.
     ///
-    /// The journal also records which key this node holds: a restart takes the kernel key from it
-    /// (`rotation_key`), so it is rewritten, never deleted (J262).
+    /// The journal also records which key this node holds: restart takes that key from it for both
+    /// Linux engines, so settlement rewrites the journal instead of deleting it (J262).
     /// - The link holds the candidate (commit was requested and the key was sent): finish the
     ///   local commit steps a stop may have left (marker, recorded key, identity), then complete
     ///   the journal, which erases the predecessor. The candidate is now our key.
@@ -1095,15 +1242,14 @@ impl Node {
     ///   erase the candidate.
     /// - Anything else is not a state this node produced, and is refused.
     fn settle_superseded_rotation(
-        store: &crate::node_state::Store,
-        identity: &mut Identity,
-        kernel_owner: &mut KernelProof,
+        &mut self,
         link: &crate::wireguard::ActiveLink,
         existing: &crate::node_state::RotationSecret,
     ) -> io::Result<()> {
-        let current = crate::wireguard::identity_at(link.ifindex)?.0;
+        let current = self.rotation_public_key(link)?;
         let (_, previous_public) = Key::from_private(&existing.previous)?;
         let (_, candidate_public) = Key::from_private(&existing.candidate)?;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         if existing.commit_requested && current == candidate_public {
             match link.owner {
                 Some(owner) if owner == previous_public => {
@@ -1113,13 +1259,23 @@ impl Node {
                 _ => return Err(io::ErrorKind::InvalidData.into()),
             }
             store.record_interface(&candidate_public)?;
-            *kernel_owner = KernelProof::single(candidate_public);
-            identity.public_key = candidate_public;
+            if self.engine_kind == EngineKind::GotaTun {
+                store.replace_private_key(&existing.candidate)?;
+            } else {
+                self.kernel_owner = KernelProof::single(candidate_public);
+            }
+            self.identity
+                .as_mut()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .public_key = candidate_public;
             return store.complete_rotation_secret(&existing.operation_id, existing.sequence);
         }
         if current != previous_public
             || link.owner != Some(previous_public)
-            || identity.public_key != previous_public
+            || self
+                .identity
+                .as_ref()
+                .is_none_or(|identity| identity.public_key != previous_public)
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -1131,19 +1287,21 @@ impl Node {
             commit_requested: true,
             completed: true,
         })?;
-        *kernel_owner = KernelProof::single(previous_public);
+        if self.engine_kind == EngineKind::Kernel {
+            self.kernel_owner = KernelProof::single(previous_public);
+        }
         Ok(())
     }
 
-    /// Switch our proven kernel link to the prepared candidate; retry is safe after an abrupt stop.
+    /// Switch our proven Linux link to the prepared candidate; retry is safe after an abrupt stop.
     ///
     /// Order (#285): durable commit intent, then the key, sent by index after the owner marker is
     /// re-verified (`Device::configure`), then the marker moved to the candidate
-    /// (`Device::remark`, again re-verified first), then the recorded key. Each step finds the
-    /// previous ones done on a retry, and [`KernelProof`] proves the link at every point between.
+    /// (`Device::remark`, again re-verified first), then the recorded key and GotaTun key file.
+    /// Each step finds the previous ones done on a retry, and the engine-specific owner proof
+    /// authorizes the predecessor and candidate only for the open journal.
     /// # Errors
-    /// Refuses `GotaTun`, a stale operation, an altered local key or a failed durable/kernel
-    /// update.
+    /// Refuses a stale operation, an altered local key or a failed durable/engine update.
     pub(crate) fn commit_rotation(
         &mut self,
         operation_id: &str,
@@ -1156,55 +1314,118 @@ impl Node {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let (candidate, candidate_public) = Key::from_private(&state.candidate)?;
-        let current_public = crate::wireguard::identity_at(link.ifindex)?.0;
+        let current_public = self.rotation_public_key(&link)?;
         if state.completed {
             let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-            if current_public != candidate_public || identity.public_key != candidate_public {
+            if current_public != candidate_public
+                || identity.public_key != candidate_public
+                || link.owner != Some(candidate_public)
+            {
                 return Err(io::ErrorKind::InvalidData.into());
             }
             store.record_interface(&candidate_public)?;
+            if self.engine_kind == EngineKind::GotaTun {
+                let private = store
+                    .read_private_key()?
+                    .ok_or(io::ErrorKind::InvalidData)?;
+                if crate::gotatun_node::secret_from_bytes(&private)?.1 != candidate_public {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+            }
             return Ok(identity.clone());
         }
         let previous_public = Key::from_private(&state.previous)?.1;
         if current_public == previous_public {
-            // Mark the operation before kernel mutation. After a stop here, restore
-            // selects this candidate and the authenticated server can reconcile it.
-            state.commit_requested = true;
-            store.save_rotation_secret(&state)?;
-            let port = self
-                .identity
-                .as_ref()
+            if link.owner != Some(previous_public) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if !state.commit_requested {
+                // Mark the operation before either engine changes its live key. A restart now
+                // selects the candidate and the authenticated server can reconcile it.
+                state.commit_requested = true;
+                store.save_rotation_secret(&state)?;
+                #[cfg(test)]
+                if self.engine_kind == EngineKind::GotaTun {
+                    rotation_tests::crash_checkpoint("rotation_commit_requested");
+                }
+            }
+            match self.engine_kind {
+                EngineKind::Kernel => {
+                    let port = self
+                        .identity
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .port;
+                    // The marker still names the predecessor; `configure` re-verifies it by index.
+                    Device::configure(link.ifindex, previous_public, &candidate, port)?;
+                }
+                EngineKind::GotaTun => {
+                    self.gotatun
+                        .as_ref()
+                        .ok_or(io::ErrorKind::NotConnected)?
+                        .set_private_key(candidate.gotatun_secret()?)?;
+                }
+            }
+            self.identity
+                .as_mut()
                 .ok_or(io::ErrorKind::NotConnected)?
-                .port;
-            // The marker still names the predecessor; `configure` re-verifies it on this index
-            // right before the candidate key is sent.
-            Device::configure(link.ifindex, previous_public, &candidate, port)?;
+                .public_key = candidate_public;
+            #[cfg(test)]
+            if self.engine_kind == EngineKind::GotaTun {
+                rotation_tests::crash_checkpoint("rotation_device_key_changed");
+            }
         } else if current_public != candidate_public {
             return Err(io::ErrorKind::InvalidData.into());
         } else if !state.commit_requested {
             state.commit_requested = true;
             store.save_rotation_secret(&state)?;
+            #[cfg(test)]
+            if self.engine_kind == EngineKind::GotaTun {
+                rotation_tests::crash_checkpoint("rotation_commit_requested");
+            }
         }
-        // The marker follows the key the link now holds.
-        match link.owner {
+        self.identity
+            .as_mut()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .public_key = candidate_public;
+        // Re-read the marker after the live key switch. A candidate marker is an idempotent retry.
+        let live_link = Device::active_link()?
+            .filter(|active| active.ifindex == link.ifindex && active.engine == self.engine_kind)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        match live_link.owner {
             Some(owner) if owner == previous_public => {
                 Device::remark(link.ifindex, previous_public, candidate_public)?;
             }
             Some(owner) if owner == candidate_public => {}
             _ => return Err(io::ErrorKind::InvalidData.into()),
         }
-        // Keep uninstall ownership aligned with the live link only after the
-        // kernel has accepted the candidate key and its marker above.
+        #[cfg(test)]
+        if self.engine_kind == EngineKind::GotaTun {
+            rotation_tests::crash_checkpoint("rotation_owner_marker_changed");
+        }
+        // Keep uninstall ownership aligned only after the engine accepted the candidate key and
+        // the marker names it. GotaTun's private key file is replaced atomically and synced.
         store.record_interface(&candidate_public)?;
-        self.kernel_owner = KernelProof::single(candidate_public);
-        let identity = self.identity.as_mut().ok_or(io::ErrorKind::NotConnected)?;
-        identity.public_key = candidate_public;
+        #[cfg(test)]
+        if self.engine_kind == EngineKind::GotaTun {
+            rotation_tests::crash_checkpoint("rotation_interface_recorded");
+        }
+        if self.engine_kind == EngineKind::GotaTun {
+            store.replace_private_key(candidate.private_bytes())?;
+        } else {
+            self.kernel_owner = KernelProof::single(candidate_public);
+        }
+        #[cfg(test)]
+        if self.engine_kind == EngineKind::GotaTun {
+            rotation_tests::crash_checkpoint("rotation_private_key_saved");
+        }
+        let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         Ok(identity.clone())
     }
 
     /// Drop retained predecessor material after the server retires the overlap.
     /// # Errors
-    /// Refuses `GotaTun`, a stale or not-yet-committed operation.
+    /// Refuses a stale or not-yet-committed operation or an identity not fully persisted by commit.
     pub(crate) fn finish_rotation(&mut self, operation_id: &str, sequence: u64) -> io::Result<()> {
         let link = self.rotation_link()?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -1213,7 +1434,8 @@ impl Node {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let candidate = Key::from_private(&state.candidate)?.1;
-        if crate::wireguard::identity_at(link.ifindex)?.0 != candidate
+        if self.rotation_public_key(&link)? != candidate
+            || link.owner != Some(candidate)
             || self
                 .identity
                 .as_ref()
@@ -1224,7 +1446,22 @@ impl Node {
         if !state.completed && !state.commit_requested {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        store.complete_rotation_secret(operation_id, sequence)
+        if self.engine_kind == EngineKind::GotaTun {
+            let private = store
+                .read_private_key()?
+                .ok_or(io::ErrorKind::InvalidData)?;
+            if crate::gotatun_node::secret_from_bytes(&private)?.1 != candidate
+                || store.recorded_interface()? != Some(candidate)
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        }
+        store.complete_rotation_secret(operation_id, sequence)?;
+        #[cfg(test)]
+        if self.engine_kind == EngineKind::GotaTun {
+            rotation_tests::crash_checkpoint("rotation_finished");
+        }
+        Ok(())
     }
 
     /// Remove all owned kernel work before reporting off. A failed cleanup remains visible.
@@ -2044,10 +2281,9 @@ mod tests {
         assert!(!key.exists(), "retirement leaves no private key behind");
     }
 
-    /// `GotaTun` refuses every rotation step before reading any state (D166, D352; #285), while
-    /// a kernel node without a link fails for that reason instead.
+    /// Both Linux engines require a live identity and owned link before rotation can start.
     #[test]
-    fn only_kernel_wireguard_accepts_rotation_steps() {
+    fn inactive_engines_refuse_rotation_without_reading_or_mutating_state() {
         let operation = "00000000-0000-4000-8000-000000000005";
         let mut gotatun = Node::default().with_engine(EngineKind::GotaTun);
         for result in [
@@ -2056,17 +2292,17 @@ mod tests {
             gotatun.finish_rotation(operation, 1),
         ] {
             assert_eq!(
-                result.expect_err("GotaTun refuses").kind(),
-                io::ErrorKind::Unsupported
+                result.expect_err("inactive GotaTun refuses").kind(),
+                io::ErrorKind::NotConnected
             );
         }
         let mut kernel = Node::default().with_engine(EngineKind::Kernel);
-        assert_ne!(
+        assert_eq!(
             kernel
                 .prepare_rotation(operation, 1)
-                .expect_err("no identity yet")
+                .expect_err("inactive kernel refuses")
                 .kind(),
-            io::ErrorKind::Unsupported
+            io::ErrorKind::NotConnected
         );
     }
 

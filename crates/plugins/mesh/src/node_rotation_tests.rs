@@ -55,7 +55,6 @@ fn gotatun_rotation_crash_child() {
     node.prepare_rotation(operation, 1).unwrap();
     node.commit_rotation(operation, 1).unwrap();
     node.finish_rotation(operation, 1).unwrap();
-    crash_checkpoint("rotation_finished");
     panic!("the requested crash boundary was never reached");
 }
 
@@ -74,6 +73,7 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
         "rotation_commit_requested",
         "rotation_device_key_changed",
         "rotation_owner_marker_changed",
+        "rotation_interface_recorded",
         "rotation_private_key_saved",
         "rotation_finished",
     ];
@@ -226,7 +226,7 @@ fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() 
         .save_rotation_secret(&crate::node_state::RotationSecret {
             operation_id: operation.to_owned(),
             sequence: 1,
-            previous: previous_private.try_into().unwrap(),
+            previous: previous_private.as_slice().try_into().unwrap(),
             candidate: candidate_key.private_bytes().try_into().unwrap(),
             commit_requested: true,
             completed: false,
@@ -248,6 +248,63 @@ fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() 
     );
     restored.down().unwrap();
 }
+
+/// An explicit down removes the engine key file, so startup restores the journal-selected key before reattaching.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_rotation_recovers_its_private_key_after_down() {
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000047";
+    let second = "00000000-0000-4000-8000-000000000048";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    node.up().unwrap();
+    let candidate = node.prepare_rotation(first, 1).unwrap();
+    node.commit_rotation(first, 1).unwrap();
+    node.finish_rotation(first, 1).unwrap();
+    node.down().unwrap();
+    drop(node);
+
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    assert_eq!(restored.up().unwrap().public_key, candidate);
+    let next = restored.prepare_rotation(second, 3).unwrap();
+    assert_ne!(next, candidate);
+    restored.commit_rotation(second, 3).unwrap();
+    restored.finish_rotation(second, 3).unwrap();
+    restored.down().unwrap();
+}
+
+/// A GotaTun candidate is not an ownership proof until its durable commit intent exists.
+#[test]
+fn gotatun_owner_proof_rejects_a_candidate_before_commit_intent() {
+    let state = RotationState::new();
+    let operation = "00000000-0000-4000-8000-000000000046";
+    let (previous_key, previous) = Key::generate().unwrap();
+    let (candidate_key, candidate) = Key::generate().unwrap();
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    store.record_engine(EngineKind::GotaTun).unwrap();
+    store.record_interface(&previous).unwrap();
+    store
+        .write_private_key(previous_key.private_bytes())
+        .unwrap();
+    store
+        .save_rotation_secret(&crate::node_state::RotationSecret {
+            operation_id: operation.to_owned(),
+            sequence: 1,
+            previous: previous_key.private_bytes().try_into().unwrap(),
+            candidate: candidate_key.private_bytes().try_into().unwrap(),
+            commit_requested: false,
+            completed: false,
+        })
+        .unwrap();
+    store
+        .replace_private_key(candidate_key.private_bytes())
+        .unwrap();
+
+    let proof = gotatun_owner_proof(&store, Some(previous)).unwrap();
+    assert!(proof.accepts(previous));
+    assert!(!proof.accepts(candidate));
+}
+
 // Keep the retained address, recovery fence and packet observation in one scenario.
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
@@ -772,38 +829,6 @@ fn a_settle_that_changes_the_key_raises_the_change_notice() {
         "a prepare that changes no key raises nothing"
     );
     plugin.call("mesh.down", b"{}").unwrap();
-}
-
-/// `GotaTun` cannot rotate yet: it says so, and every rotation step refuses without touching the
-/// device or the state (D166, D352; #285).
-#[test]
-#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-fn gotatun_reports_no_rotation_support_and_refuses_every_step() {
-    let state = RotationState::new();
-    let operation = "00000000-0000-4000-8000-000000000004";
-    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
-    let identity = node.up().unwrap();
-    assert!(
-        !identity.key_rotation,
-        "GotaTun must not offer key rotation"
-    );
-    for result in [
-        node.prepare_rotation(operation, 1).map(|_| ()),
-        node.commit_rotation(operation, 1).map(|_| ()),
-        node.finish_rotation(operation, 1),
-    ] {
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
-    }
-    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
-    assert!(
-        store.rotation_secret().unwrap().is_none(),
-        "no rotation journal is written"
-    );
-    assert_eq!(
-        store.recorded_interface().unwrap(),
-        Some(identity.public_key)
-    );
-    node.down().unwrap();
 }
 
 #[test]

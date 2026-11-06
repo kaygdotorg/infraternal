@@ -425,8 +425,9 @@ struct Started {
     info: RuntimeInfo,
 }
 
-/// Open, mark and activate the TUN, bind the engine socket, and build the device when the startup
-/// config already has peers. Runs on the engine's runtime, which also runs the TUN writer.
+/// Open and activate the TUN, bind the engine socket, and build the device when the startup
+/// config already has peers. New TUNs get a marker here; adopted TUNs were re-proven by index.
+/// Runs on the engine's runtime, which also runs the TUN writer.
 async fn initialize(
     private_key: StaticSecret,
     local_public_key: PublicKey,
@@ -478,7 +479,9 @@ async fn initialize(
             "Linux TUN checksum and TCP segmentation offloads are unavailable.",
         ));
     }
-    crate::wireguard::Device::mark_tun(local_public_key)?;
+    if adopt.is_none() {
+        crate::wireguard::Device::mark_tun(local_public_key)?;
+    }
     crate::wireguard::Device::activate_tun()?;
     // Raised on a new and on a reattached TUN alike. A refusal does not stop the engine: the
     // length it really has goes to `mesh status`.
