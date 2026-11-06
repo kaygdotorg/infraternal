@@ -248,7 +248,7 @@ test("a never-seen host goes straight to the key step: no failure screen, no err
   const hero = wizard(page).locator(".ah-page[data-page='hostkey'] .ah-hero");
   await expect(hero).not.toHaveAttribute("data-tone", "danger");
   await expect(hero.locator("path[d^='M10.3 4.6']")).toHaveCount(0);
-  await expect(wizard(page).locator(".ah-lede")).not.toContainText(/warning/i);
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).not.toContainText(/warning/i);
   await expect(inWizard(page, "Trust and continue")).toBeVisible();
   await expect(inWizard(page, "Cancel")).toBeVisible();
   await expect(page.locator(".ah-keyblock")).toContainText(/SHA256:/);
@@ -266,7 +266,7 @@ test("a changed host key stays a real warning with the strong wording (#397)", a
   await addTyped(page, "kayg@changedkey.lab");
   await expect(page.getByRole("heading", { name: /Check changedkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
   await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-hero")).toHaveAttribute("data-tone", "danger");
-  await expect(wizard(page).locator(".ah-lede")).toContainText("Warning: this host’s trusted key changed");
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).toContainText("Warning: this host’s trusted key changed");
   await expect(inWizard(page, "Replace trusted key")).toBeVisible();
 });
 
