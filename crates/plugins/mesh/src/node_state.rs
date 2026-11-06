@@ -771,7 +771,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// A GotaTun identity can be restored from its private file without weakening its mode.
+    /// A `GotaTun` identity can be restored from its private file without weakening its mode.
     #[test]
     fn gotatun_private_key_round_trips_only_as_a_private_file() {
         let directory = Directory::new();
