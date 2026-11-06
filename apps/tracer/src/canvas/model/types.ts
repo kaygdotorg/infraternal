@@ -16,6 +16,11 @@ export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings
 /** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
 export type ViewId = string;
 
+/**
+ * One window on the canvas as the runtime sees it: what it shows (its kind and target, such as a terminal's host and
+ * session), where it sits in its column, and a few in-memory flags. `toDocument` turns the parts worth keeping into
+ * the saved layout; everything else lives only in this tab.
+ */
 export interface WindowModel {
   id: string;
   kind: WindowKind;

@@ -20,6 +20,10 @@ export interface DocumentSync {
   dispose(): void;
 }
 
+/**
+ * Creates the sync for one canvas. Call `changed()` after every structural change and `reset()` after a canonical
+ * update; `persisted` says which views belong in the saved layout (the rest stay local to this tab).
+ */
 export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean = () => true): DocumentSync {
   let queued = false;
   let disposed = false;
