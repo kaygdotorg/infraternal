@@ -1,8 +1,7 @@
-//! Persists accepted public node intent and write-ahead peer-route ownership [166,198]. Under
-//! kernel `WireGuard` the private key lives only in kernel memory; the `GotaTun` engine keeps it in
-//! one private 0600 file, which down and retirement remove (#260). That key never leaves its
-//! node (D163), so backups (D147: database, CA key, configuration) must never include this
-//! directory's `mesh-private-key`.
+//! Persists accepted public node intent, engine identity records and journaled key rotation
+//! [166,198]. Kernel `WireGuard` keeps its key in kernel memory; Linux and Mac `GotaTun` keep it in
+//! a private 0600 file. That key never leaves its node (D163), so backups (D147: database, CA key,
+//! configuration) must never include this directory's private Mesh key.
 use crate::dataplane::Config;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -21,6 +20,7 @@ pub struct State {
     pub enabled: bool,
     pub config: Option<Config>,
     #[serde(default)]
+    #[cfg(target_os = "linux")]
     pub backend: Option<crate::firewall::Backend>,
 }
 impl Default for State {
@@ -28,11 +28,12 @@ impl Default for State {
         Self {
             enabled: true,
             config: None,
+            #[cfg(target_os = "linux")]
             backend: None,
         }
     }
 }
-/// This node's durable local state: the public snapshot, routes, interface key, engine, private key and rotation journal.
+/// One node's durable local state: public snapshot, routes, identity record, private key and rotation journal.
 pub struct Store {
     path: PathBuf,
     route_path: PathBuf,
@@ -43,6 +44,7 @@ pub struct Store {
     // Pending local rotation keys are separate from the public snapshot and are
     // readable only by this installation's effective UID.
     rotation_path: PathBuf,
+    #[cfg(target_os = "linux")]
     engine_path: PathBuf,
     key_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
@@ -100,6 +102,7 @@ impl Store {
         let route_path = parent.join("mesh-routes.json");
         let interface_path = parent.join("mesh-interface.json");
         let rotation_path = parent.join("mesh-key-rotation.bin");
+        #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
         let key_path = parent.join("mesh-private-key");
         sweep_private_temporaries(&key_path)?;
@@ -112,12 +115,42 @@ impl Store {
                 route_path,
                 interface_path,
                 rotation_path,
+                #[cfg(target_os = "linux")]
                 engine_path,
                 key_path,
                 route_body: Mutex::new(route_body),
             },
             state,
         ))
+    }
+
+    /// Open the shared journal beside the Mac public snapshot without decoding that platform's state.
+    ///
+    /// Mac and Linux use the same durable rotation files, while their public snapshots have
+    /// different schemas. The Mac constructor binds the shared store to `mesh-wireguard.key`.
+    /// # Errors
+    /// Refuses an unsafe state directory or key-file temporary.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn open_for_macos(parent: &Path) -> io::Result<Self> {
+        let metadata = fs::symlink_metadata(parent)?;
+        if !metadata.is_dir()
+            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            || metadata.mode() & 0o777 != 0o700
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let key_path = parent.join(crate::macos_key::KEY_FILE);
+        sweep_private_temporaries(&key_path)?;
+        let route_body =
+            serde_json::to_vec(&BTreeSet::<IpAddr>::new()).map_err(io::Error::other)?;
+        Ok(Self {
+            path: parent.join("mesh-public.json"),
+            route_path: parent.join("mesh-routes.json"),
+            interface_path: parent.join("mesh-interface.json"),
+            rotation_path: parent.join("mesh-key-rotation.bin"),
+            key_path,
+            route_body: Mutex::new(route_body),
+        })
     }
     /// Read only the public host addresses recorded before kernel mutation.
     /// # Errors
@@ -148,6 +181,72 @@ impl Store {
     pub fn recorded_interface(&self) -> io::Result<Option<crate::policy::model::PublicKey>> {
         read_public(&self.interface_path)
     }
+
+    /// Persist a candidate key and interface identity as one journal-authorized store operation.
+    ///
+    /// The interface record is written first. During either half of the update, the open journal
+    /// proves both possible identities and startup completes the operation before opening a link.
+    /// # Errors
+    /// Refuses a stale operation or a candidate that is not the journaled private key.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn record_rotation_identity(
+        &self,
+        operation_id: &str,
+        sequence: u64,
+        private_key: &[u8],
+        public_key: &crate::policy::model::PublicKey,
+    ) -> io::Result<()> {
+        let rotation = self.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
+        let candidate_private = Zeroizing::new(rotation.candidate);
+        let candidate_secret = gotatun::x25519::StaticSecret::from(*candidate_private);
+        let candidate_public = crate::policy::model::PublicKey(
+            *gotatun::x25519::PublicKey::from(&candidate_secret).as_bytes(),
+        );
+        if rotation.operation_id != operation_id
+            || rotation.sequence != sequence
+            || !rotation.commit_requested
+            || rotation.completed
+            || private_key != &candidate_private[..]
+            || candidate_public != *public_key
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.record_interface(public_key)?;
+        #[cfg(all(test, target_os = "macos"))]
+        crate::macos_node::rotation_crash_checkpoint("rotation_interface_recorded");
+        self.replace_private_key(private_key)?;
+        #[cfg(all(test, target_os = "macos"))]
+        crate::macos_node::rotation_crash_checkpoint("rotation_private_key_saved");
+        Ok(())
+    }
+
+    /// Remove this node's saved identity and open rotation after its enrolment changes.
+    /// # Errors
+    /// Refuses unsafe records and reports failed removals or directory syncs.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn discard_rotation_state(&self) -> io::Result<()> {
+        let mut removed = false;
+        for path in [&self.rotation_path, &self.interface_path] {
+            match fs::symlink_metadata(path) {
+                Ok(metadata)
+                    if metadata.is_file()
+                        && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+                        && metadata.mode() & 0o777 == 0o600 =>
+                {
+                    fs::remove_file(path)?;
+                    removed = true;
+                }
+                Ok(_) => return Err(io::ErrorKind::PermissionDenied.into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if removed {
+            FileSync::parent(&self.rotation_path)?;
+        }
+        Ok(())
+    }
+
     /// Read a pending key pair or completed-operation marker from a private, no-follow file.
     /// # Errors
     /// Refuses unsafe ownership, modes, lengths, operation IDs or key-state encodings.
@@ -293,6 +392,7 @@ impl Store {
     /// the key it describes. `switch_engine` carries the live key before changing this record.
     /// # Errors
     /// Refuses unsafe state files and reports durable-write failures.
+    #[cfg(target_os = "linux")]
     pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
         write_public(
             &self.engine_path,
@@ -302,6 +402,7 @@ impl Store {
     /// Read the selected engine, if this node has recorded one.
     /// # Errors
     /// Refuses unsafe metadata and malformed engine values.
+    #[cfg(target_os = "linux")]
     pub(crate) fn recorded_engine(&self) -> io::Result<Option<crate::gotatun_node::EngineKind>> {
         read_public(&self.engine_path)
     }
@@ -589,7 +690,7 @@ impl FileSync {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) mod tests {
     //! Provides isolated filesystem state for node persistence tests.
     #![allow(clippy::expect_used)]
@@ -980,10 +1081,10 @@ pub(crate) mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "node_state_order_tests.rs"]
 mod order_tests;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "node_state_restore_tests.rs"]
 mod restore_tests;

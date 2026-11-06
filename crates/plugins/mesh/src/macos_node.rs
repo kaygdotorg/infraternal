@@ -10,7 +10,7 @@ use gotatun::{
         UdpTransportFactory, UdpTransportFactoryParams,
         socket::{UdpSocket as GotaUdpSocket, UdpSocketFactory},
     },
-    x25519::PublicKey as X25519PublicKey,
+    x25519::{PublicKey as X25519PublicKey, StaticSecret},
 };
 use ipnetwork::IpNetwork;
 use nix::{
@@ -42,6 +42,7 @@ use tokio::{
     runtime::Builder as RuntimeBuilder,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
+use zeroize::Zeroizing;
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
@@ -52,7 +53,7 @@ const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Pause a Mac rotation child at a durable boundary so its parent can send SIGKILL.
 #[cfg(test)]
-fn rotation_crash_checkpoint(name: &str) {
+pub(crate) fn rotation_crash_checkpoint(name: &str) {
     if std::env::var("INFRATERNAL_MAC_ROTATION_CRASH_POINT").as_deref() != Ok(name) {
         return;
     }
@@ -65,6 +66,46 @@ fn rotation_crash_checkpoint(name: &str) {
 }
 
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, MacUtunTx, MacUtunRx)>;
+
+/// A temporary Mac rotation key that clears its private bytes when dropped.
+struct RotationKey(Zeroizing<[u8; 32]>);
+
+impl RotationKey {
+    /// Generate a candidate identity with the system random source.
+    /// # Errors
+    /// Reports an unavailable random source or an invalid X25519 key.
+    fn generate() -> io::Result<(Self, crate::policy::model::PublicKey)> {
+        let mut private = Zeroizing::new([0_u8; 32]);
+        openssl::rand::rand_bytes(&mut *private)
+            .map_err(|_| io::Error::other("System random generator unavailable."))?;
+        Self::from_private(&private[..])
+    }
+
+    /// Rebuild a temporary key from the private rotation journal.
+    /// # Errors
+    /// Refuses a private key with any length other than 32 bytes.
+    fn from_private(bytes: &[u8]) -> io::Result<(Self, crate::policy::model::PublicKey)> {
+        let private =
+            Zeroizing::new(<[u8; 32]>::try_from(bytes).map_err(|_| io::ErrorKind::InvalidData)?);
+        let secret = StaticSecret::from(*private);
+        let public = X25519PublicKey::from(&secret);
+        Ok((
+            Self(private),
+            crate::policy::model::PublicKey(*public.as_bytes()),
+        ))
+    }
+
+    /// Borrow private bytes only long enough to write the protected key file.
+    #[must_use]
+    fn private_bytes(&self) -> &[u8] {
+        &self.0[..]
+    }
+
+    /// Copy this key into GotaTun's zeroizing secret type for a live update.
+    fn gotatun_secret(&self) -> StaticSecret {
+        StaticSecret::from(*self.0)
+    }
+}
 
 #[derive(Clone)]
 struct BoundUdpFactory {
@@ -427,6 +468,7 @@ pub fn forget(state: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
         Ok(_) => {}
     }
+    crate::node_state::Store::open_for_macos(state)?.discard_rotation_state()?;
     crate::macos_key::retire_key(state, crate::macos_key::RotationReason::EnrolmentChanged)?;
     match fs::remove_file(state.join(PUBLIC_STATE)) {
         Ok(()) => File::open(state)?.sync_all(),
@@ -607,24 +649,60 @@ fn parse_utun_payload(frame: &[u8]) -> io::Result<&[u8]> {
     Ok(payload)
 }
 
-/// Convert the installed peers (see [`installed_peers`]) into `WireGuard` peers with host routes.
+/// Convert every configured identity into GotaTun peers, keeping both rotation keys installed.
+///
+/// Only the active overlap key gets routes and an endpoint, so the inactive key can accept an
+/// incoming handshake without competing to own the peer's host routes.
+/// # Errors
+/// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
-    installed_peers(config)
-        .map(|policy| {
-            let peer = &policy.peer;
-            let addresses = [
-                IpNetwork::new(IpAddr::V4(peer.addresses.ipv4), 32)
-                    .map_err(|_| io::ErrorKind::InvalidData)?,
-                IpNetwork::new(IpAddr::V6(peer.addresses.ipv6), 128)
-                    .map_err(|_| io::ErrorKind::InvalidData)?,
-            ];
-            let mut wireguard_peer =
-                WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
-            wireguard_peer.endpoint = peer.endpoint;
-            wireguard_peer.keepalive = Some(25);
-            Ok(wireguard_peer)
-        })
-        .collect()
+    let mut peers = Vec::new();
+    for policy in installed_peers(config) {
+        peers.extend(peer_for_policy(policy)?);
+    }
+    Ok(peers)
+}
+
+/// Convert one peer to its active key or both journaled overlap keys.
+/// # Errors
+/// Rejects invalid host routes before they reach GotaTun.
+fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
+    let peer = &policy.peer;
+    let addresses = vec![
+        IpNetwork::new(IpAddr::V4(peer.addresses.ipv4), 32)
+            .map_err(|_| io::ErrorKind::InvalidData)?,
+        IpNetwork::new(IpAddr::V6(peer.addresses.ipv6), 128)
+            .map_err(|_| io::ErrorKind::InvalidData)?,
+    ];
+    let Some(previous) = peer.previous_key.filter(|key| *key != peer.key) else {
+        let mut current =
+            WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
+        current.endpoint = peer.endpoint;
+        current.keepalive = Some(25);
+        return Ok(vec![current]);
+    };
+    let mut previous_peer = WireGuardPeer::new(X25519PublicKey::from(previous.0)).with_allowed_ips(
+        if peer.previous_active {
+            addresses.clone()
+        } else {
+            Vec::new()
+        },
+    );
+    let mut current_peer = WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(
+        if peer.previous_active {
+            Vec::new()
+        } else {
+            addresses
+        },
+    );
+    let active = if peer.previous_active {
+        &mut previous_peer
+    } else {
+        &mut current_peer
+    };
+    active.endpoint = peer.endpoint;
+    active.keepalive = Some(25);
+    Ok(vec![previous_peer, current_peer])
 }
 
 struct Pending {
@@ -807,6 +885,10 @@ enum WorkerCommand {
     Apply {
         config: Config,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
+    },
+    SetPrivateKey {
+        private_key: gotatun::x25519::StaticSecret,
+        reply: sync::SyncSender<io::Result<()>>,
     },
     Counters(sync::SyncSender<CounterMap>),
     Stop(sync::SyncSender<io::Result<()>>),
@@ -1003,6 +1085,17 @@ impl Worker {
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
     }
 
+    /// Replace the live GotaTun key on its serialized worker thread.
+    /// # Errors
+    /// Reports a stopped worker or a rejected key update.
+    fn set_private_key(&self, private_key: gotatun::x25519::StaticSecret) -> io::Result<()> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::SetPrivateKey { private_key, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
     fn stop(&mut self) -> io::Result<()> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
@@ -1040,6 +1133,10 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 let result = state.apply(config).await;
                 let _ = reply.send(result);
             }
+            WorkerCommand::SetPrivateKey { private_key, reply } => {
+                let result = state.set_private_key(private_key).await;
+                let _ = reply.send(result);
+            }
             WorkerCommand::Counters(reply) => {
                 let counters = state.counters().await.unwrap_or_default();
                 let _ = reply.send(counters);
@@ -1058,6 +1155,21 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
 }
 
 impl RuntimeState {
+    /// Change the private identity on the active WireGuard device without restarting its utun.
+    /// # Errors
+    /// Reports a stopped device or a rejected key update.
+    async fn set_private_key(
+        &mut self,
+        private_key: gotatun::x25519::StaticSecret,
+    ) -> io::Result<()> {
+        self.device
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .set_private_key(private_key)
+            .await
+            .map_err(|_| io::Error::other("WireGuard private key could not be changed."))
+    }
+
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
         let interface = self
             .utun
@@ -1196,6 +1308,7 @@ pub struct Node {
     enabled: bool,
     worker: Option<Worker>,
     identity: Option<crate::dataplane::Identity>,
+    store: Option<crate::node_state::Store>,
     config: Option<Config>,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
@@ -1211,6 +1324,7 @@ impl Default for Node {
             enabled: true,
             worker: None,
             identity: None,
+            store: None,
             config: None,
             pending: None,
             routes: BTreeSet::new(),
@@ -1220,6 +1334,146 @@ impl Default for Node {
             binding: None,
         }
     }
+}
+
+/// Recover the Mac identity selected by a prepared or committed rotation journal.
+///
+/// A pending commit selects the candidate on restart even if the key file or identity record was
+/// the last write to reach disk. Only the predecessor and candidate from this journal are valid.
+/// # Errors
+/// Refuses a key file or identity record outside the journal's authorized phase.
+fn recover_macos_rotation_key(
+    store: &crate::node_state::Store,
+    rotation: &crate::node_state::RotationSecret,
+) -> io::Result<(RotationKey, crate::policy::model::PublicKey)> {
+    let (candidate, candidate_public) = RotationKey::from_private(&rotation.candidate)?;
+    let recorded = store
+        .recorded_interface()?
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let saved = store
+        .read_private_key()?
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let saved_public = RotationKey::from_private(&saved)?.1;
+    if rotation.completed {
+        if recorded != candidate_public || saved_public != candidate_public {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        return Ok((candidate, candidate_public));
+    }
+
+    let (previous, previous_public) = RotationKey::from_private(&rotation.previous)?;
+    if !rotation.commit_requested {
+        if recorded != previous_public || saved_public != previous_public {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        return Ok((previous, previous_public));
+    }
+
+    let legal_partial_write = (recorded == previous_public && saved_public == previous_public)
+        || (recorded == candidate_public
+            && (saved_public == previous_public || saved_public == candidate_public));
+    if !legal_partial_write {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    store.record_rotation_identity(
+        &rotation.operation_id,
+        rotation.sequence,
+        candidate.private_bytes(),
+        &candidate_public,
+    )?;
+    Ok((candidate, candidate_public))
+}
+
+/// Check that a saved Mac key names only an identity from its durable rotation journal.
+/// # Errors
+/// Refuses unsafe key records and mismatched journal state.
+fn validate_macos_rotation_proof(
+    store: &crate::node_state::Store,
+    rotation: &crate::node_state::RotationSecret,
+    current: crate::policy::model::PublicKey,
+) -> io::Result<()> {
+    let candidate_public = RotationKey::from_private(&rotation.candidate)?.1;
+    let recorded = store
+        .recorded_interface()?
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let saved = store
+        .read_private_key()?
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let saved_public = RotationKey::from_private(&saved)?.1;
+    if rotation.completed {
+        if current != candidate_public
+            || recorded != candidate_public
+            || saved_public != candidate_public
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        return Ok(());
+    }
+    let previous_public = RotationKey::from_private(&rotation.previous)?.1;
+    let valid = if !rotation.commit_requested {
+        current == previous_public && recorded == previous_public && saved_public == previous_public
+    } else {
+        (current == previous_public
+            && recorded == previous_public
+            && saved_public == previous_public)
+            || (current == candidate_public
+                && recorded == previous_public
+                && saved_public == previous_public)
+            || (current == candidate_public
+                && recorded == candidate_public
+                && (saved_public == previous_public || saved_public == candidate_public))
+    };
+    if !valid {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(())
+}
+
+/// Verify an accepted local-key binding against the key file and any open rotation journal.
+fn macos_snapshot_binding_is_authorized(
+    store: &crate::node_state::Store,
+    bound: crate::policy::model::PublicKey,
+) -> io::Result<bool> {
+    let Some(private) = store.read_private_key()? else {
+        return Ok(false);
+    };
+    let private_public = RotationKey::from_private(&private)?.1;
+    let Some(rotation) = store.rotation_secret()? else {
+        return Ok(store.recorded_interface()? == Some(private_public) && private_public == bound);
+    };
+    let candidate_public = RotationKey::from_private(&rotation.candidate)?.1;
+    let Some(recorded) = store.recorded_interface()? else {
+        return Ok(false);
+    };
+    if rotation.completed {
+        // The completion marker selects exactly one key; a saved public snapshot can still carry
+        // its predecessor until a new coordinator revision arrives.
+        return Ok(private_public == candidate_public && recorded == candidate_public);
+    }
+    let previous_public = RotationKey::from_private(&rotation.previous)?.1;
+    let bound_authorized =
+        bound == previous_public || (rotation.commit_requested && bound == candidate_public);
+    let key_state_authorized = if !rotation.commit_requested {
+        private_public == previous_public && recorded == previous_public
+    } else {
+        (private_public == previous_public && recorded == previous_public)
+            || (private_public == previous_public && recorded == candidate_public)
+            || (private_public == candidate_public && recorded == candidate_public)
+    };
+    Ok(bound_authorized && key_state_authorized)
+}
+
+/// Check the coordinator's rotation identifier before creating any private state.
+fn valid_rotation_request(operation_id: &str, sequence: u64) -> bool {
+    sequence != 0
+        && operation_id.len() == 36
+        && operation_id.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
 }
 
 impl Node {
@@ -1240,10 +1494,12 @@ impl Node {
                 false,
             ),
         };
+        let store = crate::node_state::Store::open_for_macos(state_directory)?;
         if rotate {
             tracing::warn!(
                 "Mesh state is not bound to this enrolment; discarding its peers and starting with a new WireGuard key"
             );
+            store.discard_rotation_state()?;
             crate::macos_key::retire_key(
                 state_directory,
                 crate::macos_key::RotationReason::EnrolmentChanged,
@@ -1268,6 +1524,7 @@ impl Node {
             port: state.port,
             path: Some(path),
             binding: state.binding,
+            store: Some(store),
             ..Self::default()
         };
         if node.enabled {
@@ -1312,13 +1569,51 @@ impl Node {
         if let Some(identity) = &self.identity {
             return Ok(identity.clone());
         }
-        // The key lives beside the public state; a node without a state directory has no key.
+        // The key and its rotation journal live beside the platform's public state.
         let state = self
             .path
             .as_deref()
             .and_then(Path::parent)
             .ok_or(io::ErrorKind::NotFound)?;
-        let (private_key, public_key) = crate::macos_key::load_or_create(state)?;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let (private_key, public_key) = if let Some(rotation) = store.rotation_secret()? {
+            let (journal_key, journal_public) = recover_macos_rotation_key(store, &rotation)?;
+            let (secret, keychain_public) = crate::macos_key::load_or_create(state)?;
+            if keychain_public != journal_public
+                || RotationKey::from_private(journal_key.private_bytes())?.1 != journal_public
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            (secret, journal_public)
+        } else {
+            if store.recorded_interface()?.is_some() && store.read_private_key()?.is_none() {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            let (secret, keychain_public) = crate::macos_key::load_or_create(state)?;
+            let bytes = store.read_private_key()?.ok_or(io::ErrorKind::NotFound)?;
+            let (_, file_public) = RotationKey::from_private(&bytes)?;
+            if file_public != keychain_public {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            match store.recorded_interface()? {
+                Some(recorded) if recorded != file_public => {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                Some(_) => {}
+                None => store.record_interface(&file_public)?,
+            }
+            (secret, file_public)
+        };
+        if let Some(config) = self.config.as_mut()
+            && let Some(bound) = config.local_key
+        {
+            if !macos_snapshot_binding_is_authorized(store, bound)? {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if bound != public_key {
+                config.local_key = Some(public_key);
+            }
+        }
         let open = OpenUtun::open()?;
         let desired_routes = self
             .config
@@ -1368,8 +1663,7 @@ impl Node {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
-            // Key rotation is not implemented on macOS yet, so the coordinator rotates no node (#285).
-            key_rotation: false,
+            key_rotation: true,
         };
         self.identity = Some(identity.clone());
         Ok(identity)
@@ -1386,30 +1680,236 @@ impl Node {
         }
     }
 
-    /// Key rotation, step 1 (#285, D166). This node advertises `key_rotation: false`, so the coordinator never
-    /// asks. A request anyway is refused without touching the interface.
+    /// Return the identity only while this node owns a running GotaTun worker and utun.
+    /// # Errors
+    /// Refuses rotation when the node or its live interface is unavailable.
+    fn rotation_identity(&self) -> io::Result<crate::dataplane::Identity> {
+        if !self.enabled || self.worker.is_none() || self.interface.is_none() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        self.identity
+            .clone()
+            .ok_or(io::ErrorKind::NotConnected.into())
+    }
+
+    /// Settle an older open journal before accepting a higher coordinator sequence.
+    ///
+    /// The active identity is authoritative after a superseded operation: an accepted candidate
+    /// is retained, while an uncommitted predecessor stays selected and the unused candidate is
+    /// erased from the completion marker.
+    /// # Errors
+    /// Refuses a journal that does not describe the active key or any failed durable update.
+    fn settle_superseded_rotation(
+        &mut self,
+        rotation: &crate::node_state::RotationSecret,
+    ) -> io::Result<()> {
+        if rotation.completed {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let current = self.rotation_identity()?.public_key;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        validate_macos_rotation_proof(store, rotation, current)?;
+        let (candidate, candidate_public) = RotationKey::from_private(&rotation.candidate)?;
+        let (_, previous_public) = RotationKey::from_private(&rotation.previous)?;
+        if rotation.commit_requested && current == candidate_public {
+            store.record_rotation_identity(
+                &rotation.operation_id,
+                rotation.sequence,
+                candidate.private_bytes(),
+                &candidate_public,
+            )?;
+            if let Some(identity) = self.identity.as_mut() {
+                identity.public_key = candidate_public;
+            }
+            if let Some(config) = self.config.as_mut() {
+                config.local_key = Some(candidate_public);
+            }
+            store.complete_rotation_secret(&rotation.operation_id, rotation.sequence)?;
+        } else if current == previous_public {
+            store.save_rotation_secret(&crate::node_state::RotationSecret {
+                operation_id: rotation.operation_id.clone(),
+                sequence: rotation.sequence,
+                previous: [0; 32],
+                candidate: rotation.previous,
+                commit_requested: true,
+                completed: true,
+            })?;
+        } else {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(())
+    }
+
+    /// Prepare a local Mac identity without changing the live GotaTun worker (#285, D166).
+    /// The predecessor and candidate are durable before the coordinator may publish overlap.
+    /// # Errors
+    /// Refuses an inactive node, invalid request, conflicting operation, unsafe state or failed write.
     pub(crate) fn prepare_rotation(
         &mut self,
-        _operation_id: &str,
-        _sequence: u64,
+        operation_id: &str,
+        sequence: u64,
     ) -> io::Result<crate::policy::model::PublicKey> {
-        Err(io::ErrorKind::Unsupported.into())
+        if !valid_rotation_request(operation_id, sequence) {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let current = self.rotation_identity()?.public_key;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let existing = store.rotation_secret()?;
+        if let Some(existing) = existing.as_ref() {
+            if existing.completed {
+                validate_macos_rotation_proof(store, existing, current)?;
+                let completed_key = RotationKey::from_private(&existing.candidate)?.1;
+                if current != completed_key
+                    || existing.operation_id == operation_id
+                    || sequence <= existing.sequence
+                {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+            } else if existing.operation_id == operation_id && existing.sequence == sequence {
+                validate_macos_rotation_proof(store, existing, current)?;
+                return Ok(RotationKey::from_private(&existing.candidate)?.1);
+            } else if existing.operation_id != operation_id && sequence > existing.sequence {
+                self.settle_superseded_rotation(existing)?;
+            } else {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+
+        let existing = self
+            .store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .rotation_secret()?;
+        if let Some(existing) = existing.as_ref() {
+            let current = self.rotation_identity()?.public_key;
+            validate_macos_rotation_proof(
+                self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?,
+                existing,
+                current,
+            )?;
+            if !existing.completed
+                || existing.operation_id == operation_id
+                || sequence <= existing.sequence
+            {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let private = store
+            .read_private_key()?
+            .ok_or(io::ErrorKind::InvalidData)?;
+        let (previous, previous_public) = RotationKey::from_private(&private)?;
+        if previous_public != current || store.recorded_interface()? != Some(current) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let (candidate, candidate_public) = loop {
+            let pair = RotationKey::generate()?;
+            if pair.1 != previous_public {
+                break pair;
+            }
+        };
+        store.save_rotation_secret(&crate::node_state::RotationSecret {
+            operation_id: operation_id.to_owned(),
+            sequence,
+            previous: previous
+                .private_bytes()
+                .try_into()
+                .map_err(|_| io::ErrorKind::InvalidData)?,
+            candidate: candidate
+                .private_bytes()
+                .try_into()
+                .map_err(|_| io::ErrorKind::InvalidData)?,
+            commit_requested: false,
+            completed: false,
+        })?;
+        #[cfg(test)]
+        rotation_crash_checkpoint("rotation_prepared");
+        Ok(candidate_public)
     }
-    /// Key rotation, step 2: refused, as for `prepare_rotation`.
+
+    /// Commit the candidate after durably recording intent and changing the live worker key.
+    /// Retries complete the identity record and key file after any process stop.
+    /// # Errors
+    /// Refuses a stale operation, an unproven key or any failed worker or durable update.
     pub(crate) fn commit_rotation(
         &mut self,
-        _operation_id: &str,
-        _sequence: u64,
+        operation_id: &str,
+        sequence: u64,
     ) -> io::Result<crate::dataplane::Identity> {
-        Err(io::ErrorKind::Unsupported.into())
+        let mut identity = self.rotation_identity()?;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let mut rotation = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
+        if rotation.operation_id != operation_id || rotation.sequence != sequence {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        validate_macos_rotation_proof(store, &rotation, identity.public_key)?;
+        let (candidate, candidate_public) = RotationKey::from_private(&rotation.candidate)?;
+        if rotation.completed {
+            return Ok(identity);
+        }
+        let previous_public = RotationKey::from_private(&rotation.previous)?.1;
+        if identity.public_key == previous_public {
+            if !rotation.commit_requested {
+                rotation.commit_requested = true;
+                store.save_rotation_secret(&rotation)?;
+                #[cfg(test)]
+                rotation_crash_checkpoint("rotation_commit_requested");
+            }
+            self.worker
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .set_private_key(candidate.gotatun_secret())?;
+            identity.public_key = candidate_public;
+            self.identity = Some(identity.clone());
+            #[cfg(test)]
+            rotation_crash_checkpoint("rotation_device_key_changed");
+        } else if identity.public_key != candidate_public || !rotation.commit_requested {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if let Some(config) = self.config.as_mut() {
+            config.local_key = Some(candidate_public);
+        }
+        store.record_rotation_identity(
+            operation_id,
+            sequence,
+            candidate.private_bytes(),
+            &candidate_public,
+        )?;
+        Ok(self.identity.clone().ok_or(io::ErrorKind::NotConnected)?)
     }
-    /// Key rotation, step 3: refused, as for `prepare_rotation`.
-    pub(crate) fn finish_rotation(
-        &mut self,
-        _operation_id: &str,
-        _sequence: u64,
-    ) -> io::Result<()> {
-        Err(io::ErrorKind::Unsupported.into())
+
+    /// Finish an acknowledged rotation after saving its new local binding.
+    /// The retained journal makes completion safe to retry and erases the predecessor key.
+    /// # Errors
+    /// Refuses a stale or uncommitted operation, an identity mismatch or a failed durable write.
+    pub(crate) fn finish_rotation(&mut self, operation_id: &str, sequence: u64) -> io::Result<()> {
+        let identity = self.rotation_identity()?;
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let rotation = store.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
+        if rotation.operation_id != operation_id || rotation.sequence != sequence {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        validate_macos_rotation_proof(store, &rotation, identity.public_key)?;
+        let candidate_public = RotationKey::from_private(&rotation.candidate)?.1;
+        if identity.public_key != candidate_public
+            || (!rotation.completed && !rotation.commit_requested)
+            || store.recorded_interface()? != Some(candidate_public)
+            || store
+                .read_private_key()?
+                .map(|private| RotationKey::from_private(&private).map(|(_, public)| public))
+                .transpose()?
+                != Some(candidate_public)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if let Some(config) = self.config.as_mut() {
+            config.local_key = Some(candidate_public);
+        }
+        store.complete_rotation_secret(operation_id, sequence)?;
+        #[cfg(test)]
+        rotation_crash_checkpoint("rotation_finished");
+        Ok(())
     }
     /// Persist disabled intent before retiring routes and the owned utun descriptor.
     /// # Errors
@@ -1905,12 +2405,64 @@ mod tests {
             .prepare_rotation(operation, 1)
             .expect("prepare rotation");
         assert_ne!(candidate, previous.public_key);
+        assert_eq!(
+            node.prepare_rotation(operation, 1)
+                .expect("retry prepare rotation"),
+            candidate,
+            "a retry returns the journaled candidate"
+        );
+        assert_eq!(
+            node.finish_rotation(operation, 1)
+                .expect_err("an uncommitted candidate cannot finish")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            node.commit_rotation(operation, 2)
+                .expect_err("a stale sequence cannot commit")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
         let committed = node.commit_rotation(operation, 1).expect("commit rotation");
         assert_eq!(committed.public_key, candidate);
+        assert_eq!(
+            node.commit_rotation(operation, 1)
+                .expect("retry commit rotation")
+                .public_key,
+            candidate,
+            "a retry leaves the committed identity stable"
+        );
         let (_, persisted) = crate::macos_key::load_or_create(&directory.0).expect("read key file");
         assert_eq!(persisted, candidate);
         node.finish_rotation(operation, 1).expect("finish rotation");
+        node.finish_rotation(operation, 1)
+            .expect("retry finish rotation");
         node.down().expect("stop GotaTun");
+    }
+
+    /// Preparing the same Mac rotation twice returns its original journaled candidate.
+    #[test]
+    #[ignore = "Run on the macOS VM with system service privileges."]
+    fn macos_gotatun_rotation_prepare_is_retryable() {
+        let directory = test_directory();
+        let mut node = Node::restore(&directory.0, None).expect("restore Mac node");
+        node.up().expect("start GotaTun");
+
+        let operation = "00000000-0000-4000-8000-000000000052";
+        let first = node.prepare_rotation(operation, 1);
+        let second = first
+            .as_ref()
+            .ok()
+            .map(|_| node.prepare_rotation(operation, 1));
+        node.down().expect("stop GotaTun");
+
+        let candidate = first.expect("prepare rotation");
+        assert_eq!(
+            second
+                .expect("retry was attempted")
+                .expect("retry prepare rotation"),
+            candidate
+        );
     }
 
     /// Exercise the child side of [`macos_rotation_recovers_after_sigkill_at_each_durable_step`].
