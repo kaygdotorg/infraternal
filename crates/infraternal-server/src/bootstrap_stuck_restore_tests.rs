@@ -451,7 +451,13 @@ async fn a_replace_that_exceeds_its_command_bound_puts_the_stuck_install_back_as
     );
     run.confirm(run.offer().await);
     let event = finished(run.batch()).await;
-    assert!(event.message.contains("time limit"), "{}", event.message);
+    // Command timeouts retain the named connection failure, unlike the removed
+    // whole-attempt clock. The stalled key-preparation command never returns.
+    assert_eq!(event.step, Step::Failed);
+    assert!(matches!(
+        event.failure.as_ref().unwrap().failed_step,
+        Some(infraternal_plugin_ssh::model::InstallStep::Connect)
+    ));
     assert!(run.ran("\nrestore_replaced_install "));
     home.assert_as_found();
 }
