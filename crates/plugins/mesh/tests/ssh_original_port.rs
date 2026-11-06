@@ -70,6 +70,7 @@ with socket.socket(socket.AF_PACKET,socket.SOCK_RAW) as raw:
  raw.bind(('sshpeer',0));raw.send(mac('infraternal0')+mac('sshpeer')+ether+header+tcp)
 ";
 
+/// A configuration for the SSH original-port tests.
 fn configuration() -> Config {
     Config {
         local_key: None,
@@ -87,6 +88,8 @@ fn configuration() -> Config {
             PeerPolicy {
                 peer: Peer {
                     key: PublicKey([3; 32]),
+                    previous_key: None,
+                    previous_active: false,
                     addresses: Addresses {
                         ipv4: "10.254.3.3".parse().unwrap(),
                         ipv6: "fd00:3::3".parse().unwrap(),

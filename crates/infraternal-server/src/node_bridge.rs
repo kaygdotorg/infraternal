@@ -99,7 +99,14 @@ impl NodeChannel for NodeBridge {
             tokio::time::timeout(Duration::from_secs(5), self.actor.call(action, input))
                 .await
                 .map_err(|_| "Node control timed out.")?
-                .map_err(|_| "Node action refused.")
+                .map_err(|error| match error {
+                    // The node answered and its plugin refused: callers may read this as the node's answer.
+                    crate::embedded::AgentError::Rejected => {
+                        infraternal_plugin_api::node_channel::CALL_REFUSED
+                    }
+                    // No answer arrived (lost channel, full queue, protocol fault): nothing about the node.
+                    _ => "Node control unavailable.",
+                })
         })
     }
 }

@@ -14,15 +14,15 @@ from agent_fixture import exact, integer, varint
 
 class BinaryNode:
     """Own one daemon, its private runtime directory and a trusted inherited leg-B socket."""
-    def __init__(self, binary, scratch, namespace_pid=None):
-        self.state = Path(tempfile.mkdtemp(prefix="node-", dir=scratch))
+    def __init__(self, binary, scratch, namespace_pid=None, state_path=None):
+        self.state = Path(state_path) if state_path else Path(tempfile.mkdtemp(prefix="node-", dir=scratch))
         self.sock, peer = socket.socketpair()
         self.sock.settimeout(60)
         env = os.environ.copy()
         prefix = [] if namespace_pid is None else [shutil.which("nsenter"), "-t", str(namespace_pid), "-n"]
         command = prefix + [shutil.which("bash"), "-c", 'leg_b_fd=$1; if [ "$leg_b_fd" != 3 ]; then exec 3<&"$leg_b_fd"; exec {leg_b_fd}<&-; fi; shift; exec "$@"',
                             "leg-b", str(peer.fileno()), str(binary), "agent", "--fd", "3", "--state", str(self.state)]
-        self.log = (Path(scratch) / (self.state.name + ".stderr")).open("wb")
+        self.log = (Path(scratch) / (self.state.name + ".stderr")).open("ab")
         self.child = subprocess.Popen(command, pass_fds=(peer.fileno(),), env=env,
                                       stdout=subprocess.DEVNULL, stderr=self.log)
         peer.close()
@@ -81,6 +81,14 @@ class BinaryNode:
     def terminate(self):
         self.child.terminate()
 
+    def crash(self):
+        """Stop the process without deleting the state or its retained kernel interface."""
+        if self.poll() is None:
+            self.child.kill()
+            self.child.wait(timeout=5)
+        self.sock.close()
+        self.log.close()
+
     def wait(self, timeout):
         result = self.child.wait(timeout=timeout)
         self.sock.close()
@@ -108,12 +116,27 @@ class CoordinatorFixture:
                                       stdout=subprocess.PIPE, text=True)
 
     def configuration(self, mode, identities=None):
-        self.child.stdin.write(json.dumps({"mode": mode, "identities": identities}) + "\n")
+        return self.request({"mode": mode, "identities": identities})
+
+    def request(self, value):
+        self.child.stdin.write(json.dumps(value) + "\n")
         self.child.stdin.flush()
         line = self.child.stdout.readline()
         if not line:
             raise RuntimeError("coordinator fixture process stopped")
         return json.loads(line)
+
+    def rotate_key(self, node, public_key):
+        return self.request({"mode": "rotation-start", "node": node, "public_key": public_key})
+
+    def acknowledge(self, node, version):
+        return self.request({"mode": "rotation-ack", "node": node, "version": version})
+
+    def finish_rotation(self, now, reachable):
+        return self.request({"mode": "rotation-finish", "now": now, "reachable": reachable})
+
+    def compromise_key(self, node, public_key):
+        return self.request({"mode": "rotation-compromise", "node": node, "public_key": public_key})
 
     def close(self):
         self.child.stdin.close()

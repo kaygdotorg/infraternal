@@ -71,9 +71,9 @@ impl Revocations {
         Ok(signal)
     }
 
-    /// An authorized writer requests person cleanup while the old channel is
-    /// still usable. Retry cleanup while preserving the channel for a bounded
-    /// acknowledgement window; offline hosts are never reported as confirmed.
+    /// Route the test fixture's retained actor through the same durable receipt
+    /// helper as a cleanup-only reconnect; absent actors are never confirmed.
+    #[cfg(test)]
     pub(crate) async fn revoke_login(&self, host: Uuid, person: Uuid) -> bool {
         let actor = self
             .signals
@@ -91,18 +91,7 @@ impl Revocations {
         let Some(actor) = actor else {
             return false;
         };
-        // The daemon owns each accepted cleanup independently of its reply.
-        // Retrying is idempotent and allows that cleanup to finish before the
-        // authorized removal cuts the old channel. There is no idle retry work.
-        for _ in 0..3 {
-            if matches!(
-                tokio::time::timeout(Duration::from_millis(100), actor.revoke_login(person)).await,
-                Ok(Ok(()))
-            ) {
-                return true;
-            }
-        }
-        false
+        durable_cleanup(actor, person).await
     }
 
     pub(crate) async fn quiesce(
@@ -139,11 +128,35 @@ impl Revocations {
     }
 }
 
+/// Wait for an actual durable reply rather than treating a short timeout as
+/// completion. The bounded transport owner supplies the whole-attempt deadline;
+/// errors may retry, but an unanswered save is never duplicated in its queue.
+pub(crate) async fn durable_cleanup(
+    actor: crate::embedded::WeakEmbeddedAgent,
+    person: Uuid,
+) -> bool {
+    loop {
+        match actor.revoke_login(person).await {
+            Ok(()) => return true,
+            Err(crate::embedded::AgentError::Rejected) => {
+                // Busy capacity and failed persistence leave server authority
+                // pending. Yield between active retries; never retire on a
+                // finite retry budget or enqueue an unanswered save twice.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            // A lost transport leaves the persisted intent for reconnect.
+            Err(_) => return false,
+        }
+    }
+}
+
 /// Exact acknowledged public identity; only durable host Ack may advance its monotonic expiry cap.
 #[derive(Clone)]
 pub(crate) struct AuthorityGuard {
     store: EnrollmentStore,
     provisioning_owner: Option<String>,
+    /// A revoked certificate can carry only this retained durable cleanup.
+    cleanup_person: Option<Uuid>,
     pub(crate) identity: HostAuthority,
     signal: Arc<Revocation>,
     certificate: Arc<watch::Sender<Admission>>,
@@ -192,6 +205,7 @@ impl AuthorityGuard {
         Ok(Self {
             store,
             provisioning_owner: None,
+            cleanup_person: None,
             certificate: Arc::new(
                 watch::channel(Admission {
                     fingerprint,
@@ -203,6 +217,55 @@ impl AuthorityGuard {
             identity,
             signal,
         })
+    }
+
+    /// Admit ordinary authority, or a bounded cleanup-only reconnect when its
+    /// durable server outbox is still unconfirmed. Never publish the latter as a host.
+    pub(crate) async fn admit_transport(
+        store: EnrollmentStore,
+        fingerprint: [u8; 32],
+    ) -> io::Result<Self> {
+        if let Ok(authority) = Self::admit(store.clone(), fingerprint).await {
+            return Ok(authority);
+        }
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?;
+        let now = i64::try_from(elapsed.as_secs()).map_err(io::Error::other)?;
+        let (identity, person) = store
+            .admit_cleanup(&fingerprint, now)
+            .await
+            .map_err(|_| denied())?;
+        let lifetime =
+            Duration::from_secs(u64::try_from(identity.not_after).map_err(|_| denied())?)
+                .checked_sub(elapsed)
+                .ok_or_else(denied)?
+                .min(Duration::from_secs(300));
+        Ok(Self {
+            store,
+            provisioning_owner: None,
+            cleanup_person: Some(person),
+            identity: identity.clone(),
+            // Never revive the ordinary registration already cut by revocation.
+            signal: Arc::new(Revocation {
+                login_actor: Mutex::default(),
+                changed: watch::channel(false).0,
+                writes: Arc::default(),
+            }),
+            certificate: Arc::new(
+                watch::channel(Admission {
+                    fingerprint,
+                    identity,
+                    expires: Instant::now() + lifetime,
+                })
+                .0,
+            ),
+        })
+    }
+
+    /// Only the private cleanup path may consume this person; ordinary admission refuses it.
+    pub(crate) fn cleanup_person(&self) -> Option<Uuid> {
+        self.cleanup_person
     }
 
     #[cfg(test)]
@@ -220,7 +283,7 @@ impl AuthorityGuard {
         host: Uuid,
         uid: u32,
     ) -> io::Result<Self> {
-        let row: Option<(String, i64)> = sqlx::query_as("SELECT mode,execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
+        let row: Option<(String, i64)> = sqlx::query_as("SELECT mode,execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0) AND EXISTS(SELECT 1 FROM remote_bootstrap_retirement_intents WHERE host_id=remote_hosts.id)")
             .bind(host.as_bytes().as_slice()).bind(owner).fetch_optional(&store.0).await.map_err(|_| denied())?;
         let (mode, execution_uid) = row.ok_or_else(denied)?;
         if execution_uid != i64::from(uid) {
@@ -244,6 +307,7 @@ impl AuthorityGuard {
         Ok(Self {
             store,
             provisioning_owner: Some(owner.to_owned()),
+            cleanup_person: None,
             signal,
             certificate: Arc::new(
                 watch::channel(Admission {
@@ -314,6 +378,10 @@ impl AuthorityGuard {
     pub(crate) fn store(&self) -> EnrollmentStore {
         self.store.clone()
     }
+    /// The admitted host's ID.
+    pub(crate) fn host_id(&self) -> Uuid {
+        self.identity.host
+    }
     pub(crate) fn predecessor(&self) -> [u8; 32] {
         self.certificate.borrow().fingerprint
     }
@@ -345,7 +413,7 @@ impl AuthorityGuard {
     /// New operations recheck the public ledger; streaming bytes use only the
     /// event/deadline guard. A caller holding an old actor cannot bypass expiry.
     pub(crate) async fn admit_operation(&self) -> io::Result<()> {
-        if !self.permits() {
+        if self.cleanup_person.is_some() || !self.permits() {
             return Err(denied());
         }
         let now = SystemTime::now()
@@ -353,7 +421,7 @@ impl AuthorityGuard {
             .map_err(io::Error::other)?;
         let now = i64::try_from(now.as_secs()).map_err(io::Error::other)?;
         if let Some(owner) = &self.provisioning_owner {
-            let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND execution_uid=? AND revoked_at IS NULL)")
+            let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND execution_uid=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0))")
                 .bind(self.identity.host.as_bytes().as_slice()).bind(owner).bind(i64::from(self.identity.execution_uid))
                 .fetch_one(&self.store.0).await.map_err(|_| denied())?;
             return if live && self.permits() {

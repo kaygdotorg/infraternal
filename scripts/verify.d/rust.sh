@@ -2,23 +2,46 @@
 
 RUST_GATE_ROWS=()
 RUST_GATE_FAILED=0
+# Set by rust_run_gate_skippable for exactly one rust_run_gate call. A plain
+# shell variable, never exported: a `VAR=yes func` prefix would export it into
+# the row's command, and the gate's own self-tests (run inside the privileged
+# row) would then see every 77 as SKIP (J276, #378 81610).
+RUST_GATE_SKIP_NEXT=no
+export -n RUST_GATE_SKIP_NEXT
 
 rust_run_gate() {
     local name="$1"
     shift
     local result
     local started=$SECONDS
+    local skippable=$RUST_GATE_SKIP_NEXT
+    RUST_GATE_SKIP_NEXT=no
 
     printf '\n==> %s\n' "$name"
     if "$@"; then
         result="PASS"
     else
         local exit_code=$?
-        result="FAIL (${exit_code})"
-        RUST_GATE_FAILED=1
+        # Exit 77 is SKIP only for rows started with rust_run_gate_skippable.
+        if [[ $skippable == yes ]] && ((exit_code == 77)); then
+            result="SKIP"
+        else
+            result="FAIL (${exit_code})"
+            RUST_GATE_FAILED=1
+        fi
     fi
     RUST_GATE_ROWS+=("${name}|${result}")
     printf '(%s: %ss)\n' "$name" "$((SECONDS - started))"
+}
+
+# Like rust_run_gate, but exit 77 records SKIP instead of a failure: for rows
+# whose command means "nothing to check here" by 77 (the privileged row exits
+# 77 when no area is selected). Every other row keeps 77 as FAIL (77), so a
+# tool that happens to exit 77 can never read as skipped (J270, #344 81345).
+# It goes through rust_run_gate, so anything that stubs that stubs this too.
+rust_run_gate_skippable() {
+    RUST_GATE_SKIP_NEXT=yes
+    rust_run_gate "$@"
 }
 
 # Doc-comment coverage may never go down (D345): scripts/doc-coverage compares every unit with
@@ -36,7 +59,9 @@ verify_diff_docs() {
 
 # Root-only paths complement browser/passkey coverage on the test server (D351).
 verify_privileged() {
-    python3 scripts/test-verify-privileged.py && scripts/verify-privileged
+    python3 scripts/test-verify-privileged.py || return
+    # Exit 77 (nothing selected) passes through to rust_run_gate as SKIP.
+    scripts/verify-privileged
 }
 
 rust_print_summary() {
@@ -313,7 +338,7 @@ rust_verify_fast() {
     rust_run_gate "doc comments on diff" verify_diff_docs
     rust_run_gate "fixed test waits" python3 scripts/verify.d/diff-practices.py sleeps "${VERIFY_QUICK_BASE:-origin/dev}"
     if [[ "$mode" == final ]]; then
-        rust_run_gate "privileged integration" verify_privileged
+        rust_run_gate_skippable "privileged integration" verify_privileged
         rust_run_gate "probe release exclusion" python3 scripts/test-runtime-probe-gating.py
         rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
         rust_run_gate "static builds" rust_static_build_check

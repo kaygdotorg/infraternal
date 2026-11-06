@@ -15,6 +15,7 @@ use infraternal_plugin_mesh::{
 };
 use std::{collections::BTreeMap, process::Command};
 
+/// Bring up a node with a policy snapshot, with or without the fallback policy.
 fn install(fallback: bool) -> (Node, Config) {
     assert!(
         Command::new("ip")
@@ -50,6 +51,8 @@ fn install(fallback: bool) -> (Node, Config) {
             PeerPolicy {
                 peer: Peer {
                     key: Key::generate().unwrap().1,
+                    previous_key: None,
+                    previous_active: false,
                     addresses: Addresses {
                         ipv4: "10.254.0.2".parse().unwrap(),
                         ipv6: "fd01::2".parse().unwrap(),

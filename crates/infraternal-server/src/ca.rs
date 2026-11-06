@@ -94,6 +94,11 @@ impl CaMaterial {
 
 /// The owner-selected restart/unlock adapter supplies private material, never SQLite.
 pub trait CaKeySource: Send + Sync {
+    /// Monotonic public issuer epoch bound into host identity transitions.
+    /// The current single-root deployment begins at generation one.
+    fn issuer_generation(&self) -> u64 {
+        1
+    }
     /// Configured reverse proxy enrollment verifies against system HTTPS roots.
     fn uses_system_https(&self) -> bool {
         false
@@ -101,6 +106,16 @@ pub trait CaKeySource: Send + Sync {
     /// Retained public trust is readable even while signing is cold-locked.
     fn public_issuer(&self) -> Option<X509> {
         None
+    }
+    /// Ordered public roots that clients may trust during an overlap.
+    ///
+    /// Existing sources expose one root through `public_issuer`. A rollover
+    /// source can override this with the current and next generations while
+    /// keeping the signing key locked.
+    fn public_roots(&self) -> Vec<(u64, X509)> {
+        self.public_issuer()
+            .map(|issuer| vec![(1, issuer)])
+            .unwrap_or_default()
     }
     /// Optional enrollment HTTPS pin when its trust differs from machine trust.
     fn https_certificate(&self) -> Option<X509> {

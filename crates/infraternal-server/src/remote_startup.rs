@@ -65,6 +65,7 @@ impl RemoteStartup {
             self.fresh_service(config, ca_dir, name)
         }
     }
+    /// Start the remote service from a retained, versioned CA directory.
     fn retained_service(
         &self,
         config: &ServerConfig,
@@ -109,8 +110,10 @@ impl RemoteStartup {
             },
             identity: Some(identity),
             roots: vec![issuer],
+            clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
         })
     }
+    /// Start the remote service with a new CA, set up on first use.
     fn fresh_service(
         &self,
         config: &ServerConfig,
@@ -169,8 +172,10 @@ impl RemoteStartup {
             },
             identity: None,
             roots: vec![],
+            clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
         })
     }
+    /// Start the remote service from a legacy single-issuer CA directory.
     fn legacy_service(
         &self,
         config: &ServerConfig,
@@ -241,6 +246,7 @@ impl RemoteStartup {
             },
             identity: Some(Identity { certificate, key }),
             roots: vec![issuer],
+            clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
         })
     }
 }

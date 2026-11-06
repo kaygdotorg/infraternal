@@ -233,6 +233,7 @@ fn restart_reattaches_the_persisted_tun_and_mesh_identity() {
     result.unwrap();
 }
 
+/// A failed `GotaTun` replay keeps the accepted coordinator configuration.
 #[test]
 #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
 fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
@@ -267,6 +268,8 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
                 PeerPolicy {
                     peer: Peer {
                         key: peer_key,
+                        previous_key: None,
+                        previous_active: false,
                         addresses: Addresses {
                             ipv4: "10.254.0.1".parse().unwrap(),
                             ipv6: "fd01::1".parse().unwrap(),

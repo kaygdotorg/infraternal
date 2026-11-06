@@ -1,6 +1,11 @@
 /** Runs browser checks against the production tracer build through the test latency proxy [#55, D122, D130]. */
 import { defineConfig, devices } from "playwright/test";
 import { tracerEvidencePath } from "./test/evidence-path";
+import { sharedDoubleWorkersError } from "./test/shared-double-workers";
+
+/** Why this run must not start, or `undefined`: more than one worker would share one test double and its single `/__mock/reset` (#377). Checked before the build. */
+const tooManyWorkers = sharedDoubleWorkersError(process.argv.slice(2), process.env);
+if (tooManyWorkers !== undefined) throw new Error(tooManyWorkers);
 
 /** The port of the test server; `TRACER_TEST_PORT`, default 4621. */
 const port = Number(process.env.TRACER_TEST_PORT ?? "4621");

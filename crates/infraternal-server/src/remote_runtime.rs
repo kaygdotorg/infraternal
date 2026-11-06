@@ -17,6 +17,114 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// Cleanup-only connections share eight active slots and sixteen waiting host
+/// claims. Ordinary traffic uses separate admission; repeated cleanup links from
+/// one host cannot occupy another host's slot or FIFO queue position.
+static LOGIN_CLEANUPS: std::sync::LazyLock<CleanupSlots> =
+    std::sync::LazyLock::new(CleanupSlots::default);
+
+/// Fixed delivery capacity and a bounded set of distinct active or waiting hosts.
+struct CleanupSlots {
+    slots: tokio::sync::Semaphore,
+    hosts: std::sync::Mutex<std::collections::HashSet<Uuid>>,
+}
+impl Default for CleanupSlots {
+    /// Reserve eight concurrent deliveries and at most sixteen queued hosts.
+    fn default() -> Self {
+        Self {
+            slots: tokio::sync::Semaphore::new(8),
+            hosts: std::sync::Mutex::default(),
+        }
+    }
+}
+
+/// Own one host's queue position until cancellation or delivery completion.
+struct CleanupClaim<'a> {
+    hosts: &'a std::sync::Mutex<std::collections::HashSet<Uuid>>,
+    host: Uuid,
+}
+impl Drop for CleanupClaim<'_> {
+    /// Cancelled waiting connections must immediately release their host claim.
+    fn drop(&mut self) {
+        self.hosts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.host);
+    }
+}
+
+/// A delivery keeps both its global slot and its unique host claim alive.
+struct CleanupPermit<'a> {
+    _slot: tokio::sync::SemaphorePermit<'a>,
+    _claim: CleanupClaim<'a>,
+}
+impl CleanupSlots {
+    /// Claim one host before joining the semaphore's FIFO queue. Duplicate and
+    /// excess hosts return busy before retaining any actor or queue entry.
+    async fn acquire(&self, host: Uuid) -> io::Result<CleanupPermit<'_>> {
+        let claim = {
+            let mut hosts = self.hosts.lock().map_err(|_| io::ErrorKind::Other)?;
+            if hosts.len() >= 24 || !hosts.insert(host) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            CleanupClaim {
+                hosts: &self.hosts,
+                host,
+            }
+        };
+        let slot = self
+            .slots
+            .acquire()
+            .await
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        Ok(CleanupPermit {
+            _slot: slot,
+            _claim: claim,
+        })
+    }
+}
+
+/// Deliver one server-retained refusal without publishing a host or normal actor.
+/// Busy admission and failed/lost replies leave the durable obligation untouched.
+async fn deliver_login_cleanup(
+    authority: AuthorityGuard,
+    link: RemoteLink,
+    person: Uuid,
+) -> io::Result<()> {
+    let _cleanup = LOGIN_CLEANUPS.acquire(authority.identity.host).await?;
+    // This transport never enters inventory, plugin routing or the host
+    // actor map. The distinct-host lane bounds active and waiting cleanup jobs.
+    // A lost acknowledgement leaves the durable outbox for next reconnect.
+    let store = authority.store();
+    let host = authority.identity.host;
+    let (actor, accepts) = EmbeddedAgent::remote(authority.identity.execution_uid);
+    let mut inventory = actor.session_inventory();
+    accepts
+        .try_send(link.authorize(authority))
+        .map_err(|_| io::ErrorKind::WouldBlock)?;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        async {
+            tokio::select! {
+                biased;
+                durable = crate::remote_guard::durable_cleanup(actor.downgrade(), person) => durable,
+                // This private actor owns one transport. After a busy reply,
+                // disconnect can precede the next retry; its unavailable census
+                // ends that attempt instead of awaiting an impossible replacement.
+                _ = inventory.wait_for(|state| matches!(state, crate::embedded::SessionInventoryState::Unavailable)) => false,
+            }
+        },
+    )
+    .await;
+    if matches!(result, Ok(true)) {
+        store
+            .confirm_login_cleanup(host, person)
+            .await
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
 /// Trusted server transport identity and public issuers, supplied independently of the CA lock.
 pub struct RemoteService {
     /// Cold signer and private copy store for the shipping administrator adapter.
@@ -27,6 +135,8 @@ pub struct RemoteService {
     pub identity: Option<Identity>,
     /// Public issuer overlap for mutual TLS.
     pub roots: Vec<X509>,
+    /// Clock health shared by expiry status, local diagnostics and renewal recovery.
+    pub clock_health: Arc<crate::clock_health::ClockHealth>,
 }
 
 /// One durable host actor survives transport replacement; every new peer is readmitted.
@@ -50,6 +160,8 @@ struct ListenerFactory {
     address: SocketAddr,
     destinations: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
     limits: Arc<crate::remote_accept::Limits>,
+    /// Recovery uses the same signer, server-clock health and durable enrollment store.
+    recovery: Option<Arc<crate::remote_recovery::Service>>,
     /// Leased destinations join the agent address's endpoint (one CID space).
     bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
 }
@@ -340,12 +452,17 @@ impl RemoteHosts {
     /// Admit a link and update its source only when this transport exposes one.
     /// SSH pipes have no observed socket IP; preserve an existing value or use
     /// the unspecified address until the enrolled network link is admitted.
+    /// Cleanup-only admission owns a bounded private actor and never publishes
+    /// host availability, plugins, sessions or positive login authority.
     pub(crate) async fn admit_observed(
         &self,
         authority: AuthorityGuard,
         mut link: RemoteLink,
         observed_ip: Option<std::net::IpAddr>,
     ) -> io::Result<()> {
+        if let Some(person) = authority.cleanup_person() {
+            return deliver_login_cleanup(authority, link, person).await;
+        }
         if link.primed() {
             return self.admit_primed(authority, link).await;
         }
@@ -375,8 +492,13 @@ impl RemoteHosts {
             host.peer = peer;
             host.generation = generation;
             host.caps = caps;
-            host.retirement =
-                self.retirement(id, generation, authority.clone(), host.actor.clone());
+            host.retirement = self.retirement(
+                id,
+                generation,
+                authority.clone(),
+                host.actor.clone(),
+                caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+            );
             #[cfg(any(test, feature = "native-streams"))]
             {
                 *host
@@ -399,7 +521,13 @@ impl RemoteHosts {
             accepts
                 .try_send(link.authorize(authority.clone()))
                 .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
-            let retirement = self.retirement(id, generation, authority.clone(), actor.clone());
+            let retirement = self.retirement(
+                id,
+                generation,
+                authority.clone(),
+                actor.clone(),
+                caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+            );
             hosts.insert(
                 id,
                 Host {
@@ -481,7 +609,13 @@ impl RemoteHosts {
         host.peer = peer;
         host.generation = generation;
         host.caps = caps;
-        host.retirement = self.retirement(id, generation, authority.clone(), actor);
+        host.retirement = self.retirement(
+            id,
+            generation,
+            authority.clone(),
+            actor,
+            caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+        );
         // Retained NodeHost handles follow the promoted certificate and its
         // subsequent renewals, rather than the retired connection's expiry.
         #[cfg(any(test, feature = "native-streams"))]
@@ -501,12 +635,14 @@ impl RemoteHosts {
         Ok(())
     }
 
+    /// Decide what retiring host `id` removes.
     fn retirement(
         &self,
         id: Uuid,
         generation: Uuid,
         authority: AuthorityGuard,
         actor: EmbeddedAgent,
+        identity_rotation: bool,
     ) -> Retirement {
         let registry = Arc::downgrade(&self.0);
         let source = self.1.clone();
@@ -518,7 +654,7 @@ impl RemoteHosts {
                 tokio::select! {
                     biased;
                     () = authority.cancelled() => {},
-                    () = crate::remote_renewal::run(&authority, &actor, source) => {},
+                    () = crate::remote_renewal::run(&authority, &actor, source, identity_rotation) => {},
                 }
             } else {
                 authority.cancelled().await;
@@ -607,6 +743,7 @@ impl Drop for LeasedListener {
     }
 }
 impl LeasedListener {
+    /// Start a leased listener on `address`.
     async fn start(
         factory: &ListenerFactory,
         address: std::net::IpAddr,
@@ -624,6 +761,7 @@ impl LeasedListener {
             overlay,
             factory.store.clone(),
             factory.limits.clone(),
+            factory.recovery.clone(),
         ));
         Ok(Self {
             _binding: binding,
@@ -687,12 +825,47 @@ impl RemoteListeners {
         self.endpoint.local_addr()
     }
 
+    /// Start the remote listeners on `address` with this identity and its trust roots.
     pub(crate) async fn start(
         address: SocketAddr,
         identity: &Identity,
         roots: &[X509],
         store: EnrollmentStore,
         hosts: RemoteHosts,
+    ) -> io::Result<Self> {
+        Self::start_configured(address, identity, roots, store, hosts, None).await
+    }
+
+    /// Start normal mTLS admission with the separate expired-certificate recovery ALPN.
+    /// The recovery service never receives a host-admitted control channel.
+    /// # Errors
+    /// Refuses invalid TLS identity, trust or listener configuration.
+    pub(crate) async fn start_with_recovery(
+        address: SocketAddr,
+        identity: &Identity,
+        roots: &[X509],
+        store: EnrollmentStore,
+        hosts: RemoteHosts,
+        source: Arc<dyn crate::ca::CaKeySource>,
+        clock: Arc<crate::clock_health::ClockHealth>,
+    ) -> io::Result<Self> {
+        let recovery = Arc::new(crate::remote_recovery::Service::new(
+            store.clone(),
+            source,
+            clock,
+            Arc::new(crate::remote_recovery::Limiter::default()),
+        ));
+        Self::start_configured(address, identity, roots, store, hosts, Some(recovery)).await
+    }
+
+    /// Start the listener with or without the recovery service.
+    async fn start_configured(
+        address: SocketAddr,
+        identity: &Identity,
+        roots: &[X509],
+        store: EnrollmentStore,
+        hosts: RemoteHosts,
+        recovery: Option<Arc<crate::remote_recovery::Service>>,
     ) -> io::Result<Self> {
         let limits = crate::remote_accept::Limits::new();
         let (listener, tls) = Self::start_with_limits(
@@ -702,6 +875,7 @@ impl RemoteListeners {
             store.clone(),
             hosts.clone(),
             limits.clone(),
+            recovery.clone(),
         )
         .await?;
         let factory = ListenerFactory {
@@ -710,12 +884,14 @@ impl RemoteListeners {
             address: listener.local_addr()?,
             destinations: std::sync::Mutex::default(),
             limits,
+            recovery,
             bindings: listener.bindings.clone(),
         };
         *hosts.3.lock().map_err(|_| io::ErrorKind::Other)? = Some(Arc::new(factory));
         Ok(listener)
     }
 
+    /// Start the listeners with explicit admission limits.
     async fn start_with_limits(
         address: SocketAddr,
         identity: &Identity,
@@ -723,6 +899,7 @@ impl RemoteListeners {
         store: EnrollmentStore,
         hosts: RemoteHosts,
         limits: Arc<crate::remote_accept::Limits>,
+        recovery: Option<Arc<crate::remote_recovery::Service>>,
     ) -> io::Result<(Self, Arc<openssl::ssl::SslAcceptor>)> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
@@ -732,7 +909,11 @@ impl RemoteListeners {
             |_| Ok(()),
         )
         .await?;
-        let tls = Arc::new(remote_tls::server_config(identity, roots)?);
+        let tls = Arc::new(if recovery.is_some() {
+            remote_tls::recovery_server_config(identity, roots)?
+        } else {
+            remote_tls::server_config(identity, roots)?
+        });
         let mut tasks = JoinSet::new();
         tasks.spawn(crate::remote_accept::quic(
             endpoint.clone(),
@@ -746,6 +927,7 @@ impl RemoteListeners {
             hosts,
             store,
             limits,
+            recovery,
         ));
         Ok((
             Self {
@@ -763,3 +945,78 @@ impl RemoteListeners {
 #[cfg(test)]
 #[path = "remote_runtime_tests.rs"]
 pub(crate) mod tests;
+
+/// Cleanup admission must isolate a repeated host and queue distinct hosts fairly.
+#[cfg(test)]
+mod cleanup_admission_tests {
+    use super::*;
+
+    /// A stalled host cannot occupy another host's delivery slot.
+    #[tokio::test]
+    async fn cleanup_delivery_deduplicates_hosts() {
+        let lane = CleanupSlots::default();
+        let host = Uuid::new_v4();
+        let _first = lane.acquire(host).await.unwrap();
+        assert!(
+            lane.acquire(host).await.is_err(),
+            "duplicate host occupied another slot"
+        );
+    }
+}
+
+/// Distinct hosts receive FIFO admission with a finite waiting population.
+#[cfg(test)]
+mod cleanup_fairness_tests {
+    use super::*;
+    use std::{future::Future, task::Poll};
+
+    /// A returning host cannot jump a queued host; excess waiting is refused,
+    /// and dropping a queued connection releases its host claim immediately.
+    #[tokio::test]
+    async fn cleanup_delivery_is_fair_and_bounded() {
+        let lane = CleanupSlots::default();
+        let mut active = Vec::new();
+        for _ in 0..8 {
+            active.push(lane.acquire(Uuid::new_v4()).await.unwrap());
+        }
+        let mut waiting = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..16 {
+            let id = Uuid::new_v4();
+            let mut request = Box::pin(lane.acquire(id));
+            assert!(
+                matches!(
+                    std::future::poll_fn(|cx| Poll::Ready(request.as_mut().poll(cx))).await,
+                    Poll::Pending
+                ),
+                "a distinct host must queue"
+            );
+            waiting.push(request);
+            ids.push(id);
+        }
+        assert!(
+            lane.acquire(Uuid::new_v4()).await.is_err(),
+            "waiting queue grew past sixteen"
+        );
+        drop(waiting.pop());
+        let mut replacement = Box::pin(lane.acquire(*ids.last().unwrap()));
+        assert!(
+            matches!(
+                std::future::poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx))).await,
+                Poll::Pending
+            ),
+            "cancelled host claim was retained"
+        );
+        drop(active.pop());
+        assert!(
+            matches!(
+                std::future::poll_fn(|cx| Poll::Ready(replacement.as_mut().poll(cx))).await,
+                Poll::Pending
+            ),
+            "new host jumped the FIFO queue"
+        );
+        let admitted = waiting.remove(0).await.unwrap();
+        drop(admitted);
+        let _next = waiting.remove(0).await.unwrap();
+    }
+}

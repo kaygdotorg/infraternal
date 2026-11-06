@@ -84,6 +84,8 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) {
             PeerPolicy {
                 peer: Peer {
                     key: peer_key,
+                    previous_key: None,
+                    previous_active: false,
                     addresses: addresses(1),
                     endpoint: None,
                 },

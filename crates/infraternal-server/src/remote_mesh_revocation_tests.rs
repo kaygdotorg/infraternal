@@ -34,6 +34,7 @@ impl NodeChannel for PeerChannel {
                     compact_access: false,
                     public_key: PublicKey([2; 32]),
                     port: 51820,
+                    key_rotation: false,
                 }))
                 .unwrap());
             }

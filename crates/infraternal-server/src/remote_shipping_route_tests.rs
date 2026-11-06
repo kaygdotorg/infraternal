@@ -85,8 +85,8 @@ async fn review_default_server_must_register_remote_join() {
     );
 }
 
-// Independent D168 route assembly evidence uses the production router and cold
-// source; it never mounts the CA router directly or injects an unlocked signer.
+/// Independent D168 route assembly evidence uses the production router and cold
+/// source; it never mounts the CA router directly or injects an unlocked signer.
 #[tokio::test]
 async fn independent_review_configured_server_mounts_ca_unlock_routes() {
     let data = PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -122,6 +122,7 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
         },
         identity: Some(identity),
         roots: vec![issuer],
+        clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
     };
     let (app, _, listeners, _, _) = build_router_core(
         config,

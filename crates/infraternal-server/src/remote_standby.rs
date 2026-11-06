@@ -1,4 +1,4 @@
-//! Parks one ledger-admitted fallback per host without retaining handshake permits or replacing the active terminal actor [128,198,215], #129.
+//! Transfers admitted links from handshake capacity to bounded fallback parking or cleanup delivery [128,198,215], #129.
 use crate::remote_guard::AuthorityGuard;
 use infraternal_agent::{
     channel::Channel,
@@ -86,6 +86,14 @@ impl Admission {
             permits: Some(permits),
             slots,
             priming: None,
+        }
+    }
+
+    /// Transfer validated cleanup links away from normal handshake admission;
+    /// their bounded per-host delivery lane owns the connection from here.
+    pub(crate) fn release_cleanup_handshake(&mut self) {
+        if self.authority.cleanup_person().is_some() {
+            self.permits.take();
         }
     }
 
