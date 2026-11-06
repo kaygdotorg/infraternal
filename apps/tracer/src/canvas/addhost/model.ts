@@ -10,7 +10,7 @@
  * - `parseTarget` and `parseSshConfig` read what the person types or pastes into the host field.
  */
 import { shortcutLabel } from "../../../../../packages/ui/src/platform";
-import { awaitingFresh } from "../../provisioning-client";
+import { awaitingFresh, awaitingKey } from "../../provisioning-client";
 import type { AuthenticationInfo, FailureDetail, FailureKind, NetworkProvider, TargetView } from "../../provisioning-client";
 
 export type StageId = "detect" | "connect" | "install" | "enrol" | "session";
@@ -138,12 +138,13 @@ export function stagesOf(view: TargetView): StageView[] {
     else if (view.state !== "pending") {
       if (index < at) state = "done";
       // A pause on leftovers waits for the person; it is not a spinner.
-      else if (index === at) state = view.state === "failed" || awaitingFresh(view) ? "failed" : "running";
+      else if (index === at) state = (view.state === "failed" && !awaitingKey(view)) || awaitingFresh(view) ? "failed" : "running";
     }
     let detail = "";
     if (stage.id === "detect" && view.authentication && state === "done") detail = `Signed in with ${authLabel(view.authentication)}`;
     // A running stage's text is the server's latest message, which the host's header line already shows;
     // repeating it under the stage name would say everything twice.
+    else if (index === at && awaitingKey(view)) detail = "Waiting for you to check the key";
     else if (index === at && (view.state === "failed" || awaitingFresh(view))) detail = failureLine(view.failure);
     return { id: stage.id, label: stage.label, state, detail };
   });
@@ -193,7 +194,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       title: `${name} needs your OK`,
       happened: `${name} showed a security key this server hasn't seen before.`,
       next: "Compare the fingerprint with the one on the host before you trust it.",
-      fix: failure.fingerprints?.length ? "host-key" : "retry", tone: "danger",
+      fix: failure.fingerprints?.length ? "host-key" : "retry", tone: failure.host_key_changed || !failure.fingerprints?.length ? "danger" : "info",
     };
     case "auth": return failure.choose_method ? {
       title: `Couldn't sign in to ${name}`,

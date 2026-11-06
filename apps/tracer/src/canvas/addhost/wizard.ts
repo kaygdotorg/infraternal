@@ -26,7 +26,7 @@
  */
 import { createSpinner, hostIconMarkup, hostSourceIconMarkup, installFocusRing, mountChipInput, mountStepStatus, PaneStepper, Spring, springCheckbox, createKeyValueList } from "../../../../../packages/ui/src/index";
 import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusController, Tick, ToastController } from "../../../../../packages/ui/src/index";
-import { awaitingFresh, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
+import { awaitingFresh, awaitingKey, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
 import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../../provisioning-client";
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
@@ -68,9 +68,9 @@ interface Entry {
 interface Job { entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean }
 
 /** What the person sees for a host: an attempt paused on leftovers reads as needing attention, like a failure. */
-const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : job.view.state;
-/** Still working without the person: not done, not failed, not paused. */
-const working = (job: Job): boolean => { const state = shownState(job); return state === "pending" || state === "running"; };
+const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : awaitingKey(job.view) ? "running" : job.view.state;
+/** Still working without the person: not done, not failed, not paused on a new host key (a question, not a fault). */
+const working = (job: Job): boolean => { const state = shownState(job); return (state === "pending" || state === "running") && !awaitingKey(job.view); };
 
 export function platformOf(name: string | undefined): HostPlatform {
   const os = (name ?? "").toLowerCase();
@@ -613,7 +613,7 @@ export class Wizard {
       // A new host window takes the camera; the wizard stays where the person is looking while it still has work to show.
       if (this.jobs.some((item) => item.view.state === "pending" || item.view.state === "running" || item.view.state === "failed")) this.surface.reveal?.();
     }
-    if (job.view.state === "done" || shownState(job) === "failed") this.settle();
+    if (job.view.state === "done" || shownState(job) === "failed" || awaitingKey(job.view)) this.settle();
   }
 
   /** A refused command (for example the server's batch limit): shown on the hosts that had not started. */
@@ -724,7 +724,7 @@ export class Wizard {
     if (this.page !== "progress") return;
     const settled = !this.jobs.some(working);
     if (!settled) { this.setFoot(""); return; }
-    const failed = this.jobs.some((job) => shownState(job) === "failed");
+    const failed = this.jobs.some((job) => shownState(job) === "failed" || awaitingKey(job.view));
     const done = this.jobs.some((job) => job.view.state === "done");
     this.setFoot(failed
       ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${done ? "finish" : "back"}">${done ? "Close" : "Back"}</button>`
@@ -739,7 +739,7 @@ export class Wizard {
     row.dataset.state = state;
     const active = stages.find((stage) => stage.state === "running" || stage.state === "failed");
     // The server's own text for the latest event; a host with no event yet is queued.
-    row.querySelector<HTMLElement>(".ah-job-step")!.textContent = state === "pending" ? "Waiting" : state === "done" ? "Ready" : state === "failed" ? failureLine(job.view.failure) : RUNNING_TEXT[active?.id ?? "detect"];
+    row.querySelector<HTMLElement>(".ah-job-step")!.textContent = awaitingKey(job.view) ? "Waiting for you to check the key" : state === "pending" ? "Waiting" : state === "done" ? "Ready" : state === "failed" ? failureLine(job.view.failure) : RUNNING_TEXT[active?.id ?? "detect"];
     stages.forEach((stage, index) => {
       const stageRow = row.querySelector<HTMLElement>(`[data-stage="${stage.id}"]`)!;
       stageRow.dataset.state = stage.state;
@@ -749,7 +749,7 @@ export class Wizard {
     });
     // "Fix" opens the page that can mend this failure; plain retries and dead ends have only the retry button.
     // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
-    const fix = state === "failed" ? guideFor(job.entry.label, job.view.failure).fix : "none";
+    const fix = state === "failed" || awaitingKey(job.view) ? guideFor(job.entry.label, job.view.failure).fix : "none";
     // A dead end ("none") has no retry either: it would only meet the same refusal (J314 P2-1).
     row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none";
     // The row tells the news in the page's tone: neutral news is never red here (TASTE: the icon matches the news).
@@ -768,10 +768,11 @@ export class Wizard {
     if (!summary) return;
     const done = this.jobs.filter((job) => job.view.state === "done").length;
     const failed = this.jobs.filter((job) => shownState(job) === "failed").length;
-    const running = this.jobs.length - done - failed;
+    const asking = this.jobs.filter((job) => awaitingKey(job.view)).length;
+    const running = this.jobs.length - done - failed - asking;
     summary.textContent = this.jobs.length === 1
-      ? (running ? "Working out how to sign in, then installing." : done ? "Ready. The host is in your sidebar." : "This host needs attention.")
-      : `${done} of ${this.jobs.length} ready${failed ? `, ${failed} ${failed === 1 ? "needs" : "need"} attention` : ""}${running ? "" : "."}`;
+      ? (running ? "Working out how to sign in, then installing." : asking ? "Check this host's key to continue." : done ? "Ready. The host is in your sidebar." : "This host needs attention.")
+      : `${done} of ${this.jobs.length} ready${failed ? `, ${failed} ${failed === 1 ? "needs" : "need"} attention` : ""}${asking ? `, ${asking} ${asking === 1 ? "needs" : "need"} a key check` : ""}${running ? "" : "."}`;
   }
 
   /** When nothing is running: a lone failure gets its own page; a clean batch closes itself. */
@@ -779,6 +780,12 @@ export class Wizard {
     if (this.jobs.some(working)) return;
     this.footForProgress();
     const failed = this.jobs.filter((job) => shownState(job) === "failed");
+    const asking = this.jobs.filter((job) => awaitingKey(job.view));
+    // A new key is the next step of the flow: a lone host goes straight to it, a batch keeps its row's button.
+    if (!failed.length && asking.length) {
+      if (this.jobs.length === 1 && this.page === "progress") this.later(0, () => { if (this.page === "progress" && awaitingKey(asking[0]!.view)) this.openFix(asking[0]!); });
+      return;
+    }
     if (!failed.length) { this.later(700, () => this.finish()); return; }
     if (this.jobs.length === 1 && this.page === "progress") this.later(500, () => { if (this.page === "progress") this.openFix(failed[0]!); });
   }
@@ -835,14 +842,15 @@ export class Wizard {
     const print = job.view.failure?.fingerprints?.[0];
     const key = hostKeyPresentation(job.view.failure?.host_key_type);
     const changed = job.view.failure?.host_key_changed === true;
-    page.innerHTML = `${this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(job.entry.label)}'s key</h1>
+    // A new key is an ordinary question (neutral icon). Only a changed pin is a warning (TASTE: the icon matches the news).
+    page.innerHTML = `${changed ? this.hero(ICON.warning, "danger") : this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(job.entry.label)}'s key</h1>
       <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : "Compare this fingerprint with the one on the host before trusting it."}</p>
       <div class="ah-keyblock" data-kv></div>
       <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>${this.detailsBlock(job)}`;
     const list = createKeyValueList("Host key fingerprint");
     list.set(print ? [{ key: "Host key", value: `${key.label} · ${print}` }] : []);
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>${changed ? "Replace trusted key" : "Trust this key"}</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${changed ? "back-progress" : "back"}">${changed ? "Back" : "Cancel"}</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>${changed ? "Replace trusted key" : "Trust and continue"}</span></button>`);
   }
 
   private renderChoose(page: HTMLElement): void {

@@ -12,7 +12,8 @@ use infraternal_plugin_ssh::{
     bootstrap::{Authority, Backend, Bootstrap, Resolved},
     install::{BinaryPaths, JoinMaterial},
     model::{
-        Destination, Failure, InstallMode, InstallStep, MeshEvidence, Step, Target, TargetAddress,
+        Destination, Failure, FailureKind, InstallMode, InstallStep, MeshEvidence, Step, Target,
+        TargetAddress,
     },
     openssh::OpenSsh,
     probe::Check,
@@ -298,7 +299,15 @@ fn log_bootstrap_failure(
         InstallMode::Rootless => "rootless",
         InstallMode::Root => "root",
     };
-    tracing::warn!(host_id = %host.map_or_else(|| "unassigned".into(), |host| host.to_string()),
+    let host_id = host.map_or_else(|| "unassigned".into(), |host| host.to_string());
+    // A key this server has never pinned is a question for the person, not a fault: the add-host
+    // flow shows it as an ordinary step and waits for the click. Only a changed pin stays a warning.
+    if failure.kind == FailureKind::HostKey && !failure.host_key_changed {
+        tracing::info!(host_id = %host_id, target_id = %target.id, step, mode,
+            "host bootstrap awaiting host key confirmation");
+        return;
+    }
+    tracing::warn!(host_id = %host_id,
         target_id = %target.id, step, failure_kind = failure.diagnostic_kind(), exit_status = %failure.exit_status.map_or_else(|| "unavailable".into(), |status| status.to_string()),
         mode, "host bootstrap failed");
 }
@@ -586,6 +595,42 @@ mod failure_log_tests {
         }
         assert!(!text.contains("private-message-sentinel"));
         assert!(!text.contains("private-output-sentinel"));
+    }
+    /// Runs `log_bootstrap_failure` for one failure and returns the single captured line.
+    fn logged(failure: &Failure) -> String {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Capture(bytes.clone()))
+            .finish();
+        let target = Target {
+            id: "one".into(),
+            address: TargetAddress::Manual("user@host".into()),
+            credential: None,
+            mode: InstallMode::Rootless,
+            root_consent: false,
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            log_bootstrap_failure(&target, None, Step::Check, failure);
+        });
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        text
+    }
+    /// A never-seen key is awaited at INFO; a changed pin stays a WARN failure (#397).
+    #[test]
+    fn new_host_key_is_info_and_changed_key_is_a_warning() {
+        let new_key = Failure::new(FailureKind::HostKey, "Confirm this host key.");
+        let text = logged(&new_key);
+        assert!(text.contains(" INFO "), "{text}");
+        assert!(text.contains("awaiting host key confirmation"), "{text}");
+        assert!(!text.contains("host bootstrap failed"), "{text}");
+        let mut changed = Failure::new(FailureKind::HostKey, "Confirm this host key.");
+        changed.host_key_changed = true;
+        let text = logged(&changed);
+        assert!(text.contains(" WARN "), "{text}");
+        assert!(text.contains("failure_kind=\"host-key\""), "{text}");
     }
     #[test]
     fn start_fresh_logs_only_the_exact_public_ownership_journal_and_outcome() {
