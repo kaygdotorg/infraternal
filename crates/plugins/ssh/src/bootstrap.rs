@@ -2200,7 +2200,11 @@ impl Bootstrap {
             target,
             installed.host,
             token,
-            if acted.is_ok() { "completed" } else { "refused" },
+            if acted.is_ok() {
+                "completed"
+            } else {
+                "refused"
+            },
         );
         if let Err(error) = &acted
             && script_finished(error)

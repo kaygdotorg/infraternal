@@ -149,24 +149,49 @@ impl Run {
 async fn a_root_add_offers_take_over_and_a_failed_install_puts_the_old_one_back() {
     let f = fixture(true).await;
     let old = Uuid::new_v4();
-    let run = Run::start(&f, installed_check(0, old, "ready"), InstallMode::Root, None);
+    let run = Run::start(
+        &f,
+        installed_check(0, old, "ready"),
+        InstallMode::Root,
+        None,
+    );
     let offer = run.offer().await;
     let failure = serde_json::to_value(offer.failure.as_ref().unwrap()).unwrap();
     assert_eq!(failure["kind"], "unrecognized_install");
-    assert_eq!(failure["takeover"]["install"], old.simple().to_string(), "the confirmation names the old install");
+    assert_eq!(
+        failure["takeover"]["install"],
+        old.simple().to_string(),
+        "the confirmation names the old install"
+    );
     assert_eq!(failure["takeover"]["live"], true);
     assert_eq!(offer.leftovers.as_ref().unwrap().mode, InstallMode::Root);
-    assert!(run.script("\ntake_over_finished_install ").is_none(), "nothing changes before the confirmation");
+    assert!(
+        run.script("\ntake_over_finished_install ").is_none(),
+        "nothing changes before the confirmation"
+    );
 
     run.runner
-        .start_fresh(&run.batch, "owner", "one", offer.leftovers.unwrap().challenge)
+        .start_fresh(
+            &run.batch,
+            "owner",
+            "one",
+            offer.leftovers.unwrap().challenge,
+        )
         .unwrap();
     let event = finished(&run.batch).await;
     assert_eq!(event.step, Step::Failed);
 
-    let take_over = run.script("\ntake_over_finished_install ").expect("set aside after the confirmation");
-    let record = format!("INFRATERNAL_SETUP_INSTALLED {} 64:1234 live ready", old.simple());
-    assert!(take_over.contains(&format!("'{record}'")), "bound to the exact record");
+    let take_over = run
+        .script("\ntake_over_finished_install ")
+        .expect("set aside after the confirmation");
+    let record = format!(
+        "INFRATERNAL_SETUP_INSTALLED {} 64:1234 live ready",
+        old.simple()
+    );
+    assert!(
+        take_over.contains(&format!("'{record}'")),
+        "bound to the exact record"
+    );
     let token = take_over
         .rsplit("\ntake_over_finished_install ")
         .next()
@@ -175,10 +200,19 @@ async fn a_root_add_offers_take_over_and_a_failed_install_puts_the_old_one_back(
         .unwrap()
         .to_owned();
     assert_eq!(token.len(), 32);
-    let restore = run.script("\nrestore_taken_over_install ").expect("put back after the failure");
-    assert!(restore.contains(&format!("\nrestore_taken_over_install {token} ")), "the same token");
+    let restore = run
+        .script("\nrestore_taken_over_install ")
+        .expect("put back after the failure");
     assert!(
-        run.batch.events(0).1.iter().any(|event| event.message.contains("put back as it was found")),
+        restore.contains(&format!("\nrestore_taken_over_install {token} ")),
+        "the same token"
+    );
+    assert!(
+        run.batch
+            .events(0)
+            .1
+            .iter()
+            .any(|event| event.message.contains("put back as it was found")),
         "the person is told"
     );
 }
@@ -188,11 +222,25 @@ async fn a_root_add_offers_take_over_and_a_failed_install_puts_the_old_one_back(
 #[tokio::test]
 async fn a_rootless_add_is_never_offered_take_over() {
     let f = fixture(true).await;
-    let run = Run::start(&f, installed_check(1002, Uuid::new_v4(), "ready"), InstallMode::Rootless, None);
+    let run = Run::start(
+        &f,
+        installed_check(1002, Uuid::new_v4(), "ready"),
+        InstallMode::Rootless,
+        None,
+    );
     let event = finished(&run.batch).await;
     assert_eq!(event.step, Step::Failed);
-    assert_eq!(event.failure.as_ref().unwrap().message, infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE);
-    assert!(run.batch.events(0).1.iter().all(|event| event.leftovers.is_none()));
+    assert_eq!(
+        event.failure.as_ref().unwrap().message,
+        infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE
+    );
+    assert!(
+        run.batch
+            .events(0)
+            .1
+            .iter()
+            .all(|event| event.leftovers.is_none())
+    );
     assert!(run.script("\ntake_over_finished_install ").is_none());
 }
 
@@ -200,16 +248,41 @@ async fn a_rootless_add_is_never_offered_take_over() {
 #[tokio::test]
 async fn a_busy_or_unproven_install_is_never_offered() {
     for (takeover, message) in [
-        ("busy", infraternal_plugin_ssh::previous_attempt::TAKEOVER_BUSY),
-        ("unproven", infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE),
+        (
+            "busy",
+            infraternal_plugin_ssh::previous_attempt::TAKEOVER_BUSY,
+        ),
+        (
+            "unproven",
+            infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE,
+        ),
     ] {
         let f = fixture(true).await;
-        let run = Run::start(&f, installed_check(0, Uuid::new_v4(), takeover), InstallMode::Root, None);
+        let run = Run::start(
+            &f,
+            installed_check(0, Uuid::new_v4(), takeover),
+            InstallMode::Root,
+            None,
+        );
         let event = finished(&run.batch).await;
         assert_eq!(event.step, Step::Failed, "{takeover}");
-        assert_eq!(event.failure.as_ref().unwrap().message, message, "{takeover}");
-        assert!(run.batch.events(0).1.iter().all(|event| event.leftovers.is_none()), "{takeover}");
-        assert!(run.script("\ntake_over_finished_install ").is_none(), "{takeover}");
+        assert_eq!(
+            event.failure.as_ref().unwrap().message,
+            message,
+            "{takeover}"
+        );
+        assert!(
+            run.batch
+                .events(0)
+                .1
+                .iter()
+                .all(|event| event.leftovers.is_none()),
+            "{takeover}"
+        );
+        assert!(
+            run.script("\ntake_over_finished_install ").is_none(),
+            "{takeover}"
+        );
     }
 }
 
@@ -217,10 +290,18 @@ async fn a_busy_or_unproven_install_is_never_offered() {
 #[tokio::test]
 async fn an_install_of_a_host_this_server_serves_is_never_offered() {
     let f = fixture(true).await;
-    let run = Run::start(&f, installed_check(0, f.prior, "ready"), InstallMode::Root, None);
+    let run = Run::start(
+        &f,
+        installed_check(0, f.prior, "ready"),
+        InstallMode::Root,
+        None,
+    );
     let event = finished(&run.batch).await;
     assert_eq!(event.step, Step::Failed);
-    assert_eq!(event.failure.as_ref().unwrap().message, infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE);
+    assert_eq!(
+        event.failure.as_ref().unwrap().message,
+        infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE
+    );
     assert!(run.script("\ntake_over_finished_install ").is_none());
 }
 
@@ -230,14 +311,30 @@ async fn an_install_of_a_host_this_server_serves_is_never_offered() {
 #[tokio::test]
 async fn a_take_over_the_host_finds_busy_says_so_and_needs_no_restore() {
     let f = fixture(true).await;
-    let run = Run::start(&f, installed_check(0, Uuid::new_v4(), "ready"), InstallMode::Root, Some(73));
+    let run = Run::start(
+        &f,
+        installed_check(0, Uuid::new_v4(), "ready"),
+        InstallMode::Root,
+        Some(73),
+    );
     let offer = run.offer().await;
     run.runner
-        .start_fresh(&run.batch, "owner", "one", offer.leftovers.unwrap().challenge)
+        .start_fresh(
+            &run.batch,
+            "owner",
+            "one",
+            offer.leftovers.unwrap().challenge,
+        )
         .unwrap();
     let event = finished(&run.batch).await;
     assert_eq!(event.step, Step::Failed);
-    assert_eq!(event.failure.as_ref().unwrap().message, infraternal_plugin_ssh::previous_attempt::TAKEOVER_BUSY);
+    assert_eq!(
+        event.failure.as_ref().unwrap().message,
+        infraternal_plugin_ssh::previous_attempt::TAKEOVER_BUSY
+    );
     assert!(run.script("\nrestore_taken_over_install ").is_none());
-    assert!(run.script("prepare-join-key").is_none(), "nothing is installed beside it");
+    assert!(
+        run.script("prepare-join-key").is_none(),
+        "nothing is installed beside it"
+    );
 }

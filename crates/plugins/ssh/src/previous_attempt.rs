@@ -313,7 +313,9 @@ impl FinishedInstall {
             challenge,
             mode,
             findings: vec![
-                Cow::Borrowed("An infraternal agent from an earlier setup that isn't one of this server's hosts"),
+                Cow::Borrowed(
+                    "An infraternal agent from an earlier setup that isn't one of this server's hosts",
+                ),
                 Cow::Borrowed(if self.live {
                     "Its infraternal agent is running; Take over stops it"
                 } else {
@@ -1158,7 +1160,10 @@ mod tests {
     fn a_finished_install_record_round_trips_into_its_take_over() {
         let line = format!("{} 64:1234 live ready", "a".repeat(32));
         let installed = parse_installed(&line).unwrap();
-        assert_eq!(installed.record(), format!("INFRATERNAL_SETUP_INSTALLED {line}"));
+        assert_eq!(
+            installed.record(),
+            format!("INFRATERNAL_SETUP_INSTALLED {line}")
+        );
         assert_eq!(installed.takeover, Takeover::Ready);
         let offer = serde_json::to_value(installed.takeover_failure(InstallMode::Root)).unwrap();
         assert_eq!(offer["kind"], "unrecognized_install");
@@ -1172,7 +1177,11 @@ mod tests {
         assert_eq!(busy.refusal(InstallMode::Root).message, TAKEOVER_BUSY);
         let taken = installed.taken_over(uuid::Uuid::from_u128(7));
         assert_eq!(taken.set_aside(), Some(AsideKind::TakenOver));
-        assert_eq!(taken.transaction, uuid::Uuid::from_u128(7), "the token names the set-aside");
+        assert_eq!(
+            taken.transaction,
+            uuid::Uuid::from_u128(7),
+            "the token names the set-aside"
+        );
     }
 
     #[test]

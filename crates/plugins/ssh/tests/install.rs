@@ -2005,7 +2005,8 @@ fn a_finished_install_record_is_recognized_exactly() {
         ("idle", "busy", Takeover::Busy),
         ("live", "unproven", Takeover::Unproven),
     ] {
-        let valid = format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1234 {live} {takeover}\n");
+        let valid =
+            format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1234 {live} {takeover}\n");
         let (_, previous, remains) = parse_check_with_absence(valid.as_bytes()).unwrap();
         assert!(previous.is_none());
         let Remains::Installed(installed) = remains else {
@@ -2022,8 +2023,14 @@ fn a_finished_install_record_is_recognized_exactly() {
     );
     for invalid in [
         format!("{check}INFRATERNAL_SETUP_INSTALLED {host}\n"),
-        format!("{check}INFRATERNAL_SETUP_INSTALLED {} 64:1 live ready\n", "1".repeat(31)),
-        format!("{check}INFRATERNAL_SETUP_INSTALLED {} 64:1 live ready\n", "G".repeat(32)),
+        format!(
+            "{check}INFRATERNAL_SETUP_INSTALLED {} 64:1 live ready\n",
+            "1".repeat(31)
+        ),
+        format!(
+            "{check}INFRATERNAL_SETUP_INSTALLED {} 64:1 live ready\n",
+            "G".repeat(32)
+        ),
         format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64 live ready\n"),
         format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:x live ready\n"),
         format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1 running ready\n"),
