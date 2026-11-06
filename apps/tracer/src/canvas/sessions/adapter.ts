@@ -27,6 +27,8 @@ export interface LinkInfo {
   readonly resumedAt: number | undefined;
   /** When the screen came back rebuilt from the latest state, so some scrollback may be approximate. */
   readonly approximateAt: number | undefined;
+  /** The replayed screen may no longer match the program's own (D309): shown as an icon in the machine pill until fresh output arrives. */
+  readonly staleScreen: boolean;
   /** Keys typed while the link could not carry them, kept to be sent. Only a count; what was typed is never exposed. */
   readonly heldKeys: number;
 }

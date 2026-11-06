@@ -9,7 +9,6 @@ import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
 import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
-import { mountTerminalNote, type TerminalNote } from "../../../packages/ui/src/terminal-note";
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
@@ -90,6 +89,11 @@ export interface TerminalHooks {
    * `approximate`). A product surface shows its connection indicator's "approximate" mark for a moment.
    */
   onApproximate?: () => void;
+  /**
+   * The screen may be out of date (`true`) or is live again (`false`), decided by the D309 watch in `stale-screen.ts`. A
+   * product surface shows it as a state icon in the window's machine pill; the terminal itself puts nothing over the screen.
+   */
+  onStaleScreen?: (stale: boolean) => void;
   /**
    * How many keys typed while the link could not carry them are being kept to be sent (0 once they were sent). Only the
    * count is reported, never what was typed: a password typed into a hidden prompt must not be shown anywhere.
@@ -360,7 +364,6 @@ export class TerminalClient {
   /** D249: the live cursor, a layer of its own that the compositor blinks; the renderer never draws it while this shows. */
   private cursorLayer: TerminalCursorLayer | undefined;
   /** D309: after a reattach, silence from the program means its screen may be out of date; see stale-screen.ts. */
-  private staleNote: TerminalNote | undefined;
   private staleWatch: StaleScreenWatch | undefined;
   private roundTripMs: number | undefined;
   private rendererCursorHidden = false;
@@ -382,6 +385,7 @@ export class TerminalClient {
   private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
   private readonly disposeTouch: () => void;
 
+  /** Builds the client around an opened renderer; use `TerminalClient.open`, which loads the font and the renderer first. */
   private constructor(private readonly config: TerminalConfig, terminal: Terminal, font: MonoFont) {
     this.terminal = terminal;
     this.font = font;
@@ -423,12 +427,8 @@ export class TerminalClient {
       })
       : undefined;
     this.cursorLayer = mountTerminalCursorLayer(config.host);
-    this.staleNote = mountTerminalNote(config.host, "screen may be out of date");
-    this.staleWatch = new StaleScreenWatch((shown) => {
-      if (!shown) { this.staleNote?.hide(); return; }
-      const cursorRow = this.terminal.wasmTerm?.getCursor().y ?? 0;
-      this.staleNote?.show(cursorRow, this.terminal.rows);
-    }, { after: (ms, run) => window.setTimeout(run, ms), cancel: (handle) => window.clearTimeout(handle as number) });
+    // The state is presented by the window (an icon in its machine pill); the terminal draws nothing of its own.
+    this.staleWatch = new StaleScreenWatch((stale) => config.hooks?.onStaleScreen?.(stale), { after: (ms, run) => window.setTimeout(run, ms), cancel: (handle) => window.clearTimeout(handle as number) });
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("pointerdown", this.onBlinkInput, { passive: true });
     document.addEventListener("visibilitychange", this.onBlinkEnvironment);
@@ -944,6 +944,7 @@ export class TerminalClient {
     this.conn.forceDrop();
   }
 
+  /** Closes the link and releases the renderer, timers and listeners. Safe to call twice. */
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
@@ -967,8 +968,6 @@ export class TerminalClient {
     this.cursorLayer = undefined;
     this.staleWatch?.reset();
     this.staleWatch = undefined;
-    this.staleNote?.dispose();
-    this.staleNote = undefined;
     this.config.host.removeEventListener("pointermove", this.onTerminalActivity);
     this.config.host.removeEventListener("wheel", this.onTerminalActivity);
     if (this.attachmentConfirmed) this.conn.streamAttached(false);

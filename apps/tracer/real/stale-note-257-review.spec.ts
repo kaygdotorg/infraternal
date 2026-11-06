@@ -3,7 +3,7 @@ import { expect, test, type Page } from "playwright/test";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { enrol } from "./layout-devices";
 import { startRealServer } from "./server";
-import { everShown, recordNote } from "../test/stale-note-recorder";
+import { everShown, FLOATING_NOTE, NOTE, recordNote } from "../test/stale-note-recorder";
 import { tracerEvidencePath } from "../test/evidence-path";
 
 /** Keep only public geometry and cursor boundaries; sign-in and terminal contents never enter the receipt. */
@@ -86,7 +86,7 @@ for (const surface of ["canvas", "network", "probe", "restart"] as const) for (c
     if (current.fences[0]?.cols !== undefined) expect({ cols: current.fences[0].cols, rows: current.fences[0].rows }).toEqual(size);
     await page.screenshot({ path: tracerEvidencePath(`review-real-${surface}-${workload}-reload.png`) });
     expect(await everShown(page)).toBe(0);
-    await expect(page.locator(".ui-terminal-note[data-shown]")).toHaveCount(0);
+    await expect(page.locator(NOTE)).toHaveCount(0);
     expect(new Set(server.bridges.flatMap((bridge) => [...bridge.attached.values()].flat())).size).toBe(1);
   } finally { await context.close(); await server.dispose(); }
 });
@@ -122,9 +122,10 @@ for (const upgradeDelayMs of [0, 500]) test(`review: a resized silent real canva
     expect(current.sizes.at(-1)).not.toEqual({ cols: current.fences.at(-1)?.cols, rows: current.fences.at(-1)?.rows });
     expect(current.suffixes).toBe(0);
     await page.screenshot({ path: tracerEvidencePath(`review-real-canvas-resized-restore${upgradeDelayMs ? "-delayed" : ""}.png`) });
-    await expect(page.locator(".ui-terminal-note[data-shown]")).toHaveCount(1);
+    await expect(page.locator(NOTE)).toHaveCount(1);
+    await expect(page.locator(FLOATING_NOTE)).toHaveCount(0);
     await host.locator("textarea").focus();
     await page.keyboard.press("Control+C");
-    await expect(page.locator(".ui-terminal-note[data-shown]")).toHaveCount(0);
+    await expect(page.locator(NOTE)).toHaveCount(0);
   } finally { await context.close(); await server.dispose(); }
 });
