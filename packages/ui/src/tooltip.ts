@@ -450,6 +450,9 @@ function hide(instant = false) {
 
 const warm = () => shown || performance.now() < warmUntil;
 
+/** Takes the tooltip down if it is the one open on `el` (a state that explained itself has ended). */
+export function dismissTip(el: HTMLElement): void { if (shown && current === el) hide(); }
+
 /** Hides any tooltip at once (a view change, a flight, a page that lost focus). */
 export function hideTips(): void { hide(true); }
 

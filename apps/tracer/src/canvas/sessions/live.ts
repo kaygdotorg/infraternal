@@ -121,7 +121,10 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
     private resumedAt: number | undefined;
     private approximateAt: number | undefined;
     private heldKeys = 0;
-    get link(): LinkInfo { return { everConnected: this.everConnected, resumedAt: this.resumedAt, approximateAt: this.approximateAt, heldKeys: this.heldKeys }; }
+    /** The D309 watch says the replayed screen may be out of date; the window shows an icon in its pill. */
+    private staleScreen = false;
+    /** What the window's indicator and pill icon are decided from. */
+    get link(): LinkInfo { return { everConnected: this.everConnected, resumedAt: this.resumedAt, approximateAt: this.approximateAt, staleScreen: this.staleScreen, heldKeys: this.heldKeys }; }
     /** Notes that the host link missed a reply but is kept, so the pill reads reconnecting until it answers or retires. */
     private setDoubted(doubted: boolean): void {
       if (doubted === this.doubted) return;
@@ -263,6 +266,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onPaintedOutput: (bytes, at, sequence) => { if (!firstSettled && this.client?.readScreenText().trim()) settle(); if (!this.painted) { this.painted = true; this.mark("painted"); this.endGhost(); } if (first) options.firstHooks?.onPaintedOutput?.(bytes, at, sequence); },
         onLinkDoubt: (doubted) => this.setDoubted(doubted),
         onApproximate: () => { this.approximateAt = performance.now(); this.connectionChanged?.(); },
+        onStaleScreen: (stale) => { if (stale !== this.staleScreen) { this.staleScreen = stale; this.connectionChanged?.(); } },
         onInputHeld: (keys) => { if (keys !== this.heldKeys) { this.heldKeys = keys; this.connectionChanged?.(); } },
         onDisconnected: (forced) => { this.setConnected(false); if (first) options.firstHooks?.onDisconnected?.(forced); },
         onExited: (status) => { this.exited?.(status); if (first) options.firstHooks?.onExited?.(status); },

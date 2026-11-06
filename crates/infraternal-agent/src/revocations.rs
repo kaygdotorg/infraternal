@@ -16,7 +16,7 @@ use tokio::sync::watch;
 /// Bound security intent metadata independently of the ordinary disk queue.
 pub(super) const CAPACITY: usize = 18;
 /// Errors are copied for finite callers while the original intent keeps retrying.
-type Reply = Result<(), (io::ErrorKind, String)>;
+type Reply = Result<super::Revoked, (io::ErrorKind, String)>;
 /// A shared receipt completes on durability or reports an error without dropping intent.
 type Receipt = watch::Sender<Option<Reply>>;
 
@@ -40,6 +40,9 @@ struct State {
     queue: VecDeque<uuid::Uuid>,
     /// Submission starts exactly one owner before yielding to the runtime.
     running: bool,
+    /// People whose unprovable login was already reported in the log, so a
+    /// retry every 100 ms does not repeat it.
+    reported: std::collections::HashSet<uuid::Uuid>,
 }
 
 /// One configured state root, never a root supplied by a remote request.
@@ -78,7 +81,7 @@ pub(super) async fn submit(
     manager: Manager,
     person: uuid::Uuid,
     rootless: bool,
-) -> io::Result<()> {
+) -> io::Result<super::Revoked> {
     let registry = {
         let mut registries = REGISTRIES
             .lock()
@@ -172,8 +175,18 @@ async fn run(registry: Arc<Registry>) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if failed {
                 state.queue.push_back(person);
+                if result.as_ref().is_err_and(super::UnprovableLogin::of)
+                    && state.reported.insert(person)
+                {
+                    eprintln!(
+                        "Revoking host access for person {}: {}",
+                        person.simple(),
+                        super::UnprovableLogin
+                    );
+                }
             } else {
                 state.pending.remove(&person);
+                state.reported.remove(&person);
             }
         }
         intent.reply.send_replace(Some(

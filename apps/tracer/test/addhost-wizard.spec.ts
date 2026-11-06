@@ -217,10 +217,57 @@ test("an unknown host key shows its fingerprint and is never trusted without a c
   await expect(page.getByText("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", { exact: true })).toBeVisible();
   // Nothing proceeds by itself.
   await page.waitForTimeout(800);
-  await expect(inWizard(page, "Trust this key")).toBeVisible();
+  await expect(inWizard(page, "Trust and continue")).toBeVisible();
   expect(await consoleWindows(page)).not.toContain("w-newkey.lab");
-  await inWizard(page, "Trust this key").click();
+  await inWizard(page, "Trust and continue").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+});
+
+/** Records every moment a failure screen, a failed row or a danger-toned hero is on screen, so a flow can prove it never showed one. */
+async function watchForFailure(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const seen: string[] = [];
+    (window as unknown as { __sawFailure: string[] }).__sawFailure = seen;
+    const look = (): void => {
+      if (document.querySelector(".ah-page[data-page='failure']")) seen.push("failure page");
+      if (document.querySelector(".ah-run[data-state='failed'], .ah-job[data-state='failed']")) seen.push("failed row");
+      if (document.querySelector(".ah-hero[data-tone='danger']")) seen.push("danger hero");
+    };
+    new MutationObserver(look).observe(document.body, { subtree: true, childList: true, attributes: true });
+    look();
+  });
+}
+const sawFailure = (page: Page) => page.evaluate(() => (window as unknown as { __sawFailure: string[] }).__sawFailure);
+
+test("a never-seen host goes straight to the key step: no failure screen, no error icon or tone (#397)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await watchForFailure(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const hero = wizard(page).locator(".ah-page[data-page='hostkey'] .ah-hero");
+  await expect(hero).not.toHaveAttribute("data-tone", "danger");
+  await expect(hero.locator("path[d^='M10.3 4.6']")).toHaveCount(0);
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).not.toContainText(/warning/i);
+  await expect(inWizard(page, "Trust and continue")).toBeVisible();
+  await expect(inWizard(page, "Cancel")).toBeVisible();
+  await expect(page.locator(".ah-keyblock")).toContainText(/SHA256:/);
+  await expect(page.getByText("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", { exact: true })).toBeVisible();
+  // The step is part of the progress: going back to it shows the host waiting on the key, not failed.
+  expect(await sawFailure(page)).toEqual([]);
+  await inWizard(page, "Trust and continue").click();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  expect(await sawFailure(page)).toEqual([]);
+});
+
+test("a changed host key stays a real warning with the strong wording (#397)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@changedkey.lab");
+  await expect(page.getByRole("heading", { name: /Check changedkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-hero")).toHaveAttribute("data-tone", "danger");
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).toContainText("Warning: this host’s trusted key changed");
+  await expect(inWizard(page, "Replace trusted key")).toBeVisible();
 });
 
 test("a host that does not answer: what happened, Retry, and the one-line install from the host", async ({ page }) => {
