@@ -227,11 +227,11 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, bool> {
         Box::pin(async { Ok(false) })
     }
-    /// Start fresh just removed every leftover of this account's install base on
-    /// the host at `target` (D355): the server may finish the same person's stale
-    /// entries for that address and account. Backends without host records have
-    /// none.
-    fn start_fresh_cleaned<'a>(
+    /// This account's install base on the host at `target` is proven empty: Start
+    /// fresh just removed every leftover there, or the check found no install at
+    /// all (D355). The server may finish the same person's stale entries for that
+    /// address and account. Backends without host records have none.
+    fn install_base_proven_empty<'a>(
         &'a self,
         _authority: &'a Authority,
         _target: &'a Target,
@@ -1293,7 +1293,8 @@ impl Bootstrap {
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
                 metadata.authentication = session.authentication();
             }
-            let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
+            let (check, previous, absent) =
+                previous_attempt::parse_check_with_absence(&output.stdout)?;
             check.authorize_mode(target.mode)?;
             match restore_previous(batch, target, attempt, started, session.clone()).await {
                 Err(error) if error.exit_status == Some(76) => {
@@ -1492,11 +1493,19 @@ impl Bootstrap {
                     // The account's base is now empty: its stale entries on this
                     // server are finished at once (D355).
                     self.backend
-                        .start_fresh_cleaned(&batch.authority, target, &check, lookup.clone())
+                        .install_base_proven_empty(&batch.authority, target, &check, lookup.clone())
                         .await?;
                     None
                 }
             } else {
+                // The check proved no install at all here (only the inspection
+                // script reports that; the cleanup-owning probe never does):
+                // same as after a Start fresh (D355).
+                if absent && !owns_cleanup {
+                    self.backend
+                        .install_base_proven_empty(&batch.authority, target, &check, lookup.clone())
+                        .await?;
+                }
                 None
             };
             // Existing remote identities must be reported before the first

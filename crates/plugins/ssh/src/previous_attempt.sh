@@ -409,6 +409,16 @@ stop_activated_agent() {
 activated_marker() {
  [ "${not_live_scan:-all}" = unit ] && [ -f "$base/.bootstrap-lock/$1" ] && [ ! -L "$base/.bootstrap-lock/$1" ]
 }
+# Whether this account provably has no infraternal install at all (D355): its
+# base, unit and launcher each fail to stat with "No such file or directory".
+# A permission error, a dangling link or any other answer is not proof.
+install_absent() {
+ for install_path in "$base" "$unit" "$launcher"; do
+  install_error=$(LC_ALL=C stat -c %i -- "$install_path" 2>&1 >/dev/null) && return 1
+  case "$install_error" in *": No such file or directory") :;; *) return 1;; esac
+ done
+ return 0
+}
 # Whether /proc entry $1 runs in the infraternal agent's own service unit.
 agent_unit_process() {
  agent_unit=no
@@ -614,7 +624,8 @@ inspect_previous() {
   fi
   if [ -e "$base" ] || [ -L "$base" ]; then discard_committed_set_aside; fi
   report_set_aside && return
-  printf 'INFRATERNAL_SETUP_CLEAR\n'
+  # D355: proven absence lets the server finish this person's stale entries.
+  if install_absent; then printf 'INFRATERNAL_SETUP_ABSENT\n'; else printf 'INFRATERNAL_SETUP_CLEAR\n'; fi
   return
  fi
  if [ -n "$receipt" ]; then

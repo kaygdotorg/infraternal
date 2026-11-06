@@ -435,6 +435,56 @@ mock_manager() {{
         self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
         self.assertFalse(self.base.exists())
 
+    def make_no_install(self):
+        """An account with no infraternal install at all: no base, unit or
+        launcher (D355: the add's own check proves it, as on `code` today)."""
+        if self.listener:
+            self.listener.close()
+            self.listener = None
+        self.receipt.unlink(missing_ok=True)
+        shutil.rmtree(self.base, ignore_errors=True)
+        self.unit.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.launcher.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+
+    def test_check_proves_an_account_with_no_install(self):
+        # D355 (widened): only this report lets the server drop stale entries
+        # without a Start fresh.
+        self.make_no_install()
+        result = self.run_shell('\ninspect_previous')
+        self.assertEqual((result.returncode, result.stdout), (0, b'INFRATERNAL_SETUP_ABSENT\n'), result.stderr)
+
+    def test_any_trace_of_an_install_is_not_absence(self):
+        # A unit or launcher left behind, or a base still present, is "clear",
+        # never proof that nothing is installed.
+        for leftover in ('unit', 'launcher', 'base'):
+            with self.subTest(leftover=leftover):
+                self.make_no_install()
+                if leftover == 'unit':
+                    self.unit.write_text('[Unit]\n')
+                elif leftover == 'launcher':
+                    self.launcher.symlink_to(self.base / 'bin/current')
+                else:
+                    self.base.mkdir(mode=0o700)
+                    self.owner.write_text(HOST + '\n')
+                    self.owner.chmod(0o600)
+                result = self.run_shell('\ninspect_previous')
+                self.assertNotEqual(result.stdout, b'INFRATERNAL_SETUP_ABSENT\n', leftover)
+                self.unit.unlink(missing_ok=True)
+                self.launcher.unlink(missing_ok=True)
+                if self.base.exists():
+                    shutil.rmtree(self.base)
+
+    def test_absence_that_cannot_be_read_is_not_proven(self):
+        # A path the account cannot search (permission denied) proves nothing.
+        self.make_no_install()
+        units = self.unit.parent
+        units.chmod(0o000)
+        try:
+            result = self.run_shell('\ninspect_previous')
+        finally:
+            units.chmod(0o700)
+        self.assertNotEqual(result.stdout, b'INFRATERNAL_SETUP_ABSENT\n')
+
     def test_retired_owner_with_nonempty_root_is_refused(self):
         self.listener.close()
         self.owner.unlink()

@@ -425,7 +425,8 @@ impl RemoteBackend {
         }
     }
     /// D355: Start fresh just proved it emptied this account's install base on the
-    /// host at `target` (one base per account and mode), so any install the same
+    /// host at `target`, or the add's check proved there is no install there at all
+    /// (one base per account and mode), so any install the same
     /// person's stale entries had there is gone. Finish those entries now instead
     /// of leaving them pending for a receipt their gone agent never sends: deny
     /// the ones not yet denied, then complete their cleanup as that receipt would,
@@ -763,7 +764,7 @@ impl Backend for RemoteBackend {
             self.authorize(authority).await
         })
     }
-    fn start_fresh_cleaned<'a>(
+    fn install_base_proven_empty<'a>(
         &'a self,
         authority: &'a Authority,
         target: &'a Target,

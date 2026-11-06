@@ -152,3 +152,113 @@ async fn only_the_persons_own_stale_row_is_dropped() {
     assert_eq!(state(&f, finished).await, (false, None, true));
     assert_eq!(state(&f, running).await, (false, None, true));
 }
+
+/// The check on a machine with no infraternal install at all: the fixture's own
+/// session, whose "clear" report becomes the proven "absent" (D355). When the new
+/// invitation reaches the host it records how many of the person's unrevoked
+/// entries the address has (the new one included).
+struct NoInstall {
+    opens: Arc<AtomicUsize>,
+    pool: sqlx::SqlitePool,
+    owner: String,
+    at_invitation: Arc<std::sync::Mutex<Vec<i64>>>,
+}
+struct NoInstallSession {
+    sniff: Sniff,
+    pool: sqlx::SqlitePool,
+    owner: String,
+    at_invitation: Arc<std::sync::Mutex<Vec<i64>>>,
+}
+impl SshTransport for NoInstall {
+    fn open(
+        &self,
+        _: Destination,
+        _: Credentials,
+        _: MeshEvidence,
+    ) -> Operation<'_, Arc<dyn SshSession>> {
+        Box::pin(async move {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            Ok(Arc::new(NoInstallSession {
+                sniff: Sniff {
+                    opens: self.opens.clone(),
+                    refuse_key_payload_upload: false,
+                },
+                pool: self.pool.clone(),
+                owner: self.owner.clone(),
+                at_invitation: self.at_invitation.clone(),
+            }) as Arc<dyn SshSession>)
+        })
+    }
+}
+impl SshSession for NoInstallSession {
+    fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+        Box::pin(async move {
+            if matches!(input, Input::Bytes(_)) {
+                let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_hosts h JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND b.address='user@fixture'")
+                    .bind(&self.owner).fetch_one(&self.pool).await.unwrap();
+                self.at_invitation.lock().unwrap().push(entries);
+            }
+            let mut output = self.sniff.run(script, input).await?;
+            if output.stdout.ends_with(b"INFRATERNAL_SETUP_CLEAR\n") {
+                let keep = output.stdout.len() - b"INFRATERNAL_SETUP_CLEAR\n".len();
+                output.stdout.truncate(keep);
+                output.stdout.extend_from_slice(b"INFRATERNAL_SETUP_ABSENT\n");
+            }
+            Ok(output)
+        })
+    }
+}
+
+/// The owner's `code` (#305): the machine is clean (no install at all), and the
+/// server still holds the Nov 2 unfinished entry for `kayg@code`, kept across
+/// restarts by its never-used first shell. Re-adding proves the absence, drops
+/// that entry at once, and leaves exactly one entry for the address: the new one.
+#[tokio::test]
+async fn re_adding_a_clean_machine_leaves_exactly_one_entry_for_it() {
+    let f = fixture(true).await;
+    let owner = person(&f).await;
+    // As on production: the person is the server's owner (one owner per server).
+    sqlx::query("UPDATE users SET owner=0 WHERE owner=1").execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE users SET owner=1 WHERE id=?").bind(&owner).execute(&f.pool).await.unwrap();
+    let cookie = "C".repeat(43);
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'fixture',unixepoch()+3600,unixepoch(),1)")
+        .bind(crate::auth::hash(&cookie)).bind(&owner).execute(&f.pool).await.unwrap();
+    let nov2 = row(&f, &owner, "user@fixture", "rootless", 1002, true, false).await;
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) VALUES(?,?,100,100,?)")
+        .bind(Uuid::new_v4().as_bytes().as_slice()).bind(&owner).bind(nov2.as_bytes().as_slice())
+        .execute(&f.pool).await.unwrap();
+    let at_invitation = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let fixture_payload = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let runner = Bootstrap::new(
+        Arc::new(NoInstall {
+            opens: f.opens.clone(),
+            pool: f.pool.clone(),
+            owner: owner.clone(),
+            at_invitation: at_invitation.clone(),
+        }),
+        f.backend.clone(),
+        BinaryPaths {
+            x86_64: fixture_payload.clone(),
+            aarch64: fixture_payload,
+        },
+    );
+    let batch = runner
+        .start_authenticated(
+            owner.clone(),
+            Secret::new(cookie.as_bytes().to_vec()),
+            vec![cleaned().0],
+            None,
+        )
+        .unwrap();
+    let event = finished(&batch).await;
+    assert!(
+        !event.failure.as_ref().is_some_and(|failure| failure.already_added),
+        "{event:?}"
+    );
+    assert_eq!(
+        *at_invitation.lock().unwrap(),
+        vec![1],
+        "the new invitation must be the address's only entry ({event:?})"
+    );
+    assert_eq!(state(&f, nov2).await, (true, Some(1), false));
+}

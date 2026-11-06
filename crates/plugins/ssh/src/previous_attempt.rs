@@ -120,6 +120,17 @@ pub fn check_script(mode: InstallMode) -> String {
 /// # Errors
 /// Refuses unknown output, invalid identifiers and unsupported ownership formats.
 pub fn parse_check(bytes: &[u8]) -> Result<(Check, Option<PreviousAttempt>), Failure> {
+    parse_check_with_absence(bytes).map(|(check, previous, _)| (check, previous))
+}
+
+/// [`parse_check`], plus whether the check proved that the account has no
+/// infraternal install at all (`INFRATERNAL_SETUP_ABSENT`, D355): its base, unit
+/// and launcher each do not exist. "Clear" or anything else proves nothing.
+/// # Errors
+/// As [`parse_check`].
+pub fn parse_check_with_absence(
+    bytes: &[u8],
+) -> Result<(Check, Option<PreviousAttempt>, bool), Failure> {
     // The check lines plus an upgrade record with two host names stay below 1 KiB.
     if bytes.len() > 1024 {
         return Err(refused());
@@ -132,8 +143,11 @@ pub fn parse_check(bytes: &[u8]) -> Result<(Check, Option<PreviousAttempt>), Fai
         .map(|(index, _)| index + 1)
         .ok_or_else(refused)?;
     let check = Check::parse(&bytes[..end])?;
+    if &bytes[end..] == b"INFRATERNAL_SETUP_ABSENT\n" {
+        return Ok((check, None, true));
+    }
     let previous = parse(&bytes[end..])?;
-    Ok((check, previous))
+    Ok((check, previous, false))
 }
 
 fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
