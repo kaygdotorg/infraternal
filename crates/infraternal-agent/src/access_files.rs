@@ -714,7 +714,7 @@ mod tests {
         );
         assert_eq!(
             report.files[1].lines,
-            ["default.target.wants/back.service -> ../back.service"]
+            [".config/systemd/user/default.target.wants/back.service -> ../back.service"]
         );
         assert_eq!(report.files[2].lines, ["@reboot /tmp/back"]);
         std::fs::remove_dir_all(home).unwrap();
