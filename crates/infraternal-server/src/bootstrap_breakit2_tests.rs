@@ -1,4 +1,4 @@
-/// Opt-in real-SSH enrollment and retry timing through a disposable target (#169, #230).
+//! Opt-in real-SSH enrollment and retry timing through a disposable target (#169, #230).
 use super::*;
 use infraternal_plugin_ssh::auth_order::{AuthProvider, AutoAuth, NetworkProvider};
 use infraternal_plugin_ssh::openssh::OpenSsh;
@@ -157,6 +157,7 @@ async fn live_fixture_keeps_the_full_image_and_selects_the_explicit_session_imag
 }
 
 #[test]
+/// Check that timing probes observe the nested setup shell.
 fn retry_lock_timing_runs_inside_the_nested_setup_shell() {
     let script = r#"# INFRATERNAL_SETUP_STEPS_V1
 setup_step() {
@@ -176,12 +177,8 @@ setup_step upload 'exec 9< .; exec 7< Cargo.toml; flock -n 9 || exit 73; flock -
     let _ = std::fs::remove_file(&trace_path);
     std::fs::File::create(&trace_path).unwrap();
     let trace_path_text = trace_path.to_str().unwrap();
-    let instrumented = instrument_retry_setup_with_timing(
-        script,
-        true,
-        true,
-        Some(trace_path_text),
-    );
+    let instrumented =
+        instrument_retry_setup_with_timing(script, true, true, Some(trace_path_text));
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(instrumented)
@@ -206,6 +203,7 @@ setup_step upload 'exec 9< .; exec 7< Cargo.toml; flock -n 9 || exit 73; flock -
 }
 
 #[test]
+/// Keep the real upload exit status when timing setup.
 fn retry_setup_timing_preserves_transfer_upload_status() {
     let script = r#"# INFRATERNAL_TRANSFER_SETUP_V1
 setup_step() {
@@ -216,7 +214,9 @@ setup_step upload 'exit 31'
 "#;
     let output = std::process::Command::new("sh")
         .arg("-c")
-        .arg(instrument_retry_setup_with_timing(script, true, false, None))
+        .arg(instrument_retry_setup_with_timing(
+            script, true, false, None,
+        ))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(31));
@@ -512,7 +512,7 @@ fn breakit2_step(script: &str, input: &Input<'_>) -> &'static str {
         Input::Bytes(_) if script.contains("zstd -dc >") || script.contains("gzip -dc >") => {
             "upload"
         }
-        Input::File(_) => "upload",
+        Input::File(_) | Input::Transfer(_) => "upload",
         Input::Bytes(_) if script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1") => "reuse_setup",
         Input::Bytes(_) if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1") => "setup",
         Input::Bytes(_) => "join",
@@ -549,26 +549,35 @@ fn breakit2_test_https_root(script: &str, root: Option<&std::path::Path>) -> Str
 }
 
 #[test]
+/// Classify join-key preflight under connection timing.
 fn breakit2_step_labels_join_key_preflight_as_connect() {
     let script = "payload agent --data state prepare-join-key https://server:4930";
 
     assert_eq!(breakit2_step(script, &Input::Empty), "connect");
-    assert_eq!(breakit2_step("unclassified command", &Input::Empty), "command");
+    assert_eq!(
+        breakit2_step("unclassified command", &Input::Empty),
+        "command"
+    );
     let (sender, signal) = tokio::sync::oneshot::channel();
     drop(sender);
     assert_eq!(breakit2_step("commit", &Input::Signal(signal)), "commit");
 }
 
 #[test]
+/// Recognize both supported setup script headers.
 fn breakit2_step_labels_both_setup_headers_as_setup() {
     let transfer = "# INFRATERNAL_TRANSFER_SETUP_V1\ntransfer_setup";
     let setup = "# INFRATERNAL_SETUP_STEPS_V1\nsetup_step";
 
-    assert_eq!(breakit2_step(transfer, &Input::Bytes(b"fixture")), "reuse_setup");
+    assert_eq!(
+        breakit2_step(transfer, &Input::Bytes(b"fixture")),
+        "reuse_setup"
+    );
     assert_eq!(breakit2_step(setup, &Input::Bytes(b"fixture")), "setup");
 }
 
 #[test]
+/// Restrict fixture TLS trust to its join-key command.
 fn breakit2_test_https_root_is_scoped_to_join_key_preflight() {
     let path = std::path::Path::new("/tmp/test 'root.pem");
     let preflight = "payload agent --data state prepare-join-key https://server:4930";
@@ -577,7 +586,10 @@ fn breakit2_test_https_root_is_scoped_to_join_key_preflight() {
     assert!(command.starts_with("export SSL_CERT_FILE='"));
     assert!(command.contains("test '\\''root.pem'\n"));
     assert!(command.ends_with(preflight));
-    assert_eq!(breakit2_test_https_root("other command", Some(path)), "other command");
+    assert_eq!(
+        breakit2_test_https_root("other command", Some(path)),
+        "other command"
+    );
     assert_eq!(breakit2_test_https_root(preflight, None), preflight);
 }
 
@@ -670,7 +682,9 @@ impl SshSession for TimedSession {
             } else {
                 None
             };
-            let mut file_bytes = if let Input::PayloadAndInvitation { payload, .. } = &input {
+            let mut file_bytes = if let Input::PayloadAndInvitation { payload, .. }
+            | Input::Transfer(payload) = &input
+            {
                 Some(match payload {
                     infraternal_plugin_ssh::transport::PayloadInput::Bytes(bytes) => {
                         bytes.len() as u64
@@ -713,10 +727,7 @@ impl SshSession for TimedSession {
             };
             let command = breakit2_test_https_root(command, test_https_root);
             let started = Instant::now();
-            let mut result = self
-                .inner
-                .run(&command, input)
-                .await;
+            let mut result = self.inner.run(&command, input).await;
             if let Some(path) = lock_trace_path.as_deref() {
                 report_retry_lock_trace(path);
             }
@@ -852,9 +863,9 @@ impl AuthProvider for FixtureProvider {
                 key.is_some()
             );
             Ok(key.map(|key| Credentials::PrivateKey {
-                    key,
-                    passphrase: None,
-                }))
+                key,
+                passphrase: None,
+            }))
         })
     }
     fn password(&self) -> Operation<'_, Option<Credentials>> {
@@ -877,10 +888,7 @@ impl SshTransport for FixtureTransport {
             // order: real network-only refusal, then lazy key authentication.
             // Browser passkey unlocking is outside this native fixture.
             let key = self.private.lock().unwrap().take();
-            println!(
-                "DIAG breakit2 transport_open key_present={}",
-                key.is_some()
-            );
+            println!("DIAG breakit2 transport_open key_present={}", key.is_some());
             AutoAuth::new(self.transport.clone())
                 .open(
                     destination,
@@ -929,15 +937,17 @@ async fn seed_replacement_host(
         }
     };
     let now = unix_now().unwrap();
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,?,?,?)")
-        .bind(request.host.as_bytes().as_slice())
-        .bind(&authority.owner)
-        .bind(mode.as_str())
-        .bind(execution_uid)
-        .bind(now)
-        .execute(&backend.issuer.store().0)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,?,?,?)",
+    )
+    .bind(request.host.as_bytes().as_slice())
+    .bind(&authority.owner)
+    .bind(mode.as_str())
+    .bind(execution_uid)
+    .bind(now)
+    .execute(&backend.issuer.store().0)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,?)")
         .bind(request.host.as_bytes().as_slice())
         .bind(address)
@@ -948,13 +958,7 @@ async fn seed_replacement_host(
     let _ = backend
         .issuer
         .store()
-        .issue(
-            &authority.owner,
-            request.host,
-            mode,
-            now,
-            &digest,
-        )
+        .issue(&authority.owner, request.host, mode, now, &digest)
         .await
         .unwrap();
 }
@@ -1008,11 +1012,12 @@ impl Backend for ObservedBackend {
             // enrolled; without it the fixture is another server's (D335).
             // Seeded once: the attempt asks again right before the stop (#305 P1-1).
             if std::env::var_os("BREAKIT2_REPLACE_STUCK").is_some() {
-                let seeded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=?)")
-                    .bind(request.host.as_bytes().as_slice())
-                    .fetch_one(&backend.issuer.store().0)
-                    .await
-                    .unwrap();
+                let seeded: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=?)")
+                        .bind(request.host.as_bytes().as_slice())
+                        .fetch_one(&backend.issuer.store().0)
+                        .await
+                        .unwrap();
                 if !seeded {
                     seed_replacement_host(&backend, authority, &request).await;
                 }
@@ -1278,6 +1283,7 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
 
 #[tokio::test]
 #[ignore = "#169 live disposable Docker target; invoke docs/verification/addhost-breakit2/measure.py"]
+/// Exercise installation, enrollment and terminal input on a disposable SSH host.
 async fn breakit2_live_ssh_install_join_and_terminal() {
     let scratch = PathBuf::from(std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").unwrap());
     let binary = PathBuf::from(std::env::var_os("INFRATERNAL_REMOTE_TEST_BINARY").unwrap());
@@ -1338,7 +1344,10 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         source,
         endpoint,
     )
-    .merge(crate::remote_agent_http::router(hosts.clone(), store.clone()));
+    .merge(crate::remote_agent_http::router(
+        hosts.clone(),
+        store.clone(),
+    ));
     let http_tls = axum_server::tls_openssl::OpenSSLConfig::from_der(
         &identity.certificate.to_der().unwrap(),
         &identity.key.private_key_to_der().unwrap(),
@@ -1476,12 +1485,12 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         let mut changed = batch.subscribe();
         let challenge = tokio::time::timeout(Duration::from_secs(120), async {
             loop {
-                if let Some(challenge) = batch
-                    .events(0)
-                    .1
-                    .iter()
-                    .find_map(|event| event.leftovers.as_deref().map(|leftovers| leftovers.challenge))
-                {
+                if let Some(challenge) = batch.events(0).1.iter().find_map(|event| {
+                    event
+                        .leftovers
+                        .as_deref()
+                        .map(|leftovers| leftovers.challenge)
+                }) {
                     return challenge;
                 }
                 changed.changed().await.unwrap();
@@ -1489,7 +1498,9 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         })
         .await
         .unwrap();
-        runner.start_fresh(&batch, "owner", "live", challenge).unwrap();
+        runner
+            .start_fresh(&batch, "owner", "live", challenge)
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(delay)).await;
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1689,16 +1700,21 @@ async fn breakit2_live_ssh_install_join_and_terminal() {
         );
     }
     if replace_stuck {
-        assert!(replacement_started, "the stale install did not offer replacement");
+        assert!(
+            replacement_started,
+            "the stale install did not offer replacement"
+        );
         assert_eq!(result, Step::Done, "the stuck install replacement failed");
-        let address_records: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM remote_host_bootstrap WHERE address=?",
-        )
-        .bind(&address)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-        assert_eq!(address_records, 1, "replacement left duplicate host records");
+        let address_records: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap WHERE address=?")
+                .bind(&address)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            address_records, 1,
+            "replacement left duplicate host records"
+        );
         println!("REPLACEMENT breakit2 completed=true address_records=1");
     }
     if let Some(private) = readd_private
@@ -1867,7 +1883,10 @@ async fn replace_keeps_a_terminal(
     })
     .await
     .expect("the server still counts the stopped infraternal agent as connected");
-    println!("SURVIVOR breakit2 disconnected_after_ms={}", gone.elapsed().as_millis());
+    println!(
+        "SURVIVOR breakit2 disconnected_after_ms={}",
+        gone.elapsed().as_millis()
+    );
     *transport.private.lock().unwrap() = Some(Secret::new(private));
     let finished = replace_again(f, runner).await;
     assert_eq!(finished.host_id, Some(host), "a Replace keeps the host");
@@ -1880,9 +1899,12 @@ async fn replace_keeps_a_terminal(
 fn leave_install_stuck(scratch: &std::path::Path) -> [u8; 16] {
     use std::io::Write as _;
     let script = std::fs::read(std::env::var_os("BREAKIT2_REPLACE_AFTER_JOIN").unwrap()).unwrap();
-    let key = std::env::var_os("BREAKIT2_CRAFT_KEY").expect("BREAKIT2_CRAFT_KEY names the fixture key");
+    let key =
+        std::env::var_os("BREAKIT2_CRAFT_KEY").expect("BREAKIT2_CRAFT_KEY names the fixture key");
     let target = std::env::var("BREAKIT2_TARGET").unwrap();
-    let (login, port) = target.rsplit_once(':').expect("BREAKIT2_TARGET is user@host:port");
+    let (login, port) = target
+        .rsplit_once(':')
+        .expect("BREAKIT2_TARGET is user@host:port");
     let mut craft = std::process::Command::new(scratch.join("ssh"))
         .arg("-i")
         .arg(&key)
@@ -1937,8 +1959,7 @@ async fn replace_again(f: &Fixture, runner: &Bootstrap) -> Event {
     let finished = tokio::time::timeout(Duration::from_secs(220), async {
         loop {
             let events = batch.events(0).1;
-            if !confirmed
-                && let Some(event) = events.iter().find(|event| event.leftovers.is_some())
+            if !confirmed && let Some(event) = events.iter().find(|event| event.leftovers.is_some())
             {
                 let failure = serde_json::to_value(&event.failure).unwrap();
                 println!(
@@ -1947,7 +1968,9 @@ async fn replace_again(f: &Fixture, runner: &Bootstrap) -> Event {
                     event.leftovers.as_ref().unwrap().findings
                 );
                 let challenge = event.leftovers.as_ref().unwrap().challenge;
-                runner.start_fresh(&batch, "owner", "replace", challenge).unwrap();
+                runner
+                    .start_fresh(&batch, "owner", "replace", challenge)
+                    .unwrap();
                 confirmed = true;
             }
             if let Some(event) = events
@@ -1968,7 +1991,12 @@ async fn replace_again(f: &Fixture, runner: &Bootstrap) -> Event {
     .await
     .unwrap();
     assert!(confirmed, "the stuck install was not offered for Replace");
-    assert_eq!(finished.step, Step::Done, "the Replace did not finish: {}", finished.message);
+    assert_eq!(
+        finished.step,
+        Step::Done,
+        "the Replace did not finish: {}",
+        finished.message
+    );
     finished
 }
 
@@ -1999,7 +2027,9 @@ async fn echo_through_new_agent(f: &Fixture, host: Uuid, session: [u8; 16]) -> b
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut received = Vec::new();
         while let Some(event) = output.recv().await {
-            if let TerminalOutput::Output { bytes, .. } | TerminalOutput::Snapshot { bytes, .. } = event {
+            if let TerminalOutput::Output { bytes, .. } | TerminalOutput::Snapshot { bytes, .. } =
+                event
+            {
                 received.extend_from_slice(&bytes);
                 if received.windows(9).any(|window| window == b"carried-4") {
                     return true;
@@ -2026,20 +2056,15 @@ impl SshSession for RetryObservation {
                 script.contains("if [ \"$1\" != install ] && sh -c"),
                 Ordering::SeqCst,
             );
-            self.lock_wrapper
-                .store(
-                    script.contains("ADDHOST_RETRY_LOCK_TRACE_PATH=")
-                        && script.contains("\"lease_try\""),
-                    Ordering::SeqCst,
-                );
-            self.lock_tries.store(
-                script.matches("\"lease_try\"").count(),
+            self.lock_wrapper.store(
+                script.contains("ADDHOST_RETRY_LOCK_TRACE_PATH=")
+                    && script.contains("\"lease_try\""),
                 Ordering::SeqCst,
             );
-            self.lock_waits.store(
-                script.matches("\"lease_wait\"").count(),
-                Ordering::SeqCst,
-            );
+            self.lock_tries
+                .store(script.matches("\"lease_try\"").count(), Ordering::SeqCst);
+            self.lock_waits
+                .store(script.matches("\"lease_wait\"").count(), Ordering::SeqCst);
             Ok(CommandOutput {
                 stdout: b"STEP upload\nTRACE_SETUP_STEP upload 1.000 1.250 0\nTRACE_LOCK lease_try 1.250 1.251 0\nSTEP join\nSTEP install\nFAIL install 1\n".to_vec(),
             })

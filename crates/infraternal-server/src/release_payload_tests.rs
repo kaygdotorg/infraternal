@@ -212,6 +212,7 @@ impl Release {
             .collect();
         Self { root, files, trust }
     }
+    /// Build a release resolver against this test bucket and isolated cache.
     fn resolver(&self, origin: String, cache: &str, development: bool) -> ReleasePayload {
         let state = self.root.join(cache);
         std::fs::create_dir(&state).unwrap();
@@ -226,6 +227,7 @@ impl Release {
             development,
             origin,
             lock: Mutex::new(()),
+            progress: tokio::sync::watch::channel(0).0,
             trust: Some(self.trust.clone()),
         }
     }
@@ -433,6 +435,7 @@ async fn cache_symlinks_and_shared_files_are_refused() {
 // Staging::drop, matching abrupt server termination rather than cancellation.
 #[test]
 #[ignore = "subprocess helper for release-cache restart verification"]
+/// Run the isolated interrupted-download side of the restart fixture.
 fn partial_download_restart_child() {
     let Some(state) = std::env::var_os("REVIEW_RELEASE_STATE") else {
         return;
@@ -448,6 +451,7 @@ fn partial_download_restart_child() {
         development: false,
         origin: std::env::var("REVIEW_RELEASE_ORIGIN").unwrap(),
         lock: Mutex::new(()),
+        progress: tokio::sync::watch::channel(0).0,
         trust: Some(std::env::var("REVIEW_RELEASE_TRUST").unwrap()),
     };
     tokio::runtime::Runtime::new()

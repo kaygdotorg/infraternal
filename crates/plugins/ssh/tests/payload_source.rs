@@ -163,6 +163,92 @@ impl PayloadSource for StalledPayload {
         Box::pin(std::future::pending())
     }
 }
+
+/// Read real stream bytes while the synthetic release supplies them over virtual time.
+struct ProgressingPayload {
+    read: tokio::sync::Mutex<tokio::io::DuplexStream>,
+    bytes: tokio::sync::watch::Sender<u64>,
+}
+impl PayloadSource for ProgressingPayload {
+    fn progress(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.bytes.subscribe())
+    }
+    fn get(&self, _: infraternal_plugin_ssh::probe::Architecture) -> Operation<'_, PathBuf> {
+        Box::pin(async move {
+            use tokio::io::AsyncReadExt;
+            let mut reader = self.read.lock().await;
+            for count in 1..=10 {
+                let mut byte = [0];
+                reader.read_exact(&mut byte).await.unwrap();
+                assert_eq!(byte, [42]);
+                self.bytes.send_replace(count);
+            }
+            Err(
+                Failure::install("the progressing acquisition reached its final verification.")
+                    .at(InstallStep::GetArm64Binary),
+            )
+        })
+    }
+}
+
+/// Neither a 60-second acquisition nor a 180-second attempt may cut off real byte progress.
+#[tokio::test(start_paused = true)]
+async fn acquisition_progress_outlives_both_whole_transfer_clocks() {
+    use tokio::io::AsyncWriteExt;
+    let (mut remote, local) = tokio::io::duplex(64);
+    let sending = tokio::spawn(async move {
+        for _ in 0..10 {
+            // sleep: release each actual acquisition byte after advancing virtual time.
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            if remote.write_all(&[42]).await.is_err() {
+                return;
+            }
+        }
+    });
+    let source = ProgressingPayload {
+        read: tokio::sync::Mutex::new(local),
+        bytes: tokio::sync::watch::channel(0).0,
+    };
+    let bootstrap = Bootstrap::new(
+        Arc::new(Session(AtomicUsize::new(0))),
+        Arc::new(ReadyBackend),
+        BinaryPaths {
+            x86_64: "unused".into(),
+            aarch64: "unused".into(),
+        },
+    )
+    .with_payload_source(Arc::new(source));
+    let batch = bootstrap
+        .start(
+            "owner".into(),
+            vec![Target {
+                id: "host".into(),
+                address: TargetAddress::Manual("user@fixture".into()),
+                credential: None,
+                mode: InstallMode::Rootless,
+                root_consent: false,
+            }],
+            None,
+        )
+        .unwrap();
+    let mut changed = batch.subscribe();
+    loop {
+        if let Some(failed) = batch
+            .events(0)
+            .1
+            .iter()
+            .find(|event| event.step == Step::Failed)
+        {
+            assert_eq!(
+                failed.failure.as_ref().unwrap().message,
+                "the progressing acquisition reached its final verification."
+            );
+            break;
+        }
+        changed.changed().await.unwrap();
+    }
+    sending.await.unwrap();
+}
 #[tokio::test(start_paused = true)]
 async fn stalled_download_retains_the_named_step_before_the_attempt_deadline() {
     let bootstrap = Bootstrap::new(
