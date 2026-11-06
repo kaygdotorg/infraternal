@@ -217,6 +217,7 @@ pub async fn ensure(
     }
     // Only the system manager reaches this launch path (`root_login_manager`,
     // D354): there is no `su` fallback for root logins any more.
+    let bound = runtime_socket(root, &name, &endpoint, user)?;
     let mut command = crate::sessions::isolated(Path::new("systemd-run"));
     command
         .args(
@@ -240,25 +241,17 @@ pub async fn ensure(
         command
             .arg("-p")
             .arg(format!("UtmpIdentifier={record}"))
-            .args(["-p", "UtmpMode=user", "-p", "StandardInput=null"].as_slice())
+            .args(["-p", "UtmpMode=user"].as_slice())
             .arg("-p")
             .arg(format!(
                 "TTYPath=/dev/{}",
                 crate::login_records::line(person, &record)
             ));
     }
+    // No RuntimeDirectory=: systemd would give that directory to the
+    // account, which could then swap the login socket (J295 P1).
     command
-        .arg("-p")
-        .arg(format!("RuntimeDirectory={name}"))
-        .args(
-            [
-                "-p",
-                "RuntimeDirectoryMode=0700",
-                "-p",
-                "KillMode=control-group",
-            ]
-            .as_slice(),
-        )
+        .args(["-p", "KillMode=control-group"].as_slice())
         .arg("-p")
         .arg(format!("WorkingDirectory={}", user.dir.display()))
         .arg(exe)
@@ -268,6 +261,8 @@ pub async fn ensure(
                 "--login-worker",
                 "--login-ready-fd",
                 "1",
+                "--login-listen-fd",
+                "0",
                 "--session",
                 &person.simple().to_string(),
                 "--uid",
@@ -277,7 +272,8 @@ pub async fn ensure(
             .as_slice(),
         )
         .arg(&endpoint)
-        .stdin(Stdio::null())
+        // `--pipe` hands this root-created socket to the worker as its stdin.
+        .stdin(Stdio::from(bound))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
@@ -326,6 +322,87 @@ pub async fn ensure(
     // recorded too, before this open returns (#355).
     remember_scope(root, &name, &endpoint, person, user.uid.as_raw()).await?;
     Ok(adopted)
+}
+
+/// Creates login `name`'s runtime directory and socket as root, for the worker
+/// to serve: the directory root-owned and 0755, the socket bound at
+/// `endpoint` but not listening (the worker listens, so peers still see its
+/// credentials), and owned by the account at 0600 so only root and the
+/// account connect. The account can use the socket but can neither replace it
+/// nor its directory, so no open can be steered to a decoy (J291, J295 P1,
+/// #355). A leftover account-owned directory (an older unit's
+/// `RuntimeDirectory=`) and stale sockets are replaced. Called under the
+/// unit's lock, so no other launch races it.
+fn runtime_socket(
+    root: &Path,
+    name: &str,
+    endpoint: &Path,
+    user: &User,
+) -> io::Result<std::os::fd::OwnedFd> {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
+    use std::os::{
+        fd::AsRawFd as _,
+        unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _},
+    };
+    let directory = root.join(name);
+    match std::fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == 0 => {}
+        // Not ours (an older unit's account-owned directory, or not a
+        // directory): remove it; this never follows a symlink.
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&directory)?,
+        Ok(_) => std::fs::remove_file(&directory)?,
+        Err(error) => return Err(error),
+    }
+    match std::fs::DirBuilder::new().mode(0o755).create(&directory) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        result => result?,
+    }
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))?;
+    for stale in [endpoint.to_owned(), endpoint.with_extension("stop")] {
+        match std::fs::remove_file(stale) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    let bound = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .map_err(io::Error::from)?;
+    bind(
+        bound.as_raw_fd(),
+        &UnixAddr::new(endpoint).map_err(io::Error::from)?,
+    )
+    .map_err(io::Error::from)?;
+    nix::unistd::chown(endpoint, Some(user.uid), Some(user.gid)).map_err(io::Error::from)?;
+    std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o600))?;
+    Ok(bound)
+}
+
+/// Whether login `unit` still has a runtime directory that its account owns:
+/// an `su` login from before D354, or a unit launched with
+/// `RuntimeDirectory=`. Its processes cannot be shown gone without a unit or
+/// a recorded scope. A root-owned directory is the agent's own, not evidence.
+fn account_owned_runtime(root: &Path, unit: &str) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::symlink_metadata(root.join(unit)).is_ok_and(|metadata| metadata.uid() != 0)
+}
+
+/// Removes login `unit`'s root-owned runtime directory once the login is
+/// shown gone. An account-owned one is left alone (fail-closed path).
+fn remove_runtime(root: &Path, unit: &str) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let directory = root.join(unit);
+    match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() && metadata.uid() == 0 => {
+            std::fs::remove_dir_all(directory)
+        }
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// The manager a root revocation stops logins under. A launch's `Detached`
@@ -1369,12 +1446,12 @@ async fn stop_system_login(root: &Path, uid: u32, unit: &str) -> io::Result<()> 
             groups.push(group);
         }
     } else if recorded.is_empty() {
-        if root.join(unit).exists() {
+        if account_owned_runtime(root, unit) {
             return Err(io::Error::other(
                 "host login has no unit and no recorded scope; cannot prove it ended",
             ));
         }
-        return Ok(());
+        return remove_runtime(root, unit);
     }
     groups.sort();
     groups.dedup();
@@ -1429,9 +1506,10 @@ async fn stop_system_login(root: &Path, uid: u32, unit: &str) -> io::Result<()> 
         return Err(io::Error::other("host login unit still running after stop"));
     }
     match std::fs::remove_file(scope_record(root, unit)) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
     }
+    remove_runtime(root, unit)
 }
 
 async fn acquire(root: &Path, name: &str) -> io::Result<nix::fcntl::Flock<std::fs::File>> {

@@ -615,6 +615,8 @@ fn session_shim_action() -> ActionDefinition {
                 #[cfg(feature = "plugin-agent")]
                 ("login_ready_fd".to_owned(), JsonSchema::integer("Internal shell-start confirmation descriptor.")),
                 #[cfg(feature = "plugin-agent")]
+                ("login_listen_fd".to_owned(), JsonSchema::integer("Internal root-created login socket descriptor.")),
+                #[cfg(feature = "plugin-agent")]
                 ("login_master_fd".to_owned(), JsonSchema::integer("Internal prestarted terminal master descriptor.")),
                 #[cfg(feature = "plugin-agent")]
                 ("login_lease_fd".to_owned(), JsonSchema::integer("Internal authenticated terminal lease descriptor.")),
@@ -895,6 +897,8 @@ mod tests {
     }
 
     #[cfg(feature = "plugin-agent")]
+    /// With the infraternal agent compiled in, the shim accepts every host
+    /// login flag, including the root-created socket descriptor.
     #[test]
     fn enabled_agent_registers_host_login_shim_flags() {
         let registry = registry().expect("enabled agent metadata");
@@ -906,6 +910,7 @@ mod tests {
             "login_worker_parent",
             "login_cgroup",
             "login_ready_fd",
+            "login_listen_fd",
             "login_master_fd",
             "login_lease_fd",
             "login_socket",
@@ -920,6 +925,7 @@ mod tests {
     }
 
     #[cfg(not(feature = "plugin-agent"))]
+    /// Without the infraternal agent, none of the host login flags exist.
     #[test]
     fn compiled_out_agent_removes_host_login_shim_flags() {
         let registry = registry().expect("core metadata");
@@ -933,6 +939,7 @@ mod tests {
             "login_worker_parent",
             "login_cgroup",
             "login_ready_fd",
+            "login_listen_fd",
             "login_master_fd",
             "login_lease_fd",
             "login_socket",
