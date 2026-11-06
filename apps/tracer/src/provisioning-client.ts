@@ -20,6 +20,7 @@
 import { isCanonicalUuid } from "./identifiers";
 
 export type BootstrapStep = "check" | "install" | "facts" | "connect" | "done" | "failed";
+/** Public failure categories from the server (contracts/ssh-bootstrap.md); the page for each lives in addhost/model.ts. */
 export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "no_account";
 export type BootstrapMode = "rootless" | "root";
 

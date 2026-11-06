@@ -67,6 +67,7 @@ function installSentence(failure: FailureDetail): string {
   if (failure.failed_step === "connect") return "Connecting to the host failed.";
   return [failure.message, ...failure.log_tail.filter((line) => !BOUNDARY_NOTES.some((note) => line.startsWith(note)))].join(" ");
 }
+/** Details lines that only mark where a command stopped; the page never repeats them. */
 const BOUNDARY_NOTES = ["Remote command returned", "The remote setup command returned"];
 
 /** The progress row's line for an install failure, by the step that stopped. */

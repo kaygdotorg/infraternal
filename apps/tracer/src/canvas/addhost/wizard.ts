@@ -803,6 +803,7 @@ export class Wizard {
       <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(text)}</pre></details>` : "";
   }
 
+  /** The page for one failed host: what happened, what to do, Details, and the one action that fixes it. */
   private renderFailure(page: HTMLElement): void {
     const job = this.fixing!;
     const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
