@@ -108,6 +108,27 @@ impl UnprovableLogin {
     }
 }
 
+/// A root open refused because the host's system manager did not answer its
+/// probe in time, twice. The host has systemd but is too busy just now; the
+/// open may be retried. Typed, so the daemon names it without matching text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProbeTimeout;
+
+impl std::fmt::Display for ProbeTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the host's service manager did not answer; host login not opened")
+    }
+}
+
+impl std::error::Error for ProbeTimeout {}
+
+impl ProbeTimeout {
+    /// Whether `error` is this refusal.
+    pub(crate) fn of(error: &io::Error) -> bool {
+        matches!(error.get_ref(), Some(inner) if inner.is::<Self>())
+    }
+}
+
 /// Resolve account names on the host, where its account database is authoritative.
 /// # Errors
 /// Rootless hosts refuse account switching and absent fallback identities.
@@ -492,10 +513,7 @@ where
     match probe().await {
         Some(Manager::System) => Ok(Manager::System),
         Some(_) => Err(NoSystemd.denied()),
-        None => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "the host's service manager did not answer; host login not opened",
-        )),
+        None => Err(io::Error::new(io::ErrorKind::TimedOut, ProbeTimeout)),
     }
 }
 
@@ -1656,10 +1674,13 @@ mod tests {
     /// the manager is still silent (J291 P1, #355).
     #[tokio::test]
     async fn a_timed_out_manager_probe_never_opens_a_fallback_login() {
-        let silent = root_login_manager(Manager::Detached, || async { None }).await;
-        assert_eq!(
-            silent.map_err(|error| error.kind()).err(),
-            Some(io::ErrorKind::TimedOut)
+        let silent = root_login_manager(Manager::Detached, || async { None })
+            .await
+            .unwrap_err();
+        assert_eq!(silent.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            ProbeTimeout::of(&silent),
+            "a silent probe has its own reason: {silent}"
         );
         let answered = root_login_manager(Manager::Detached, || async { Some(Manager::System) })
             .await

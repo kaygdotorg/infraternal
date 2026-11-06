@@ -285,6 +285,9 @@ fn open_refusal(error: &io::Error) -> infraternal_plugin_api::admission::OpenRef
     if crate::logins::NoSystemd::of(error) {
         return OpenRefusal::NoSystemd;
     }
+    if crate::logins::ProbeTimeout::of(error) {
+        return OpenRefusal::ProbeTimeout;
+    }
     match (RootlessRefusal::of(error), error.kind()) {
         (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin,
         (Some(RootlessRefusal::OtherAccount), _) => OpenRefusal::Permission,
@@ -315,6 +318,19 @@ mod refusal_tests {
         assert_eq!(kind(io::ErrorKind::PermissionDenied), OpenRefusal::Invalid);
         assert_eq!(
             kind(io::ErrorKind::TimedOut),
+            OpenRefusal::ResourceUnavailable
+        );
+    }
+
+    /// A root open whose manager probe stayed silent names its own reason, so
+    /// the browser can say "busy, try again" rather than a generic failure.
+    #[test]
+    fn a_silent_manager_probe_names_its_own_reason() {
+        let refused = io::Error::new(io::ErrorKind::TimedOut, crate::logins::ProbeTimeout);
+        assert_eq!(open_refusal(&refused), OpenRefusal::ProbeTimeout);
+        // A plain timeout stays the generic, retryable reason.
+        assert_eq!(
+            open_refusal(&io::Error::from(io::ErrorKind::TimedOut)),
             OpenRefusal::ResourceUnavailable
         );
     }
