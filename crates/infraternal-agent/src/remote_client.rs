@@ -10,7 +10,7 @@ use crate::{
 };
 use infraternal_protocol::encode_frame_into;
 use openssl::x509::X509;
-use std::{io, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, time::Duration};
 use tokio::sync::Mutex;
 
 /// Local enrolled host credentials; no private material leaves the host.
@@ -48,7 +48,7 @@ fn trace_attempt<T>(phase: &'static str, result: io::Result<T>) -> io::Result<T>
 /// # Errors
 /// Refuses local uid mismatch or invalid credentials before contacting the server.
 pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Result<()> {
-    run_inner(
+    Box::pin(run_inner(
         identity,
         state,
         None,
@@ -57,7 +57,7 @@ pub async fn run(identity: &RemoteIdentity, state: Option<PathBuf>) -> io::Resul
         None,
         #[cfg(any(test, feature = "native-streams"))]
         None,
-    )
+    ))
     .await
 }
 
@@ -81,19 +81,56 @@ pub async fn run_with_installation(
     publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
     installation: Option<&crate::plugins::Installation>,
 ) -> io::Result<()> {
-    let renewal =
-        crate::remote_renewal::RenewalIdentity::new(&identity.identity, &identity.roots, publisher);
-    run_inner(
-        identity,
-        state,
-        Some(&renewal),
-        installation,
-        #[cfg(any(test, feature = "native-streams"))]
-        None,
-        #[cfg(any(test, feature = "native-streams"))]
-        None,
-    )
-    .await
+    run_with_publishers(identity, state, publisher, None, installation).await
+}
+
+/// Run with durable support for overlapping Ed25519 identity-key rotation.
+/// # Errors
+/// Refuses unsafe local identity, invalid rotation state or failed transport configuration.
+pub async fn run_with_identity_rotation(
+    identity: &RemoteIdentity,
+    state: Option<PathBuf>,
+    publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
+    rotation: std::sync::Arc<dyn infraternal_plugin_remote::identity_rotation::RotationPublisher>,
+    installation: Option<&crate::plugins::Installation>,
+) -> io::Result<()> {
+    run_with_publishers(identity, state, publisher, Some(rotation), installation).await
+}
+
+/// The boxed client future. Boxing keeps the large connection state off the caller's stack.
+type ClientFuture<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+
+/// Keep public callers' stack futures small; this owns the long-lived reconnect state machine.
+fn run_with_publishers<'a>(
+    identity: &'a RemoteIdentity,
+    state: Option<PathBuf>,
+    publisher: std::sync::Arc<dyn crate::remote_renewal::CertificatePublisher>,
+    rotation: Option<
+        std::sync::Arc<dyn infraternal_plugin_remote::identity_rotation::RotationPublisher>,
+    >,
+    installation: Option<&'a crate::plugins::Installation>,
+) -> ClientFuture<'a> {
+    Box::pin(async move {
+        let mut renewal = crate::remote_renewal::RenewalIdentity::new(
+            &identity.identity,
+            &identity.roots,
+            publisher,
+        );
+        if let Some(rotation) = rotation {
+            renewal.enable_identity_rotation(rotation)?;
+        }
+        Box::pin(run_inner(
+            identity,
+            state,
+            Some(&renewal),
+            installation,
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
+        ))
+        .await
+    })
 }
 
 /// Run with trusted compiled node providers, retaining prepared identities across reconnect.
@@ -105,14 +142,14 @@ pub async fn run_with_registry(
     state: Option<PathBuf>,
     registry: crate::plugins::SharedRegistry,
 ) -> io::Result<()> {
-    run_inner(
+    Box::pin(run_inner(
         identity,
         state,
         None,
         None,
         Some(crate::plugin_control::Registry::from_shared(registry)),
         None,
-    )
+    ))
     .await
 }
 
@@ -128,14 +165,14 @@ pub async fn run_with_registry_observed(
     registry: crate::plugins::SharedRegistry,
     observer: impl Fn(&'static str, io::ErrorKind) + Send + Sync,
 ) -> io::Result<()> {
-    run_inner(
+    Box::pin(run_inner(
         identity,
         state,
         None,
         None,
         Some(crate::plugin_control::Registry::from_shared(registry)),
         Some(&observer),
-    )
+    ))
     .await
 }
 
@@ -204,6 +241,7 @@ async fn ensure_service(
         .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
 }
 
+/// Run the remote client: check or recover the certificate, then serve the server path until it ends.
 async fn run_inner(
     identity: &RemoteIdentity,
     state: Option<PathBuf>,
@@ -223,7 +261,8 @@ async fn run_inner(
     // credentials temporarily prevent another connection attempt.
     #[cfg(target_os = "linux")]
     let lifetime = Mutex::new(None::<std::sync::Arc<std::fs::File>>);
-    supervisor::run(|connected| {
+    // The retry loop owns large QUIC/TLS state; keep that frame off the caller's stack.
+    Box::pin(supervisor::run(|connected| {
         let service = &service;
         #[cfg(target_os = "linux")]
         let lifetime = &lifetime;
@@ -231,14 +270,23 @@ async fn run_inner(
         #[cfg(any(test, feature = "native-streams"))]
         let supplied = supplied.clone();
         async move {
-            // Invalid enrollment creates no local state or plugin work. A clock or
-            // credential failure still leaves the retry owner alive for recovery.
+            // Host time is only a hint: try recovery early when it calls a leaf
+            // expired, but still let ordinary mTLS and the server's clock decide.
             if let Some(renewal) = renewal {
                 let current = trace_attempt("renewal-current", renewal.current())?;
-                trace_attempt(
+                if let Err(error) = trace_attempt(
                     "certificate-valid",
                     crate::remote_renewal::require_current(&current),
-                )?;
+                ) {
+                    if error.kind() != io::ErrorKind::PermissionDenied {
+                        return Err(error);
+                    }
+                    // A denial may mean the server clock still considers this
+                    // leaf current, so a refused recovery never blocks mTLS.
+                    if let Some(endpoint) = identity.endpoint {
+                        let _ = renewal.recover(endpoint, &identity.server_name).await;
+                    }
+                }
             } else {
                 trace_attempt(
                     "certificate-valid",
@@ -267,28 +315,43 @@ async fn run_inner(
             if let Some(observer) = observer {
                 return trace_attempt(
                     "server-path",
-                    server_path::run_observed(
+                    Box::pin(server_path::run_observed(
                         identity,
                         state,
                         renewal,
                         plugins,
                         connected,
                         Some(observer),
-                    )
+                    ))
                     .await,
                 );
             }
-            trace_attempt(
+            let result = trace_attempt(
                 "server-path",
-                server_path::run(identity, state, renewal, plugins, connected).await,
-            )
+                Box::pin(server_path::run(
+                    identity, state, renewal, plugins, connected,
+                ))
+                .await,
+            );
+            // A host clock behind server time can misclassify an expired leaf as
+            // current. Try recovery only after an authentication failure; network
+            // failures keep the existing retry path and do not trigger signer work.
+            if result
+                .as_ref()
+                .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+                && let Some(renewal) = renewal
+                && let Some(endpoint) = identity.endpoint
+            {
+                let _ = renewal.recover(endpoint, &identity.server_name).await;
+            }
+            result
         }
-    })
+    }))
     .await
 }
 
-// Keep the race in its own future. Its losing socket is dropped when this
-// returns, rather than retained throughout the winning control dispatch.
+/// Keep the race in its own future. Its losing socket is dropped when this
+/// returns, rather than retained throughout the winning control dispatch.
 async fn dial_preferred(
     endpoint: &quinn::Endpoint,
     identity: &RemoteIdentity,
@@ -309,12 +372,27 @@ async fn dial_preferred(
         biased;
         result = &mut quic => match result {
             Ok(connection) => Ok(Connected::Quic(connection)),
-            Err(_) => fallback.await.map(Connected::Tcp),
+            Err(quic_error) => fallback
+                .await
+                .map(Connected::Tcp)
+                .map_err(|fallback_error| prefer_auth_error(quic_error, fallback_error)),
         },
         result = &mut fallback => match result {
             Ok(connection) => Ok(Connected::Tcp(connection)),
-            Err(_) => quic.await.map(Connected::Quic),
+            Err(fallback_error) => quic
+                .await
+                .map(Connected::Quic)
+                .map_err(|quic_error| prefer_auth_error(fallback_error, quic_error)),
         },
+    }
+}
+
+/// Of two dial errors, report the server's refusal of this identity if either was one, so recovery can start.
+fn prefer_auth_error(first: io::Error, second: io::Error) -> io::Error {
+    if first.kind() == io::ErrorKind::PermissionDenied {
+        first
+    } else {
+        second
     }
 }
 
@@ -405,6 +483,7 @@ impl Channel for PrefixedControl {
     }
 }
 
+/// Dial the server over QUIC with this host's identity.
 async fn quic_connect(
     endpoint: &quinn::Endpoint,
     identity: &RemoteIdentity,
@@ -420,13 +499,19 @@ async fn quic_connect(
     )
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
-    .map_err(io::Error::other)
+    .map_err(|error| match error {
+        quinn::ConnectionError::TransportError(_) => {
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        }
+        error => io::Error::other(error),
+    })
 }
 
-fn client_greeting(renewal: bool) -> infraternal_protocol::Frame<'static> {
+/// The Hello this agent sends, offering renewal and identity rotation when available.
+fn client_greeting(renewal: bool, identity_rotation: bool) -> infraternal_protocol::Frame<'static> {
     infraternal_protocol::Frame::Hello {
         version: 1,
-        caps: daemon::hello_capabilities(true, renewal),
+        caps: daemon::hello_capabilities(true, renewal, identity_rotation),
         client_info: "infraternal agent",
     }
 }
@@ -437,6 +522,7 @@ struct ProvedControl {
     receive: Receive,
 }
 
+/// Serve a server-path session over an established QUIC connection.
 async fn quic_session_on(
     connection: quinn::Connection,
     identity: &RemoteIdentity,
@@ -464,7 +550,10 @@ async fn quic_session_on(
         // Opening a QUIC stream emits no packet until there is data. Send the
         // greeting once, then let common dispatch consume the server's greeting.
         let mut tx = crate::transport::Transmit::default();
-        let mut greeting = client_greeting(renewal.is_some());
+        let mut greeting = client_greeting(
+            renewal.is_some(),
+            renewal.is_some_and(crate::remote_renewal::RenewalIdentity::supports_identity_rotation),
+        );
         #[cfg(not(any(test, feature = "native-streams")))]
         let native_caps = 0;
         #[cfg(any(test, feature = "native-streams"))]

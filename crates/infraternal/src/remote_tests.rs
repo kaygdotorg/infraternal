@@ -134,6 +134,7 @@ async fn uid_and_privilege_mismatch_fails_before_key_generation() {
     }
 }
 
+/// Renewal publication replaces only the certificate and keeps the private metadata.
 #[test]
 fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata() {
     use infraternal_agent::remote_renewal::CertificatePublisher;
@@ -150,7 +151,10 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
         https_der: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
+    let mut expected = serde_json::to_value(&stored).unwrap();
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
     let key = PKey::generate_ed25519().unwrap();
     let mut certificate = X509::builder().unwrap();
@@ -175,15 +179,11 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
         .unwrap();
     certificate.sign(&key, MessageDigest::null()).unwrap();
     let certificate = certificate.build();
-    let publisher = IdentityPublisher {
-        data: data.clone(),
-        stored,
-    };
+    let publisher = IdentityPublisher { data: data.clone() };
     publisher.publish(&certificate).unwrap();
     let path = data.join("identity.json");
     let current: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let mut expected = serde_json::to_value(&publisher.stored).unwrap();
     expected["certificate_der"] = B64.encode(certificate.to_der().unwrap()).into();
     assert!(
         current == expected,
@@ -205,6 +205,7 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
     assert_eq!(std::fs::read(target).unwrap(), b"unchanged");
 }
 
+/// A legacy port-7443 identity migrates atomically to its HTTPS origin.
 #[test]
 fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
     let directory = Directory::new();
@@ -222,6 +223,8 @@ fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let mut old_document = serde_json::to_value(&legacy).unwrap();
     let old_object = old_document.as_object_mut().unwrap();
@@ -276,6 +279,7 @@ async fn public_origin_preflight_fails_before_preparing_a_host_key() {
     );
 }
 
+/// Re-enrolling through the public origin keeps the legacy D168 server name.
 #[test]
 fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
     let directory = Directory::new();
@@ -295,6 +299,8 @@ fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
     let invitation = JoinInvitation {
@@ -449,6 +455,8 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     publish(&data, &bytes).unwrap();
@@ -498,6 +506,69 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
     assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
 }
 
+/// Candidate identity documents are written through zeroizing buffers, with no plain JSON copy in between.
+#[test]
+fn candidate_identity_buffers_are_zeroizing_without_an_intermediate_json_vec() {
+    fn assert_zeroizing_string(_: &Zeroizing<String>) {}
+    fn assert_zeroizing_bytes(_: &Zeroizing<Vec<u8>>) {}
+
+    let key = PKey::generate_ed25519().unwrap();
+    let pkcs8 = Zeroizing::new(key.private_key_to_pkcs8().unwrap());
+    let encoded = encode_candidate_key(&pkcs8);
+    assert_zeroizing_string(&encoded);
+
+    let decoded = decode_candidate_key(&encoded).unwrap();
+    assert_zeroizing_bytes(&decoded);
+    assert_eq!(decoded.as_slice(), pkcs8.as_slice());
+
+    let stored = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: None,
+        server_name: "localhost".into(),
+        public_origin: None,
+        https_der: None,
+        https_system_roots: false,
+        ca_der: "public issuer".into(),
+        certificate_der: "public certificate".into(),
+        key_der: "active identity".into(),
+        identity_rotation: Some(StoredRotation {
+            challenge: infraternal_plugin_remote::identity_rotation::Challenge {
+                host_id: uuid::Uuid::new_v4(),
+                operation_id: uuid::Uuid::new_v4(),
+                sequence: 1,
+                challenge: [1; 32],
+                predecessor_fingerprint: [2; 32],
+                issuer_fingerprint: [3; 32],
+                issuer_generation: 1,
+            },
+            candidate_key_der: encoded.clone(),
+            certificate_der: None,
+        }),
+        completed_identity_rotation: None,
+    };
+    let document = serialize_identity_document(&stored).unwrap();
+    assert_zeroizing_bytes(&document);
+    let directory = Directory::new();
+    let identity_path = directory.0.join("identity.json");
+    std::fs::write(&identity_path, document.as_slice()).unwrap();
+    std::fs::set_permissions(
+        &identity_path,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
+    let (restored, snapshot) = load_snapshot(&directory.0).unwrap();
+    assert_zeroizing_bytes(&snapshot.bytes);
+    assert_eq!(
+        restored
+            .identity_rotation
+            .unwrap()
+            .candidate_key_der
+            .as_str(),
+        encoded.as_str(),
+    );
+}
+
 /// Break-it (#230): the host id alone does not name a host. Another server
 /// (a staging copy of the database, or any server that issues the same id)
 /// must not take over an identity enrolled with this one: its invitation has
@@ -523,6 +594,8 @@ async fn join_refuses_the_same_host_id_from_another_server() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     publish(&data, &bytes).unwrap();
@@ -580,6 +653,8 @@ async fn join_re_enrolls_for_a_moved_server_but_not_a_renamed_one() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     let bytes = serde_json::to_vec(&stored).unwrap();
     publish(&data, &bytes).unwrap();
@@ -639,6 +714,8 @@ fn replace_aborts_when_the_identity_changed_since_it_was_read() {
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
         key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
     };
     publish(&data, &serde_json::to_vec(&stored).unwrap()).unwrap();
     let (_, snapshot) = load_snapshot(&data).unwrap();

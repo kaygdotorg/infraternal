@@ -95,5 +95,9 @@ pub mod settings;
 #[cfg(feature = "server")]
 pub mod node_coordination;
 
+/// The coordinator's durable `WireGuard` key rotation driver (D166, #285).
+#[cfg(feature = "server")]
+mod rotation;
+
 #[cfg(feature = "server")]
 pub mod presence;

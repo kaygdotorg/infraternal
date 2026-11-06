@@ -85,6 +85,7 @@ pub const ACTIONS: &[ActionDef] = &[
         ],
     ),
 ];
+/// The control actions an infraternal agent registers for its Mesh node.
 const CONTROL_ACTIONS: &[ActionDef] = &[
     action(
         "mesh.identity",
@@ -96,6 +97,30 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
             "The authenticated coordinator queries the enabled node identity.",
             "An explicitly stopped component stays off.",
         ],
+    ),
+    action(
+        "mesh.rotation.prepare",
+        "Prepare a local Mesh key rotation",
+        r#"{"type":"object","properties":{"operation_id":{"type":"string","minLength":36,"maxLength":36},"sequence":{"type":"integer","minimum":1}},"required":["operation_id","sequence"],"additionalProperties":false}"#,
+        r#"{"type":"object","properties":{"public_key":{"type":"array","items":{"type":"integer","minimum":0,"maximum":255},"minItems":32,"maxItems":32}},"required":["public_key"],"additionalProperties":false}"#,
+        Effect::Write,
+        &["Persist a candidate private key locally before returning its public key."],
+    ),
+    action(
+        "mesh.rotation.commit",
+        "Commit a prepared local Mesh key rotation",
+        r#"{"type":"object","properties":{"operation_id":{"type":"string","minLength":36,"maxLength":36},"sequence":{"type":"integer","minimum":1}},"required":["operation_id","sequence"],"additionalProperties":false}"#,
+        r#"{"type":"object","properties":{"public_key":{"type":"array","items":{"type":"integer","minimum":0,"maximum":255},"minItems":32,"maxItems":32}},"required":["public_key"],"additionalProperties":false}"#,
+        Effect::Write,
+        &["Switch the local WireGuard identity to the acknowledged candidate key."],
+    ),
+    action(
+        "mesh.rotation.finish",
+        "Finish a completed local Mesh key rotation",
+        r#"{"type":"object","properties":{"operation_id":{"type":"string","minLength":36,"maxLength":36},"sequence":{"type":"integer","minimum":1}},"required":["operation_id","sequence"],"additionalProperties":false}"#,
+        "Empty",
+        Effect::Write,
+        &["Erase the retained predecessor after the coordinator retires the overlap."],
     ),
     action(
         "mesh.configure",
@@ -330,6 +355,15 @@ struct IdentityProbe {
     #[cfg(feature = "mesh-dns-spike")]
     #[serde(default)]
     dns_names: bool,
+    #[serde(default)]
+    key_rotation: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Durable server operation key and epoch for one local `WireGuard` key change.
+pub struct RotationOperation {
+    operation_id: String,
+    sequence: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -371,7 +405,11 @@ pub enum Request {
         compact_access: bool,
         #[cfg(feature = "mesh-dns-spike")]
         dns_names: bool,
+        key_rotation: bool,
     },
+    RotationPrepare(RotationOperation),
+    RotationCommit(RotationOperation),
+    RotationFinish(RotationOperation),
     Up,
     Down,
     Status,
@@ -389,8 +427,12 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 compact_access: probe.compact_access,
                 #[cfg(feature = "mesh-dns-spike")]
                 dns_names: probe.dns_names,
+                key_rotation: probe.key_rotation,
             })
         }
+        "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
+        "mesh.rotation.commit" => Ok(Request::RotationCommit(parse(input)?)),
+        "mesh.rotation.finish" => Ok(Request::RotationFinish(parse(input)?)),
         "mesh.up" | "mesh.down" | "mesh.status" => {
             let _: Empty = parse(input)?;
             Ok(match action {
@@ -405,21 +447,58 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
     }
 }
 // Advertise extensions only after an explicit probe; ordinary callers receive the legacy shape.
+/// One key rotation step on this node's own interface key (#285, D166).
+fn rotation_response(node: &mut Node, request: Request) -> Result<serde_json::Value, PluginError> {
+    Ok(match request {
+        Request::RotationPrepare(operation) => json!({
+            "public_key": node
+                .prepare_rotation(&operation.operation_id, operation.sequence)
+                .map_err(|_| PluginError::Rejected)?
+        }),
+        Request::RotationCommit(operation) => json!({
+            "public_key": node
+                .commit_rotation(&operation.operation_id, operation.sequence)
+                .map_err(|_| PluginError::Rejected)?
+                .public_key
+        }),
+        Request::RotationFinish(operation) => {
+            node.finish_rotation(&operation.operation_id, operation.sequence)
+                .map_err(|_| PluginError::Rejected)?;
+            json!({})
+        }
+        _ => return Err(PluginError::Rejected),
+    })
+}
+/// The identity reply, offering each optional capability only when both the node and the requester support it.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
     requested_compact_access: bool,
     requested_dns_names: bool,
-) -> Option<crate::dataplane::Identity> {
+    requested_key_rotation: bool,
+) -> Option<IdentityResponse> {
     #[cfg(not(feature = "mesh-dns-spike"))]
     let _ = requested_dns_names;
-    identity.map(|mut identity| {
-        identity.compact_access &= requested_compact_access;
+    identity.map(|identity| IdentityResponse {
+        public_key: identity.public_key,
+        port: identity.port,
+        compact_access: identity.compact_access && requested_compact_access,
+        key_rotation: identity.key_rotation && requested_key_rotation,
         #[cfg(feature = "mesh-dns-spike")]
-        {
-            identity.dns_names &= requested_dns_names;
-        }
-        identity
+        dns_names: identity.dns_names && requested_dns_names,
     })
+}
+/// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
+#[derive(serde::Serialize)]
+struct IdentityResponse {
+    public_key: crate::policy::model::PublicKey,
+    port: u16,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    compact_access: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    key_rotation: bool,
+    #[cfg(feature = "mesh-dns-spike")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    dns_names: bool,
 }
 
 impl AgentPlugin for MeshNodePlugin {
@@ -482,6 +561,7 @@ impl AgentPlugin for MeshNodePlugin {
                     compact_access,
                     #[cfg(feature = "mesh-dns-spike")]
                     dns_names,
+                    key_rotation,
                 } => {
                     #[cfg(feature = "mesh-dns-spike")]
                     let requested_dns_names = dns_names;
@@ -491,6 +571,7 @@ impl AgentPlugin for MeshNodePlugin {
                         node.ensure().map_err(|_| PluginError::Rejected)?,
                         compact_access,
                         requested_dns_names,
+                        key_rotation,
                     ))
                 }
                 Request::Up => {
@@ -498,8 +579,12 @@ impl AgentPlugin for MeshNodePlugin {
                         Some(node.up().map_err(|_| PluginError::Rejected)?),
                         false,
                         false,
+                        false,
                     ))
                 }
+                request @ (Request::RotationPrepare(_)
+                | Request::RotationCommit(_)
+                | Request::RotationFinish(_)) => rotation_response(node, request)?,
                 Request::Down => {
                     node.down().map_err(|_| PluginError::Rejected)?;
                     json!({"state":"Off","version":null})
@@ -549,7 +634,10 @@ impl AgentPlugin for MeshNodePlugin {
             .then(|| node.config().cloned());
             (result, observed_config)
         };
-        if matches!(action, "mesh.up" | "mesh.down") {
+        if matches!(
+            action,
+            "mesh.up" | "mesh.down" | "mesh.rotation.commit" | "mesh.rotation.finish"
+        ) {
             self.changed.store(true, Ordering::Release);
         }
         if let Some(config) = observed_config
@@ -641,13 +729,14 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
     }
 }
 
+/// Node action checks that need a Linux kernel or network namespace.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
-    // Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
+    /// Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
     fn applied_server_route_and_observed_link_survive_only_explicit_component_up() {
         use crate::{
             dataplane::{DefaultPolicy, Peer, PeerPolicy},
@@ -690,6 +779,8 @@ mod tests {
                 PeerPolicy {
                     peer: Peer {
                         key,
+                        previous_key: None,
+                        previous_active: false,
                         addresses: Addresses {
                             ipv4: "10.254.0.2".parse().expect("IPv4"),
                             ipv6: "fd01::2".parse().expect("IPv6"),
@@ -764,6 +855,7 @@ mod tests {
         plugin.call("mesh.down", b"{}").expect("cleanup");
     }
 
+    /// `mesh.peers` reads its counters from the `GotaTun` engine when that is the selected engine.
     #[test]
     #[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
     fn mesh_peers_action_reads_counters_from_the_selected_gotatun_engine() {
@@ -814,6 +906,8 @@ mod tests {
                 PeerPolicy {
                     peer: Peer {
                         key: peer_key,
+                        previous_key: None,
+                        previous_active: false,
                         addresses: Addresses {
                             ipv4: "10.254.0.1".parse().expect("peer IPv4"),
                             ipv6: "fd01::1".parse().expect("peer IPv6"),
@@ -986,8 +1080,10 @@ mod tests {
     }
 }
 
+/// The identity reply keeps its legacy shape unless a capability is requested.
 #[cfg(all(test, target_os = "linux"))]
 mod identity_upgrade_tests {
+    /// An ordinary identity request gets the reply older coordinators read.
     #[test]
     fn ordinary_identity_reply_retains_the_legacy_shape() {
         let identity = crate::dataplane::Identity {
@@ -996,22 +1092,31 @@ mod identity_upgrade_tests {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: true,
+            key_rotation: true,
         };
         let legacy = serde_json::json!(super::identity_response(
             Some(identity.clone()),
+            false,
             false,
             false
         ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
         assert!(legacy.get("compact_access").is_none());
-        let negotiated =
-            serde_json::json!(super::identity_response(Some(identity.clone()), true, true));
+        let negotiated = serde_json::json!(super::identity_response(
+            Some(identity.clone()),
+            true,
+            true,
+            true
+        ));
         assert_eq!(negotiated["compact_access"], true);
+        assert_eq!(negotiated["key_rotation"], true);
         #[cfg(feature = "mesh-dns-spike")]
         assert_eq!(negotiated["dns_names"], true);
-        let compact_only = serde_json::json!(super::identity_response(Some(identity), true, false));
+        let compact_only =
+            serde_json::json!(super::identity_response(Some(identity), true, false, false));
         assert_eq!(compact_only["compact_access"], true);
+        assert!(compact_only.get("key_rotation").is_none());
         #[cfg(feature = "mesh-dns-spike")]
         assert!(compact_only.get("dns_names").is_none());
     }
@@ -1022,6 +1127,7 @@ mod identity_upgrade_tests {
 mod peer_page_tests {
     #![allow(clippy::expect_used)]
     use super::{Counters, Cursor, peer_page};
+    /// A configuration with `peers` peers, for paging tests.
     fn peer_config(peers: u64) -> crate::dataplane::Config {
         use crate::{
             dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
@@ -1057,6 +1163,8 @@ mod peer_page_tests {
                         PeerPolicy {
                             peer: Peer {
                                 key: PublicKey([byte; 32]),
+                                previous_key: None,
+                                previous_active: false,
                                 addresses: address(id),
                                 endpoint: Some(std::net::SocketAddr::from((
                                     [203, 0, 113, 7],
@@ -1120,13 +1228,17 @@ mod peer_page_tests {
             pages.len()
         );
         assert!(pages.len() > 1);
-        // A full page is as full as a frame allows: one more row would not fit.
+        // A full page stops when the next encoded row would exceed its byte budget.
         let first = serde_json::to_vec(&pages[0]["peers"])
             .expect("encode")
             .len();
+        let next = serde_json::to_vec(&pages[1]["peers"][0])
+            .expect("encode")
+            .len();
+        let budget = infraternal_plugin_api::MAX_ACTION_BYTES - 128;
         assert!(
-            first > infraternal_plugin_api::MAX_ACTION_BYTES - 128 - 200,
-            "{first}"
+            first <= budget && first + next + 1 > budget,
+            "page has {first} bytes and next row has {next} bytes for {budget}-byte budget"
         );
     }
     /// Poll cost at scale, userspace only: every `mesh.peers` page the server's node builds for one poll, its

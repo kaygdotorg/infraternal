@@ -19,6 +19,9 @@ pub struct Identity {
     #[cfg(feature = "mesh-dns-spike")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dns_names: bool,
+    /// This node supports durable automatic key rotation actions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_rotation: bool,
 }
 
 /// Explicit pair rules replace this fallback, so port grants also narrow an open mesh.
@@ -41,6 +44,13 @@ impl Default for DefaultPolicy {
 #[serde(deny_unknown_fields)]
 pub struct Peer {
     pub key: PublicKey,
+    /// Other identity accepted during the coordinator's overlap window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_key: Option<PublicKey>,
+    /// Keep outgoing host routes on `previous_key` until the new local key is active.
+    /// This avoids sending to a candidate identity before its `WireGuard` interface switches.
+    #[serde(default)]
+    pub previous_active: bool,
     pub addresses: Addresses,
     pub endpoint: Option<SocketAddr>,
 }

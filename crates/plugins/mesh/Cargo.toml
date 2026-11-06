@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = ["server"]
-server = ["dep:uuid", "dep:tracing", "dep:url"]
+server = ["dep:uuid", "dep:tracing", "dep:url", "dep:nix"]
 ee = []
 # Diagnostic stage logging is removable and never enabled by a shipping role.
 cutoff-measure = ["nix?/time"]
@@ -43,7 +43,7 @@ sqlx.workspace = true
 tokio.workspace = true
 tracing = { workspace = true, optional = true }
 
-nix = { workspace = true, optional = true, features = ["net", "ioctl"] }
+nix = { workspace = true, optional = true, features = ["net", "ioctl", "time"] }
 # Already in the binary through tokio with these features; used for the seam's
 # raw send socket and its classic BPF packet tap [313].
 socket2 = { version = "0.6", optional = true, features = ["all"] }

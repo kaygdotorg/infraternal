@@ -103,6 +103,89 @@ async fn default_switch_requires_owner_freshness_and_the_preview_revision() {
     .await;
 }
 
+/// The rotation read shows the 7-day default interval and every mesh node.
+#[tokio::test]
+async fn rotation_read_exposes_the_seven_day_interval_and_each_mesh_node() {
+    let (_pool, service, _store, now) = fixture().await;
+    let status = service
+        .execute("owner", "mesh.rotation.get", b"{}", now)
+        .await
+        .unwrap();
+
+    assert_eq!(status["rotation_period_secs"], 7 * 24 * 60 * 60);
+    assert_eq!(status["hosts"].as_array().unwrap().len(), 2);
+    assert!(status["hosts"].as_array().unwrap().iter().all(|host| {
+        let last = host["last_rotation"]
+            .as_str()
+            .and_then(|value| value.parse::<i64>().ok());
+        let next = host["next_rotation"]
+            .as_str()
+            .and_then(|value| value.parse::<i64>().ok());
+        last.zip(next)
+            .is_some_and(|(last, next)| next - last == 7 * 24 * 60 * 60)
+    }));
+}
+
+/// Changing the rotation interval needs the owner and a fresh passkey confirmation.
+#[tokio::test]
+async fn rotation_interval_change_requires_a_fresh_owner_confirmation() {
+    let (pool, service, _store, now) = fixture().await;
+    let fresh = service.with_fresh_authority("fixture-authority".into());
+    let revision: i64 = sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let input = serde_json::to_vec(&json!({
+        "rotation_period_secs": 14 * 24 * 60 * 60,
+        "expected_revision": revision
+    }))
+    .unwrap();
+
+    assert_eq!(
+        fresh
+            .execute("owner", "mesh.rotation.interval.set", &input, now)
+            .await,
+        Err(MeshApiError::FreshRequired)
+    );
+    assert_eq!(
+        service
+            .execute("member", "mesh.rotation.interval.set", &input, now)
+            .await,
+        Err(MeshApiError::Denied)
+    );
+    sqlx::query("UPDATE sessions SET fresh=?")
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let applied = fresh
+        .execute("owner", "mesh.rotation.interval.set", &input, now)
+        .await
+        .unwrap();
+    assert_eq!(applied["rotation_period_secs"], 14 * 24 * 60 * 60);
+    assert_eq!(applied["revision"], revision + 1);
+    assert_eq!(
+        fresh
+            .execute("owner", "mesh.rotation.interval.set", &input, now)
+            .await,
+        Err(MeshApiError::Conflict)
+    );
+    let status = service
+        .execute("owner", "mesh.rotation.get", b"{}", now)
+        .await
+        .unwrap();
+    assert_eq!(status["rotation_period_secs"], 14 * 24 * 60 * 60);
+    assert_eq!(status["revision"], revision + 1);
+    let audit: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mesh_audit WHERE action='mesh.rotation.interval.set'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audit, 1);
+}
+
 async fn fixture() -> (
     sqlx::SqlitePool,
     MeshService,

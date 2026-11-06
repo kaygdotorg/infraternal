@@ -6,16 +6,13 @@
 //! `mesh.peers`. This module reads them on the server and keeps the answer in memory:
 //!
 //! - **The server node is online while its own Mesh component is On.** It is the machine answering the request.
-//! - **A peer is online, on a direct path, for the full session window after its last handshake.**
-//!   `WireGuard` rejects a session after [`SESSION_SECS`], so an older handshake (or none) is offline.
-//!   Silence before that cannot prove death. Even a peer configured to send keepalives every 25 seconds may
-//!   stop sending them when incoming server keepalives keep rearming its timer. A passive empty reply also
-//!   has the same size as a persistent keepalive. No received-byte pattern promises future sends (#236 R4).
-//!   Inferring that promise caused healthy peers to flash offline, including current infraternal agents.
-//!   A dead peer therefore stays online until its session expires: up to 180 seconds plus one poll. The
-//!   earlier 55–60 second target is incompatible with avoiding false offline from these observations alone.
-//!   Both rekey directions get the full window, including a peer-initiated session that rekeys after 165 seconds.
-//!   Each poll replaces all peer state; a reset counter or recreated peer inherits no sending classification.
+//! - **A recent direct handshake or newly received packet proves current activity.** `WireGuard` rejects a
+//!   session after [`SESSION_SECS`], so a direct handshake or last observed packet older than that is offline.
+//!   A receive-counter increase proves a packet arrived on some path, including a relay path that has no
+//!   server-device handshake. An unchanged cumulative counter does not keep a peer live, and a reset counter
+//!   or recreated peer inherits no activity timestamp. A live peer therefore stays online for at most 180
+//!   seconds after its last direct handshake or newly received packet, plus one poll. This is a bound on
+//!   observed activity, not a promise that the peer will send again.
 //! - **Every reading has an age limit.** When the server's own node stops answering, the last reading counts for
 //!   at most [`STALE`] and is then dropped: nodes read offline, never frozen online. Presence is only re-evaluated
 //!   when a poll ends, so nodes go offline at the first poll that ends after that: **20 s** after the last good
@@ -62,6 +59,8 @@ const MAX_PAGES: usize = 1024;
 pub enum NodePath {
     /// A `WireGuard` session straight between the server and the node.
     Direct,
+    /// Recent peer traffic arrived without a recent direct server-device handshake.
+    Relay,
 }
 
 /// Nodes that are online now, each with its path when one is known. Absent means offline.
@@ -168,8 +167,17 @@ pub async fn observe(channel: &dyn NodeChannel) -> Option<(bool, Vec<PeerRow>)> 
 pub struct Tracker {
     read_at: Option<u64>,
     server_on: bool,
-    /// Last handshake per peer; byte counters and keepalive settings do not establish a sending promise.
-    peers: BTreeMap<NodeId, u64>,
+    /// Last direct handshake and newly received packet per peer.
+    peers: BTreeMap<NodeId, PeerObservation>,
+}
+
+/// What the last reading showed for one peer: the newest direct handshake, the received byte counter, and when that
+/// counter last grew (relayed packets count, so a relay-only peer stays live).
+#[derive(Clone, Copy, Debug, Default)]
+struct PeerObservation {
+    handshake: u64,
+    received: u64,
+    last_received_at: Option<u64>,
 }
 
 impl Tracker {
@@ -178,12 +186,35 @@ impl Tracker {
         let Some((on, rows)) = reading else {
             return;
         };
+        let previous_reading_within_session = self
+            .read_at
+            .is_some_and(|at| now.abs_diff(at) <= SESSION_SECS);
         self.read_at = Some(now);
         self.server_on = on;
-        self.peers.clear();
+        let mut peers = BTreeMap::new();
         for row in rows {
-            self.peers.insert(row.node, row.handshake);
+            let previous = previous_reading_within_session
+                .then(|| self.peers.get(&row.node).copied())
+                .flatten();
+            // A receive delta across a gap no longer than one WireGuard session
+            // proves a packet arrived since the last reading. Stamp it now:
+            // being late to observe an active relay path must not exempt its
+            // peer from the ack barrier.
+            let last_received_at = match previous {
+                Some(previous) if row.received > previous.received => Some(now),
+                Some(previous) if row.received == previous.received => previous.last_received_at,
+                Some(_) | None => None,
+            };
+            peers.insert(
+                row.node,
+                PeerObservation {
+                    handshake: row.handshake,
+                    received: row.received,
+                    last_received_at,
+                },
+            );
         }
+        self.peers = peers;
     }
     /// Who is online at `now`. Nothing once the last good reading is older than [`STALE`].
     #[must_use]
@@ -199,12 +230,16 @@ impl Tracker {
         if let Some(server) = server {
             live.insert(server, None);
         }
-        for (&node, &handshake) in &self.peers {
+        for (&node, peer) in &self.peers {
             // A clock far in the future must not keep a node online forever either.
-            let age = now.abs_diff(handshake);
-            let in_session = handshake > 0 && age <= SESSION_SECS;
-            if in_session {
+            let direct = peer.handshake > 0 && now.abs_diff(peer.handshake) <= SESSION_SECS;
+            if direct {
                 live.insert(node, Some(NodePath::Direct));
+            } else if peer
+                .last_received_at
+                .is_some_and(|at| now.abs_diff(at) <= SESSION_SECS)
+            {
+                live.insert(node, Some(NodePath::Relay));
             }
         }
         live
@@ -236,6 +271,7 @@ pub async fn run(service: MeshService, channel: Arc<dyn NodeChannel>) {
     }
 }
 
+/// Presence tracking checks.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -263,6 +299,7 @@ mod tests {
         tracker
     }
 
+    /// A recent handshake on a direct path counts as online.
     #[test]
     fn a_recent_handshake_is_online_on_a_direct_path() {
         let mut rows = Vec::new();
@@ -271,6 +308,28 @@ mod tests {
         assert_eq!(rows, [row(3, NOW - 20, 925_000, 25)]);
         let live = tracked(rows).live(None, NOW);
         assert_eq!(live.get(&NodeId(3)), Some(&Some(NodePath::Direct)));
+    }
+
+    /// A peer that is reachable only through the relay stays live while its received counter grows.
+    #[test]
+    fn a_relay_only_peer_stays_live_while_packets_arrive_without_a_direct_handshake() {
+        let mut tracker = Tracker::default();
+        tracker.record(Some((true, vec![row(3, 0, 100, 0)])), NOW);
+        assert!(!tracker.live(None, NOW).contains_key(&NodeId(3)));
+
+        tracker.record(Some((true, vec![row(3, 0, 101, 0)])), NOW + 5);
+        assert_eq!(
+            tracker.live(None, NOW + 5).get(&NodeId(3)),
+            Some(&Some(NodePath::Relay)),
+            "new received data proves an active path even without a server handshake"
+        );
+
+        let at_expiry = NOW + 5 + SESSION_SECS;
+        tracker.record(Some((true, vec![row(3, 0, 101, 0)])), at_expiry);
+        assert!(tracker.live(None, at_expiry).contains_key(&NodeId(3)));
+        let after_expiry = at_expiry + 1;
+        tracker.record(Some((true, vec![row(3, 0, 101, 0)])), after_expiry);
+        assert!(!tracker.live(None, after_expiry).contains_key(&NodeId(3)));
     }
 
     #[test]
@@ -309,14 +368,13 @@ mod tests {
         );
     }
 
-    /// A keepalive-sized receive is no promise of future sends. Quiet peers keep the same full session
-    /// window regardless of their earlier counters; these deterministic ages exercise the expiry boundary.
+    /// An unchanged cumulative receive counter is not fresh activity; handshake age still expires normally.
     #[test]
-    fn receiving_a_keepalive_does_not_shorten_the_session_window() {
+    fn an_unchanged_receive_counter_does_not_extend_a_direct_session() {
         let mut tracker = tracked(vec![row(3, NOW, 100, 25), row(4, NOW, 100, 25)]);
         for at in (5..=SESSION_SECS + 5).step_by(5) {
             tracker.record(
-                Some((true, vec![row(3, NOW, 132, 25), row(4, NOW, 180, 25)])),
+                Some((true, vec![row(3, NOW, 100, 25), row(4, NOW, 100, 25)])),
                 NOW + at,
             );
             assert_eq!(
@@ -327,22 +385,32 @@ mod tests {
         }
     }
 
-    /// Bytes still arriving never keep a peer online past its session window.
+    /// Received packets refresh the activity window even when the direct handshake timestamp is absent.
     #[test]
-    fn traffic_proves_a_session_until_it_ends() {
-        let mut tracker = tracked(vec![row(3, NOW, 0, 25)]);
+    fn traffic_proves_a_relay_path_until_the_activity_window_ends() {
+        let mut tracker = tracked(vec![row(3, 0, 0, 25)]);
         for at in (5..=SESSION_SECS).step_by(5) {
-            tracker.record(Some((true, vec![row(3, NOW, at, 25)])), NOW + at);
+            tracker.record(Some((true, vec![row(3, 0, at, 25)])), NOW + at);
             assert!(
-                tracker.live(None, NOW + at).contains_key(&NodeId(3)),
+                tracker
+                    .live(None, NOW + at)
+                    .get(&NodeId(3))
+                    .is_some_and(|path| *path == Some(NodePath::Relay)),
                 "{at}"
             );
         }
-        let at = NOW + SESSION_SECS + 5;
-        tracker.record(Some((true, vec![row(3, NOW, at, 25)])), at);
-        assert!(tracker.live(None, at).is_empty());
+        let at_expiry = NOW + SESSION_SECS * 2;
+        tracker.record(Some((true, vec![row(3, 0, SESSION_SECS, 25)])), at_expiry);
+        assert!(tracker.live(None, at_expiry).contains_key(&NodeId(3)));
+        let after_expiry = at_expiry + 1;
+        tracker.record(
+            Some((true, vec![row(3, 0, SESSION_SECS, 25)])),
+            after_expiry,
+        );
+        assert!(tracker.live(None, after_expiry).is_empty());
     }
 
+    /// A reading expires once the node stops answering.
     #[test]
     fn a_reading_expires_when_the_node_stops_answering() {
         let mut tracker = tracked(vec![row(3, NOW - 10, 100, 0)]);
@@ -354,6 +422,27 @@ mod tests {
                 .live(Some(NodeId(1)), NOW + STALE.as_secs() + 1)
                 .is_empty()
         );
+    }
+
+    /// A counter that grew across a gap between readings still counts as recent traffic.
+    #[test]
+    fn a_counter_delta_after_a_stale_poll_gap_keeps_a_recent_relay_peer_live() {
+        let mut tracker = tracked(vec![row(3, 0, 100, 0)]);
+        tracker.record(None, NOW + STALE.as_secs() + 1);
+        let activity_at = NOW + STALE.as_secs() + 5;
+        tracker.record(Some((true, vec![row(3, 0, 200, 0)])), activity_at);
+        assert_eq!(
+            tracker.live(None, activity_at).get(&NodeId(3)),
+            Some(&Some(NodePath::Relay)),
+            "a counter increase since the last reading proves activity within this recent gap"
+        );
+
+        let at_expiry = activity_at + SESSION_SECS;
+        tracker.record(Some((true, vec![row(3, 0, 200, 0)])), at_expiry);
+        assert!(tracker.live(None, at_expiry).contains_key(&NodeId(3)));
+        let after_expiry = at_expiry + 1;
+        tracker.record(Some((true, vec![row(3, 0, 200, 0)])), after_expiry);
+        assert!(!tracker.live(None, after_expiry).contains_key(&NodeId(3)));
     }
 
     /// The documented bound: polls that fail at once leave nodes online through +15 s and offline at +20 s.
@@ -388,6 +477,7 @@ mod tests {
     struct ServerNode {
         state: &'static str,
         handshake: u64,
+        received: u64,
     }
     impl NodeChannel for ServerNode {
         fn id(&self) -> &'static str {
@@ -413,7 +503,7 @@ mod tests {
             let reply = match action {
                 "mesh.status" => json!({"state":self.state,"peer_count":1}),
                 "mesh.peers" => {
-                    json!({"peers":[[3, self.handshake, 925_000, 0]],"next_cursor":null})
+                    json!({"peers":[[3, self.handshake, self.received, 0]],"next_cursor":null})
                 }
                 _ => return Box::pin(async { Err("unknown action") }),
             };
@@ -421,11 +511,13 @@ mod tests {
         }
     }
 
+    /// The server and a peer passing traffic count as online.
     #[tokio::test]
     async fn the_server_and_a_peer_passing_traffic_are_online() {
         let node = ServerNode {
             state: "On",
             handshake: NOW - 30,
+            received: 925_000,
         };
         let mut tracker = Tracker::default();
         tracker.record(observe(&node).await, NOW);
@@ -435,23 +527,49 @@ mod tests {
         );
     }
 
+    /// A mesh that is off shows nobody online.
     #[tokio::test]
     async fn a_mesh_that_is_off_shows_nobody_online() {
         let node = ServerNode {
             state: "Off",
             handshake: NOW - 30,
+            received: 925_000,
         };
         let mut tracker = Tracker::default();
         tracker.record(observe(&node).await, NOW);
         assert!(tracker.live(Some(NodeId(1)), NOW).is_empty());
     }
 
+    /// An unreadable node counts as no reading.
     #[tokio::test]
     async fn an_unreadable_node_is_no_reading() {
         let node = ServerNode {
             state: "unreadable",
             handshake: 0,
+            received: 0,
         };
         assert_eq!(observe(&node).await, None);
+    }
+
+    /// The server's own observation tracks relayed packets without a direct handshake.
+    #[tokio::test]
+    async fn a_server_observation_tracks_a_relay_packet_without_a_direct_handshake() {
+        let mut tracker = Tracker::default();
+        let before = ServerNode {
+            state: "On",
+            handshake: 0,
+            received: 100,
+        };
+        tracker.record(observe(&before).await, NOW);
+        let after = ServerNode {
+            state: "On",
+            handshake: 0,
+            received: 101,
+        };
+        tracker.record(observe(&after).await, NOW + 5);
+        assert_eq!(
+            tracker.live(None, NOW + 5).get(&NodeId(3)),
+            Some(&Some(NodePath::Relay))
+        );
     }
 }

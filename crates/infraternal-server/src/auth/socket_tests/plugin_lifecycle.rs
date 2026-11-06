@@ -41,6 +41,7 @@ where
     }
 }
 
+/// Mesh plugin discovery, disable and restart keep the control socket working.
 #[tokio::test(start_paused = true)]
 async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
     let _guard = SERIAL.lock().await;
@@ -118,7 +119,7 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
         .find(|plugin| plugin["descriptor"]["id"] == "mesh")
         .expect("compiled mesh feature is missing")["descriptor"];
     assert_eq!(descriptor["id"], "mesh");
-    assert_eq!(descriptor["actions"].as_array().unwrap().len(), 19);
+    assert_eq!(descriptor["actions"].as_array().unwrap().len(), 21);
     assert_eq!(descriptor["roles"][0]["requires"], json!(["server"]));
     for action in descriptor["actions"].as_array().unwrap() {
         assert_ne!(action["summary"].as_str().unwrap(), "");
@@ -569,6 +570,7 @@ async fn mesh_coordinator_requires_an_existing_server_role() {
         "feature construction must not initialize another server"
     );
 }
+/// The Mesh actions that need confirmation are exactly the frozen destructive set.
 #[test]
 fn mesh_destructive_metadata_matches_frozen_confirmation_requirements() {
     let mut destructive: Vec<_> = infraternal_plugin_mesh::descriptor::ACTIONS
@@ -586,6 +588,7 @@ fn mesh_destructive_metadata_matches_frozen_confirmation_requirements() {
             "mesh.node.delete",
             "mesh.role.assign",
             "mesh.role.define",
+            "mesh.rotation.interval.set",
             "mesh.tag.delete",
             "mesh.tag.member.remove"
         ]

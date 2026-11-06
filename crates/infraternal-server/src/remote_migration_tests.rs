@@ -1,7 +1,26 @@
 //! Proves deployed schema upgrades preserve remote identity and route data, and
-//! that the release migration chain stays contiguous through API key inactivity policy [9][19][64][133][311], #78, #243, #269.
+//! that the release migration chain keeps its D347 shape through API key inactivity policy [9][19][64][133][311], #78, #243, #269.
 
 use sqlx::sqlite::SqlitePoolOptions;
+
+/// Check the release history's D347 shape and return its versions in order: the numbered
+/// history 0001–0040 is complete, other numbered versions are only the reserved 0041–0049,
+/// every newer migration is named by UTC timestamp, and versions strictly ascend.
+/// Reserved numbers that have not merged yet are allowed to be absent.
+fn release_history(migrations: &sqlx::migrate::Migrator) -> Vec<i64> {
+    // Sorted, duplicate-free and containing #303's migrations; then the D347 shape below.
+    let versions = migration_versions(migrations);
+    assert!(
+        (1..=40).all(|version| versions.contains(&version)),
+        "numbered history 0001-0040 is complete"
+    );
+    assert!(
+        versions.iter().all(|version| (1..=49).contains(version)
+            || (20_000_000_000_000..30_000_000_000_000).contains(version)),
+        "new migrations are named by UTC timestamp (D347)"
+    );
+    versions
+}
 
 #[tokio::test]
 async fn remote_identity_and_sessions_upgrade_dev_v11_and_remain_idempotent() {
@@ -128,10 +147,29 @@ fn migration_versions(migrations: &sqlx::migrate::Migrator) -> Vec<i64> {
     versions
 }
 
+/// The embedded migration history has its D347 shape with #285's migrations in place, and both a production database
+/// and a fresh one apply exactly that history.
 #[tokio::test]
-async fn canvas_layout_migration_upgrades_production_v27_and_fresh_schema_in_order() {
+async fn release_migration_history_is_complete_for_production_and_fresh_schemas() {
     let migrations = sqlx::migrate!("./migrations");
-    let versions = migration_versions(&migrations);
+    let versions = release_history(&migrations);
+    // #285's four migrations keep the D347 timestamps they were created with: Part B's
+    // Mesh and host key rotation first, then Part A's cookie order and certificate recovery.
+    let trust = [
+        20_261_105_020_355,
+        20_261_105_020_356,
+        20_261_105_020_605,
+        20_261_105_020_607,
+    ];
+    let present: Vec<i64> = versions
+        .iter()
+        .copied()
+        .filter(|version| trust.contains(version))
+        .collect();
+    assert_eq!(
+        present, trust,
+        "trust migrations are present, in creation order"
+    );
 
     let production = SqlitePoolOptions::new()
         .max_connections(1)
@@ -321,6 +359,7 @@ async fn old_uuid_mesh_placeholders_upgrade_to_audited_fallback_names() {
     assert!(last["automatic"].as_bool().unwrap_or(false));
 }
 
+/// The hostname migration upgrades a release-6 copy without changing its canvas or its migration checksums.
 #[tokio::test]
 async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_checksums() {
     let production = SqlitePoolOptions::new()
@@ -408,7 +447,12 @@ async fn hostname_migration_upgrades_release6_copy_without_changing_canvas_or_ch
         "ok"
     );
     println!(
-        "RELEASE7_MIGRATION before=28 after=34 preserved_checksums=28 canvas_revision=7 receipt_count=0 placeholder=host-000000 integrity=ok"
+        "RELEASE7_MIGRATION before=28 applied={} last_version={} preserved_checksums=28 canvas_revision=7 receipt_count=0 placeholder=host-000000 integrity=ok",
+        after.len(),
+        after
+            .last()
+            .map(|(version, _)| *version)
+            .unwrap_or_default()
     );
 }
 

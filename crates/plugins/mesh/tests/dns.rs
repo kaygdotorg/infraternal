@@ -53,6 +53,8 @@ fn config() -> Config {
             PeerPolicy {
                 peer: Peer {
                     key: PublicKey([1; 32]),
+                    previous_key: None,
+                    previous_active: false,
                     addresses: Addresses {
                         ipv4: Ipv4Addr::new(10, 254, 0, 1),
                         ipv6: "fd66:6821:bc63:834e::1".parse().unwrap(),

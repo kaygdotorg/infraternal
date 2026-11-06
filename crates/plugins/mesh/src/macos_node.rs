@@ -1350,6 +1350,8 @@ impl Node {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
+            // Key rotation is not implemented on macOS yet, so the coordinator rotates no node (#285).
+            key_rotation: false,
         };
         self.identity = Some(identity.clone());
         Ok(identity)
@@ -1366,6 +1368,31 @@ impl Node {
         }
     }
 
+    /// Key rotation, step 1 (#285, D166). This node advertises `key_rotation: false`, so the coordinator never
+    /// asks. A request anyway is refused without touching the interface.
+    pub(crate) fn prepare_rotation(
+        &mut self,
+        _operation_id: &str,
+        _sequence: u64,
+    ) -> io::Result<crate::policy::model::PublicKey> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Key rotation, step 2: refused, as for `prepare_rotation`.
+    pub(crate) fn commit_rotation(
+        &mut self,
+        _operation_id: &str,
+        _sequence: u64,
+    ) -> io::Result<crate::dataplane::Identity> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    /// Key rotation, step 3: refused, as for `prepare_rotation`.
+    pub(crate) fn finish_rotation(
+        &mut self,
+        _operation_id: &str,
+        _sequence: u64,
+    ) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
     /// Persist disabled intent before retiring routes and the owned utun descriptor.
     /// # Errors
     /// Keeps the old route inventory when cleanup cannot be completed.
@@ -1521,6 +1548,7 @@ mod tests {
         thread,
     };
 
+    /// A one-peer configuration for the macOS node tests.
     fn config() -> Config {
         Config {
             local_key: Some(PublicKey([1; 32])),
@@ -1542,6 +1570,8 @@ mod tests {
                 PeerPolicy {
                     peer: Peer {
                         key: PublicKey([2; 32]),
+                        previous_key: None,
+                        previous_active: false,
                         addresses: Addresses {
                             ipv4: Ipv4Addr::new(10, 254, 0, 4),
                             ipv6: "fd01::4".parse().expect("peer IPv6"),
@@ -1576,10 +1606,13 @@ mod tests {
         );
     }
 
+    /// A test peer `id` with the given inbound policy.
     fn peer_policy(id: u8, inbound: TrafficPolicy) -> PeerPolicy {
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([id; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4: Ipv4Addr::new(10, 254, 0, id),
                     ipv6: format!("fd01::{id}").parse().expect("peer IPv6"),
@@ -1632,6 +1665,7 @@ mod tests {
         assert_eq!(super::ENFORCEMENT, "unavailable");
     }
 
+    /// Revoking a peer's arrow removes it from the installed peer set.
     #[test]
     fn revoking_an_arrow_removes_the_installed_peer() {
         let old = config();
@@ -1641,6 +1675,7 @@ mod tests {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
+            key_rotation: false,
         };
         assert_eq!(installed_keys(&old), BTreeSet::from([[2; 32]]));
 
@@ -1674,6 +1709,7 @@ mod tests {
         );
     }
 
+    /// A staged configuration is accepted only with its last chunk.
     #[test]
     fn staged_configuration_is_not_accepted_until_its_last_chunk() {
         let config = config();
@@ -1683,6 +1719,7 @@ mod tests {
             compact_access: true,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
+            key_rotation: false,
         };
         let mut chunks = crate::configuration::chunks(None, &config).expect("full snapshot");
         assert_eq!(chunks.len(), 1);

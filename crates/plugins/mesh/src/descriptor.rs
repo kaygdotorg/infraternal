@@ -81,6 +81,41 @@ pub const ACTIONS: &[ActionDef] = &[
         effect: Effect::Destructive,
     },
     ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
+        api_scope: None,
+        fresh_passkey: false,
+        id: "mesh.rotation.get",
+        summary: "Read Mesh key rotation",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Read the Mesh key rotation interval and each host's current schedule.",
+        ],
+        input: infraternal_plugin_api::SchemaRef("Empty"),
+        output: infraternal_plugin_api::SchemaRef("MeshRotationSettings"),
+        permission: One("server.configure"),
+        effect: Effect::Read,
+    },
+    ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Required,
+        opens: None,
+        api_scope: None,
+        fresh_passkey: false,
+        id: "mesh.rotation.interval.set",
+        summary: "Change Mesh key rotation interval",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Confirm the new interval with your passkey.",
+            "Submit the revision returned by mesh.rotation.get.",
+        ],
+        input: infraternal_plugin_api::SchemaRef("MeshRotationIntervalSet"),
+        output: infraternal_plugin_api::SchemaRef("MeshRotationInterval"),
+        permission: One("server.configure"),
+        effect: Effect::Destructive,
+    },
+    ActionDef {
         target: infraternal_plugin_api::Target::Node,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
         opens: None,
@@ -458,5 +493,21 @@ mod macos_cli_tests {
             assert_eq!(action.availability, ActionAvailability::Available);
             assert_eq!(action.cli_handler, CliHandler::MeshService);
         }
+    }
+}
+
+#[cfg(test)]
+mod rotation_action_tests {
+    //! The socket adapter grants fresh-passkey context only to destructive actions.
+    use super::*;
+
+    /// Changing the rotation interval is a destructive action, so the socket adapter requires a fresh passkey for it.
+    #[test]
+    fn changing_rotation_interval_requires_fresh_confirmation() {
+        assert!(ACTIONS.iter().any(|action| {
+            action.id == "mesh.rotation.interval.set"
+                && action.effect == Effect::Destructive
+                && action.dry_run == infraternal_plugin_api::DryRun::Required
+        }));
     }
 }

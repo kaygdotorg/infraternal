@@ -76,6 +76,7 @@ pub(super) fn bounded_output(
     }
 }
 
+/// A client can neither steal nor create the private control endpoint.
 #[tokio::test]
 async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     let directory = Directory::new();
@@ -97,6 +98,39 @@ async fn private_control_endpoint_cannot_be_stolen_or_created_by_a_client() {
     assert!(control.path.exists());
     drop(control);
     assert!(!directory.state().join("restart/control.sock").exists());
+}
+
+/// A same-user status request reads the CA lock, and an unavailable socket is reported as such.
+#[tokio::test]
+async fn same_uid_local_status_reads_ca_lock_and_distinguishes_unavailable_socket() {
+    let directory = Directory::new();
+    assert!(query_ca_status(directory.state()).is_err());
+
+    let mut control = Control::start(directory.state()).unwrap();
+    let source =
+        std::sync::Arc::new(infraternal_server::ca_memory::MemoryCaSource::unprovisioned(None));
+    let server = tokio::spawn(async move { control.requested(Some(source.as_ref())).await });
+    let state = directory.state().to_owned();
+    let status = tokio::task::spawn_blocking(move || query_ca_status(&state))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.available);
+    assert!(!status.initialized);
+    assert_eq!(status.locked, Some(true));
+    assert!(!status.clock_healthy);
+    assert!(status.roots.is_empty());
+    server.abort();
+    assert!(server.await.is_err_and(|error| error.is_cancelled()));
+}
+
+/// The control endpoint accepts a read-only status request frame.
+#[tokio::test]
+async fn private_control_endpoint_accepts_a_read_only_status_request_frame() {
+    let (mut client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    client.write_u16(0).await.unwrap();
+    client.write_u8(1).await.unwrap();
+    assert!(read_request(&mut server).await.is_ok());
 }
 
 /// Check default-path admission in a compact running image and refuse untrusted paths.

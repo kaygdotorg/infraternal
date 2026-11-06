@@ -26,18 +26,71 @@ async fn update_listener(
         *listener = Some((address, lease));
     }
 }
-// Probe before advertising an extension. Strict older nodes reject the probe,
-// then answer the ordinary request without enabling a new representation.
-async fn read_identity(channel: &dyn NodeChannel) -> Option<Identity> {
+/// Probe before advertising an extension. Strict older nodes reject the probe,
+/// then answer the ordinary request without enabling a new representation.
+///
+/// Returns the identity and its rotation support as far as the replies prove it (J262).
+async fn read_identity(channel: &dyn NodeChannel) -> Option<(Identity, Option<bool>)> {
     #[cfg(feature = "mesh-dns-spike")]
-    let probe = br#"{"compact_access":true,"dns_names":true}"#.to_vec();
+    let (probe, before_rotation) = (
+        br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.as_slice(),
+        br#"{"compact_access":true,"dns_names":true}"#.as_slice(),
+    );
     #[cfg(not(feature = "mesh-dns-spike"))]
-    let probe = br#"{"compact_access":true}"#.to_vec();
-    let reply = match channel.call("mesh.identity", probe).await {
-        Ok(reply) => reply,
-        Err(_) => channel.call("mesh.identity", b"{}".to_vec()).await.ok()?,
-    };
-    serde_json::from_slice::<Option<Identity>>(&reply)
+    let (probe, before_rotation) = (
+        br#"{"compact_access":true,"key_rotation":true}"#.as_slice(),
+        br#"{"compact_access":true}"#.as_slice(),
+    );
+    probe_identity(
+        |input| channel.call("mesh.identity", input),
+        probe,
+        before_rotation,
+    )
+    .await
+}
+
+/// Classify a node's identity replies into its rotation support (J262).
+///
+/// - The full probe answers, first or on one immediate retry: the reply says whether the node rotates.
+/// - The full probe fails but the same request without `key_rotation` answers: the node deterministically rejects
+///   that field, so it is an older binary without rotation support (`Some(false)`), and the coordinator may
+///   abandon its open rotation.
+/// - Only the legacy `{}` request answers: the failures prove nothing about rotation, so support is unknown
+///   (`None`) unless the reply itself claims it. A transient failure must not abandon a rotation, since that is
+///   what left kernel nodes with an open journal (J262 P2); the node also settles such a journal itself.
+async fn probe_identity<F, R>(
+    call: F,
+    probe: &[u8],
+    before_rotation: &[u8],
+) -> Option<(Identity, Option<bool>)>
+where
+    F: Fn(Vec<u8>) -> R,
+    R: std::future::Future<Output = Result<Vec<u8>, &'static str>>,
+{
+    for _ in 0..2 {
+        if let Ok(reply) = call(probe.to_vec()).await {
+            return parse_identity(&reply).map(|identity| {
+                let supported = identity.key_rotation;
+                (identity, Some(supported))
+            });
+        }
+    }
+    if let Ok(reply) = call(before_rotation.to_vec()).await {
+        return parse_identity(&reply).map(|identity| {
+            let supported = identity.key_rotation;
+            (identity, Some(supported))
+        });
+    }
+    let reply = call(b"{}".to_vec()).await.ok()?;
+    parse_identity(&reply).map(|identity| {
+        let supported = identity.key_rotation.then_some(true);
+        (identity, supported)
+    })
+}
+
+/// Decode an identity reply, refusing an unset key or port.
+fn parse_identity(reply: &[u8]) -> Option<Identity> {
+    serde_json::from_slice::<Option<Identity>>(reply)
         .ok()
         .flatten()
         .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0)
@@ -68,9 +121,13 @@ pub async fn run(
     let mut binding = None;
     let mut installed: Option<Snapshot> = None;
     let mut refresh_identity = true;
+    let mut current_identity: Option<Identity> = None;
     let mut compact_access = false;
     #[cfg(feature = "mesh-dns-spike")]
     let mut dns_names = false;
+    let mut ack_retry: Option<(infraternal_mesh::model::NodeId, u64)> = None;
+    let mut presence_updates = service.subscribe_presence();
+    let mut rotation_updates = service.subscribe_rotation_progress();
     let mut listener: ServerListener = None;
     let mut transport_port = None;
     let mut peer_route: Option<(
@@ -81,12 +138,13 @@ pub async fn run(
         if refresh_identity || binding.is_none() {
             refresh_identity = false;
             let identity = read_identity(channel.as_ref()).await;
-            if let Some(identity) = identity {
+            if let Some((identity, key_rotation)) = identity {
                 compact_access = identity.compact_access;
                 #[cfg(feature = "mesh-dns-spike")]
                 {
                     dns_names = identity.dns_names;
                 }
+                current_identity = Some(identity.clone());
                 transport_port = if !channel.is_server() && channel.supports_server_paths() {
                     // Status is extensible; keep the strict identity response
                     // unchanged for older coordinators. The control channel
@@ -111,12 +169,13 @@ pub async fn run(
                         return;
                     };
                     store
-                        .attach_named(
+                        .attach_named_with_probed_capability(
                             channel.id(),
                             identity.public_key,
                             endpoint,
                             channel.is_server(),
                             reported.as_deref(),
+                            key_rotation,
                         )
                         .await
                 };
@@ -131,19 +190,26 @@ pub async fn run(
                 } else {
                     binding = None;
                     installed = None;
+                    current_identity = None;
                 }
             } else {
                 binding = None;
                 installed = None;
+                current_identity = None;
             }
         }
+        let local_identity = current_identity
+            .as_ref()
+            .map(|identity| identity.public_key);
         let config = if let Some(node) = binding {
             match work.acquire().await {
-                Ok(_permit) => match store
-                    .snapshot()
-                    .await
-                    .and_then(|snapshot| snapshot.config(node).map(|config| (config, snapshot)))
-                {
+                Ok(_permit) => match store.snapshot().await.and_then(|snapshot| {
+                    local_identity.map_or(Err(MeshApiError::NotFound), |identity| {
+                        snapshot
+                            .config_for_identity(node, identity)
+                            .map(|config| (config, snapshot))
+                    })
+                }) {
                     Ok(config) => Some(config),
                     Err(MeshApiError::NotFound) => {
                         // A deleted binding can be re-enrolled before this worker
@@ -180,6 +246,7 @@ pub async fn run(
                     || old.node != config.node
                     || names_changed
                     || dns_suffix_changed
+                    || old.local_key != config.local_key
                     || old.addresses != config.addresses
                     || old.exposure != config.exposure
                     || old.default_policy != config.default_policy
@@ -246,12 +313,35 @@ pub async fn run(
                         break;
                     }
                 }
+                if !failed && snapshot.acknowledgments_required() {
+                    if store
+                        .acknowledge_applied(config.node, config.version)
+                        .await
+                        .is_err()
+                    {
+                        ack_retry = Some((config.node, config.version));
+                    } else {
+                        ack_retry = None;
+                        service.rotation_applied();
+                    }
+                }
                 installed = if failed { None } else { Some(snapshot) };
                 // A refused delta needs a snapshot now, not a future unrelated
                 // edit. A failed snapshot waits for a source change rather than spinning.
                 if failed && was_delta {
                     continue;
                 }
+            } else if snapshot.acknowledgments_required()
+                && installed.is_some()
+                && store
+                    .acknowledge_applied(config.node, config.version)
+                    .await
+                    .is_ok()
+            {
+                // The kernel already holds an identical peer view; a metadata-only revision
+                // can acknowledge that applied view without an unchanged netlink rewrite.
+                ack_retry = None;
+                service.rotation_applied();
             }
         }
         if binding.is_none() {
@@ -266,21 +356,64 @@ pub async fn run(
             let address = std::net::IpAddr::V4(config.addresses.ipv4);
             update_listener(channel.as_ref(), address, &mut listener).await;
         }
+        let rotation_wait =
+            if let (Some(node), Some(identity)) = (binding, current_identity.as_ref()) {
+                let live = presence_updates.borrow().keys().copied().collect();
+                match work.acquire().await {
+                    Ok(_permit) => {
+                        crate::rotation::drive(
+                            &store,
+                            &service,
+                            channel.as_ref(),
+                            node,
+                            identity,
+                            &live,
+                        )
+                        .await
+                    }
+                    Err(_) => return,
+                }
+            } else {
+                None
+            };
         // No retry timer or heartbeat. Reconnect, local up/down, or committed
         // policy change is the only wakeup. Closed sources retire the worker.
         tokio::select! {
             result=notices.changed()=> {if result.is_err() {return;}refresh_identity=true;installed=None;},
             result=revisions.recv()=>if matches!(result,Err(tokio::sync::broadcast::error::RecvError::Closed)) {return;},
+            result=presence_updates.changed()=>if result.is_err() {return;},
+            result=rotation_updates.changed()=>if result.is_err() {return;},
+            () = tokio::time::sleep(std::time::Duration::from_secs(5)), if ack_retry.is_some() => {
+                if let Some((node, revision)) = ack_retry
+                    && store.acknowledge_applied(node, revision).await.is_ok()
+                {
+                    ack_retry = None;
+                    service.rotation_applied();
+                }
+            },
+            () = sleep_optional(rotation_wait) => {}
         }
     }
 }
 
+/// Sleep for `delay`, or forever when there is no deadline; the caller's other select arms then wake the worker.
+async fn sleep_optional(delay: Option<std::time::Duration>) {
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Coordinator-side node worker checks against an in-memory node channel.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
     use crate::policy::model::PublicKey;
+    use infraternal_mesh::model::NodeId;
     use infraternal_plugin_api::PluginOperation;
+    use sqlx::Row;
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -305,9 +438,12 @@ mod tests {
             self.0.fetch_sub(1, Ordering::AcqRel);
         }
     }
+    /// An in-memory node channel whose identity, refusals and replies a test controls.
     struct Channel {
         server: bool,
         legacy_host_facts: bool,
+        identity_key: PublicKey,
+        key_rotation: bool,
         path_capable: AtomicBool,
         leases: Arc<AtomicUsize>,
         refuse_listener: AtomicBool,
@@ -327,11 +463,14 @@ mod tests {
         fn with_server(server: bool) -> Arc<Self> {
             Self::named(server, None)
         }
+        /// A channel for a server or ordinary node, optionally reporting a hostname.
         fn named(server: bool, hostname: Option<&'static str>) -> Arc<Self> {
             let (notices, _) = tokio::sync::watch::channel(());
             Arc::new(Self {
                 server,
                 legacy_host_facts: false,
+                identity_key: PublicKey([2; 32]),
+                key_rotation: false,
                 path_capable: AtomicBool::new(server),
                 leases: Arc::default(),
                 refuse_listener: AtomicBool::new(false),
@@ -344,6 +483,14 @@ mod tests {
                 frames: Mutex::new(Vec::new()),
                 hostname,
             })
+        }
+        /// A test channel that presents the candidate key and advertises rotation support.
+        fn candidate() -> Arc<Self> {
+            let mut channel = Self::named(false, None);
+            let candidate = Arc::get_mut(&mut channel).expect("new test channel is uniquely owned");
+            candidate.identity_key = PublicKey([3; 32]);
+            candidate.key_rotation = true;
+            channel
         }
         fn legacy() -> Arc<Self> {
             let mut channel = Self::named(false, None);
@@ -435,7 +582,12 @@ mod tests {
                             compact_access: false,
                             #[cfg(feature = "mesh-dns-spike")]
                             dns_names: false,
-                            public_key: PublicKey([if self.server { 1 } else { 2 }; 32]),
+                            key_rotation: self.key_rotation,
+                            public_key: if self.server {
+                                PublicKey([1; 32])
+                            } else {
+                                self.identity_key
+                            },
                             port: 44000,
                         },
                     ))
@@ -942,5 +1094,825 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// Enroll a new node for `host` the way an owner would. It has not negotiated rotation support.
+    async fn enroll_without_rotation_support(
+        service: &MeshService,
+        pool: &sqlx::SqlitePool,
+        host: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)",
+        )
+        .bind(uuid::Uuid::parse_str(host).unwrap().as_bytes().as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        service
+            .execute(
+                "owner",
+                "mesh.node.enroll",
+                &serde_json::to_vec(&serde_json::json!({
+                    "name":"unsupported-during-rotation",
+                    "public_key":PublicKey([4; 32]),
+                    "host_id":host
+                }))
+                .unwrap(),
+                1_800_000_000,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// An unsupported node enrolled during preparation must keep the candidate unpublished.
+    #[tokio::test]
+    async fn overlap_is_refused_if_an_unsupported_node_joins_during_preparation() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (rotating, _) = store
+            .attach_named_with_capability(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rotating_id = i64::try_from(rotating.0).unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET last_rotation=0,schedule_boot_id='test-boot',schedule_monotonic=0,schedule_period_secs=604800 WHERE node_id=?",
+        )
+        .bind(rotating_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let operation = store
+            .begin_rotation(rotating, "test-boot", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let unsupported_host = "00000000-0000-4000-8000-000000000002";
+        enroll_without_rotation_support(&service, &pool, unsupported_host).await;
+
+        let supported: bool = sqlx::query_scalar(
+            "SELECT key_rotation_supported FROM mesh_nodes WHERE dataplane_host=?",
+        )
+        .bind(unsupported_host)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !supported,
+            "a newly enrolled node has no negotiated capability"
+        );
+        let overlap = store
+            .start_rotation_overlap(
+                rotating,
+                &operation.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await;
+        assert!(
+            overlap.is_err(),
+            "D166 requires deferring overlap when an unsupported node joins"
+        );
+        // Deferred, not abandoned: the node keeps its prepared candidate for this same operation.
+        let (phase, operation_id, candidate): (Option<String>, Option<String>, Option<Vec<u8>>) =
+            sqlx::query_as(
+                "SELECT rotation_phase,operation_id,candidate_public_key FROM mesh_node_key_rotation WHERE node_id=?",
+            )
+            .bind(rotating_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(phase.as_deref(), Some("preparing"));
+        assert_eq!(
+            operation_id.as_deref(),
+            Some(operation.operation_id.as_str())
+        );
+        assert_eq!(candidate, None, "no candidate key is published");
+        let schedule = store
+            .rotation_schedule(rotating, 100, "test-boot", 1, 1_000_000_000)
+            .await
+            .unwrap();
+        assert!(
+            !schedule.all_nodes_supported,
+            "the rotation driver sees the gate closed and waits instead of retrying"
+        );
+    }
+
+    /// Start a rotation for one supported node and return its id, row id and operation (J252 P2 fixtures).
+    async fn rotating_node(
+        service: &crate::api::MeshService,
+        host: &str,
+        key: PublicKey,
+    ) -> (NodeId, i64, crate::store::RotationRecord) {
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach_named_with_capability(
+                host,
+                key,
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        // Every node supports rotation, so the D166 all-node gate opens.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let node_id = i64::try_from(node.0).unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET last_rotation=0,schedule_boot_id='test-boot',schedule_monotonic=0,schedule_period_secs=604800 WHERE node_id=?",
+        )
+        .bind(node_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let operation = store
+            .begin_rotation(node, "test-boot", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        (node, node_id, operation)
+    }
+
+    /// A node's stored key, rotation support, phase, candidate, predecessor and operation id.
+    type RotationRow = (
+        Vec<u8>,
+        bool,
+        Option<String>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<String>,
+    );
+
+    /// Read a node's stored key, rotation support and rotation columns.
+    async fn rotation_row(service: &crate::api::MeshService, node_id: i64) -> RotationRow {
+        sqlx::query_as(
+            "SELECT n.public_key,n.key_rotation_supported,r.rotation_phase,r.candidate_public_key,r.previous_public_key,r.operation_id \
+             FROM mesh_nodes AS n JOIN mesh_node_key_rotation AS r ON r.node_id=n.id WHERE n.id=?",
+        )
+        .bind(node_id)
+        .fetch_one(&service.pool_for_tests())
+        .await
+        .unwrap()
+    }
+
+    /// J252 P2: a node whose rotation is being prepared restarts on an engine without rotation support (kernel to
+    /// `GotaTun`, D346). The attach must succeed, record the lost support and abandon the rotation in one
+    /// transaction, so the candidate is never published and later restarts are not refused.
+    #[tokio::test]
+    async fn a_node_that_loses_rotation_support_while_preparing_abandons_the_rotation() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let key = PublicKey([2; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, node_id, operation) = rotating_node(&service, host, key).await;
+
+        store
+            .attach_named_with_capability(host, key, endpoint, false, None, false)
+            .await
+            .expect("an attach without rotation support is accepted while a rotation is open");
+        let (current, supported, phase, candidate, previous, operation_id) =
+            rotation_row(&service, node_id).await;
+        assert_eq!(
+            current,
+            key.0.to_vec(),
+            "the node keeps the key it presented"
+        );
+        assert!(!supported, "the lost support is recorded");
+        assert_eq!(
+            (phase, candidate, previous, operation_id),
+            (None, None, None, None),
+            "the rotation is abandoned"
+        );
+        assert!(
+            store
+                .start_rotation_overlap(
+                    node,
+                    &operation.operation_id,
+                    PublicKey([3; 32]),
+                    100,
+                    "test-boot",
+                    1_000
+                )
+                .await
+                .is_err(),
+            "the abandoned operation cannot publish its candidate"
+        );
+        assert!(
+            store
+                .begin_rotation(node, "test-boot", 2)
+                .await
+                .unwrap()
+                .is_none(),
+            "no new rotation starts while the node reports no support"
+        );
+        store
+            .attach_named_with_capability(host, key, endpoint, false, None, false)
+            .await
+            .expect("a later restart attaches too");
+    }
+
+    /// J252 P2 in the overlap phase: peers already hold both keys and the node restarts without rotation support,
+    /// presenting the predecessor it carried. The coordinator returns to that key alone and refuses the stale
+    /// commit, so no peer is left routing to a key the node may not hold.
+    #[tokio::test]
+    async fn a_node_that_loses_rotation_support_during_overlap_keeps_the_key_it_presents() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let previous = PublicKey([2; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, node_id, operation) = rotating_node(&service, host, previous).await;
+        store
+            .start_rotation_overlap(
+                node,
+                &operation.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        store
+            .attach_named_with_capability(host, previous, endpoint, false, None, false)
+            .await
+            .expect("an attach without rotation support is accepted during the overlap");
+        let (current, supported, phase, candidate, stored_previous, operation_id) =
+            rotation_row(&service, node_id).await;
+        assert_eq!(
+            current,
+            previous.0.to_vec(),
+            "peers route to the key the node holds"
+        );
+        assert!(!supported);
+        assert_eq!(
+            (phase, candidate, stored_previous, operation_id),
+            (None, None, None, None)
+        );
+        assert!(
+            store
+                .commit_rotation(node, &operation.operation_id)
+                .await
+                .is_err(),
+            "the abandoned operation cannot commit"
+        );
+    }
+
+    /// J262: a probe that could not show the capability (only the legacy request answered) must not abandon an
+    /// open rotation. The attach keeps the old refusal, the rotation and its operation stay as they were, and
+    /// the next attach that proves support continues the same operation.
+    #[tokio::test]
+    async fn an_unknown_capability_never_abandons_an_open_rotation() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let predecessor = PublicKey([2; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, node_id, first) = rotating_node(&service, host, predecessor).await;
+        store
+            .start_rotation_overlap(
+                node,
+                &first.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let before = rotation_row(&service, node_id).await;
+
+        assert_eq!(
+            store
+                .attach_named_with_probed_capability(host, predecessor, endpoint, false, None, None)
+                .await,
+            Err("Mesh key rotation is in progress."),
+            "an unknown capability is refused while the rotation is open"
+        );
+        assert_eq!(
+            rotation_row(&service, node_id).await,
+            before,
+            "nothing was abandoned"
+        );
+        store
+            .attach_named_with_probed_capability(
+                host,
+                predecessor,
+                endpoint,
+                false,
+                None,
+                Some(true),
+            )
+            .await
+            .expect("the next probe that proves support attaches");
+        let (_, supported, phase, _, _, operation) = rotation_row(&service, node_id).await;
+        assert!(supported);
+        assert_eq!(phase.as_deref(), Some("overlap"));
+        assert_eq!(
+            operation.as_deref(),
+            Some(first.operation_id.as_str()),
+            "the same operation continues"
+        );
+    }
+
+    /// With no rotation open, an unknown capability attaches as unsupported, as a legacy attach always did.
+    #[tokio::test]
+    async fn an_unknown_capability_without_a_rotation_attaches_as_unsupported() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let (node, _) = store
+            .attach_named_with_probed_capability(host, PublicKey([2; 32]), None, false, None, None)
+            .await
+            .unwrap();
+        let (_, supported, phase, ..) =
+            rotation_row(&service, i64::try_from(node.0).unwrap()).await;
+        assert!(!supported);
+        assert_eq!(phase, None);
+    }
+
+    /// An identity reply for the probe tests, with the given rotation flag.
+    fn identity_reply(key_rotation: bool) -> Vec<u8> {
+        serde_json::to_vec(&Some(Identity {
+            compact_access: false,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation,
+            public_key: PublicKey([2; 32]),
+            port: 44000,
+        }))
+        .unwrap()
+    }
+
+    /// Run `probe_identity` against scripted replies (in call order) and return the classified support and the
+    /// requests made.
+    async fn classify(
+        replies: Vec<Result<Vec<u8>, &'static str>>,
+    ) -> (Option<Option<bool>>, Vec<Vec<u8>>) {
+        let replies = Mutex::new(replies.into_iter());
+        let requests = Mutex::new(Vec::new());
+        let result = probe_identity(
+            |input| {
+                requests.lock().unwrap().push(input);
+                let reply = replies.lock().unwrap().next().unwrap_or(Err("no reply"));
+                async move { reply }
+            },
+            b"FULL",
+            b"BEFORE",
+        )
+        .await
+        .map(|(_, supported)| supported);
+        (result, requests.into_inner().unwrap())
+    }
+
+    /// J262 (b): one transient probe failure is retried and the retry proves support.
+    #[tokio::test]
+    async fn a_transient_probe_failure_is_retried_before_any_fallback() {
+        let (supported, requests) = classify(vec![
+            Err("Node control timed out."),
+            Ok(identity_reply(true)),
+        ])
+        .await;
+        assert_eq!(supported, Some(Some(true)));
+        assert_eq!(requests, vec![b"FULL".to_vec(), b"FULL".to_vec()]);
+    }
+
+    /// An older binary rejects the full probe every time but answers the same request without `key_rotation`:
+    /// that proves no support.
+    #[tokio::test]
+    async fn an_older_binary_that_rejects_only_the_rotation_field_reports_no_support() {
+        let (supported, requests) = classify(vec![
+            Err("Node action refused."),
+            Err("Node action refused."),
+            Ok(identity_reply(false)),
+        ])
+        .await;
+        assert_eq!(supported, Some(Some(false)));
+        assert_eq!(requests.last().unwrap(), b"BEFORE");
+    }
+
+    /// When only the legacy request answers, the failures prove nothing about rotation: support is unknown.
+    #[tokio::test]
+    async fn only_a_legacy_answer_leaves_rotation_support_unknown() {
+        let (supported, requests) = classify(vec![
+            Err("Node control timed out."),
+            Err("Node control timed out."),
+            Err("Node control timed out."),
+            Ok(identity_reply(false)),
+        ])
+        .await;
+        assert_eq!(supported, Some(None));
+        assert_eq!(requests.last().unwrap(), b"{}");
+    }
+
+    /// A coordinator restart in the overlap phase still publishes the previous key to peers.
+    #[tokio::test]
+    async fn coordinator_restart_restores_the_previous_key_during_overlap() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let server = store.node_for_host("server").await.unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = "00000000-0000-4000-8000-000000000001";
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+            .bind(operation_id)
+            .bind(i64::try_from(node.0).unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        store
+            .start_rotation_overlap(
+                node,
+                operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        let restarted = crate::store::Store::new(pool);
+        let config = restarted.config(server).await.unwrap();
+        let peer = &config.peers[&node].peer;
+        assert_eq!(peer.key, PublicKey([2; 32]));
+        assert_eq!(
+            peer.previous_key,
+            Some(PublicKey([3; 32])),
+            "a server restart must not forget the old public key before overlap retirement"
+        );
+        assert!(
+            !peer.previous_active,
+            "the previous key remains the route owner until the local candidate switch"
+        );
+    }
+
+    /// A node that reconnects with its predecessor key during the overlap keeps the recorded candidate.
+    #[tokio::test]
+    async fn reconnect_with_predecessor_preserves_candidate_during_overlap() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let predecessor = PublicKey([2; 32]);
+        let candidate = PublicKey([3; 32]);
+        let endpoint = Some("192.0.2.1:44000".parse().unwrap());
+        let (node, _) = store
+            .attach(host, predecessor, endpoint, false)
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = "00000000-0000-4000-8000-000000000004";
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation_id)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(node, operation_id, candidate, 100, "test-boot", 1_000)
+            .await
+            .unwrap();
+
+        let (reattached, _) = store
+            .attach_named_with_capability(host, predecessor, endpoint, false, None, true)
+            .await
+            .unwrap();
+
+        assert_eq!(reattached, node);
+        let schedule = store
+            .rotation_schedule(node, 100, "test-boot", 0, 1_000)
+            .await;
+        assert!(
+            schedule.is_ok(),
+            "a predecessor reconnect must preserve the persisted candidate rotation"
+        );
+        let current: Vec<u8> = sqlx::query_scalar("SELECT public_key FROM mesh_nodes WHERE id=?")
+            .bind(i64::try_from(node.0).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(current, candidate.0);
+    }
+
+    /// A node may already present the candidate key before the server records the retiring phase.
+    #[tokio::test]
+    async fn candidate_identity_reconnects_before_server_marks_rotation_retiring() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (node, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let operation_id = "00000000-0000-4000-8000-000000000003";
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&service.pool_for_tests())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation_id)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&service.pool_for_tests())
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(
+                node,
+                operation_id,
+                PublicKey([3; 32]),
+                1_800_000_000,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        let snapshot = store.snapshot().await.unwrap();
+        let predecessor = snapshot
+            .config_for_identity(node, PublicKey([2; 32]))
+            .unwrap();
+        assert_eq!(predecessor.local_key, Some(PublicKey([2; 32])));
+        let candidate = snapshot
+            .config_for_identity(node, PublicKey([3; 32]))
+            .unwrap();
+        assert_eq!(
+            candidate.local_key,
+            Some(PublicKey([3; 32])),
+            "a host restored after local key commit must bind its full config to the candidate"
+        );
+        assert!(
+            snapshot
+                .config_for_identity(node, PublicKey([4; 32]))
+                .is_err()
+        );
+
+        let server = store.node_for_host("server").await.unwrap();
+        let peer = snapshot.config(server).unwrap().peers[&node].peer.clone();
+        assert_eq!(peer.key, PublicKey([2; 32]));
+        assert_eq!(peer.previous_key, Some(PublicKey([3; 32])));
+        assert!(!peer.previous_active);
+    }
+
+    /// Applied views are durably acknowledged while a rotation needs them, and a new server instance asks again.
+    #[tokio::test]
+    async fn successful_peer_configuration_is_durably_acknowledged_until_restart() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host_id = "00000000-0000-4000-8000-000000000001";
+        let (node, _) = store
+            .attach(
+                host_id,
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = "00000000-0000-4000-8000-000000000002";
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(operation_id)
+        .bind(i64::try_from(node.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        store
+            .start_rotation_overlap(
+                node,
+                operation_id,
+                PublicKey([3; 32]),
+                1_800_000_000,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let rotation_revision = store.commit_rotation(node, operation_id).await.unwrap();
+        let channel = Channel::candidate();
+        let mut progress = service.subscribe_rotation_progress();
+        let worker = tokio::spawn(run(
+            store.clone(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        channel.wait().await;
+        progress.changed().await.unwrap();
+        let applied =
+            sqlx::query("SELECT revision,server_instance FROM mesh_node_applied WHERE node_id=?")
+                .bind(i64::try_from(node.0).unwrap())
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+                .expect("successful configuration must survive worker and coordinator restart");
+        assert!(applied.get::<i64, _>("revision") >= i64::try_from(rotation_revision).unwrap());
+        assert_eq!(
+            applied.get::<String, _>("server_instance"),
+            store.server_instance()
+        );
+        assert!(
+            store
+                .rotation_acks_ready(rotation_revision, &[node].into_iter().collect())
+                .await
+                .unwrap()
+        );
+        let restarted = crate::store::Store::new(pool);
+        assert!(
+            !restarted
+                .rotation_acks_ready(rotation_revision, &[node].into_iter().collect())
+                .await
+                .unwrap(),
+            "a new coordinator instance must reapply views before trusting old receipts"
+        );
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    /// Presence where one peer is reachable only through the relay and another is offline.
+    fn live_with_relay_activity(
+        rotating: NodeId,
+        relay_peer: NodeId,
+        offline_peer: NodeId,
+        server: NodeId,
+    ) -> crate::presence::Live {
+        let now = 1_800_000_000;
+        let mut tracker = crate::presence::Tracker::default();
+        let rows = vec![
+            crate::presence::PeerRow {
+                node: rotating,
+                handshake: now - 10,
+                received: 100,
+                keepalive: 0,
+            },
+            crate::presence::PeerRow {
+                node: relay_peer,
+                handshake: 0,
+                received: 200,
+                keepalive: 0,
+            },
+            crate::presence::PeerRow {
+                node: offline_peer,
+                handshake: 0,
+                received: 0,
+                keepalive: 0,
+            },
+        ];
+        tracker.record(Some((true, rows.clone())), now);
+        let active_rows = rows
+            .into_iter()
+            .map(|mut row| {
+                if row.node == relay_peer {
+                    row.received += 1;
+                }
+                row
+            })
+            .collect();
+        tracker.record(Some((true, active_rows)), now + 5);
+        let live = tracker.live(Some(server), now + 5);
+        assert_eq!(
+            live.get(&relay_peer),
+            Some(&Some(crate::presence::NodePath::Relay)),
+            "relayed packet activity counts without a direct handshake"
+        );
+        live
+    }
+
+    /// A peer reachable only through the relay counts as reachable, so its missing acknowledgment blocks retirement.
+    #[tokio::test]
+    async fn relay_only_peer_without_candidate_ack_blocks_rotation_retirement() {
+        let service = service().await;
+        let store = service.dataplane();
+        let (rotating, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000001",
+                PublicKey([2; 32]),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let (relay_peer, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000002",
+                PublicKey([4; 32]),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let (offline_peer, _) = store
+            .attach(
+                "00000000-0000-4000-8000-000000000003",
+                PublicKey([5; 32]),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let server = store.node_for_host("server").await.unwrap();
+        let pool = service.pool_for_tests();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        // Rotation starts only once every node supports it (D166), the server included.
+        sqlx::query("UPDATE mesh_nodes SET key_rotation_supported=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=1 WHERE node_id=?",
+        )
+        .bind(&operation_id)
+        .bind(i64::try_from(rotating.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let revision = store
+            .start_rotation_overlap(
+                rotating,
+                &operation_id,
+                PublicKey([3; 32]),
+                1_800_000_000,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        let live = live_with_relay_activity(rotating, relay_peer, offline_peer, server);
+        let reachable = store
+            .rotation_reachable_peers(rotating, &live.keys().copied().collect())
+            .await
+            .unwrap();
+        assert!(reachable.contains(&relay_peer));
+        assert!(
+            !reachable.contains(&offline_peer),
+            "D166 keeps offline peers exempt"
+        );
+        store.acknowledge_applied(server, revision).await.unwrap();
+        store.acknowledge_applied(rotating, revision).await.unwrap();
+        assert!(
+            !store
+                .rotation_acks_ready(revision, &reachable)
+                .await
+                .unwrap(),
+            "the active relay-only peer has not applied the candidate view"
+        );
     }
 }

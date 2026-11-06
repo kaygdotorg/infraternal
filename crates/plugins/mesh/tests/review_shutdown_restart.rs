@@ -49,6 +49,7 @@ fn addresses(id: u32) -> Addresses {
     }
 }
 
+/// Configure `node` with 1000 peers.
 fn configure(node: &mut Node) {
     let peers: Vec<_> = (2..=1001)
         .map(|id| {
@@ -57,6 +58,8 @@ fn configure(node: &mut Node) {
                 PeerPolicy {
                     peer: Peer {
                         key: Key::generate().unwrap().1,
+                        previous_key: None,
+                        previous_active: false,
                         addresses: addresses(id),
                         endpoint: None,
                     },
