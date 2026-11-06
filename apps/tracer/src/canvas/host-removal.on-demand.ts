@@ -7,7 +7,11 @@ import { mountConfirmTip } from "../../../../packages/ui/src/tooltip";
 import type { CoreScreen } from "../core-screen";
 import { isCanonicalUuid } from "../identifiers";
 interface RemovalStart { review: string; action: { host_id: string; host: string; uninstall: boolean } }
-/** `manual` carries the command that removes a leftover install, when the host could not uninstall itself. */
+/**
+ * `manual` carries the command that removes a leftover install. While `host_cleanup` is `pending` the
+ * server asks the host when it next connects and this is only the fallback (#409); otherwise the host
+ * could not uninstall itself.
+ */
 interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null }
 /** Send a bounded removal step with the browser session and same-origin checks. */
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -37,12 +41,18 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
           const manual = result.manual;
           if (typeof manual === "string" && manual) {
             // Pending delivery must keep the same local uninstall action as a
-            // completed removal with a leftover installation (#235).
+            // completed removal with a leftover installation (#235). A
+            // `pending` cleanup is not a failure: the server asks the host to
+            // uninstall itself when it next connects, and the command is only
+            // the fallback for a machine that never comes back (#409).
+            const asking = result.state === "pending" && result.host_cleanup === "pending";
             core.toast.show({
-              message: result.state === "pending"
-                ? `${name}: revoked, cleanup pending. infraternal is still installed on it. Copy the command and run it there.`
-                : `${name} was removed here, but infraternal is still installed on it. Copy the command and run it there.`,
-              tone: "error",
+              message: asking
+                ? `${name}: access revoked. It uninstalls infraternal as soon as it connects. If it never comes back, copy the command and run it there.`
+                : result.state === "pending"
+                  ? `${name}: revoked, cleanup pending. infraternal is still installed on it. Copy the command and run it there.`
+                  : `${name} was removed here, but infraternal is still installed on it. Copy the command and run it there.`,
+              ...(asking ? {} : { tone: "error" as const }),
               dismissible: true,
               action: { label: "Copy command", onSelect: () => { void navigator.clipboard.writeText(manual).then(() => core.toast.show({ message: `Command copied. Run it on ${name}.`, duration: 5000 }), () => core.toast.show({ message: result.message, tone: "error", dismissible: true })); } },
             });
