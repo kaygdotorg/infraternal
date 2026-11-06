@@ -1374,6 +1374,15 @@ fn record_scope(root: &Path, unit: &str, uid: u32, group: &str) -> io::Result<()
     if groups.iter().any(|recorded| recorded == group) {
         return Ok(());
     }
+    // A scope whose cgroup is gone holds no process (the kernel removes only
+    // empty cgroups) and logind does not reuse session ids within a boot, so
+    // it is dropped: worker deaths alone never fill the record and lock the
+    // person out (J308 P3-1, #355).
+    groups.retain(|recorded| {
+        cgroup_root()
+            .join(recorded.trim_start_matches('/'))
+            .exists()
+    });
     if groups.len() >= RECORDED_SCOPES {
         return Err(io::Error::other("host login has too many recorded scopes"));
     }
@@ -2142,12 +2151,48 @@ mod tests {
     #[tokio::test]
     async fn scope_records_keep_every_launch() {
         let (root, _, uid, unit) = system_login_fixture().await;
+        // Both launches' scopes are live: a pruned record keeps live scopes only.
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        for id in [1029, 1031] {
+            std::fs::create_dir_all(
+                host.scope
+                    .parent()
+                    .unwrap()
+                    .join(format!("session-{id}.scope")),
+            )
+            .unwrap();
+        }
         let old = format!("/user.slice/user-{uid}.slice/session-1029.scope");
         let new = format!("/user.slice/user-{uid}.slice/session-1031.scope");
         record_scope(&root, &unit, uid, &old).unwrap();
         record_scope(&root, &unit, uid, &new).unwrap();
         record_scope(&root, &unit, uid, &old).unwrap();
         assert_eq!(recorded_scopes(&root, &unit, uid).unwrap(), [old, new]);
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Recording a scope drops recorded scopes whose cgroup is gone, so a
+    /// person whose worker died 16 times in one boot can still open (J308
+    /// P3-1): only live scopes count towards the bound.
+    #[tokio::test]
+    async fn ended_scopes_never_fill_the_record() {
+        let (root, _, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        for id in 100..100 + RECORDED_SCOPES {
+            record_scope(
+                &root,
+                &unit,
+                uid,
+                &format!("/user.slice/user-{uid}.slice/session-{id}.scope"),
+            )
+            .unwrap();
+        }
+        // session-7.scope exists in the scripted cgroupfs; 100.. never did.
+        let live = format!("/user.slice/user-{uid}.slice/session-7.scope");
+        record_scope(&root, &unit, uid, &live).expect("ended scopes filled the record");
+        assert_eq!(recorded_scopes(&root, &unit, uid).unwrap(), [live]);
+        drop(host);
         std::fs::remove_dir_all(root).unwrap();
     }
 
