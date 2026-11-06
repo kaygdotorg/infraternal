@@ -21,8 +21,9 @@ def cpu_mask_for_namespace(namespace: str, side_a: str, side_b: str, housekeepin
 
 
 def cpu_scope_unit_name(namespace: str, pid: int, nonce: int) -> str:
-    """Name a proof scope so the D348 audit can find it under `perf.slice`."""
-    return f"j88i-j279-{namespace}-{pid}-{nonce}.scope"
+    """Expose only the two measured endpoint sides to the D348 audit."""
+    prefix = "j88i-j279" if namespace in ("nodeA", "nodeB") else "j279"
+    return f"{prefix}-{namespace}-{pid}-{nonce}.scope"
 
 
 def parse_ping_reply(line: str) -> tuple[float, int, float] | None:

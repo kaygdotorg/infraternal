@@ -61,8 +61,8 @@ class D348CpuPlacementTests(unittest.TestCase):
         self.assertEqual(cpu_mask_for_namespace("nodeB", "1-2", "3-4", "0,5"), "3-4")
         self.assertEqual(cpu_mask_for_namespace("relay1", "1-2", "3-4", "0,5"), "0,5")
 
-    def test_scope_name_is_visible_to_the_d348_audit(self):
-        """Keep proof process scopes discoverable by the shared runnable-task audit."""
+    def test_scope_names_select_only_the_two_measured_sides_for_the_audit(self):
+        """Audit A/B workloads while keeping housekeeping namespaces outside test CPU checks."""
         self.assertTrue(
             hasattr(mesh_rotation_latency, "cpu_scope_unit_name"),
             "the D348 audit requires a j88i-prefixed scope name",
@@ -70,6 +70,10 @@ class D348CpuPlacementTests(unittest.TestCase):
         self.assertEqual(
             mesh_rotation_latency.cpu_scope_unit_name("nodeA", 123, 456),
             "j88i-j279-nodeA-123-456.scope",
+        )
+        self.assertEqual(
+            mesh_rotation_latency.cpu_scope_unit_name("relay1", 123, 456),
+            "j279-relay1-123-456.scope",
         )
 
 
