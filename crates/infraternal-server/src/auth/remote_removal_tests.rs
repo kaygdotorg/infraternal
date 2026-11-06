@@ -539,7 +539,10 @@ async fn pending_removal_describes_one_host_without_claiming_completion() {
         assert!(!message.contains("was removed"), "{message}");
         assert!(message.contains("revoked, cleanup pending"), "{message}");
         if let Some(manual) = result["manual"].as_str() {
-            assert!(message.contains(manual));
+            assert!(
+                message.ends_with(manual),
+                "the copied command must end the message unchanged: {message}"
+            );
         }
     }
 }

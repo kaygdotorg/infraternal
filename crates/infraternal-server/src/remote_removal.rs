@@ -355,6 +355,7 @@ impl Removal {
 }
 /// Describe removal once, distinguishing pending cleanup from completed retirement.
 /// Pending responses keep the ownership-checked manual command available.
+/// A command ends the text verbatim so copying it cannot include sentence punctuation.
 ///
 /// `installation` is the host id when infraternal setup installed the host:
 /// only then are there commands, because only then is there an installation
@@ -389,8 +390,9 @@ fn outcome(
                 (format!("infraternal is still installed on it, so remove it there {account} with: {commands}"), Some(commands))
             }
         };
+        let punctuation = if manual.is_some() { "" } else { "." };
         return (
-            format!("{name}: revoked, cleanup pending; {detail}."),
+            format!("{name}: revoked, cleanup pending; {detail}{punctuation}"),
             manual,
         );
     }
