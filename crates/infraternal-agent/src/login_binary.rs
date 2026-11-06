@@ -124,12 +124,13 @@ const EXECUTABLE_TYPE: &[u8] = b"bin_t";
 ///
 /// A file has a `security.selinux` attribute only while `SELinux` labels the
 /// filesystem, so a file without one (no `SELinux`, or a filesystem without
-/// labels) is left alone. The label is read back after writing, and a policy
-/// without `bin_t` fails here with a clear error, instead of later as an
-/// opaque `203/EXEC` in the login unit.
+/// labels) is left alone. The label is read back after writing. A policy
+/// without `bin_t`, or an agent domain that may not relabel, fails here, before
+/// any unit exists: `logins::ensure` logs the reason as a journal warning and
+/// the open is refused as unavailable, instead of a later opaque `203/EXEC`.
 /// # Errors
-/// Returns attribute read or write failures and labels that cannot be parsed or
-/// do not stick.
+/// Every failure is a [`label_failure`]: a host or policy condition, never a
+/// malformed request.
 #[cfg(target_os = "linux")]
 fn executable_label(file: &File) -> io::Result<()> {
     use xattr::FileExt as _;
@@ -137,31 +138,33 @@ fn executable_label(file: &File) -> io::Result<()> {
         Ok(Some(current)) => current,
         Ok(None) => return Ok(()),
         Err(error) if error.raw_os_error() == Some(nix::libc::EOPNOTSUPP) => return Ok(()),
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(label_failure(&format!(
+                "cannot read its SELinux label: {error}"
+            )));
+        }
     };
-    let wanted = with_type(&current, EXECUTABLE_TYPE).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unreadable SELinux label on login image",
-        )
-    })?;
+    let wanted = with_type(&current, EXECUTABLE_TYPE)
+        .ok_or_else(|| label_failure("its SELinux label is unreadable"))?;
     if context(&current) == context(&wanted) {
         return Ok(());
     }
     file.set_xattr(SELINUX_ATTRIBUTE, &wanted)
-        .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("cannot label login image bin_t for SELinux: {error}"),
-            )
-        })?;
-    match file.get_xattr(SELINUX_ATTRIBUTE)? {
-        Some(applied) if context(&applied) == context(&wanted) => Ok(()),
-        _ => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "SELinux kept a non-executable label on login image",
-        )),
+        .map_err(|error| label_failure(&format!("cannot label it bin_t for SELinux: {error}")))?;
+    match file.get_xattr(SELINUX_ATTRIBUTE) {
+        Ok(Some(applied)) if context(&applied) == context(&wanted) => Ok(()),
+        _ => Err(label_failure("SELinux kept a non-executable label on it")),
     }
+}
+
+/// A login image that could not be made executable for `SELinux` (#401).
+///
+/// The kind is `Unsupported`, as for a `noexec` cache filesystem: the host or
+/// its policy does not allow it, the request itself was fine. The daemon
+/// therefore refuses the open as unavailable, not as an invalid request.
+#[cfg(target_os = "linux")]
+pub(crate) fn label_failure(reason: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, format!("login image: {reason}"))
 }
 
 /// macOS publishes no login images (see [`executable_filesystem`]).

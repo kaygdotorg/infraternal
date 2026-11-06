@@ -221,6 +221,9 @@ pub fn name(person: uuid::Uuid, uid: u32) -> String {
     format!("infraternal-login-{}-{uid}", person.simple())
 }
 
+/// Where a root infraternal agent publishes the account-readable login images (D247).
+const LOGIN_IMAGES: &str = "/var/cache/infraternal-login-bin";
+
 /// Open a host login or authenticate its existing worker before launching any terminal.
 /// # Errors
 /// Returns host manager, account, worker readiness or privilege failures.
@@ -251,8 +254,18 @@ pub async fn ensure(
     }
     // Refuses unless the system manager answers (D354); only it reaches below.
     root_login_manager(manager, Manager::probe).await?;
-    let image =
-        crate::login_binary::accessible(exe, Path::new("/var/cache/infraternal-login-bin")).await?;
+    let image = crate::login_binary::accessible(exe, Path::new(LOGIN_IMAGES))
+        .await
+        .inspect_err(|error| {
+            // The open is refused with only a coarse reason, so the journal is
+            // where an operator learns why (#401: SELinux label, noexec cache,
+            // untrusted image). `<4>` makes journald record it as a warning.
+            // The error text names no person, account or path beyond the cache.
+            eprintln!(
+                "<4>infraternal agent: login image in {LOGIN_IMAGES} unavailable ({:?}): {error}",
+                error.kind()
+            );
+        })?;
     let exe = image.path();
     let _lock = acquire(root, &name).await?;
     let endpoint = root.join(&name).join("login.sock");

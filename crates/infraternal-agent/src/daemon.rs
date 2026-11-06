@@ -322,6 +322,17 @@ mod refusal_tests {
         );
     }
 
+    /// #401: a login image that `SELinux` would not let us mark executable is a
+    /// host or policy condition, so the open is refused as unavailable, never
+    /// as a malformed request.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn selinux_label_failure_is_not_an_invalid_request() {
+        let failure = crate::login_binary::label_failure("test");
+        assert_eq!(failure.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(open_refusal(&failure), OpenRefusal::ResourceUnavailable);
+    }
+
     /// A root open whose manager probe stayed silent names its own reason, so
     /// the browser can say "busy, try again" rather than a generic failure.
     #[test]
