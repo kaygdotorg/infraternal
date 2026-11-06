@@ -747,6 +747,14 @@ async fn request_stop(
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
 }
 
+/// Stops one person's host login for account `uid` (`unit`).
+///
+/// With the system manager, the unit is ended through systemd alone
+/// ([`stop_unit`]). The login worker runs as the revoked account, which can
+/// freeze or ptrace it, so revocation must not depend on its answers (J261
+/// P1/P2, #355). Without a system manager there is no unit and the worker is
+/// the only handle: it is authenticated and asked to stop its shells, under
+/// short bounds, because its silence is the account's choice, not a slow host.
 async fn stop_login(
     root: &Path,
     manager: Manager,
@@ -754,6 +762,9 @@ async fn stop_login(
     uid: u32,
     unit: &str,
 ) -> io::Result<()> {
+    if matches!(manager, Manager::System) {
+        return stop_unit(unit).await;
+    }
     let endpoint = root.join(unit).join("login.sock");
     let scope = tokio::time::timeout(
         Duration::from_secs(3),
@@ -773,71 +784,7 @@ async fn stop_login(
         }
         Err(error) => return Err(error),
     };
-    let stopped = request_stop(&endpoint, uid, scope.as_ref()).await;
-    if let Some(identity) = &scope
-        && !identity.group.as_os_str().is_empty()
-    {
-        let path = &identity.group;
-        // The kernel-backed MainPID check authenticated this exact login scope.
-        // Root PTY owners are siblings of the worker, so child cleanup alone
-        // cannot retire retained terminal shims immediately on revoked access.
-        let kill = path
-            .parent()
-            .ok_or_else(|| io::Error::other("login cgroup parent absent"))?
-            .join("cgroup.kill");
-        match std::fs::write(kill, b"1") {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if path.parent().is_some_and(Path::exists) {
-                    return Err(io::Error::other(
-                        "host login cgroup lacks immediate cleanup",
-                    ));
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if matches!(manager, Manager::System) {
-        let unit = format!("{unit}.service");
-        let mut show = crate::sessions::isolated(Path::new("systemctl"));
-        let output = tokio::time::timeout(
-            Duration::from_secs(2),
-            show.args(["show", "--property=LoadState", "--value", &unit].as_slice())
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .output(),
-        )
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-        let load = std::str::from_utf8(&output.stdout).ok().map(str::trim);
-        if output.stdout.len() > 32 || (!output.status.success() && load != Some("not-found")) {
-            return Err(io::Error::other("host login unit state unavailable"));
-        }
-        // Collected transient units leave their private account lock as history.
-        // Repeated access removal must not fail merely because cleanup already
-        // unloaded that unit; an existing unit still gets an explicit stop.
-        if load != Some("not-found") {
-            let mut command = crate::sessions::isolated(Path::new("systemctl"));
-            let status = tokio::time::timeout(
-                Duration::from_secs(5),
-                command
-                    .args(["stop", &unit].as_slice())
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .kill_on_drop(true)
-                    .status(),
-            )
-            .await
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-            if !status.success() {
-                return Err(io::Error::other("host login unit refused stop"));
-            }
-        }
-    }
-    match stopped {
+    match request_stop(&endpoint, uid, scope.as_ref()).await {
         Ok(()) => Ok(()),
         Err(error)
             if matches!(
@@ -847,9 +794,167 @@ async fn stop_login(
         {
             Ok(())
         }
-        Err(_) if matches!(manager, Manager::System) && scope.is_some() => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+/// Hang guard for one `systemctl show` query. systemd is a peer whose
+/// progress we trust, so this only detects a manager that never answers; a
+/// slow host makes the query slow, not wrong (#355).
+const SYSTEMD_QUERY_HANG: Duration = Duration::from_secs(60);
+
+/// Hang guard for `systemctl stop`. systemd itself escalates a unit that
+/// ignores its stop signal to SIGKILL after the unit's stop timeout (90 s by
+/// default), so this stays above that escalation and only detects a manager
+/// that never answers (#355).
+const UNIT_STOP_HANG: Duration = Duration::from_secs(180);
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only stand-ins for the `systemctl` program and the cgroup
+    /// filesystem root, so `stop_unit` runs against a scripted manager.
+    static HOST_UNITS: std::cell::RefCell<Option<(PathBuf, PathBuf)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// A `systemctl` command, isolated like every host-manager child.
+fn systemctl() -> tokio::process::Command {
+    #[cfg(test)]
+    if let Some((program, _)) = HOST_UNITS.with(|units| units.borrow().clone()) {
+        return crate::sessions::isolated(&program);
+    }
+    crate::sessions::isolated(Path::new("systemctl"))
+}
+
+/// Root of the unified cgroup hierarchy that systemd's `ControlGroup` paths
+/// are relative to.
+fn cgroup_root() -> PathBuf {
+    #[cfg(test)]
+    if let Some((_, root)) = HOST_UNITS.with(|units| units.borrow().clone()) {
+        return root;
+    }
+    PathBuf::from("/sys/fs/cgroup")
+}
+
+/// What systemd reports about one unit.
+struct UnitState {
+    /// `LoadState`: `not-found` once a transient unit has been collected.
+    load: String,
+    /// `ActiveState`: `inactive` or `failed` once the unit has stopped.
+    active: String,
+    /// `ControlGroup`, relative to [`cgroup_root`]; empty when it has none.
+    control_group: String,
+}
+
+/// Asks systemd for `service`'s load, active and cgroup state.
+async fn unit_state(service: &str) -> io::Result<UnitState> {
+    let output = tokio::time::timeout(
+        SYSTEMD_QUERY_HANG,
+        systemctl()
+            .args(
+                [
+                    "show",
+                    "--property=LoadState",
+                    "--property=ActiveState",
+                    "--property=ControlGroup",
+                    service,
+                ]
+                .as_slice(),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    let unavailable = || io::Error::other("host login unit state unavailable");
+    if output.stdout.len() > 1024 {
+        return Err(unavailable());
+    }
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| unavailable())?;
+    let mut state = UnitState {
+        load: String::new(),
+        active: String::new(),
+        control_group: String::new(),
+    };
+    for line in text.lines() {
+        match line.split_once('=') {
+            Some(("LoadState", value)) => value.trim().clone_into(&mut state.load),
+            Some(("ActiveState", value)) => value.trim().clone_into(&mut state.active),
+            Some(("ControlGroup", value)) => value.trim().clone_into(&mut state.control_group),
+            _ => {}
+        }
+    }
+    if state.load.is_empty() || (!output.status.success() && state.load != "not-found") {
+        return Err(unavailable());
+    }
+    Ok(state)
+}
+
+/// Ends the host login unit `unit` through systemd alone, then refuses only
+/// if systemd still reports it running.
+///
+/// The cgroup comes from systemd's `ControlGroup` of a unit only root can
+/// create, so nothing here depends on the login worker, which runs as the
+/// revoked account (J261 P1, #355). `cgroup.kill` ends every process in it at
+/// once, the shells, their PTY owners and any `setsid` escapees, before any
+/// courtesy, so no exchange the account controls can delay the kill (J261
+/// P2). `systemctl stop` then retires the unit and its PAM session.
+async fn stop_unit(unit: &str) -> io::Result<()> {
+    let service = format!("{unit}.service");
+    let state = unit_state(&service).await?;
+    // Collected transient units leave their private account lock as history.
+    // Repeated access removal must not fail merely because cleanup already
+    // unloaded that unit.
+    if state.load == "not-found" {
+        return Ok(());
+    }
+    if !state.control_group.is_empty() {
+        let group = &state.control_group;
+        let parts: Vec<_> = group.split('/').collect();
+        if !group.starts_with('/')
+            || parts[1..]
+                .iter()
+                .any(|part| matches!(*part, "" | "." | ".."))
+            || parts.last() != Some(&service.as_str())
+        {
+            return Err(io::Error::other("invalid host login cgroup"));
+        }
+        let directory = cgroup_root().join(group.trim_start_matches('/'));
+        match std::fs::write(directory.join("cgroup.kill"), b"1") {
+            Ok(()) => {}
+            // The unit's cgroup is already gone: nothing is left to kill.
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !directory.exists() => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(io::Error::other(
+                    "host login cgroup lacks immediate cleanup",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let status = tokio::time::timeout(
+        UNIT_STOP_HANG,
+        systemctl()
+            .args(["stop", &service].as_slice())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    if !status.success() {
+        return Err(io::Error::other("host login unit refused stop"));
+    }
+    let after = unit_state(&service).await?;
+    if after.load != "not-found" && !matches!(after.active.as_str(), "inactive" | "failed") {
+        return Err(io::Error::other("host login unit still running after stop"));
+    }
+    Ok(())
 }
 
 async fn acquire(root: &Path, name: &str) -> io::Result<nix::fcntl::Flock<std::fs::File>> {
@@ -1085,6 +1190,88 @@ async fn fallback(
 mod tests {
     //! Person identity remains distinct even when the OS account is shared.
     use super::*;
+
+    /// A revoked account that freezes its own login worker (`kill -STOP`)
+    /// still loses its shell: with the system manager, revocation kills the
+    /// unit's cgroup and stops the unit through systemd without asking the
+    /// worker (J261 P1, #355). The worker here accepts and never answers, the
+    /// socket-level shape of a stopped process. systemd is a script that
+    /// records its calls and reports the unit stopped after `stop`.
+    #[tokio::test]
+    async fn frozen_login_worker_cannot_keep_a_revoked_shell() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Short, so the worker's socket path stays within SUN_LEN.
+        let root = nix::unistd::mkdtemp("/tmp/rl-XXXXXX").unwrap();
+        let person = uuid::Uuid::new_v4();
+        let uid = Uid::effective().as_raw();
+        let unit = name(person, uid);
+        drop(acquire(&root, &unit).await.unwrap());
+        synchronize_at(&root, person).unwrap();
+        let endpoint = root.join(&unit).join("login.sock");
+        std::fs::create_dir(endpoint.parent().unwrap()).unwrap();
+        let worker = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let frozen = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                // Accepted and never read or answered.
+                held.push(worker.accept().await.unwrap().0);
+            }
+        });
+        let host = root.join("host");
+        let group = format!("/system.slice/{unit}.service");
+        let cgroup = host.join("cgroup").join(group.trim_start_matches('/'));
+        std::fs::create_dir_all(&cgroup).unwrap();
+        std::fs::write(cgroup.join("cgroup.kill"), b"").unwrap();
+        std::fs::write(host.join("active"), "active\n").unwrap();
+        std::fs::write(host.join("group"), format!("{group}\n")).unwrap();
+        let script = format!(
+            "#!/bin/sh\nd='{}'\necho \"$*\" >> \"$d/calls\"\ncase \"$1\" in\n\
+             show) printf 'LoadState=loaded\\nActiveState=%s\\nControlGroup=%s\\n' \"$(cat \"$d/active\")\" \"$(cat \"$d/group\")\" ;;\n\
+             stop) echo inactive > \"$d/active\"; : > \"$d/group\" ;;\nesac\n",
+            host.display()
+        );
+        let staging = host.join("systemctl.staging");
+        std::fs::write(&staging, script).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let systemctl = host.join("systemctl");
+        // Published by a separate process so no forked sibling holds a writer (ETXTBSY).
+        assert!(
+            std::process::Command::new("install")
+                .args(["-m", "700", "--"])
+                .args([&staging, &systemctl])
+                .status()
+                .unwrap()
+                .success()
+        );
+        HOST_UNITS.with(|units| *units.borrow_mut() = Some((systemctl, host.join("cgroup"))));
+        // Hang guard only: a correct revocation never waits on the worker.
+        let revoked = tokio::time::timeout(
+            Duration::from_secs(300),
+            revoke_at(&root, Manager::System, person, false),
+        )
+        .await
+        .expect("revocation hung");
+        HOST_UNITS.with(|units| *units.borrow_mut() = None);
+        frozen.abort();
+        let calls = std::fs::read_to_string(host.join("calls")).unwrap_or_default();
+        let killed = std::fs::read(cgroup.join("cgroup.kill")).unwrap();
+        assert!(
+            revoked.is_ok(),
+            "a frozen worker refused the revocation: {revoked:?}; systemctl calls: {calls:?}"
+        );
+        assert_eq!(killed, b"1", "the unit's cgroup was not killed");
+        assert!(
+            calls
+                .lines()
+                .any(|line| line == format!("stop {unit}.service")),
+            "the unit was not stopped: {calls:?}"
+        );
+        assert_eq!(
+            permitted(&root, person).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Contended publishers must leave a worker available for refusal markers.
     /// Run explicitly as root in a private fixture; the watchdog only breaks a
