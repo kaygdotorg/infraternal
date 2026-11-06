@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Exercise strict authentication and progress-bounded uploads through a real SSH master.
 #[tokio::test]
 #[ignore = "run through research/ssh-client/measure.py with the synthetic rootless sshd fixture"]
 async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
@@ -79,6 +80,29 @@ async fn actual_ssh_authentication_check_and_strict_host_key_rejection() {
         started.elapsed().as_micros(),
         check.uid
     );
+    // Consume 256 chunks at a deliberately slow rate. This exceeds the old
+    // 30-second command clock without asserting speed on a shared build VM.
+    let upload = vec![42; 256 * 65536];
+    let script = r#"python3 -c '
+import os, time
+for _ in range(256):
+    remaining = 65536
+    while remaining:
+        chunk = os.read(0, remaining)
+        assert chunk and all(byte == 42 for byte in chunk)
+        remaining -= len(chunk)
+    # sleep: throttle the synthetic upload beyond the former total command deadline.
+    time.sleep(.15)
+assert not os.read(0, 1)
+print("UPLOAD complete")
+'"#;
+    let output = session.run(script, Input::Bytes(&upload)).await.unwrap();
+    assert_eq!(output.stdout, b"UPLOAD complete\n");
+    println!(
+        "PROOF real_sshd progressing_upload bytes={} chunks=256 complete",
+        upload.len()
+    );
+
     drop(session);
     assert!(
         std::fs::read_dir(&fixture).unwrap().all(|entry| !entry

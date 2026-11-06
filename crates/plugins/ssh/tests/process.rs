@@ -1,4 +1,4 @@
-//! Proves active helper cancellation and bounded output using real child processes, including a descendant.
+//! Proves progress deadlines, helper cancellation and bounded output using real child processes.
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -398,4 +398,76 @@ async fn declared_selection_mismatch_and_missing_verification_withhold_private_i
         );
         std::fs::remove_file(&path).ok();
     }
+}
+
+/// Advance a virtual clock while a real child consumes gated payload chunks.
+/// Restoring the total helper timeout makes this fail after the third advance.
+#[tokio::test]
+async fn progressing_upload_outlives_thirty_seconds() {
+    let scratch = common::scratch();
+    let root = scratch.join(format!("progress-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&root).unwrap();
+    let script = r"
+import os, pathlib, sys, time
+root = pathlib.Path(sys.argv[1])
+for index in range(8):
+    remaining = 65536
+    while remaining:
+        chunk = os.read(0, remaining)
+        assert chunk
+        remaining -= len(chunk)
+    (root / str(index)).touch()
+    while not (root / ('release' + str(index))).exists():
+        # sleep: wait for the test to advance virtual time before accepting more bytes.
+        time.sleep(.001)
+assert not os.read(0, 1)
+";
+    let path = root.clone();
+    let running = tokio::spawn(async move {
+        let payload = vec![42; 8 * 65536];
+        let mut command = Command::new("/usr/bin/python3");
+        command.args(["-c", script]).arg(path);
+        execute(
+            &mut command,
+            Input::Bytes(&payload),
+            Duration::from_secs(30),
+        )
+        .await
+    });
+    tokio::time::pause();
+    // The product clock is virtual. This generous real-time guard only catches
+    // a wedged fixture while waiting for an external child's acknowledgment.
+    let hang_guard = std::time::Instant::now() + Duration::from_secs(600);
+    for index in 0..8 {
+        while !root.join(index.to_string()).exists() {
+            assert!(!running.is_finished(), "upload ended before chunk {index}");
+            assert!(
+                std::time::Instant::now() < hang_guard,
+                "the upload fixture stopped acknowledging chunks"
+            );
+            tokio::task::yield_now().await;
+        }
+        // The child's acknowledgment proves these bytes passed the input pipe.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        std::fs::write(root.join(format!("release{index}")), []).unwrap();
+    }
+    tokio::time::resume();
+    let result = running.await.unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(result.is_ok_and(|output| output.success));
+}
+
+/// A child that accepts no input must expire even when no wall time elapses.
+#[tokio::test]
+async fn stalled_upload_expires_under_virtual_time() {
+    let mut command = Command::new("/bin/sleep");
+    command.arg("600");
+    tokio::time::pause();
+    let bytes = vec![42; 1024 * 1024];
+    let result = execute(&mut command, Input::Bytes(&bytes), Duration::from_secs(30)).await;
+    tokio::time::resume();
+    assert_eq!(
+        result.err().unwrap().message,
+        "The SSH operation timed out."
+    );
 }

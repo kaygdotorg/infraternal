@@ -9,11 +9,19 @@ use nix::{
     sys::signal::{Signal, killpg},
     unistd::Pid,
 };
-use std::{os::unix::process::CommandExt, process::Stdio, time::Duration};
+use std::{
+    os::unix::process::CommandExt,
+    pin::Pin,
+    process::Stdio,
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     process::Command,
     signal::unix::{Signal as ExitEvents, SignalKind, signal},
+    sync::watch,
+    time::Instant,
 };
 
 /// Process data is bounded even when a compromised SSH endpoint streams endlessly.
@@ -26,7 +34,11 @@ pub struct Output {
     pub ssh_failure: bool,
 }
 
-/// Run one trusted helper with bounded pipes and a total active deadline.
+/// Run one trusted helper with bounded pipes and a progress deadline.
+/// Successful stdin writes renew `timeout`; idle input, receipt waits and exit
+/// waits expire after that interval. Output cannot renew the bound, so banners
+/// and diagnostics cannot keep a blocked upload alive. Commands without input
+/// retain their total deadline. Production SSH uses a 30-second interval.
 /// # Errors
 /// Reports helper startup, bounded I/O or active timeout without printing process data.
 pub async fn execute(
@@ -58,6 +70,7 @@ pub(crate) async fn execute_prompt(
     execute_inner(command, input, timeout, 4096, Some(parent)).await
 }
 
+/// Keep process ownership and bounded diagnostics intact across progress expiry.
 async fn execute_inner(
     command: &mut Command,
     input: Input<'_>,
@@ -107,63 +120,86 @@ async fn execute_inner(
         .stderr
         .take()
         .ok_or_else(|| Failure::install("The SSH diagnostic pipe is unavailable."))?;
+    // One latest timestamp per child, never a queue proportional to payload size.
+    // Waiting for terminal proof is not transfer progress and keeps its total bound.
+    let (progress, mut moved) = watch::channel(Instant::now());
+    let transferring = !matches!(input, Input::Empty | Input::Signal(_));
+    let stdin = ProgressWriter {
+        inner: stdin,
+        progress: transferring.then(|| progress.clone()),
+    };
     let (negotiated, payload_ack, declared) = transfer_options(&input);
     let (choice, selected) = tokio::sync::oneshot::channel();
     let (ready, received) = tokio::sync::oneshot::channel();
-    let operation = async {
-        let write = write_input(stdin, input, selected, received);
-        let read = async {
-            let (stdout, stderr) = tokio::try_join!(
-                async {
-                    if negotiated {
-                        negotiated_output(
-                            stdout,
-                            stdout_limit,
-                            choice,
-                            ready,
-                            payload_ack,
-                            declared,
-                        )
-                        .await
-                    } else {
-                        bounded(stdout, stdout_limit).await
-                    }
-                },
-                bounded(stderr, 8192)
-            )?;
-            Ok::<_, Failure>((stdout, stderr))
+    let result = {
+        let operation = async {
+            let write = write_input(stdin, input, selected, received);
+            let read = async {
+                let (stdout, stderr) = tokio::try_join!(
+                    async {
+                        if negotiated {
+                            negotiated_output(
+                                stdout,
+                                stdout_limit,
+                                choice,
+                                ready,
+                                payload_ack,
+                                declared,
+                            )
+                            .await
+                        } else {
+                            bounded(stdout, stdout_limit).await
+                        }
+                    },
+                    bounded(stderr, 8192)
+                )?;
+                Ok::<_, Failure>((stdout, stderr))
+            };
+            // Retain the unreaped leader identity while inherited pipes are pending.
+            // A descendant can leave the group but keep a pipe open; reaping first
+            // would let cancellation signal a subsequently reused group id.
+            let (write, read) = tokio::join!(write, read);
+            observe_exit(group.id, &mut exits).await?;
+            // Retire closed-pipe descendants before reaping releases the group id.
+            group.retire();
+            // Revoke helper authority before the leader identity can be reused.
+            drop(prompt_lease);
+            let status = child.wait().await;
+            let status =
+                status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
+            let (stdout, stderr) = read?;
+            // A negotiated setup may refuse a stage without consuming invitation
+            // stdin. Keep only a complete canonical refusal for the caller's typed
+            // decoder; successful or malformed receipts still require input delivery.
+            let refused = negotiated
+                && crate::install::parse_transfer_setup(&stdout)
+                    .is_err_and(|failure| failure.exit_status.is_some());
+            if status.success() && !refused {
+                write?;
+            }
+            Ok(Output {
+                stdout,
+                stderr,
+                success: status.success(),
+                exit_status: status.code().and_then(|code| u8::try_from(code).ok()),
+                ssh_failure: status.code() == Some(255),
+            })
         };
-        // Retain the unreaped leader identity while inherited pipes are pending.
-        // A descendant can leave the group but keep a pipe open; reaping first
-        // would let cancellation signal a subsequently reused group id.
-        let (write, read) = tokio::join!(write, read);
-        observe_exit(group.id, &mut exits).await?;
-        // Retire closed-pipe descendants before reaping releases the group id.
-        group.retire();
-        // Revoke helper authority before the leader identity can be reused.
-        drop(prompt_lease);
-        let status = child.wait().await;
-        let status =
-            status.map_err(|_| Failure::install("The SSH helper did not exit cleanly."))?;
-        let (stdout, stderr) = read?;
-        // A negotiated setup may refuse a stage without consuming invitation
-        // stdin. Keep only a complete canonical refusal for the caller's typed
-        // decoder; successful or malformed receipts still require input delivery.
-        let refused = negotiated
-            && crate::install::parse_transfer_setup(&stdout)
-                .is_err_and(|failure| failure.exit_status.is_some());
-        if status.success() && !refused {
-            write?;
+        tokio::pin!(operation);
+        let expiry = tokio::time::sleep(timeout);
+        tokio::pin!(expiry);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut operation => break Some(result),
+                Ok(()) = moved.changed() => {
+                    expiry.as_mut().reset(*moved.borrow_and_update() + timeout);
+                },
+                () = &mut expiry => break None,
+            }
         }
-        Ok(Output {
-            stdout,
-            stderr,
-            success: status.success(),
-            exit_status: status.code().and_then(|code| u8::try_from(code).ok()),
-            ssh_failure: status.code() == Some(255),
-        })
     };
-    if let Ok(result) = tokio::time::timeout(timeout, operation).await {
+    if let Some(result) = result {
         // Normal completion retired the group before reaping. Early errors still
         // own the leader identity and must also retire descendants.
         group.retire();
@@ -172,6 +208,48 @@ async fn execute_inner(
         group.retire();
         let _ = child.wait().await;
         Err(Failure::install("The SSH operation timed out."))
+    }
+}
+
+/// Observe bytes accepted by the SSH input pipe, including partial writes.
+/// File reads, empty writes and remote chatter cannot renew an upload deadline.
+struct ProgressWriter<W> {
+    /// The owned input pipe; cancellation still drops it with the child scope.
+    inner: W,
+    /// Latest successful write, absent for commands waiting on non-byte signals.
+    progress: Option<watch::Sender<Instant>>,
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for ProgressWriter<W> {
+    /// Renew only after the underlying writer accepts a nonempty byte range.
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.inner).poll_write(context, bytes);
+        if matches!(&result, Poll::Ready(Ok(count)) if *count != 0)
+            && let Some(progress) = &self.progress
+        {
+            progress.send_replace(Instant::now());
+        }
+        result
+    }
+
+    /// Flushing buffered data does not prove that another byte was accepted.
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(context)
+    }
+
+    /// Close input without manufacturing a final progress event.
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(context)
     }
 }
 
@@ -256,7 +334,7 @@ fn transfer_options(input: &Input<'_>) -> (bool, bool, Option<TransferChoice>) {
 
 /// Keep commit release and ordinary input under the same bounded child lifecycle.
 async fn write_input(
-    mut stdin: tokio::process::ChildStdin,
+    mut stdin: impl AsyncWrite + Unpin,
     input: Input<'_>,
     selected: tokio::sync::oneshot::Receiver<Option<TransferChoice>>,
     received: tokio::sync::oneshot::Receiver<()>,
@@ -414,7 +492,7 @@ async fn negotiated_output(
 
 /// Public file framing is shared by both fixed and negotiated input paths.
 async fn write_payload(
-    stdin: &mut tokio::process::ChildStdin,
+    stdin: &mut (impl AsyncWrite + Unpin),
     payload: PayloadInput<'_>,
 ) -> Result<(), Failure> {
     match payload {

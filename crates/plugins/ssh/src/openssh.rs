@@ -24,6 +24,8 @@ pub struct OpenSsh {
     /// Trusted optional binary implementing only the private socket handoff.
     pub tcp_connector: Option<PathBuf>,
     pub scratch: PathBuf,
+    /// Short-command bound and maximum idle interval between upload writes.
+    /// Production uses 30 seconds; payload length does not consume this interval.
     pub command_timeout: Duration,
 }
 
