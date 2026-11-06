@@ -456,10 +456,14 @@ scan_holders() {
  # turned non-dumpable meanwhile (an ssh or a shim starting) is decided as
  # above; any other error is unknown and refuses.
  live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>&1 >&4 | sed 's/^/unreadable: /'; } 4>&1 )
- while IFS= read -r scan_line; do
+ # One line per entry; no here-document (compaction, see install.rs) and no
+ # pipeline, whose subshell would swallow exit 73.
+ scan_nl=$(printf '\n_'); scan_nl=${scan_nl%_}
+ scan_ifs=$IFS; IFS=$scan_nl; set -f
+ for scan_line in $live; do
   case "$scan_line" in
    '') continue;;
-   "unreadable: find: '/proc/"*)
+   "unreadable: find: "?/proc/*)
     scan_pid=${scan_line#*/proc/}
     scan_pid=${scan_pid%%[!0-9]*}
     [ -n "$scan_pid" ] || exit 73
@@ -472,9 +476,8 @@ scan_holders() {
     esac;;
    *) exit 73;;
   esac
- done <<SCAN
-$live
-SCAN
+ done
+ set +f; IFS=$scan_ifs
 }
 # Whether /proc entry $1, whose exe or fds are hidden (non-dumpable), may hold
 # this install. A process that has exited (or is a zombie) holds nothing.
