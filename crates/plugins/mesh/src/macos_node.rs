@@ -622,12 +622,20 @@ struct Pending {
     config: Config,
 }
 
+/// Stage a contiguous Mac snapshot, treating a changed authority as a fresh full snapshot.
+/// # Errors
+/// Refuses incomplete, stale, unbound, or inconsistent chunks.
 fn stage_chunk(
     pending: &mut Option<Pending>,
     current: Option<&Config>,
     identity: &crate::dataplane::Identity,
     chunk: crate::dataplane::Chunk,
 ) -> io::Result<Option<Config>> {
+    let current = if needs_authority_reset(current, &chunk) {
+        None
+    } else {
+        current
+    };
     if !chunk.access_updates.is_empty()
         && (chunk.from_version.is_none()
             || chunk.index != 0
@@ -780,6 +788,11 @@ fn stage_chunk(
     } else {
         Ok(None)
     }
+}
+
+/// Check whether an incoming snapshot starts a new server or restored revision authority.
+fn needs_authority_reset(current: Option<&Config>, chunk: &crate::dataplane::Chunk) -> bool {
+    current.is_some_and(|old| old.server != chunk.server || chunk.version < old.version)
 }
 
 #[derive(Clone)]
@@ -989,15 +1002,16 @@ impl Worker {
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
     }
 
+    /// Stop the worker and wait until its device thread has finished teardown.
+    /// # Errors
+    /// Reports command delivery, route cleanup, or worker-thread failures.
     fn stop(&mut self) -> io::Result<()> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
             .send(WorkerCommand::Stop(reply))
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         let stopped = result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?;
-        if stopped.is_ok()
-            && let Some(join) = self.join.take()
-        {
+        if let Some(join) = self.join.take() {
             join.join()
                 .map_err(|_| io::Error::other("Mesh worker stopped unexpectedly."))?;
         }
@@ -1019,6 +1033,7 @@ struct RuntimeState {
     port: u16,
 }
 
+/// Apply worker commands in order and exit after a stop request even if route cleanup reports an error.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     while let Some(command) = commands.recv().await {
         match command {
@@ -1032,11 +1047,8 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
             }
             WorkerCommand::Stop(reply) => {
                 let result = state.stop().await;
-                let stop = result.is_ok();
                 let _ = reply.send(result);
-                if stop {
-                    return;
-                }
+                return;
             }
         }
     }
@@ -1127,21 +1139,21 @@ impl RuntimeState {
         Ok(counters)
     }
 
+    /// Stop GotaTun even when removing an old utun route fails.
+    /// # Errors
+    /// Returns the route cleanup error after the device and utun descriptor have been stopped.
     async fn stop(&mut self) -> io::Result<()> {
-        let interface = self
+        let route_result = self
             .utun
             .as_ref()
-            .map(MacUtun::name)
-            .ok_or(io::ErrorKind::NotConnected)?
-            .to_owned();
-        remove_routes(&interface, &self.routes)?;
+            .map_or(Ok(()), |utun| remove_routes(utun.name(), &self.routes));
         if let Some(device) = self.device.take() {
             device.stop().await;
         }
         self.utun.take();
         self.routes.clear();
         self.config = None;
-        Ok(())
+        route_result
     }
 }
 
@@ -1433,12 +1445,48 @@ impl Node {
     /// # Errors
     /// Refuses wrong identity bindings, incomplete chunks, unsafe routes, or failed engine updates.
     pub fn chunk(&mut self, chunk: crate::dataplane::Chunk) -> io::Result<bool> {
-        let identity = self.identity.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        let Some(identity) = self.identity.clone() else {
+            self.pending = None;
+            tracing::warn!("Mac mesh configuration chunk refused while the node is not up");
+            return Err(io::ErrorKind::NotConnected.into());
+        };
         if !self.enabled || self.worker.is_none() || chunk.local_key != Some(identity.public_key) {
             self.pending = None;
+            tracing::warn!(
+                error_kind = ?io::ErrorKind::InvalidData,
+                "Mac mesh configuration chunk refused"
+            );
             return Err(io::ErrorKind::InvalidData.into());
         }
-        let result = stage_chunk(&mut self.pending, self.config.as_ref(), identity, chunk);
+        if needs_authority_reset(self.config.as_ref(), &chunk) {
+            if let Some(old) = self.config.as_ref() {
+                tracing::warn!(
+                    old_server = ?old.server,
+                    new_server = ?chunk.server,
+                    old_node = old.node.0,
+                    new_node = chunk.node.0,
+                    old_version = old.version,
+                    new_version = chunk.version,
+                    "retiring retained Mac mesh peers before applying a changed authority or older revision"
+                );
+            }
+            if let Err(error) = self.retire_stale_configuration() {
+                self.pending = None;
+                tracing::warn!(
+                    error_kind = ?error.kind(),
+                    "Mac mesh configuration chunk refused after authority reset"
+                );
+                return Err(error);
+            }
+        }
+        let result = stage_chunk(&mut self.pending, self.config.as_ref(), &identity, chunk);
+        if let Err(error) = &result {
+            self.pending = None;
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "Mac mesh configuration chunk refused"
+            );
+        }
         let Some(config) = result? else {
             return Ok(false);
         };
@@ -1471,6 +1519,98 @@ impl Node {
             self.interface.clone(),
         )?;
         Ok(true)
+    }
+
+    /// Replace the accepted Mac peer set with an empty deny config before staging a new authority.
+    ///
+    /// Persisting the empty intent first ensures a restart cannot restore peers that the new server
+    /// has removed. If that update cannot be saved or applied, stop the GotaTun device so the old
+    /// peers cannot stay reachable while the caller reports the refusal.
+    /// # Errors
+    /// Returns persistence, worker, or shutdown errors; a failed reset leaves the node stopped.
+    fn retire_stale_configuration(&mut self) -> io::Result<()> {
+        let Some(mut deny) = self.config.clone() else {
+            return Ok(());
+        };
+        deny.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        deny.peers.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        deny.peer_names.clear();
+        self.pending = None;
+        self.config = Some(deny.clone());
+
+        let mut cleanup_routes = self.routes.clone();
+        cleanup_routes.extend(route_addresses(&deny));
+        if let Err(error) = self.persist(true, Some(&deny), cleanup_routes, self.interface.clone())
+        {
+            return self.stop_after_retirement_failure(error);
+        }
+        let applied = match self.worker.as_ref() {
+            Some(worker) => worker.apply(deny),
+            None => Err(io::ErrorKind::NotConnected.into()),
+        };
+        let info = match applied {
+            Ok(info) => info,
+            Err(error) => return self.stop_after_retirement_failure(error),
+        };
+        self.routes = info.routes;
+        self.interface = Some(info.interface);
+        self.port = info.port;
+        if let Err(error) = self.persist(true, None, self.routes.clone(), self.interface.clone()) {
+            return self.stop_after_retirement_failure(error);
+        }
+        self.config = None;
+        Ok(())
+    }
+
+    /// Stop the node when the empty peer config cannot be durably applied.
+    /// # Errors
+    /// Returns the reset cause unless shutdown reports a more immediate failure.
+    fn stop_after_retirement_failure(&mut self, reset_error: io::Error) -> io::Result<()> {
+        self.enabled = false;
+        if let Err(error) = self.persist(
+            false,
+            self.config.as_ref(),
+            self.routes.clone(),
+            self.interface.clone(),
+        ) {
+            tracing::error!(
+                error_kind = ?error.kind(),
+                "could not persist disabled Mac mesh state after peer retirement failed"
+            );
+        }
+        let stop_result = self
+            .worker
+            .take()
+            .map_or(Ok(()), |mut worker| worker.stop());
+        self.identity = None;
+        self.config = None;
+        self.pending = None;
+        self.routes.clear();
+        self.interface = None;
+        if let Err(error) = self.persist(false, None, BTreeSet::new(), None) {
+            tracing::error!(
+                error_kind = ?error.kind(),
+                "could not persist stopped Mac mesh state after peer retirement failed"
+            );
+        }
+        match stop_result {
+            Ok(()) => {
+                tracing::warn!(
+                    error_kind = ?reset_error.kind(),
+                    "Mac mesh stopped because stale peers could not be retired"
+                );
+                Err(reset_error)
+            }
+            Err(stop_error) => {
+                tracing::error!(
+                    reset_error_kind = ?reset_error.kind(),
+                    stop_error_kind = ?stop_error.kind(),
+                    "Mac mesh peer retirement and fail-closed shutdown both failed"
+                );
+                Err(stop_error)
+            }
+        }
     }
 
     fn persist(
@@ -1526,10 +1666,10 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
-        UdpTransportFactoryParams, parse_utun_payload, peers_for_config, read_public_state,
-        reconcile, route_addresses, stage_chunk, utun_family, valid_utun_name, validate_config,
-        validate_underlay_routes, write_public_state,
+        BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, UdpSocketFactory,
+        UdpTransportFactoryParams, Worker, WorkerCommand, mpsc, parse_utun_payload,
+        peers_for_config, read_public_state, reconcile, route_addresses, stage_chunk, utun_family,
+        valid_utun_name, validate_config, validate_underlay_routes, write_public_state,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -1546,7 +1686,7 @@ mod tests {
         os::unix::fs::{PermissionsExt, symlink},
         path::PathBuf,
         sync::{
-            Arc, Barrier,
+            Arc, Barrier, Mutex,
             atomic::{AtomicU64, Ordering},
         },
         thread,
@@ -1637,6 +1777,38 @@ mod tests {
             .collect()
     }
 
+    /// Provide a worker that records complete configs without opening a Mac utun.
+    fn recording_worker(applied: Arc<Mutex<Vec<Config>>>) -> Worker {
+        let (commands, mut receiver) = mpsc::unbounded_channel();
+        let join = thread::spawn(move || {
+            while let Some(command) = receiver.blocking_recv() {
+                match command {
+                    WorkerCommand::Apply { config, reply } => {
+                        if let Ok(mut configs) = applied.lock() {
+                            configs.push(config.clone());
+                        }
+                        let _ = reply.send(Ok(RuntimeInfo {
+                            interface: "utun-test".to_owned(),
+                            port: 51820,
+                            routes: route_addresses(&config),
+                        }));
+                    }
+                    WorkerCommand::Counters(reply) => {
+                        let _ = reply.send(super::CounterMap::new());
+                    }
+                    WorkerCommand::Stop(reply) => {
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
+                }
+            }
+        });
+        Worker {
+            commands,
+            join: Some(join),
+        }
+    }
+
     /// D164 deny-by-default must hold while the Mac has no packet filter (#265 P1-2).
     #[test]
     fn peers_without_full_inbound_access_are_not_installed() {
@@ -1697,6 +1869,58 @@ mod tests {
         assert!(applied.peers.contains_key(&NodeId(4)));
         assert!(installed_keys(&applied).is_empty());
         assert!(route_addresses(&applied).is_empty());
+    }
+
+    /// A restored lower-revision snapshot replaces peers from the later state.
+    #[test]
+    fn restored_snapshot_replaces_stale_peers() {
+        let mut current = config();
+        current.version = 11;
+        let mut restored = current.clone();
+        restored.version = 2;
+        restored.peers.clear();
+        let identity = Identity {
+            public_key: current.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: false,
+        };
+        let applied_configs = Arc::new(Mutex::new(Vec::new()));
+        let mut node = Node {
+            enabled: true,
+            worker: Some(recording_worker(Arc::clone(&applied_configs))),
+            identity: Some(identity),
+            config: Some(current.clone()),
+            pending: None,
+            routes: route_addresses(&current),
+            interface: Some("utun-test".to_owned()),
+            port: 51820,
+            path: None,
+            binding: None,
+        };
+        let mut applied = false;
+        for chunk in crate::configuration::chunks(None, &restored).expect("full restore") {
+            applied = node
+                .chunk(chunk)
+                .expect("restored snapshot should establish a fresh authority");
+        }
+
+        assert!(applied, "the full restored snapshot was not committed");
+        let installed = node.config().expect("accepted configuration");
+        assert_eq!(installed.version, 2);
+        assert!(installed.peers.is_empty());
+        assert!(installed_keys(installed).is_empty());
+        let applied_configs = applied_configs.lock().expect("recorded configs");
+        assert_eq!(
+            applied_configs.len(),
+            2,
+            "retire, then install the snapshot"
+        );
+        assert!(applied_configs[0].peers.is_empty());
+        assert_eq!(applied_configs[0].default_policy, DefaultPolicy::Deny);
+        assert!(applied_configs[1].peers.is_empty());
     }
 
     #[test]

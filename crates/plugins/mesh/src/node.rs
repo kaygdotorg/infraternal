@@ -1336,11 +1336,74 @@ impl Node {
             self.refusing_at_ns = None;
         }
         self.finish_connection_cleanup()?;
+        // A changed server id or revision rollback resets authority. Node ids and addresses are
+        // mutable configuration fields, so validate them before disturbing an accepted snapshot.
+        let authority_reset = self
+            .config
+            .as_ref()
+            .is_some_and(|old| old.server != chunk.server || chunk.version < old.version);
+        if authority_reset {
+            if let Some(old) = self.config.as_ref() {
+                tracing::warn!(
+                    old_server = ?old.server,
+                    new_server = ?chunk.server,
+                    old_node = old.node.0,
+                    new_node = chunk.node.0,
+                    old_version = old.version,
+                    new_version = chunk.version,
+                    "retiring retained mesh peers before applying a changed authority or older revision"
+                );
+            }
+            self.retire_stale_configuration()?;
+        }
         let result = self.stage(chunk);
-        if result.is_err() {
+        if let Err(error) = &result {
             self.pending = None;
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "mesh configuration chunk refused"
+            );
         }
         result
+    }
+    /// Remove every peer from the retained authority before accepting a replacement snapshot.
+    ///
+    /// The empty deny configuration is installed and persisted first. Saving `config: null` next
+    /// lets a lower-revision full snapshot from the current server establish a fresh base, while a
+    /// failed or partial replacement leaves no peers from the previous authority installed.
+    /// # Errors
+    /// Returns a kernel, firewall or persistence failure; callers must not accept the replacement.
+    fn retire_stale_configuration(&mut self) -> io::Result<()> {
+        let Some(mut deny) = self.config.clone() else {
+            return Ok(());
+        };
+        deny.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        deny.peers.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        deny.peer_names.clear();
+        self.pending = None;
+        if let Err(apply_error) = self.apply(deny) {
+            return match self.down() {
+                Ok(()) => {
+                    tracing::warn!(
+                        error_kind = ?apply_error.kind(),
+                        "mesh stopped because stale peers could not be retired in place"
+                    );
+                    Err(apply_error)
+                }
+                Err(stop_error) => {
+                    tracing::error!(
+                        apply_error_kind = ?apply_error.kind(),
+                        stop_error_kind = ?stop_error.kind(),
+                        "mesh peer retirement and fail-closed shutdown both failed"
+                    );
+                    Err(stop_error)
+                }
+            };
+        }
+        self.save(None, true)?;
+        self.config = None;
+        Ok(())
     }
     // Keep enabled-key authority separate from contiguous snapshot staging.
     fn validate_binding(&self, chunk: &Chunk) -> io::Result<()> {

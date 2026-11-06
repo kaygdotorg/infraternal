@@ -153,3 +153,71 @@ fn nft_split_snapshot_replay_requires_complete_identical_contents() {
 fn nf_tables_split_snapshot_replay_requires_complete_identical_contents() {
     split_replay(true);
 }
+
+/// A full snapshot from a restored server replaces a newer retained config and retires its peers.
+#[test]
+#[ignore = "Run in a disposable user/network namespace, issue #382."]
+fn nft_server_revision_rollback_replaces_stale_peers() {
+    let (mut node, mut accepted) = install(false);
+    let identity = node.up().unwrap();
+    accepted.local_key = Some(identity.public_key);
+    accepted.server = Some(NodeId(1));
+    accepted.version = 11;
+    for chunk in configuration::chunks(None, &accepted).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+
+    let mut restored = accepted.clone();
+    restored.version = 2;
+    restored.peers.clear();
+    let result = configuration::chunks(None, &restored)
+        .unwrap()
+        .into_iter()
+        .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
+    let retained = node.config().cloned();
+    let installed_peers = Device::counters().unwrap().len();
+    node.down().unwrap();
+
+    assert!(
+        result.is_ok(),
+        "restored full snapshot was refused: {result:?}"
+    );
+    assert_eq!(retained, Some(restored));
+    assert_eq!(installed_peers, 0, "a stale peer key remained installed");
+}
+
+/// A rejected snapshot from a newly enrolled server cannot leave the previous server's peers reachable.
+#[test]
+#[ignore = "Run in a disposable user/network namespace, issue #382."]
+fn nft_new_server_rejection_retires_previous_peers() {
+    let (mut node, mut accepted) = install(false);
+    let identity = node.up().unwrap();
+    accepted.local_key = Some(identity.public_key);
+    accepted.server = Some(NodeId(1));
+    accepted.version = 11;
+    for chunk in configuration::chunks(None, &accepted).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+
+    let mut invalid = accepted.clone();
+    invalid.server = Some(NodeId(2));
+    invalid.version = 12;
+    invalid.peers.get_mut(&NodeId(2)).unwrap().peer.key = identity.public_key;
+    let result = configuration::chunks(None, &invalid)
+        .unwrap()
+        .into_iter()
+        .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
+    let retained = node.config().cloned();
+    let installed_peers = Device::counters().unwrap().len();
+    node.down().unwrap();
+
+    assert!(
+        result.is_err(),
+        "the invalid new-server snapshot was accepted"
+    );
+    assert_eq!(
+        retained, None,
+        "an invalid replacement must leave no accepted snapshot from the previous server"
+    );
+    assert_eq!(installed_peers, 0, "a stale peer key remained installed");
+}
