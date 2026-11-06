@@ -889,9 +889,10 @@ fn retirement_fence(owner: &mut UnixStream) {
 }
 
 /// The retention maximum bounds an owned exit. It holds the shim after the
-/// exit, is never extended by an owner, an unread data peer or later attaches,
-/// and still ends with the typed exit record. Ordering events, not a short
-/// window, decide each part.
+/// exit, is never extended by an owner, an unread data peer or later attaches
+/// (not even once: the shim must retire before an untouched control with a
+/// longer maximum), and still ends with the typed exit record. Ordering
+/// events, not a short window, decide each part.
 #[test]
 fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
     // Not before: an owner and an unread data peer keep an exited shell's shim.
@@ -914,12 +915,24 @@ fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
     let _ownership = owner(&session);
     let _stalled = session.attach(0);
     exit_without_viewer(&session);
+    // Ordering control for a one-off extension: an untouched session with the
+    // same peers and a 5 s maximum, which exits after the one under attack.
+    // Load delays both alike, so the attacked shim retires first unless the
+    // attaches extended its maximum (by more than about 4.3 s), even once.
+    let control = Session::start_retention(8192, false, None, 5_000);
+    let _control_ownership = owner(&control);
+    let _control_stalled = control.attach(0);
+    exit_without_viewer(&control);
     let deadline = Instant::now() + OWNERSHIP_HANG;
     let mut later = Vec::new();
     while session.path().exists() {
         assert!(
             Instant::now() < deadline,
             "owner, data peer or later attaches extended the maximum"
+        );
+        assert!(
+            control.path().exists(),
+            "attaches extended the maximum: the shim outlived an untouched one with a 5 s maximum"
         );
         // Best effort: the shim may retire between the check and the connect.
         if let Ok(mut peer) = UnixStream::connect(session.path()) {
