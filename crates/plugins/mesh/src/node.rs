@@ -1260,6 +1260,9 @@ impl Node {
         let (_, candidate_public) = Key::from_private(&existing.candidate)?;
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         if existing.commit_requested && current == candidate_public {
+            if self.identity.is_none() {
+                return Err(io::ErrorKind::NotConnected.into());
+            }
             match link.owner {
                 Some(owner) if owner == previous_public => {
                     Device::remark(link.ifindex, previous_public, candidate_public)?;
@@ -1268,18 +1271,14 @@ impl Node {
                 _ => return Err(io::ErrorKind::InvalidData.into()),
             }
             // The marker now names the candidate while the journal still holds both keys with commit
-            // intent: the proof accepts both, as a restart would compute from the journal, so a retry after
-            // a failed save below still proves this link (J284 P3-b).
+            // intent. Keep both kernel keys in the proof until completion is durable, and leave the
+            // presented identity unchanged until the same point, so a failed save is retryable (J284 P3-b).
             store.record_interface(&candidate_public)?;
             if self.engine_kind == EngineKind::GotaTun {
                 store.replace_private_key(&existing.candidate)?;
             } else {
-                self.kernel_owner = KernelProof::single(candidate_public);
+                self.kernel_owner = KernelProof(vec![previous_public, candidate_public]);
             }
-            self.identity
-                .as_mut()
-                .ok_or(io::ErrorKind::NotConnected)?
-                .public_key = candidate_public;
             #[cfg(feature = "test-support")]
             if let Some(hook) = BEFORE_SETTLE_SAVE
                 .lock()
@@ -1288,7 +1287,15 @@ impl Node {
             {
                 hook();
             }
-            return store.complete_rotation_secret(&existing.operation_id, existing.sequence);
+            store.complete_rotation_secret(&existing.operation_id, existing.sequence)?;
+            if self.engine_kind == EngineKind::Kernel {
+                self.kernel_owner = KernelProof::single(candidate_public);
+            }
+            self.identity
+                .as_mut()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .public_key = candidate_public;
+            return Ok(());
         }
         if current != previous_public
             || link.owner != Some(previous_public)
