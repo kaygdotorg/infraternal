@@ -117,8 +117,8 @@ class FakeLibFuzzer:
 
     A fuzz run (it has `-max_total_time`) writes `writes` into the artifact
     prefix and prints libFuzzer's `Test unit written to` line for each. A
-    re-check (one input, no budget) prints `Executed <input> in <ms> ms` and
-    exits with `recheck_exit`. Every command is recorded in `commands`.
+    re-check (one input, no budget) prints `Executed <input> in <ms> ms`
+    (nothing when `recheck_ms` is None) and exits with `recheck_exit`. Every command is recorded in `commands`.
     """
 
     def __init__(self, writes=None, recheck_exit=0, recheck_ms=0):
@@ -137,7 +137,8 @@ class FakeLibFuzzer:
                 path.write_bytes(data)
                 stdout.write(f"artifact_prefix='{prefix}'; Test unit written to {path}\n")
             return subprocess.CompletedProcess(command, 70 if self.writes else 0)
-        stdout.write(f"Executed {command[command.index('--') - 1]} in {self.recheck_ms} ms\n")
+        if self.recheck_ms is not None:
+            stdout.write(f"Executed {command[command.index('--') - 1]} in {self.recheck_ms} ms\n")
         return subprocess.CompletedProcess(command, self.recheck_exit)
 
 
@@ -297,6 +298,29 @@ class NightlyFuzz(unittest.TestCase):
         self.assertIn(f'-timeout={fuzz.TIMEOUT_SECONDS}', command)
         self.assertIn(str(crash), command)
         self.assertFalse([flag for flag in command if flag.startswith('-max_total_time')])
+
+    def test_recheck_files_a_slow_input_that_passes(self):
+        """A clean re-check at or over half the limit still files the input; under it, the input is set aside."""
+        crash = self.crash('timeout-input', b'')
+        half = fuzz.TIMEOUT_SECONDS * 1000 // 2
+        for elapsed, expected in [(0, False), (1, False), (half - 1, False), (half, True), (6000, True), (9000, True)]:
+            fake = FakeLibFuzzer(recheck_exit=0, recheck_ms=elapsed)
+            self.assertEqual(fuzz.reproduces(self.fuzzer(fake), self.state, 'release_channel', crash), expected, elapsed)
+
+    def test_recheck_without_a_reported_time_files_the_input(self):
+        """If libFuzzer printed no `Executed` time, the re-check proves nothing, so the input is filed."""
+        crash = self.crash('timeout-input', b'')
+        fake = FakeLibFuzzer(recheck_exit=0, recheck_ms=None)
+        self.assertTrue(fuzz.reproduces(self.fuzzer(fake), self.state, 'release_channel', crash))
+
+    def test_run_target_files_a_six_second_timeout(self):
+        """A synthetic 6 s input that passes its re-check is filed, not set aside."""
+        fake = FakeLibFuzzer(writes={'timeout-slow': b'slow'}, recheck_exit=0, recheck_ms=6000)
+        filed = []
+        entry = fuzz.run_target(self.fuzzer(fake), self.state, 'release_channel', 5,
+                                lambda _name, crash: filed.append(crash.name))
+        self.assertEqual(filed, ['timeout-slow'])
+        self.assertEqual(entry['unconfirmed'], 0)
 
     def test_run_target_sets_aside_a_timeout_that_passes_alone(self):
         """#370 end to end: the fuzz run leaves a timeout and a crash; only the crash is filed."""

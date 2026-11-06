@@ -12,7 +12,8 @@ something did not work: a target that failed without leaving an input, or a
 report that could not be filed.
 
 Timeouts are checked before they are filed: a `timeout-*` input is run again
-on its own and filed only if it times out again (#370).
+on its own and filed if it fails again or still takes at least half the time
+limit (#370).
 """
 import argparse
 from dataclasses import dataclass
@@ -88,6 +89,11 @@ def written_inputs(log_text, artifacts):
 # so both apply the same bar.
 TIMEOUT_SECONDS = 10
 
+# A re-check that passes but needs at least this long still files the input:
+# an input that takes 7-9 s alone trips the limit under load, and it is a real
+# performance bug even when a quiet re-check stays under the limit (#370 review).
+SLOW_RECHECK_MS = TIMEOUT_SECONDS * 1000 // 2
+
 
 def confirmed_inputs(crashes, unconfirmed, reproduces):
     """The artifacts worth filing; timeouts that do not happen again move to `unconfirmed`.
@@ -97,8 +103,8 @@ def confirmed_inputs(crashes, unconfirmed, reproduces):
     build gates. On 2026-11-05 the run started under heavy IO pressure, and
     libFuzzer's opening empty-input call passed the 10 s limit. That input
     then runs in 0 ms on its own (#370).
-    `reproduces(path)` runs one input in isolation and says whether it failed
-    again. Anything that cannot be confirmed is kept on disk, out of the
+    `reproduces(path)` runs one input in isolation and says whether it still
+    has to be filed (see `reproduces`). Anything that cannot be confirmed is kept on disk, out of the
     artifact directory, so it is neither filed nor re-checked every night.
     A re-check that cannot run at all counts as reproduced, so a real hang is
     never dropped because of a build or tool error.
@@ -148,12 +154,22 @@ def recheck_flags(recheck):
     return [f'-timeout={TIMEOUT_SECONDS}', '-rss_limit_mb=2048', f'-artifact_prefix={recheck}/']
 
 
-def reproduces(fuzzer, state, name, crash):
-    """Run one timeout input alone and say whether it failed again.
+def executed_ms(output, crash):
+    """How long libFuzzer says one input ran, from its `Executed <input> in <N> ms` line, or None without one."""
+    match = re.search(rf'Executed {re.escape(str(crash))} in (\d+) ms', output)
+    return int(match[1]) if match else None
 
-    Any non-zero exit counts as reproduced: a second timeout (libFuzzer exits
-    70), a crash, or a re-check that could not run at all. Only a clean exit
-    sets an input aside, so a tool error never drops a real hang.
+
+def reproduces(fuzzer, state, name, crash):
+    """Run one timeout input alone and say whether it still has to be filed.
+
+    It counts as reproduced on any non-zero exit: a second timeout
+    (libFuzzer exits 70), a crash, or a re-check that could not run at all.
+    It also counts when it passed but took at least SLOW_RECHECK_MS, or when
+    libFuzzer reported no time for it. The time is libFuzzer's own measure
+    of the unit, without process start or cargo's checks, so a host that is
+    slow to start processes does not file a 0 ms input. Only a quick, clean
+    run sets an input aside.
     The output goes to the target's log, after the fuzz run's own output.
     """
     recheck = state / 'recheck' / name
@@ -161,8 +177,12 @@ def reproduces(fuzzer, state, name, crash):
     log_path = state / f'{name}.log'
     with log_path.open('a') as log:
         log.write(f'\n== re-check of {crash.name} in isolation\n')
+    offset = log_path.stat().st_size
     result = fuzzer.execute(fuzzer.command(name, crash, recheck_flags(recheck)), log_path, 'a')
-    return result.returncode != 0
+    with log_path.open('rb') as log:
+        log.seek(offset)
+        elapsed = executed_ms(log.read().decode(errors='replace'), crash)
+    return result.returncode != 0 or elapsed is None or elapsed >= SLOW_RECHECK_MS
 
 
 def run_target(fuzzer, state, name, budget, report):
