@@ -44,8 +44,16 @@ async fn row(
     pending: bool,
 ) -> Uuid {
     let host = Uuid::new_v4();
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,?,?,100)")
-        .bind(host.as_bytes().as_slice()).bind(owner).bind(mode).bind(uid).execute(&f.pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,?,?,100)",
+    )
+    .bind(host.as_bytes().as_slice())
+    .bind(owner)
+    .bind(mode)
+    .bind(uid)
+    .execute(&f.pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,?,NULL)")
         .bind(host.as_bytes().as_slice())
         .bind(address)
@@ -202,7 +210,9 @@ impl SshSession for NoInstallSession {
             if output.stdout.ends_with(b"INFRATERNAL_SETUP_CLEAR\n") {
                 let keep = output.stdout.len() - b"INFRATERNAL_SETUP_CLEAR\n".len();
                 output.stdout.truncate(keep);
-                output.stdout.extend_from_slice(b"INFRATERNAL_SETUP_ABSENT\n");
+                output
+                    .stdout
+                    .extend_from_slice(b"INFRATERNAL_SETUP_ABSENT\n");
             }
             Ok(output)
         })
@@ -218,8 +228,15 @@ async fn re_adding_a_clean_machine_leaves_exactly_one_entry_for_it() {
     let f = fixture(true).await;
     let owner = person(&f).await;
     // As on production: the person is the server's owner (one owner per server).
-    sqlx::query("UPDATE users SET owner=0 WHERE owner=1").execute(&f.pool).await.unwrap();
-    sqlx::query("UPDATE users SET owner=1 WHERE id=?").bind(&owner).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE users SET owner=0 WHERE owner=1")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET owner=1 WHERE id=?")
+        .bind(&owner)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     let cookie = "C".repeat(43);
     sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'fixture',unixepoch()+3600,unixepoch(),1)")
         .bind(crate::auth::hash(&cookie)).bind(&owner).execute(&f.pool).await.unwrap();
@@ -252,7 +269,10 @@ async fn re_adding_a_clean_machine_leaves_exactly_one_entry_for_it() {
         .unwrap();
     let event = finished(&batch).await;
     assert!(
-        !event.failure.as_ref().is_some_and(|failure| failure.already_added),
+        !event
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.already_added),
         "{event:?}"
     );
     assert_eq!(

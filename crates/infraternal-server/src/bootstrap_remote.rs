@@ -2424,15 +2424,25 @@ mod tests {
     async fn an_abandoned_setup_of_a_person_is_denied_without_waiting_for_its_gone_agent() {
         let f = fixture(true).await;
         let person = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,?,?,0,'test')")
-            .bind(&person).bind(&person).bind(&person).execute(&f.pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,?,?,0,'test')",
+        )
+        .bind(&person)
+        .bind(&person)
+        .bind(&person)
+        .execute(&f.pool)
+        .await
+        .unwrap();
         let ghost = Uuid::new_v4();
         sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,100)")
             .bind(ghost.as_bytes().as_slice()).bind(&person).execute(&f.pool).await.unwrap();
         sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES(?,'user@ghost',NULL)")
             .bind(ghost.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
         sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")
-            .bind(ghost.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
+            .bind(ghost.as_bytes().as_slice())
+            .execute(&f.pool)
+            .await
+            .unwrap();
         let found = tokio::time::timeout(
             Duration::from_secs(10),
             f.backend.existing_host(&person, "user@ghost", None, true),
