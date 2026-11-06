@@ -130,7 +130,7 @@ async fn publication_identity_tracks_server_public_host_across_restart() {
 }
 
 #[tokio::test]
-#[cfg(feature = "mesh-dns")]
+#[cfg(all(feature = "agent", feature = "mesh-dns"))]
 async fn a_fallback_named_node_is_not_published_in_mesh_dns_until_it_has_a_real_name() {
     let pool = pool().await;
     let store = Store::new(pool.clone());
