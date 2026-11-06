@@ -72,7 +72,7 @@ impl NoSystemd {
 
     /// Whether `error` is this refusal.
     pub(crate) fn of(error: &io::Error) -> bool {
-        error.get_ref().is_some_and(|inner| inner.is::<Self>())
+        matches!(error.get_ref(), Some(inner) if inner.is::<Self>())
     }
 }
 
@@ -196,7 +196,8 @@ pub async fn ensure(
         }
         return Ok(None);
     }
-    let manager = root_login_manager(manager, Manager::probe).await?;
+    // Refuses unless the system manager answers (D354); only it reaches below.
+    root_login_manager(manager, Manager::probe).await?;
     let image =
         crate::login_binary::accessible(exe, Path::new("/var/cache/infraternal-login-bin")).await?;
     let exe = image.path();
