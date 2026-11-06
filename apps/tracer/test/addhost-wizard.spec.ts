@@ -545,6 +545,58 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
   });
 }
 
+// #394 (owner, production): a root add of minipc01 showed the exit-71 paragraph, and the progress row wrapped it in red.
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
+  test(`an install this server didn't make is named once, with its location only in Details at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "installed.lab");
+    await expect(page.getByRole("heading", { name: "installed.lab has an infraternal install this server didn't make" })).toBeVisible({ timeout: 15_000 });
+    const failure = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(failure.locator(".ah-lede")).toContainText("nothing was changed");
+    await expect(failure).not.toContainText("/var/lib/infraternal");
+    await expect(failure).not.toContainText("didn't finish");
+    await expect(inWizard(page, "Try again")).toBeVisible();
+    await failure.locator(".ah-details summary").click();
+    await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-failure-${viewport.width}.png`) });
+  });
+
+  test(`a login name with no account says so by name at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@noacct.lab");
+    await expect(page.getByRole("heading", { name: "There is no account named kayg on noacct.lab" })).toBeVisible({ timeout: 15_000 });
+    await expect(wizard(page).locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("Use an account that exists there, or add it as root.");
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });
+  });
+
+  test(`a failed host's progress row says it in one line beside its name at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    // Two hosts keep the progress page up after the failure, the interim state the owner saw.
+    await page.locator(".ui-chip-text").click();
+    await page.keyboard.type("installed.lab broken.lab ", { delay: 5 });
+    await inWizard(page, "Continue").click();
+    await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+    const row = wizard(page).locator(".ah-run[data-state='failed']").first();
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    const step = row.locator(".ah-job-step");
+    await expect(step).not.toHaveText("");
+    const box = await step.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const name = element.parentElement!.querySelector(".ah-name")!.getBoundingClientRect();
+      const own = element.getBoundingClientRect();
+      return { lines: Math.round(own.height / parseFloat(style.lineHeight)), overlap: own.top < name.bottom - 0.5 };
+    });
+    expect(box).toEqual({ lines: 1, overlap: false });
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `progress-row-${viewport.width}.png`) });
+  });
+}
+
 test("a failure with nothing beyond the summary shows no Details at all", async ({ page }) => {
   await open(page);
   await openWizard(page);

@@ -807,7 +807,7 @@ export class Wizard {
     const job = this.fixing!;
     const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
     const openId = hostId && this.deps.sink.hasHost?.(hostId) !== false ? hostId : undefined;
-    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined);
+    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined, job.entry.user);
     const replaceStuck = guide.fix === "replace-stuck-install";
     if (replaceStuck) guide.fix = "start-fresh";
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.

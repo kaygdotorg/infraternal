@@ -43,17 +43,43 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "unsupported": return "This host can't run the infraternal agent yet";
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
+    case "unrecognized_install": return "Found infraternal files this setup didn't make";
+    case "no_account": return "No account with that name on this host";
     case "install":
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
         return `Download infraternal (${failure.failed_step === "get-arm64-binary" ? "arm64" : "x86_64"}): ${failure.message}`;
       }
       if (failure.already_added) return failure.message;
       if (failure.missing_binary) return `The ${failure.missing_binary.architecture} static infraternal binary is unavailable. Put it at ${failure.missing_binary.path} on the server, then try again.`;
-      if (failure.failed_step === "connect") return "Connecting to the host failed.";
-      return failure.failed_step ? [failure.message, ...failure.log_tail.filter((line) => !line.startsWith("Remote command returned"))].join(" ") : "Setting up this host didn't finish";
+      // One short line: it heads the progress row and its failed stage, so a paragraph wrapped there in red
+      // (#394). The server's full sentence is on the failure page and its Details.
+      return failure.failed_step ? SHORT_STEP_LINE[failure.failed_step] : "Setting up this host didn't finish";
     default: return "Something went wrong while setting up this host. Try again.";
   }
 }
+
+/**
+ * The failure page's sentence for an install failure: the server's text plus its public diagnostics. Boundary
+ * notes ("the remote command returned a failure status") say nothing to act on and stay in Details.
+ */
+function installSentence(failure: FailureDetail): string {
+  if (failure.missing_binary || failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") return failureLine(failure);
+  if (failure.failed_step === "connect") return "Connecting to the host failed.";
+  return [failure.message, ...failure.log_tail.filter((line) => !BOUNDARY_NOTES.some((note) => line.startsWith(note)))].join(" ");
+}
+const BOUNDARY_NOTES = ["Remote command returned", "The remote setup command returned"];
+
+/** The progress row's line for an install failure, by the step that stopped. */
+const SHORT_STEP_LINE: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
+  "get-arm64-binary": "Getting the arm64 binary didn't finish",
+  "get-x86-64-binary": "Getting the x86_64 binary didn't finish",
+  connect: "Connecting to the host failed.",
+  upload: "Copying to the host didn't finish",
+  install: "Installing on the host didn't finish",
+  join: "Joining this server didn't finish",
+  start: "The infraternal agent didn't start",
+  readiness: "The terminal wasn't ready yet",
+};
 
 /**
  * What confirming a stuck-install replacement does to its open terminals; empty when the server
@@ -143,8 +169,8 @@ export const STEP_ADVICE: Record<NonNullable<FailureDetail["failed_step"]>, stri
 };
 const GENERIC_ADVICE = "Try again, or open the details to see where it stopped.";
 
-/** Plain-language account of a failed host. `name` is what the person typed or picked. */
-export function guideFor(name: string, failure: FailureDetail | undefined, canOpen = false): Guide {
+/** Plain-language account of a failed host. `name` is the host the person typed or picked; `user`, the login name they gave. */
+export function guideFor(name: string, failure: FailureDetail | undefined, canOpen = false, user?: string): Guide {
   // Without a button to open its terminal (an older server sends no host id; the page may not list the host) the
   // copy carries the route itself, so the page is never a dead end. Keys follow the platform (⌘ only on Apple keyboards).
   if (failure?.already_added) return { title: `${name} is already added`, happened: "It's already in Console.", next: canOpen ? "" : `Find its terminal with ${shortcutLabel({ mac: "⌘K", other: "Ctrl K" })}.`, fix: "none", tone: "info" };
@@ -243,9 +269,26 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       fix: "retry",
       tone: "info",
     };
+    // #394: a finished install for a host id this server doesn't know, or files at the setup location that
+    // a staging step can't prove are its own. Nothing was changed; the server's sentence says which, and the
+    // location is in Details. Retry is right once the other server has removed it.
+    case "unrecognized_install": return {
+      title: `${name} has an infraternal install this server didn't make`,
+      happened: failure.message,
+      next: "",
+      fix: "retry", tone: "info",
+    };
+    // #394: the login name is no account on the host (kayg on a Proxmox host). No sign-in method can help.
+    // `user` is the login name the person gave; without one the server chose it.
+    case "no_account": return {
+      title: user ? `There is no account named ${user} on ${name}` : `${name} has no account with the name used to sign in`,
+      happened: "Use an account that exists there, or add it as root.",
+      next: "",
+      fix: "none", tone: "danger",
+    };
     case "install": return {
       title: `Setting up ${name} didn't finish`,
-      happened: failure.failed_step ? failureLine(failure) : "Setup stopped before this host was ready.",
+      happened: failure.failed_step ? installSentence(failure) : "Setup stopped before this host was ready.",
       next: failure.missing_binary ? "Add the file on the server, then try again." : failure.failed_step ? STEP_ADVICE[failure.failed_step] : GENERIC_ADVICE,
       fix: "retry", tone: "danger",
     };

@@ -352,6 +352,8 @@
 .ah-run-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; column-gap: 0.75rem; padding: 0.25rem 0.625rem 0.25rem; border-radius: 0.625rem; }
 .ah-run-toggle { display: grid; min-width: 0; grid-template-columns: var(--ah-icon) minmax(0, 1fr); align-items: center; column-gap: 0.75rem; margin: 0; padding: 0.25rem 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 @media (hover: hover) and (pointer: fine) { .ah-run-head:hover { background: var(--hover); } }
+/* The row's status is one line beside the host's name; the full reason is on the failure page (#394). */
+.ah-job-step { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ah-run[data-state="failed"] .ah-job-step { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
 .ah-run[data-state="pending"] :is(.ah-name, .ah-os-mark) { color: var(--fg-3); }
 .ah-run[data-state="failed"] .ah-mark { display: none; }
