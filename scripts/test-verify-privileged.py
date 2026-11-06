@@ -282,7 +282,7 @@ class RealRootProof(unittest.TestCase):
                                   return_value=subprocess.CompletedProcess([], 3)) as run:
             self.assertEqual(slot_hold.hold(['cargo', 'build']), 3)
         argv, kwargs = popen.call_args
-        self.assertEqual(argv[0][:4], ['runuser', '-u', 'claude', '--'])
+        self.assertEqual(argv[0], slot_hold.waiter_command())
         self.assertIs(kwargs['stderr'], subprocess.DEVNULL)
         self.assertIs(kwargs['stdout'], subprocess.PIPE)
         self.assertIs(kwargs['stdin'], subprocess.PIPE)
@@ -320,7 +320,7 @@ class RealRootProof(unittest.TestCase):
 
         def popen(argv, *args, **kwargs):
             """Fake only claude's waiter; let subprocess.run start the real root command."""
-            if argv[:1] == ['runuser']:
+            if argv[:1] == ['systemd-run']:
                 seen.append(kwargs)
                 return waiter
             return real_popen(argv, *args, **kwargs)
@@ -355,6 +355,16 @@ class RealRootProof(unittest.TestCase):
             self.assertEqual(slot_hold.main(), 0)
         self.assertEqual(hold.call_args[0], (['cargo', 'build'], [9]))
         self.assertIn('scripts/root-slot-hold" --keep-fd 9 nix develop', self.proof_code())
+
+    def test_claudes_side_runs_in_claudes_slice(self):
+        """The waiter is a transient unit as claude in claude's slice, killed as a whole (J281 P3-2)."""
+        argv = slot_hold.waiter_command()
+        self.assertEqual(argv[0], 'systemd-run')
+        for option in ('--uid=claude', '--gid=claude', '--slice=user-1500.slice', '--pipe', '--wait', '--collect'):
+            self.assertIn(option, argv)
+        self.assertIn('KillMode=control-group', argv)
+        self.assertEqual(argv[argv.index('--') + 1], slot_hold.BUILD_SLOT)
+        self.assertNotIn('runuser', argv)
 
     def test_slot_holder_runs_nothing_without_a_slot(self):
         """If claude's side never reports ready, root's command does not run."""

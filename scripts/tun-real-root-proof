@@ -26,7 +26,8 @@
 # including a build failure or a dropped ssh session. The build waits for a
 # shared build slot; only the slot's lock is held as `claude`, through the
 # commit's own scripts/root-slot-hold, which starts claude's build-slot script
-# with runuser and gives it no file of root's (stderr is /dev/null).
+# as a unit in claude's own slice (killed as a whole on release) and gives it
+# no file of root's (stderr is /dev/null).
 #
 # Usage, from `code` (which can ssh to root@compute01), with a full commit id:
 #   scripts/tun-real-root-proof <40-hex commit>

@@ -5,9 +5,17 @@ What it is for: build slots belong to the `claude` build account (its
 `~/infraternal-ops/build-slot` script queues every heavy job on a VM). A root
 proof, such as `scripts/tun-real-root-proof`, must wait its turn like
 everyone else, but must not let anything `claude` controls into root's
-process. This helper starts claude's build-slot **as claude** (`runuser`),
-waits for one readiness line from it over a pipe, runs the given command as
-root, then releases the slot.
+process. This helper starts claude's build-slot **as claude**, as a
+transient systemd unit in claude's own slice (`user-1500.slice`), waits for
+one readiness line from it over a pipe, runs the given command as root, then
+releases the slot.
+
+Why a unit in claude's slice: with `runuser`, anything claude's script forked
+lived in root's ssh session, outside claude's MemoryMax and TasksMax, and
+outlived the proof (J281, 81509 P3-2). As a unit with KillMode=control-group,
+every process claude's side starts is in claude's slice, under claude's
+limits, and is killed when the waiter exits: when root releases the slot, or
+when root's side dies and the waiter's stdin pipe closes.
 
 What claude's side can and can't do: it controls only when the slot is
 granted (timing). It gets stdin and stdout pipes to this helper and nothing
@@ -27,11 +35,22 @@ import subprocess
 import sys
 
 BUILD_SLOT = '/home/claude/infraternal-ops/build-slot'
+CLAUDE_SLICE = 'user-1500.slice'
 READY = b'ROOT_SLOT_READY\n'
 # The waiter runs as claude inside its slot: print one line, then block until
 # root writes a byte (or closes the pipe) to release the slot.
 WAITER = ['/usr/bin/python3', '-c',
           'import sys; sys.stdout.buffer.write(%r); sys.stdout.flush(); sys.stdin.buffer.read(1)' % READY]
+
+
+def waiter_command():
+    """The argv that starts claude's slot waiter as a unit in claude's slice.
+
+    --pipe hands the unit this process's stdin, stdout and stderr (the pipes
+    and /dev/null set by Popen) and nothing else.
+    """
+    return ['systemd-run', '--uid=claude', '--gid=claude', f'--slice={CLAUDE_SLICE}', '--pipe', '--wait',
+            '--collect', '--quiet', '-p', 'KillMode=control-group', '--', BUILD_SLOT, *WAITER]
 
 
 def hold(command, keep_fds=()):
@@ -40,7 +59,7 @@ def hold(command, keep_fds=()):
     `keep_fds` are passed on to `command` only, never to claude's waiter.
     """
     print('root-slot-hold: waiting for a build slot', file=sys.stderr, flush=True)
-    waiter = subprocess.Popen(['runuser', '-u', 'claude', '--', BUILD_SLOT, *WAITER],
+    waiter = subprocess.Popen(waiter_command(),
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               close_fds=True)
     try:
