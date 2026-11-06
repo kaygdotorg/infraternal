@@ -513,7 +513,7 @@ mod tests {
         let wide = "\u{1f600}".repeat(LINE_CHARS);
         let report = report(
             State::Changed,
-            vec![file("~/.zshrc", &vec![wide.as_str(); LINES])],
+            vec![file("~/.zshrc", &[wide.as_str(); LINES])],
         )
         .bounded();
         assert!(
