@@ -639,9 +639,13 @@ impl Failure {
             FailureKind::Unsupported => "unsupported",
             FailureKind::StalePreviousAttempt => "leftovers",
             FailureKind::SetupRunning => "setup-running",
-            _ if self.log_tail.contains(&"The SSH command channel failed.") => "channel",
-            _ if self.log_tail.contains(&"The SSH connection setup failed.") => "transport",
-            _ => "setup",
+            FailureKind::Install if self.log_tail.contains(&"The SSH command channel failed.") => {
+                "channel"
+            }
+            FailureKind::Install if self.log_tail.contains(&"The SSH connection setup failed.") => {
+                "transport"
+            }
+            FailureKind::Install => "setup",
         }
     }
 

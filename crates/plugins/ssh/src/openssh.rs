@@ -457,8 +457,8 @@ impl Drop for Session {
     }
 }
 
-/// The whole stderr of a NetBird SSH session for a login name that is no
-/// account on the host (measured against NetBird-SSH-Server 0.82.0, #394).
+/// The whole stderr of a `NetBird` SSH session for a login name that is no
+/// account on the host (measured against `NetBird-SSH-Server` 0.82.0, #394).
 const NETBIRD_NO_ACCOUNT: &str = "User authentication failed";
 
 /// Only allowlisted categories/text survive; remote banners and command output are discarded.
@@ -466,7 +466,7 @@ const NETBIRD_NO_ACCOUNT: &str = "User authentication failed";
 pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure {
     let text = String::from_utf8_lossy(&stderr[..stderr.len().min(8192)]);
     let mut failure = if text.trim() == NETBIRD_NO_ACCOUNT {
-        // The NetBird SSH server accepts the network sign-in, then ends the
+        // The `NetBird` SSH server accepts the network sign-in, then ends the
         // session with exactly this line and status 1 when the login name is
         // no account on the host (#394: kayg on Proxmox hosts). Read as a
         // command failure, it was reported as a generic setup failure.
@@ -533,7 +533,7 @@ mod tests {
     use super::*;
     use crate::model::InstallStep;
 
-    /// #394: NetBird's SSH server signs in over the network, then ends the
+    /// #394: the `NetBird` SSH server signs in over the network, then ends the
     /// session with this one line when the login name is no account there.
     #[test]
     fn a_login_name_with_no_account_is_named_not_a_setup_failure() {
