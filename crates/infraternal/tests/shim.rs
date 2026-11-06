@@ -914,14 +914,15 @@ fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
     let session = Session::start_retention(8192, false, None, 700);
     let _ownership = owner(&session);
     let _stalled = session.attach(0);
-    exit_without_viewer(&session);
     // Ordering control for a one-off extension: an untouched session with the
-    // same peers and a 5 s maximum, which exits after the one under attack.
-    // Load delays both alike, so the attacked shim retires first unless the
-    // attaches extended its maximum (by more than about 4.3 s), even once.
-    let control = Session::start_retention(8192, false, None, 5_000);
+    // same peers and a 2.5 s maximum. It is fully set up first, so its shell
+    // exits right after the attacked one. Load delays both shims alike, so
+    // the attacked shim retires first unless the attaches extended its
+    // maximum, even once, past the control's (a re-arm to about 3 s or more).
+    let control = Session::start_retention(8192, false, None, 2_500);
     let _control_ownership = owner(&control);
     let _control_stalled = control.attach(0);
+    exit_without_viewer(&session);
     exit_without_viewer(&control);
     let deadline = Instant::now() + OWNERSHIP_HANG;
     let mut later = Vec::new();
@@ -932,7 +933,7 @@ fn owned_exit_maximum_retires_with_status_even_with_an_unread_data_peer() {
         );
         assert!(
             control.path().exists(),
-            "attaches extended the maximum: the shim outlived an untouched one with a 5 s maximum"
+            "attaches extended the maximum: the shim outlived an untouched one with a 2.5 s maximum"
         );
         // Best effort: the shim may retire between the check and the connect.
         if let Ok(mut peer) = UnixStream::connect(session.path()) {
