@@ -232,6 +232,10 @@ function parseLeftovers(value: unknown): Leftovers | undefined {
   return { challenge: value.challenge, mode: value.mode === "root" ? "root" : "rootless", findings: value.findings.slice(0, 16) };
 }
 
+/**
+ * Validates one server event. Its failure is kept only in its known shape, and `leftovers` only on a failure that
+ * pauses for confirmation (pausesForConfirmation).
+ */
 function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined {
   const { sequence, target, attempt, step, message, elapsed_ms: elapsed } = value;
   if (typeof sequence !== "number" || typeof target !== "string" || typeof attempt !== "number" || typeof step !== "string" || !STEPS.includes(step)

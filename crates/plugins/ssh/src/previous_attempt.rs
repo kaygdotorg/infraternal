@@ -388,6 +388,8 @@ impl FinishedInstall {
     }
 }
 
+/// Decode the check's record after its fixed check lines: clear, a refusal, a
+/// running setup, a set-aside install, or an earlier attempt to recover.
 fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if bytes == b"INFRATERNAL_SETUP_CLEAR\n" {
         return Ok(None);
@@ -1184,6 +1186,8 @@ mod tests {
         );
     }
 
+    /// A set-aside install's record offers Put it back, and names which restore
+    /// puts it back (Re-enroll or Take over, D359); unknown kinds refuse.
     #[test]
     fn a_set_aside_install_is_offered_back_by_its_record() {
         let record = format!(

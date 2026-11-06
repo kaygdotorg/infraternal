@@ -50,6 +50,7 @@ const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = { netbird: "NetBird", tailscale: "Tailscale", "known-hosts": "Known hosts", "ssh-config": "SSH config", "already-added": "Added" };
 const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/** The wizard's pages; `takeover` is the Take over confirmation that names the old install (D359). */
 type Page = "authority" | "discovery" | "root" | "progress" | "choose" | "hostkey" | "failure" | "takeover" | "install";
 type Direction = 1 | -1 | 0;
 

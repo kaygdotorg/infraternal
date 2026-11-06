@@ -76,6 +76,7 @@ struct Run {
     scripts: Arc<Mutex<Vec<String>>>,
 }
 impl Run {
+    /// Start the add of `root@fixture` in `mode`, with the host answering `check`.
     fn start(f: &Fixture, check: Vec<u8>, mode: InstallMode, takeover_exit: Option<u8>) -> Self {
         let scripts = Arc::new(Mutex::new(Vec::new()));
         let binary = std::env::current_exe().unwrap();
