@@ -253,21 +253,36 @@ async fn record_grant(root: &Path, person: uuid::Uuid, user: &User) {
     .await;
 }
 
-/// What changed in account `uid`'s access files since `person`'s grant
-/// (D356), read off the event loop.
-async fn access_changes(root: &Path, person: uuid::Uuid, uid: u32) -> crate::access_files::Changes {
+/// What changed on every account `person` had a grant on since that grant
+/// (D356), read off the event loop, then the records are forgotten. The
+/// accounts come from the persistent record store, so a reboot that emptied
+/// `/run` still reports; `live` adds accounts with logins but no record.
+async fn access_report(
+    root: &Path,
+    person: uuid::Uuid,
+    live: Vec<u32>,
+    rootless: bool,
+) -> crate::access_files::Access {
     let store = crate::access_files::store(root);
-    tokio::task::spawn_blocking(move || match User::from_uid(Uid::from_raw(uid)) {
-        Ok(Some(user)) => crate::access_files::since_grant(
+    tokio::task::spawn_blocking(move || {
+        let lookup = |uid| User::from_uid(Uid::from_raw(uid)).ok().flatten();
+        let access = crate::access_files::since_grant(
             &store,
             person,
-            &user,
+            &live,
+            &lookup,
             &crate::access_files::host_spools,
-        ),
-        _ => crate::access_files::Changes::default(),
+            rootless,
+        );
+        let _ = crate::access_files::forget(&store, person);
+        access
     })
     .await
-    .unwrap_or_default()
+    .unwrap_or_else(|_| crate::access_files::Access {
+        state: crate::access_files::State::NotChecked,
+        reason: Some(crate::access_files::Reason::RecordMissing),
+        accounts: Vec::new(),
+    })
 }
 
 /// [`ensure`] without the grant record.
@@ -883,10 +898,10 @@ pub struct Revoked {
     /// (D353), or linger came back on after they were stopped, which only
     /// the account's own code outside the login does (J308 P3-2).
     pub background_may_remain: bool,
-    /// Access files of the person's accounts with lines that are new since
-    /// their grant, for the person revoking to review and remove (D356).
-    /// Never edited by infraternal.
-    pub changed: crate::access_files::Changes,
+    /// What changed in the access files of the person's accounts since
+    /// their grant, or why it was not checked, for the person revoking to
+    /// review and remove (D356). Never edited by infraternal.
+    pub access: crate::access_files::Access,
 }
 
 /// Try one reserved revocation; its owner retains denial and retries any failure.
@@ -914,10 +929,8 @@ async fn revoke_once(
         // applies to root agents only.
         crate::rootless_sessions::revoke(root, person, Some(person_guard), admission).await?;
         let uid = Uid::effective().as_raw();
-        let changed = access_changes(root, person, uid).await;
-        let _ = crate::access_files::forget(&crate::access_files::store(root), person, uid);
         return Ok(Revoked {
-            changed,
+            access: access_report(root, person, vec![uid], true).await,
             ..Revoked::default()
         });
     }
@@ -973,13 +986,9 @@ async fn revoke_once(
         return Err(error);
     }
     // D356: what each account's access files gained since this person's
-    // grant, reported, never edited. A retried attempt compares again.
-    for uid in accounts {
-        let changed = access_changes(root, person, uid).await;
-        revoked.changed.truncated |= changed.truncated;
-        revoked.changed.files.extend(changed.files);
-        let _ = crate::access_files::forget(&crate::access_files::store(root), person, uid);
-    }
+    // grant, reported, never edited. Only a completed revocation forgets
+    // the records, so a retried attempt compares again.
+    revoked.access = access_report(root, person, accounts, false).await;
     Ok(revoked)
 }
 

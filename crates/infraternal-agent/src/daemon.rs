@@ -382,34 +382,121 @@ fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) 
 const REVOKE_REPLY_BUDGET: usize = 30 * 1024;
 
 /// The revoke result for the server: `revoked`, D353's `warning` when
-/// background programs may remain, and D356's `changed` access files, which
+/// background programs may remain, and D356's `access` report, which
 /// only the person revoking sees (never a log). If the report would not fit a
 /// control frame, its last lines are dropped and it says it is truncated.
 fn revoke_reply(revoked: &crate::logins::Revoked) -> Vec<u8> {
-    let mut changed = revoked.changed.clone();
+    let mut access = revoked.access.clone();
     loop {
         let mut reply = serde_json::json!({ "revoked": true });
         if revoked.background_may_remain {
             // D353: others still share the account, or linger came back (J308).
             reply["warning"] = "Background programs of this host account may still be running: other people still have access to it, or its own programs turned linger back on.".into();
         }
-        if !changed.files.is_empty() {
-            reply["changed"] = serde_json::to_value(&changed).unwrap_or_default();
-        }
+        // D356: always sent, so "nothing changed" is never confused with
+        // "not checked" (an older agent sends none).
+        reply["access"] = serde_json::to_value(&access).unwrap_or_default();
         let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{\"revoked\":true}".to_vec());
         if bytes.len() <= REVOKE_REPLY_BUDGET {
             return bytes;
         }
-        changed.truncated = true;
-        match changed.files.last_mut() {
-            Some(file) if !file.lines.is_empty() => {
-                file.lines.pop();
-            }
-            Some(_) => {
-                changed.files.pop();
-            }
-            None => return bytes,
+        // Lines go first; then whole files, counted, never silently.
+        if !trim_report(&mut access) {
+            return bytes;
         }
+    }
+}
+
+/// Drops one reported line, or failing that one whole file (counted in
+/// `omitted_files`), from the last account that has one, and marks that
+/// account truncated. `false` when nothing is left to drop.
+fn trim_report(access: &mut crate::access_files::Access) -> bool {
+    if let Some(account) = access
+        .accounts
+        .iter_mut()
+        .rev()
+        .find(|account| account.files.iter().any(|file| !file.lines.is_empty()))
+    {
+        if let Some(file) = account
+            .files
+            .iter_mut()
+            .rev()
+            .find(|file| !file.lines.is_empty())
+        {
+            file.lines.pop();
+            let more = "more new lines than the report shows";
+            match &mut file.note {
+                Some(note) if note.contains(more) => {}
+                Some(note) => {
+                    note.push_str("; ");
+                    note.push_str(more);
+                }
+                None => file.note = Some(more.to_owned()),
+            }
+        }
+        account.truncated = true;
+        return true;
+    }
+    if let Some(account) = access
+        .accounts
+        .iter_mut()
+        .rev()
+        .find(|account| !account.files.is_empty())
+    {
+        account.files.pop();
+        account.omitted_files += 1;
+        account.truncated = true;
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod revoke_reply_tests {
+    //! D356: the revoke reply always says what was checked, and fits a frame.
+    use crate::access_files::{Access, AccountReport, Change, ChangeKind, State};
+
+    /// A report far over the frame budget is cut to fit; lines go first,
+    /// then whole files, which are counted, and the account says truncated.
+    /// A report with nothing changed still carries its outcome.
+    #[test]
+    fn the_reply_fits_a_frame_and_counts_what_it_drops() {
+        let file = |index: usize| Change {
+            path: format!("~/.config/autostart/{index}.desktop"),
+            change: ChangeKind::Added,
+            lines: vec!["x".repeat(190); 4],
+            note: None,
+        };
+        let revoked = crate::logins::Revoked {
+            background_may_remain: true,
+            access: Access {
+                state: State::Changed,
+                reason: None,
+                accounts: vec![AccountReport {
+                    account: "deploy".into(),
+                    state: State::Changed,
+                    reason: None,
+                    files: (0..400).map(file).collect(),
+                    truncated: false,
+                    unscanned: Vec::new(),
+                    omitted_files: 0,
+                }],
+            },
+        };
+        let bytes = super::revoke_reply(&revoked);
+        assert!(bytes.len() <= super::REVOKE_REPLY_BUDGET);
+        let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let account = &reply["access"]["accounts"][0];
+        assert_eq!(account["truncated"], true);
+        let listed = account["files"].as_array().unwrap().len();
+        assert_eq!(
+            listed + usize::try_from(account["omitted_files"].as_u64().unwrap()).unwrap(),
+            400
+        );
+        assert!(reply["warning"].is_string(), "D353's warning was dropped");
+        let clean = super::revoke_reply(&crate::logins::Revoked::default());
+        let clean: serde_json::Value = serde_json::from_slice(&clean).unwrap();
+        assert_eq!(clean["access"]["state"], "unchanged");
     }
 }
 
