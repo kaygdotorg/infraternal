@@ -156,6 +156,10 @@
   pointer-events: none;
 }
 .ui-toast-stack[hidden] { display: none !important; }
+/* On a desktop the canvas's windows end about 1.125rem above the viewport's bottom, and a toast 1rem from the bottom sat right on
+   that frame line, hiding the window's bottom edge. Lifting the stack to 2.5rem keeps the whole toast inside the window's
+   area with clear space under it, so a window's bottom edge is never covered (#377). Touch layouts size their own tray above. */
+@media (pointer: fine) { .ui-toast-stack { bottom: calc(max(2.5rem, env(safe-area-inset-bottom)) + var(--ui-toast-stack-offset, 0px)); } }
 /* Older toasts sit behind the newest, smaller and a little higher; while the stack is held they fan out to their own heights. */
 .ui-toast {
   --y: calc(var(--i, 0) * -0.5rem);

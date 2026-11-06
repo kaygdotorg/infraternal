@@ -204,6 +204,37 @@ for (const viewport of VIEWPORTS) {
         await expect(page.locator(".cl-sx-pop")).toContainText("busy-host");
       });
 
+      test("a notice never covers a window's frame edge", async ({ page }) => {
+        test.setTimeout(90_000);
+        await boot(page, "forward");
+        const win = page.locator(".ui-window[data-kind='terminal']").first();
+        await expect(win).toHaveAttribute("data-status", "live", { timeout: 20_000 });
+        await page.waitForFunction(() => Boolean(Reflect.get(window, "__toast")));
+        await page.evaluate(() => {
+          const toast = Reflect.get(window, "__toast") as { dismiss(): void; show(value: Record<string, unknown>): void };
+          toast.dismiss();
+          toast.show({ message: "Not saved — keep this tab open", duration: 0 });
+        });
+        const card = page.locator('.ui-toast[data-open="true"]');
+        await expect(card).toHaveCount(1);
+        // The notice has stopped sliding in once its box stops moving.
+        let last = "";
+        await expect.poll(async () => { const now = JSON.stringify(await card.boundingBox()); const still = now === last; last = now; return still; }, { intervals: [100, 100, 200] }).toBe(true);
+        const covered = await page.evaluate(() => {
+          const n = document.querySelector('.ui-toast[data-open="true"]')!.getBoundingClientRect();
+          const edges: string[] = [];
+          for (const frame of document.querySelectorAll(".ui-window")) {
+            const w = frame.getBoundingClientRect();
+            const across = w.right > n.left && w.left < n.right;
+            if (across && w.bottom >= n.top - 1 && w.bottom <= n.bottom + 1) edges.push(`bottom edge at ${w.bottom} under a notice spanning ${n.top}-${n.bottom}`);
+            if (across && w.top >= n.top - 1 && w.top <= n.bottom + 1) edges.push(`top edge at ${w.top} under a notice spanning ${n.top}-${n.bottom}`);
+          }
+          return edges;
+        });
+        expect(covered, "no window's top or bottom edge lies under the notice").toEqual([]);
+        await shot(page, "notice");
+      });
+
       test("a host that never answers says it cannot be reached, and Try again brings it live", async ({ page }) => {
         test.setTimeout(90_000);
         const state = await boot(page, "silent");
