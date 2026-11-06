@@ -710,7 +710,11 @@ mod tests {
         );
         // A session that has its own value keeps it.
         assert_eq!(
-            user_manager_runtime_in(&root, uid, Some(std::ffi::OsStr::new("/run/user/elsewhere"))),
+            user_manager_runtime_in(
+                &root,
+                uid,
+                Some(std::ffi::OsStr::new("/run/user/elsewhere"))
+            ),
             None
         );
         // Never another account's directory, even one this account created.
