@@ -22,6 +22,134 @@ fn command(program: &str, args: &[&str]) {
             .success()
     );
 }
+
+/// Stop a child test at one rotation durability boundary so its parent can send SIGKILL.
+pub(super) fn crash_checkpoint(name: &str) {
+    if std::env::var("INFRATERNAL_ROTATION_CRASH_POINT").as_deref() != Ok(name) {
+        return;
+    }
+    let ready = std::env::var_os("INFRATERNAL_ROTATION_CRASH_READY")
+        .expect("the crash proof supplies a readiness path");
+    std::fs::write(ready, name).expect("publish the reached crash boundary");
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Exercise the child side of [`gotatun_rotation_recovers_after_sigkill_at_every_durable_step`].
+#[test]
+#[ignore = "launched by the GotaTun SIGKILL recovery proof"]
+fn gotatun_rotation_crash_child() {
+    let state = std::env::var_os("INFRATERNAL_ROTATION_STATE")
+        .expect("the parent supplies the isolated state directory");
+    let state = std::path::PathBuf::from(state);
+    let mut node = Node::restore_with_engine(&state, EngineKind::GotaTun).unwrap();
+    let previous = node.up().unwrap();
+    assert!(previous.key_rotation, "GotaTun offers durable rotation");
+    std::fs::write(
+        state.join("rotation-crash-previous-public"),
+        previous.public_key.0,
+    )
+    .expect("save the public predecessor for the parent proof");
+    let operation = "00000000-0000-4000-8000-000000000367";
+    node.prepare_rotation(operation, 1).unwrap();
+    node.commit_rotation(operation, 1).unwrap();
+    node.finish_rotation(operation, 1).unwrap();
+    panic!("the requested crash boundary was never reached");
+}
+
+/// SIGKILL after each durable GotaTun transition leaves enough journal evidence to restart safely.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
+    use std::{
+        os::unix::process::ExitStatusExt,
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+
+    let stages = [
+        "rotation_prepared",
+        "rotation_commit_requested",
+        "rotation_device_key_changed",
+        "rotation_owner_marker_changed",
+        "rotation_private_key_saved",
+        "rotation_finished",
+    ];
+    for stage in stages {
+        let state = RotationState::new();
+        let ready = state.0.join("rotation-crash-ready");
+        let mut child = Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--ignored", "gotatun_rotation_crash_child", "--nocapture"])
+            .env("INFRATERNAL_ROTATION_STATE", &state.0)
+            .env("INFRATERNAL_ROTATION_CRASH_POINT", stage)
+            .env("INFRATERNAL_ROTATION_CRASH_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start the rotation child");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().expect("check the child") {
+                panic!("child exited before {stage}: {status}");
+            }
+            assert!(Instant::now() < deadline, "child did not reach {stage}");
+            // sleep: allow the child to finish the next durability boundary without busy polling.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().expect("send SIGKILL at the reached boundary");
+        let status = child.wait().expect("reap the killed child");
+        assert_eq!(status.signal(), Some(nix::libc::SIGKILL), "stage {stage}");
+
+        let previous: [u8; 32] = std::fs::read(state.0.join("rotation-crash-previous-public"))
+            .expect("child recorded the predecessor")
+            .try_into()
+            .expect("public key length");
+        let (store, _) = crate::node_state::Store::open(&state.0).expect("open the journal");
+        let journal = store
+            .rotation_secret()
+            .expect("read the journal")
+            .expect("prepared rotation survives SIGKILL");
+        let previous_public = if journal.completed {
+            assert!(journal.previous == [0; 32], "finish erases the predecessor");
+            crate::policy::model::PublicKey(previous)
+        } else {
+            Key::from_private(&journal.previous).unwrap().1
+        };
+        let candidate_public = Key::from_private(&journal.candidate).unwrap().1;
+        assert_eq!(previous_public.0, previous, "stage {stage}");
+        assert_eq!(journal.completed, stage == "rotation_finished", "stage {stage}");
+        drop(journal);
+        drop(store);
+
+        let expects_candidate = stage != "rotation_prepared";
+        let expected = if expects_candidate {
+            candidate_public
+        } else {
+            previous_public
+        };
+        let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+        let identity = restored.up().unwrap();
+        assert!(identity.key_rotation, "GotaTun retains rotation support");
+        assert_eq!(identity.public_key, expected, "recovered key at {stage}");
+        let link = Device::active_link().unwrap().unwrap();
+        assert_eq!(link.owner, Some(expected), "recovered owner marker at {stage}");
+        let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+        let bytes = store.read_private_key().unwrap().unwrap();
+        assert_eq!(
+            crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
+            expected,
+            "recovered private-key file at {stage}"
+        );
+        restored.commit_rotation("00000000-0000-4000-8000-000000000367", 1)
+            .unwrap();
+        restored.finish_rotation("00000000-0000-4000-8000-000000000367", 1)
+            .unwrap();
+        assert!(store.rotation_secret().unwrap().unwrap().completed);
+        drop(store);
+        restored.down().unwrap();
+    }
+}
 // Keep the retained address, recovery fence and packet observation in one scenario.
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
