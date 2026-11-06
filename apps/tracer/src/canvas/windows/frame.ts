@@ -54,11 +54,11 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
     actions.push({ id: "sessions", label: "Sessions", icon: SESSION_ICON.sessions, onSelect: (e) => cx.sessionUi?.toggleManager(rec, e.currentTarget as HTMLElement, e.detail === 0 ? "keyboard" : "pointer") });
   }
   if (m.kind !== "node" && m.kind !== "settings" && m.kind !== "docs" && !readOnly) actions.push({ id: "close", label: "Close", icon: ICON.close, onSelect: () => cx.win.close(rec) });
-  // "Read about this window" comes first, before split, sessions and close, when the docs adapter has something to say about it (#304).
-  // Not in a terminal's header on a touch device: there the header holds Close alone, because "?" next to Close made the group fold
-  // into a "…" whose 44 px target overlapped its neighbours. It is reached from ⌘K ("Read about this window") instead. Other windows
-  // (a Settings window's header holds only "?") keep it on a phone.
-  if ((header || m.kind !== "terminal") && cx.adapters.docs?.for(m)) actions.unshift({ id: "docs", label: "Read about this window", icon: ICON.help, onSelect: (e) => { const source = e.detail === 0 ? "keyboard" : "pointer"; void onDemand(() => import("./docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, rec, source); }); } });
+  // "Read about this window" comes first when the docs adapter has something to say about the window (#304, D317: a Settings window's
+  // "?" lands on its heading). Never on a terminal, on any device (owner, 2026-11-06: "they're just terminals? don't blindly add
+  // elements where it does not make sense"; TASTE "every control earns its place"). A terminal's page is reached from ⌘K, in the
+  // Canvas group ("Read about this window"), and from its key.
+  if (m.kind !== "terminal" && cx.adapters.docs?.for(m)) actions.unshift({ id: "docs", label: "Read about this window", icon: ICON.help, onSelect: (e) => { const source = e.detail === 0 ? "keyboard" : "pointer"; void onDemand(() => import("./docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, rec, source); }); } });
   // An app window or a screen is named by what it shows ("Notebook · Today"); the machine it lives on is the quiet part that gives
   // way first in a narrow pill, with its OS mark in front (D208). A terminal is the other way round: the machine, then its session.
   const title = m.kind === "app" || m.kind === "screen" ? { host: m.session ?? m.host, session: m.host } : { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
@@ -129,6 +129,7 @@ export function setActive(cx: Ctx, rec: WinRec | undefined): void {
   cx.tree.render();
 }
 
+/** Wires one window's frame: focus on press, the pill that moves the window or opens its details, resizing and the lock. */
 function wireWindow(cx: Ctx, rec: WinRec): void {
   const { signal, camera } = cx;
   const root = rec.card.root;
@@ -144,11 +145,12 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   pill.addEventListener("click", (e) => { e.preventDefault(); if (e.detail === 0 && camera.lod !== "thumb") pillPress(cx, rec, "keyboard"); }, { signal });
   pill.style.touchAction = "none";
   pill.dataset.grab = "";
-  let press: { id: number; x: number; y: number; timer: number; touch: boolean } | undefined;
+  // `onMark`: a finger went down on the connection indicator, whose tap peeks its sentence (connection-indicator.ts) and must not also open the details.
+  let press: { id: number; x: number; y: number; timer: number; touch: boolean; onMark: boolean } | undefined;
   pill.addEventListener("pointerdown", (e) => {
     if (e.button !== 0 || camera.lod === "thumb" || rec.owner.view.team) return;
     const touch = e.pointerType !== "mouse";
-    press = { id: e.pointerId, x: e.clientX, y: e.clientY, touch, timer: 0 };
+    press = { id: e.pointerId, x: e.clientX, y: e.clientY, touch, timer: 0, onMark: touch && (e.target as Element).closest(".ui-conn") !== null };
     pill.setPointerCapture(e.pointerId);
     void loadMove(); // the drag code is fetched while the finger is down, so it is there by the time the pill has moved 6 px
   }, { signal });
@@ -168,8 +170,9 @@ function wireWindow(cx: Ctx, rec: WinRec): void {
   const release = (e: PointerEvent): void => {
     if (!press || e.pointerId !== press.id) return;
     window.clearTimeout(press.timer);
+    const { onMark } = press;
     press = undefined;
-    if (e.type === "pointerup") pillPress(cx, rec, "pointer");
+    if (e.type === "pointerup" && !onMark) pillPress(cx, rec, "pointer");
     // A failed setup explains itself in the pill first; the details are one press further.
   };
   pill.addEventListener("pointerup", release, { signal });

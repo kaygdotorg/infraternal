@@ -68,6 +68,7 @@ export interface WindowCardOptions {
   onLockChange?(locked: boolean, source: LockSource): void;
 }
 
+/** One terminal window: its frame, header pill, status marks and body. Made by `createWindowCard`. */
 export interface WindowCard {
   readonly root: HTMLElement;
   readonly header: HTMLElement;
@@ -85,6 +86,8 @@ export interface WindowCard {
    * default from its three states; a caller that knows more (slow, resumed, kept keys) says so here after it.
    */
   setConnection(state: ConnectionIndicatorState, detail?: string, held?: number): void;
+  /** Says whether the screen may be out of date (D309): the same indicator shows its "stale" state, with its tooltip. */
+  setStale(stale: boolean): void;
   setIcon(svg: string): void;
   dispose(): void;
 }
@@ -266,6 +269,7 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     setTitle,
     setStatus,
     setConnection: (state: ConnectionIndicatorState, detail?: string, held?: number): void => conn.set(state, detail, held),
+    setStale: (stale: boolean): void => conn.setStale(stale),
     setIcon,
     dispose() {
       indicators.delete(conn);

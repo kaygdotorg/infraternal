@@ -8,6 +8,8 @@
  *   reconnecting  the same arc: the link was lost and is being resumed; typed keys are kept, and a small amber key says how many
  *   resumed       a tick for a moment: back, exactly where it was left
  *   approximate   a screen for a moment: back, the picture was rebuilt, a little scrollback may be approximate
+ *   stale         a screen with an amber badge: the replayed screen may be out of date (D309); it takes the place of
+ *                 connected, resumed and approximate while the link is up, and a lost link or an ended session replaces it
  *   offline       a slashed ring: the session ended, or the host refused to open one; the sentence says which
  *
  * Moments (resumed, approximate) are told by when they happened: the indicator settles back to "connected" by itself, and a
@@ -32,6 +34,8 @@ export interface LinkView {
   detail?: string;
   /** Keys kept to be sent. */
   held: number;
+  /** The screen may be out of date (D309): the machine pill shows its icon. Only while the link is up; a lost link replaces the question. */
+  stale: boolean;
 }
 
 /** What the indicator is decided from. `now` is a `performance.now()` time, used to end the short "resumed" and "approximate" moments. */
@@ -49,15 +53,15 @@ export interface LinkInput {
  * attach) or reconnecting (it was connected before) with the count of kept keys; then the two short moments; else connected.
  */
 export function linkView(input: LinkInput): LinkView {
-  if (input.ended) return { status: "offline", state: "offline", detail: "This session has ended.", held: 0 };
-  if (input.refusal !== undefined) return { status: "offline", state: "offline", detail: input.refusal, held: 0 };
+  if (input.ended) return { status: "offline", state: "offline", detail: "This session has ended.", held: 0, stale: false };
+  if (input.refusal !== undefined) return { status: "offline", state: "offline", detail: input.refusal, held: 0, stale: false };
   const link = input.binding?.link;
   if (input.binding?.connected === false) {
-    return { status: "connecting", state: link?.everConnected ? "reconnecting" : "connecting", held: link?.heldKeys ?? 0 };
+    return { status: "connecting", state: link?.everConnected ? "reconnecting" : "connecting", held: link?.heldKeys ?? 0, stale: false };
   }
-  if (link?.approximateAt !== undefined && input.now - link.approximateAt < APPROXIMATE_MS) return { status: "live", state: "approximate", held: 0 };
-  if (link?.resumedAt !== undefined && input.now - link.resumedAt < RESUMED_MS) return { status: "live", state: "resumed", held: 0 };
-  return { status: "live", state: "connected", held: 0 };
+  if (link?.approximateAt !== undefined && input.now - link.approximateAt < APPROXIMATE_MS) return { status: "live", state: "approximate", held: 0, stale: link.staleScreen };
+  if (link?.resumedAt !== undefined && input.now - link.resumedAt < RESUMED_MS) return { status: "live", state: "resumed", held: 0, stale: link.staleScreen };
+  return { status: "live", state: "connected", held: 0, stale: link?.staleScreen === true };
 }
 
 /** Paints a terminal window's status and its indicator from its binding. */
@@ -65,4 +69,5 @@ export function paintLink(rec: WinRec, ended: boolean, refusal: string | undefin
   const view = linkView({ binding: rec.binding, ended, refusal, now: performance.now() });
   rec.card.setStatus(view.status);
   rec.card.setConnection(view.state, view.detail, view.held);
+  rec.card.setStale(view.stale);
 }
