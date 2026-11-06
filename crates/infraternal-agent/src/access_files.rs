@@ -686,8 +686,9 @@ mod tests {
     #[test]
     fn enabled_units_and_crontab_lines_are_reported() {
         let (user, home) = account();
-        let crontab = std::sync::Mutex::new(b"0 * * * * backup\n".to_vec());
-        let extra = |_: &User| vec![("crontab".to_owned(), Ok(crontab.lock().unwrap().clone()))];
+        let crontab = std::sync::Arc::new(std::sync::Mutex::new(b"0 * * * * backup\n".to_vec()));
+        let spool = crontab.clone();
+        let extra = move |_: &User| vec![("crontab".to_owned(), Ok(spool.lock().unwrap().clone()))];
         let base = capture(&user, &extra);
         let wants = home.join(".config/systemd/user/default.target.wants");
         std::fs::create_dir_all(&wants).unwrap();
