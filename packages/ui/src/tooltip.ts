@@ -54,6 +54,7 @@ let swallowClick = false, press0: { x: number; y: number } | null = null;
 let pointAnchor: HTMLElement | null = null, pointLabel = "", pointRect: DOMRect | undefined, pointOptions: PointTooltipOptions | undefined;
 const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; timer: number }>();
 
+/** The tooltip and confirmation styles, installed once by `buildStyleOnly`. */
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
 .tip, .tip-sizer { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: 0.5rem; width: max-content; max-width: min(17.5rem, calc(100vw - 2 * ${MARGIN}px)); overflow: hidden;
@@ -193,6 +194,7 @@ export interface ConfirmTipController { close(restoreFocus?: boolean): void }
 
 /** The longest button label drawn in full; the accessible name and the tooltip keep the whole text. A button is a verb, never a sentence. */
 const MAX_BUTTON_LABEL = 28;
+/** A button label as drawn: whole when short, cut with an ellipsis past `MAX_BUTTON_LABEL`. */
 function capLabel(label: string): string { return label.length > MAX_BUTTON_LABEL ? `${label.slice(0, MAX_BUTTON_LABEL - 1)}…` : label; }
 
 let activeConfirmTip: ConfirmTipController | undefined;

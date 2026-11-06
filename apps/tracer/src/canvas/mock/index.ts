@@ -61,6 +61,7 @@ export interface MockupController { dispose(): void }
 
 interface Scene { name: string; hint: string; enter(): void }
 
+/** Mounts the clusters mockup on the core screen: the canvas on a test double, with the query switches the specs rely on (`?removal=1` and others). */
 export async function mountMockup(core: CoreScreen, options: MockupOptions = {}): Promise<MockupController> {
   const stage = core.stage;
   const world = await createMockWorld(options.role ?? "operator", Boolean(options.role));

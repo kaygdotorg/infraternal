@@ -22,6 +22,7 @@ export async function openSettings(cx: Ctx, section: string, source?: string): P
 
 export interface CanvasAction { action?: string; source?: string }
 
+/** Runs a `canvas:` palette action (open a view, split, remove a host, and so on); `selected` is the window that was active when the palette opened. */
 export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: WinRec | undefined): void {
   const { core, views } = cx;
   const [, kind, value] = (detail?.action ?? "").split(":");

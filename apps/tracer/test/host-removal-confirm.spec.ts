@@ -11,9 +11,12 @@
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** The three review viewports: desktop, an iPhone and a small phone. */
 const sizes = [{ id: "desktop", width: 1440, height: 900 }, { id: "phone", width: 393, height: 852 }, { id: "small-phone", width: 375, height: 667 }] as const;
+/** Both card themes the owner reviews. */
 const themes = ["ink", "paper"] as const;
 
+/** Opens the clusters mockup, focuses a window (optionally after flying into the dense Console view), and starts "Remove host" for a host other than the focused window's from the palette. */
 async function startRemovalFromPalette(page: Page, theme: string, dense: boolean): Promise<{ focusedPill: string; removed: string }> {
   await page.context().request.post("/__mock/reset").catch(() => undefined);
   await page.goto(`/?mock=1&proto=clusters&scene=1&bg=none&removal=1&theme=${theme}`);
