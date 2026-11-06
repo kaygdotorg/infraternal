@@ -43,7 +43,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "unsupported": return "This host can't run the infraternal agent yet";
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
-    case "unrecognized_install": return "Found infraternal files this setup didn't make";
+    case "unrecognized_install": return "Already set up elsewhere";
     case "no_account": return "No account with that name on this host";
     case "install":
       if (failure.failed_step === "get-arm64-binary" || failure.failed_step === "get-x86-64-binary") {
@@ -274,7 +274,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     // a staging step can't prove are its own. Nothing was changed; the server's sentence says which, and the
     // location is in Details. Retry is right once the other server has removed it.
     case "unrecognized_install": return {
-      title: `${name} has an infraternal install this server didn't make`,
+      title: `${name} is set up elsewhere`,
       happened: failure.message,
       next: "",
       fix: "retry", tone: "info",

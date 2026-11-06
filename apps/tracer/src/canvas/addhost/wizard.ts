@@ -811,8 +811,9 @@ export class Wizard {
     const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined, job.entry.user);
     const replaceStuck = guide.fix === "replace-stuck-install";
     if (replaceStuck) guide.fix = "start-fresh";
-    // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
-    const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
+    // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red. Only a running
+    // setup, which the person waits for, gets the clock (TASTE: the icon matches the news, #394).
+    const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
       <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${this.detailsBlock(job)}`;

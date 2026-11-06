@@ -552,7 +552,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await page.setViewportSize(viewport);
     await openWizard(page);
     await addTyped(page, "installed.lab");
-    await expect(page.getByRole("heading", { name: "installed.lab has an infraternal install this server didn't make" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("heading", { name: "installed.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
     const failure = wizard(page).locator(".ah-page[data-page='failure']");
     await expect(failure.locator(".ah-lede")).toContainText("nothing was changed");
     // What the page says outside the collapsed Details: no path, no "didn't finish".
@@ -564,6 +564,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(inWizard(page, "Try again")).toBeVisible();
     await failure.locator(".ah-details summary").click();
     await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-failure-${viewport.width}.png`) });
   });
 
@@ -574,6 +575,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await addTyped(page, "kayg@noacct.lab");
     await expect(page.getByRole("heading", { name: "There is no account named kayg on noacct.lab" })).toBeVisible({ timeout: 15_000 });
     await expect(wizard(page).locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("Use an account that exists there, or add it as root.");
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });
   });
 

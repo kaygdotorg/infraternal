@@ -160,7 +160,7 @@ test("an install this server didn't make is named once, with no chore and no pat
   } as const;
   const detail = { ...failure, log_tail: [...failure.log_tail] };
   const guide = guideFor("minipc01", detail);
-  expect(guide.title).toBe("minipc01 has an infraternal install this server didn't make");
+  expect(guide.title).toBe("minipc01 is set up elsewhere");
   expect(guide.happened).toBe(failure.message);
   for (const text of [guide.title, guide.happened, guide.next, failureLine(detail)]) {
     expect(text).not.toMatch(/\/var\/lib|Check .* folders|didn't finish|ownership or permissions/);
