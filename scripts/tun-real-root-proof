@@ -36,7 +36,11 @@ commit=${1:?usage: tun-real-root-proof <40-hex commit>}
 host=infraternal-dev-01-compute01
 
 status=0
-ssh "root@$host" bash -s -- "$commit" <<'ROOT' || status=$?
+# Root's side starts with an empty environment plus this allowlist, so nothing
+# set machine-wide or by sshd (a future INFRATERNAL_SCCACHE_DIR, RUSTC_WRAPPER,
+# LD_*, CARGO_*) can reach root's build (J277, 81454 P3-4).
+root_env=(env -i PATH=/nix/var/nix/profiles/default/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8)
+ssh "root@$host" "${root_env[@]}" bash -s -- "$commit" <<'ROOT' || status=$?
 set -euo pipefail
 commit=$1
 test=an_unprivileged_user_cannot_attach_the_persisted_tun

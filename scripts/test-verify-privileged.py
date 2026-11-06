@@ -290,6 +290,28 @@ class RealRootProof(unittest.TestCase):
         self.assertNotIn('/root/.cache/root-build-slot', code)
         self.assertIn('tail -20 "$work/build.log" | cat -v', code)
 
+    def test_proof_scrubs_roots_environment(self):
+        """Root's side runs under env -i with exactly PATH, HOME and LANG (J277 P3-4)."""
+        code = self.proof_code()
+        line = next(line for line in code.splitlines() if line.startswith('root_env=('))
+        words = line[len('root_env=('):-1].split()
+        self.assertEqual(words[:2], ['env', '-i'])
+        self.assertEqual(sorted(word.split('=', 1)[0] for word in words[2:]), ['HOME', 'LANG', 'PATH'])
+        self.assertIn('ssh "root@$host" "${root_env[@]}" bash -s -- "$commit"', code)
+
+    def test_env_allowlist_really_clears_the_rest(self):
+        """The same env -i form, run here, drops a planted variable such as INFRATERNAL_SCCACHE_DIR."""
+        code = self.proof_code()
+        line = next(line for line in code.splitlines() if line.startswith('root_env=('))
+        words = line[len('root_env=('):-1].split()
+        out = subprocess.run([*words, '/bin/sh', '-c', 'env'], capture_output=True, text=True,
+                             env=dict(os.environ, INFRATERNAL_SCCACHE_DIR='/home/claude/cache',
+                                      RUSTC_WRAPPER='sccache')).stdout
+        names = sorted(entry.split('=', 1)[0] for entry in out.splitlines() if '=' in entry)
+        self.assertNotIn('INFRATERNAL_SCCACHE_DIR', names)
+        self.assertNotIn('RUSTC_WRAPPER', names)
+        self.assertTrue({'PATH', 'HOME', 'LANG'} <= set(names))
+
     def test_proof_script_keeps_claude_out_of_roots_process(self):
         """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
         script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()
