@@ -196,6 +196,10 @@ pub enum FailureKind {
     /// found, and the location goes in Details.
     #[serde(rename = "unrecognized_install")]
     UnrecognizedInstall,
+    /// The host has no account with the login name; no sign-in method can
+    /// help, so the person picks another account or root (#394).
+    #[serde(rename = "no_account")]
+    NoAccount,
 }
 
 /// Public, bounded findings from a host-local ownership check; paths belong in Details.
@@ -631,6 +635,10 @@ impl Failure {
             FailureKind::HostKey => "host-key",
             FailureKind::Unreachable | FailureKind::MeshPolicy => "transport",
             FailureKind::UnrecognizedInstall => "unrecognized-install",
+            FailureKind::NoAccount => "no-account",
+            FailureKind::Unsupported => "unsupported",
+            FailureKind::StalePreviousAttempt => "leftovers",
+            FailureKind::SetupRunning => "setup-running",
             _ if self.log_tail.contains(&"The SSH command channel failed.") => "channel",
             _ if self.log_tail.contains(&"The SSH connection setup failed.") => "transport",
             _ => "setup",

@@ -619,7 +619,7 @@ each have a 30-second bound. A payload source without byte observations gets a
 30-second acquisition bound. Confirmation and authenticated readiness retain
 their own independent limits.
 
-## Finished installs (#394)
+## Finished installs and missing accounts (#394)
 
 A base with no journal is a finished install owned by the host id in its
 `.bootstrap-owner`. The read-only check reports it as
@@ -628,3 +628,8 @@ every new attempt carries a new host id, and staging refuses (71) a base whose
 owner names another host. After the existing already-added preflight, the
 server answers `unrecognized_install` at the `connect` step before any write.
 Taking such an install over (D337) is not offered by this slice.
+
+When the NetBird SSH server accepts a network sign-in and then ends the session
+with exactly `User authentication failed` (status 1), the login name is no
+account on the host. That is kind `no_account`, never a setup failure; no other
+sign-in method is tried.

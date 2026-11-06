@@ -457,11 +457,25 @@ impl Drop for Session {
     }
 }
 
+/// The whole stderr of a NetBird SSH session for a login name that is no
+/// account on the host (measured against NetBird-SSH-Server 0.82.0, #394).
+const NETBIRD_NO_ACCOUNT: &str = "User authentication failed";
+
 /// Only allowlisted categories/text survive; remote banners and command output are discarded.
 #[must_use]
 pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure {
     let text = String::from_utf8_lossy(&stderr[..stderr.len().min(8192)]);
-    let mut failure = if !ssh_failure {
+    let mut failure = if text.trim() == NETBIRD_NO_ACCOUNT {
+        // The NetBird SSH server accepts the network sign-in, then ends the
+        // session with exactly this line and status 1 when the login name is
+        // no account on the host (#394: kayg on Proxmox hosts). Read as a
+        // command failure, it was reported as a generic setup failure.
+        // Nothing else matches: only this whole stderr selects the kind.
+        Failure::new(
+            FailureKind::NoAccount,
+            "This host has no account with that user name.",
+        )
+    } else if !ssh_failure {
         Failure::install("The remote bootstrap command failed.")
     } else if text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
         || text.contains("Host key verification failed")
@@ -500,6 +514,7 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
             "Discovery confirms mesh reachability; SSH was refused or timed out."
         }
         FailureKind::Unreachable => "OpenSSH could not establish the connection.",
+        FailureKind::NoAccount => "The host's SSH server reported no such account.",
         _ => "Remote command returned a failure status; raw output was withheld.",
     });
     // Copy only canonical public error lines, never arbitrary remote bytes.
@@ -516,6 +531,28 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
 mod tests {
     use super::*;
     use crate::model::InstallStep;
+
+    /// #394: NetBird's SSH server signs in over the network, then ends the
+    /// session with this one line when the login name is no account there.
+    #[test]
+    fn a_login_name_with_no_account_is_named_not_a_setup_failure() {
+        for ssh_failure in [false, true] {
+            let failure = classify(
+                b"User authentication failed\n",
+                ssh_failure,
+                MeshEvidence::default(),
+            );
+            assert_eq!(failure.kind, FailureKind::NoAccount);
+            assert_eq!(failure.diagnostic_kind(), "no-account");
+        }
+        // Only the whole stderr selects it: a script that mentions it is not it.
+        let other = classify(
+            b"step 3\nUser authentication failed\n",
+            false,
+            MeshEvidence::default(),
+        );
+        assert_eq!(other.kind, FailureKind::Install);
+    }
 
     #[test]
     fn only_trusted_setup_scripts_retain_bounded_child_stderr() {
