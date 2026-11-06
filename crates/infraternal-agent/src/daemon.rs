@@ -282,6 +282,9 @@ struct OpenTask {
 fn open_refusal(error: &io::Error) -> infraternal_plugin_api::admission::OpenRefusal {
     use crate::logins::RootlessRefusal;
     use infraternal_plugin_api::admission::OpenRefusal;
+    if crate::logins::NoSystemd::of(error) {
+        return OpenRefusal::NoSystemd;
+    }
     match (RootlessRefusal::of(error), error.kind()) {
         (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin,
         (Some(RootlessRefusal::OtherAccount), _) => OpenRefusal::Permission,
@@ -312,6 +315,13 @@ mod refusal_tests {
             kind(io::ErrorKind::TimedOut),
             OpenRefusal::ResourceUnavailable
         );
+    }
+
+    /// A root host without systemd names its own reason, not "try again" (D354).
+    #[test]
+    fn a_root_host_without_systemd_names_why_it_cannot_log_in() {
+        let refused = io::Error::new(io::ErrorKind::Unsupported, crate::logins::NoSystemd);
+        assert_eq!(open_refusal(&refused), OpenRefusal::NoSystemd);
     }
 
     #[test]

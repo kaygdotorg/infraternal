@@ -48,6 +48,34 @@ impl RootlessRefusal {
     }
 }
 
+/// A root infraternal agent on a host without systemd refuses person logins
+/// (D354, amending D247). Without systemd's per-login cgroups, revocation
+/// cannot prove that every process of a login is gone, and with `su` a revoked
+/// person kept their shell alive (J291). Rootless agents and systemd hosts are
+/// unaffected. The error carries a type so the daemon never matches on text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NoSystemd;
+
+impl std::fmt::Display for NoSystemd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a root infraternal agent opens person logins only on hosts with systemd")
+    }
+}
+
+impl std::error::Error for NoSystemd {}
+
+impl NoSystemd {
+    /// This refusal as an error.
+    fn denied(self) -> io::Error {
+        io::Error::new(io::ErrorKind::Unsupported, self)
+    }
+
+    /// Whether `error` is this refusal.
+    pub(crate) fn of(error: &io::Error) -> bool {
+        error.get_ref().is_some_and(|inner| inner.is::<Self>())
+    }
+}
+
 /// Resolve account names on the host, where its account database is authoritative.
 /// # Errors
 /// Rootless hosts refuse account switching and absent fallback identities.
@@ -176,11 +204,7 @@ pub async fn ensure(
     let endpoint = root.join(&name).join("login.sock");
     match ready(&endpoint, user.uid.as_raw()).await {
         Ok(()) => {
-            if matches!(manager, Manager::System) {
-                remember_scope(root, &name, &endpoint, person, user.uid.as_raw()).await?;
-            } else {
-                cgroup(&endpoint, manager, person, user.uid.as_raw()).await?;
-            }
+            remember_scope(root, &name, &endpoint, person, user.uid.as_raw()).await?;
             return Ok(Some(endpoint));
         }
         Err(error)
@@ -190,18 +214,8 @@ pub async fn ensure(
             ) => {}
         Err(error) => return Err(error),
     }
-    match manager {
-        Manager::System => {}
-        Manager::Detached | Manager::User => {
-            // The launcher authenticates before releasing ownership. The
-            // terminal admission path independently rechecks the returned worker.
-            return fallback(exe, root, &name, &endpoint, person, user)
-                .await
-                .map(Some);
-        }
-    }
-    // Only the system manager reaches this launch path. The exhaustive branch
-    // above keeps user-manager/fallback flags out of this future's unit setup.
+    // Only the system manager reaches this launch path (`root_login_manager`,
+    // D354): there is no `su` fallback for root logins any more.
     let mut command = crate::sessions::isolated(Path::new("systemd-run"));
     command
         .args(
@@ -313,15 +327,16 @@ pub async fn ensure(
     Ok(adopted)
 }
 
-/// The manager a root agent opens another account's login under.
+/// The manager a root agent opens another account's login under: always the
+/// system manager.
 ///
 /// A launch gets `Detached` both when the host has no system manager and when
 /// the system manager's probe merely timed out (`Manager::resolve` keeps only
-/// answers). The second must never reach the `su` fallback: that login has no
-/// unit and no recorded scope, so a later revocation, seeing `System`, could
-/// not find it (J291 P1, #355). So a non-`System` manager is probed again
-/// here. An answer is used as given; a probe that times out again refuses the
-/// open, and the server may retry it.
+/// answers). So a non-`System` manager is probed again here. An answer of
+/// `System` is used; an answer that there is none refuses the login with
+/// [`NoSystemd`] (D354); a probe that times out again refuses the open, and
+/// the server may retry it. No root login ever runs without a unit and a
+/// recorded scope that revocation can kill and check (J291 P1, #355).
 async fn root_login_manager<F, Fut>(manager: Manager, probe: F) -> io::Result<Manager>
 where
     F: FnOnce() -> Fut,
@@ -330,12 +345,14 @@ where
     if matches!(manager, Manager::System) {
         return Ok(manager);
     }
-    probe().await.ok_or_else(|| {
-        io::Error::new(
+    match probe().await {
+        Some(Manager::System) => Ok(Manager::System),
+        Some(_) => Err(NoSystemd.denied()),
+        None => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "the host's service manager did not answer; host login not opened",
-        )
-    })
+        )),
+    }
 }
 
 // The manager passes this root controller's original socket to the exact
@@ -429,9 +446,10 @@ pub(crate) async fn cgroup(
     }
     let mut identity = crate::login_auth::pin(pid, PathBuf::new())?;
     if !matches!(manager, Manager::System) {
-        crate::login_auth::fallback(&mut identity, person, uid, endpoint)?;
-        crate::login_auth::remember(person, uid, identity.clone());
-        return Ok(Some(identity));
+        // A root login outside the system manager is an `su` fallback from
+        // before D354. It is never authenticated again: revocation of it fails
+        // closed (`stop_login`), and new ones are not opened.
+        return Err(NoSystemd.denied());
     }
     let unit = format!("{}.service", name(person, uid));
     let mut command = crate::sessions::isolated(Path::new("systemctl"));
@@ -1411,179 +1429,6 @@ async fn acquire(root: &Path, name: &str) -> io::Result<nix::fcntl::Flock<std::f
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
 }
 
-fn quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-/// The utility argv is a public identity binding, shared with fallback adoption checks.
-pub(crate) fn fallback_script(
-    executable: &str,
-    endpoint: &Path,
-    person: uuid::Uuid,
-    uid: u32,
-    controller: u32,
-) -> io::Result<String> {
-    let endpoint = endpoint
-        .to_str()
-        .ok_or_else(|| io::Error::other("login endpoint is not UTF-8"))?;
-    Ok(format!(
-        "exec {} __shim --login-worker --controller-uid {controller} --session {} --uid {uid} --login-socket {}",
-        quoted(executable),
-        person.simple(),
-        quoted(endpoint)
-    ))
-}
-
-// Pending launch ownership is distinct from the adopted long-lived login.
-// Cancellation must let the host login utility run its own session cleanup,
-// rather than abruptly abandoning or killing only its PAM-owning parent.
-struct PendingLogin(Option<tokio::process::Child>);
-impl PendingLogin {
-    fn child(&mut self) -> io::Result<&mut tokio::process::Child> {
-        self.0
-            .as_mut()
-            .ok_or_else(|| io::Error::other("pending login already released"))
-    }
-    fn release(&mut self) -> io::Result<tokio::process::Child> {
-        self.0
-            .take()
-            .ok_or_else(|| io::Error::other("pending login already released"))
-    }
-}
-impl Drop for PendingLogin {
-    fn drop(&mut self) {
-        let Some(mut child) = self.0.take() else {
-            return;
-        };
-        if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid),
-                nix::sys::signal::Signal::SIGTERM,
-            );
-        }
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if !matches!(
-                    tokio::time::timeout(Duration::from_secs(3), child.wait()).await,
-                    Ok(Ok(_))
-                ) {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            });
-        } else {
-            // Startup cancellation normally happens inside the daemon reactor.
-            // Still refuse to retain a launcher if shutdown has removed it.
-            let _ = child.start_kill();
-        }
-    }
-}
-
-async fn fallback(
-    exe: &Path,
-    root: &Path,
-    name: &str,
-    endpoint: &Path,
-    person: uuid::Uuid,
-    user: &User,
-) -> io::Result<PathBuf> {
-    use std::{
-        fs::{self, DirBuilder, File},
-        os::unix::{
-            fs::{DirBuilderExt, MetadataExt},
-            process::CommandExt,
-        },
-    };
-    let directory = root.join(name);
-    match DirBuilder::new().mode(0o700).create(&directory) {
-        Ok(()) => {
-            let file = File::open(&directory)?;
-            if Uid::effective().is_root() {
-                nix::unistd::fchown(&file, Some(user.uid), Some(user.gid))
-                    .map_err(io::Error::from)?;
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
-    let meta = fs::symlink_metadata(&directory)?;
-    if !meta.is_dir() || meta.uid() != user.uid.as_raw() || meta.mode() & 0o777 != 0o700 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "unsafe fallback login directory",
-        ));
-    }
-    match fs::symlink_metadata(endpoint) {
-        Ok(meta)
-            if std::os::unix::fs::FileTypeExt::is_socket(&meta.file_type())
-                && meta.uid() == user.uid.as_raw() =>
-        {
-            fs::remove_file(endpoint)?;
-        }
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "unsafe fallback login endpoint",
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    let mut command = crate::sessions::isolated(Path::new("su"));
-    let executable = exe
-        .to_str()
-        .ok_or_else(|| io::Error::other("login executable is not UTF-8"))?;
-    let script = fallback_script(
-        executable,
-        endpoint,
-        person,
-        user.uid.as_raw(),
-        Uid::effective().as_raw(),
-    )?;
-    command
-        .args(["--login", "--shell", "/bin/sh", "--command"].as_slice())
-        .arg(script)
-        .arg("--")
-        .arg(&user.name)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Host policy decides whether this local login is permitted. Never feed an
-    // auth prompt or substitute a bare uid change if su refuses the session.
-    // Keep the host login utility out of the daemon's foreground group.
-    // The utility still decides how its PAM child/session is established.
-    command.as_std_mut().process_group(0);
-    let mut pending = PendingLogin(Some(command.spawn()?));
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if pending.child()?.try_wait()?.is_some() {
-                return Err(io::Error::other("host login path refused the account"));
-            }
-            if ready(endpoint, user.uid.as_raw()).await.is_ok() {
-                return Ok(endpoint.to_path_buf());
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)));
-    // Keep utility ownership until identity authentication has completed. A
-    // failed pin/parent check must close the newly opened host PAM login too.
-    let result = match result {
-        Ok(endpoint) => cgroup(&endpoint, Manager::Detached, person, user.uid.as_raw())
-            .await
-            .map(|_| endpoint),
-        Err(error) => Err(error),
-    };
-    if result.is_ok() {
-        let mut child = pending.release()?;
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     //! Person identity remains distinct even when the OS account is shared.
@@ -1605,10 +1450,10 @@ mod tests {
         assert!(matches!(answered, Manager::System));
         let absent = root_login_manager(Manager::Detached, || async { Some(Manager::Detached) })
             .await
-            .unwrap();
+            .unwrap_err();
         assert!(
-            matches!(absent, Manager::Detached),
-            "a host without systemd keeps D247's path"
+            NoSystemd::of(&absent),
+            "a host without systemd refuses root logins (D354): {absent}"
         );
         let system = root_login_manager(Manager::System, || async {
             unreachable!("a system manager is not probed again")
@@ -2085,39 +1930,6 @@ mod tests {
             io::ErrorKind::UnexpectedEof
         );
     }
-    #[tokio::test]
-    async fn fallback_refuses_a_same_account_socket_without_a_host_login_parent() {
-        let root = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
-            ".cache/codex-scratch/rl3/fake-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let endpoint = root.join("login.sock");
-        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
-        let server = tokio::spawn(async move {
-            let (mut peer, _) = listener.accept().await.unwrap();
-            let mut request = [0];
-            peer.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request, b"?");
-            peer.write_all(b"R").await.unwrap();
-        });
-        let result = cgroup(
-            &endpoint,
-            Manager::Detached,
-            uuid::Uuid::new_v4(),
-            Uid::effective().as_raw(),
-        )
-        .await;
-        server.abort();
-        std::fs::remove_dir_all(root).unwrap();
-        assert_eq!(
-            result
-                .err()
-                .expect("fake same-account listener was adopted")
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-    }
 
     #[test]
     fn login_fences_do_not_wait_for_shared_blocking_pool_capacity() {
@@ -2288,41 +2100,6 @@ mod tests {
                 .await
                 .unwrap();
             std::fs::remove_dir_all(root).unwrap();
-        });
-    }
-
-    #[test]
-    fn cancelling_pending_launch_terminates_and_reaps_the_launcher() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let mut command = tokio::process::Command::new("/bin/sleep");
-            command
-                .arg("300")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            let child = command.spawn().unwrap();
-            let pid = child.id().unwrap();
-            drop(PendingLogin(Some(child)));
-            let deadline = std::time::Instant::now() + Duration::from_millis(500);
-            let mut gone = false;
-            while std::time::Instant::now() < deadline {
-                if !Path::new(&format!("/proc/{pid}")).exists() {
-                    gone = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            if !gone {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
-                    nix::sys::signal::Signal::SIGKILL,
-                );
-            }
-            assert!(gone, "cancelled pending login launcher was retained");
         });
     }
 

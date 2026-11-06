@@ -33,6 +33,9 @@ pub enum OpenRefusal {
     Permission,
     /// A rootless host has no account matching the person's name and, unlike a root host, cannot fall back to root.
     NoLogin,
+    /// A root host without systemd opens no person logins: it could not prove a revoked login's
+    /// processes gone (D354). A rootless agent on that host, or a host with systemd, still can.
+    NoSystemd,
     /// The terminal could not be opened for a reason the host does not detail.
     Unavailable,
     /// The host could not check or reserve the resources a terminal needs.
@@ -66,6 +69,20 @@ impl OpenRefusal {
 mod tests {
     //! Exercise additive compatibility and strict numeric refusal decoding.
     use super::*;
+
+    /// D354's refusal is its own reason on the wire, so the browser can say why and what works instead.
+    #[test]
+    fn no_systemd_refusal_has_its_own_reason() {
+        let json = OpenRefusal::NoSystemd.json().unwrap();
+        assert_eq!(
+            std::str::from_utf8(&json).unwrap(),
+            r#"{"error":"terminal unavailable","reason":"no_systemd"}"#
+        );
+        assert_eq!(
+            serde_json::from_slice::<OpenRefusal>(&json).unwrap(),
+            OpenRefusal::NoSystemd
+        );
+    }
 
     #[test]
     fn memory_refusal_round_trips_without_losing_legacy_error() {
