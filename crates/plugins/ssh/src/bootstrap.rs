@@ -227,6 +227,29 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+    /// This account's install base on the host at `target` is proven empty: Start
+    /// fresh just removed every leftover there, or the check found no install at
+    /// all (D355). The server may finish the same person's stale entries for that
+    /// address and account. Backends without host records have none.
+    fn install_base_proven_empty<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _target: &'a Target,
+        _check: &'a Check,
+        _lookup: Option<String>,
+    ) -> Operation<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    /// Whether the infraternal agent of an earlier setup's journal (`host`) is
+    /// connected to this server now. Its leftovers are then in use, never offered
+    /// for cleanup (#305, J257). Backends without host links have none.
+    fn leftover_connected<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _host: uuid::Uuid,
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
     /// Bind nonsecret cleanup coordinates to the connection that actually authenticated.
     fn invitation_with_trust<'a>(
         &'a self,
@@ -894,9 +917,20 @@ impl Bootstrap {
                 }
                 let mut rolled_back = true;
                 if let Some(installation) = resources.installation {
-                    let cleanup =
-                        tokio::time::timeout(Duration::from_secs(30), installation.rollback())
-                            .await;
+                    // A fresh install that committed before a later step failed
+                    // (its login check, completion) has no journal left to roll
+                    // back: remove it, or it keeps running for a host the server
+                    // revokes and blocks every retry (#305 F-B). A Replace or
+                    // Re-enroll keeps the enrolled host, so it is never removed.
+                    let cleanup = if installation.committed() && resources.set_aside.is_none() {
+                        tokio::time::timeout(
+                            Duration::from_secs(30),
+                            installation.uninstall_committed(),
+                        )
+                        .await
+                    } else {
+                        tokio::time::timeout(Duration::from_secs(30), installation.rollback()).await
+                    };
                     rolled_back = matches!(cleanup, Ok(Ok(())));
                     if !rolled_back {
                         if let Some(state) = lock(&batch.states).get_mut(&target.id) {
@@ -1239,7 +1273,8 @@ impl Bootstrap {
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
                 metadata.authentication = session.authentication();
             }
-            let (check, previous) = previous_attempt::parse_check(&output.stdout)?;
+            let (check, previous, absent) =
+                previous_attempt::parse_check_with_absence(&output.stdout)?;
             check.authorize_mode(target.mode)?;
             match restore_previous(batch, target, attempt, started, session.clone()).await {
                 Err(error) if error.exit_status == Some(76) => {
@@ -1399,6 +1434,15 @@ impl Bootstrap {
                         }
                     }
                 } else {
+                    // An interrupted activation can leave its agent running. If it is
+                    // connected here, its setup is not abandoned (#305, J257).
+                    if self
+                        .backend
+                        .leftover_connected(&batch.authority, previous.host)
+                        .await?
+                    {
+                        return Err(leftover_in_use());
+                    }
                     // Only this server's durable failed-host binding finishes the
                     // earlier setup without asking (#230).
                     let automatic = self
@@ -1426,9 +1470,22 @@ impl Bootstrap {
                         resources,
                     )
                     .await?;
+                    // The account's base is now empty: its stale entries on this
+                    // server are finished at once (D355).
+                    self.backend
+                        .install_base_proven_empty(&batch.authority, target, &check, lookup.clone())
+                        .await?;
                     None
                 }
             } else {
+                // The check proved no install at all here (only the inspection
+                // script reports that; the cleanup-owning probe never does):
+                // same as after a Start fresh (D355).
+                if absent && !owns_cleanup {
+                    self.backend
+                        .install_base_proven_empty(&batch.authority, target, &check, lookup.clone())
+                        .await?;
+                }
                 None
             };
             // Existing remote identities must be reported before the first
@@ -1919,6 +1976,15 @@ impl Bootstrap {
     ) -> Result<(), Failure> {
         self.confirm_start_fresh(batch, target, attempt, started, previous, mode, resources)
             .await?;
+        // The person may have waited: an agent that connected here meanwhile
+        // makes the leftovers in use again (#305, J272).
+        if self
+            .backend
+            .leftover_connected(&batch.authority, previous.host)
+            .await?
+        {
+            return Err(leftover_in_use());
+        }
         self.act_start_fresh(batch, target, attempt, started, session, previous, mode)
             .await
     }
@@ -2242,6 +2308,16 @@ impl Drop for Batch {
     fn drop(&mut self) {
         self.inner.socket_closed.send_replace(true);
     }
+}
+
+/// An earlier setup's infraternal agent is connected to this server: its
+/// leftovers are in use, so nothing is offered or removed (#305, J257).
+fn leftover_in_use() -> Failure {
+    let mut failure = Failure::install(
+        "Setup is already running on this host. Wait for it to finish, then try again.",
+    );
+    failure.kind = crate::model::FailureKind::SetupRunning;
+    failure
 }
 
 fn emit(

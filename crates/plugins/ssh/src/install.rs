@@ -106,6 +106,9 @@ pub struct Installation {
     images: Arc<[std::sync::OnceLock<Arc<str>>; 2]>,
     /// Fixed, validated setup receipt used to report an occupied short CLI name.
     alias_skipped: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once this transaction's commit returned success: its journal is gone,
+    /// so rollback can no longer undo it (see [`Installation::uninstall_committed`]).
+    committed: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Installation {
     /// Whether setup preserved a foreign `infra` path; callers should show a warning.
@@ -134,6 +137,7 @@ impl Installation {
             mode: self.mode,
             images: self.images.clone(),
             alias_skipped: self.alias_skipped.clone(),
+            committed: self.committed.clone(),
         }
     }
 }
@@ -380,6 +384,7 @@ impl Installation {
             mode: cleanup.mode,
             images: Arc::default(),
             alias_skipped: Arc::default(),
+            committed: Arc::default(),
         })
     }
     /// Validate consent and URL again at the mutation boundary.
@@ -411,6 +416,7 @@ impl Installation {
             mode: target.mode,
             images: Arc::default(),
             alias_skipped: Arc::default(),
+            committed: Arc::default(),
         })
     }
 
@@ -430,6 +436,7 @@ impl Installation {
             mode: target.mode,
             images: Arc::default(),
             alias_skipped: Arc::default(),
+            committed: Arc::default(),
         })
     }
 
@@ -1188,6 +1195,8 @@ retire_set_aside"#);
             self.session.run(&script, Input::Empty).await
         };
         result.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+        self.committed
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -1236,6 +1245,45 @@ retire_set_aside"#
             self.session.run(&script, Input::Signal(release)).await
         };
         result.map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
+        self.committed
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether this transaction's commit succeeded, so its journal is gone.
+    #[must_use]
+    pub fn committed(&self) -> bool {
+        self.committed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Remove the install this transaction committed, after a later step of the same
+    /// attempt failed (for example the host's login check, #305 F-B).
+    ///
+    /// Rollback cannot do it: commit deleted the journal. Left in place, the install
+    /// keeps running for a host id the server is about to revoke, and its
+    /// `.bootstrap-owner` makes every later add of this host refuse to stage (exit 71)
+    /// with a misleading permissions error. This runs the install's own uninstall,
+    /// which removes nothing unless `.bootstrap-owner` names exactly this attempt's
+    /// host, and does nothing while a setup journal is present (that is rollback's).
+    /// The checks run under the setup lock; the lock is released only for the
+    /// uninstall, which takes it again itself.
+    /// # Errors
+    /// Reports a failed SSH command or uninstall; the caller then keeps the
+    /// "cleanup could not finish" path.
+    pub async fn uninstall_committed(&self) -> Result<(), Failure> {
+        let script = self.script(
+            r#"[ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 0
+[ ! -e "$base/.bootstrap-lock" ] && [ ! -L "$base/.bootstrap-lock" ] || exit 0
+[ -x "$base/bin/live" ] && [ ! -L "$base/bin/live" ] || exit 71
+# The uninstall takes this same setup lock itself and revalidates that
+# .bootstrap-owner names this host; holding it here would refuse it.
+exec 9<&-
+"$base/bin/live" --bootstrap-uninstall "$host" >/dev/null"#,
+        );
+        self.session
+            .run(&script, Input::Empty)
+            .await
+            .map_err(|error| error.at(InstallStep::Install).in_mode(self.mode))?;
         Ok(())
     }
 
