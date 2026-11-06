@@ -282,6 +282,9 @@ struct OpenTask {
 fn open_refusal(error: &io::Error) -> infraternal_plugin_api::admission::OpenRefusal {
     use crate::logins::RootlessRefusal;
     use infraternal_plugin_api::admission::OpenRefusal;
+    if crate::logins::NoSystemd::of(error) {
+        return OpenRefusal::NoSystemd;
+    }
     match (RootlessRefusal::of(error), error.kind()) {
         (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin,
         (Some(RootlessRefusal::OtherAccount), _) => OpenRefusal::Permission,
@@ -301,6 +304,8 @@ mod refusal_tests {
     use super::*;
     use infraternal_plugin_api::admission::OpenRefusal;
 
+    /// Plain I/O failures map to the generic reasons: only malformed requests
+    /// and refused ownership are "invalid", anything else "resource unavailable".
     #[test]
     fn io_kinds_map_to_their_reason() {
         let kind = |kind| open_refusal(&io::Error::from(kind));
@@ -312,6 +317,13 @@ mod refusal_tests {
             kind(io::ErrorKind::TimedOut),
             OpenRefusal::ResourceUnavailable
         );
+    }
+
+    /// A root host without systemd names its own reason, not "try again" (D354).
+    #[test]
+    fn a_root_host_without_systemd_names_why_it_cannot_log_in() {
+        let refused = io::Error::new(io::ErrorKind::Unsupported, crate::logins::NoSystemd);
+        assert_eq!(open_refusal(&refused), OpenRefusal::NoSystemd);
     }
 
     #[test]
@@ -363,17 +375,24 @@ fn spawn_revocation(
     tokio::spawn(async move {
         let manager = Manager::resolve(&manager).await;
         let result = if restore {
-            crate::logins::restore(&state, person).await
+            crate::logins::restore(&state, person)
+                .await
+                .map(|()| b"{\"restored\":true}".to_vec())
         } else {
-            crate::logins::revoke(&state, manager, person).await
+            crate::logins::revoke(&state, manager, person)
+                .await
+                .map(|revoked| {
+                    if revoked.background_may_remain {
+                        // D353: others still share the account, so its own services stayed.
+                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, so its services were not stopped.\"}".to_vec()
+                    } else {
+                        b"{\"revoked\":true}".to_vec()
+                    }
+                })
         }
-        .map(|()| Opened {
+        .map(|json| Opened {
             session: None,
-            json: if restore {
-                b"{\"restored\":true}".to_vec()
-            } else {
-                b"{\"revoked\":true}".to_vec()
-            },
+            json,
         })
         .map_err(|error| match error.kind() {
             io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidInput => OpenRefusal::Invalid,

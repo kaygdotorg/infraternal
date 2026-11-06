@@ -1795,13 +1795,35 @@ fn run_login_shim_if_requested(
 // This startup entry is absent from a running daemon; keep its code away
 // from hot dispatch pages without changing the terminal/worker pump itself.
 #[cold]
+/// Runs the shim's host-login roles: the login worker (on a root-created
+/// socket with `--login-listen-fd 0`, or binding its own), or the proxy that
+/// starts a terminal inside an authenticated login.
 fn run_login_command(
     matches: &ArgMatches,
     session: &str,
     uid: u32,
     endpoint: &std::path::Path,
 ) -> ExitCode {
-    let result = if matches.get_flag("login_worker") {
+    let result = if matches.get_flag("login_worker")
+        && let Some(listen) = matches.get_one::<i64>("login_listen_fd")
+    {
+        // Only the announced, root-launched worker takes a root-created socket,
+        // always on standard input (fd 0), never another number.
+        if *listen != 0 || matches.get_one::<i64>("login_ready_fd") != Some(&1) {
+            return ExitCode::from(2);
+        }
+        std::os::fd::AsFd::as_fd(&std::io::stdin())
+            .try_clone_to_owned()
+            .and_then(|bound| {
+                infraternal_shim::login::worker_announced_on(
+                    endpoint,
+                    infraternal_shim::login::GRACE,
+                    shim_integer(matches, "controller_uid", Some(0)).unwrap_or(u32::MAX),
+                    bound,
+                )
+            })
+            .map(|()| 0)
+    } else if matches.get_flag("login_worker") {
         let startup = match matches.get_one::<i64>("login_ready_fd") {
             None => infraternal_shim::login::worker_as_controller,
             Some(1) => infraternal_shim::login::worker_announced,

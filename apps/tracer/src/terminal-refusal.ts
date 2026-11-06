@@ -33,6 +33,12 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
       // Asking again cannot change the account, so the action is a host that can.
       case "permission":
       case "no_login": return { message: ROOTLESS, sessionList: false, action: "add-host" };
+      // A root host without systemd cannot prove a revoked login is gone, so it opens none (D354). Name the two ways
+      // that work; the action is a host that can.
+      case "no_systemd": return {
+        message: `${host} has no systemd, so infraternal can't open logins there as root. Reinstall infraternal there without root, or add a host with systemd.`,
+        sessionList: false, action: "add-host",
+      };
       // The account may not use this host: only its owner can change that, so there is nothing to retry.
       case "forbidden":
       case "denied": return { message: `You do not have access to ${hostName?.trim() || "this host"}. Ask an admin for access.`, sessionList: false, action: "none" };

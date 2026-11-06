@@ -100,7 +100,7 @@ pub fn worker(endpoint: &Path, grace: Duration) -> io::Result<()> {
 /// # Errors
 /// Returns worker startup or descriptor errors.
 pub fn worker_as_controller(endpoint: &Path, grace: Duration, controller: u32) -> io::Result<()> {
-    worker_configured(endpoint, grace, controller, false)
+    worker_configured(endpoint, grace, controller, false, None)
 }
 
 /// Announce the original ready process on the system manager's private stdout
@@ -108,7 +108,41 @@ pub fn worker_as_controller(endpoint: &Path, grace: Duration, controller: u32) -
 /// # Errors
 /// Returns normal worker startup errors or launch-pipe delivery failures.
 pub fn worker_announced(endpoint: &Path, grace: Duration, controller: u32) -> io::Result<()> {
-    worker_configured(endpoint, grace, controller, true)
+    worker_configured(endpoint, grace, controller, true, None)
+}
+
+/// [`worker_announced`] for a socket the root controller created: `bound` is a
+/// Unix stream socket already bound at `endpoint`, inside a directory only
+/// root can change, and not yet listening. The worker listens on it itself,
+/// so connecting peers still see the worker's own credentials, but the
+/// account can neither replace the socket nor its directory (J291 P1, J295
+/// P1, #355). Root logins no longer use a separate stop socket: revocation
+/// kills the login's session scope instead.
+/// # Errors
+/// Refuses a descriptor that is not a socket bound at `endpoint`.
+pub fn worker_announced_on(
+    endpoint: &Path,
+    grace: Duration,
+    controller: u32,
+    bound: std::os::fd::OwnedFd,
+) -> io::Result<()> {
+    worker_configured(endpoint, grace, controller, true, Some(bound))
+}
+
+/// Takes the root-created socket `bound` for `endpoint`: checks that it is a
+/// Unix socket bound at exactly that path, then listens on it.
+fn adopt_listener(bound: std::os::fd::OwnedFd, endpoint: &Path) -> io::Result<UnixListener> {
+    use nix::sys::socket::{Backlog, UnixAddr, getsockname, listen};
+    use std::os::fd::AsRawFd as _;
+    let address: UnixAddr = getsockname(bound.as_raw_fd()).map_err(io::Error::from)?;
+    if address.path() != Some(endpoint) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "login socket descriptor is not bound at the login endpoint",
+        ));
+    }
+    listen(&bound, Backlog::new(128).map_err(io::Error::from)?).map_err(io::Error::from)?;
+    Ok(UnixListener::from(bound))
 }
 
 /// Shared body of the worker entry points; `announce` selects whether to report
@@ -118,19 +152,24 @@ fn worker_configured(
     grace: Duration,
     controller: u32,
     announce: bool,
+    bound: Option<std::os::fd::OwnedFd>,
 ) -> io::Result<()> {
-    let parent = endpoint
-        .parent()
-        .ok_or_else(|| io::Error::other("login endpoint has no parent"))?;
-    let metadata = fs::symlink_metadata(parent)?;
-    if !metadata.is_dir()
-        || metadata.uid() != Uid::effective().as_raw()
-        || metadata.mode() & 0o777 != 0o700
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "login directory must be private to the account",
-        ));
+    // A root-created socket lives in root's directory; otherwise the worker
+    // binds in a directory private to its own account.
+    if bound.is_none() {
+        let parent = endpoint
+            .parent()
+            .ok_or_else(|| io::Error::other("login endpoint has no parent"))?;
+        let metadata = fs::symlink_metadata(parent)?;
+        if !metadata.is_dir()
+            || metadata.uid() != Uid::effective().as_raw()
+            || metadata.mode() & 0o777 != 0o700
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "login directory must be private to the account",
+            ));
+        }
     }
     // The PAM-opened account context lasts until this login retires. Resolve
     // shell/home once before declaring readiness; each terminal still checks
@@ -141,10 +180,16 @@ fn worker_configured(
     let mut shell = crate::pty::LoginShell::new(&user)?;
     // Binding without unlink is the final duplicate-start fence, even when two
     // concurrent terminal requests both saw an absent endpoint.
-    let listener = UnixListener::bind(endpoint)?;
-    let _endpoint = Endpoint(endpoint);
-    fs::set_permissions(endpoint, fs::Permissions::from_mode(0o600))?;
-    let mut cleanup = crate::cleanup::Cleanup::bind(endpoint, controller, b"S".to_vec())?;
+    let (listener, _endpoint, mut cleanup) = if let Some(bound) = bound {
+        // The root controller owns and removes this socket and its directory.
+        (adopt_listener(bound, endpoint)?, None, None)
+    } else {
+        let listener = UnixListener::bind(endpoint)?;
+        let endpoint_guard = Endpoint(endpoint);
+        fs::set_permissions(endpoint, fs::Permissions::from_mode(0o600))?;
+        let cleanup = crate::cleanup::Cleanup::bind(endpoint, controller, b"S".to_vec())?;
+        (listener, Some(endpoint_guard), Some(cleanup))
+    };
     // Adopt detached descendants before starting any shell. Their parentage,
     // rather than an account-wide process scan, defines what this login owns.
     nix::sys::prctl::set_child_subreaper(true).map_err(io::Error::from)?;
@@ -184,10 +229,21 @@ fn worker_configured(
         let mut fds = Vec::with_capacity(running.len() + 4);
         fds.push(PollFd::new(listener.as_fd(), PollFlags::POLLIN));
         fds.push(PollFd::new(signals.as_fd(), PollFlags::POLLIN));
-        fds.push(PollFd::new(cleanup.listener().as_fd(), PollFlags::POLLIN));
+        // Without a stop socket, slots 2 and 3 hold the listener with no
+        // events, so the poll layout stays fixed.
+        fds.push(match &cleanup {
+            Some(cleanup) => PollFd::new(cleanup.listener().as_fd(), PollFlags::POLLIN),
+            None => PollFd::new(listener.as_fd(), PollFlags::empty()),
+        });
         fds.push(PollFd::new(
-            cleanup.peer().map_or(listener.as_fd(), AsFd::as_fd),
-            if cleanup.reading() {
+            cleanup
+                .as_ref()
+                .and_then(crate::cleanup::Cleanup::peer)
+                .map_or(listener.as_fd(), AsFd::as_fd),
+            if cleanup
+                .as_ref()
+                .is_some_and(crate::cleanup::Cleanup::reading)
+            {
                 PollFlags::POLLIN
             } else {
                 PollFlags::empty()
@@ -224,18 +280,20 @@ fn worker_configured(
             .revents()
             .is_some_and(|flags| flags.intersects(PollFlags::POLLIN | PollFlags::POLLHUP));
         drop(fds);
-        if request_ready {
-            cleanup.read_request();
-        }
-        if cleanup_ready {
-            cleanup.accept()?;
-        }
-        if cleanup.requested() {
-            finish_children()?;
-            cleanup.confirm();
-            cleanup.flush();
-            terminate();
-            return Ok(());
+        if let Some(cleanup) = cleanup.as_mut() {
+            if request_ready {
+                cleanup.read_request();
+            }
+            if cleanup_ready {
+                cleanup.accept()?;
+            }
+            if cleanup.requested() {
+                finish_children()?;
+                cleanup.confirm();
+                cleanup.flush();
+                terminate();
+                return Ok(());
+            }
         }
         for index in (0..closed.len()).rev() {
             if closed[index] {
@@ -709,6 +767,34 @@ mod tests {
         drop(listener);
         fs::remove_dir_all(root).unwrap();
     }
+    /// A root-created socket is adopted only at the endpoint it is bound to,
+    /// and the worker's own `listen` makes it accept connections (J295 P1).
+    #[test]
+    fn a_root_bound_socket_is_adopted_only_at_its_endpoint() {
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
+        use std::os::fd::AsRawFd as _;
+        let directory = nix::unistd::mkdtemp("/tmp/lw-XXXXXX").unwrap();
+        let endpoint = directory.join("login.sock");
+        let fresh = || {
+            let _ = fs::remove_file(&endpoint);
+            let bound = socket(
+                AddressFamily::Unix,
+                SockType::Stream,
+                SockFlag::SOCK_CLOEXEC,
+                None,
+            )
+            .unwrap();
+            bind(bound.as_raw_fd(), &UnixAddr::new(&endpoint).unwrap()).unwrap();
+            bound
+        };
+        let refused = adopt_listener(fresh(), &directory.join("other.sock")).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        let listener = adopt_listener(fresh(), &endpoint).unwrap();
+        let _client = UnixStream::connect(&endpoint).unwrap();
+        assert!(listener.accept().is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn exposed_login_directory_is_refused_before_bind() {
         let root = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(
