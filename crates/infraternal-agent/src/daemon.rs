@@ -304,6 +304,8 @@ mod refusal_tests {
     use super::*;
     use infraternal_plugin_api::admission::OpenRefusal;
 
+    /// Plain I/O failures map to the generic reasons: only malformed requests
+    /// and refused ownership are "invalid", anything else "resource unavailable".
     #[test]
     fn io_kinds_map_to_their_reason() {
         let kind = |kind| open_refusal(&io::Error::from(kind));
