@@ -104,11 +104,25 @@ class PrivilegedAreas(unittest.TestCase):
         script = ('source "$1"; rust_run_gate_skippable skipped bash -c "exit 77"; rust_run_gate ok true; '
                   'echo "failed=$RUST_GATE_FAILED"; rust_run_gate plain bash -c "exit 77"; '
                   'echo "failed=$RUST_GATE_FAILED"; printf "%s\\n" "${RUST_GATE_ROWS[@]}"')
-        out = subprocess.run(['bash', '-c', script, 'gate', str(rust)], capture_output=True, text=True).stdout
+        # Run as the gate does: inside an opted-in row, with the flag names
+        # already exported. Neither may turn a plain row's 77 into SKIP.
+        env = dict(os.environ, RUST_GATE_SKIP_NEXT='yes', RUST_GATE_SKIPPABLE='yes')
+        out = subprocess.run(['bash', '-c', script, 'gate', str(rust)], capture_output=True, text=True,
+                             env=env).stdout
         self.assertIn('skipped|SKIP', out)
         self.assertIn('ok|PASS', out)
         self.assertIn('plain|FAIL (77)', out)
         self.assertLess(out.index('failed=0'), out.index('failed=1'))
+
+    def test_skippable_flag_does_not_reach_the_rows_command(self):
+        """A skippable row's command must not inherit the skip flag (J276, #378 81610)."""
+        rust = Path(__file__).resolve().parent / 'verify.d/rust.sh'
+        probe = 'env | grep -q "^RUST_GATE_SKIP" && exit 1 || exit 0'
+        script = ('source "$1"; rust_run_gate_skippable leak bash -c "$2"; '
+                  'printf "%s\\n" "${RUST_GATE_ROWS[@]}"')
+        out = subprocess.run(['bash', '-c', script, 'gate', str(rust), probe], capture_output=True,
+                             text=True).stdout
+        self.assertIn('leak|PASS', out)
 
     def test_only_the_privileged_row_is_skippable(self):
         """The privileged row opts in; no other row in the gate does."""
