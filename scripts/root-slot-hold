@@ -39,7 +39,10 @@ def hold(command):
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               close_fds=True)
     try:
-        if waiter.stdout.readline() != READY:
+        # Bounded: claude's side controls this stream, and an unbounded
+        # readline() let it grow root's memory (J281 pushed it to 398 MiB with
+        # a 400 MB line, charged to root's session, not claude's slice).
+        if waiter.stdout.readline(len(READY) + 1) != READY:
             print('root-slot-hold: build slot admission failed', file=sys.stderr)
             return 1
         return subprocess.run(['nice', '-n', '10', *command], check=False).returncode

@@ -290,6 +290,27 @@ class RealRootProof(unittest.TestCase):
         self.assertEqual(run.call_args[0][0], ['nice', '-n', '10', 'cargo', 'build'])
         waiter.stdin.write.assert_called_once()
 
+    def test_slot_holder_reads_a_bounded_ready_line(self):
+        """The ready line is read with a size limit, so claude can't grow root's memory (J281 P3-1)."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = slot_hold.READY
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter), \
+                mock.patch.object(slot_hold.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+            slot_hold.hold(['true'])
+        (limit,), _ = waiter.stdout.readline.call_args
+        self.assertEqual(limit, len(slot_hold.READY) + 1)
+
+    def test_slot_holder_refuses_an_endless_line_without_reading_it_all(self):
+        """A real pipe carrying a huge line without a newline is refused after a bounded read."""
+        import io
+        stream = io.BufferedReader(io.BytesIO(b'X' * (8 << 20)))
+        waiter = mock.MagicMock()
+        waiter.stdout = stream
+        with mock.patch.object(slot_hold.subprocess, 'Popen', return_value=waiter), \
+                mock.patch.object(slot_hold.subprocess, 'run', side_effect=AssertionError('ran without a slot')):
+            self.assertEqual(slot_hold.hold(['true']), 1)
+        self.assertLessEqual(stream.tell(), len(slot_hold.READY) + 1 + io.DEFAULT_BUFFER_SIZE)
+
     def test_slot_holder_runs_nothing_without_a_slot(self):
         """If claude's side never reports ready, root's command does not run."""
         waiter = mock.MagicMock()
