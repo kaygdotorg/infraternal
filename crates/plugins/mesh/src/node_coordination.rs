@@ -26,6 +26,10 @@ async fn update_listener(
         *listener = Some((address, lease));
     }
 }
+/// How long a worker waits before it probes again after its attach was refused for unknown rotation support while
+/// a rotation is open (J273 P3-2). Each probe is a few small calls on an authenticated channel.
+const UNKNOWN_SUPPORT_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Probe before advertising an extension. Strict older nodes reject the probe,
 /// then answer the ordinary request without enabling a new representation.
 ///
@@ -59,6 +63,9 @@ async fn read_identity(channel: &dyn NodeChannel) -> Option<(Identity, Option<bo
 /// - Only the legacy `{}` request answers: the failures prove nothing about rotation, so support is unknown
 ///   (`None`) unless the reply itself claims it. A transient failure must not abandon a rotation, since that is
 ///   what left kernel nodes with an open journal (J262 P2); the node also settles such a journal itself.
+///   While a rotation is open, the coordinator refuses such an attach and retries on a timer. A binary older than
+///   `compact_access` (2026-10-13) always lands here, so a downgrade to one in the middle of its own rotation is
+///   refused until it is upgraded again; no supported install runs one, since updates are lockstep (D135).
 async fn probe_identity<F, R>(
     call: F,
     probe: &[u8],
@@ -142,6 +149,7 @@ pub async fn run(
     let mut presence_updates = service.subscribe_presence();
     let mut rotation_updates = service.subscribe_rotation_progress();
     let mut listener: ServerListener = None;
+    let mut attach_retry: Option<std::time::Duration> = None;
     let mut transport_port = None;
     let mut peer_route: Option<(
         std::net::SocketAddr,
@@ -192,6 +200,10 @@ pub async fn run(
                         )
                         .await
                 };
+                // Unknown support is refused while a rotation is open (J262). Nothing else may wake this worker
+                // soon, so retry on a timer (J273 P3-2).
+                attach_retry =
+                    (attached.is_err() && key_rotation.is_none()).then_some(UNKNOWN_SUPPORT_RETRY);
                 if let Ok((node, updated)) = attached {
                     binding = Some(node);
                     if updated {
@@ -209,6 +221,7 @@ pub async fn run(
                 binding = None;
                 installed = None;
                 current_identity = None;
+                attach_retry = None;
             }
         }
         let local_identity = current_identity
@@ -389,8 +402,8 @@ pub async fn run(
             } else {
                 None
             };
-        // No retry timer or heartbeat. Reconnect, local up/down, or committed
-        // policy change is the only wakeup. Closed sources retire the worker.
+        // No heartbeat. Reconnect, local up/down, a committed policy change, a rotation deadline or a refused
+        // attach with unknown rotation support wakes the worker. Closed sources retire it.
         tokio::select! {
             result=notices.changed()=> {if result.is_err() {return;}refresh_identity=true;installed=None;},
             result=revisions.recv()=>if matches!(result,Err(tokio::sync::broadcast::error::RecvError::Closed)) {return;},
@@ -405,6 +418,7 @@ pub async fn run(
                 }
             },
             () = sleep_optional(rotation_wait) => {}
+            () = sleep_optional(attach_retry) => {}
         }
     }
 }
@@ -468,6 +482,10 @@ mod tests {
         applied: tokio::sync::Semaphore,
         frames: Mutex<Vec<(Option<u64>, u64, bool)>>,
         hostname: Option<&'static str>,
+        /// The full identity probe answers instead of failing (J273 P3-2).
+        probe_answers: AtomicBool,
+        /// The legacy `{}` reply hides rotation support, as a real node does when the request does not ask.
+        legacy_hides_rotation: AtomicBool,
     }
     impl Channel {
         fn new() -> Arc<Self> {
@@ -495,6 +513,8 @@ mod tests {
                 applied: tokio::sync::Semaphore::new(0),
                 frames: Mutex::new(Vec::new()),
                 hostname,
+                probe_answers: AtomicBool::new(false),
+                legacy_hides_rotation: AtomicBool::new(false),
             })
         }
         /// A test channel that presents the candidate key and advertises rotation support.
@@ -586,16 +606,19 @@ mod tests {
             Box::pin(async move {
                 if action == "mesh.identity" {
                     // Model the strict legacy request parser to exercise fallback.
-                    if input != b"{}" {
+                    let legacy = input == b"{}";
+                    if !legacy && !self.probe_answers.load(Ordering::Acquire) {
                         return Err("unsupported identity probe");
                     }
+                    let key_rotation = self.key_rotation
+                        && !(legacy && self.legacy_hides_rotation.load(Ordering::Acquire));
                     self.queried.notify_one();
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
                             compact_access: false,
                             #[cfg(feature = "mesh-dns-spike")]
                             dns_names: false,
-                            key_rotation: self.key_rotation,
+                            key_rotation,
                             public_key: if self.server {
                                 PublicKey([1; 32])
                             } else {
@@ -1740,6 +1763,64 @@ mod tests {
         assert_eq!(peer.key, PublicKey([2; 32]));
         assert_eq!(peer.previous_key, Some(PublicKey([3; 32])));
         assert!(!peer.previous_active);
+    }
+
+    /// J273 P3-2: a node whose support is unknown is refused while its rotation is open. The worker retries on a
+    /// timer, so once the probe answers again the node attaches without waiting for an unrelated event.
+    #[tokio::test]
+    async fn a_refused_attach_with_unknown_support_retries_on_a_timer() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let (node, _, operation) = rotating_node(&service, host, PublicKey([2; 32])).await;
+        store
+            .start_rotation_overlap(
+                node,
+                &operation.operation_id,
+                PublicKey([3; 32]),
+                1_800_000_000,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+        // The retiring phase makes no node calls, so the worker only attaches and configures.
+        store
+            .commit_rotation(node, &operation.operation_id)
+            .await
+            .unwrap();
+        let channel = Channel::candidate();
+        channel.legacy_hides_rotation.store(true, Ordering::Release);
+        let worker = tokio::spawn(run(
+            store.clone(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            channel.queried.notified(),
+        )
+        .await
+        .expect("the worker probes the node");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), channel.applied.acquire())
+                .await
+                .is_err(),
+            "unknown support is refused while the rotation is open"
+        );
+        // The probe answers again; no mesh, presence or channel event follows.
+        channel.probe_answers.store(true, Ordering::Release);
+        tokio::time::timeout(
+            UNKNOWN_SUPPORT_RETRY + std::time::Duration::from_secs(5),
+            channel.applied.acquire(),
+        )
+        .await
+        .expect("the refused attach is retried on its own timer")
+        .unwrap()
+        .forget();
+        worker.abort();
+        let _ = worker.await;
     }
 
     /// Applied views are durably acknowledged while a rotation needs them, and a new server instance asks again.
