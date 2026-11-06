@@ -168,6 +168,7 @@ pub async fn ensure(
         }
         return Ok(None);
     }
+    let manager = root_login_manager(manager, Manager::probe).await?;
     let image =
         crate::login_binary::accessible(exe, Path::new("/var/cache/infraternal-login-bin")).await?;
     let exe = image.path();
@@ -310,6 +311,31 @@ pub async fn ensure(
     // recorded too, before this open returns (#355).
     remember_scope(root, &name, &endpoint, person, user.uid.as_raw()).await?;
     Ok(adopted)
+}
+
+/// The manager a root agent opens another account's login under.
+///
+/// A launch gets `Detached` both when the host has no system manager and when
+/// the system manager's probe merely timed out (`Manager::resolve` keeps only
+/// answers). The second must never reach the `su` fallback: that login has no
+/// unit and no recorded scope, so a later revocation, seeing `System`, could
+/// not find it (J291 P1, #355). So a non-`System` manager is probed again
+/// here. An answer is used as given; a probe that times out again refuses the
+/// open, and the server may retry it.
+async fn root_login_manager<F, Fut>(manager: Manager, probe: F) -> io::Result<Manager>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<Manager>>,
+{
+    if matches!(manager, Manager::System) {
+        return Ok(manager);
+    }
+    probe().await.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the host's service manager did not answer; host login not opened",
+        )
+    })
 }
 
 // The manager passes this root controller's original socket to the exact
@@ -793,17 +819,26 @@ async fn stop_login(
         Err(error) => return Err(error),
     };
     match request_stop(&endpoint, uid, scope.as_ref()).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {}
         Err(error)
             if matches!(
                 error.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(error),
+            ) => {}
+        Err(error) => return Err(error),
     }
+    // Without a system manager there is no cgroup to kill or inspect, and
+    // the account owns the worker and can delete its sockets: neither a stop
+    // confirmation nor a missing socket proves its processes are gone. While
+    // the login's root-created runtime directory exists, revocation fails
+    // closed (J291 P1, #355; how such hosts get a provable kill is open
+    // under D247).
+    if root.join(unit).exists() {
+        return Err(io::Error::other(
+            "host login without a system manager cannot be shown ended",
+        ));
+    }
+    Ok(())
 }
 
 /// Hang guard for one `systemctl show` query. systemd is a peer whose
@@ -1443,6 +1478,50 @@ async fn fallback(
 mod tests {
     //! Person identity remains distinct even when the OS account is shared.
     use super::*;
+
+    /// A root open never takes the `su` fallback on a probe that only timed
+    /// out: it probes again, uses an answer as given, and refuses the open if
+    /// the manager is still silent (J291 P1, #355).
+    #[tokio::test]
+    async fn a_timed_out_manager_probe_never_opens_a_fallback_login() {
+        let silent = root_login_manager(Manager::Detached, || async { None }).await;
+        assert_eq!(
+            silent.map_err(|error| error.kind()).err(),
+            Some(io::ErrorKind::TimedOut)
+        );
+        let answered = root_login_manager(Manager::Detached, || async { Some(Manager::System) })
+            .await
+            .unwrap();
+        assert!(matches!(answered, Manager::System));
+        let absent = root_login_manager(Manager::Detached, || async { Some(Manager::Detached) })
+            .await
+            .unwrap();
+        assert!(
+            matches!(absent, Manager::Detached),
+            "a host without systemd keeps D247's path"
+        );
+        let system = root_login_manager(Manager::System, || async {
+            unreachable!("a system manager is not probed again")
+        })
+        .await
+        .unwrap();
+        assert!(matches!(system, Manager::System));
+    }
+
+    /// Without a system manager, a login whose runtime directory remains is
+    /// never reported revoked, even when its socket is gone: the account can
+    /// delete that socket while its shell lives on (J291 unlink, #355).
+    #[tokio::test]
+    async fn detached_revocation_fails_closed_while_the_login_remains() {
+        let (root, person, _, unit) = system_login_fixture().await;
+        std::fs::create_dir(root.join(&unit)).unwrap();
+        let revoked = revoke_at(&root, Manager::Detached, person, false).await;
+        assert!(
+            revoked.is_err(),
+            "a login with a deleted socket was reported revoked"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// A scripted host for `stop_system_login`: a fake cgroupfs where login
     /// `unit` of `uid` has an empty unit cgroup and its processes in
