@@ -1199,13 +1199,17 @@ pub(crate) fn since_grant(
     access
 }
 
-/// Forgets `person`'s records once their revocation is done.
+/// Forgets `person`'s records once their revocation is done, and an
+/// account directory left empty.
 pub(crate) fn forget(store: &Path, person: uuid::Uuid) -> io::Result<()> {
     for uid in recorded_accounts(store, person) {
         match std::fs::remove_file(record_path(store, person, uid)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
+        // The account's directory goes with its last record; one that still
+        // holds another person's record stays (the removal fails).
+        let _ = std::fs::remove_dir(store.join(uid.to_string()));
     }
     Ok(())
 }

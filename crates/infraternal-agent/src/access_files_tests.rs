@@ -316,6 +316,10 @@ fn the_record_holds_no_content_and_is_forgotten() {
     assert!(path.starts_with(granted.store.join(granted.user.uid.as_raw().to_string())));
     forget(&granted.store, granted.person).unwrap();
     assert!(!path.exists());
+    assert!(
+        !path.parent().unwrap().exists(),
+        "an empty account directory was left"
+    );
 }
 
 /// A planted link is reported with its target and never read, at a file
