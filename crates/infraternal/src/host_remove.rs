@@ -151,7 +151,7 @@ fn command_result(host: Uuid, value: Value, finish: bool, machine: bool) -> Comm
         result = result.with_next_step(manual);
     }
     match report.as_ref().map(|report| &report["state"]) {
-        Some(state) if state == "ready" && !machine => {
+        Some(state) if state == "reported" && !machine => {
             if let Some(body) = report.as_ref().and_then(report_body) {
                 result = result.with_body(body);
             }
@@ -167,22 +167,9 @@ fn command_result(host: Uuid, value: Value, finish: bool, machine: bool) -> Comm
 }
 
 /// Present the access report on its own (D356). Scripts get the server's
-/// object in `data`; people get the files and lines.
+/// object in `data`; people get each account's outcome, files and lines.
 fn report_result(host: Uuid, value: &Value, machine: bool) -> CommandResult<Value> {
-    let (state, message) = match value["state"].as_str() {
-        Some("ready") => (
-            CommandState::Ready,
-            "These access files changed on the host since its logins were granted.",
-        ),
-        Some("pending") => (
-            CommandState::Pending,
-            "The host has not confirmed the revocation yet, so it has not reported its access files.",
-        ),
-        _ => (
-            CommandState::Ready,
-            "No access file on the host changed since its logins were granted.",
-        ),
-    };
+    let (state, message) = report_message(value);
     let data = if machine { value.clone() } else { json!({}) };
     let mut result = CommandResult::new("remove-host", state, message, data);
     if machine {
@@ -199,34 +186,129 @@ fn report_result(host: Uuid, value: &Value, machine: bool) -> CommandResult<Valu
     result
 }
 
-/// The files and lines of a ready report, for people. infraternal never
-/// changes these files; the text says so and leaves the removal to the reader.
+/// The headline for a report. "Nothing changed" is said only when every
+/// account was checked.
+fn report_message(value: &Value) -> (CommandState, &'static str) {
+    let reports = value["reports"].as_array().map_or(&[][..], Vec::as_slice);
+    let any = |state: &str| reports.iter().any(|report| report["state"] == state);
+    match value["state"].as_str() {
+        Some("pending") => (
+            CommandState::Pending,
+            "The host has not confirmed the revocation yet, so it has not reported its access files.",
+        ),
+        Some("not_revoked") => (
+            CommandState::Ready,
+            "No revocation has run on this host yet, so there is no access report.",
+        ),
+        Some("reported") if any("changed") => (
+            CommandState::Ready,
+            "These access files changed on the host since its logins were granted.",
+        ),
+        Some("reported") if any("not_checked") || reports.is_empty() => (
+            CommandState::Ready,
+            "The host's access files were not checked; see why below.",
+        ),
+        Some("reported") => (
+            CommandState::Ready,
+            "Checked: no access file on the host changed since its logins were granted.",
+        ),
+        _ => (
+            CommandState::Ready,
+            "The server sent an access report this version cannot read.",
+        ),
+    }
+}
+
+/// Why something was not checked, in plain words.
+fn reason_words(reason: &str) -> &'static str {
+    match reason {
+        "record_missing" => {
+            "not checked: there is no record from when access was granted (granted before this check, or the record is gone); check its access files by hand"
+        }
+        "rootless_unverified" => {
+            "not verified: infraternal runs as this account itself, so the person could have changed the record; anything below is only a hint, check by hand"
+        }
+        "older_agent" => {
+            "not checked: the host's infraternal agent is too old to report access files"
+        }
+        "agent_removed" => {
+            "not checked: the host's infraternal agent was removed before it could report"
+        }
+        "not_recorded" => {
+            "not checked: this revocation was recorded before access reports were kept"
+        }
+        _ => "not checked",
+    }
+}
+
+/// Each person's report for people: per account, its outcome, then the
+/// changed files with their new lines, then what was left out. infraternal
+/// never changes these files; the text says so and leaves removal to the
+/// reader.
 fn report_body(report: &Value) -> Option<String> {
     let reports = report["reports"]
         .as_array()
         .filter(|reports| !reports.is_empty())?;
-    let mut lines = vec![
-        "Remove what you do not recognise. infraternal did not change these files.".to_owned(),
-    ];
-    let mut truncated = false;
+    let mut lines = Vec::new();
+    let mut files_shown = false;
     for entry in reports {
-        truncated |= entry["truncated"].as_bool().unwrap_or(false);
-        for file in entry["files"].as_array().into_iter().flatten() {
-            let path = file["path"].as_str().unwrap_or("?");
-            lines.push(match file["note"].as_str() {
-                Some(note) => format!("{path} ({note})"),
-                None => path.to_owned(),
-            });
-            for line in file["lines"].as_array().into_iter().flatten() {
-                lines.push(format!("  + {}", line.as_str().unwrap_or("")));
+        if let Some(warning) = entry["warning"].as_str() {
+            lines.push(format!("Warning: {warning}"));
+        }
+        let accounts = entry["accounts"].as_array().map_or(&[][..], Vec::as_slice);
+        if accounts.is_empty() && entry["state"] == "not_checked" {
+            let reason = entry["reason"].as_str().unwrap_or("");
+            lines.push(format!("Access files: {}.", reason_words(reason)));
+        }
+        for account in accounts {
+            let name = account["account"].as_str().unwrap_or("?");
+            let outcome = match account["state"].as_str() {
+                Some("changed") => "changed since the grant",
+                Some("unchanged") => "checked, nothing changed",
+                _ => reason_words(account["reason"].as_str().unwrap_or("")),
+            };
+            lines.push(format!("Account {name}: {outcome}."));
+            for file in account["files"].as_array().into_iter().flatten() {
+                files_shown = true;
+                let path = file["path"].as_str().unwrap_or("?");
+                let added = if file["change"] == "added" {
+                    "new: "
+                } else {
+                    ""
+                };
+                lines.push(match file["note"].as_str() {
+                    Some(note) => format!("  {added}{path} ({note})"),
+                    None => format!("  {added}{path}"),
+                });
+                for line in file["lines"].as_array().into_iter().flatten() {
+                    lines.push(format!("    + {}", line.as_str().unwrap_or("")));
+                }
+            }
+            let omitted = account["omitted_files"].as_u64().unwrap_or(0);
+            if omitted > 0 {
+                lines.push(format!("  {omitted} more changed files are not listed."));
+            }
+            let unscanned: Vec<&str> = account["unscanned"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if !unscanned.is_empty() {
+                lines.push(format!("  Not scanned: {}.", unscanned.join(", ")));
+            } else if account["truncated"] == true && omitted == 0 {
+                lines.push("  Some changes were left out; check the account by hand.".to_owned());
             }
         }
     }
-    if truncated {
-        lines.push("Some changes were left out; check the host's access files there.".to_owned());
+    if files_shown {
+        lines.push(
+            "Remove what you do not recognise. infraternal did not change these files.".to_owned(),
+        );
     }
     Some(lines.join("\n"))
 }
+
 /// The TLS client for the removal routes: the connector `sign-in` and the hosted actions use,
 /// so all of them trust the host's public CA bundle even when the linked OpenSSL's default paths
 /// hold no roots (a vendored build names its build prefix). TLS 1.3, peer and hostname
@@ -334,20 +416,29 @@ mod tests {
         assert_eq!(result.data, serde_json::json!({}));
     }
 
-    /// D356: people see each reported file and its new lines after a removal,
-    /// with the reminder that infraternal did not change them; scripts get the
-    /// server's object. A report still pending points at `--access-report`.
+    /// D356: people see each account's outcome and each reported file with
+    /// its new lines after a removal, with the reminder that infraternal did
+    /// not change them; scripts get the server's object. A report still
+    /// pending points at `--access-report`.
     #[test]
     fn removal_shows_the_access_files_the_host_reported() {
         use crate::cli::output::{RenderOptions, render_pretty};
         let host = uuid::Uuid::from_u128(7);
-        let report = serde_json::json!({"host_id": host, "state": "ready", "reports": [{
+        let report = serde_json::json!({"host_id": host, "state": "reported", "reports": [{
             "person_id": uuid::Uuid::from_u128(9),
-            "files": [
-                {"path": "~/.ssh/authorized_keys", "lines": ["ssh-ed25519 AAAAleft left-behind"]},
-                {"path": "~/.profile", "lines": [], "note": "a symbolic link; not followed"}
-            ],
-            "truncated": true,
+            "state": "changed",
+            "warning": "Background programs of this host account may still be running.",
+            "accounts": [{
+                "account": "deploy",
+                "state": "changed",
+                "files": [
+                    {"path": "~/.ssh/authorized_keys", "change": "changed", "lines": ["ssh-ed25519 AAAAleft left-behind"]},
+                    {"path": "~/.profile", "change": "added", "lines": [], "note": "a symbolic link to /etc/passwd; not followed"}
+                ],
+                "truncated": true,
+                "unscanned": ["~/.config/systemd/user/a.service.d"],
+                "omitted_files": 2,
+            }],
         }]});
         let finished = serde_json::json!({"state": "ready", "message": "The host was removed.", "access_report": report});
         let options = RenderOptions {
@@ -361,11 +452,14 @@ mod tests {
         )
         .unwrap();
         for expected in [
+            "Warning: Background programs",
+            "Account deploy: changed since the grant.",
             "~/.ssh/authorized_keys",
-            "  + ssh-ed25519 AAAAleft left-behind",
-            "~/.profile (a symbolic link; not followed)",
+            "    + ssh-ed25519 AAAAleft left-behind",
+            "new: ~/.profile (a symbolic link to /etc/passwd; not followed)",
+            "2 more changed files are not listed.",
+            "Not scanned: ~/.config/systemd/user/a.service.d.",
             "infraternal did not change these files",
-            "Some changes were left out",
         ] {
             assert!(
                 output.contains(expected),
@@ -385,8 +479,49 @@ mod tests {
         );
         let later = render_pretty(&super::report_result(host, &report, false), options).unwrap();
         assert!(
-            later.contains("  + ssh-ed25519 AAAAleft left-behind"),
+            later.contains("    + ssh-ed25519 AAAAleft left-behind"),
             "{later}"
+        );
+    }
+
+    /// J322 P2: "nothing changed" is said only when everything was checked.
+    /// An older agent, a missing record and a rootless host each say why
+    /// they were not checked.
+    #[test]
+    fn not_checked_is_never_shown_as_nothing_changed() {
+        use crate::cli::output::{RenderOptions, render_pretty};
+        let host = uuid::Uuid::from_u128(7);
+        let options = RenderOptions {
+            terminal: false,
+            color: false,
+            width: 200,
+        };
+        let render = |reports: serde_json::Value| {
+            let value =
+                serde_json::json!({"host_id": host, "state": "reported", "reports": reports});
+            render_pretty(&super::report_result(host, &value, false), options).unwrap()
+        };
+        let older = render(
+            serde_json::json!([{"person_id": host, "state": "not_checked", "reason": "older_agent", "accounts": []}]),
+        );
+        assert!(older.contains("were not checked"), "{older}");
+        assert!(older.contains("too old to report"), "{older}");
+        assert!(!older.contains("no access file"), "{older}");
+        let rootless = render(
+            serde_json::json!([{"person_id": host, "state": "not_checked", "reason": "rootless_unverified", "accounts": [
+                {"account": "me", "state": "not_checked", "reason": "rootless_unverified", "files": [], "truncated": false, "unscanned": [], "omitted_files": 0}
+            ]}]),
+        );
+        assert!(rootless.contains("Account me: not verified"), "{rootless}");
+        let clean = render(
+            serde_json::json!([{"person_id": host, "state": "unchanged", "accounts": [
+                {"account": "me", "state": "unchanged", "files": [], "truncated": false, "unscanned": [], "omitted_files": 0}
+            ]}]),
+        );
+        assert!(clean.contains("Checked: no access file"), "{clean}");
+        assert!(
+            clean.contains("Account me: checked, nothing changed."),
+            "{clean}"
         );
     }
 
