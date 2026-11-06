@@ -84,7 +84,7 @@ echo "root clone at $commit in $work"
 export CARGO_HOME=/root/.cache/tun-proof-cargo CARGO_TARGET_DIR=$work/target CARGO_BUILD_JOBS=4
 mkdir -p "$CARGO_HOME"
 cd "$work/src"
-/usr/bin/python3 "$work/src/scripts/root-slot-hold" nix develop -c cargo test --locked -p infraternal-plugin-mesh \
+/usr/bin/python3 "$work/src/scripts/root-slot-hold" --keep-fd 9 nix develop -c cargo test --locked -p infraternal-plugin-mesh \
     --features agent,server,relay,test-support --test gotatun_tun_owner --no-run --message-format=json \
     > "$work/build.json" 2> "$work/build.log" || { tail -20 "$work/build.log" | cat -v >&2; exit 1; }
 binary=$(python3 -c 'import json, sys

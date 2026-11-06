@@ -311,6 +311,51 @@ class RealRootProof(unittest.TestCase):
             self.assertEqual(slot_hold.hold(['true']), 1)
         self.assertLessEqual(stream.tell(), len(slot_hold.READY) + 1 + io.DEFAULT_BUFFER_SIZE)
 
+    def test_root_command_holds_the_lock_fd(self):
+        """With --keep-fd 9, the root command really has fd 9 open: cmd-has-fd9: yes (J281 P3-3)."""
+        waiter = mock.MagicMock()
+        waiter.stdout.readline.return_value = slot_hold.READY
+        real_popen = subprocess.Popen
+        seen = []
+
+        def popen(argv, *args, **kwargs):
+            """Fake only claude's waiter; let subprocess.run start the real root command."""
+            if argv[:1] == ['runuser']:
+                seen.append(kwargs)
+                return waiter
+            return real_popen(argv, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            lock, out = Path(directory) / 'lock', Path(directory) / 'out'
+            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT)
+            saved = os.dup(9) if os.path.exists('/proc/self/fd/9') else None
+            os.dup2(descriptor, 9, inheritable=False)
+            try:
+                probe = f'if [ -e /proc/self/fd/9 ]; then echo "cmd-has-fd9: yes"; else echo "cmd-has-fd9: no"; fi > {out}'
+                with mock.patch.object(slot_hold.subprocess, 'Popen', side_effect=popen):
+                    slot_hold.hold(['bash', '-c', probe], keep_fds=(9,))
+                self.assertEqual(out.read_text().strip(), 'cmd-has-fd9: yes')
+                with mock.patch.object(slot_hold.subprocess, 'Popen', side_effect=popen):
+                    slot_hold.hold(['bash', '-c', probe])
+                self.assertEqual(out.read_text().strip(), 'cmd-has-fd9: no')
+                # claude's waiter is never handed the kept descriptors.
+                self.assertTrue(all(kwargs.get('close_fds') and not kwargs.get('pass_fds') for kwargs in seen))
+            finally:
+                if saved is not None:
+                    os.dup2(saved, 9)
+                    os.close(saved)
+                else:
+                    os.close(9)
+                os.close(descriptor)
+
+    def test_keep_fd_is_parsed_and_proof_passes_the_lock(self):
+        """--keep-fd N reaches hold(); the proof passes fd 9 (its lock)."""
+        with mock.patch.object(slot_hold, 'hold', return_value=0) as hold, \
+                mock.patch.object(sys, 'argv', ['root-slot-hold', '--keep-fd', '9', 'cargo', 'build']):
+            self.assertEqual(slot_hold.main(), 0)
+        self.assertEqual(hold.call_args[0], (['cargo', 'build'], [9]))
+        self.assertIn('scripts/root-slot-hold" --keep-fd 9 nix develop', self.proof_code())
+
     def test_slot_holder_runs_nothing_without_a_slot(self):
         """If claude's side never reports ready, root's command does not run."""
         waiter = mock.MagicMock()
@@ -322,7 +367,7 @@ class RealRootProof(unittest.TestCase):
     def test_proof_uses_the_reviewed_slot_holder(self):
         """The proof runs the commit's own root-slot-hold, not a host-only helper, and escapes its log tail."""
         code = self.proof_code()
-        self.assertIn('/usr/bin/python3 "$work/src/scripts/root-slot-hold" nix develop', code)
+        self.assertIn('/usr/bin/python3 "$work/src/scripts/root-slot-hold" --keep-fd 9 nix develop', code)
         self.assertNotIn('/root/.cache/root-build-slot', code)
         self.assertIn('tail -20 "$work/build.log" | cat -v', code)
 

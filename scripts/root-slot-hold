@@ -19,7 +19,9 @@ the command root runs comes from root's own arguments.
 It replaces the host-only `/root/.cache/root-build-slot`, which passed root's
 stderr to claude's process. Run it from the reviewed clone root is building.
 
-Usage (as root): root-slot-hold <command> [args...]
+Usage (as root): root-slot-hold [--keep-fd N]... <command> [args...]
+`--keep-fd N` passes this process's open descriptor N on to the command
+(the TUN proof passes its lock, so every root child of a run holds it).
 """
 import subprocess
 import sys
@@ -32,8 +34,11 @@ WAITER = ['/usr/bin/python3', '-c',
           'import sys; sys.stdout.buffer.write(%r); sys.stdout.flush(); sys.stdin.buffer.read(1)' % READY]
 
 
-def hold(command):
-    """Hold a slot as claude, run `command` as this process, release; return its exit code."""
+def hold(command, keep_fds=()):
+    """Hold a slot as claude, run `command` as root, release; return its exit code.
+
+    `keep_fds` are passed on to `command` only, never to claude's waiter.
+    """
     print('root-slot-hold: waiting for a build slot', file=sys.stderr, flush=True)
     waiter = subprocess.Popen(['runuser', '-u', 'claude', '--', BUILD_SLOT, *WAITER],
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -45,7 +50,7 @@ def hold(command):
         if waiter.stdout.readline(len(READY) + 1) != READY:
             print('root-slot-hold: build slot admission failed', file=sys.stderr)
             return 1
-        return subprocess.run(['nice', '-n', '10', *command], check=False).returncode
+        return subprocess.run(['nice', '-n', '10', *command], check=False, pass_fds=tuple(keep_fds)).returncode
     finally:
         try:
             waiter.stdin.write(b'x')
@@ -57,9 +62,15 @@ def hold(command):
 
 def main():
     """Check the arguments and hold the slot around them."""
-    if len(sys.argv) < 2:
-        raise SystemExit('usage: root-slot-hold <command> [args...]')
-    return hold(sys.argv[1:])
+    args, keep = sys.argv[1:], []
+    while len(args) >= 2 and args[0] == '--keep-fd':
+        if not args[1].isdigit():
+            raise SystemExit('root-slot-hold: --keep-fd takes a descriptor number')
+        keep.append(int(args[1]))
+        args = args[2:]
+    if not args:
+        raise SystemExit('usage: root-slot-hold [--keep-fd N]... <command> [args...]')
+    return hold(args, keep)
 
 
 if __name__ == '__main__':
