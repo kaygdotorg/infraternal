@@ -447,9 +447,15 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
     }
 }
 // Advertise extensions only after an explicit probe; ordinary callers receive the legacy shape.
-/// One key rotation step on this node's own interface key (#285, D166).
-fn rotation_response(node: &mut Node, request: Request) -> Result<serde_json::Value, PluginError> {
-    Ok(match request {
+/// One key rotation step on this node's own interface key (#285, D166), and whether the step changed the key this
+/// node presents. Prepare changes it only when it settles an ended operation whose candidate the link already
+/// holds (J273 P3-3); commit and finish always raise the change notice.
+fn rotation_response(
+    node: &mut Node,
+    request: Request,
+) -> Result<(serde_json::Value, bool), PluginError> {
+    let before = node.interface_key();
+    let value = match request {
         Request::RotationPrepare(operation) => json!({
             "public_key": node
                 .prepare_rotation(&operation.operation_id, operation.sequence)
@@ -467,7 +473,8 @@ fn rotation_response(node: &mut Node, request: Request) -> Result<serde_json::Va
             json!({})
         }
         _ => return Err(PluginError::Rejected),
-    })
+    };
+    Ok((value, node.interface_key() != before))
 }
 /// The identity reply, offering each optional capability only when both the node and the requester support it.
 fn identity_response(
@@ -584,7 +591,13 @@ impl AgentPlugin for MeshNodePlugin {
                 }
                 request @ (Request::RotationPrepare(_)
                 | Request::RotationCommit(_)
-                | Request::RotationFinish(_)) => rotation_response(node, request)?,
+                | Request::RotationFinish(_)) => {
+                    let (value, key_changed) = rotation_response(node, request)?;
+                    if key_changed {
+                        self.changed.store(true, Ordering::Release);
+                    }
+                    value
+                }
                 Request::Down => {
                     node.down().map_err(|_| PluginError::Rejected)?;
                     json!({"state":"Off","version":null})

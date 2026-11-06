@@ -1298,6 +1298,10 @@ impl Node {
         }
         Ok(())
     }
+    /// The public key this node currently presents as its identity, once it is up.
+    pub(crate) fn interface_key(&self) -> Option<crate::policy::model::PublicKey> {
+        self.identity.as_ref().map(|identity| identity.public_key)
+    }
     /// Read the retained applied configuration, never partial incoming chunks.
     #[must_use]
     pub fn config(&self) -> Option<&Config> {

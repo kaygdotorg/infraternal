@@ -409,6 +409,53 @@ fn settling_an_abandoned_commit_moves_the_marker_the_stop_left_behind() {
     restored.down().unwrap();
 }
 
+/// J273 P3-3: a settle that moves this node's key to the candidate the link already holds (a commit that stopped
+/// between sending the key and moving the marker, then an abandoned operation) changes the identity the
+/// coordinator knows, so the prepare that settles it raises the change notice.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn a_settle_that_changes_the_key_raises_the_change_notice() {
+    use infraternal_plugin_api::AgentPlugin;
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000041";
+    let second = "00000000-0000-4000-8000-000000000042";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let previous = node.up().unwrap();
+    let candidate = node.prepare_rotation(first, 1).unwrap();
+    let (index, _, _) = kernel_link_identity();
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let mut rotation = store.rotation_secret().unwrap().unwrap();
+    rotation.commit_requested = true;
+    store.save_rotation_secret(&rotation).unwrap();
+    let (candidate_key, _) = Key::from_private(&rotation.candidate).unwrap();
+    Device::configure(index, previous.public_key, &candidate_key, previous.port).unwrap();
+    drop(rotation);
+    drop(store);
+
+    let mut plugin = crate::node_actions::MeshNodePlugin::from_node(node);
+    let _ = plugin.take_events();
+    let input = format!(r#"{{"operation_id":"{second}","sequence":3}}"#);
+    plugin
+        .call("mesh.rotation.prepare", input.as_bytes())
+        .unwrap();
+    assert_eq!(kernel_link_identity(), (index, Some(candidate), candidate));
+    assert_eq!(
+        plugin.take_events(),
+        vec![("mesh.changed", b"{}".to_vec())],
+        "the coordinator learns the key moved"
+    );
+    // A prepare that changes no key raises nothing.
+    plugin
+        .call("mesh.rotation.prepare", input.as_bytes())
+        .unwrap();
+    assert_eq!(
+        plugin.take_events(),
+        Vec::<(&str, Vec<u8>)>::new(),
+        "a prepare that changes no key raises nothing"
+    );
+    plugin.call("mesh.down", b"{}").unwrap();
+}
+
 /// `GotaTun` cannot rotate yet: it says so, and every rotation step refuses without touching the
 /// device or the state (D166, D352; #285).
 #[test]
