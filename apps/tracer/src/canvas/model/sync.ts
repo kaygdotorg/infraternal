@@ -30,7 +30,9 @@ export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean =
   const save = (): void => {
     queued = false;
     if (disposed) return;
-    const unresolved = new Set([...cx.views.values()].flatMap((v) => [...v.wins.values()].filter((w) => w.model.kind === "terminal" && !w.model.sessionId).map((w) => w.model.id)));
+    // A terminal still waiting for its session id is "unresolved": its birth is held until the id arrives. A refused
+    // shell's window is not: no id will come, so it stays out of the document instead (#395).
+    const unresolved = new Set([...cx.views.values()].flatMap((v) => [...v.wins.values()].filter((w) => w.model.kind === "terminal" && !w.model.sessionId && !w.model.openRefused).map((w) => w.model.id)));
     if (unresolved.size && !cx.adapters.store.acceptsPendingReferences) return;
     revision += 1;
     const next = document();

@@ -30,6 +30,12 @@ export interface WindowModel {
   sessionPinned?: boolean;
   /** The session this window shows (a terminal window): stable across renames and reloads (D180). */
   sessionId?: string;
+  /**
+   * The host refused to start this window's shell, so it has no session and none is on its way (#395). Kept in memory
+   * only, never saved: such a window shows the refusal in place but is left out of the saved layout, so it does not hold
+   * its birth and every later layout edit as "waiting for a session id". Cleared when a new shell in it does start.
+   */
+  openRefused?: boolean;
   user?: string;
   os?: HostPlatform;
   /** Fixed height in px, or a ratio of the column height when 1 or less; a window without one shares its column equally. */
