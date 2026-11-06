@@ -136,7 +136,8 @@ async function checkPreview(page: Page, kind: "popover" | "sheet", windowId?: st
     // It lines up with the "?" it grew from (its right edges meet), or, in a window too narrow for that, sits at the window's own inset on the left;
     // either way it keeps the header's inset from the window's edges.
     const inset = 8 + m.border, atButton = Math.abs(m.root.right - m.anchorRight!) <= 0.5, atEdge = Math.abs(m.root.left - (m.win!.left + inset)) <= 0.5;
-    expect(atButton || atEdge, `the popover meets the "?" at its right edge (${m.root.right} vs ${m.anchorRight}) or the window's inset on the left`).toBe(true);
+    // A terminal has no "?" (it is opened from ⌘K and anchors to the title pill): then only the containment below applies.
+    if (m.anchorRight !== undefined) expect(atButton || atEdge, `the popover meets the "?" at its right edge (${m.root.right} vs ${m.anchorRight}) or the window's inset on the left`).toBe(true);
     expect(m.root.left).toBeGreaterThanOrEqual(m.win!.left + inset - 0.5); expect(m.root.right).toBeLessThanOrEqual(m.win!.right - inset + 0.5);
   } else {
     near(m.root.left, m.vw - m.root.right, "the sheet has equal gutters left and right");
@@ -565,7 +566,7 @@ test("\"?\": the first button on a terminal, the add-host dialog and an error ca
   await expect(page.locator(".ui-dp-pop")).toBeVisible();
   await page.waitForTimeout(450);
   await expect(page.locator(".ui-dp-pop .ui-dp-title")).toHaveText("All keys at a glance");
-  await checkPreview(page, "popover");
+  await checkPreview(page, "popover", card);
   await page.locator(".ui-dp-pop .ui-dp-expand").click();
   await page.waitForTimeout(1500);
   expect(await docsOnScreen(page)).toBe(true);
