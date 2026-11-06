@@ -893,45 +893,89 @@ fn others_share(root: &Path, person: uuid::Uuid, uid: u32) -> io::Result<bool> {
 }
 
 /// Ends host account `uid`'s own background services, once its last holder
-/// is revoked (D353): turns linger off so nothing restarts them, kills the
-/// user manager's cgroup (`user@<uid>.service`, which holds every
-/// `systemd-run --user` unit), stops the manager, and requires that cgroup to
-/// be empty. The account's other, non-infraternal sessions are not touched.
+/// is revoked (D353): kills the user manager's cgroup (`user@<uid>.service`,
+/// which holds every `systemd-run --user` unit), stops the manager and
+/// requires that cgroup to be empty, then turns linger off, and reports
+/// success only once linger is verified off and the manager has stayed gone.
+/// The account's other, non-infraternal sessions are not touched.
 async fn stop_user_services(uid: u32) -> io::Result<()> {
-    let linger = tokio::time::timeout(
-        SYSTEMD_QUERY_HANG,
-        loginctl()
-            .args(["disable-linger", &uid.to_string()].as_slice())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status(),
-    )
-    .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-    if !linger.success() {
-        return Err(io::Error::other(
-            "host account linger could not be turned off",
-        ));
-    }
+    let name = User::from_uid(Uid::from_raw(uid))
+        .map_err(io::Error::from)?
+        .ok_or_else(|| io::Error::other("host account absent"))?
+        .name;
     let manager = format!("/user.slice/user-{uid}.slice/user@{uid}.service");
-    kill_cgroup(&manager)?;
-    // The cgroup check below decides; a manager that is already gone may
-    // make `stop` report failure.
-    let _ = tokio::time::timeout(
-        UNIT_STOP_HANG,
-        systemctl()
-            .args(["stop", &format!("user@{uid}.service")].as_slice())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status(),
-    )
-    .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
-    cgroup_emptied(&manager).await
+    // The account's own services can keep asking logind for linger, and an
+    // enable-linger queued before the kill still lands. So the user manager
+    // dies first, then linger goes off, then both are checked: linger off and
+    // no user manager back (J295 P1, #355). A few rounds absorb a request
+    // that was already in flight; one that keeps coming back fails this
+    // attempt, and the owner retries.
+    for _ in 0..LINGER_ROUNDS {
+        kill_cgroup(&manager)?;
+        // The cgroup check below decides; a manager that is already gone may
+        // make `stop` report failure.
+        let _ = tokio::time::timeout(
+            UNIT_STOP_HANG,
+            systemctl()
+                .args(["stop", &format!("user@{uid}.service")].as_slice())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?;
+        cgroup_emptied(&manager).await?;
+        let linger = tokio::time::timeout(
+            SYSTEMD_QUERY_HANG,
+            loginctl()
+                .args(["disable-linger", &uid.to_string()].as_slice())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        if !linger.success() {
+            return Err(io::Error::other(
+                "host account linger could not be turned off",
+            ));
+        }
+        if !linger_file(&name).exists() && cgroup_empty(&manager)? {
+            return Ok(());
+        }
+    }
+    Err(io::Error::other(
+        "host account linger or user manager kept coming back; revocation will retry",
+    ))
+}
+
+/// How many kill, linger-off, verify rounds one revocation attempt makes.
+const LINGER_ROUNDS: usize = 5;
+
+/// logind's linger flag for account `name`: a root-owned file whose presence
+/// starts the account's user manager at boot.
+fn linger_file(name: &str) -> PathBuf {
+    #[cfg(test)]
+    if let Some(host) = stand_in() {
+        return host.linger.join(name);
+    }
+    Path::new("/var/lib/systemd/linger").join(name)
+}
+
+/// Whether cgroup `group` has no process left (or is gone), right now.
+fn cgroup_empty(group: &str) -> io::Result<bool> {
+    let events = cgroup_root()
+        .join(group.trim_start_matches('/'))
+        .join("cgroup.events");
+    match std::fs::read_to_string(events) {
+        Err(error) if cgroup_gone(&error) => Ok(true),
+        Err(error) => Err(error),
+        Ok(text) => Ok(text.lines().any(|line| line == "populated 0")),
+    }
 }
 
 /// Validate and durably publish a person's refusal before any shell is stopped.
@@ -1108,6 +1152,8 @@ struct HostStandIn {
     empty_hang: Duration,
     /// The manager probe's answer; `None` is a probe that timed out.
     probe: Option<Manager>,
+    /// Stand-in for `/var/lib/systemd/linger`.
+    linger: PathBuf,
 }
 
 #[cfg(test)]
@@ -1694,7 +1740,13 @@ mod tests {
                     "case \"$1\" in\nshow) printf 'LoadState=%s\\nActiveState=%s\\nControlGroup=/system.slice/{service}\\nMainPID=0\\n' \"$(cat \"$d/load\")\" \"$(cat \"$d/active\")\" ;;\nstop) echo inactive > \"$d/active\"; echo not-found > \"$d/load\"; exit 5 ;;\nesac\n"
                 ),
             );
-            let loginctl = script("loginctl", "exit 0\n");
+            // disable-linger removes the linger files, except once while
+            // `relinger` exists: a queued enable-linger that lands after it.
+            let loginctl = script(
+                "loginctl",
+                "if [ \"$1\" = disable-linger ]; then if [ -e \"$d/relinger\" ]; then rm \"$d/relinger\"; else rm -f \"$d\"/linger/*; fi; fi\nexit 0\n",
+            );
+            std::fs::create_dir_all(host.join("linger")).unwrap();
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             if dies {
                 let (groups, stop) = (vec![scope.clone(), services.clone()], stop.clone());
@@ -1720,6 +1772,7 @@ mod tests {
                     cgroups,
                     empty_hang: Duration::from_secs(2),
                     probe: Some(Manager::System),
+                    linger: host.join("linger"),
                 });
             });
             Self {
@@ -1872,6 +1925,40 @@ mod tests {
             calls
                 .lines()
                 .any(|line| line == format!("systemctl stop user@{uid}.service")),
+            "{calls:?}"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J295 `lingerloop`: the account's service keeps asking for linger, and
+    /// one request lands after `disable-linger`. The revocation reports
+    /// success only once linger is verified off (and the user manager stays
+    /// gone): it kills first, then disables, then checks, and repeats.
+    #[tokio::test]
+    async fn a_linger_request_landing_after_disable_never_survives_revocation() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        let name = User::from_uid(Uid::from_raw(uid)).unwrap().unwrap().name;
+        std::fs::write(host.host.join("linger").join(&name), b"").unwrap();
+        std::fs::write(host.host.join("relinger"), b"").unwrap();
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
+        let calls = host.calls();
+        assert!(revoked.is_ok(), "{revoked:?}; {calls:?}");
+        assert!(
+            !host.host.join("linger").join(&name).exists(),
+            "revoked with linger still on: {calls:?}"
+        );
+        assert_eq!(
+            calls.matches("loginctl disable-linger").count(),
+            2,
             "{calls:?}"
         );
         drop(host);
