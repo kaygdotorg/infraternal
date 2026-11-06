@@ -656,9 +656,15 @@ Individual tests on `NOT_COVERED_TESTS` today:
   and is reattached after a restart, which is the part our code controls
   (#260, J213 P1). When TUN code changes (`TUN_PATHS`), the row prints
   `REAL-ROOT PROOF REQUIRED`, and the job runs `scripts/tun-real-root-proof
-  <commit>` from `code` and records the output on its issue. That script
-  builds the test as `claude`; root only runs that one prebuilt binary in a
-  throwaway network namespace. The gate itself never runs as root, and no
+  <40-hex commit>` from `code` and records the output on its issue. The proof
+  trusts only that commit and the public repository: root clones it into a
+  fresh 0700 directory under `/root`, builds with a root-owned cargo home and
+  target, refuses the binary if its interpreter or RUNPATH points outside
+  `/nix/store` and that directory (`scripts/elf-runpath-guard`), runs the one
+  test in a throwaway network namespace, and deletes everything on any exit.
+  Nothing the shared `claude` account can write reaches root's process: no
+  claude-built binary, path, worktree, cache or library directory (J270,
+  81345). Runs are serialised by a root-owned lock. The gate itself never runs as root, and no
   `newuidmap` is installed: a setuid-root helper on the shared VMs and a
   second mapped uid would weaken the sandbox (J266, 80581).
 

@@ -30,6 +30,7 @@ def load(name):
 
 
 p = load('verify-privileged')
+guard = load('elf-runpath-guard')
 
 
 def userns_available():
@@ -182,6 +183,68 @@ class IgnoredSelection(unittest.TestCase):
         shared = dict((name, f) for name, _, f in p.PACKAGES['mesh'])['infraternal-plugin-mesh']
         self.assertNotIn('mesh-dns-spike', shared)
         self.assertIn('mesh-dns-spike', p.TARGET_FEATURES[('infraternal-plugin-mesh', 'test:dns')])
+
+
+class RealRootProof(unittest.TestCase):
+    """The real-root TUN proof lets nothing the shared build account can write reach root (J270, 81345)."""
+
+    def test_guard_refuses_a_claude_writable_library_path(self):
+        """A RUNPATH into the claude build tree (what the dev shell produced) is refused."""
+        reasons = guard.problems('/nix/store/abc-glibc/lib/ld-linux-x86-64.so.2',
+                                 ['/home/claude/worktrees/tun/outputs/out/lib:/nix/store/abc-glibc/lib'], [])
+        self.assertEqual(len(reasons), 1)
+        self.assertIn('/home/claude/worktrees/tun/outputs/out/lib', reasons[0])
+
+    def test_guard_refuses_unsafe_interpreters_and_relative_entries(self):
+        """A host or user interpreter, $ORIGIN, relative and empty entries are all refused."""
+        self.assertTrue(guard.problems('/home/claude/ld.so', [], []))
+        for entry in ('$ORIGIN/lib', 'lib', '', '/tmp/libs', '/nix/store/../../home/claude'):
+            self.assertTrue(guard.problems('/nix/store/x/ld.so', [entry], []), entry)
+
+    def test_guard_allows_store_and_root_owned_dirs_only(self):
+        """/nix/store passes; an --allow dir passes only if it and its parents are root-owned and not writable by others."""
+        self.assertEqual(guard.problems('/nix/store/x/ld.so', ['/nix/store/a/lib:/nix/store/b/lib'], []), [])
+        with tempfile.TemporaryDirectory() as directory:
+            # A temp dir under /tmp is not a root-owned chain for a non-root test user.
+            mine = Path(directory) / 'out/lib'
+            mine.mkdir(parents=True)
+            if os.geteuid() != 0:
+                self.assertTrue(guard.problems('/nix/store/x/ld.so', [str(mine)], [directory]))
+
+    def test_guard_reads_a_real_binary(self):
+        """The ELF reader parses this interpreter's own executable."""
+        interpreter, search = guard.read_elf(os.path.realpath(sys.executable))
+        self.assertTrue(interpreter is None or interpreter.startswith('/'))
+        self.assertIsInstance(search, list)
+
+    def test_guard_cli_refuses_a_built_binary_with_a_user_runpath(self):
+        """End to end: link a tiny program with a RUNPATH under a user dir; the guard exits 1."""
+        compiler = shutil.which('cc') or shutil.which('gcc')
+        if not compiler:
+            self.skipTest('no C compiler on PATH')
+        with tempfile.TemporaryDirectory() as directory:
+            source, binary = Path(directory) / 'p.c', Path(directory) / 'p'
+            source.write_text('int main(void) { return 0; }\n')
+            built = subprocess.run([compiler, str(source), '-o', str(binary),
+                                    '-Wl,--enable-new-dtags,-rpath,/home/claude/worktrees/x/outputs/out/lib'],
+                                   capture_output=True)
+            if built.returncode:
+                self.skipTest('could not link the probe program')
+            with mock.patch.object(sys, 'stderr', new=__import__('io').StringIO()) as err:
+                self.assertEqual(guard.main([str(binary)]), 1)
+            self.assertIn('/home/claude/worktrees/x/outputs/out/lib', err.getvalue())
+
+    def test_proof_script_keeps_claude_out_of_roots_process(self):
+        """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
+        script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()
+        code = '\n'.join(line for line in script.splitlines() if not line.lstrip().startswith('#'))
+        self.assertNotIn('claude@', code)
+        self.assertNotIn('/home/claude', code)
+        for needle in ('^[0-9a-f]{40}$', 'git clone -q --no-checkout "$repository"', 'mktemp -d /root/tun-proof.',
+                       'flock 9', 'trap cleanup EXIT', 'scripts/elf-runpath-guard" "$binary" --allow "$work"',
+                       '$binary == "$work"/target/*', 'CARGO_HOME=/root/.cache/'):
+            self.assertIn(needle, code, needle)
+        self.assertLess(code.index('elf-runpath-guard'), code.index('unshare --net'))
 
 
 class Builds(unittest.TestCase):
