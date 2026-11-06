@@ -49,7 +49,7 @@ pub struct Peer {
     pub previous_key: Option<PublicKey>,
     /// Keep outgoing host routes on `previous_key` until the new local key is active.
     /// This avoids sending to a candidate identity before its `WireGuard` interface switches.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub previous_active: bool,
     pub addresses: Addresses,
     pub endpoint: Option<SocketAddr>,
@@ -256,4 +256,42 @@ fn deserialize_access_updates<'de, D: serde::Deserializer<'de>>(
     }
     Vec::<Object>::deserialize(deserializer)
         .map(|objects| objects.into_iter().map(|object| object.0).collect())
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    //! Keep non-rotating peer snapshots readable by strict pre-rotation nodes.
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// The peer shape understood by nodes built before rotation fields were added.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PreRotationPeer {
+        key: PublicKey,
+        addresses: Addresses,
+        endpoint: Option<SocketAddr>,
+    }
+
+    /// A non-rotating peer keeps the old wire shape so an upgraded server can still configure it.
+    #[test]
+    fn nonrotating_peer_uses_pre_rotation_wire_shape() {
+        let peer = Peer {
+            key: PublicKey([1; 32]),
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().unwrap(),
+                ipv6: "fd01::2".parse().unwrap(),
+            },
+            endpoint: None,
+        };
+        let encoded = serde_json::to_vec(&peer).unwrap();
+        let legacy: PreRotationPeer = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(legacy.key, peer.key);
+        assert_eq!(legacy.addresses, peer.addresses);
+        assert_eq!(legacy.endpoint, peer.endpoint);
+    }
 }

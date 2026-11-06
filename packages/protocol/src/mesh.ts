@@ -19,6 +19,8 @@ export interface MeshNode {
     host: string;
     tags: readonly string[];
   };
+  /** Whether this node's attached infraternal agent supports safe mesh key rotation. */
+  key_rotation_supported?: boolean;
   live: boolean;
   last_seen: number | null;
   last_rtt_us: number | null;
