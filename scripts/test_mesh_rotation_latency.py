@@ -2,6 +2,7 @@
 
 import unittest
 
+import mesh_rotation_latency
 from mesh_rotation_latency import (
     cpu_mask_for_namespace,
     parse_ping_reply,
@@ -59,6 +60,17 @@ class D348CpuPlacementTests(unittest.TestCase):
         self.assertEqual(cpu_mask_for_namespace("nodeA", "1-2", "3-4", "0,5"), "1-2")
         self.assertEqual(cpu_mask_for_namespace("nodeB", "1-2", "3-4", "0,5"), "3-4")
         self.assertEqual(cpu_mask_for_namespace("relay1", "1-2", "3-4", "0,5"), "0,5")
+
+    def test_scope_name_is_visible_to_the_d348_audit(self):
+        """Keep proof process scopes discoverable by the shared runnable-task audit."""
+        self.assertTrue(
+            hasattr(mesh_rotation_latency, "cpu_scope_unit_name"),
+            "the D348 audit requires a j88i-prefixed scope name",
+        )
+        self.assertEqual(
+            mesh_rotation_latency.cpu_scope_unit_name("nodeA", 123, 456),
+            "j88i-j279-nodeA-123-456.scope",
+        )
 
 
 if __name__ == "__main__":

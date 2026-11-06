@@ -40,6 +40,7 @@ import threading
 import time
 from mesh_rotation_latency import (
     cpu_mask_for_namespace,
+    cpu_scope_unit_name,
     parse_ping_reply,
     summarize_latency,
 )
@@ -78,7 +79,7 @@ def namespace_scope(namespace):
         os.environ.get("H2H_CPUSET_B", "3-4"),
         os.environ.get("H2H_CPUSET_HOUSEKEEPING", "0,5"),
     )
-    unit = f"j279-{namespace}-{os.getpid()}-{random.randrange(1 << 24)}.scope"
+    unit = cpu_scope_unit_name(namespace, os.getpid(), random.randrange(1 << 24))
     return {"mask": mask, "unit": unit, "namespace": namespace}
 
 

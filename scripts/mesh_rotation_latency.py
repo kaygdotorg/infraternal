@@ -20,6 +20,11 @@ def cpu_mask_for_namespace(namespace: str, side_a: str, side_b: str, housekeepin
     return housekeeping
 
 
+def cpu_scope_unit_name(namespace: str, pid: int, nonce: int) -> str:
+    """Name a proof scope so the D348 audit can find it under `perf.slice`."""
+    return f"j88i-j279-{namespace}-{pid}-{nonce}.scope"
+
+
 def parse_ping_reply(line: str) -> tuple[float, int, float] | None:
     """Read the timestamp, sequence and round-trip time from one iputils reply."""
     match = _PING_REPLY.search(line)
