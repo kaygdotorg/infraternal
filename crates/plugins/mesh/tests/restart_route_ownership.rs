@@ -10,6 +10,7 @@ use infraternal_plugin_mesh::{
 };
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Command};
 
+/// Retiring orphan routes on restart leaves routes this node does not own.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
 fn orphan_route_retirement_preserves_foreign_routes() {
@@ -50,6 +51,8 @@ fn orphan_route_retirement_preserves_foreign_routes() {
     let (_, key) = Key::generate().unwrap();
     let orphan = Peer {
         key,
+        previous_key: None,
+        previous_active: false,
         addresses: Addresses {
             ipv4: "10.254.0.2".parse().unwrap(),
             ipv6: "fd01::2".parse().unwrap(),

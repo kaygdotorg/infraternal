@@ -15,7 +15,9 @@ import type { PopoverSource } from "../../../../../packages/ui/src/anchored-popo
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
 import type { SessionUiPart } from "./session-ui.on-demand";
+import type { RefusalAction } from "../../terminal-refusal";
 
+/** What the rest of the canvas asks of the session surfaces: repaint a window, open the manager, say a window was refused or cannot connect. */
 export interface SessionUi {
   /** Brings a window's own surfaces (final-screen strip, size badge, status dot) in line with its session. */
   paint(rec: WinRec): void;
@@ -24,8 +26,10 @@ export interface SessionUi {
   closeManager(): void;
   /** A window was pointed at another session: its name slides in and its frame lights up. */
   arrived(rec: WinRec): void;
-  /** The host refused a window's new shell: its strip says why. False when no strip claims it (the caller shows a toast). */
-  refused(rec: WinRec, message: string): boolean;
+  /** The host refused a window's shell: its strip says why. False when no strip claims it (the caller shows a toast). */
+  refused(rec: WinRec, message: string, action?: RefusalAction): boolean;
+  /** A window has been connecting too long (`message`), or connects again (undefined): its strip says so. */
+  unreachable(rec: WinRec, message: string | undefined): void;
   /** The window whose session is `id` on `host`, in any view. */
   windowFor(host: string, id: string): WinRec | undefined;
   dispose(): void;
@@ -36,6 +40,7 @@ function canManage(rec: WinRec): boolean {
   return isTerminal(rec) && !rec.model.noAccess && !rec.owner.view.team;
 }
 
+/** Makes the always-loaded part of the session surfaces; it loads the on-demand strip and manager the first time one is needed. */
 export function createSessionHooks(cx: Ctx): SessionUi {
   const inventory = cx.adapters.inventory!;
   let part: SessionUiPart | undefined;
@@ -95,7 +100,23 @@ export function createSessionHooks(cx: Ctx): SessionUi {
     },
     closeManager() { part?.closeManager(); },
     arrived(rec) { part?.arrived(rec); },
-    refused(rec, message) { return part?.refused(rec, message) ?? false; },
+    refused(rec, message, action) {
+      if (part) return part.refused(rec, message, action);
+      // The strip's code is not here yet: a window with no session claims its refusal now and shows it once the code
+      // arrives. If it cannot load, the refusal still reaches the person, as a toast, rather than being lost.
+      if (rec.model.sessionId) return false;
+      void load().then((p) => {
+        if (p) p.refused(rec, message, action);
+        else cx.toast.show({ message, tone: "error", duration: Math.max(4200, message.length * 70) });
+      });
+      return true;
+    },
+    unreachable(rec, message) {
+      if (part) { part.unreachable(rec, message); return; }
+      if (message === undefined) return;
+      // Only show it if the window is still waiting when the code arrives.
+      void load().then((p) => { if (p && rec.binding?.connected === false && rec.card.root.isConnected) p.unreachable(rec, message); });
+    },
     windowFor,
     dispose() { off(); part?.dispose(); },
   };

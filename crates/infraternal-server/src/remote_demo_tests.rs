@@ -472,6 +472,7 @@ async fn fixture_at_through_tls_proxy(
     fixture_at_with_options(directory, address, endpoint, false, true).await
 }
 
+/// A remote fixture at `address` in `directory`, with the given options.
 async fn fixture_at_with_options(
     directory: &Directory,
     address: SocketAddr,
@@ -545,6 +546,7 @@ async fn fixture_at_with_options(
             key: identity.key.clone(),
         }),
         roots: vec![root.clone()],
+        clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
     };
     let (app, setup, listeners, _, _) = build_router_core(
         config,

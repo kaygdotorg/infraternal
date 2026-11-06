@@ -24,6 +24,20 @@ pub struct Connection {
     pub peer_fingerprint: [u8; 32],
 }
 
+/// A TLS exchange that cannot enter ordinary host admission or control dispatch.
+pub struct RecoveryConnection {
+    /// Restricted raw channel used only by the recovery request parser.
+    pub channel: TcpTls,
+}
+
+/// The selected ALPN determines which single purpose may use an accepted TLS socket.
+pub enum AcceptedConnection {
+    /// Ordinary mTLS host transport with its verified leaf fingerprint.
+    Host(Connection),
+    /// Server-authenticated recovery exchange without a client certificate.
+    Recovery(RecoveryConnection),
+}
+
 /// Full-duplex TLS channel. Reader and writer retain TLS state across readiness waits.
 /// Cancelling a partial frame write requires retiring the entire connection.
 pub struct TcpTls {
@@ -106,6 +120,12 @@ fn denied() -> io::Error {
 
 const ALPN: &[u8] = b"\x0dinfraternal/1";
 const PROTOCOL: &[u8] = b"infraternal/1";
+/// The ALPN wire form of the recovery protocol.
+const RECOVERY_ALPN: &[u8] = b"\x1dinfraternal/remote-recovery/1";
+/// The certificate-free recovery protocol (#285). It may only ever reach the recovery service.
+const RECOVERY_PROTOCOL: &[u8] = b"infraternal/remote-recovery/1";
+/// What a recovery-aware listener offers: the normal protocol first, then recovery.
+const ALPN_WITH_RECOVERY: &[u8] = b"\x0dinfraternal/1\x1dinfraternal/remote-recovery/1";
 const HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn configure(
@@ -154,6 +174,23 @@ pub fn server_config(identity: &Identity, roots: &[X509]) -> io::Result<SslAccep
     });
     Ok(config.build())
 }
+
+/// Build the same TLS listener with one isolated recovery ALPN that permits no client leaf.
+/// # Errors
+/// Refuses inconsistent identity, empty trust or unsupported TLS configuration.
+pub fn recovery_server_config(identity: &Identity, roots: &[X509]) -> io::Result<SslAcceptor> {
+    use openssl::ssl::{AlpnError, SslMethod, SslVerifyMode, select_next_proto};
+    let mut config =
+        SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server()).map_err(|_| denied())?;
+    configure(&mut config, identity, roots)?;
+    // Optional certificate exchange is safe only because accept_recovery_aware
+    // requires a verified leaf before it returns the ordinary-host variant.
+    config.set_verify(SslVerifyMode::PEER);
+    config.set_alpn_select_callback(|_, offered| {
+        select_next_proto(ALPN_WITH_RECOVERY, offered).ok_or(AlpnError::ALERT_FATAL)
+    });
+    Ok(config.build())
+}
 /// Build pinned trust and the local host identity for an outgoing connection.
 /// # Errors
 /// Refuses inconsistent identity, empty trust or unsupported TLS configuration.
@@ -163,6 +200,37 @@ pub fn client_config(identity: &Identity, roots: &[X509]) -> io::Result<SslConne
     configure(&mut config, identity, roots)?;
     config.set_verify(SslVerifyMode::PEER);
     config.set_alpn_protos(ALPN).map_err(|_| denied())?;
+    Ok(config.build())
+}
+
+/// Build server-only trust for the one recovery ALPN; this connector sends no client certificate.
+/// # Errors
+/// Refuses empty trust or unsupported TLS configuration.
+pub fn recovery_client_config(roots: &[X509]) -> io::Result<SslConnector> {
+    use openssl::{
+        ssl::{SslMethod, SslVerifyMode, SslVersion},
+        x509::store::X509StoreBuilder,
+    };
+    if roots.is_empty() || roots.len() > 16 {
+        return Err(denied());
+    }
+    let mut config = SslConnector::builder(SslMethod::tls_client()).map_err(|_| denied())?;
+    config
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|_| denied())?;
+    config
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|_| denied())?;
+    let mut trust = X509StoreBuilder::new().map_err(|_| denied())?;
+    for root in roots {
+        trust.add_cert(root.clone()).map_err(|_| denied())?;
+    }
+    config.set_cert_store(trust.build());
+    config.set_verify_depth(2);
+    config.set_verify(SslVerifyMode::PEER);
+    config
+        .set_alpn_protos(RECOVERY_ALPN)
+        .map_err(|_| denied())?;
     Ok(config.build())
 }
 /// Dial only an outgoing connection and verify the server name before exposing bytes.
@@ -185,6 +253,39 @@ pub async fn dial(
         .map_err(|_| denied())?
         .map_err(|_| denied())?;
     finish(stream)
+}
+
+/// Dial the server-authenticated recovery ALPN without offering an expired client certificate.
+/// # Errors
+/// Refuses server name, root, ALPN, handshake, deadline or network failures.
+pub async fn dial_recovery(
+    address: SocketAddr,
+    name: &str,
+    config: &SslConnector,
+) -> io::Result<RecoveryConnection> {
+    use openssl::x509::X509VerifyResult;
+
+    let socket = dial_socket(address).await?;
+    let ssl = config
+        .configure()
+        .map_err(|_| denied())?
+        .into_ssl(name)
+        .map_err(|_| denied())?;
+    let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| denied())?;
+    tokio::time::timeout(HANDSHAKE, std::pin::Pin::new(&mut stream).connect())
+        .await
+        .map_err(|_| denied())?
+        .map_err(|_| denied())?;
+    if stream.ssl().verify_result() != X509VerifyResult::OK
+        || stream.ssl().selected_alpn_protocol() != Some(RECOVERY_PROTOCOL)
+    {
+        return Err(denied());
+    }
+    // This connector is built without a local identity; its peer certificate is
+    // the verified server leaf and cannot prove which client certificate was sent.
+    Ok(RecoveryConnection {
+        channel: channel(stream),
+    })
 }
 /// Keep connection construction separate so OS liveness can be verified on the
 /// actual outgoing socket before the encrypted channel owns its split halves.
@@ -230,6 +331,50 @@ pub async fn accept(socket: tokio::net::TcpStream, config: &SslAcceptor) -> io::
         .map_err(|_| denied())?;
     finish(stream)
 }
+
+/// Accept either unchanged mTLS host transport or the certificate-free recovery ALPN.
+/// # Errors
+/// Refuses missing/invalid ALPN, invalid certificate, non-recovery certificate omission or timeout.
+pub async fn accept_recovery_aware(
+    socket: tokio::net::TcpStream,
+    config: &SslAcceptor,
+) -> io::Result<AcceptedConnection> {
+    use openssl::{hash::MessageDigest, x509::X509VerifyResult};
+
+    socket.set_nodelay(true)?;
+    let ssl = openssl::ssl::Ssl::new(config.context()).map_err(|_| denied())?;
+    let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| denied())?;
+    tokio::time::timeout(HANDSHAKE, std::pin::Pin::new(&mut stream).accept())
+        .await
+        .map_err(|_| denied())?
+        .map_err(|_| denied())?;
+    if stream.ssl().verify_result() != X509VerifyResult::OK {
+        return Err(denied());
+    }
+    match stream.ssl().selected_alpn_protocol() {
+        Some(PROTOCOL) => {
+            let peer = stream.ssl().peer_certificate().ok_or_else(denied)?;
+            let peer_fingerprint = peer
+                .digest(MessageDigest::sha256())
+                .map_err(|_| denied())?
+                .as_ref()
+                .try_into()
+                .map_err(|_| denied())?;
+            Ok(AcceptedConnection::Host(Connection {
+                channel: channel(stream),
+                peer_fingerprint,
+            }))
+        }
+        Some(RECOVERY_PROTOCOL) if stream.ssl().peer_certificate().is_none() => {
+            Ok(AcceptedConnection::Recovery(RecoveryConnection {
+                channel: channel(stream),
+            }))
+        }
+        _ => Err(denied()),
+    }
+}
+
+/// Finish an accepted TLS connection: require the negotiated ALPN and a verified client certificate.
 fn finish(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> io::Result<Connection> {
     use openssl::{hash::MessageDigest, x509::X509VerifyResult};
     // Missing ALPN and missing client certificates cannot silently downgrade
@@ -246,15 +391,20 @@ fn finish(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> io::Result
         .as_ref()
         .try_into()
         .map_err(|_| denied())?;
-    let (reader, writer) = tokio::io::split(stream);
     Ok(Connection {
-        channel: TcpTls {
-            retired: tokio::sync::watch::channel(false).0,
-            reader: tokio::sync::Mutex::new(reader),
-            writer: tokio::sync::Mutex::new(writer),
-        },
+        channel: channel(stream),
         peer_fingerprint,
     })
+}
+
+/// Wrap an accepted TLS stream as a channel that can be retired.
+fn channel(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> TcpTls {
+    let (reader, writer) = tokio::io::split(stream);
+    TcpTls {
+        retired: tokio::sync::watch::channel(false).0,
+        reader: tokio::sync::Mutex::new(reader),
+        writer: tokio::sync::Mutex::new(writer),
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

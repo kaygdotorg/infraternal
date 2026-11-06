@@ -135,6 +135,8 @@ pub struct RemoteService {
     pub identity: Option<Identity>,
     /// Public issuer overlap for mutual TLS.
     pub roots: Vec<X509>,
+    /// Clock health shared by expiry status, local diagnostics and renewal recovery.
+    pub clock_health: Arc<crate::clock_health::ClockHealth>,
 }
 
 /// One durable host actor survives transport replacement; every new peer is readmitted.
@@ -158,6 +160,8 @@ struct ListenerFactory {
     address: SocketAddr,
     destinations: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
     limits: Arc<crate::remote_accept::Limits>,
+    /// Recovery uses the same signer, server-clock health and durable enrollment store.
+    recovery: Option<Arc<crate::remote_recovery::Service>>,
     /// Leased destinations join the agent address's endpoint (one CID space).
     bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
 }
@@ -488,8 +492,13 @@ impl RemoteHosts {
             host.peer = peer;
             host.generation = generation;
             host.caps = caps;
-            host.retirement =
-                self.retirement(id, generation, authority.clone(), host.actor.clone());
+            host.retirement = self.retirement(
+                id,
+                generation,
+                authority.clone(),
+                host.actor.clone(),
+                caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+            );
             #[cfg(any(test, feature = "native-streams"))]
             {
                 *host
@@ -512,7 +521,13 @@ impl RemoteHosts {
             accepts
                 .try_send(link.authorize(authority.clone()))
                 .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
-            let retirement = self.retirement(id, generation, authority.clone(), actor.clone());
+            let retirement = self.retirement(
+                id,
+                generation,
+                authority.clone(),
+                actor.clone(),
+                caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+            );
             hosts.insert(
                 id,
                 Host {
@@ -594,7 +609,13 @@ impl RemoteHosts {
         host.peer = peer;
         host.generation = generation;
         host.caps = caps;
-        host.retirement = self.retirement(id, generation, authority.clone(), actor);
+        host.retirement = self.retirement(
+            id,
+            generation,
+            authority.clone(),
+            actor,
+            caps & infraternal_plugin_api::channel::LIVE_IDENTITY_ROTATION != 0,
+        );
         // Retained NodeHost handles follow the promoted certificate and its
         // subsequent renewals, rather than the retired connection's expiry.
         #[cfg(any(test, feature = "native-streams"))]
@@ -614,12 +635,14 @@ impl RemoteHosts {
         Ok(())
     }
 
+    /// Decide what retiring host `id` removes.
     fn retirement(
         &self,
         id: Uuid,
         generation: Uuid,
         authority: AuthorityGuard,
         actor: EmbeddedAgent,
+        identity_rotation: bool,
     ) -> Retirement {
         let registry = Arc::downgrade(&self.0);
         let source = self.1.clone();
@@ -631,7 +654,7 @@ impl RemoteHosts {
                 tokio::select! {
                     biased;
                     () = authority.cancelled() => {},
-                    () = crate::remote_renewal::run(&authority, &actor, source) => {},
+                    () = crate::remote_renewal::run(&authority, &actor, source, identity_rotation) => {},
                 }
             } else {
                 authority.cancelled().await;
@@ -720,6 +743,7 @@ impl Drop for LeasedListener {
     }
 }
 impl LeasedListener {
+    /// Start a leased listener on `address`.
     async fn start(
         factory: &ListenerFactory,
         address: std::net::IpAddr,
@@ -737,6 +761,7 @@ impl LeasedListener {
             overlay,
             factory.store.clone(),
             factory.limits.clone(),
+            factory.recovery.clone(),
         ));
         Ok(Self {
             _binding: binding,
@@ -800,12 +825,47 @@ impl RemoteListeners {
         self.endpoint.local_addr()
     }
 
+    /// Start the remote listeners on `address` with this identity and its trust roots.
     pub(crate) async fn start(
         address: SocketAddr,
         identity: &Identity,
         roots: &[X509],
         store: EnrollmentStore,
         hosts: RemoteHosts,
+    ) -> io::Result<Self> {
+        Self::start_configured(address, identity, roots, store, hosts, None).await
+    }
+
+    /// Start normal mTLS admission with the separate expired-certificate recovery ALPN.
+    /// The recovery service never receives a host-admitted control channel.
+    /// # Errors
+    /// Refuses invalid TLS identity, trust or listener configuration.
+    pub(crate) async fn start_with_recovery(
+        address: SocketAddr,
+        identity: &Identity,
+        roots: &[X509],
+        store: EnrollmentStore,
+        hosts: RemoteHosts,
+        source: Arc<dyn crate::ca::CaKeySource>,
+        clock: Arc<crate::clock_health::ClockHealth>,
+    ) -> io::Result<Self> {
+        let recovery = Arc::new(crate::remote_recovery::Service::new(
+            store.clone(),
+            source,
+            clock,
+            Arc::new(crate::remote_recovery::Limiter::default()),
+        ));
+        Self::start_configured(address, identity, roots, store, hosts, Some(recovery)).await
+    }
+
+    /// Start the listener with or without the recovery service.
+    async fn start_configured(
+        address: SocketAddr,
+        identity: &Identity,
+        roots: &[X509],
+        store: EnrollmentStore,
+        hosts: RemoteHosts,
+        recovery: Option<Arc<crate::remote_recovery::Service>>,
     ) -> io::Result<Self> {
         let limits = crate::remote_accept::Limits::new();
         let (listener, tls) = Self::start_with_limits(
@@ -815,6 +875,7 @@ impl RemoteListeners {
             store.clone(),
             hosts.clone(),
             limits.clone(),
+            recovery.clone(),
         )
         .await?;
         let factory = ListenerFactory {
@@ -823,12 +884,14 @@ impl RemoteListeners {
             address: listener.local_addr()?,
             destinations: std::sync::Mutex::default(),
             limits,
+            recovery,
             bindings: listener.bindings.clone(),
         };
         *hosts.3.lock().map_err(|_| io::ErrorKind::Other)? = Some(Arc::new(factory));
         Ok(listener)
     }
 
+    /// Start the listeners with explicit admission limits.
     async fn start_with_limits(
         address: SocketAddr,
         identity: &Identity,
@@ -836,6 +899,7 @@ impl RemoteListeners {
         store: EnrollmentStore,
         hosts: RemoteHosts,
         limits: Arc<crate::remote_accept::Limits>,
+        recovery: Option<Arc<crate::remote_recovery::Service>>,
     ) -> io::Result<(Self, Arc<openssl::ssl::SslAcceptor>)> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
@@ -845,7 +909,11 @@ impl RemoteListeners {
             |_| Ok(()),
         )
         .await?;
-        let tls = Arc::new(remote_tls::server_config(identity, roots)?);
+        let tls = Arc::new(if recovery.is_some() {
+            remote_tls::recovery_server_config(identity, roots)?
+        } else {
+            remote_tls::server_config(identity, roots)?
+        });
         let mut tasks = JoinSet::new();
         tasks.spawn(crate::remote_accept::quic(
             endpoint.clone(),
@@ -859,6 +927,7 @@ impl RemoteListeners {
             hosts,
             store,
             limits,
+            recovery,
         ));
         Ok((
             Self {

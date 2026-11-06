@@ -34,9 +34,54 @@ struct Loaded {
     endpoints: std::sync::Arc<BTreeMap<NodeId, SocketAddr>>,
     default: DefaultPolicy,
     revision: u64,
+    /// Durable key rotation phase per node; compiling a view rewrites peer keys from it.
+    rotations: std::sync::Arc<BTreeMap<NodeId, RotationRecord>>,
     /// Synthetic unnamed labels remain reachable without creating DNS records.
     #[cfg(feature = "mesh-dns-spike")]
     dns_placeholders: std::sync::Arc<BTreeSet<NodeId>>,
+}
+
+/// Where one node's key rotation stands: preparing the candidate, overlapping both keys, routing on the candidate
+/// (retiring), then dropping the old key (cleanup).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RotationPhase {
+    Preparing,
+    Overlap,
+    Retiring,
+    Cleanup,
+}
+impl RotationPhase {
+    /// The phase's name in `mesh_node_key_rotation.rotation_phase`.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Overlap => "overlap",
+            Self::Retiring => "retiring",
+            Self::Cleanup => "cleanup",
+        }
+    }
+}
+
+/// Durable public rotation metadata needed to compile each node's current phase.
+#[derive(Clone, Debug)]
+pub(crate) struct RotationRecord {
+    pub(crate) phase: RotationPhase,
+    pub(crate) candidate_key: Option<PublicKey>,
+    pub(crate) previous_key: Option<PublicKey>,
+    pub(crate) operation_id: String,
+    pub(crate) sequence: u64,
+    pub(crate) revision: Option<u64>,
+    pub(crate) started_at: Option<i64>,
+    pub(crate) monotonic: Option<i64>,
+}
+
+/// Durable scheduler view for one node. The monotonic deadline is tied to the recorded boot ID.
+#[derive(Clone, Debug)]
+pub(crate) struct RotationSchedule {
+    pub(crate) due_in_secs: u64,
+    pub(crate) supported: bool,
+    pub(crate) all_nodes_supported: bool,
+    pub(crate) record: Option<RotationRecord>,
 }
 /// Workers retain the shared source of their acknowledged version. Recompiling
 /// its node view preserves exact deltas while idle memory stays proportional to
@@ -49,12 +94,21 @@ pub(crate) struct Snapshot {
     control_plane: TrafficPolicy,
 }
 impl Snapshot {
+    /// Whether any node is past preparation, so applied views need durable acknowledgments before the rotation moves on.
+    pub(crate) fn acknowledgments_required(&self) -> bool {
+        self.loaded
+            .rotations
+            .values()
+            .any(|rotation| rotation.phase != RotationPhase::Preparing)
+    }
+    /// Compile `node`'s configuration from this snapshot, applying any key rotation phase to its own and its peers' keys.
     pub(crate) fn config(&self, node: NodeId) -> Result<Config, crate::api::MeshApiError> {
         use crate::{api::MeshApiError, policy::model::MeshError};
         let coordinator = &self.loaded.coordinator;
         let endpoints = &self.loaded.endpoints;
         let default = self.loaded.default;
         let revision = self.loaded.revision;
+        let rotations = &self.loaded.rotations;
         #[cfg(feature = "cutoff-measure")]
         let _compile = crate::cutoff_measure::Stage::new(node, revision, "compile");
         let compiled = configuration::compile_with_dns_suffix(
@@ -78,7 +132,74 @@ impl Snapshot {
                 .peer_names
                 .retain(|peer, _| !self.loaded.dns_placeholders.contains(peer));
         }
+        if let Some(rotation) = rotations.get(&node)
+            && rotation.phase == RotationPhase::Overlap
+        {
+            config.local_key = rotation.previous_key;
+        }
+        for (peer_id, peer) in &mut config.peers {
+            let Some(rotation) = rotations.get(peer_id) else {
+                continue;
+            };
+            match rotation.phase {
+                RotationPhase::Preparing => {}
+                RotationPhase::Overlap => {
+                    let previous = rotation
+                        .previous_key
+                        .ok_or_else(|| storage_error("Mesh rotation state invalid."))?;
+                    let candidate = rotation
+                        .candidate_key
+                        .ok_or_else(|| storage_error("Mesh rotation state invalid."))?;
+                    if peer.peer.key != candidate || previous == candidate {
+                        return Err(storage_error("Mesh rotation state invalid."));
+                    }
+                    peer.peer.key = previous;
+                    peer.peer.previous_key = Some(candidate);
+                    // The candidate is installed before the node changes its
+                    // interface key. Keep routes on the old key until the node
+                    // confirms the local switch.
+                    peer.peer.previous_active = false;
+                }
+                RotationPhase::Retiring => {
+                    peer.peer.previous_active = false;
+                }
+                RotationPhase::Cleanup => {
+                    peer.peer.previous_key = None;
+                    peer.peer.previous_active = false;
+                }
+            }
+        }
         config.version = revision;
+        Ok(config)
+    }
+
+    /// Compile a node view for the identity it presented on the authenticated channel.
+    pub(crate) fn config_for_identity(
+        &self,
+        node: NodeId,
+        identity: crate::policy::model::PublicKey,
+    ) -> Result<Config, crate::api::MeshApiError> {
+        let mut config = self.config(node)?;
+        if let Some(rotation) = self.loaded.rotations.get(&node)
+            && rotation.phase == RotationPhase::Overlap
+        {
+            let previous = rotation
+                .previous_key
+                .ok_or_else(|| storage_error("Mesh rotation state invalid."))?;
+            let candidate = rotation
+                .candidate_key
+                .ok_or_else(|| storage_error("Mesh rotation state invalid."))?;
+            if previous == candidate || (identity != previous && identity != candidate) {
+                return Err(storage_error(
+                    "Mesh node identity does not match rotation state.",
+                ));
+            }
+            config.local_key = Some(identity);
+        } else if config.local_key.is_some_and(|local| local != identity) {
+            return Err(storage_error(
+                "Mesh node identity does not match rotation state.",
+            ));
+        }
         Ok(config)
     }
 }
@@ -265,6 +386,30 @@ fn is_legacy_unnamed_label(name: &str) -> bool {
             !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
         })
 }
+/// Abandon a node's open rotation because it reattached without rotation support (J252 P2, D166, D352).
+///
+/// A node that restarts on an engine that cannot rotate (kernel to `GotaTun`, D346), loses its journal or runs an
+/// older binary keeps only one key. Keeping the rotation open would refuse that node forever, since only its own
+/// commit can close it, and the overlap could later publish a candidate it no longer holds. The caller runs
+/// this inside the attach transaction that records the lost support and the key the node presents, and bumps
+/// the revision, so peers drop the abandoned candidate or predecessor in the same view. The sequence moves on,
+/// so a step still in flight for the abandoned operation matches nothing.
+async fn abandon_rotation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    node_id: i64,
+) -> Result<(), &'static str> {
+    sqlx::query(
+        "UPDATE mesh_node_key_rotation SET candidate_public_key=NULL,previous_public_key=NULL,rotation_phase=NULL,\
+         rotation_started_at=NULL,rotation_boot_id=NULL,rotation_monotonic=NULL,operation_id=NULL,rotation_revision=NULL,\
+         local_committed=0,sequence=sequence+1 WHERE node_id=? AND rotation_phase IS NOT NULL",
+    )
+    .bind(node_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| "Mesh storage unavailable.")?;
+    Ok(())
+}
+
 /// What names a node of `host`, and who gives it, with the names the owner gave every other host.
 ///
 /// The server is named after its own hostname; a remote machine after the name the owner typed when adding it,
@@ -435,10 +580,13 @@ async fn audit_renames(
     }
     Ok(())
 }
+/// The coordinator's durable store: inventory, addresses, policy and rotation state, with a cached snapshot.
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
     cache: std::sync::Arc<tokio::sync::Mutex<Option<Loaded>>>,
+    // Applied-view receipts are valid only for this server process lifetime.
+    server_instance: std::sync::Arc<str>,
     load_diagnostics: StorageDiagnostics,
     config_diagnostics: StorageDiagnostics,
     preview_diagnostics: StorageDiagnostics,
@@ -470,6 +618,7 @@ impl Store {
         Self {
             pool,
             cache: std::sync::Arc::default(),
+            server_instance: uuid::Uuid::new_v4().to_string().into(),
             load_diagnostics: StorageDiagnostics::new("mesh.coordinator.load"),
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
             preview_diagnostics: StorageDiagnostics::new("mesh.default.preview"),
@@ -477,7 +626,694 @@ impl Store {
             control_plane: std::sync::Arc::default(),
         }
     }
+    /// The server instance ID that tags acknowledgment receipts.
+    #[cfg(test)]
+    pub(crate) fn server_instance(&self) -> &str {
+        &self.server_instance
+    }
+    /// Record a kernel-applied view only while a rotation needs durable receipts.
+    /// A new server instance overwrites old receipts so restart always reapplies views.
+    pub(crate) async fn acknowledge_applied(
+        &self,
+        node: NodeId,
+        revision: u64,
+    ) -> Result<(), crate::api::MeshApiError> {
+        let node =
+            i64::try_from(node.0).map_err(|_| storage_error("Mesh applied node invalid."))?;
+        let revision =
+            i64::try_from(revision).map_err(|_| storage_error("Mesh applied revision invalid."))?;
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_node_key_rotation WHERE rotation_phase IS NOT NULL)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| storage_sql_error(error))?;
+        if !pending {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO mesh_node_applied(node_id,revision,server_instance) VALUES(?,?,?) \
+             ON CONFLICT(node_id) DO UPDATE SET revision=excluded.revision,server_instance=excluded.server_instance",
+        )
+        .bind(node)
+        .bind(revision)
+        .bind(self.server_instance.as_ref())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| storage_sql_error(error))?;
+        Ok(())
+    }
+    /// Check whether every currently reachable peer has applied a rotation revision.
+    pub(crate) async fn rotation_acks_ready(
+        &self,
+        revision: u64,
+        reachable: &BTreeSet<NodeId>,
+    ) -> Result<bool, crate::api::MeshApiError> {
+        if reachable.is_empty() {
+            return Ok(true);
+        }
+        let revision = i64::try_from(revision)
+            .map_err(|_| storage_error("Mesh rotation revision invalid."))?;
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT COUNT(*) FROM mesh_node_applied WHERE server_instance=",
+        );
+        query
+            .push_bind(self.server_instance.as_ref())
+            .push(" AND revision >= ")
+            .push_bind(revision)
+            .push(" AND node_id IN (");
+        let mut separated = query.separated(",");
+        for node in reachable {
+            separated.push_bind(
+                i64::try_from(node.0).map_err(|_| storage_error("Mesh rotation peer invalid."))?,
+            );
+        }
+        separated.push_unseparated(")");
+        let applied: i64 = query
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| storage_sql_error(error))?;
+        Ok(usize::try_from(applied).ok() == Some(reachable.len()))
+    }
+    /// Read and reconcile one node's persisted schedule and overlap clock.
+    /// A reboot restarts the minimum overlap instead of allowing wall time to retire a key early.
+    // Keep schedule repair, phase validation, and commit in one writer transaction.
+    pub(crate) async fn rotation_schedule(
+        &self,
+        node: NodeId,
+        wall_secs: i64,
+        boot_id: &str,
+        monotonic_secs: i64,
+        monotonic_nanos: i64,
+    ) -> Result<RotationSchedule, crate::api::MeshApiError> {
+        use crate::api::MeshApiError;
+        let node_id = i64::try_from(node.0).map_err(|_| MeshApiError::InvalidInput)?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(storage_sql_error)?;
+        let row = sqlx::query(
+            "SELECT n.public_key,r.last_rotation,r.schedule_boot_id,r.schedule_monotonic,r.schedule_period_secs,\
+                    r.candidate_public_key,r.previous_public_key,r.rotation_phase,r.operation_id,r.sequence,r.rotation_revision,\
+                    r.rotation_started_at,r.rotation_boot_id,r.rotation_monotonic,n.key_rotation_supported,\
+                    d.rotation_period_secs \
+             FROM mesh_node_key_rotation AS r \
+             JOIN mesh_nodes AS n ON n.id=r.node_id \
+             JOIN mesh_dataplane AS d ON d.singleton=1 WHERE r.node_id=?",
+        )
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?
+        .ok_or(MeshApiError::NotFound)?;
+        let period: i64 = row
+            .try_get("rotation_period_secs")
+            .map_err(storage_sql_error)?;
+        if period <= 0 {
+            return Err(storage_error("Mesh rotation period invalid."));
+        }
+        let last_rotation: i64 = row.try_get("last_rotation").map_err(storage_sql_error)?;
+        let mut schedule_boot: String =
+            row.try_get("schedule_boot_id").map_err(storage_sql_error)?;
+        let mut schedule_deadline: i64 = row
+            .try_get("schedule_monotonic")
+            .map_err(storage_sql_error)?;
+        let mut scheduled_period: i64 = row
+            .try_get("schedule_period_secs")
+            .map_err(storage_sql_error)?;
+        let phase: Option<String> = row.try_get("rotation_phase").map_err(storage_sql_error)?;
+        let mut rotation_boot: Option<String> =
+            row.try_get("rotation_boot_id").map_err(storage_sql_error)?;
+        let mut rotation_monotonic: Option<i64> = row
+            .try_get("rotation_monotonic")
+            .map_err(storage_sql_error)?;
 
+        if phase.is_none()
+            && (schedule_boot != boot_id || scheduled_period != period || schedule_deadline == 0)
+        {
+            let due_wall = last_rotation.saturating_add(period);
+            let remaining = due_wall.saturating_sub(wall_secs).max(0);
+            schedule_deadline = monotonic_secs.saturating_add(remaining);
+            schedule_boot = boot_id.to_owned();
+            scheduled_period = period;
+            sqlx::query(
+                "UPDATE mesh_node_key_rotation SET schedule_boot_id=?,schedule_monotonic=?,schedule_period_secs=? WHERE node_id=? AND rotation_phase IS NULL",
+            )
+            .bind(&schedule_boot)
+            .bind(schedule_deadline)
+            .bind(scheduled_period)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_sql_error)?;
+        }
+        if phase.as_deref().is_some_and(|phase| phase != "preparing")
+            && rotation_boot.as_deref() != Some(boot_id)
+        {
+            rotation_boot = Some(boot_id.to_owned());
+            rotation_monotonic = Some(monotonic_nanos);
+            sqlx::query(
+                "UPDATE mesh_node_key_rotation SET rotation_boot_id=?,rotation_monotonic=? WHERE node_id=? AND rotation_phase IS NOT NULL",
+            )
+            .bind(boot_id)
+            .bind(monotonic_nanos)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_sql_error)?;
+        }
+
+        let unsupported: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE key_rotation_supported=0)",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?;
+        let supported: bool = row
+            .try_get("key_rotation_supported")
+            .map_err(storage_sql_error)?;
+        let record = if let Some(phase) = phase {
+            let candidate: Option<Vec<u8>> = row
+                .try_get("candidate_public_key")
+                .map_err(storage_sql_error)?;
+            let candidate_key = candidate
+                .map(|key| {
+                    key.try_into()
+                        .map(PublicKey)
+                        .map_err(|_| storage_error("Mesh rotation candidate invalid."))
+                })
+                .transpose()?;
+            let previous: Option<Vec<u8>> = row
+                .try_get("previous_public_key")
+                .map_err(storage_sql_error)?;
+            let previous_key = previous
+                .map(|key| {
+                    key.try_into()
+                        .map(PublicKey)
+                        .map_err(|_| storage_error("Mesh rotation key invalid."))
+                })
+                .transpose()?;
+            let phase = match phase.as_str() {
+                "preparing" if previous_key.is_none() && candidate_key.is_none() => {
+                    RotationPhase::Preparing
+                }
+                "overlap" if previous_key.is_some() && candidate_key.is_some() => {
+                    RotationPhase::Overlap
+                }
+                "retiring" if previous_key.is_some() && candidate_key.is_none() => {
+                    RotationPhase::Retiring
+                }
+                "cleanup" if previous_key.is_none() && candidate_key.is_none() => {
+                    RotationPhase::Cleanup
+                }
+                _ => return Err(storage_error("Mesh rotation state invalid.")),
+            };
+            let current_key: Vec<u8> = row.try_get("public_key").map_err(storage_sql_error)?;
+            if phase == RotationPhase::Overlap
+                && candidate_key.is_none_or(|candidate| current_key.as_slice() != candidate.0)
+            {
+                return Err(storage_error("Mesh rotation state invalid."));
+            }
+            let operation_id: String = row.try_get("operation_id").map_err(storage_sql_error)?;
+            uuid::Uuid::parse_str(&operation_id)
+                .map_err(|_| storage_error("Mesh rotation operation invalid."))?;
+            let sequence = u64::try_from(
+                row.try_get::<i64, _>("sequence")
+                    .map_err(storage_sql_error)?,
+            )
+            .ok()
+            .filter(|sequence| *sequence > 0)
+            .ok_or_else(|| storage_error("Mesh rotation sequence invalid."))?;
+            let revision = row
+                .try_get::<Option<i64>, _>("rotation_revision")
+                .map_err(storage_sql_error)?
+                .map(|revision| {
+                    u64::try_from(revision)
+                        .map_err(|_| storage_error("Mesh rotation revision invalid."))
+                })
+                .transpose()?;
+            let started_at: Option<i64> = row
+                .try_get("rotation_started_at")
+                .map_err(storage_sql_error)?;
+            let boot_id = rotation_boot;
+            let monotonic = rotation_monotonic;
+            if phase == RotationPhase::Preparing {
+                if revision.is_some()
+                    || started_at.is_some()
+                    || boot_id.is_some()
+                    || monotonic.is_some()
+                {
+                    return Err(storage_error("Mesh preparing state invalid."));
+                }
+            } else if revision.is_none()
+                || started_at.is_none()
+                || boot_id.is_none()
+                || monotonic.is_none()
+            {
+                return Err(storage_error("Mesh rotation timing invalid."));
+            }
+            Some(RotationRecord {
+                phase,
+                candidate_key,
+                previous_key,
+                operation_id,
+                sequence,
+                revision,
+                started_at,
+                monotonic,
+            })
+        } else {
+            None
+        };
+        tx.commit().await.map_err(storage_sql_error)?;
+        Ok(RotationSchedule {
+            due_in_secs: u64::try_from(schedule_deadline.saturating_sub(monotonic_secs).max(0))
+                .unwrap_or(u64::MAX),
+            supported,
+            all_nodes_supported: !unsupported,
+            record,
+        })
+    }
+    /// Claim a due rotation by writing its id and sequence before the node generates a candidate key.
+    pub(crate) async fn begin_rotation(
+        &self,
+        node: NodeId,
+        boot_id: &str,
+        monotonic_secs: i64,
+    ) -> Result<Option<RotationRecord>, crate::api::MeshApiError> {
+        use crate::api::MeshApiError;
+        let node_id = i64::try_from(node.0).map_err(|_| MeshApiError::InvalidInput)?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(storage_sql_error)?;
+        let row = sqlx::query(
+            "SELECT r.rotation_phase,r.operation_id,r.sequence,r.schedule_boot_id,r.schedule_monotonic,\
+                    r.schedule_period_secs,n.key_rotation_supported,d.rotation_period_secs \
+             FROM mesh_node_key_rotation AS r JOIN mesh_nodes AS n ON n.id=r.node_id \
+             JOIN mesh_dataplane AS d ON d.singleton=1 WHERE r.node_id=?",
+        )
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?
+        .ok_or(MeshApiError::NotFound)?;
+        let phase: Option<String> = row.try_get("rotation_phase").map_err(storage_sql_error)?;
+        if phase.as_deref() == Some("preparing") {
+            let operation_id: String = row.try_get("operation_id").map_err(storage_sql_error)?;
+            uuid::Uuid::parse_str(&operation_id)
+                .map_err(|_| storage_error("Mesh rotation operation invalid."))?;
+            let sequence = u64::try_from(
+                row.try_get::<i64, _>("sequence")
+                    .map_err(storage_sql_error)?,
+            )
+            .ok()
+            .filter(|sequence| *sequence > 0)
+            .ok_or_else(|| storage_error("Mesh rotation sequence invalid."))?;
+            tx.commit().await.map_err(storage_sql_error)?;
+            return Ok(Some(RotationRecord {
+                phase: RotationPhase::Preparing,
+                candidate_key: None,
+                previous_key: None,
+                operation_id,
+                sequence,
+                revision: None,
+                started_at: None,
+                monotonic: None,
+            }));
+        }
+        let period: i64 = row
+            .try_get("rotation_period_secs")
+            .map_err(storage_sql_error)?;
+        let schedule_period: i64 = row
+            .try_get("schedule_period_secs")
+            .map_err(storage_sql_error)?;
+        let schedule_boot: String = row.try_get("schedule_boot_id").map_err(storage_sql_error)?;
+        let deadline: i64 = row
+            .try_get("schedule_monotonic")
+            .map_err(storage_sql_error)?;
+        let supported: bool = row
+            .try_get("key_rotation_supported")
+            .map_err(storage_sql_error)?;
+        let unsupported: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE key_rotation_supported=0)",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?;
+        if phase.is_some()
+            || !supported
+            || unsupported
+            || period <= 0
+            || schedule_period != period
+            || schedule_boot != boot_id
+            || deadline > monotonic_secs
+        {
+            tx.commit().await.map_err(storage_sql_error)?;
+            return Ok(None);
+        }
+        let sequence = row
+            .try_get::<i64, _>("sequence")
+            .map_err(storage_sql_error)?
+            .checked_add(1)
+            .filter(|sequence| *sequence > 0)
+            .ok_or_else(|| storage_error("Mesh rotation sequence exhausted."))?;
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=? WHERE node_id=? AND rotation_phase IS NULL",
+        )
+        .bind(&operation_id)
+        .bind(sequence)
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?;
+        tx.commit().await.map_err(storage_sql_error)?;
+        Ok(Some(RotationRecord {
+            phase: RotationPhase::Preparing,
+            candidate_key: None,
+            previous_key: None,
+            operation_id,
+            sequence: u64::try_from(sequence)
+                .map_err(|_| storage_error("Mesh rotation sequence invalid."))?,
+            revision: None,
+            started_at: None,
+            monotonic: None,
+        }))
+    }
+    /// Publish a locally persisted candidate as a dual-key overlap in one database transaction.
+    pub(crate) async fn start_rotation_overlap(
+        &self,
+        node: NodeId,
+        operation_id: &str,
+        candidate: PublicKey,
+        wall_secs: i64,
+        boot_id: &str,
+        monotonic_nanos: i64,
+    ) -> Result<u64, crate::api::MeshApiError> {
+        use crate::api::MeshApiError;
+        if candidate.0 == [0; 32] || uuid::Uuid::parse_str(operation_id).is_err() {
+            return Err(MeshApiError::InvalidInput);
+        }
+        let node_id = i64::try_from(node.0).map_err(|_| MeshApiError::InvalidInput)?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(storage_sql_error)?;
+        let row = sqlx::query(
+            "SELECT n.public_key,r.candidate_public_key,r.rotation_phase,r.operation_id,r.sequence,r.rotation_revision \
+             FROM mesh_nodes AS n JOIN mesh_node_key_rotation AS r ON r.node_id=n.id WHERE n.id=?",
+        )
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?
+        .ok_or(MeshApiError::NotFound)?;
+        let current: Vec<u8> = row.try_get("public_key").map_err(storage_sql_error)?;
+        let stored_candidate: Option<Vec<u8>> = row
+            .try_get("candidate_public_key")
+            .map_err(storage_sql_error)?;
+        let phase: Option<String> = row.try_get("rotation_phase").map_err(storage_sql_error)?;
+        let existing_operation: Option<String> =
+            row.try_get("operation_id").map_err(storage_sql_error)?;
+        if phase.as_deref() == Some("overlap")
+            && existing_operation.as_deref() == Some(operation_id)
+            && stored_candidate.as_deref() == Some(candidate.0.as_slice())
+        {
+            let revision = u64::try_from(
+                row.try_get::<Option<i64>, _>("rotation_revision")
+                    .map_err(storage_sql_error)?
+                    .ok_or_else(|| storage_error("Mesh rotation revision missing."))?,
+            )
+            .map_err(|_| storage_error("Mesh rotation revision invalid."))?;
+            tx.commit().await.map_err(storage_sql_error)?;
+            return Ok(revision);
+        }
+        let sequence: i64 = row.try_get("sequence").map_err(storage_sql_error)?;
+        if phase.as_deref() != Some("preparing")
+            || existing_operation.as_deref() != Some(operation_id)
+            || current.as_slice() == candidate.0
+        {
+            return Err(MeshApiError::Conflict);
+        }
+        // D166/D352: recheck the all-node gate inside this immediate transaction, which serializes against
+        // enrollment. A node that cannot rotate may have joined since preparation began; publish nothing then.
+        // The operation stays in preparation and resumes once every node supports rotation again.
+        let unsupported: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE key_rotation_supported=0)",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?;
+        if unsupported {
+            return Err(MeshApiError::Conflict);
+        }
+        let revision: i64 = sqlx::query_scalar(
+            "UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?
+        .ok_or(MeshApiError::Conflict)?;
+        let changed = sqlx::query("UPDATE mesh_nodes SET public_key=? WHERE id=? AND public_key=?")
+            .bind(candidate.0.as_slice())
+            .bind(node_id)
+            .bind(&current)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_sql_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(MeshApiError::Conflict);
+        }
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET candidate_public_key=?,previous_public_key=?,rotation_phase='overlap',rotation_started_at=?,rotation_boot_id=?,rotation_monotonic=?,rotation_revision=?,local_committed=0 WHERE node_id=? AND rotation_phase='preparing' AND operation_id=? AND sequence=?",
+        )
+        .bind(candidate.0.as_slice())
+        .bind(&current)
+        .bind(wall_secs)
+        .bind(boot_id)
+        .bind(monotonic_nanos)
+        .bind(revision)
+        .bind(node_id)
+        .bind(operation_id)
+        .bind(sequence)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?;
+        tx.commit().await.map_err(storage_sql_error)?;
+        u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))
+    }
+    /// Mark the node's local candidate active and advance every peer to candidate-first routing.
+    pub(crate) async fn commit_rotation(
+        &self,
+        node: NodeId,
+        operation_id: &str,
+    ) -> Result<u64, crate::api::MeshApiError> {
+        self.advance_rotation(
+            node,
+            operation_id,
+            RotationPhase::Overlap,
+            RotationPhase::Retiring,
+        )
+        .await
+    }
+    /// Drop the previous public key only after the new-route view is applied by reachable peers.
+    pub(crate) async fn begin_rotation_cleanup(
+        &self,
+        node: NodeId,
+        operation_id: &str,
+    ) -> Result<u64, crate::api::MeshApiError> {
+        self.advance_rotation(
+            node,
+            operation_id,
+            RotationPhase::Retiring,
+            RotationPhase::Cleanup,
+        )
+        .await
+    }
+    /// Move one node's rotation from `from` to `to` for the named operation in one immediate transaction that also
+    /// advances the configuration revision. Repeating a step already taken returns its revision unchanged.
+    async fn advance_rotation(
+        &self,
+        node: NodeId,
+        operation_id: &str,
+        from: RotationPhase,
+        to: RotationPhase,
+    ) -> Result<u64, crate::api::MeshApiError> {
+        use crate::api::MeshApiError;
+        let from_name = from.as_str();
+        let to_name = to.as_str();
+        let node_id = i64::try_from(node.0).map_err(|_| MeshApiError::InvalidInput)?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(storage_sql_error)?;
+        let row = sqlx::query(
+            "SELECT rotation_phase,operation_id,rotation_revision,candidate_public_key FROM mesh_node_key_rotation WHERE node_id=?",
+        )
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?
+        .ok_or(MeshApiError::NotFound)?;
+        let phase: Option<String> = row.try_get("rotation_phase").map_err(storage_sql_error)?;
+        let current_operation: Option<String> =
+            row.try_get("operation_id").map_err(storage_sql_error)?;
+        if phase.as_deref() == Some(to_name) && current_operation.as_deref() == Some(operation_id) {
+            let revision = u64::try_from(
+                row.try_get::<Option<i64>, _>("rotation_revision")
+                    .map_err(storage_sql_error)?
+                    .ok_or_else(|| storage_error("Mesh rotation revision missing."))?,
+            )
+            .map_err(|_| storage_error("Mesh rotation revision invalid."))?;
+            tx.commit().await.map_err(storage_sql_error)?;
+            return Ok(revision);
+        }
+        if phase.as_deref() != Some(from_name) || current_operation.as_deref() != Some(operation_id)
+        {
+            return Err(MeshApiError::Conflict);
+        }
+        let revision: i64 = sqlx::query_scalar(
+            "UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?
+        .ok_or(MeshApiError::Conflict)?;
+        if to == RotationPhase::Cleanup {
+            sqlx::query(
+                "UPDATE mesh_node_key_rotation SET previous_public_key=NULL,rotation_phase='cleanup',rotation_revision=? WHERE node_id=? AND rotation_phase='retiring' AND operation_id=?",
+            )
+            .bind(revision)
+            .bind(node_id)
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_sql_error)?;
+        } else {
+            let candidate: Vec<u8> = row
+                .try_get::<Option<Vec<u8>>, _>("candidate_public_key")
+                .map_err(storage_sql_error)?
+                .ok_or_else(|| storage_error("Mesh rotation candidate missing."))?;
+            sqlx::query("UPDATE mesh_nodes SET public_key=? WHERE id=?")
+                .bind(&candidate)
+                .bind(node_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage_sql_error)?;
+            sqlx::query(
+                "UPDATE mesh_node_key_rotation SET candidate_public_key=NULL,rotation_phase='retiring',rotation_revision=?,local_committed=1 WHERE node_id=? AND rotation_phase='overlap' AND operation_id=?",
+            )
+            .bind(revision)
+            .bind(node_id)
+            .bind(operation_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_sql_error)?;
+        }
+        tx.commit().await.map_err(storage_sql_error)?;
+        u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))
+    }
+    /// Finish the local private-key journal only after the no-previous-key view was acknowledged.
+    pub(crate) async fn finish_rotation(
+        &self,
+        node: NodeId,
+        operation_id: &str,
+        wall_secs: i64,
+        boot_id: &str,
+        monotonic_secs: i64,
+    ) -> Result<(), crate::api::MeshApiError> {
+        use crate::api::MeshApiError;
+        let node_id = i64::try_from(node.0).map_err(|_| MeshApiError::InvalidInput)?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(storage_sql_error)?;
+        let row = sqlx::query(
+            "SELECT r.rotation_phase,r.operation_id,r.last_rotation,r.sequence,d.rotation_period_secs \
+             FROM mesh_node_key_rotation AS r JOIN mesh_dataplane AS d ON d.singleton=1 WHERE r.node_id=?",
+        )
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?
+        .ok_or(MeshApiError::NotFound)?;
+        let phase: Option<String> = row.try_get("rotation_phase").map_err(storage_sql_error)?;
+        let current_operation: Option<String> =
+            row.try_get("operation_id").map_err(storage_sql_error)?;
+        if phase.is_none() && current_operation.is_none() {
+            tx.commit().await.map_err(storage_sql_error)?;
+            return Ok(());
+        }
+        if phase.as_deref() != Some("cleanup") || current_operation.as_deref() != Some(operation_id)
+        {
+            return Err(MeshApiError::Conflict);
+        }
+        let period: i64 = row
+            .try_get("rotation_period_secs")
+            .map_err(storage_sql_error)?;
+        if period <= 0 {
+            return Err(storage_error("Mesh rotation period invalid."));
+        }
+        let deadline = monotonic_secs.saturating_add(period);
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET last_rotation=?,schedule_boot_id=?,schedule_monotonic=?,schedule_period_secs=?,previous_public_key=NULL,rotation_phase=NULL,rotation_started_at=NULL,rotation_boot_id=NULL,rotation_monotonic=NULL,operation_id=NULL,rotation_revision=NULL,local_committed=0 WHERE node_id=? AND rotation_phase='cleanup' AND operation_id=?",
+        )
+        .bind(wall_secs)
+        .bind(boot_id)
+        .bind(deadline)
+        .bind(period)
+        .bind(node_id)
+        .bind(operation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_sql_error)?;
+        tx.commit().await.map_err(storage_sql_error)?;
+        *self.cache.lock().await = None;
+        Ok(())
+    }
+    /// Restrict retirement checks to configured peers that the server currently observes online.
+    pub(crate) async fn rotation_reachable_peers(
+        &self,
+        node: NodeId,
+        live: &BTreeSet<NodeId>,
+    ) -> Result<BTreeSet<NodeId>, crate::api::MeshApiError> {
+        let node = i64::try_from(node.0).map_err(|_| crate::api::MeshApiError::InvalidInput)?;
+        let peers: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM mesh_nodes WHERE id<>? ORDER BY id")
+                .bind(node)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage_sql_error)?;
+        peers.into_iter().try_fold(
+            BTreeSet::from([NodeId(
+                u64::try_from(node).map_err(|_| storage_error("Mesh rotation node invalid."))?,
+            )]),
+            |mut result, peer| {
+                let peer = u64::try_from(peer)
+                    .map(NodeId)
+                    .map_err(|_| storage_error("Mesh rotation peer invalid."))?;
+                if live.contains(&peer) {
+                    result.insert(peer);
+                }
+                Ok(result)
+            },
+        )
+    }
+    /// Read the candidate public key already committed to the coordinator inventory.
+    pub(crate) async fn rotation_candidate_key(
+        &self,
+        node: NodeId,
+    ) -> Result<PublicKey, crate::api::MeshApiError> {
+        let node = i64::try_from(node.0).map_err(|_| crate::api::MeshApiError::InvalidInput)?;
+        let key: Vec<u8> = sqlx::query_scalar(
+            "SELECT candidate_public_key FROM mesh_node_key_rotation WHERE node_id=? AND rotation_phase='overlap'",
+        )
+            .bind(node)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_sql_error)?
+            .ok_or(crate::api::MeshApiError::NotFound)?;
+        Ok(PublicKey(key.try_into().map_err(|_| {
+            storage_error("Mesh rotation key invalid.")
+        })?))
+    }
     /// Tell every clone of this store where the server's control plane
     /// listens. Only the first call takes effect. Until it is set, the
     /// server's node admits peers only as Access allows (D352, #221).
@@ -514,6 +1350,92 @@ impl Store {
         server: bool,
         reported: Option<&str>,
     ) -> Result<(NodeId, bool), &'static str> {
+        self.attach_named_with_capability(host, key, endpoint, server, reported, false)
+            .await
+    }
+    /// Preserve the coordinator's candidate key if a host reconnects before local activation.
+    /// A pending operation accepts only the predecessor or current key for its durable phase.
+    fn attached_public_key(
+        row: &sqlx::sqlite::SqliteRow,
+        presented: PublicKey,
+        rotation_supported: bool,
+    ) -> Result<Vec<u8>, &'static str> {
+        let current: Vec<u8> = row
+            .try_get("public_key")
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let phase: Option<String> = row
+            .try_get("rotation_phase")
+            .map_err(|_| "Mesh storage unavailable.")?;
+        // Without support the caller abandons any open rotation in this same transaction (J252 P2), so the
+        // node attaches as one that is not rotating: with the key it presents.
+        let Some(phase) = phase.filter(|_| rotation_supported) else {
+            return Ok(presented.0.to_vec());
+        };
+        let candidate: Option<Vec<u8>> = row
+            .try_get("candidate_public_key")
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let previous: Option<Vec<u8>> = row
+            .try_get("previous_public_key")
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let presented = presented.0.as_slice();
+        let valid = match phase.as_str() {
+            "preparing" | "cleanup" => {
+                candidate.is_none() && previous.is_none() && current.as_slice() == presented
+            }
+            "overlap" => {
+                candidate.as_deref() == Some(current.as_slice())
+                    && (current.as_slice() == presented || previous.as_deref() == Some(presented))
+            }
+            "retiring" => candidate.is_none() && current.as_slice() == presented,
+            _ => false,
+        };
+        if valid {
+            Ok(current)
+        } else {
+            Err("Mesh key rotation identity is invalid.")
+        }
+    }
+    /// Bind identity and the negotiated dual-key rotation capability in one writer transaction.
+    /// A legacy peer remains ineligible until a live channel explicitly advertises support.
+    /// # Errors
+    /// Returns fixed public errors, not database input or authentication data.
+    pub async fn attach_named_with_capability(
+        &self,
+        host: &str,
+        key: PublicKey,
+        endpoint: Option<SocketAddr>,
+        server: bool,
+        reported: Option<&str>,
+        key_rotation_supported: bool,
+    ) -> Result<(NodeId, bool), &'static str> {
+        self.attach_named_with_probed_capability(
+            host,
+            key,
+            endpoint,
+            server,
+            reported,
+            Some(key_rotation_supported),
+        )
+        .await
+    }
+    /// Attach with the rotation capability as the identity probe established it: `Some` when the node answered
+    /// whether it rotates, `None` when only the legacy request answered and the probe could not tell (J262).
+    ///
+    /// Only a definite `Some(false)` abandons an open rotation (J252 P2). An unknown capability keeps the old
+    /// refusal while a rotation is open, so a transient probe failure costs one retried attach instead of an
+    /// abandoned rotation; with no rotation open it attaches as unsupported, which keeps the D166 gate closed.
+    /// # Errors
+    /// Returns fixed public errors, not database input or authentication data.
+    pub async fn attach_named_with_probed_capability(
+        &self,
+        host: &str,
+        key: PublicKey,
+        endpoint: Option<SocketAddr>,
+        server: bool,
+        reported: Option<&str>,
+        key_rotation: Option<bool>,
+    ) -> Result<(NodeId, bool), &'static str> {
+        let key_rotation_supported = key_rotation.unwrap_or(false);
         if server != (host == "server") {
             return Err("Mesh host identity invalid.");
         }
@@ -525,7 +1447,10 @@ impl Store {
         // The authenticated host is the sole selector; uniqueness refuses any
         // conflicting key without changing another node's grants [164,166,235].
         let existing = sqlx::query(
-            "SELECT id,name,name_source,public_key,endpoint,dataplane_host FROM mesh_nodes WHERE dataplane_host=?",
+            "SELECT n.id,n.name,n.name_source,n.public_key,n.endpoint,n.dataplane_host,n.key_rotation_supported,\
+                    r.rotation_phase,r.candidate_public_key,r.previous_public_key \
+             FROM mesh_nodes AS n LEFT JOIN mesh_node_key_rotation AS r ON r.node_id=n.id \
+             WHERE n.dataplane_host=?",
         )
         .bind(host)
         .fetch_optional(&mut *tx)
@@ -546,6 +1471,18 @@ impl Store {
             .map_err(|_| "Mesh storage unavailable.")?;
         let mut renamed = Vec::new();
         let id = if let Some(row) = existing {
+            let rotating = row
+                .try_get::<Option<String>, _>("rotation_phase")
+                .map_err(|_| "Mesh storage unavailable.")?
+                .is_some();
+            if rotating && key_rotation.is_none() {
+                return Err("Mesh key rotation is in progress.");
+            }
+            let public_key = Self::attached_public_key(&row, key, key_rotation_supported)?;
+            let abandoned = rotating && key_rotation == Some(false);
+            if abandoned {
+                abandon_rotation(&mut tx, row.get("id")).await?;
+            }
             // Temporary discovery absence is not an endpoint removal [166].
             // Keep the last known direct coordinate until an observed replacement arrives.
             let endpoint = endpoint.or_else(|| row.get::<Option<String>, _>("endpoint"));
@@ -568,9 +1505,11 @@ impl Store {
             }
             rename(&mut tx, &renamed).await?;
             if renamed.is_empty()
+                && !abandoned
                 && row.get::<Option<String>, _>("dataplane_host").as_deref() == Some(host)
-                && row.get::<Vec<u8>, _>("public_key") == key.0
+                && row.get::<Vec<u8>, _>("public_key") == public_key
                 && row.get::<Option<String>, _>("endpoint").as_deref() == endpoint.as_deref()
+                && row.get::<bool, _>("key_rotation_supported") == key_rotation_supported
             {
                 return Ok((
                     NodeId(u64::try_from(id).map_err(|_| "Mesh identity invalid.")?),
@@ -578,11 +1517,12 @@ impl Store {
                 ));
             }
             sqlx::query(
-                "UPDATE mesh_nodes SET public_key=?,endpoint=?,dataplane_host=? WHERE id=?",
+                "UPDATE mesh_nodes SET public_key=?,endpoint=?,dataplane_host=?,key_rotation_supported=? WHERE id=?",
             )
-            .bind(key.0.as_slice())
+            .bind(public_key)
             .bind(&endpoint)
             .bind(host)
+            .bind(key_rotation_supported)
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -595,7 +1535,7 @@ impl Store {
                 .ok_or("Mesh identity invalid.")?;
             renamed = naming.moved;
             rename(&mut tx, &renamed).await?;
-            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint) VALUES(?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
+            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint,key_rotation_supported) VALUES(?,?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).bind(key_rotation_supported).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
             high
         };
         let revision = sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
@@ -839,7 +1779,7 @@ impl Store {
             })
             .await
     }
-    // Keep one writer snapshot, allocation rebuild and public persistence boundary together.
+    /// Keep one writer snapshot, allocation rebuild and public persistence boundary together.
     async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await
@@ -966,6 +1906,15 @@ impl Store {
             state.origin_dns_suffix = Some(self.default_dns_suffix.clone());
             changed
         };
+        let rotation_period: i64 =
+            sqlx::query_scalar("SELECT rotation_period_secs FROM mesh_dataplane WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| storage_sql_error(error))?;
+        state.settings.rotation_period_secs = u64::try_from(rotation_period)
+            .ok()
+            .filter(|period| *period > 0)
+            .ok_or_else(|| storage_error("Mesh rotation period invalid."))?;
         if state.server != server {
             return Err(storage_error("Mesh server identity changed."));
         }
@@ -1044,8 +1993,131 @@ impl Store {
                 .add_arrow(arrow)
                 .map_err(|_| storage_error("Mesh rule invalid."))?;
         }
+        let mut rotations = BTreeMap::new();
+        for row in sqlx::query(
+            "SELECT r.node_id,n.public_key,r.candidate_public_key,r.previous_public_key,r.rotation_phase,r.operation_id,r.sequence,r.rotation_revision,r.rotation_started_at,r.rotation_boot_id,r.rotation_monotonic \
+             FROM mesh_node_key_rotation AS r JOIN mesh_nodes AS n ON n.id=r.node_id ORDER BY r.node_id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| storage_sql_error(error))?
+        {
+            let Some(phase) = row
+                .try_get::<Option<String>, _>("rotation_phase")
+                .map_err(|error| storage_sql_error(error))?
+            else {
+                continue;
+            };
+            let node = NodeId(
+                u64::try_from(
+                    row.try_get::<i64, _>("node_id")
+                        .map_err(|error| storage_sql_error(error))?,
+                )
+                .map_err(|_| storage_error("Mesh rotation node invalid."))?,
+            );
+            let current: Vec<u8> = row
+                .try_get("public_key")
+                .map_err(|error| storage_sql_error(error))?;
+            let candidate: Option<Vec<u8>> = row
+                .try_get("candidate_public_key")
+                .map_err(|error| storage_sql_error(error))?;
+            let candidate_key = candidate
+                .map(|key| {
+                    key.try_into()
+                        .map(PublicKey)
+                        .map_err(|_| storage_error("Mesh rotation candidate invalid."))
+                })
+                .transpose()?;
+            let previous: Option<Vec<u8>> = row
+                .try_get("previous_public_key")
+                .map_err(|error| storage_sql_error(error))?;
+            let previous_key = previous
+                .map(|key| {
+                    key.try_into()
+                        .map(PublicKey)
+                        .map_err(|_| storage_error("Mesh rotation key invalid."))
+                })
+                .transpose()?;
+            let phase = match phase.as_str() {
+                "preparing" if previous_key.is_none() && candidate_key.is_none() => RotationPhase::Preparing,
+                "overlap" if previous_key.is_some() && candidate_key.is_some() => RotationPhase::Overlap,
+                "retiring" if previous_key.is_some() && candidate_key.is_none() => RotationPhase::Retiring,
+                "cleanup" if previous_key.is_none() && candidate_key.is_none() => RotationPhase::Cleanup,
+                _ => return Err(storage_error("Mesh rotation state invalid.")),
+            };
+            if phase == RotationPhase::Overlap
+                && candidate_key.is_none_or(|candidate| current.as_slice() != candidate.0)
+            {
+                return Err(storage_error("Mesh rotation state invalid."));
+            }
+            let operation_id: String = row
+                .try_get("operation_id")
+                .map_err(|error| storage_sql_error(error))?;
+            uuid::Uuid::parse_str(&operation_id)
+                .map_err(|_| storage_error("Mesh rotation operation invalid."))?;
+            let sequence = u64::try_from(
+                row.try_get::<i64, _>("sequence")
+                    .map_err(|error| storage_sql_error(error))?,
+            )
+            .ok()
+            .filter(|sequence| *sequence > 0)
+            .ok_or_else(|| storage_error("Mesh rotation sequence invalid."))?;
+            let revision = row
+                .try_get::<Option<i64>, _>("rotation_revision")
+                .map_err(|error| storage_sql_error(error))?
+                .map(|revision| {
+                    u64::try_from(revision)
+                        .map_err(|_| storage_error("Mesh rotation revision invalid."))
+                })
+                .transpose()?;
+            let started_at: Option<i64> = row
+                .try_get("rotation_started_at")
+                .map_err(|error| storage_sql_error(error))?;
+            let boot_id: Option<String> = row
+                .try_get("rotation_boot_id")
+                .map_err(|error| storage_sql_error(error))?;
+            let monotonic: Option<i64> = row
+                .try_get("rotation_monotonic")
+                .map_err(|error| storage_sql_error(error))?;
+            if phase != RotationPhase::Preparing
+                && (revision.is_none() || started_at.is_none() || boot_id.is_none() || monotonic.is_none())
+            {
+                return Err(storage_error("Mesh rotation timing invalid."));
+            }
+            rotations.insert(
+                node,
+                RotationRecord {
+                    phase,
+                    candidate_key,
+                    previous_key,
+                    operation_id,
+                    sequence,
+                    revision,
+                    started_at,
+                    monotonic,
+                },
+            );
+        }
         let mut checkpoint = coordinator.checkpoint();
         checkpoint.allocation = state.allocation.clone();
+        for member in &mut checkpoint.members {
+            if let Some(rotation) = rotations.get(&member.node.id)
+                && matches!(
+                    rotation.phase,
+                    RotationPhase::Overlap | RotationPhase::Retiring
+                )
+            {
+                member.keys.previous = rotation.previous_key;
+                let started_at = rotation
+                    .started_at
+                    .ok_or_else(|| storage_error("Mesh rotation timing invalid."))?;
+                let deadline = started_at
+                    .checked_add(120)
+                    .and_then(|deadline| u64::try_from(deadline).ok())
+                    .ok_or_else(|| storage_error("Mesh rotation deadline invalid."))?;
+                member.retire_after = Some(deadline);
+            }
+        }
         coordinator = Coordinator::restore(checkpoint, &[])
             .map_err(|_| storage_error("Mesh allocation invalid."))?;
         let policy: Option<String> = sqlx::query_scalar::<_, Option<String>>(
@@ -1084,6 +2156,7 @@ impl Store {
             default,
             revision: u64::try_from(revision)
                 .map_err(|_| storage_error("Mesh revision invalid."))?,
+            rotations: std::sync::Arc::new(rotations),
             #[cfg(feature = "mesh-dns-spike")]
             dns_placeholders: std::sync::Arc::new(dns_placeholders),
         })

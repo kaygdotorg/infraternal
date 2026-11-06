@@ -92,7 +92,9 @@ fn current_credentials(
     let refreshed = renewal
         .map(crate::remote_renewal::RenewalIdentity::current)
         .transpose()?;
-    crate::remote_renewal::require_current(refreshed.as_ref().unwrap_or(&identity.identity))?;
+    if renewal.is_none() {
+        crate::remote_renewal::require_current(&identity.identity)?;
+    }
     Ok(refreshed)
 }
 
@@ -108,8 +110,7 @@ async fn connect(
     let enrolled_address = identity
         .endpoint
         .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
-    let refreshed = current_credentials(identity, renewal)?;
-    let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
+    let mut refreshed = current_credentials(identity, renewal)?;
     let driver = DialRuntime::new();
     let path = PathSocket::from_udp(
         std::net::UdpSocket::bind(if enrolled_address.is_ipv6() {
@@ -129,15 +130,41 @@ async fn connect(
         path.clone(),
         driver.runtime(),
     )?;
-    endpoint.set_default_client_config(remote_quic::client_config(credentials, &identity.roots)?);
-    let connected = if kind == ServerLinkKind::Mesh {
-        // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
-        // proof below completes before any Hello can replace the server actor.
-        // The shared dial already owns the five-second handshake deadline.
-        Connected::Quic(super::quic_connect(&endpoint, identity).await?)
-    } else {
-        let tls = remote_tls::client_config(credentials, &identity.roots)?;
-        dial_preferred(&endpoint, identity, &tls).await?
+    let mut recovery_attempted = false;
+    let connected = loop {
+        let credentials = refreshed.as_ref().unwrap_or(&identity.identity);
+        endpoint
+            .set_default_client_config(remote_quic::client_config(credentials, &identity.roots)?);
+        let attempt = if kind == ServerLinkKind::Mesh {
+            // Mutual TLS keeps the enrolled SAN and identity unchanged. Application
+            // proof below completes before any Hello can replace the server actor.
+            // The shared dial already owns the five-second handshake deadline.
+            super::quic_connect(&endpoint, identity)
+                .await
+                .map(Connected::Quic)
+        } else {
+            let tls = remote_tls::client_config(credentials, &identity.roots)?;
+            dial_preferred(&endpoint, identity, &tls).await
+        };
+        match attempt {
+            Ok(connection) => break connection,
+            Err(error)
+                if error.kind() == io::ErrorKind::PermissionDenied
+                    && !recovery_attempted
+                    && let Some(renewal) = renewal =>
+            {
+                recovery_attempted = true;
+                if renewal
+                    .recover(enrolled_address, &identity.server_name)
+                    .await
+                    .is_err()
+                {
+                    return Err(error);
+                }
+                refreshed = current_credentials(identity, Some(renewal))?;
+            }
+            Err(error) => return Err(error),
+        }
     };
     let (endpoint, driver, path) = if matches!(&connected, Connected::Tcp(_)) {
         drop(endpoint);
@@ -173,6 +200,78 @@ async fn connect(
         link.proof = Some(proof);
     }
     Ok(link)
+}
+
+/// Whether the server refused this host's TLS identity, directly or as a QUIC TLS alert under a stream error.
+/// Only that refusal falls back to the pending predecessor identity.
+fn identity_admission_refused(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    let Some(source) = error.get_ref() else {
+        return false;
+    };
+    if let Some(connection) = source.downcast_ref::<quinn::ConnectionError>() {
+        return connection_refused_by_tls(connection);
+    }
+    if let Some(read) = source.downcast_ref::<quinn::ReadError>() {
+        return matches!(read, quinn::ReadError::ConnectionLost(error) if connection_refused_by_tls(error));
+    }
+    if let Some(write) = source.downcast_ref::<quinn::WriteError>() {
+        return matches!(write, quinn::WriteError::ConnectionLost(error) if connection_refused_by_tls(error));
+    }
+    source
+        .downcast_ref::<io::Error>()
+        .is_some_and(identity_admission_refused)
+}
+
+/// Whether a QUIC connection ended with a TLS alert code.
+fn connection_refused_by_tls(error: &quinn::ConnectionError) -> bool {
+    match error {
+        quinn::ConnectionError::TransportError(error) => is_tls_crypto_error(error.code),
+        quinn::ConnectionError::ConnectionClosed(error) => is_tls_crypto_error(error.error_code),
+        _ => false,
+    }
+}
+
+/// QUIC reserves 0x100–0x1ff for TLS alert codes; other close codes can be
+/// network, application, or protocol failures and must not trigger identity fallback.
+fn is_tls_crypto_error(code: quinn::TransportErrorCode) -> bool {
+    (0x100..0x200).contains(&u64::from(code))
+}
+
+/// Retry a refused candidate once with its durable predecessor, without demoting it.
+async fn connect_with_predecessor_fallback(
+    identity: &RemoteIdentity,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    address: SocketAddr,
+    kind: ServerLinkKind,
+    prove: bool,
+) -> io::Result<Link> {
+    match connect(identity, renewal, address, kind, prove).await {
+        Ok(link) => Ok(link),
+        Err(candidate_error) if identity_admission_refused(&candidate_error) => {
+            let Some(renewal) = renewal else {
+                return Err(candidate_error);
+            };
+            let Some(predecessor) = renewal.predecessor_for()? else {
+                return Err(candidate_error);
+            };
+            let predecessor_identity = RemoteIdentity {
+                host_id: identity.host_id,
+                identity: predecessor,
+                roots: identity.roots.clone(),
+                endpoint: identity.endpoint,
+                server_name: identity.server_name.clone(),
+                public_origin: identity.public_origin.clone(),
+                https_root: identity.https_root.clone(),
+                https_system_roots: identity.https_system_roots,
+                execution_uid: identity.execution_uid,
+            };
+            connect(&predecessor_identity, None, address, kind, prove).await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn prove_channel<C: Channel>(
@@ -686,7 +785,7 @@ async fn available(
     let mut paths = registry.server_paths();
     let proposed = *paths.borrow_and_update();
     let Some(ip) = proposed.filter(|_| !force_fallback) else {
-        return connect(
+        return connect_with_predecessor_fallback(
             identity,
             renewal,
             enrolled_address,
@@ -695,7 +794,7 @@ async fn available(
         )
         .await;
     };
-    let mesh = connect(
+    let mesh = connect_with_predecessor_fallback(
         identity,
         renewal,
         SocketAddr::new(ip, enrolled_address.port()),
@@ -704,7 +803,7 @@ async fn available(
     );
     let fallback = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        connect(
+        connect_with_predecessor_fallback(
             identity,
             renewal,
             enrolled_address,
@@ -721,7 +820,7 @@ async fn available(
     }
 }
 
-// Keep pinned-session retirement and reconnect accounting in the same owning scope.
+/// Keep pinned-session retirement and reconnect accounting in the same owning scope.
 pub(super) async fn run(
     identity: &RemoteIdentity,
     state: PathBuf,
@@ -729,7 +828,7 @@ pub(super) async fn run(
     registry: crate::plugin_control::Registry,
     connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
-    run_observed(
+    Box::pin(run_observed(
         identity,
         state,
         renewal,
@@ -737,7 +836,7 @@ pub(super) async fn run(
         connected,
         #[cfg(any(test, feature = "native-streams"))]
         None,
-    )
+    ))
     .await
 }
 

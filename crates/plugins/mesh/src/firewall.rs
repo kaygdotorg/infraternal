@@ -629,6 +629,7 @@ fn render_connection_checks(script: &mut String, config: &Config) {
     }
 }
 
+/// Firewall compilation and ownership checks.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -667,6 +668,7 @@ mod tests {
         assert!(!removes_only_permissions(&old, &changed));
     }
 
+    /// A two-peer configuration with stable test addresses.
     fn config() -> Config {
         let address = |id: u32| Addresses {
             ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + id),
@@ -691,6 +693,8 @@ mod tests {
                         PeerPolicy {
                             peer: Peer {
                                 key: PublicKey([1; 32]),
+                                previous_key: None,
+                                previous_active: false,
                                 addresses: address(id),
                                 endpoint: None,
                             },

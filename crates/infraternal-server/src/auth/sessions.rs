@@ -19,7 +19,12 @@ pub struct Session {
     #[serde(skip)]
     pub(crate) owner: bool,
 }
-/// Pending recovery discloses an estimated deadline, including after bearer expiry.
+/// Publicly safe absolute cookie deadline and ordering value for one live session row.
+pub(super) struct CookieState {
+    pub login_sequence: i64,
+    pub expires: i64,
+}
+/// Pending recovery discloses only its original deadline, including after bearer expiry.
 #[derive(Serialize)]
 pub struct RecoveryPending {
     pub ready_at: i64,
@@ -97,6 +102,23 @@ impl Auth {
         })
     }
 
+    /// Read the live row's cookie deadline after an authenticated action has succeeded.
+    /// The session read remains the only expiry write; this indexed lookup only returns the
+    /// committed deadline needed for the persistent cookie's absolute Expires attribute.
+    pub(super) async fn cookie_state(&self, token: &str, now: i64) -> Result<Option<CookieState>> {
+        let row = sqlx::query(
+            "SELECT login_sequence,expires FROM sessions WHERE token_hash=? AND expires>?",
+        )
+        .bind(hash(token))
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| CookieState {
+            login_sequence: row.get("login_sequence"),
+            expires: row.get("expires"),
+        }))
+    }
+
     /// Activate only a still-live pending cookie after the browser confirms successful unwrap.
     /// The server never receives the plaintext DEK; this is a client completion signal.
     pub async fn unlock_finish(&self, token: &str, transaction: &str, now: i64) -> Result<()> {
@@ -131,9 +153,67 @@ impl Auth {
         Ok(session)
     }
 
+    /// Revoke the presented bearers that belong to the signed-in account, and no others (#285).
+    ///
+    /// The account is the owner of the selected (newest) session cookie. If that bearer no longer
+    /// resolves (a replayed logout, or a session revoked meanwhile), the browser is already logged
+    /// out and nothing is deleted: the remaining bearers may belong to someone else. Only when no
+    /// cookie is selected (an ambiguous ordering) is the account the one that all live presented
+    /// bearers share; bearers of more than one account then refuse the logout with nothing deleted.
+    /// A browser may hold another account's cookie, and logging out here must never end that session.
+    pub async fn logout_presented(&self, selected: Option<&str>, tokens: &[&str]) -> Result<()> {
+        let Some(account) = self.logout_account(selected, tokens).await? else {
+            return Ok(());
+        };
+        for token in tokens {
+            self.revoke_session(token, Some(&account)).await?;
+        }
+        Ok(())
+    }
+
+    /// The account a logout acts for, or `None` when its selected bearer is already gone; see
+    /// `logout_presented`.
+    async fn logout_account(
+        &self,
+        selected: Option<&str>,
+        tokens: &[&str],
+    ) -> Result<Option<String>> {
+        if let Some(selected) = selected {
+            // Never infer an account from the other bearers once a cookie was selected (#285).
+            return Ok(sqlx::query_scalar::<_, String>(
+                "SELECT user_id FROM sessions WHERE token_hash=?",
+            )
+            .bind(hash(selected))
+            .fetch_optional(&self.pool)
+            .await?);
+        }
+        let mut owners = Vec::new();
+        for token in tokens {
+            if let Some(user) =
+                sqlx::query_scalar::<_, String>("SELECT user_id FROM sessions WHERE token_hash=?")
+                    .bind(hash(token))
+                    .fetch_optional(&self.pool)
+                    .await?
+                && !owners.contains(&user)
+            {
+                owners.push(user);
+            }
+        }
+        match owners.as_slice() {
+            [only] => Ok(Some(only.clone())),
+            _ => Err(Error::Denied),
+        }
+    }
+
     /// Revoke the current session immediately.
     pub async fn logout(&self, token: &str) -> Result<()> {
+        self.revoke_session(token, None).await
+    }
+
+    /// Delete one session by bearer, only within `account` when given, and publish the revocation.
+    async fn revoke_session(&self, token: &str, account: Option<&str>) -> Result<()> {
         let session_hash = hash(token);
+        let account = account.map(str::to_owned);
         let revocations = self.revocations.clone();
         // Pool waiters remain cancellable. Only work that already owns a connection
         // is detached, so the pool also bounds unfinished logout tasks.
@@ -146,11 +226,13 @@ impl Auth {
         super::committed::run(Box::pin(async move {
             // Keep connection ownership through publication. Returning it to the pool
             // also fences the notification, even after the requesting future is gone.
-            let mut users: Vec<String> =
-                sqlx::query_scalar("DELETE FROM sessions WHERE token_hash=? RETURNING user_id")
-                    .bind(&session_hash)
-                    .fetch_all(&mut *connection)
-                    .await?;
+            let mut users: Vec<String> = sqlx::query_scalar(
+                "DELETE FROM sessions WHERE token_hash=? AND (?2 IS NULL OR user_id=?2) RETURNING user_id",
+            )
+            .bind(&session_hash)
+            .bind(&account)
+            .fetch_all(&mut *connection)
+            .await?;
             if let Some(user) = users.pop() {
                 revocations.publish(&user, Some(session_hash));
             }
@@ -255,6 +337,7 @@ pub(crate) async fn require_live_session_tx(
     Ok(())
 }
 
+/// Insert a session row with its login sequence inside the caller's transaction.
 pub(super) async fn insert_session(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     token: &str,
@@ -263,13 +346,19 @@ pub(super) async fn insert_session(
     now: i64,
     passkey_id: Option<&str>,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,passkey_id) VALUES (?,?,?,?,?,?)")
+    let login_sequence: i64 = sqlx::query_scalar(
+        "UPDATE session_login_sequence SET value=value+1 WHERE singleton=1 AND value<9223372036854775807 RETURNING value",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,passkey_id,login_sequence) VALUES (?,?,?,?,?,?,?)")
         .bind(hash(token))
         .bind(user)
         .bind(device)
         .bind(now + SESSION)
         .bind(now)
         .bind(passkey_id)
+        .bind(login_sequence)
         .execute(&mut **tx)
         .await?;
     Ok(())

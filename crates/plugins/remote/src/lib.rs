@@ -15,6 +15,9 @@ use infraternal_plugin_api::{
 pub mod agent_link;
 #[cfg(feature = "transport")]
 pub mod enrollment;
+/// Server-challenged host identity-key rotation proof and bounded wire types [285].
+#[cfg(feature = "transport")]
+pub mod identity_rotation;
 #[cfg(feature = "transport")]
 pub mod remote_bindings;
 #[cfg(feature = "transport")]
@@ -29,6 +32,9 @@ pub mod remote_path_socket;
 mod remote_peer_routes;
 #[cfg(feature = "transport")]
 pub mod remote_quic;
+/// Certificate recovery for an expired host identity, client side (#285).
+#[cfg(feature = "transport")]
+pub mod remote_recovery;
 #[cfg(feature = "transport")]
 pub mod remote_renewal;
 #[cfg(feature = "transport")]

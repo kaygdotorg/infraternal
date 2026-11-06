@@ -70,6 +70,7 @@ pub struct RenewalIdentity {
     identity: Arc<RwLock<Identity>>,
     roots: Vec<X509>,
     publisher: Arc<dyn CertificatePublisher>,
+    rotation: Option<crate::identity_rotation::IdentityRotation>,
 }
 impl RenewalIdentity {
     /// Retain the host key, public pins and the installation publication adapter.
@@ -86,7 +87,39 @@ impl RenewalIdentity {
             })),
             roots: roots.to_vec(),
             publisher,
+            rotation: None,
         }
+    }
+    /// Enable rotation only when the installation supplies durable private-state publication.
+    /// # Errors
+    /// Refuses malformed or inconsistent pending rotation state.
+    pub fn enable_identity_rotation(
+        &mut self,
+        publisher: Arc<dyn crate::identity_rotation::RotationPublisher>,
+    ) -> io::Result<()> {
+        let predecessor = self.current()?;
+        let (rotation, current) =
+            crate::identity_rotation::IdentityRotation::new(&predecessor, &self.roots, publisher)?;
+        *self.identity.write().map_err(|_| denied())? = current;
+        self.rotation = Some(rotation);
+        Ok(())
+    }
+
+    /// Whether the installed host can durably stage and acknowledge a candidate key.
+    #[must_use]
+    pub fn supports_identity_rotation(&self) -> bool {
+        self.rotation
+            .as_ref()
+            .is_some_and(crate::identity_rotation::IdentityRotation::supports_rotation)
+    }
+    /// Return the retained predecessor only while an unacknowledged candidate is active.
+    /// # Errors
+    /// Refuses poisoned or concurrently publishing identity state.
+    pub fn predecessor_for(&self) -> io::Result<Option<Identity>> {
+        let Some(rotation) = &self.rotation else {
+            return Ok(None);
+        };
+        rotation.predecessor_for(&self.current()?)
     }
     /// Snapshot the current acknowledged leaf without exposing the key to the peer.
     /// # Errors
@@ -104,6 +137,42 @@ impl RenewalIdentity {
             key: identity.key.clone(),
         })
     }
+    /// Recover an expired certificate without presenting it to the normal mTLS listener.
+    /// The response is checked against pinned roots and published before reconnect can use it.
+    /// # Errors
+    /// Refuses unavailable or denied recovery, invalid certificate metadata, changed identity,
+    /// transport failure, or failed durable publication.
+    pub async fn recover(
+        &self,
+        address: std::net::SocketAddr,
+        server_name: &str,
+    ) -> io::Result<()> {
+        let current = self.current()?;
+        let certificate =
+            crate::remote_recovery::exchange(address, server_name, &current, &self.roots).await?;
+        let verify_at = epoch_seconds(certificate.not_before())?;
+        let mut identity = self.identity.try_write().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),
+            std::sync::TryLockError::Poisoned(_) => denied(),
+        })?;
+        if identity
+            .certificate
+            .digest(MessageDigest::sha256())
+            .map_err(|_| denied())?
+            .as_ref()
+            != current
+                .certificate
+                .digest(MessageDigest::sha256())
+                .map_err(|_| denied())?
+                .as_ref()
+        {
+            return Err(denied());
+        }
+        validate_at(&certificate, &identity, &self.roots, Some(verify_at), true)?;
+        self.publisher.publish(&certificate)?;
+        identity.certificate = certificate;
+        Ok(())
+    }
     /// Only the pinned server can invoke these two control actions.
     /// # Errors
     /// Malformed/oversized input, altered host/key, invalid issuer/purpose/validity or failed publication.
@@ -111,13 +180,25 @@ impl RenewalIdentity {
         if input.len() > MAX_RENEWAL_JSON {
             return Err(denied());
         }
+        if matches!(
+            action,
+            "transport.csr.rotate"
+                | "transport.identity.rotate.certificate"
+                | "transport.identity.rotate.ack"
+        ) {
+            return self.rotation.as_ref().ok_or_else(denied)?.action(
+                &self.identity,
+                action,
+                input,
+            );
+        }
         match action {
             "transport.csr" => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]
                 struct Empty {}
                 serde_json::from_slice::<Empty>(input).map_err(|_| denied())?;
-                let identity = self.identity.read().map_err(|_| denied())?;
+                let identity = self.current()?;
                 let mut request = X509Req::builder().map_err(|_| denied())?;
                 request
                     .set_subject_name(&X509NameBuilder::new().map_err(|_| denied())?.build())
@@ -143,6 +224,9 @@ impl RenewalIdentity {
                 // A failed fsync/rename leaves process authority unchanged.
                 self.publisher.publish(&certificate)?;
                 identity.certificate = certificate;
+                if let Some(rotation) = &self.rotation {
+                    rotation.renewed_certificate(&identity.certificate)?;
+                }
                 Ok(b"{}".to_vec())
             }
             _ => Err(denied()),
@@ -150,7 +234,20 @@ impl RenewalIdentity {
     }
 }
 
+/// Verify a renewed certificate chain now.
 fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Result<()> {
+    validate_at(certificate, identity, roots, None, false)
+}
+
+/// Verify a certificate chain at `verify_at` (now when absent). When recovering, the new certificate must also not
+/// start before the expired one ended.
+fn validate_at(
+    certificate: &X509,
+    identity: &Identity,
+    roots: &[X509],
+    verify_at: Option<i64>,
+    recovering: bool,
+) -> io::Result<()> {
     let mut trust = X509StoreBuilder::new().map_err(|_| denied())?;
     for issuer in roots {
         trust.add_cert(issuer.clone()).map_err(|_| denied())?;
@@ -158,6 +255,11 @@ fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Resu
     trust
         .set_purpose(openssl::x509::X509PurposeId::SSL_CLIENT)
         .map_err(|_| denied())?;
+    if let Some(verify_at) = verify_at {
+        let mut parameters = openssl::x509::verify::X509VerifyParam::new().map_err(|_| denied())?;
+        parameters.set_time(verify_at);
+        trust.set_param(&parameters).map_err(|_| denied())?;
+    }
     let chain = openssl::stack::Stack::new().map_err(|_| denied())?;
     if !X509StoreContext::new()
         .map_err(|_| denied())?
@@ -186,10 +288,21 @@ fn validate(certificate: &X509, identity: &Identity, roots: &[X509]) -> io::Resu
             .secs
             != 0
         || certificate.not_after() <= identity.certificate.not_after()
+        || (recovering && certificate.not_before() < identity.certificate.not_after())
     {
         return Err(denied());
     }
     Ok(())
+}
+
+/// Seconds since the Unix epoch for an ASN.1 time.
+fn epoch_seconds(time: &openssl::asn1::Asn1TimeRef) -> io::Result<i64> {
+    let epoch = Asn1Time::from_unix(0).map_err(|_| denied())?;
+    let difference = epoch.diff(time).map_err(|_| denied())?;
+    i64::from(difference.days)
+        .checked_mul(86_400)
+        .and_then(|days| days.checked_add(i64::from(difference.secs)))
+        .ok_or_else(denied)
 }
 fn host_uri(certificate: &X509) -> io::Result<String> {
     let names = certificate.subject_alt_names().ok_or_else(denied)?;
@@ -214,9 +327,18 @@ fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
 
+/// Renewal validation and time conversion checks.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ASN.1 times convert to Unix seconds counted from the epoch.
+    #[test]
+    fn unix_time_conversion_uses_time_after_epoch() {
+        let expected = 1_900_000_000;
+        let time = Asn1Time::from_unix(expected).unwrap();
+        assert_eq!(epoch_seconds(time.as_ref()).unwrap(), expected);
+    }
 
     struct Publisher;
     impl CertificatePublisher for Publisher {

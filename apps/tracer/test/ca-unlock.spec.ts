@@ -16,8 +16,9 @@ mkdirSync(CAPTURES, { recursive: true });
 const LABEL = "Unlock host connections";
 const SETTINGS_ROW = '.ui-sp [data-kind="host-connections"]';
 
-async function open(page: Page, query: string): Promise<void> {
-  await page.goto(`/?mock=1&proto=clusters&scene=${query.includes("role=") ? 5 : 3}&theme=ink&${query}`);
+/** Open the mock canvas with the given query and theme, and wait for it to render. */
+async function open(page: Page, query: string, theme: "ink" | "paper" = "ink"): Promise<void> {
+  await page.goto(`/?mock=1&proto=clusters&scene=${query.includes("role=") ? 5 : 3}&theme=${theme}&${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   // The state is learned shortly after the first paint.
   await page.waitForTimeout(1800);
@@ -100,6 +101,110 @@ test("a viewer who is not an administrator sees the state and no button", async 
   await expect(row).toContainText("Locked until an administrator confirms with a passkey");
   await expect(row.locator("button")).toHaveAttribute("data-shown", "false");
   await expect(row.locator("button")).toHaveAttribute("inert", "");
+});
+
+for (const [warning, expected] of [
+  ["365d", "CA expires: 365 days"],
+  ["90d", "CA expires: 90 days"],
+  ["30d", "CA expires: 30 days"],
+  ["7d", "CA expires: 7 days"],
+  ["expired", "CA root expired"],
+  ["unknown", "CA expiry unknown"],
+] as const) {
+  test(`CA expiry warning ${warning} appears in Settings and the administrator Inbox`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+    const page = await context.newPage();
+    await open(page, `ca=warning-${warning}`);
+    await page.locator("#sidebar-toggle").click();
+    const inbox = page.locator(".ui-inbox:not([hidden])");
+    await expect(inbox).toContainText("Inbox", { timeout: 5000 });
+    const warningRow = inbox.getByRole("button", { name: expected });
+    await expect(warningRow).toBeVisible();
+    const inboxAlignment = await warningRow.evaluate((row) => {
+      const icon = row.querySelector<HTMLElement>(".ui-inbox-glyph")!.getBoundingClientRect();
+      const title = row.querySelector<HTMLElement>(".ui-inbox-title")!.getBoundingClientRect();
+      return Math.abs((icon.top + icon.height / 2) - (title.top + title.height / 2));
+    });
+    expect(inboxAlignment).toBeLessThanOrEqual(0.5);
+    await warningRow.click();
+    const body = inbox.locator(".ui-inbox-body");
+    const contentFits = await warningRow.evaluate((row) => {
+      const title = row.querySelector<HTMLElement>(".ui-inbox-title")!;
+      const details = row.parentElement!.querySelector<HTMLElement>(".ui-inbox-body")!;
+      return {
+        title: title.scrollWidth <= title.clientWidth,
+        details: details.scrollWidth <= details.clientWidth,
+      };
+    });
+    expect(contentFits).toEqual({ title: true, details: true });
+    await expect(body).toContainText("Settings → Hosts");
+    if (warning === "unknown") await expect(body).toContainText("Check server time");
+    if (warning === "30d") {
+      await page.screenshot({ path: resolve(CAPTURES, "expiry-warning-inbox.png"), scale: "device" });
+    }
+    await inbox.getByRole("button", { name: "Review", exact: true }).click();
+    const row = page.locator(SETTINGS_ROW);
+    await expect(row).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as unknown as {
+      __tracerClusters?: { activeWindow(): string | undefined };
+    }).__tracerClusters?.activeWindow())).toBe("s-hosts");
+    await expect(row).toBeInViewport({ ratio: 0.5 });
+    await expect(row).toContainText(expected);
+    const settingsAlignment = await page.evaluate(() => {
+      const details = document.querySelector<HTMLElement>('.ui-sp [data-kind="extended-info"] .ui-sp-label')!.getBoundingClientRect();
+      const authority = document.querySelector<HTMLElement>('.ui-sp [data-kind="host-connections"] .ui-sp-label')!.getBoundingClientRect();
+      return Math.abs(details.left - authority.left);
+    });
+    expect(settingsAlignment).toBeLessThanOrEqual(0.5);
+    if (warning === "30d") {
+      await page.screenshot({ path: resolve(CAPTURES, "expiry-warning-settings.png"), scale: "device" });
+    }
+    await context.close();
+  });
+}
+
+test("CA root expiry warning stays readable in the phone Inbox", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  await open(page, "ca=warning-7d", "paper");
+  await page.locator("#sidebar-toggle").click();
+  const inbox = page.locator(".ui-inbox:not([hidden])");
+  const warningRow = inbox.getByRole("button", { name: "CA expires: 7 days" });
+  await expect(warningRow).toBeVisible();
+  const alignment = await warningRow.evaluate((row) => {
+    const icon = row.querySelector<HTMLElement>(".ui-inbox-glyph")!.getBoundingClientRect();
+    const title = row.querySelector<HTMLElement>(".ui-inbox-title")!.getBoundingClientRect();
+    return Math.abs((icon.top + icon.height / 2) - (title.top + title.height / 2));
+  });
+  expect(alignment).toBeLessThanOrEqual(0.5);
+  await warningRow.click();
+  await expect(inbox.locator(".ui-inbox-body")).toContainText("Settings → Hosts");
+  await expect(inbox.getByRole("button", { name: "Review", exact: true })).toBeInViewport();
+  await page.screenshot({ path: resolve(CAPTURES, "expiry-warning-phone-inbox.png"), scale: "device" });
+  await context.close();
+});
+
+test("CA expiry Inbox actions stay visible on a short phone screen", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 375, height: 667 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  await open(page, "ca=warning-30d", "paper");
+  await page.locator("#sidebar-toggle").click();
+  const inbox = page.locator(".ui-inbox:not([hidden])");
+  const warningRow = inbox.getByRole("button", { name: "CA expires: 30 days" });
+  await expect(warningRow).toBeVisible();
+  await warningRow.click();
+  await expect(inbox.locator(".ui-inbox-body")).toContainText("Settings → Hosts");
+  await expect(inbox.getByRole("button", { name: "Review", exact: true })).toBeInViewport();
+  await context.close();
+});
+
+test("CA expiry warnings are hidden from viewers", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "ca=warning-30d&role=viewer");
+  // sleep: the authority status check runs 1.2 s after load, and an absence can only be shown after it.
+  await page.waitForTimeout(1800);
+  await expect(page.locator("body")).not.toContainText("CA expires:");
+  await expect(page.locator(".ui-inbox:not([hidden])")).toHaveCount(0);
 });
 
 test("the inbox line is collapsed, expands to Unlock, and unlocking clears the card", async ({ page }) => {

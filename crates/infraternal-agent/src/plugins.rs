@@ -460,10 +460,13 @@ mod proxy_mesh_context_tests {
         net::Ipv4Addr,
     };
 
+    /// A test peer `id` at `ipv4` with the given policies.
     fn peer(id: u8, ipv4: Ipv4Addr, inbound: TrafficPolicy, outbound: TrafficPolicy) -> PeerPolicy {
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([id; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4,
                     ipv6: format!("fd00::{id:x}").parse().expect("IPv6 mesh address"),

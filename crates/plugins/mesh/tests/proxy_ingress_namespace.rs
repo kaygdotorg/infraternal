@@ -65,12 +65,15 @@ fn tcp(numbers: &[u16]) -> TrafficPolicy {
     )
 }
 
+/// A test peer `id` with the given inbound policy.
 fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
     (
         NodeId(u64::from(id)),
         PeerPolicy {
             peer: Peer {
                 key: PublicKey([id; 32]),
+                previous_key: None,
+                previous_active: false,
                 addresses: Addresses {
                     ipv4: format!("10.254.0.{id}").parse().unwrap(),
                     ipv6: format!("fd01::{id}").parse().unwrap(),

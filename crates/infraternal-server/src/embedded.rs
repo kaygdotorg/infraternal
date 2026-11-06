@@ -492,6 +492,20 @@ impl EmbeddedAgent {
         .map_err(|_| AgentError::Unavailable)?
     }
 
+    /// Close the old identity stream after its candidate certificate was durably acknowledged.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retire_connection(&self) -> Result<(), AgentError> {
+        let (reply, retired) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            self.commands
+                .send(Command::RetireConnection(reply))
+                .await
+                .map_err(|_| AgentError::Unavailable)?;
+            retired.await.map_err(|_| AgentError::Unavailable)
+        })
+        .await
+        .map_err(|_| AgentError::Unavailable)?
+    }
     /// Open a terminal on the embedded infraternal agent's host (legacy fixtures).
     #[cfg_attr(not(test), allow(dead_code))]
     pub async fn open(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
@@ -720,6 +734,7 @@ struct PersonLogin {
     grant: LoginGrant,
 }
 
+/// A request to the embedded agent actor, answered on its own reply channel.
 enum Command {
     #[cfg(all(feature = "remote", feature = "ssh"))]
     InstalledRoute(oneshot::Sender<bool>),
@@ -744,6 +759,8 @@ enum Command {
         json: Vec<u8>,
         reply: oneshot::Sender<Result<Vec<u8>, AgentError>>,
     },
+    #[cfg(feature = "remote")]
+    RetireConnection(oneshot::Sender<()>),
     Open {
         size: TerminalSize,
         login: Option<PersonLogin>,
@@ -1917,7 +1934,7 @@ fn retain_owned_input(
     Some(true)
 }
 
-// The command variants mutate one shared route table in one bounded actor turn.
+/// The command variants mutate one shared route table in one bounded actor turn.
 async fn process_command(
     command: Command,
     connection: &mut AgentConnection,
@@ -1991,7 +2008,18 @@ async fn process_command(
             if reply.is_closed() {
                 return true;
             }
-            if !matches!(&connection.peer, Peer::Remote(link) if link.supports_renewal()) {
+            let supported = match action {
+                "transport.csr" | "transport.certificate" => {
+                    matches!(&connection.peer, Peer::Remote(link) if link.supports_renewal())
+                }
+                "transport.csr.rotate"
+                | "transport.identity.rotate.certificate"
+                | "transport.identity.rotate.ack" => {
+                    matches!(&connection.peer, Peer::Remote(link) if link.supports_identity_rotation())
+                }
+                _ => false,
+            };
+            if !supported {
                 let _ = reply.send(Err(AgentError::Unsupported));
                 return true;
             }
@@ -2019,6 +2047,14 @@ async fn process_command(
             }
             pending.insert(call_id, PendingCall::Control(reply));
             true
+        }
+        #[cfg(feature = "remote")]
+        Command::RetireConnection(reply) => {
+            if let Peer::Remote(remote) = &connection.peer {
+                remote.retire();
+            }
+            let _ = reply.send(());
+            false
         }
         Command::Open {
             size,

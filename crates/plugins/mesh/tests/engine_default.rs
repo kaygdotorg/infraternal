@@ -111,7 +111,7 @@ const PIN_CHILD: &str = "INFRATERNAL_ENGINE_PIN_CHILD";
 /// Child half, run with `INFRATERNAL_MESH_ENGINE=gotatun`: restore with kernel chosen in code.
 /// Exit 0 when kernel runs, 1 when `GotaTun` runs, 2 on an error.
 #[test]
-#[ignore = "Child-only fixture for the engine precedence proof."]
+#[ignore = "Child-only fixture: started by the engine precedence proof; does nothing alone."]
 fn explicit_engine_child() {
     if std::env::var_os(PIN_CHILD).is_none() {
         return;
@@ -165,7 +165,7 @@ const DEFAULT_PATH_CHILD: &str = "INFRATERNAL_ENGINE_DEFAULT_PATH_CHILD";
 /// Child half, run with `INFRATERNAL_MESH_ENGINE=kernel`: bring up a node that was not restored.
 /// Exit 0 when `GotaTun` runs, 1 when kernel runs, 2 on an error.
 #[test]
-#[ignore = "Child-only fixture for the engine environment scope proof."]
+#[ignore = "Child-only fixture: started by the engine environment scope proof; does nothing alone."]
 fn default_path_child() {
     if std::env::var_os(DEFAULT_PATH_CHILD).is_none() {
         return;

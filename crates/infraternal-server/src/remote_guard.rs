@@ -378,6 +378,10 @@ impl AuthorityGuard {
     pub(crate) fn store(&self) -> EnrollmentStore {
         self.store.clone()
     }
+    /// The admitted host's ID.
+    pub(crate) fn host_id(&self) -> Uuid {
+        self.identity.host
+    }
     pub(crate) fn predecessor(&self) -> [u8; 32] {
         self.certificate.borrow().fingerprint
     }

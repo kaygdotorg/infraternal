@@ -41,11 +41,20 @@ export interface SettingsSource {
 function authorityPref(control: AuthorityControl): StatusActionPref {
   return {
     id: "host-connections", title: "Host connections",
-    text: () => control.state() === "unknown" ? undefined
-      : control.state() === "unlocked" ? "Unlocked"
-      : "Locked until an administrator confirms with a passkey",
-    action: () => control.state() === "locked" && control.canUnlock() ? "Unlock" : undefined,
-    act: () => { void control.unlock(); },
+    text: () => {
+      const state = control.state();
+      const warnings = control.expiryWarnings();
+      if (state === "unknown" && warnings.length === 0) return undefined;
+      const lock = state === "locked" ? "Locked until an administrator confirms with a passkey"
+        : state === "unlocked" ? "Unlocked" : "Host connection lock state unknown";
+      return [lock, ...warnings].join(" · ");
+    },
+    action: () => control.state() === "locked" && control.canUnlock() ? "Unlock"
+      : control.expiryWarnings().length ? "Review" : undefined,
+    act: () => {
+      if (control.state() === "locked" && control.canUnlock()) void control.unlock();
+      else control.review();
+    },
     refresh: () => { void control.refresh(); },
     onChange: (listener) => control.onChange(listener),
   };

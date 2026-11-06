@@ -49,7 +49,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     }, exited: (status) => {
       const setupPending = rec.setup?.isPending() ?? false;
       if (shouldCloseWindowAfterExit(status, setupPending)) cx.win.close(rec);
-    }, refused: (message) => cx.sessionUi?.refused(rec, message) ?? false });
+    }, refused: (message, action) => cx.sessionUi?.refused(rec, message, action) ?? false, unreachable: (message) => cx.sessionUi?.unreachable(rec, message) });
     rec.binding = binding;
     if (binding.connected === false) paintLink(rec, false, undefined);
     binding.mount(body);

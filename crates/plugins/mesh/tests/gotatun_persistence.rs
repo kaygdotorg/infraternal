@@ -102,6 +102,8 @@ fn snapshot(local: (u32, PublicKey), peer: (u32, PublicKey), endpoint: SocketAdd
             PeerPolicy {
                 peer: Peer {
                     key: peer.1,
+                    previous_key: None,
+                    previous_active: false,
                     addresses: addresses(peer.0),
                     endpoint: Some(endpoint),
                 },

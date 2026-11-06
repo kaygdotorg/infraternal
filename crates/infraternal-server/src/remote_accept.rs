@@ -66,8 +66,7 @@ fn remember(known: &Mutex<HashSet<IpAddr>>, address: IpAddr) {
         known.insert(address);
     }
 }
-/// Accept bounded authenticated QUIC links, including refusal-only reconnects
-/// whose server-owned cleanup obligation is still unconfirmed.
+/// Accept bounded authenticated QUIC links, including pending-cleanup reconnects.
 pub(crate) async fn quic(
     quic: quinn::Endpoint,
     hosts: RemoteHosts,
@@ -119,8 +118,7 @@ pub(crate) async fn quic(
             let admitted = async {
                 let link =
                     RemoteLink::quic_admitted(connection.clone(), Some(&mut admission)).await?;
-                // The validated cleanup link now uses its own bounded host lane,
-                // so queued delivery must not retain normal reconnect capacity.
+                // Cleanup has its own bounded lane; release ordinary handshake capacity.
                 admission.release_cleanup_handshake();
                 #[cfg(all(test, feature = "mesh-transport-proof"))]
                 crate::remote_autoswitch_probe::record(
@@ -149,15 +147,42 @@ pub(crate) async fn quic(
         });
     }
 }
-/// Accept bounded TLS links with normal authority or cleanup-only admission;
-/// retired hosts never regain ordinary host routing through this listener.
+/// What every accepted TCP connection needs: TLS, the host registry, the store, limits and, when enabled, recovery.
+#[derive(Clone)]
+struct TcpContext {
+    tls: Arc<openssl::ssl::SslAcceptor>,
+    hosts: RemoteHosts,
+    store: EnrollmentStore,
+    limits: Arc<Limits>,
+    recovery: Option<Arc<crate::remote_recovery::Service>>,
+}
+
+/// One connection's admission: its source, whether that source is known, its first-byte permits and its deadline.
+struct TcpAdmission {
+    address: IpAddr,
+    known_source: bool,
+    first_byte: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+    deadline: Duration,
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    diagnostic_peer: std::net::SocketAddr,
+}
+
+/// Accept host TCP connections: TLS, then mTLS admission or, when enabled, certificate recovery.
 pub(crate) async fn tcp(
     tcp: TcpListener,
     tls: Arc<openssl::ssl::SslAcceptor>,
     hosts: RemoteHosts,
     store: EnrollmentStore,
     limits: Arc<Limits>,
+    recovery: Option<Arc<crate::remote_recovery::Service>>,
 ) {
+    let context = TcpContext {
+        tls,
+        hosts,
+        store,
+        limits,
+        recovery,
+    };
     let idle = Arc::new(Semaphore::new(48));
     let idle_sources = Arc::new(SourceSlots::new(4));
     let probes = Arc::new(Semaphore::new(16));
@@ -169,17 +194,18 @@ pub(crate) async fn tcp(
         #[cfg(all(test, feature = "mesh-transport-proof"))]
         let diagnostic_peer = address;
         let address = address.ip().to_canonical();
-        let known_source = limits
+        let known_source = context
+            .limits
             .known
             .lock()
             .is_ok_and(|known| known.contains(&address));
         let regular_sources = if known_source {
-            &limits.reserved_sources
+            &context.limits.reserved_sources
         } else {
             &idle_sources
         };
         let regular_slots = if known_source {
-            &limits.reserved
+            &context.limits.reserved
         } else {
             &idle
         };
@@ -200,68 +226,100 @@ pub(crate) async fn tcp(
             // that same NAT address already has idle anonymous sockets.
             ((source, permit), Duration::from_millis(100))
         };
-        let limits = limits.clone();
-        let hosts = hosts.for_local(socket.local_addr().ok().map(|address| address.ip()));
-        let store = store.clone();
-        let tls = tls.clone();
-        handshakes.spawn(async move {
-            let mut byte = [0];
-            if !matches!(
-                tokio::time::timeout(deadline, socket.peek(&mut byte)).await,
-                Ok(Ok(1))
-            ) {
+        handshakes.spawn(handle_tcp_connection(
+            socket,
+            context.clone(),
+            TcpAdmission {
+                address,
+                known_source,
+                first_byte,
+                deadline,
+                #[cfg(all(test, feature = "mesh-transport-proof"))]
+                diagnostic_peer,
+            },
+        ));
+    }
+}
+
+/// Accept one TCP connection: run TLS, and send the recovery ALPN to the recovery service, everything else to mTLS
+/// admission. Recovery never reaches host admission.
+async fn handle_tcp_connection(
+    socket: tokio::net::TcpStream,
+    context: TcpContext,
+    pending: TcpAdmission,
+) {
+    let address = pending.address;
+    let local_ip = socket.local_addr().ok().map(|address| address.ip());
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    let diagnostic_peer = pending.diagnostic_peer;
+
+    let mut byte = [0];
+    if !matches!(
+        tokio::time::timeout(pending.deadline, socket.peek(&mut byte)).await,
+        Ok(Ok(1))
+    ) {
+        return;
+    }
+    // Known sources reserve their complete path before peeking, so idle
+    // anonymous probes cannot consume the reserved TLS capacity.
+    let permits = if pending.known_source {
+        Some(pending.first_byte)
+    } else {
+        drop(pending.first_byte);
+        context.limits.handshake(address)
+    };
+    let Some(permits) = permits else {
+        return;
+    };
+    let connection = if let Some(service) = context.recovery.as_ref() {
+        match remote_tls::accept_recovery_aware(socket, &context.tls).await {
+            Ok(remote_tls::AcceptedConnection::Host(connection)) => connection,
+            Ok(remote_tls::AcceptedConnection::Recovery(connection)) => {
+                service.serve(connection.channel, address).await;
                 return;
             }
-            // Known sources reserve their complete path before peeking, so idle
-            // anonymous probes cannot consume the reserved TLS capacity.
-            let permits = if known_source {
-                Some(first_byte)
-            } else {
-                drop(first_byte);
-                limits.handshake(address)
-            };
-            let Some(permits) = permits else {
-                return;
-            };
-            let Ok(connection) = remote_tls::accept(socket, &tls).await else {
-                return;
-            };
-            #[cfg(all(test, feature = "mesh-transport-proof"))]
-            probe::record(probe::Kind::TlsHandshake, diagnostic_peer, 0);
-            let Ok(Ok(authority)) = tokio::time::timeout(
-                Duration::from_secs(5),
-                AuthorityGuard::admit_transport(store, connection.peer_fingerprint),
-            )
-            .await
-            else {
-                return;
-            };
-            let mut admission =
-                crate::remote_standby::Admission::new(authority, permits, limits.standby.clone());
-            #[cfg(all(test, feature = "mesh-transport-proof"))]
-            probe::record(probe::Kind::LedgerAdmission, diagnostic_peer, 0);
-            let Ok(link) = RemoteLink::tcp_admitted(connection.channel, Some(&mut admission)).await
-            else {
-                return;
-            };
-            // Cleanup's bounded identity lane replaces handshake ownership.
-            admission.release_cleanup_handshake();
-            #[cfg(all(test, feature = "mesh-transport-proof"))]
-            let link = {
-                probe::record(probe::Kind::ControlReady, diagnostic_peer, 0);
-                if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
-                    probe::record(probe::Kind::TcpControlReady, diagnostic_peer, 0);
-                }
-                link.with_diagnostic_peer(diagnostic_peer)
-            };
-            if hosts
-                .admit_observed(admission.authority, link, Some(address))
-                .await
-                .is_ok()
-            {
-                remember(&limits.known, address);
-            }
-        });
+            Err(_) => return,
+        }
+    } else {
+        let Ok(connection) = remote_tls::accept(socket, &context.tls).await else {
+            return;
+        };
+        connection
+    };
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    probe::record(probe::Kind::TlsHandshake, diagnostic_peer, 0);
+    let Ok(Ok(authority)) = tokio::time::timeout(
+        Duration::from_secs(5),
+        AuthorityGuard::admit_transport(context.store, connection.peer_fingerprint),
+    )
+    .await
+    else {
+        return;
+    };
+    let mut admission =
+        crate::remote_standby::Admission::new(authority, permits, context.limits.standby.clone());
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    probe::record(probe::Kind::LedgerAdmission, diagnostic_peer, 0);
+    let Ok(link) = RemoteLink::tcp_admitted(connection.channel, Some(&mut admission)).await else {
+        return;
+    };
+    // Cleanup has its own bounded lane; release ordinary handshake capacity.
+    admission.release_cleanup_handshake();
+    #[cfg(all(test, feature = "mesh-transport-proof"))]
+    let link = {
+        probe::record(probe::Kind::ControlReady, diagnostic_peer, 0);
+        if std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {
+            probe::record(probe::Kind::TcpControlReady, diagnostic_peer, 0);
+        }
+        link.with_diagnostic_peer(diagnostic_peer)
+    };
+    let hosts = context.hosts.for_local(local_ip);
+    if hosts
+        .admit_observed(admission.authority, link, Some(address))
+        .await
+        .is_ok()
+    {
+        remember(&context.limits.known, address);
     }
 }
 

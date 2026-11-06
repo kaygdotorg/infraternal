@@ -1,9 +1,11 @@
-/** Runs the existing purpose-bound CA passkey ceremony with a browser-only account key [D168]. */
+/**
+ * Reads public CA lock and root-expiry status and runs the existing purpose-bound passkey ceremony [D168].
+ * Status contains only public root metadata; malformed or unavailable status never implies an unlocked CA.
+ */
 import { recoveryAuth as auth, type AuthStart, type Wrap } from "../../auth";
 import { isCanonicalUuid } from "../../identifiers";
-import { ServiceError } from "./service";
+import { ServiceError, type AuthorityRootStatus, type AuthorityStatus } from "./service";
 
-export interface AuthorityStatus { initialized: boolean; locked: boolean }
 interface CaStart extends AuthStart { ca: { member: string; generation: number; salt: string; operation?: "setup" | "unlock" } }
 interface StoredWrap { kind: string; key_id: string; wrap: Wrap; prf_input?: string }
 
@@ -13,10 +15,29 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   try { return await response.json() as T; } catch { throw new ServiceError("Host connections are not configured on this server. Set up the remote component first."); }
 }
 
+/** Read the CA's public lock and root status, refusing malformed or unavailable answers. */
 export async function authorityStatus(): Promise<AuthorityStatus> {
   const status = await post<AuthorityStatus>("status", {});
-  if (typeof status.initialized !== "boolean" || typeof status.locked !== "boolean") throw new ServiceError("Host connections need a server update before setup is available.");
+  if (status.available === false) throw new ServiceError("Host connections are not configured on this server. Configure the remote component on the server, then try again.");
+  if (status.available !== undefined && typeof status.available !== "boolean") throw new ServiceError("Host connection status needs a server update. Try again.");
+  if (typeof status.initialized !== "boolean" || (status.locked !== null && typeof status.locked !== "boolean")) throw new ServiceError("Host connections need a server update before setup is available.");
+  if (status.clock_healthy !== undefined && typeof status.clock_healthy !== "boolean") throw new ServiceError("Host connection status needs a server update. Try again.");
+  if (status.roots !== undefined && (!Array.isArray(status.roots) || status.roots.some((root) => !validRootStatus(root)))) {
+    throw new ServiceError("Host connection status needs a server update. Try again.");
+  }
   return status;
+}
+
+/** Whether one root's status from the server has the documented shape and a known warning level. */
+function validRootStatus(value: unknown): value is AuthorityRootStatus {
+  if (typeof value !== "object" || value === null) return false;
+  const root = value as Partial<AuthorityRootStatus>;
+  return typeof root.generation === "number" && Number.isSafeInteger(root.generation) && root.generation > 0
+    && typeof root.fingerprint === "string"
+    && typeof root.not_after === "number" && Number.isSafeInteger(root.not_after)
+    && (root.remaining_seconds === null || (typeof root.remaining_seconds === "number" && Number.isSafeInteger(root.remaining_seconds)))
+    && typeof root.warning_level === "string"
+    && ["none", "365d", "90d", "30d", "7d", "expired", "unknown"].includes(root.warning_level);
 }
 
 /** This domain is specified by the retained CA copy contract, including the exact membership generation. */

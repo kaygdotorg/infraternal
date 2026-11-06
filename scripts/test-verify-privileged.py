@@ -30,6 +30,7 @@ def load(name):
 
 
 p = load('verify-privileged')
+guard = load('elf-runpath-guard')
 
 
 def userns_available():
@@ -61,6 +62,59 @@ class PrivilegedAreas(unittest.TestCase):
         ):
             self.assertEqual(p.areas([path]), expected, path)
 
+    def test_dependency_crate_selects_its_area(self):
+        """A diff touching only infraternal-linux-tun selects the mesh (TUN) area (J266 P2-2)."""
+        graph = {'infraternal-plugin-mesh': ('crates/plugins/mesh', {'infraternal-linux-tun', 'infraternal-protocol'}),
+                 'infraternal-linux-tun': ('crates/infraternal-linux-tun', set()),
+                 'infraternal-protocol': ('crates/infraternal-protocol', set()),
+                 'unrelated': ('crates/unrelated', set())}
+        root = Path(__file__).resolve().parents[1]
+        dirs = p.dependency_directories(root, graph)
+        self.assertIn('crates/infraternal-linux-tun', dirs['mesh'])
+        self.assertEqual(p.areas(['crates/infraternal-linux-tun/src/lib.rs']), set())
+        self.assertEqual(p.areas(['crates/infraternal-linux-tun/src/lib.rs'], dirs), {'mesh'})
+        self.assertEqual(p.areas(['crates/unrelated/src/lib.rs'], dirs), set())
+        # A sibling directory sharing a prefix is not inside the crate.
+        self.assertEqual(p.areas(['crates/infraternal-linux-tunnel/x.rs'], dirs), set())
+
+    def test_real_graph_covers_the_reviewed_crates(self):
+        """On the real workspace, the four crates J266 listed select the mesh area."""
+        root = Path(__file__).resolve().parents[1]
+        if not shutil.which('cargo'):
+            self.skipTest('cargo is not on PATH')
+        dirs = p.dependency_directories(root, p.workspace_graph(root))
+        for path in ('crates/infraternal-linux-tun/src/lib.rs', 'crates/plugins/relay/src/lib.rs',
+                     'crates/infraternal-protocol/src/lib.rs', 'crates/infraternal-plugin-api/src/lib.rs'):
+            self.assertIn('mesh', p.areas([path], dirs), path)
+        self.assertEqual(p.areas(['docs/ENGINEERING.md'], dirs), set())
+
+    def test_skip_exits_with_the_skip_code(self):
+        """With nothing selected the row exits 77, which the gate prints as SKIP (J266 P2-2)."""
+        with mock.patch.object(p.subprocess, 'check_output', side_effect=['base\n', b'docs/x.md\0', b'']), \
+                mock.patch.object(p, 'workspace_graph', return_value={}), \
+                mock.patch.object(sys, 'argv', ['verify-privileged']), \
+                self.assertRaises(SystemExit) as stop:
+            p.main()
+        self.assertEqual(stop.exception.code, p.SKIP_EXIT)
+
+    def test_gate_prints_skip_for_77(self):
+        """Only an opted-in row records 77 as SKIP; an ordinary row records FAIL (77) (J270 P3-2)."""
+        rust = Path(__file__).resolve().parent / 'verify.d/rust.sh'
+        script = ('source "$1"; rust_run_gate_skippable skipped bash -c "exit 77"; rust_run_gate ok true; '
+                  'echo "failed=$RUST_GATE_FAILED"; rust_run_gate plain bash -c "exit 77"; '
+                  'echo "failed=$RUST_GATE_FAILED"; printf "%s\\n" "${RUST_GATE_ROWS[@]}"')
+        out = subprocess.run(['bash', '-c', script, 'gate', str(rust)], capture_output=True, text=True).stdout
+        self.assertIn('skipped|SKIP', out)
+        self.assertIn('ok|PASS', out)
+        self.assertIn('plain|FAIL (77)', out)
+        self.assertLess(out.index('failed=0'), out.index('failed=1'))
+
+    def test_only_the_privileged_row_is_skippable(self):
+        """The privileged row opts in; no other row in the gate does."""
+        rust = (Path(__file__).resolve().parent / 'verify.d/rust.sh').read_text()
+        calls = [line.strip() for line in rust.splitlines() if line.strip().startswith('rust_run_gate_skippable ')]
+        self.assertEqual(calls, ['rust_run_gate_skippable "privileged integration" verify_privileged'])
+
     def test_gaps_are_named(self):
         """Real-root behaviour the row cannot reach is stated, not silently skipped."""
         self.assertTrue(all(p.NOT_COVERED.get(area) for area in ('proxy', 'install', 'shim')))
@@ -90,6 +144,28 @@ class IgnoredSelection(unittest.TestCase):
             self.assertEqual({target: set(names) for target, names in found.items()},
                              {'lib': {'in_lib'}, 'test:kernel': {'alone', 'with_attr'}, 'test:split': {'nested'}})
 
+    def test_child_only_fixtures_are_not_selected(self):
+        """A child half returns at once when run alone; selecting it would be a pass that tests nothing (J266 P2-1)."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'pkg/tests').mkdir(parents=True)
+            (root / 'pkg/tests/split.rs').write_text(
+                '#[test]\n#[ignore = "Run in a disposable user/network namespace."]\nfn parent() {}\n'
+                '#[test]\n#[ignore = "Child-only fixture: started by parent inside its namespace; does nothing alone."]\n'
+                'fn child() {}\n')
+            self.assertEqual(set(p.privileged_ignored(root, 'pkg', 'pkg')['test:split']), {'parent'})
+
+    def test_child_halves_use_the_one_prefix(self):
+        """Every ignore reason that names a child fixture starts with the shared prefix, so the rule holds."""
+        root = Path(__file__).resolve().parents[1]
+        listed = subprocess.run(['git', 'grep', '-h', '-o', '-E', r'#\[ignore = "[^"]*[Cc]hild[^"]*"\]', '--', 'crates'],
+                                cwd=root, capture_output=True, text=True).stdout.splitlines()
+        self.assertTrue(listed)
+        for attribute in listed:
+            reason = attribute.split('"')[1]
+            if 'fixture' in reason.lower() or 'inside the namespace prepared' in reason.lower():
+                self.assertRegex(reason, p.CHILD_ONLY, attribute)
+
     def test_binary_only_package(self):
         """Unit tests of a package without src/lib.rs live in its binary target."""
         self.assertEqual(p.target_of('src/install.rs', 'bin:infraternal'), 'bin:infraternal')
@@ -107,6 +183,68 @@ class IgnoredSelection(unittest.TestCase):
         shared = dict((name, f) for name, _, f in p.PACKAGES['mesh'])['infraternal-plugin-mesh']
         self.assertNotIn('mesh-dns-spike', shared)
         self.assertIn('mesh-dns-spike', p.TARGET_FEATURES[('infraternal-plugin-mesh', 'test:dns')])
+
+
+class RealRootProof(unittest.TestCase):
+    """The real-root TUN proof lets nothing the shared build account can write reach root (J270, 81345)."""
+
+    def test_guard_refuses_a_claude_writable_library_path(self):
+        """A RUNPATH into the claude build tree (what the dev shell produced) is refused."""
+        reasons = guard.problems('/nix/store/abc-glibc/lib/ld-linux-x86-64.so.2',
+                                 ['/home/claude/worktrees/tun/outputs/out/lib:/nix/store/abc-glibc/lib'], [])
+        self.assertEqual(len(reasons), 1)
+        self.assertIn('/home/claude/worktrees/tun/outputs/out/lib', reasons[0])
+
+    def test_guard_refuses_unsafe_interpreters_and_relative_entries(self):
+        """A host or user interpreter, $ORIGIN, relative and empty entries are all refused."""
+        self.assertTrue(guard.problems('/home/claude/ld.so', [], []))
+        for entry in ('$ORIGIN/lib', 'lib', '', '/tmp/libs', '/nix/store/../../home/claude'):
+            self.assertTrue(guard.problems('/nix/store/x/ld.so', [entry], []), entry)
+
+    def test_guard_allows_store_and_root_owned_dirs_only(self):
+        """/nix/store passes; an --allow dir passes only if it and its parents are root-owned and not writable by others."""
+        self.assertEqual(guard.problems('/nix/store/x/ld.so', ['/nix/store/a/lib:/nix/store/b/lib'], []), [])
+        with tempfile.TemporaryDirectory() as directory:
+            # A temp dir under /tmp is not a root-owned chain for a non-root test user.
+            mine = Path(directory) / 'out/lib'
+            mine.mkdir(parents=True)
+            if os.geteuid() != 0:
+                self.assertTrue(guard.problems('/nix/store/x/ld.so', [str(mine)], [directory]))
+
+    def test_guard_reads_a_real_binary(self):
+        """The ELF reader parses this interpreter's own executable."""
+        interpreter, search = guard.read_elf(os.path.realpath(sys.executable))
+        self.assertTrue(interpreter is None or interpreter.startswith('/'))
+        self.assertIsInstance(search, list)
+
+    def test_guard_cli_refuses_a_built_binary_with_a_user_runpath(self):
+        """End to end: link a tiny program with a RUNPATH under a user dir; the guard exits 1."""
+        compiler = shutil.which('cc') or shutil.which('gcc')
+        if not compiler:
+            self.skipTest('no C compiler on PATH')
+        with tempfile.TemporaryDirectory() as directory:
+            source, binary = Path(directory) / 'p.c', Path(directory) / 'p'
+            source.write_text('int main(void) { return 0; }\n')
+            built = subprocess.run([compiler, str(source), '-o', str(binary),
+                                    '-Wl,--enable-new-dtags,-rpath,/home/claude/worktrees/x/outputs/out/lib'],
+                                   capture_output=True)
+            if built.returncode:
+                self.skipTest('could not link the probe program')
+            with mock.patch.object(sys, 'stderr', new=__import__('io').StringIO()) as err:
+                self.assertEqual(guard.main([str(binary)]), 1)
+            self.assertIn('/home/claude/worktrees/x/outputs/out/lib', err.getvalue())
+
+    def test_proof_script_keeps_claude_out_of_roots_process(self):
+        """No ssh as claude, a root fetch of a full commit id, root-owned dirs, a lock, a trap and the guard."""
+        script = (Path(__file__).resolve().parent / 'tun-real-root-proof').read_text()
+        code = '\n'.join(line for line in script.splitlines() if not line.lstrip().startswith('#'))
+        self.assertNotIn('claude@', code)
+        self.assertNotIn('/home/claude', code)
+        for needle in ('^[0-9a-f]{40}$', 'git clone -q --no-checkout "$repository"', 'mktemp -d /root/tun-proof.',
+                       'flock 9', 'trap cleanup EXIT', 'scripts/elf-runpath-guard" "$binary" --allow "$work"',
+                       '$binary == "$work"/target/*', 'CARGO_HOME=/root/.cache/'):
+            self.assertIn(needle, code, needle)
+        self.assertLess(code.index('elf-runpath-guard'), code.index('unshare --net'))
 
 
 class Builds(unittest.TestCase):
@@ -328,6 +466,28 @@ class Lifecycle(unittest.TestCase):
             self.assertTrue(reason)
             self.assertIn(name, p.privileged_ignored(root, package, directories[package]).get(target, {}),
                           f'{package} {target} {name}')
+
+    def test_self_check_command_line(self):
+        """`verify-privileged --self-check` runs the escape probes and exits 0 when contained (J266 P3-1)."""
+        contained = subprocess.CompletedProcess([], 0, ''.join(f'contained: {label}\n' for label in p.ESCAPES)
+                                                + 'contained: wrote only to the sandbox tmpfs\n', '')
+        with mock.patch.object(p, 'run_sandboxed', return_value=contained) as run, \
+                mock.patch.object(p, 'memory_scope', return_value=['scope-prefix']), \
+                mock.patch.object(sys, 'argv', ['verify-privileged', '--self-check']), \
+                self.assertRaises(SystemExit) as stop:
+            p.main()
+        self.assertIn(stop.exception.code, (0, None))
+        self.assertEqual(run.call_args[0][5], ['scope-prefix'])
+
+    def test_self_check_command_line_fails_on_escape(self):
+        """An escape reported by the probes makes `--self-check` exit non-zero, naming it."""
+        escaped = subprocess.CompletedProcess([], 0, 'ESCAPED: write /etc\n', '')
+        with mock.patch.object(p, 'run_sandboxed', return_value=escaped), \
+                mock.patch.object(p, 'memory_scope', return_value=[]), \
+                mock.patch.object(sys, 'argv', ['verify-privileged', '--self-check']), \
+                self.assertRaises(SystemExit) as stop:
+            p.main()
+        self.assertIn('ESCAPED: write /etc', str(stop.exception.code))
 
     def test_fails_closed_when_the_sandbox_cannot_start(self):
         """A sandbox that exits early or prints nothing counts as an escape, never as contained."""

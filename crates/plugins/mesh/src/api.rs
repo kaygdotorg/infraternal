@@ -327,7 +327,11 @@ impl MeshApiError {
 /// Returns `InvalidInput` for unknown actions, malformed JSON, or an invalid mesh policy.
 pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiError> {
     let request = match action {
-        "mesh.default.get" | "mesh.default.preview" | "mesh.default.set" => {
+        "mesh.default.get"
+        | "mesh.default.preview"
+        | "mesh.default.set"
+        | "mesh.rotation.get"
+        | "mesh.rotation.interval.set" => {
             MeshRequest::Default(crate::settings::parse_action(action, input)?)
         }
         "mesh.list" => MeshRequest::List(parse(input)?),
@@ -498,6 +502,8 @@ pub struct MeshService {
     updates: broadcast::Sender<MeshChange>,
     // Runtime liveness from the server's own device; never persisted (presence.rs, #236).
     presence: std::sync::Arc<crate::presence::Presence>,
+    // Rotation drivers sleep until a deadline and wake only when a peer applies a view.
+    rotation_updates: tokio::sync::watch::Sender<u64>,
     // Request-local authority is never installed in the shared service.
     fresh_authority: Option<String>,
     store: crate::store::Store,
@@ -524,6 +530,7 @@ impl MeshService {
         )
     }
 
+    /// Build the service around an already opened store, with a fresh change broadcast.
     fn with_store(pool: SqlitePool, store: crate::store::Store) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);
         Self {
@@ -531,6 +538,7 @@ impl MeshService {
             pool,
             updates,
             presence: std::sync::Arc::default(),
+            rotation_updates: tokio::sync::watch::Sender::new(0),
             fresh_authority: None,
             invalid_hosts: crate::diagnostics::InvalidHosts::default(),
             list_diagnostics: StorageDiagnostics::new("mesh.list"),
@@ -595,6 +603,18 @@ impl MeshService {
         &self,
     ) -> tokio::sync::watch::Receiver<std::sync::Arc<crate::presence::Live>> {
         self.presence.subscribe()
+    }
+
+    /// Wake rotation drivers after an applied-view receipt is committed.
+    pub(crate) fn rotation_applied(&self) {
+        self.rotation_updates
+            .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// Subscribe to coalesced applied-view progress without a polling timer.
+    #[must_use]
+    pub(crate) fn subscribe_rotation_progress(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.rotation_updates.subscribe()
     }
 
     /// Subscribe to post-commit revision invalidations; a lagging reader should reload its filtered list.
@@ -720,7 +740,7 @@ impl MeshService {
             .await
     }
 
-    // Keep one parsed dispatch inside the entry point's diagnostic scope.
+    /// Keep one parsed dispatch inside the entry point's diagnostic scope.
     async fn execute_request(
         &self,
         actor: &str,
@@ -741,7 +761,7 @@ impl MeshService {
                     self.fresh_authority.as_deref(),
                 )
                 .await?;
-                if action == "mesh.default.set" {
+                if action == "mesh.default.set" || action == "mesh.rotation.interval.set" {
                     self.invalidate_dataplane().await;
                 }
                 Ok(value)
