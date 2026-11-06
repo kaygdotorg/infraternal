@@ -834,8 +834,10 @@ async fn revoke_at(
 /// What a completed revocation could not guarantee.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Revoked {
-    /// Someone else still has access to a host account the person used, so
-    /// that account's own background services were left running (D353).
+    /// Background programs of a host account the person used may still run:
+    /// someone else still has access, so its services were left running
+    /// (D353), or linger came back on after they were stopped, which only
+    /// the account's own code outside the login does (J308 P3-2).
     pub background_may_remain: bool,
 }
 
@@ -895,8 +897,14 @@ async fn revoke_once(
             Ok(()) if matches!(manager, Manager::System) => {
                 if others_share(root, person, uid)? {
                     revoked.background_may_remain = true;
-                } else if let Err(error) = stop_user_services(uid).await {
-                    failure = Some(error);
+                } else {
+                    match stop_user_services(uid).await {
+                        Err(error) => failure = Some(error),
+                        // Linger came back after the account's services were
+                        // gone: its code runs outside the login (J308 P3-2).
+                        Ok(true) => revoked.background_may_remain = true,
+                        Ok(false) => {}
+                    }
                 }
             }
             Ok(()) => {}
@@ -952,7 +960,7 @@ fn others_share(root: &Path, person: uuid::Uuid, uid: u32) -> io::Result<bool> {
 /// requires that cgroup to be empty, then turns linger off, and reports
 /// success only once linger is verified off and the manager has stayed gone.
 /// The account's other, non-infraternal sessions are not touched.
-async fn stop_user_services(uid: u32) -> io::Result<()> {
+async fn stop_user_services(uid: u32) -> io::Result<bool> {
     let name = User::from_uid(Uid::from_raw(uid))
         .map_err(io::Error::from)?
         .ok_or_else(|| io::Error::other("host account absent"))?
@@ -999,7 +1007,13 @@ async fn stop_user_services(uid: u32) -> io::Result<()> {
             ));
         }
         if !linger_file(&name).exists() && cgroup_empty(&manager)? {
-            return Ok(());
+            // Code of the account running outside the login (a cron or `at`
+            // job running now) can switch linger back on after this. Look
+            // again after a short settle: if it is back, say that background
+            // programs may remain rather than report a clean result (J308).
+            // sleep: a deliberate settle time before the second look.
+            tokio::time::sleep(linger_settle()).await;
+            return Ok(linger_file(&name).exists());
         }
     }
     Err(io::Error::other(
@@ -1009,6 +1023,18 @@ async fn stop_user_services(uid: u32) -> io::Result<()> {
 
 /// How many kill, linger-off, verify rounds one revocation attempt makes.
 const LINGER_ROUNDS: usize = 5;
+
+/// How long a last-holder revocation waits before its second look at linger.
+const LINGER_SETTLE: Duration = Duration::from_secs(1);
+
+/// [`LINGER_SETTLE`], or the scripted host's in tests.
+fn linger_settle() -> Duration {
+    #[cfg(test)]
+    if let Some(host) = stand_in() {
+        return host.settle;
+    }
+    LINGER_SETTLE
+}
 
 /// logind's linger flag for account `name`: a root-owned file whose presence
 /// starts the account's user manager at boot.
@@ -1206,6 +1232,8 @@ struct HostStandIn {
     probe: Option<Manager>,
     /// Stand-in for `/var/lib/systemd/linger`.
     linger: PathBuf,
+    /// Replaces [`LINGER_SETTLE`].
+    settle: Duration,
 }
 
 #[cfg(test)]
@@ -1812,7 +1840,7 @@ mod tests {
             // `relinger` exists: a queued enable-linger that lands after it.
             let loginctl = script(
                 "loginctl",
-                "if [ \"$1\" = disable-linger ]; then if [ -e \"$d/relinger\" ]; then rm \"$d/relinger\"; else rm -f \"$d\"/linger/*; fi; fi\nexit 0\n",
+                "if [ \"$1\" = disable-linger ]; then if [ -e \"$d/relinger\" ]; then rm \"$d/relinger\"; else rm -f \"$d\"/linger/*; fi; if [ -e \"$d/comeback\" ]; then rm \"$d/comeback\"; (sleep 0.1; : > \"$d/linger/$(cat \"$d/comeback-name\")\") & fi; fi\nexit 0\n",
             );
             std::fs::create_dir_all(host.join("linger")).unwrap();
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1841,6 +1869,7 @@ mod tests {
                     empty_hang: Duration::from_secs(2),
                     probe: Some(Manager::System),
                     linger: host.join("linger"),
+                    settle: Duration::from_millis(500),
                 });
             });
             Self {
@@ -2062,6 +2091,38 @@ mod tests {
         assert!(
             calls.contains(&format!("systemctl stop user@{uid}.service")),
             "{calls:?}"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J308 P3-2: code of the account running outside the login switches
+    /// linger back on right after the revocation turned it off. The second
+    /// look catches it, and the result carries D353's warning that
+    /// background programs may remain, not a clean success.
+    #[tokio::test]
+    async fn linger_coming_back_after_the_revocation_says_programs_may_remain() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        let name = User::from_uid(Uid::from_raw(uid)).unwrap().unwrap().name;
+        std::fs::write(host.host.join("linger").join(&name), b"").unwrap();
+        std::fs::write(host.host.join("comeback"), b"").unwrap();
+        std::fs::write(host.host.join("comeback-name"), &name).unwrap();
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false).await;
+        let calls = host.calls();
+        assert_eq!(
+            revoked.as_ref().ok(),
+            Some(&Revoked {
+                background_may_remain: true
+            }),
+            "{revoked:?}; {calls:?}"
         );
         drop(host);
         std::fs::remove_dir_all(root).unwrap();
