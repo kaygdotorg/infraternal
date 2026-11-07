@@ -592,6 +592,88 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
   });
 }
 
+// #394 (owner, production): a root add of minipc01 showed the exit-71 paragraph, and the progress row wrapped it in red.
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
+  test(`an install this server didn't make is named once, with its location only in Details at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "installed.lab");
+    await expect(page.getByRole("heading", { name: "installed.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
+    const failure = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(failure.locator(".ah-lede")).toContainText("nothing was changed");
+    // What the page says outside the collapsed Details: no path, no "didn't finish".
+    for (const visible of [failure.locator(".ah-title"), failure.locator(".ah-lede")]) {
+      await expect(visible).not.toContainText("/var/lib/infraternal");
+      await expect(visible).not.toContainText("didn't finish");
+    }
+    await expect(failure.locator(".ah-text")).toHaveCount(0);
+    await expect(inWizard(page, "Try again")).toBeVisible();
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    // The page as it opens: its icon and title are fully inside the card (J314: clipped at 375).
+    const top = await failure.evaluate((page) => {
+      const scroller = page.closest<HTMLElement>(".ah-scroll") ?? page.parentElement!;
+      const box = scroller.getBoundingClientRect();
+      return { scrolled: scroller.scrollTop, hero: page.querySelector(".ah-hero")!.getBoundingClientRect().top - box.top, title: page.querySelector(".ah-title")!.getBoundingClientRect().top - box.top };
+    });
+    expect(top.scrolled).toBe(0);
+    expect(top.hero).toBeGreaterThanOrEqual(0);
+    expect(top.title).toBeGreaterThanOrEqual(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-failure-${viewport.width}.png`) });
+    // Details open shows its text, not an empty caret (J314).
+    await failure.locator(".ah-details summary").click();
+    await expect(failure.locator(".ah-details pre")).toBeVisible();
+    await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
+    await failure.locator(".ah-details pre").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-details-${viewport.width}.png`) });
+  });
+
+  test(`a login name with no account says so by name at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@noacct.lab");
+    await expect(page.getByRole("heading", { name: "noacct.lab couldn't find an account named kayg" })).toBeVisible({ timeout: 15_000 });
+    await expect(wizard(page).locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("Use an account that exists there, or add it as root.");
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });
+  });
+
+  test(`a failed host's progress row says it in one line beside its name at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    // Two hosts keep the progress page up after the failure, the interim state the owner saw.
+    await page.locator(".ui-chip-text").click();
+    await page.keyboard.type("installed.lab broken.lab ", { delay: 5 });
+    await inWizard(page, "Continue").click();
+    await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+    const row = wizard(page).locator(".ah-run[data-state='failed']").first();
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    const step = row.locator(".ah-job-step");
+    await expect(step).not.toHaveText("");
+    const box = await step.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const name = element.parentElement!.querySelector(".ah-name")!.getBoundingClientRect();
+      const own = element.getBoundingClientRect();
+      return { lines: Math.round(own.height / parseFloat(style.lineHeight)), overlap: own.top < name.bottom - 0.5 };
+    });
+    expect(box).toEqual({ lines: 1, overlap: false });
+    // The row tells this news in the page's neutral tone, never red (J314).
+    const tone = await row.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--fg-2)";
+      element.append(probe);
+      const neutral = getComputedStyle(probe).color;
+      probe.remove();
+      return { tone: (element as HTMLElement).dataset.tone, step: getComputedStyle(element.querySelector(".ah-job-step")!).color, neutral };
+    });
+    expect(tone.tone).toBe("info");
+    expect(tone.step).toBe(tone.neutral);
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `progress-row-${viewport.width}.png`) });
+  });
+}
+
 test("a failure with nothing beyond the summary shows no Details at all", async ({ page }) => {
   await open(page);
   await openWizard(page);
@@ -602,3 +684,25 @@ test("a failure with nothing beyond the summary shows no Details at all", async 
   await expect(failure.locator(".ah-lede")).toHaveText("Setup stopped before this host was ready.");
   await expect(failure.locator(".ah-details")).toHaveCount(0);
 });
+
+// J314 P2-1: the other staging refusals each say what was found, and offer no retry that would meet the same files.
+for (const [host, title] of [
+  ["unproven-cache.lab", "unproven-cache.lab's download cache isn't setup's own"],
+  ["unproven-prepared.lab", "An earlier copy of the agent is in the way on unproven-prepared.lab"],
+  ["unproven-foreign.lab", "unproven-foreign.lab's setup folder has files setup didn't make"],
+] as const) {
+  test(`a staging refusal is named by its cause, with no retry: ${host}`, async ({ page }) => {
+    await open(page);
+    await openWizard(page);
+    await addTyped(page, host);
+    await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(wizard(page).getByText("set up elsewhere", { exact: false })).toHaveCount(0);
+    await expect(inWizard(page, "Try again")).toHaveCount(0);
+    await expect(inWizard(page, "Retry")).toHaveCount(0);
+    await inWizard(page, "Back").click();
+    await expect(page.locator(".ah-job-retry")).toBeHidden();
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `refusal-${host.split(".")[0]}-1440.png`) });
+  });
+}
+

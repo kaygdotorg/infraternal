@@ -20,7 +20,8 @@
 import { isCanonicalUuid } from "./identifiers";
 
 export type BootstrapStep = "check" | "install" | "facts" | "connect" | "done" | "failed";
-export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running";
+/** Public failure categories from the server (contracts/ssh-bootstrap.md); the page for each lives in addhost/model.ts. */
+export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account";
 export type BootstrapMode = "rootless" | "root";
 
 /** Phases a target passes through in order, before `done` (or `failed` at any point). */
@@ -46,6 +47,7 @@ export type AuthMethod = "network" | "server-key" | "user-key" | "password";
 export type NetworkProvider = "netbird" | "tailscale" | "twingate" | "other";
 export interface AuthenticationInfo { method: AuthMethod; network?: NetworkProvider }
 
+/** A failed or paused step as the server describes it: the public failure fields the add-host pages read. */
 export interface FailureDetail {
   kind: FailureKind;
   message: string;
@@ -66,6 +68,8 @@ export interface FailureDetail {
     /** Another server's install runs with open terminals and may be in use there: refused, not offered (D337). */
     in_use?: boolean;
   };
+  /** Which staging check refused, only on `unproven_files`, when the host named it (#394). */
+  refusal?: "cache" | "prepared" | "foreign";
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -137,7 +141,8 @@ export interface OneUseAuth { key?: string; passphrase?: string; password?: stri
 
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 const STEPS: readonly string[] = ["check", "install", "facts", "connect", "done", "failed"];
-const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running"];
+/** Every failure kind the server may send; anything else is dropped rather than shown (see {@link FailureKind}). */
+const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running", "unrecognized_install", "unproven_files", "no_account"];
 
 /** Turns a host label into a valid request-local id (`[A-Za-z0-9._-]{1,128}`). */
 export function targetIdFor(label: string): string {
@@ -179,6 +184,7 @@ function parseSetupLock(value: unknown): FailureDetail["setup_lock"] | undefined
   return lock;
 }
 
+/** Keeps only the known, well-formed fields of a server failure; anything else is dropped, never shown. */
 function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
@@ -186,6 +192,7 @@ function parseFailure(value: unknown): FailureDetail | undefined {
     const setupLock = parseSetupLock(value.setup_lock);
     if (setupLock) failure.setup_lock = setupLock;
   }
+  if (value.kind === "unproven_files" && (value.refusal === "cache" || value.refusal === "prepared" || value.refusal === "foreign")) failure.refusal = value.refusal;
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
   if (["get-arm64-binary", "get-x86-64-binary", "connect", "upload", "install", "join", "start", "readiness"].includes(String(value.failed_step))) failure.failed_step = value.failed_step as NonNullable<FailureDetail["failed_step"]>;
