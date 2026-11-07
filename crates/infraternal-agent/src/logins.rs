@@ -431,11 +431,19 @@ fn runtime_socket(
             _ => {}
         }
     }
-    let bound = socket(
-        AddressFamily::Unix,
-        SockType::Stream,
-        SockFlag::SOCK_CLOEXEC,
-        None,
+    // Linux creates the socket close-on-exec atomically. Darwin has no
+    // SOCK_CLOEXEC, so it sets FD_CLOEXEC right after: nothing forks between
+    // the two calls while the unit's lock is held.
+    #[cfg(target_os = "linux")]
+    let flags = SockFlag::SOCK_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = SockFlag::empty();
+    let bound =
+        socket(AddressFamily::Unix, SockType::Stream, flags, None).map_err(io::Error::from)?;
+    #[cfg(not(target_os = "linux"))]
+    nix::fcntl::fcntl(
+        &bound,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
     )
     .map_err(io::Error::from)?;
     bind(
