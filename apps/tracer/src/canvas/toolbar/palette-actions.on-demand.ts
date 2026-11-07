@@ -46,7 +46,10 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   else if (kind === "removehost" && value) {
     const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
     // Started from the palette, the question is about a host and not about the focused window, so it is centred (TASTE: a confirmation belongs to what it acts on).
-    if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, null);
+    if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, null, () => {
+      // Escape or Keep goes back to the terminal the palette was opened from (not on a phone, where focus would raise the keyboard).
+      if (!matchMedia("(pointer: coarse)").matches) active?.binding?.focus();
+    });
   }
   else if (kind === "rename" && value) {
     // Goes to the Mesh view, where the host's card opens its name field as soon as the card is on screen.

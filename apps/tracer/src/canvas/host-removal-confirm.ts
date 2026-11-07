@@ -12,9 +12,9 @@ import { mountConfirmTip, type ConfirmTipController } from "../../../../packages
 
 /**
  * Ask whether to remove the host called `name`. `anchor` is that host's own row or pill, or `null` to centre the question.
- * `onConfirm` runs only after the person confirms.
+ * `onConfirm` runs only after the person confirms. A centred question hands focus to `returnFocus` when it is dismissed.
  */
-export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onConfirm: () => void): ConfirmTipController {
+export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onConfirm: () => void, returnFocus?: () => void): ConfirmTipController {
   return mountConfirmTip(anchor, {
     label: `Remove ${name}`,
     title: `Remove ${name}?`,
@@ -23,5 +23,6 @@ export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onC
     confirmLabel: "Remove",
     cancelLabel: "Keep",
     onConfirm,
+    ...(returnFocus ? { returnFocus } : {}),
   });
 }

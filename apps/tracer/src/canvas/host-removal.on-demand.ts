@@ -24,7 +24,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
   return {
     label: () => label,
     /** Review and persist denial; pending acceptance leaves the host in inventory. */
-    remove(id: string, name: string, anchor: HTMLElement | null): void {
+    remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void {
       if (!label || !isCanonicalUuid(id) || busy) return;
       confirmHostRemoval(name, anchor, () => {
         busy = true;
@@ -51,7 +51,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
             core.toast.show({ message: result.message, duration: 5000 });
           }
         })().catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "Host removal failed. Try again.", tone: "error", duration: 6000 })).finally(() => { busy = false; });
-      });
+      }, returnFocus);
     },
   };
 }
