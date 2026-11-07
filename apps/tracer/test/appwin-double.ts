@@ -36,6 +36,17 @@ let layout: CanvasDocument = { format: FORMAT, version: VERSION, revision: 0, vi
 let layoutInitialized = false;
 const layoutSubscribers = new Map<WebSocket, Set<number>>();
 const layoutReceipts = new Map<string, number>();
+/**
+ * Layout saves held back by `/__mock/layout/hold` (D358 spec): while set, save calls get no answer, as on a stalled
+ * connection; releasing the hold answers them in arrival order. Undefined means saves are answered at once.
+ */
+let heldSaves: Array<{ socket: WebSocket; frame: WireFrame }> | undefined;
+/** Holds (`true`) or releases (`false`) layout save answers; a release answers every held save in order. */
+export function appwinLayoutHold(hold: boolean): void {
+  if (hold) { heldSaves ??= []; return; }
+  const held = heldSaves ?? []; heldSaves = undefined;
+  for (const { socket, frame } of held) if (socket.readyState === 1) appwinLayoutFrame(socket, frame);
+}
 function layoutSnapshot(): Record<string, unknown> {
   return { type: "canvas.layout.snapshot", initialized: layoutInitialized, revision: layout.revision, document: layout };
 }
@@ -45,7 +56,7 @@ export function appwinLayoutReset(): void {
   // account state: handleWire drops frames from closed sockets, so they cannot populate the next fixture.
   for (const socket of layoutSubscribers.keys()) socket.terminate();
   layout = { format: FORMAT, version: VERSION, revision: 0, views: [] };
-  layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear();
+  layoutInitialized = false; layoutSubscribers.clear(); layoutReceipts.clear(); heldSaves = undefined;
 }
 /** The account layout as the server holds it, for a check that wants to see what the product saved (`/__mock/layout`). */
 export function appwinLayoutRead(): { initialized: boolean; document: CanvasDocument } {
@@ -68,6 +79,10 @@ function publishLayout(event: Record<string, unknown>): void {
     if (socket.readyState === 1) socket.send(encodeMuxedFrame(0, { type: "Event", subId, eventJson: text(event) }));
   }
 }
+/**
+ * Answers the layout protocol for one socket: a `canvas.layout` subscription gets the snapshot, and a save is applied
+ * with the real reducer and receipted (or held while `/__mock/layout/hold` is on). False for any other frame.
+ */
 export function appwinLayoutFrame(socket: WebSocket, frame: WireFrame): boolean {
   if (frame.type === "Subscribe" && JSON.parse(new TextDecoder().decode(frame.filterJson))?.topic === "canvas.layout") {
     const subscriptions = layoutSubscribers.get(socket) ?? new Set<number>();
@@ -76,6 +91,7 @@ export function appwinLayoutFrame(socket: WebSocket, frame: WireFrame): boolean 
     return true;
   }
   if (frame.type !== "Call" || !["canvas.layout.initialize", "canvas.layout.apply"].includes(frame.actionId)) return false;
+  if (heldSaves) { heldSaves.push({ socket, frame }); return true; }
   const input = JSON.parse(new TextDecoder().decode(frame.inputJson)) as { op_id: string; document?: unknown; intent: Intent };
   let revision = layoutReceipts.get(input.op_id);
   if (revision === undefined) {

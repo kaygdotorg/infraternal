@@ -2,6 +2,7 @@
 import { expect, test, type Page } from "playwright/test";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { enrol } from "./layout-devices";
+import { watchLayout } from "./layout-observer";
 import { startRealServer } from "./server";
 import { everShown, FLOATING_NOTE, NOTE, recordNote } from "../test/stale-note-recorder";
 import { tracerEvidencePath } from "../test/evidence-path";
@@ -46,7 +47,7 @@ for (const surface of ["canvas", "network", "probe", "restart"] as const) for (c
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4857), ...(surface === "network" ? { upgradeDelayMs: 500 } : {}) });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   try {
-    const page = await context.newPage();
+    const page = watchLayout(await context.newPage());
     const connections = observe(page);
     await enrol(page, server);
     const mockResize = await context.request.post(`${server.origin}/__mock/resize-session`, { data: { cols: 50, rows: 12 } });
@@ -96,7 +97,7 @@ for (const upgradeDelayMs of [0, 500]) test(`review: a resized silent real canva
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4857), upgradeDelayMs });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
   try {
-    const page = await context.newPage();
+    const page = watchLayout(await context.newPage());
     const connections = observe(page);
     await enrol(page, server);
     const host = page.locator('.cl[data-view="console"] .terminal-host');
