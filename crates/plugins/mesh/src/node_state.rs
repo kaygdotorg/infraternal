@@ -538,12 +538,12 @@ impl Store {
         if !rotation.commit_requested {
             return Ok(false);
         }
-        let (_, journal_candidate) = crate::wireguard::Key::from_private(&rotation.candidate)?;
+        let journal_candidate = rotation_public_key(&rotation.candidate)?;
         if candidate != journal_candidate {
             return Ok(false);
         }
         if !rotation.completed {
-            let (_, journal_previous) = crate::wireguard::Key::from_private(&rotation.previous)?;
+            let journal_previous = rotation_public_key(&rotation.previous)?;
             if previous != journal_previous {
                 return Ok(false);
             }
@@ -558,7 +558,7 @@ impl Store {
         let Some(private_key) = self.read_private_key()? else {
             return Ok(false);
         };
-        let private_public = crate::gotatun_node::secret_from_bytes(&private_key)?.1;
+        let private_public = rotation_public_key(&private_key)?;
         Ok(private_public == journal_candidate)
     }
     /// Atomically publish public intent and fsync the replacement and directory.
@@ -619,6 +619,22 @@ impl Store {
         });
         write_public(&self.path, &body)
     }
+}
+
+/// Derive a `GotaTun` public identity from a private key in the journal or key file.
+///
+/// This shared proof runs on Linux and macOS, where the kernel `WireGuard` adapter is not available
+/// on both targets. `GotaTun` uses the same X25519 bytes on each platform.
+/// # Errors
+/// Returns `InvalidData` when the journal or private-key file does not contain exactly 32 bytes.
+fn rotation_public_key(private_key: &[u8]) -> io::Result<crate::policy::model::PublicKey> {
+    let private_bytes: [u8; 32] = private_key
+        .try_into()
+        .map_err(|_| io::ErrorKind::InvalidData)?;
+    let private_bytes = Zeroizing::new(private_bytes);
+    let secret = gotatun::x25519::StaticSecret::from(*private_bytes);
+    let public = gotatun::x25519::PublicKey::from(&secret);
+    Ok(crate::policy::model::PublicKey(*public.as_bytes()))
 }
 
 // Both public files must pass the same ownership, mode and no-follow boundary.

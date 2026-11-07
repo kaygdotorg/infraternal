@@ -2396,6 +2396,58 @@ mod tests {
         assert!(directory.join(PUBLIC_STATE).is_file());
     }
 
+    /// A committed Mac journal authorizes only its candidate binding at the same policy revision.
+    #[test]
+    fn macos_store_accepts_a_journal_proven_same_revision_binding_advance() {
+        let directory = test_directory();
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let previous_secret = gotatun::x25519::StaticSecret::from(previous);
+        let candidate_secret = gotatun::x25519::StaticSecret::from(candidate);
+        let previous_public =
+            PublicKey(*gotatun::x25519::PublicKey::from(&previous_secret).as_bytes());
+        let candidate_public =
+            PublicKey(*gotatun::x25519::PublicKey::from(&candidate_secret).as_bytes());
+        let mut accepted = config();
+        accepted.local_key = Some(previous_public);
+        accepted.version = 7;
+        let mut state = crate::node_state::State {
+            enabled: true,
+            config: Some(accepted),
+        };
+        let (store, _) = crate::node_state::Store::open(&directory.0).expect("open node state");
+        store
+            .save(&state)
+            .expect("save accepted predecessor binding");
+        store
+            .save_rotation_secret(&crate::node_state::RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("save commit intent");
+        store
+            .record_interface(&candidate_public)
+            .expect("record candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save candidate private key");
+        state.config.as_mut().expect("accepted config").local_key = Some(candidate_public);
+
+        store
+            .save(&state)
+            .expect("advance only the journal-proven binding");
+        let (_, restored) =
+            crate::node_state::Store::open(&directory.0).expect("restore candidate binding");
+        assert_eq!(
+            restored.config.and_then(|config| config.local_key),
+            Some(candidate_public)
+        );
+    }
+
     /// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
     #[test]
     #[ignore = "Run on the macOS VM with system service privileges."]
