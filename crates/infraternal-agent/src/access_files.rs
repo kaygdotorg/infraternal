@@ -99,15 +99,25 @@ pub(crate) enum Watch {
 /// One place the agent watches for a way back into an account.
 #[derive(Debug)]
 pub(crate) struct Watched {
-    /// What kind of access it gives, in plain words: the table's own
-    /// documentation, and what the coverage test names when a place is
-    /// missed. Not read by the scan.
-    #[allow(dead_code)]
+    /// What kind of access it gives, in plain words; reports list these
+    /// (D360: "the 214 places we watch (SSH keys, cron, …)").
     pub(crate) category: &'static str,
     /// Its path under the home (or a name, for the spools).
     pub(crate) path: &'static str,
     /// How it is scanned.
     pub(crate) watch: Watch,
+}
+
+/// The categories of [`WATCHED`], each once, in table order: what a report
+/// names as watched (D360).
+pub(crate) fn categories() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for place in WATCHED {
+        if !out.iter().any(|known| known == place.category) {
+            out.push(place.category.to_owned());
+        }
+    }
+    out
 }
 
 /// How many places this agent watches; a report covering fewer comes from
@@ -130,92 +140,92 @@ pub(crate) const WATCHED: &[Watched] = &[
         watch: Watch::File,
     },
     Watched {
-        category: "scheduled jobs",
+        category: "cron and at jobs",
         path: "crontab and at jobs",
         watch: Watch::Spools,
     },
     Watched {
-        category: "systemd user units",
+        category: "user services",
         path: ".config/systemd/user",
         watch: Watch::Units,
     },
     Watched {
-        category: "systemd user units",
+        category: "user services",
         path: ".local/share/systemd/user",
         watch: Watch::Units,
     },
     Watched {
-        category: "systemd user environment",
+        category: "user services",
         path: ".config/environment.d",
         watch: Watch::Directory,
     },
     Watched {
-        category: "SSH login commands",
+        category: "SSH settings",
         path: ".ssh/rc",
         watch: Watch::File,
     },
     Watched {
-        category: "SSH client settings",
+        category: "SSH settings",
         path: ".ssh/config",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".bashrc",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".bash_profile",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".bash_login",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".bash_logout",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".bash_aliases",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".profile",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".zshrc",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".zprofile",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".zshenv",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".zlogin",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".config/fish/config.fish",
         watch: Watch::File,
     },
     Watched {
-        category: "shell startup",
+        category: "shell startup files",
         path: ".config/fish/conf.d",
         watch: Watch::Directory,
     },
@@ -387,9 +397,16 @@ pub struct AccountReport {
     /// Every place watched was scanned, at the grant and now.
     #[serde(default)]
     pub complete: bool,
-    /// How many watched places (see [`WATCHED`]) this report covers.
+    /// How many rows of [`WATCHED`] this report covers (its coverage).
     #[serde(default)]
     pub watched: usize,
+    /// How many places (files, links, spool jobs) were checked: the count a
+    /// "no changes found" report names (D360).
+    #[serde(default)]
+    pub places: usize,
+    /// The categories watched, in plain words (D360).
+    #[serde(default)]
+    pub categories: Vec<String>,
     /// Root, or may become root.
     #[serde(default)]
     pub privileged: bool,
@@ -420,6 +437,8 @@ impl AccountReport {
             omitted_files: 0,
             complete: false,
             watched: 0,
+            places: 0,
+            categories: Vec::new(),
             privileged: false,
             shared: false,
             programs_may_remain: false,
@@ -537,6 +556,9 @@ struct Ended {
     unscanned: Vec<String>,
     /// Watched places gone through.
     watched: usize,
+    /// Entries checked (files, links, spool jobs): the places a report says
+    /// it watched (D360).
+    places: usize,
 }
 
 /// A walk over one account's access files, in the order of [`WATCHED`],
@@ -601,6 +623,7 @@ impl<'a> Scan<'a> {
             truncated: scan.truncated,
             unscanned: scan.unscanned,
             watched,
+            places: scan.entries,
         }
     }
 
@@ -1269,6 +1292,8 @@ fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> 
         omitted_files: 0,
         complete,
         watched: ended.watched,
+        places: ended.places,
+        categories: categories(),
         privileged: false,
         shared: false,
         programs_may_remain: false,

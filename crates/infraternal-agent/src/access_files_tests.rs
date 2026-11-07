@@ -853,14 +853,32 @@ fn a_retry_sends_the_last_report_again() {
     assert_eq!(retry.state, State::Changed);
 }
 
-/// Each report says when its baseline was recorded and when it was scanned.
+/// Each report says when its baseline was recorded and when it was
+/// scanned, how many places it checked and their categories (D360).
 #[test]
 fn a_report_carries_its_baseline_time() {
-    let granted = Granted::new(|_| {}, &no_extra);
+    let granted = Granted::new(
+        |home| std::fs::write(home.join(".bashrc"), "export PATH=$PATH:~/bin\n").unwrap(),
+        &no_extra,
+    );
     let account = &granted.report(&no_extra).accounts[0];
     assert!(account.recorded_at > 0 && account.scanned_at >= account.recorded_at);
     assert_eq!(account.watched, WATCHED.len());
+    assert_eq!(account.places, 1, "one file was there to check");
     assert!(account.complete);
+    // D360: the report names what it watched.
+    assert_eq!(
+        account.categories,
+        [
+            "SSH keys",
+            "cron and at jobs",
+            "user services",
+            "SSH settings",
+            "shell startup files",
+            "desktop autostart",
+            "programs on PATH"
+        ]
+    );
 }
 
 /// J334 P2-1, the second person: the account was shared when the first
