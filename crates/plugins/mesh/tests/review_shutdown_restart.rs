@@ -123,6 +123,7 @@ fn crash_child() {
         .save(&State {
             enabled: true,
             config: None,
+            authority_reset_pending: false,
             backend: Some(backend),
         })
         .unwrap();
@@ -136,6 +137,7 @@ fn crash_child() {
         .save(&State {
             enabled: false,
             config: None,
+            authority_reset_pending: false,
             backend: Some(backend),
         })
         .unwrap();

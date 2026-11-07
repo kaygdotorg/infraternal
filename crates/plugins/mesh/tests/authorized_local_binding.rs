@@ -35,6 +35,7 @@ fn check(backend: Backend) {
         .save(&infraternal_plugin_mesh::node_state::State {
             enabled: true,
             config: None,
+            authority_reset_pending: false,
             backend: Some(backend),
         })
         .unwrap();
