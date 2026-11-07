@@ -1168,12 +1168,9 @@ impl RuntimeState {
                 route(&interface, *address, "add", Some(mtu))?;
                 added.insert(*address);
             }
-            for address in route_mtus_to_refresh(
-                &old_routes,
-                &new_routes,
-                &old_route_mtus,
-                &new_route_mtus,
-            ) {
+            for address in
+                route_mtus_to_refresh(&old_routes, &new_routes, &old_route_mtus, &new_route_mtus)
+            {
                 let mtu = new_route_mtus
                     .get(&address)
                     .copied()
@@ -1666,8 +1663,8 @@ mod tests {
     use super::{
         BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
         UdpTransportFactoryParams, parse_utun_payload, peers_for_config, read_public_state,
-        reconcile, route_addresses, stage_chunk, utun_family, valid_utun_name, validate_config,
-        route_mtus_to_refresh, validate_underlay_routes, write_public_state,
+        reconcile, route_addresses, route_mtus_to_refresh, stage_chunk, utun_family,
+        valid_utun_name, validate_config, validate_underlay_routes, write_public_state,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -2169,8 +2166,16 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let old_mtus = old_routes.iter().copied().map(|route| (route, 1420)).collect();
-        let new_mtus = new_routes.iter().copied().map(|route| (route, 1200)).collect();
+        let old_mtus = old_routes
+            .iter()
+            .copied()
+            .map(|route| (route, 1420))
+            .collect();
+        let new_mtus = new_routes
+            .iter()
+            .copied()
+            .map(|route| (route, 1200))
+            .collect();
 
         let refreshed = route_mtus_to_refresh(&old_routes, &new_routes, &old_mtus, &new_mtus);
 

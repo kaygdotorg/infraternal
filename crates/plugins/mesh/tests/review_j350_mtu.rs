@@ -67,9 +67,10 @@ async fn narrow_path_mesh_budget_fits_relay_datagram() {
             .connection()
             .send_datagram(bytes::Bytes::from(vec![0; inner + 32 + 4]));
         // The previous direct-path budgets exceed both relay limits.
-        let legacy = client
-            .connection()
-            .send_datagram(bytes::Bytes::from(vec![0; previous_inner + 32 + 4]));
+        let legacy =
+            client
+                .connection()
+                .send_datagram(bytes::Bytes::from(vec![0; previous_inner + 32 + 4]));
         // The shipped 1380-byte packet fitted a normal relay path but not a narrow one.
         let shipped = client
             .connection()
@@ -78,7 +79,10 @@ async fn narrow_path_mesh_budget_fits_relay_datagram() {
             "underlay={underlay} inner_mtu={inner} relay_frame={} actual_max={maximum:?} send_result={result:?} previous_budget_send={legacy:?} shipped_1380_send={shipped:?}",
             inner + 36
         );
-        assert!(legacy.is_err(), "previous budget unexpectedly fit: {legacy:?}");
+        assert!(
+            legacy.is_err(),
+            "previous budget unexpectedly fit: {legacy:?}"
+        );
         assert_eq!(shipped.is_ok(), underlay == 1500);
         results.push(result);
         client.connection().close(0_u32.into(), b"done");

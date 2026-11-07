@@ -799,11 +799,8 @@ impl Node {
                 Some(mtu) => overrides.insert(peer.key, mtu),
                 None => overrides.remove(&peer.key),
             };
-            let result = Device::routes_with_mtu_overrides(
-                std::slice::from_ref(&peer),
-                &overrides,
-                false,
-            );
+            let result =
+                Device::routes_with_mtu_overrides(std::slice::from_ref(&peer), &overrides, false);
             if result.is_err() {
                 if let Some(previous) = previous {
                     overrides.insert(peer.key, previous);
@@ -1831,13 +1828,11 @@ impl Node {
                                 .apply(config.clone())?;
                         }
                     }
-                    previous_route_overrides = Some(
-                        refresh_peer_routes_from(
-                            &route_mtu_overrides,
-                            &peers,
-                            &route_overrides_to_clear,
-                        )?,
-                    );
+                    previous_route_overrides = Some(refresh_peer_routes_from(
+                        &route_mtu_overrides,
+                        &peers,
+                        &route_overrides_to_clear,
+                    )?);
                     Ok(())
                 })();
                 // Release the engine-field borrow before updating the shared interface MTU.
@@ -2034,11 +2029,13 @@ impl Node {
             self.apply_peer_changes(&config, &changed, &retired_keys)?;
             // A full accepted snapshot also re-derives routes for unchanged peers: the endpoint
             // route or its egress link MTU may have changed since their last peer update.
-            let configured_peers: Vec<_> =
-                config.peers.values().map(|policy| policy.peer.clone()).collect();
-            previous_route_overrides = Some(
-                self.refresh_peer_routes(&configured_peers, &route_overrides_to_clear)?,
-            );
+            let configured_peers: Vec<_> = config
+                .peers
+                .values()
+                .map(|policy| policy.peer.clone())
+                .collect();
+            previous_route_overrides =
+                Some(self.refresh_peer_routes(&configured_peers, &route_overrides_to_clear)?);
             if self.config.is_none()
                 || self
                     .routes

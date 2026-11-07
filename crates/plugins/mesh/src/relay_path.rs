@@ -565,17 +565,14 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
                         live.client.connection().max_datagram_size(),
                     );
                     tokio::spawn(async move {
-                        let result =
-                            tokio::task::spawn_blocking(move || updater(Some(mtu))).await;
+                        let result = tokio::task::spawn_blocking(move || updater(Some(mtu))).await;
                         if !matches!(result, Ok(Ok(()))) {
                             tracing::warn!(
                                 relay_mtu = mtu,
                                 "Could not refresh peer route after an oversized relay datagram"
                             );
                         }
-                        refresh
-                            .refreshing_route_mtu
-                            .store(false, Ordering::Release);
+                        refresh.refreshing_route_mtu.store(false, Ordering::Release);
                     });
                 }
             }
@@ -701,16 +698,25 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
             // The smaller budget is safe on both connections while the data path switches.
             let transition = previous.min(next);
             if !update_peer_route_mtu(peer, Some(transition)).await {
-                tracing::warn!(relay_mtu = transition, "Could not install relay transition route MTU");
+                tracing::warn!(
+                    relay_mtu = transition,
+                    "Could not install relay transition route MTU"
+                );
             }
             *write(&peer.active) = installed.clone();
             if next != transition && !update_peer_route_mtu(peer, Some(next)).await {
-                tracing::warn!(relay_mtu = next, "Could not refresh peer route for relay path change");
+                tracing::warn!(
+                    relay_mtu = next,
+                    "Could not refresh peer route for relay path change"
+                );
             }
         }
         (None, Some(next)) => {
             if !update_peer_route_mtu(peer, Some(next)).await {
-                tracing::warn!(relay_mtu = next, "Could not refresh peer route for relay path change");
+                tracing::warn!(
+                    relay_mtu = next,
+                    "Could not refresh peer route for relay path change"
+                );
             }
             *write(&peer.active) = installed.clone();
         }
@@ -788,7 +794,10 @@ async fn watch_relay_mtu(shared: Arc<Shared>, live: Arc<Live>) {
         let mut updated = true;
         for peer in peers {
             if !update_peer_route_mtu(&peer, Some(mtu)).await {
-                tracing::warn!(relay_mtu = mtu, "Could not refresh peer route for relay MTU change");
+                tracing::warn!(
+                    relay_mtu = mtu,
+                    "Could not refresh peer route for relay MTU change"
+                );
                 updated = false;
             }
         }
