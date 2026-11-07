@@ -735,6 +735,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     expect(await heroTone(page)).toBeNull();
     await expect(inWizard(page, "Try again")).toHaveCount(0);
     await expect(inWizard(page, "Start fresh")).toHaveCount(0);
+    // Capture only once the step transition has settled on this one page.
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `offer-${viewport.width}.png`) });
 
     await wizard(page).locator('[data-ah="review-take-over"]').click();
@@ -760,6 +762,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     expect(Math.abs(edges.text - edges.title)).toBeLessThanOrEqual(0.5);
     expect(edges.inside).toBe(true);
     expect(edges.valueRight).toBeLessThanOrEqual(edges.listRight + 0.5);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `confirm-${viewport.width}.png`) });
 
     await wizard(page).locator('[data-ah="take-over"]').click();
