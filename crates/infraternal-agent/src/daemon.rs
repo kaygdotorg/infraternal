@@ -425,58 +425,81 @@ fn report_value(path: &str) -> u8 {
 }
 
 /// Makes the report smaller by one step, marking the account it took from
-/// truncated: one line from the least valuable file that has lines, else
-/// one not-scanned name, else the least valuable file (counted in
-/// `omitted_files`). `false` when nothing is left to take.
+/// truncated. The order is by value, across kinds: lines of the least
+/// valuable files, then of the middling ones, then not-scanned names, then
+/// whole files from the least valuable up (counted in `omitted_files`), and
+/// only last what admits a login (J334 P2-2). `false` when nothing is left.
 fn trim_report(access: &mut crate::access_files::Access) -> bool {
-    let least = |access: &crate::access_files::Access, with_lines: bool| {
-        access
-            .accounts
-            .iter()
-            .enumerate()
-            .flat_map(|(a, account)| {
-                account
-                    .files
+    /// One step of the order.
+    enum Step {
+        /// A line of a file worth this much.
+        Line(u8),
+        /// A not-scanned name.
+        Unscanned,
+        /// A whole file worth this much.
+        File(u8),
+    }
+    let order = [
+        Step::Line(1),
+        Step::Line(2),
+        Step::Unscanned,
+        Step::File(1),
+        Step::File(2),
+        Step::Line(3),
+        Step::File(3),
+    ];
+    for step in order {
+        let found = match step {
+            Step::Unscanned => access
+                .accounts
+                .iter()
+                .rposition(|account| !account.unscanned.is_empty())
+                .map(|a| (a, None)),
+            Step::Line(value) | Step::File(value) => {
+                let lines = matches!(step, Step::Line(_));
+                access
+                    .accounts
                     .iter()
                     .enumerate()
-                    .filter(move |(_, file)| !with_lines || !file.lines.is_empty())
-                    .map(move |(f, file)| (report_value(&file.path), std::cmp::Reverse(f), a, f))
-            })
-            .min()
-            .map(|(_, _, a, f)| (a, f))
-    };
-    if let Some((a, f)) = least(access, true) {
-        let account = &mut access.accounts[a];
-        let file = &mut account.files[f];
-        file.lines.pop();
-        let more = "more new lines than the report shows";
-        match &mut file.note {
-            Some(note) if note.contains(more) => {}
-            Some(note) => {
-                note.push_str("; ");
-                note.push_str(more);
+                    .rev()
+                    .find_map(|(a, account)| {
+                        account
+                            .files
+                            .iter()
+                            .rposition(|file| {
+                                report_value(&file.path) == value
+                                    && (!lines || !file.lines.is_empty())
+                            })
+                            .map(|f| (a, Some((f, lines))))
+                    })
             }
-            None => file.note = Some(more.to_owned()),
-        }
-        account.truncated = true;
-        account.complete = false;
-        return true;
-    }
-    if let Some(account) = access
-        .accounts
-        .iter_mut()
-        .rev()
-        .find(|account| !account.unscanned.is_empty())
-    {
-        account.unscanned.pop();
-        account.truncated = true;
-        account.complete = false;
-        return true;
-    }
-    if let Some((a, f)) = least(access, false) {
+        };
+        let Some((a, place)) = found else {
+            continue;
+        };
         let account = &mut access.accounts[a];
-        account.files.remove(f);
-        account.omitted_files += 1;
+        match place {
+            None => {
+                account.unscanned.pop();
+            }
+            Some((f, true)) => {
+                let file = &mut account.files[f];
+                file.lines.pop();
+                let more = "more new lines than the report shows";
+                match &mut file.note {
+                    Some(note) if note.contains(more) => {}
+                    Some(note) => {
+                        note.push_str("; ");
+                        note.push_str(more);
+                    }
+                    None => file.note = Some(more.to_owned()),
+                }
+            }
+            Some((f, false)) => {
+                account.files.remove(f);
+                account.omitted_files += 1;
+            }
+        }
         account.truncated = true;
         account.complete = false;
         return true;
