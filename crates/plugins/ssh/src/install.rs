@@ -1183,6 +1183,11 @@ fi
         self.commit_with_timeout(None).await
     }
 
+    /// Commit this transaction on the host, within `timeout` when one is given:
+    /// its journal goes and what it replaced is deleted, after the new install
+    /// is durable (COMMIT_RETIRE).
+    /// # Errors
+    /// Reports a refused or failed commit; nothing is marked committed then.
     async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
         let script = self.script(&format!(
             r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
