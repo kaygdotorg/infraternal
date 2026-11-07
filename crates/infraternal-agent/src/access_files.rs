@@ -655,7 +655,10 @@ impl<'a> Scan<'a> {
         }
         self.seen.insert(path.clone());
         match content {
-            Err(error) => visit(path, error_entry(&error), None),
+            Err(error) => {
+                self.skip(&path);
+                visit(path, error_entry(&error), None);
+            }
             Ok(bytes) => {
                 let entry = Entry {
                     kind: "file".to_owned(),
@@ -687,23 +690,41 @@ impl<'a> Scan<'a> {
     /// the home (a dotfile manager's `~/.ssh -> .dotfiles/ssh`, J334 P2-4).
     /// Nothing is followed on disk: each hop is opened again beneath the home
     /// with `O_NOFOLLOW`. A link that leaves the home, or too many hops,
-    /// makes the account incomplete and returns `None`.
-    fn resolve(&mut self, rel: &Path) -> Option<PathBuf> {
+    /// makes the account incomplete and returns `None`. With `whole`, the
+    /// last component is resolved too: a watched directory that is itself a
+    /// link (`~/.local/bin -> ../.dotfiles/bin`) is scanned at its target
+    /// (J343 P2-C); a file's own link is kept, and reported as a link.
+    fn resolve(&mut self, rel: &Path, whole: bool) -> Option<PathBuf> {
         let mut path = rel.to_owned();
+        let mut linked = false;
         for _ in 0..LINK_HOPS {
             let home = self.home.as_ref()?;
             let parts: Vec<_> = path.components().collect();
             let mut prefix = PathBuf::new();
             let mut next = None;
-            for part in &parts[..parts.len().saturating_sub(1)] {
+            let walked = if whole {
+                parts.len()
+            } else {
+                parts.len().saturating_sub(1)
+            };
+            for part in &parts[..walked] {
                 prefix.push(part);
                 match open_beneath(home, &prefix, true) {
                     Ok(_) => {}
                     Err(error) if is_link_error(&error) => {
                         let rest = path.strip_prefix(&prefix).ok()?.to_owned();
-                        let inside = self
-                            .read_link(&prefix)
-                            .and_then(|target| beneath_home(self.account, &prefix, &target));
+                        let target = self.read_link(&prefix);
+                        // A regular final file also returns ENOTDIR when probed
+                        // as a directory. Its caller will read it without links.
+                        if whole
+                            && prefix == path
+                            && target.is_none()
+                            && error.raw_os_error() == Some(nix::libc::ENOTDIR)
+                        {
+                            return Some(path);
+                        }
+                        let inside =
+                            target.and_then(|target| beneath_home(self.account, &prefix, &target));
                         let Some(inside) = inside else {
                             self.skip(&format!(
                                 "~/{} (a link that leaves the home; not followed)",
@@ -711,11 +732,26 @@ impl<'a> Scan<'a> {
                             ));
                             return None;
                         };
-                        next = Some(inside.join(rest));
+                        linked = true;
+                        next = Some(if rest.as_os_str().is_empty() {
+                            inside
+                        } else {
+                            inside.join(rest)
+                        });
                         break;
                     }
-                    // Missing or unreadable: the caller's open says which.
-                    Err(_) => return Some(path),
+                    // Ordinary absent places are fine; a broken link is not.
+                    Err(error) if error.kind() == io::ErrorKind::NotFound && !linked => {
+                        return Some(path);
+                    }
+                    Err(error) => {
+                        self.skip(&format!(
+                            "~/{} (could not be resolved: {})",
+                            rel.display(),
+                            error.kind()
+                        ));
+                        return None;
+                    }
                 }
             }
             match next {
@@ -735,7 +771,7 @@ impl<'a> Scan<'a> {
         if self.seen.contains(&shown_path) {
             return;
         }
-        let Some(resolved) = self.resolve(rel) else {
+        let Some(resolved) = self.resolve(rel, false) else {
             return;
         };
         let Some(home) = &self.home else {
@@ -751,15 +787,20 @@ impl<'a> Scan<'a> {
                 Err(error) => {
                     if self.admit(&shown_path) {
                         self.seen.insert(shown_path.clone());
+                        self.skip(&shown_path);
                         visit(shown_path, error_entry(&error), None);
                     }
                     return;
                 }
             },
-            None => match home.try_clone() {
-                Ok(home) => home,
-                Err(_) => return,
-            },
+            None => {
+                if let Ok(home) = home.try_clone() {
+                    home
+                } else {
+                    self.skip(&shown_path);
+                    return;
+                }
+            }
         };
         let stat = match nix::sys::stat::fstatat(
             &parent,
@@ -771,6 +812,7 @@ impl<'a> Scan<'a> {
             Err(errno) => {
                 if self.admit(&shown_path) {
                     self.seen.insert(shown_path.clone());
+                    self.skip(&shown_path);
                     visit(shown_path, error_entry(&io::Error::from(errno)), None);
                 }
                 return;
@@ -795,9 +837,15 @@ impl<'a> Scan<'a> {
             match opened {
                 Ok(fd) => {
                     let (entry, bytes) = self.read(std::fs::File::from(fd));
+                    if entry.kind == "error" || entry.kind == "foreign" {
+                        self.skip(&shown_path);
+                    }
                     visit(shown_path, entry, bytes.as_deref());
                 }
-                Err(errno) => visit(shown_path, error_entry(&io::Error::from(errno)), None),
+                Err(errno) => {
+                    self.skip(&shown_path);
+                    visit(shown_path, error_entry(&io::Error::from(errno)), None);
+                }
             }
         } else {
             let entry = Entry {
@@ -813,9 +861,10 @@ impl<'a> Scan<'a> {
     /// inside the home is queued to be checked as its own entry.
     fn link(&mut self, rel: &Path) -> Entry {
         let target = self.read_link(rel);
-        if let Some(inside) = target
-            .as_deref()
-            .and_then(|target| beneath_home(self.account, rel, target))
+        if target.is_none() {
+            self.skip(&format!("~/{} (the link could not be read)", rel.display()));
+        } else if let Some(inside) = self.resolve(rel, true)
+            && inside != rel
         {
             self.targets.insert(inside);
         }
@@ -900,7 +949,15 @@ impl<'a> Scan<'a> {
     /// subdirectories systemd reads too; other subdirectories run nothing.
     fn directory(&mut self, rel: &Path, units: bool, visit: &mut Visit<'_>) {
         let shown_path = format!("~/{}", rel.display());
-        let Some(resolved) = self.resolve(rel) else {
+        if let Some(parent_resolved) = self.resolve(rel, false)
+            && self.read_link(&parent_resolved).is_some()
+        {
+            self.file(rel, visit);
+        }
+        // Resolved to the end: a watched directory that is a link inside the
+        // home is scanned at its target; one leaving the home has already
+        // made the scan incomplete (J343 P2-C).
+        let Some(resolved) = self.resolve(rel, true) else {
             return;
         };
         let Some(home) = &self.home else {
@@ -909,19 +966,12 @@ impl<'a> Scan<'a> {
         let opened = open_beneath(home, &resolved, true);
         let directory = match opened {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-            Err(error) if is_link_error(&error) => {
-                // The directory itself is a link (to /etc/xdg/autostart, say).
-                if self.admit(&shown_path) {
-                    self.seen.insert(shown_path.clone());
-                    let entry = self.link(&resolved);
-                    visit(shown_path, entry, None);
-                }
-                return;
-            }
             Err(error) => {
-                if self.admit(&shown_path) {
-                    visit(shown_path, error_entry(&error), None);
-                }
+                // Not a directory, or unreadable: nothing in it was checked.
+                self.skip(&format!(
+                    "{shown_path} (could not be read: {})",
+                    error.kind()
+                ));
                 return;
             }
             Ok(directory) => OwnedFd::from(directory),
@@ -948,17 +998,18 @@ impl<'a> Scan<'a> {
             let Some(home) = &self.home else {
                 return;
             };
-            if open_beneath(home, &resolved.join(&name), true).is_ok() {
+            let unit_directory = units && {
                 let name = name.to_string_lossy();
-                if units
-                    && (name.ends_with(".wants")
-                        || name.ends_with(".requires")
-                        || name.ends_with(".upholds")
-                        || name.ends_with(".d"))
-                {
-                    self.directory(&child, false, visit);
-                }
-            } else {
+                name.ends_with(".wants")
+                    || name.ends_with(".requires")
+                    || name.ends_with(".upholds")
+                    || name.ends_with(".d")
+            };
+            if unit_directory {
+                // Unit subdirectories may themselves be links; resolve them
+                // before deciding what to read, just like the watched root.
+                self.directory(&child, false, visit);
+            } else if open_beneath(home, &resolved.join(&name), true).is_err() {
                 // Not a directory (a file, a link, a FIFO): one entry.
                 self.file(&child, visit);
             }
@@ -1259,13 +1310,13 @@ fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> 
     }
     let complete = !ended.truncated && !base.truncated && unscanned.is_empty();
     // What was there at the grant and is gone now (J334 P2-3: a deleted
-    // mask re-enables a unit). Only claimed when both scans were complete,
-    // and for home paths only when the path is really absent now (a link
+    // mask re-enables a unit). Spool removal needs complete scans. Home
+    // paths need proven absence even if another place was skipped (a link
     // target that is merely no longer linked is still there).
-    if complete {
+    {
         let gone = |path: &str| {
             path.strip_prefix("~/")
-                .is_none_or(|rel| absent_beneath(account, Path::new(rel)))
+                .map_or(complete, |rel| absent_beneath(account, Path::new(rel)))
         };
         for (path, before) in &base.entries {
             if present.contains(path) || !gone(path) {

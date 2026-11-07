@@ -937,3 +937,126 @@ fn a_later_report_on_a_shared_account_says_it_was_shared() {
     );
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// J343: final directory links inside the home must expose planted files.
+#[test]
+fn watched_directory_links_are_scanned_to_the_end() {
+    for place in [".local/bin", ".config/systemd/user"] {
+        let granted = Granted::new(
+            |home| {
+                std::fs::create_dir_all(home.join(".dotfiles/real")).unwrap();
+                std::fs::create_dir_all(home.join(place).parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(home.join(".dotfiles/real"), home.join(place)).unwrap();
+            },
+            &no_extra,
+        );
+        std::fs::write(
+            granted.home.join(place).join("back.service"),
+            "ExecStart=/tmp/plant\n",
+        )
+        .unwrap();
+        let report = granted.report(&no_extra);
+        assert_eq!(report.state, State::Changed, "{place}: {report:?}");
+        assert!(
+            report.accounts[0]
+                .files
+                .iter()
+                .any(|f| f.lines.iter().any(|l| l.contains("plant")))
+        );
+    }
+}
+
+/// J343: outside links, broken links and cycles cannot support a clean result.
+#[test]
+fn unresolved_watched_links_make_the_scan_incomplete() {
+    for place in [".local/bin", ".bashrc"] {
+        for target in ["/var/tmp/j347-never-read", "missing", ".bashrc"] {
+            let granted = Granted::new(
+                |home| {
+                    std::fs::create_dir_all(home.join(place).parent().unwrap()).unwrap();
+                    std::os::unix::fs::symlink(target, home.join(place)).unwrap();
+                },
+                &no_extra,
+            );
+            let report = granted.report(&no_extra);
+            assert_eq!(
+                report.accounts[0].reason,
+                Some(Reason::Incomplete),
+                "{place} -> {target}: {report:?}"
+            );
+        }
+    }
+}
+
+/// Resolving only one link hop must not miss a changed startup file.
+#[test]
+fn a_chain_of_file_links_reaches_its_content() {
+    let granted = Granted::new(
+        |home| {
+            std::fs::write(home.join("real"), "old\n").unwrap();
+            std::os::unix::fs::symlink("real", home.join("middle")).unwrap();
+            std::os::unix::fs::symlink("middle", home.join(".bashrc")).unwrap();
+        },
+        &no_extra,
+    );
+    std::fs::write(granted.home.join("real"), "plant\n").unwrap();
+    assert_eq!(granted.report(&no_extra).state, State::Changed);
+}
+
+/// An equally unreadable spool at both times is incomplete, never clean.
+#[test]
+fn unreadable_places_cannot_compare_clean() {
+    let extra = |_: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+        visit(
+            "crontab".into(),
+            Err(io::ErrorKind::PermissionDenied.into()),
+        );
+    };
+    let granted = Granted::new(|_| {}, &extra);
+    let report = granted.report(&extra);
+    assert_eq!(
+        report.accounts[0].reason,
+        Some(Reason::Incomplete),
+        "{report:?}"
+    );
+}
+
+/// A non-directory in a watched path cannot compare as a clean read error.
+#[test]
+fn unreadable_home_places_are_incomplete() {
+    let granted = Granted::new(
+        |home| {
+            std::fs::write(home.join(".ssh"), "not a directory\n").unwrap();
+        },
+        &no_extra,
+    );
+    let report = granted.report(&no_extra);
+    assert_eq!(
+        report.accounts[0].reason,
+        Some(Reason::Incomplete),
+        "{report:?}"
+    );
+}
+
+/// Systemd reads linked drop-in directories as well as linked unit roots.
+#[test]
+fn a_linked_drop_in_directory_exposes_its_plant() {
+    let granted = Granted::new(
+        |home| {
+            std::fs::create_dir_all(home.join(".config/systemd/user")).unwrap();
+            std::fs::create_dir_all(home.join(".dotfiles/dropin")).unwrap();
+            std::os::unix::fs::symlink(
+                home.join(".dotfiles/dropin"),
+                home.join(".config/systemd/user/back.service.d"),
+            )
+            .unwrap();
+        },
+        &no_extra,
+    );
+    std::fs::write(
+        granted.home.join(".dotfiles/dropin/back.conf"),
+        "ExecStartPost=/tmp/plant\n",
+    )
+    .unwrap();
+    assert_eq!(granted.report(&no_extra).state, State::Changed);
+}
