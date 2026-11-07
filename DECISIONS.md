@@ -4199,3 +4199,44 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      adds no power. Rootless adds of another account's install still
      refuse. The rejected options were keeping D337 strict (a by-hand
      uninstall when the old server is gone) and never offering a button.
+
+360. **A revoke report names what it checked, never "unchanged" (owner,
+     2026-11-07, #355; refines D356):** J334's review showed that a report
+     could say "unchanged" when access was left behind: a folder with more
+     than 1,024 entries was skipped, and systemd and bash read places the
+     scan did not cover. No scan can prove nothing was left. The owner chose
+     "Say what was checked": when the scan finds nothing, the report says
+     what it watched and since when, for example "No changes found in the
+     214 places we watch (SSH keys, cron, user services, shell startup
+     files) since 3 Nov, 14:02". It never uses the word "unchanged". The
+     server decides that outcome itself, only when the scan was complete,
+     covered every category D356 names, ran in an account that could not
+     rewrite its record or the infraternal agent, and nothing of the person's
+     could write afterwards. Otherwise it says "Not checked" with the reason.
+     The rejected options were keeping "unchanged" for complete scans (it
+     still reads as a guarantee) and listing changes only (silence can't tell
+     "checked, nothing found" from "couldn't check").
+
+361. **The nightly fuzz run follows dev (owner, 2026-11-07, #353; changes
+     PROCESS §12):** the nightly fuzz runner on dev-02 was pinned to the
+     commit chosen at install, and only a reinstall moved it. It stayed on a
+     5 November commit, re-reported a parser bug already fixed on dev, and
+     never ran the newer runner checks. The owner chose "Follow latest dev":
+     before each night's run the runner fetches `dev` as the fuzz account and
+     fuzzes that head, and the night fails if the fetch fails. Its token
+     still only meets reviewed code, because only the orchestrator merges
+     into dev. The rejected option was keeping the pin and reinstalling after
+     merges, which drifts whenever a reinstall is forgotten.
+
+362. **A sole-holder revoke stops every process of the account (owner,
+     2026-11-07, #355; extends D353):** D353 stops the account's user
+     services and turns linger off when the revoked person is the account's
+     last holder. J343's review (#355 comment 84293) showed that a program
+     started some other way (a background job, or a session over the host's
+     local SSH socket) survives that, and can write a new SSH key after the
+     revoke. The owner chose "Stop all its processes": when no one else holds
+     the account, the revoke ends every remaining process running as that
+     account, then scans. A shared account's processes are left alone, and
+     its report says "Not checked: programs may still be running" with the
+     list. The rejected option was only reporting the surviving programs,
+     which leaves the access open until someone acts.
