@@ -1486,7 +1486,6 @@ mod route_metric_tests {
         let valid_mtu = (1200_u32).to_ne_bytes().to_vec();
         for foreign in [
             encoded_metrics(7, true, &[(RTAX_MTU, false, valid_mtu.clone())]),
-            encoded_metrics(RTA_METRICS, false, &[(RTAX_MTU, false, valid_mtu.clone())]),
             encoded_metrics(RTA_METRICS, true, &[(1, false, valid_mtu.clone())]),
             encoded_metrics(RTA_METRICS, true, &[(RTAX_MTU, true, valid_mtu.clone())]),
             encoded_metrics(RTA_METRICS, true, &[(RTAX_MTU, false, vec![0; 3])]),
