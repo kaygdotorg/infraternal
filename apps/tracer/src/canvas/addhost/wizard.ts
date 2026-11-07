@@ -731,6 +731,10 @@ export class Wizard {
       : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="finish"><span>Done</span></button>`);
   }
 
+  /**
+   * Redraws one host's row on the progress page from its view: state and tone, its one-line status, each stage,
+   * and the row's retry and fix buttons. Does nothing when the progress page isn't showing.
+   */
   private paint(job: Job, page: HTMLElement | undefined = this.current): void {
     const row = page?.dataset.page === "progress" ? page.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.target)}"]`) : null;
     if (!row) return;
@@ -750,7 +754,10 @@ export class Wizard {
     // "Fix" opens the page that can mend this failure; plain retries and dead ends have only the retry button.
     // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
     const fix = state === "failed" || awaitingKey(job.view) ? guideFor(job.entry.label, job.view.failure).fix : "none";
-    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install";
+    // A dead end ("none") has no retry either: it would only meet the same refusal (J314 P2-1).
+    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none";
+    // The row tells the news in the page's tone: neutral news is never red here (TASTE: the icon matches the news).
+    row.dataset.tone = state === "failed" ? guideFor(job.entry.label, job.view.failure).tone : "";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.
@@ -810,15 +817,17 @@ export class Wizard {
       <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(text)}</pre></details>` : "";
   }
 
+  /** The page for one failed host: what happened, what to do, Details, and the one action that fixes it. */
   private renderFailure(page: HTMLElement): void {
     const job = this.fixing!;
     const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
     const openId = hostId && this.deps.sink.hasHost?.(hostId) !== false ? hostId : undefined;
-    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined);
+    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined, job.entry.user);
     const replaceStuck = guide.fix === "replace-stuck-install";
     if (replaceStuck) guide.fix = "start-fresh";
-    // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
-    const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
+    // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red. Only a running
+    // setup, which the person waits for, gets the clock (TASTE: the icon matches the news, #394).
+    const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
       <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${this.detailsBlock(job)}`;

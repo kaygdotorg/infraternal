@@ -408,9 +408,15 @@ the default server supplies the verified source through the same SSH plugin.
 ## Classified attempt failures (#169)
 
 Failure adds optional `exit_status` from the authenticated command process (a
-signal or unavailable status omits it). Fixed installer code 71 retains
-`failed_step` and identifies the approved root/rootless directory with ownership,
-permission and setup-file guidance. An unfinished transaction (72) directs the
+signal or unavailable status omits it). Fixed installer code 71 outside the
+check and join retains `failed_step` and names the root/rootless setup location
+in `log_tail` only (#394). The refusing check may name itself with one fixed
+stderr line, `INFRATERNAL_REFUSED <cache|prepared|foreign|owner>`, right
+before its exit; nothing else of stderr is read. `owner` (an owner record for
+another host) becomes kind `unrecognized_install`; every other 71 becomes kind
+`unproven_files` (setup found files it cannot prove are its own and changed
+nothing), with `refusal: "cache" | "prepared" | "foreign"` when named. Neither
+is retried: a retry would meet the same files. An unfinished transaction (72) directs the
 person back to cleanup; a live setup (73) offers to wait. A retry with retained
 coordinates actually finishes the original cleanup before continuing. A returned
 script status is a setup failure, including status 255 after authentication;
@@ -617,3 +623,24 @@ as transfer progress. HTTP connect, TLS, response headers and storage completion
 each have a 30-second bound. A payload source without byte observations gets a
 30-second acquisition bound. Confirmation and authenticated readiness retain
 their own independent limits.
+
+## Finished installs and missing accounts (#394)
+
+A base with no journal is a finished install owned by the host id in its
+`.bootstrap-owner`. The read-only check reports it as
+`INFRATERNAL_SETUP_INSTALLED <32 hex host id>`, never `INFRATERNAL_SETUP_CLEAR`:
+every new attempt carries a new host id, and staging refuses (71) a base whose
+owner names another host. After the existing already-added preflight, the
+server answers `unrecognized_install` at the `connect` step before any write.
+Its sentence holds whoever enrolled it: another server, another person on this
+server, or an earlier setup this server retired. Taking such an install over is
+D359's Take over, a separate slice on `addhost-takeover-d359`.
+
+When the NetBird SSH server accepts a network sign-in and then ends a command
+session with exactly `User authentication failed` and status 1, the host could
+not find the login name's account. That is kind `no_account`, never a setup
+failure; no other sign-in method is tried. The same line with any other command
+status is the command's own failure. The master connection has no command
+status and matches on the line alone. The answer also covers a directory lookup
+that failed, so the wording says the host couldn't find the account, not that
+it has none.

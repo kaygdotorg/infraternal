@@ -1273,7 +1273,7 @@ impl Bootstrap {
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
                 metadata.authentication = session.authentication();
             }
-            let (check, previous, absent) =
+            let (check, previous, remains) =
                 previous_attempt::parse_check_with_absence(&output.stdout)?;
             check.authorize_mode(target.mode)?;
             match restore_previous(batch, target, attempt, started, session.clone()).await {
@@ -1481,7 +1481,7 @@ impl Bootstrap {
                 // The check proved no install at all here (only the inspection
                 // script reports that; the cleanup-owning probe never does):
                 // same as after a Start fresh (D355).
-                if absent && !owns_cleanup {
+                if remains == previous_attempt::Remains::Absent && !owns_cleanup {
                     self.backend
                         .install_base_proven_empty(&batch.authority, target, &check, lookup.clone())
                         .await?;
@@ -1496,6 +1496,12 @@ impl Bootstrap {
                 self.backend
                     .preflight_existing_host(&batch.authority, target, lookup.clone())
                     .await?;
+            }
+            // A finished install this server did not recognize above. Staging
+            // carries a new host id and would refuse it (exit 71) on this and
+            // every retry; answer now, before anything is written (#394).
+            if remains == previous_attempt::Remains::Installed {
+                return Err(previous_attempt::installed_elsewhere(target.mode));
             }
             // Public HTTPS must be reachable and the host key prepared before the
             // backend creates the one-use invitation. The staged transaction remains
