@@ -123,14 +123,28 @@ pub fn parse_check(bytes: &[u8]) -> Result<(Check, Option<PreviousAttempt>), Fai
     parse_check_with_absence(bytes).map(|(check, previous, _)| (check, previous))
 }
 
-/// [`parse_check`], plus whether the check proved that the account has no
-/// infraternal install at all (`INFRATERNAL_SETUP_ABSENT`, D355): its base, unit
-/// and launcher each do not exist. "Clear" or anything else proves nothing.
+/// What the read-only check found in place of an earlier unfinished setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Remains {
+    /// `INFRATERNAL_SETUP_CLEAR`, or a journal record: proves nothing more.
+    Unproven,
+    /// `INFRATERNAL_SETUP_ABSENT` (D355): the base, unit and launcher each do
+    /// not exist, so the account has no infraternal install at all.
+    Absent,
+    /// `INFRATERNAL_SETUP_INSTALLED <host>` (#394): a finished install with no
+    /// journal. Its `.bootstrap-owner` names a host id this attempt does not
+    /// carry, so staging would refuse it (exit 71). The caller answers before
+    /// staging: already added here, or [`installed_elsewhere`].
+    Installed,
+}
+
+/// [`parse_check`], plus what the check proved about the account's install
+/// ([`Remains`]).
 /// # Errors
 /// As [`parse_check`].
 pub fn parse_check_with_absence(
     bytes: &[u8],
-) -> Result<(Check, Option<PreviousAttempt>, bool), Failure> {
+) -> Result<(Check, Option<PreviousAttempt>, Remains), Failure> {
     // The check lines plus an upgrade record with two host names stay below 1 KiB.
     if bytes.len() > 1024 {
         return Err(refused());
@@ -143,12 +157,41 @@ pub fn parse_check_with_absence(
         .map(|(index, _)| index + 1)
         .ok_or_else(refused)?;
     let check = Check::parse(&bytes[..end])?;
-    if &bytes[end..] == b"INFRATERNAL_SETUP_ABSENT\n" {
-        return Ok((check, None, true));
+    let rest = &bytes[end..];
+    if rest == b"INFRATERNAL_SETUP_ABSENT\n" {
+        return Ok((check, None, Remains::Absent));
     }
-    let previous = parse(&bytes[end..])?;
-    Ok((check, previous, false))
+    if let Some(host) = rest
+        .strip_prefix(b"INFRATERNAL_SETUP_INSTALLED ")
+        .and_then(|host| host.strip_suffix(b"\n"))
+    {
+        // Only the exact fixed shape is accepted; the id itself is not used,
+        // since it is never shown and never authorizes anything.
+        canonical_id(std::str::from_utf8(host).map_err(|_| refused())?)?;
+        return Ok((check, None, Remains::Installed));
+    }
+    let previous = parse(rest)?;
+    Ok((check, previous, Remains::Unproven))
 }
+
+/// The answer for [`Remains::Installed`] once the server has ruled out "already
+/// added": the machine runs a finished infraternal install that this server
+/// does not know, from another server or a setup whose host was removed here.
+/// Setup stops before changing anything, because removing it is a takeover
+/// (D337), not leftover cleanup (#394). Reported at the connect step, whose
+/// check found it; the location goes in Details.
+#[must_use]
+pub fn installed_elsewhere(mode: InstallMode) -> Failure {
+    let mut failure = Failure::new(FailureKind::UnrecognizedInstall, INSTALLED_ELSEWHERE);
+    failure.failed_step = Some(crate::model::InstallStep::Connect);
+    failure.log_tail.push(crate::model::setup_location(mode));
+    failure
+}
+
+/// Public text for [`installed_elsewhere`]; also pinned by the tracer copy test.
+/// True in every case it covers: an install of another server, of another
+/// person on this server, or of an earlier setup this server retired (J314).
+pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.";
 
 fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if bytes == b"INFRATERNAL_SETUP_CLEAR\n" {

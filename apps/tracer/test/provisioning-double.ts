@@ -30,6 +30,9 @@
  * - `added*`: the host is already added: an `install` failure with `already_added` and the existing `host_id`, no details
  * - `running*`: `setup_running` once; the retry succeeds
  * - `unsupported*`: reported after sign-in, never succeeds; `broken*`: install fails, the retry works
+ * - `installed*`: a finished install this server doesn't know (#394); `noacct*`: the login name is no account there
+ * - `unproven-cache*` / `unproven-prepared*` / `unproven-foreign*`: a staging step refused files it can't prove are its own (`unproven_files`
+ *   with that `refusal`, J314 P2-1)
  * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
  * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
  */
@@ -48,7 +51,8 @@ const RETAINED_EVENTS = 1024;
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 
 type Step = "check" | "install" | "facts" | "connect" | "done" | "failed";
-type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running";
+/** The failure kinds the double can script, mirroring the server contract (contracts/ssh-bootstrap.md). */
+type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account";
 const PHASES = [
   { step: "check", message: "Checking the system" },
   { step: "install", message: "Installing the infraternal agent" },
@@ -56,6 +60,7 @@ const PHASES = [
   { step: "connect", message: "Connecting" },
 ] as const;
 
+/** One bootstrap event as the double sends it over the socket, in the server's wire shape. */
 interface BootstrapEvent {
   sequence: number;
   target: string;
@@ -67,7 +72,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "start"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
+  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -126,7 +131,8 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
   return known;
 }
 
-interface Failure { failed_step?: "connect" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean }
+/** The scripted failure of a named host: where it stops, what it reports and what Details shows. */
+interface Failure { failed_step?: "connect" | "upload" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean; refusal?: "cache" | "prepared" | "foreign" }
 
 /** The existing host a duplicate (`added*`) names; the mock world maps it to a host it already has. */
 const ADDED_HOST_ID = "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30";
@@ -168,6 +174,11 @@ function failureOf(target: Target): Failure | undefined {
   if (/^added/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "This host is already added. Open its terminal from Console.", evidence: "", alreadyAdded: true };
   if (/^nodetail/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "Setup stopped before this host was ready.", evidence: "Setup stopped before this host was ready." };
   if (/^connectfail/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "install", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", evidence: "The SSH connection setup failed." };
+  if (/^installed/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: false, kind: "unrecognized_install", message: "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.", evidence: "Setup location: /var/lib/infraternal" };
+  for (const refusal of ["cache", "prepared", "foreign"] as const) {
+    if (name.startsWith(`unproven-${refusal}`)) return { failed_step: "upload", phase: 1, beforeLogin: false, kind: "unproven_files", refusal, message: "Setup changed nothing.", evidence: "Setup location: /var/lib/infraternal" };
+  }
+  if (/^noacct/.test(name)) return { phase: 0, beforeLogin: false, kind: "no_account", message: "This host has no account with that user name.", evidence: "The host's SSH server reported no such account." };
   if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;
 }
@@ -181,6 +192,7 @@ function authOf(target: Target): NonNullable<BootstrapEvent["authentication"]> {
   return network ? { method: "network", network } : { method: "server-key" };
 }
 
+/** Serves one bootstrap socket: starts, retries, confirms and replays scripted host attempts. */
 export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, publishTerminal?: (hostId: string) => string): void {
   const targets = new Map<string, Target>();
   const events: BootstrapEvent[] = [];
@@ -231,7 +243,7 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
     const fail = (): void => {
       if (!failure) return;
       emit(target, "failed", failure.message, {
-        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? [failure.evidence] : [],
+        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), ...(failure.refusal ? { refusal: failure.refusal } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? [failure.evidence] : [],
         ...(failure.alreadyAdded ? { already_added: true, host_id: ADDED_HOST_ID } : {}),
         ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519", ...(failure.keyChanged ? { host_key_changed: true } : {}) } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });

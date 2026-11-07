@@ -1471,7 +1471,8 @@ supersede_stuck_install "{expected}"
         self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
         aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
         self.new_host_in_place()
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+        # Nothing to offer: the new host's finished install is named (#394).
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, f'INFRATERNAL_SETUP_INSTALLED {"5" * 32}\n'.encode())
         self.assertFalse(aside.exists(), 'the old install and its key are gone')
 
     def test_several_set_aside_installs_are_refused_by_name(self):
@@ -1581,11 +1582,11 @@ supersede_stuck_install "{expected}"
         result = self.confirm('finish_stuck_upgrade')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertFalse(replaced.exists(), 'Finish is a commit and retires the replaced journal')
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, f'INFRATERNAL_SETUP_INSTALLED {HOST}\n'.encode())
 
     def test_a_replaced_journal_beside_an_active_agent_is_never_offered_or_put_back(self):
         # #305 P2-3: something newer is serving (a commit that predates
-        # retire_set_aside, or a manual start). Check stays CLEAR and the
+        # retire_set_aside, or a manual start). Check offers nothing and the
         # restore refuses rather than make a healthy host stuck again.
         stage, _ = self.make_upgrade_fixture()
         self.assertEqual(self.confirm('replace_stuck_install').returncode, 0)
@@ -1595,7 +1596,7 @@ supersede_stuck_install "{expected}"
         self.assertEqual(restore.returncode, 72, restore.stderr.decode())
         self.assertTrue(replaced.exists())
         self.assertFalse(stage.exists(), 'the stale journal is not planted into the live install')
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, b'INFRATERNAL_SETUP_CLEAR\n')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, f'INFRATERNAL_SETUP_INSTALLED {HOST}\n'.encode())
         self.assertFalse(replaced.exists(), 'and Check deletes it: no set-aside copy is kept (D337)')
 
     def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
@@ -1757,6 +1758,34 @@ mock_manager() {{
         self.assertEqual(result.returncode, 71, 'a symlink ancestor must be refused')
         self.assertTrue(outside.exists(), 'host provisioning removed the redirected directory')
         self.assertTrue(receipt.exists(), 'the refused journal must survive')
+
+    def make_committed_fixture(self):
+        """#394's field shape: a finished install (no journal) whose
+        `.bootstrap-owner` names a host id this attempt does not carry, such as
+        an install an earlier server or an earlier attempt committed."""
+        stage, _ = self.make_upgrade_fixture()
+        shutil.rmtree(stage)
+
+    def stage_as(self, host):
+        """Run the upload step's staging prologue as a new attempt for `host`."""
+        body = f'\nhost={host}\n' + CONSTANTS['STAGE_TRANSACTION']
+        return self.run_shell(body)
+
+    def test_a_finished_install_for_another_host_id_is_never_reported_clear(self):
+        # #394: the check said CLEAR, then staging refused at the owner line
+        # with exit 71 on every retry, and Start fresh was never offered.
+        self.make_committed_fixture()
+        check = self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertEqual(check.stdout, f'INFRATERNAL_SETUP_INSTALLED {HOST}\n'.encode())
+        self.assertEqual(self.mutating_calls(), [], 'the check changes nothing')
+
+    def test_staging_refuses_a_finished_install_for_another_host_id(self):
+        # The refusal itself stays: staging never adopts another host's install.
+        self.make_committed_fixture()
+        self.assertEqual(self.stage_as('6' * 32).returncode, 71)
+        self.assertEqual((self.base / '.bootstrap-owner').read_text(), HOST + '\n')
+
 
 class LeaseBirthFields(unittest.TestCase):
     def decode(self, records):

@@ -626,6 +626,15 @@ inspect_previous() {
   fi
   if [ -e "$base" ] || [ -L "$base" ]; then discard_committed_set_aside; fi
   report_set_aside && return
+  # A base with no journal is a finished install, owned by the host id in
+  # .bootstrap-owner. A new attempt carries a new host id, and staging refuses
+  # (71) any base whose owner names another host. Reporting CLEAR here sent
+  # every Add host and retry into that refusal, and nothing was ever offered
+  # (#394). Name the install instead, so the server answers before staging.
+  if [ -e "$base" ] || [ -L "$base" ]; then
+   printf 'INFRATERNAL_SETUP_INSTALLED %s\n' "$(cat "$base/.bootstrap-owner")"
+   return
+  fi
   # D355: proven absence lets the server finish this person's stale entries.
   if install_absent; then printf 'INFRATERNAL_SETUP_ABSENT\n'; else printf 'INFRATERNAL_SETUP_CLEAR\n'; fi
   return

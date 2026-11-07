@@ -427,8 +427,7 @@ impl SshSession for Session {
             {
                 return Err(capture_setup_stderr(error, script, &result.stderr));
             }
-            let mut failure = classify(&result.stderr, false, MeshEvidence::default());
-            failure.exit_status = result.exit_status;
+            let mut failure = command_failure(&result.stderr, result.exit_status);
             failure = capture_setup_stderr(failure, script, &result.stderr);
             if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n") {
                 failure.failed_step = crate::install::interrupted_setup_step(&result.stdout);
@@ -438,6 +437,27 @@ impl SshSession for Session {
             Err(failure).map_err(|error: Failure| error.at_ssh_boundary(true))
         })
     }
+}
+
+/// The failure of a command that ran after sign-in, from its bounded stderr and
+/// its exit status. `NetBird` ends a session for a missing account with status
+/// 1 (#394); the same line with any other status is a command's own failure.
+/// (The master connection has no command status and matches on the line
+/// alone.) On exit 71 the fixed cause line names which staging check refused
+/// ([`crate::model::Refusal`]); the rest of stderr stays withheld.
+fn command_failure(stderr: &[u8], exit_status: Option<u8>) -> Failure {
+    let mut failure = classify(stderr, false, MeshEvidence::default());
+    if failure.kind == FailureKind::NoAccount && exit_status != Some(1) {
+        failure = classify(b"", false, MeshEvidence::default());
+    }
+    failure.exit_status = exit_status;
+    if exit_status == Some(71) {
+        let stderr = &stderr[..stderr.len().min(8192)];
+        failure = failure.with_refusal(crate::model::Refusal::from_stderr(
+            &String::from_utf8_lossy(stderr),
+        ));
+    }
+    failure
 }
 
 /// Keep remote stderr only for the trusted setup script families sent by this adapter.
@@ -457,11 +477,25 @@ impl Drop for Session {
     }
 }
 
+/// The whole stderr of a `NetBird` SSH session for a login name that is no
+/// account on the host (measured against `NetBird-SSH-Server` 0.82.0, #394).
+const NETBIRD_NO_ACCOUNT: &str = "User authentication failed";
+
 /// Only allowlisted categories/text survive; remote banners and command output are discarded.
 #[must_use]
 pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure {
     let text = String::from_utf8_lossy(&stderr[..stderr.len().min(8192)]);
-    let mut failure = if !ssh_failure {
+    let mut failure = if text.trim() == NETBIRD_NO_ACCOUNT {
+        // The `NetBird` SSH server accepts the network sign-in, then ends the
+        // session with exactly this line and status 1 when the login name is
+        // no account on the host (#394: kayg on Proxmox hosts). Read as a
+        // command failure, it was reported as a generic setup failure.
+        // Nothing else matches: only this whole stderr selects the kind.
+        Failure::new(
+            FailureKind::NoAccount,
+            "This host has no account with that user name.",
+        )
+    } else if !ssh_failure {
         Failure::install("The remote bootstrap command failed.")
     } else if text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
         || text.contains("Host key verification failed")
@@ -500,6 +534,7 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
             "Discovery confirms mesh reachability; SSH was refused or timed out."
         }
         FailureKind::Unreachable => "OpenSSH could not establish the connection.",
+        FailureKind::NoAccount => "The host's SSH server reported no such account.",
         _ => "Remote command returned a failure status; raw output was withheld.",
     });
     // Copy only canonical public error lines, never arbitrary remote bytes.
@@ -512,10 +547,67 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
     failure.at_ssh_boundary(!ssh_failure)
 }
 
+/// Pins stderr classification and setup-stderr capture to their allowlists.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::InstallStep;
+
+    /// #394: the `NetBird` SSH server signs in over the network, then ends the
+    /// session with this one line when the login name is no account there.
+    #[test]
+    fn a_login_name_with_no_account_is_named_not_a_setup_failure() {
+        for ssh_failure in [false, true] {
+            let failure = classify(
+                b"User authentication failed\n",
+                ssh_failure,
+                MeshEvidence::default(),
+            );
+            assert_eq!(failure.kind, FailureKind::NoAccount);
+            assert_eq!(failure.diagnostic_kind(), "no-account");
+        }
+        // Only the whole stderr selects it: a script that mentions it is not it.
+        let other = classify(
+            b"step 3\nUser authentication failed\n",
+            false,
+            MeshEvidence::default(),
+        );
+        assert_eq!(other.kind, FailureKind::Install);
+    }
+
+    /// J314 P2-2: `no_account` needs `NetBird`'s status 1 on a command session.
+    /// J314 P2-1: an exit 71 carries the cause its host named, and only that.
+    #[test]
+    fn a_command_failure_reads_only_its_status_and_fixed_cause_line() {
+        let missing = b"User authentication failed\n";
+        assert_eq!(
+            command_failure(missing, Some(1)).kind,
+            FailureKind::NoAccount
+        );
+        for status in [Some(2), Some(71), None] {
+            assert_eq!(
+                command_failure(missing, status).kind,
+                FailureKind::Install,
+                "{status:?}"
+            );
+        }
+        let refused = command_failure(b"noise\nINFRATERNAL_REFUSED cache\n", Some(71));
+        assert_eq!(refused.refusal(), Some(crate::model::Refusal::Cache));
+        assert_eq!(
+            command_failure(b"INFRATERNAL_REFUSED cache\n", Some(72)).refusal(),
+            None
+        );
+        assert_eq!(
+            command_failure(b"INFRATERNAL_REFUSED other\n", Some(71)).refusal(),
+            None
+        );
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(json["refusal"], "cache");
+        assert!(
+            !json.to_string().contains("noise"),
+            "other stderr stays withheld"
+        );
+    }
 
     #[test]
     fn only_trusted_setup_scripts_retain_bounded_child_stderr() {

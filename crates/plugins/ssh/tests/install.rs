@@ -76,6 +76,16 @@ impl Local {
         format!("{script}\nbootstrap_test_status=$?\nexit \"$bootstrap_test_status\"")
     }
 }
+/// As the real transport does: on exit 71 keep only the host's fixed cause line (#394).
+fn refusal_of(failure: Failure, stderr: &[u8]) -> Failure {
+    if failure.exit_status != Some(71) {
+        return failure;
+    }
+    failure.with_refusal(infraternal_plugin_ssh::model::Refusal::from_stderr(
+        &String::from_utf8_lossy(stderr),
+    ))
+}
+
 impl SshSession for Local {
     fn stream<'a>(
         &'a self,
@@ -113,7 +123,7 @@ impl SshSession for Local {
                 if !output.success {
                     let mut error = Failure::install("The synthetic remote command failed.");
                     error.exit_status = output.exit_status;
-                    return Err(error);
+                    return Err(refusal_of(error, &output.stderr));
                 }
                 return Ok(CommandOutput {
                     stdout: output.stdout,
@@ -127,7 +137,7 @@ impl SshSession for Local {
                 )
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
                 .unwrap();
@@ -171,7 +181,7 @@ impl SshSession for Local {
                     .status
                     .code()
                     .and_then(|code| u8::try_from(code).ok());
-                return Err(failure);
+                return Err(refusal_of(failure, &output.stderr));
             }
             Ok(CommandOutput {
                 stdout: output.stdout,
@@ -1782,6 +1792,9 @@ async fn command_failure_names_upload_join_install_and_start_separately() {
     }
 }
 
+/// A setup directory without our owner record refuses staging with exit 71,
+/// as kind `unproven_files` naming that cause, with the location in Details
+/// (#394, J314 P2-1): it is not "set up elsewhere".
 #[tokio::test]
 async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
     let fixture = Fixture::new();
@@ -1793,8 +1806,60 @@ async fn foreign_data_refusal_retains_exit_status_and_actionable_directory() {
         .await
         .unwrap_err();
     assert_eq!(serde_json::to_value(&failure).unwrap()["exit_status"], 71);
-    assert!(failure.message.contains("~/.local/share/infraternal"));
-    assert!(failure.message.contains("ownership"));
+    // One plain finding; the location is in Details, never in the sentence (#394).
+    assert_eq!(
+        failure.kind,
+        infraternal_plugin_ssh::model::FailureKind::UnprovenFiles
+    );
+    assert_eq!(
+        failure.refusal(),
+        Some(infraternal_plugin_ssh::model::Refusal::Foreign)
+    );
+    assert_eq!(
+        failure.message,
+        infraternal_plugin_ssh::model::UNPROVEN_FOREIGN
+    );
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap()["refusal"],
+        "foreign"
+    );
+    assert!(!failure.message.contains("~/.local/share/infraternal"));
+    assert!(
+        failure
+            .log_tail
+            .contains(&"Setup location: ~/.local/share/infraternal")
+    );
+}
+
+/// Only an owner record for another host is "set up elsewhere" at staging
+/// (J314 P2-1); its sentence stays true whoever enrolled it.
+#[tokio::test]
+async fn an_owner_record_for_another_host_is_set_up_elsewhere() {
+    let fixture = Fixture::new();
+    let base = fixture.root.join(".local/share/infraternal");
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let owner = base.join(".bootstrap-owner");
+    std::fs::write(&owner, format!("{}\n", "6".repeat(32))).unwrap();
+    std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let failure = fixture
+        .transaction()
+        .stage(&fixture.binary)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.exit_status, Some(71));
+    assert_eq!(
+        failure.kind,
+        infraternal_plugin_ssh::model::FailureKind::UnrecognizedInstall
+    );
+    assert_eq!(
+        failure.message,
+        infraternal_plugin_ssh::previous_attempt::INSTALLED_ELSEWHERE
+    );
+    assert_eq!(
+        std::fs::read_to_string(&owner).unwrap(),
+        format!("{}\n", "6".repeat(32))
+    );
 }
 
 #[tokio::test]
@@ -1898,6 +1963,8 @@ async fn stale_previous_attempt_socket_can_be_retired_without_manual_cleanup() {
     next.commit().await.unwrap();
 }
 
+/// A staged transaction keeps its lease between separate SSH commands, so a
+/// later check reports setup running, never leftovers to remove.
 #[tokio::test]
 async fn active_transaction_is_live_between_ssh_setup_commands() {
     let fixture = Fixture::new();
@@ -1923,6 +1990,46 @@ async fn active_transaction_is_live_between_ssh_setup_commands() {
     assert!(fixture.base().join(".bootstrap-lock").exists());
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
+}
+
+/// #394: a finished install is named, not reported clear; only the exact
+/// record with a canonical host id is accepted.
+#[test]
+fn a_finished_install_record_is_recognized_exactly() {
+    use infraternal_plugin_ssh::previous_attempt::{Remains, parse_check_with_absence};
+    let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
+    let valid = format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "1".repeat(32));
+    let (_, previous, remains) = parse_check_with_absence(valid.as_bytes()).unwrap();
+    assert!(previous.is_none());
+    assert_eq!(remains, Remains::Installed);
+    let clear = format!("{check}INFRATERNAL_SETUP_CLEAR\n");
+    assert_eq!(
+        parse_check_with_absence(clear.as_bytes()).unwrap().2,
+        Remains::Unproven
+    );
+    for invalid in [
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "1".repeat(31)),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "G".repeat(32)),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {} x\n", "1".repeat(32)),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {}", "1".repeat(32)),
+    ] {
+        assert!(
+            parse_check_with_absence(invalid.as_bytes()).is_err(),
+            "{invalid}"
+        );
+    }
+    let failure = infraternal_plugin_ssh::previous_attempt::installed_elsewhere(
+        infraternal_plugin_ssh::model::InstallMode::Root,
+    );
+    assert_eq!(
+        failure.kind,
+        infraternal_plugin_ssh::model::FailureKind::UnrecognizedInstall
+    );
+    assert_eq!(
+        failure.log_tail,
+        vec!["Setup location: /var/lib/infraternal"]
+    );
+    assert!(!failure.message.contains('/'), "paths go in Details only");
 }
 
 #[test]
