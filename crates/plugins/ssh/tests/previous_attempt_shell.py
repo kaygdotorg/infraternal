@@ -1991,6 +1991,28 @@ manager=kill_manager
         return subprocess.run(['unshare', '-Urm', 'sh', '-c', f'{mount} && exec /bin/sh -c "$1"', '_', script],
                               capture_output=True, env=dict(os.environ, HOME=str(self.home)))
 
+    def test_a_unit_with_a_drop_in_is_never_offered(self):
+        # J342 P3-3: a drop-in can change ExecStart while the unit file still
+        # passes; Take over would stop that unit and carry the drop-in over.
+        self.make_takeover_fixture()
+        beside = Path(f'{self.unit}.d')
+        beside.mkdir(mode=0o700)
+        (beside / 'override.conf').write_text('[Service]\nExecStart=\nExecStart=/bin/true\n')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+        shutil.rmtree(beside)
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        reported = '''
+dropin_manager() {
+ case "$*" in
+  "show -p DropInPaths --value infraternal-agent.service") printf '%s\\n' /run/systemd/system/infraternal-agent.service.d/zz.conf;;
+  *) mock_manager "$@";;
+ esac
+}
+manager=dropin_manager'''
+        self.assertEqual(self.run_shell(reported + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+        everyone = reported.replace('/run/systemd/system/infraternal-agent.service.d/zz.conf', '/usr/lib/systemd/system/service.d/10-timeout-abort.conf')
+        self.assertEqual(self.run_shell(everyone + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+
     def test_an_install_with_a_mount_inside_is_never_offered(self):
         # J342 P3-1: Take over's commit deletes the whole set-aside tree; a
         # bind mount inside it would have its contents deleted.

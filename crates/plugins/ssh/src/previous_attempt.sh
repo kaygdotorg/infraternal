@@ -303,6 +303,12 @@ validate_upgrade_root() {
  [ "$(stat -c '%s' "$unit")" -le 4096 ] || refuse size
  grep -Fxq "# infraternal bootstrap $previous_host" "$unit" || exit 71
  grep -Fxq "ExecStart=\"$base/bin/current\" agent --data \"$base/state\" --state \"$base/sessions\" run" "$unit" || exit 71
+ # Drop-ins change what systemd runs without touching the unit file (J342
+ # P3-3): none for this unit, beside it or anywhere systemd reports one.
+ # Drop-ins for every service (a distribution's service.d) are not ours to judge.
+ [ ! -e "$unit.d" ] && [ ! -L "$unit.d" ] || exit 71
+ setup_dropins=$($manager show -p DropInPaths --value infraternal-agent.service 2>/dev/null || :)
+ case "$setup_dropins" in *infraternal-agent.service.d/*) exit 71;; esac
  setup_wanted=$(sed -n 's/^WantedBy=//p' "$unit")
  case "$setup_wanted" in default.target|multi-user.target) :;; *) refuse unit;; esac
  setup_wants_dir="$(dirname "$unit")/$setup_wanted.wants"
