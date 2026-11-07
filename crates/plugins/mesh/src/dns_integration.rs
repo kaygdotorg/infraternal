@@ -306,6 +306,12 @@ fn networkmanager_route_commands(
     address: Ipv4Addr,
     suffixes: &[String],
 ) -> Vec<Vec<String>> {
+    // nmcli consumes one argv value per property; list values use comma separators.
+    let search_domains = suffixes
+        .iter()
+        .flat_map(|suffix| [suffix.clone(), format!("~{suffix}")])
+        .collect::<Vec<_>>()
+        .join(",");
     let mut arguments = vec![
         "device".to_owned(),
         "modify".to_owned(),
@@ -314,10 +320,7 @@ fn networkmanager_route_commands(
         address.to_string(),
         "ipv4.dns-search".to_owned(),
     ];
-    for suffix in suffixes {
-        arguments.push(suffix.clone());
-        arguments.push(format!("~{suffix}"));
-    }
+    arguments.push(search_domains);
     vec![arguments]
 }
 
@@ -800,10 +803,7 @@ mod tests {
                 "ipv4.dns",
                 "10.254.0.2",
                 "ipv4.dns-search",
-                "internal",
-                "~internal",
-                "mesh.kayg.org",
-                "~mesh.kayg.org",
+                "internal,~internal,mesh.kayg.org,~mesh.kayg.org",
             ]]
             .into_iter()
             .map(|arguments| arguments.into_iter().map(str::to_owned).collect())
@@ -974,3 +974,7 @@ mod tests {
         fs::remove_dir_all(directory).expect("temporary resolver directory cleanup");
     }
 }
+
+#[cfg(all(test, target_os = "linux", feature = "mesh-dns"))]
+#[path = "review_j354_integration.rs"]
+mod review_j354_integration;
