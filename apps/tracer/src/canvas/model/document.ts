@@ -18,9 +18,12 @@ import type { ColumnModel, ViewModel, WindowModel } from "./types";
 import { FORMAT, VERSION, type CanvasDocument, type DocTarget, type DocColumn, type DocWindow, type DocLayout, type DocView } from "./schema";
 export * from "./schema";
 
-/** Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out. */
+/**
+ * Turns a runtime window into its stable reference. Windows that cannot be referenced (node cards) are left out, and so
+ * is a terminal whose shell the host refused (`openRefused`): it has no session to save, and none is coming (#395).
+ */
 function targetOf(w: WindowModel, pending: boolean): DocTarget | undefined {
-  if (w.kind === "terminal") return w.sessionId || pending ? { type: "session", id: w.sessionId ?? w.id, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}), ...(w.sessionPinned ? { pinned: true } : {}) } : undefined;
+  if (w.kind === "terminal") return w.sessionId || pending && !w.openRefused ? { type: "session", id: w.sessionId ?? w.id, host: w.host, ...(w.hostId ? { hostId: w.hostId, ...(w.user ? { user: w.user } : {}), ...(w.address ? { address: w.address } : {}) } : {}), ...(w.session ? { name: w.session } : {}), ...(w.sessionPinned ? { pinned: true } : {}) } : undefined;
   if (w.kind === "settings") return { type: "settings", section: w.id.slice(2) };
   if (w.kind === "containers" || w.kind === "logs") return { type: w.kind, host: w.host };
   return undefined;
