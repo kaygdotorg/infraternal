@@ -1034,6 +1034,20 @@ pub(crate) fn prepare_parent_bound_child(command: &mut Command) {
     }
 }
 
+/// Allocate an owned proxy destination before Command creates its private pipes.
+/// Keep the returned file alive until spawn finishes; never choose a free numeric
+/// destination that Command could later occupy with its exec-error pipe (#414).
+#[cfg(target_os = "linux")]
+pub(crate) fn reserve_proxy_descriptor(file: &File, minimum: i32) -> io::Result<File> {
+    if minimum < 64 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let descriptor = fcntl(file, FcntlArg::F_DUPFD_CLOEXEC(minimum)).map_err(errno)?;
+    // SAFETY: fcntl returned a fresh descriptor. This File is its sole owner;
+    // CLOEXEC keeps it private in the parent until the child mapping clears it.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
 /// Keep the proxy's rootful credential drop inside the audited child boundary [#281].
 // Linux only, like its public wrapper: on macOS the proxy child is refused
 // before this boundary (lib.rs), and Darwin has no nix `setgroups`.
@@ -1047,10 +1061,10 @@ pub(crate) fn prepare_proxy_child(
 ) -> io::Result<()> {
     let working_directory = working_directory.as_raw_fd();
     let cgroup_procs = cgroup_procs.map(AsRawFd::as_raw_fd);
-    let descriptors = descriptors.to_vec();
+    let mut descriptors = descriptors.to_vec();
     if descriptors
         .iter()
-        .any(|(source, target)| *source < 3 || *target < 64 || source == target)
+        .any(|(source, target)| *source < 3 || *target < 64)
         || cgroup_procs.is_some_and(|procs| procs < 3)
     {
         return Err(io::Error::new(
@@ -1058,6 +1072,18 @@ pub(crate) fn prepare_proxy_child(
             "proxy child descriptor mapping is outside policy",
         ));
     }
+    let temporary_floor = descriptors
+        .iter()
+        .map(|(_, target)| *target)
+        .max()
+        .unwrap_or(63)
+        .checked_add(1)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "proxy descriptor target overflows",
+            )
+        })?;
     #[cfg(target_os = "linux")]
     let owner = unistd::getpid();
     // SAFETY: the established shim hooks set signal defaults, close the trusted
@@ -1075,13 +1101,40 @@ pub(crate) fn prepare_proxy_child(
             {
                 return Err(io::Error::last_os_error());
             }
-            for (source, target) in &descriptors {
-                if nix::libc::dup2(*source, *target) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-            }
+            // The cwd can itself occupy a destination slot. Consume it before
+            // any mapping replaces that descriptor, just like cgroup.procs above.
             if nix::libc::fchdir(working_directory) == -1 {
                 return Err(io::Error::last_os_error());
+            }
+            if descriptors.iter().all(|(source, target)| source == target) {
+                // Parent-reserved slots already contain the correct descriptions.
+                // dup2(fd, fd) would keep CLOEXEC, so explicitly clear it instead.
+                for (source, _) in &descriptors {
+                    if nix::libc::fcntl(*source, nix::libc::F_SETFD, 0) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+            } else {
+                // Snapshot every source above all destinations before overwriting
+                // any slot. This preserves chains, cycles and repeated sources.
+                // The Vec was allocated before fork; only its integer slots change.
+                for (source, _) in &mut descriptors {
+                    let duplicate =
+                        nix::libc::fcntl(*source, nix::libc::F_DUPFD_CLOEXEC, temporary_floor);
+                    if duplicate == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    *source = duplicate;
+                }
+                for (source, target) in &descriptors {
+                    // Also handles an original source == target: dup2(fd, fd)
+                    // would retain CLOEXEC, whereas copying from the temporary
+                    // descriptor preserves the file description and clears it.
+                    if nix::libc::dup2(*source, *target) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    nix::libc::close(*source);
+                }
             }
             #[cfg(target_os = "linux")]
             if let Some((uid, gid)) = identity {
@@ -2661,3 +2714,8 @@ mod lifeline_tests {
         assert!(hold_lifeline(1_000_000).is_err(), "a closed descriptor");
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "proxy_child_tests.rs"]
+/// Isolated descriptor-table regression cases for proxy launches.
+mod proxy_child_tests;

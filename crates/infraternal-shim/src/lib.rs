@@ -178,10 +178,26 @@ pub fn prepare_parent_bound_child(command: &mut std::process::Command) {
     pty::prepare_parent_bound_child(command);
 }
 
+/// Allocate a proxy child slot, held open in the parent so spawn's private pipes cannot use it.
+/// Keep the returned file alive through spawn and use its fd as both mapping source and target.
+/// # Errors
+/// Refuses a minimum below 64 and returns descriptor-allocation errors.
+#[cfg(target_os = "linux")]
+pub fn reserve_proxy_descriptor(
+    file: &std::fs::File,
+    minimum: i32,
+) -> std::io::Result<std::fs::File> {
+    pty::reserve_proxy_descriptor(file, minimum)
+}
+
 /// Prepare a proxy child with descriptor-only access and a dedicated rootful identity.
 ///
-/// Descriptors are duplicated to reserved child slots before credentials are dropped. The
-/// working directory is entered while the parent still has permission to traverse its path.
+/// Callers must own every destination slot until spawn returns, using
+/// [`reserve_proxy_descriptor`] on Linux, so Command cannot allocate a private pipe there.
+/// Overlapping mappings are copied through temporary slots above every destination before
+/// credentials are dropped. Sources already at their targets have CLOEXEC cleared. The working
+/// directory is entered before remapping, while its pinned descriptor is intact and the parent
+/// still has permission to traverse its path.
 /// With `cgroup_procs` (an open, write-only `cgroup.procs` of the child's own leaf), the child
 /// moves itself into that cgroup first, before it can exec or fork, so nothing it starts is
 /// ever outside the leaf. The caller keeps the file open until spawn returns.
