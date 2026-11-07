@@ -287,15 +287,6 @@ impl Removal {
         authority: RemovalAuthority,
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
-        // J334 P2-6: an uninstall removes the infraternal agent and its access
-        // records, so the person's revocation, with its D356 report, goes
-        // first, over the live link and bounded, before the writer lock is
-        // taken. A host that does not answer in time keeps the outbox path.
-        let early = if entry.uninstall {
-            self.revoke_first(entry.host, &entry.user).await
-        } else {
-            None
-        };
         let mut tx = self.pool.begin().await?;
         // Acquire SQLite's writer lock before authority checks and the bounded
         // node handoff: concurrent logout/revocation cannot invalidate them in between.
@@ -344,6 +335,14 @@ impl Removal {
                 }
                 Some(*audit_id)
             }
+        };
+        // The writer lock keeps the removal's authority valid through this
+        // bounded host effect. A refused removal must leave the host untouched.
+        // Uninstall follows the revoke so its access report is not lost.
+        let early = if entry.uninstall {
+            self.revoke_first(entry.host, &entry.user).await
+        } else {
+            None
         };
         // A coordinates row means infraternal setup installed this host; only
         // then does a known installation exist to remove by hand (#235).

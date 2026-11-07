@@ -768,3 +768,82 @@ async fn cleanup_delivery_returns_handshake_admission_before_waiting() {
     let _ = retirement.await;
     fixture.peer.abort();
 }
+
+/// Refused default removals must not send even the preliminary host revoke.
+#[tokio::test]
+async fn refused_removal_leaves_the_connected_host_untouched() {
+    for refusal in [
+        "session",
+        "expired_session",
+        "window",
+        "revoked_key",
+        "key_scope",
+    ] {
+        let mut fixture = login_host(Some(true)).await;
+        let now = crate::runtime::unix_seconds().unwrap();
+        let token = "j347-removal-session";
+        let hash = crate::auth::hash(token);
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES(?,?,'fixture',?,?,1)")
+            .bind(&hash).bind(fixture.person.to_string()).bind(now + 3600).bind(now).execute(&fixture.pool).await.unwrap();
+        let auth = crate::auth::Auth::new(
+            fixture.pool.clone(),
+            "removal.example.test",
+            "https://removal.example.test",
+        )
+        .await
+        .unwrap();
+        let removal = crate::remote_removal::Removal::new(
+            auth,
+            fixture.pool.clone(),
+            fixture.store.clone(),
+            fixture.listeners.diagnostic_hosts.clone(),
+            std::path::PathBuf::new(),
+        );
+        let result = if matches!(refusal, "session" | "expired_session" | "window") {
+            let review = removal.start(token, fixture.host, true, now).await.unwrap();
+            let sql = if refusal == "session" {
+                "DELETE FROM sessions WHERE token_hash=?"
+            } else if refusal == "expired_session" {
+                "UPDATE sessions SET expires=1 WHERE token_hash=?"
+            } else {
+                "UPDATE sessions SET fresh=1 WHERE token_hash=?"
+            };
+            sqlx::query(sql)
+                .bind(&hash)
+                .execute(&fixture.pool)
+                .await
+                .unwrap();
+            removal
+                .finish_host(token, fixture.host, review["review"].as_str().unwrap(), now)
+                .await
+        } else {
+            let (scopes, dead) = if refusal == "revoked_key" {
+                ("[\"hosts:write\"]", 1)
+            } else {
+                ("[\"hosts:read\"]", 0)
+            };
+            sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture',?,?,?,?)")
+                .bind(&hash).bind(fixture.person.to_string()).bind(scopes).bind(now).bind(now + 3600).bind(dead).execute(&fixture.pool).await.unwrap();
+            removal
+                .remove_with_key(&hash, &fixture.person.to_string(), fixture.host, 0, now)
+                .await
+        };
+        assert!(result.is_err(), "{refusal} removal was accepted");
+        assert!(
+            matches!(
+                fixture.observed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "{refusal} sent a host revoke before refusing removal"
+        );
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM remote_host_removals WHERE host_id=?")
+                .bind(fixture.host.as_bytes().as_slice())
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 0);
+        fixture.peer.abort();
+        let _ = fixture.peer.await;
+    }
+}
