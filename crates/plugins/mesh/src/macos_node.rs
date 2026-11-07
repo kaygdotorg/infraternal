@@ -523,6 +523,20 @@ fn route_mtus(config: &Config) -> BTreeMap<IpAddr, u16> {
     routes
 }
 
+/// Return retained host routes whose freshly derived MTU differs from the installed metric.
+fn route_mtus_to_refresh(
+    old_routes: &BTreeSet<IpAddr>,
+    new_routes: &BTreeSet<IpAddr>,
+    old_mtus: &BTreeMap<IpAddr, u16>,
+    new_mtus: &BTreeMap<IpAddr, u16>,
+) -> BTreeSet<IpAddr> {
+    old_routes
+        .intersection(new_routes)
+        .copied()
+        .filter(|address| old_mtus.get(address).copied() != new_mtus.get(address).copied())
+        .collect()
+}
+
 /// Refuse an endpoint that a host route would send back into this tunnel.
 fn validate_underlay_routes(config: &Config, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
     if config.peers.values().any(|policy| {
@@ -1154,15 +1168,18 @@ impl RuntimeState {
                 route(&interface, *address, "add", Some(mtu))?;
                 added.insert(*address);
             }
-            for address in old_routes.intersection(&new_routes) {
-                let new_mtu = new_route_mtus
-                    .get(address)
+            for address in route_mtus_to_refresh(
+                &old_routes,
+                &new_routes,
+                &old_route_mtus,
+                &new_route_mtus,
+            ) {
+                let mtu = new_route_mtus
+                    .get(&address)
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-                if old_route_mtus.get(address).copied() != Some(new_mtu) {
-                    route(&interface, *address, "change", Some(new_mtu))?;
-                    changed.insert(*address);
-                }
+                route(&interface, address, "change", Some(mtu))?;
+                changed.insert(address);
             }
             for address in old_routes.difference(&new_routes) {
                 route(&interface, *address, "delete", None)?;
@@ -1650,7 +1667,7 @@ mod tests {
         BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
         UdpTransportFactoryParams, parse_utun_payload, peers_for_config, read_public_state,
         reconcile, route_addresses, stage_chunk, utun_family, valid_utun_name, validate_config,
-        validate_underlay_routes, write_public_state,
+        route_mtus_to_refresh, validate_underlay_routes, write_public_state,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -2133,6 +2150,31 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    /// A full update must refresh a retained peer when its route-derived MTU changes.
+    #[test]
+    fn full_peer_update_refreshes_existing_peer_route_mtu() {
+        let old_routes: BTreeSet<IpAddr> = [
+            IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4)),
+            IpAddr::V6("fd01::4".parse().expect("peer IPv6")),
+        ]
+        .into_iter()
+        .collect();
+        let new_routes: BTreeSet<IpAddr> = [
+            IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4)),
+            IpAddr::V6("fd01::4".parse().expect("peer IPv6")),
+            IpAddr::V4(Ipv4Addr::new(10, 254, 0, 5)),
+            IpAddr::V6("fd01::5".parse().expect("new peer IPv6")),
+        ]
+        .into_iter()
+        .collect();
+        let old_mtus = old_routes.iter().copied().map(|route| (route, 1420)).collect();
+        let new_mtus = new_routes.iter().copied().map(|route| (route, 1200)).collect();
+
+        let refreshed = route_mtus_to_refresh(&old_routes, &new_routes, &old_mtus, &new_mtus);
+
+        assert_eq!(refreshed, old_routes);
     }
 
     #[test]

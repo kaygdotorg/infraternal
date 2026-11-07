@@ -20,6 +20,10 @@ pub(crate) const FALLBACK_MESH_MTU: u16 = 1200;
 pub(crate) const IPV6_MINIMUM_MTU: u16 = 1280;
 /// The largest `WireGuard` UDP overhead for an outer IPv6 packet.
 const OUTER_OVERHEAD: u32 = 80;
+/// The encrypted `WireGuard` transport header and tag in one data packet.
+const WIREGUARD_PACKET_OVERHEAD: u32 = 32;
+/// The peer link id prefixed to each relayed datagram.
+const RELAY_LINK_ID_OVERHEAD: u32 = 4;
 /// The lowest useful interface MTU and the minimum MTU we accept on an owned peer route.
 pub(crate) const MIN_MESH_MTU: u16 = 68;
 
@@ -44,6 +48,22 @@ pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
         .map_or(FALLBACK_MESH_MTU, mtu_for_route)
 }
 
+/// Derive a relayed peer's inner MTU from Quinn's current application-payload limit.
+///
+/// Quinn's `max_datagram_size` already accounts for QUIC packet and DATAGRAM framing. The relay
+/// adds only the `WireGuard` data-packet overhead and its four-byte link id before sending.
+/// Unknown limits use the same conservative fallback as unresolved direct endpoints.
+pub(crate) fn for_relay_datagram(max_datagram_size: Option<usize>) -> u16 {
+    max_datagram_size
+        .map(|size| u32::try_from(size).unwrap_or(u32::MAX))
+        .map(|size| {
+            mtu_for_inner_budget(
+                size.saturating_sub(WIREGUARD_PACKET_OVERHEAD + RELAY_LINK_ID_OVERHEAD),
+            )
+        })
+        .unwrap_or(FALLBACK_MESH_MTU)
+}
+
 /// Keep a shared link at IPv6's minimum while allowing larger peer route budgets.
 fn interface_mtu(peer_mtus: &[u16]) -> u16 {
     peer_mtus
@@ -63,7 +83,11 @@ pub(crate) fn watcher(mtu: u16) -> (watch::Sender<u16>, MtuWatcher) {
 
 /// Return the safe inner MTU for one route after reserving worst-case encapsulation overhead.
 fn mtu_for_route(route_mtu: u32) -> u16 {
-    let inner = route_mtu.saturating_sub(OUTER_OVERHEAD);
+    mtu_for_inner_budget(route_mtu.saturating_sub(OUTER_OVERHEAD))
+}
+
+/// Bound a converted inner packet budget to a useful 16-bit mesh route MTU.
+fn mtu_for_inner_budget(inner: u32) -> u16 {
     if inner < u32::from(MIN_MESH_MTU) {
         return MIN_MESH_MTU;
     }
@@ -91,9 +115,6 @@ fn endpoint_route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
     }
     let route_output = String::from_utf8_lossy(&route.stdout);
     let interface = parse_macos_route_interface(&route_output)?;
-    if let Ok((mtu, _)) = parse_macos_route(&route_output) {
-        return Ok(mtu);
-    }
     let interface_output = Command::new("/sbin/ifconfig").arg(interface).output()?;
     if !interface_output.status.success() {
         return Err(io::ErrorKind::NotFound.into());
@@ -133,12 +154,13 @@ pub(crate) fn parse_macos_route_interface(output: &str) -> io::Result<String> {
         .ok_or_else(|| io::ErrorKind::InvalidData.into())
 }
 
-/// Use the selected underlay interface's MTU when `route -n get` reports zero or no route MTU.
+/// Bound the route metric by the selected underlay interface's actual MTU.
 #[cfg(target_os = "macos")]
 pub(crate) fn parse_macos_route_mtu(route_output: &str, interface_output: &str) -> io::Result<u32> {
-    parse_macos_route(route_output)
-        .map(|(mtu, _)| mtu)
-        .or_else(|_| parse_macos_interface_mtu(interface_output))
+    let link_mtu = parse_macos_interface_mtu(interface_output)?;
+    Ok(parse_macos_route(route_output)
+        .map(|(route_mtu, _)| route_mtu.min(link_mtu))
+        .unwrap_or(link_mtu))
 }
 
 /// Read the MTU from macOS `ifconfig` output when the route has no explicit MTU.
@@ -172,6 +194,15 @@ mod tests {
     #[test]
     fn keeps_the_largest_safe_mtu_on_a_normal_route() {
         assert_eq!(mtu_for_route(1500), 1420);
+    }
+
+    /// Quinn's application payload already excludes QUIC framing; only the mesh wrappers remain.
+    #[test]
+    fn relay_route_budget_subtracts_wireguard_and_link_id() {
+        assert_eq!(for_relay_datagram(Some(1214)), 1178);
+        assert_eq!(for_relay_datagram(Some(1434)), 1398);
+        assert_eq!(for_relay_datagram(Some(80)), MIN_MESH_MTU);
+        assert_eq!(for_relay_datagram(None), FALLBACK_MESH_MTU);
     }
 
     /// A route too small for normal IPv4 still selects the minimum usable IPv4 interface MTU.
@@ -225,6 +256,15 @@ mod tests {
     #[test]
     fn falls_back_to_the_selected_interface_mtu_when_route_mtu_is_unspecified() {
         let route = "route to: 10.69.69.218\ndestination: 10.69.69.218\ninterface: en0\nflags: <UP,HOST>\n recvpipe sendpipe ssthresh rtt,msec rttvar hopcount mtu expire\n 0 0 1 152 11 0 0 0\n";
+        let interface = "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1280\n";
+        assert_eq!(parse_macos_route_mtu(route, interface).unwrap(), 1280);
+    }
+
+    /// An explicit route metric cannot exceed the selected underlay interface's MTU.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn endpoint_route_metric_is_bounded_by_egress_link_mtu() {
+        let route = "route to: 10.69.69.218\ndestination: 10.69.69.218\ninterface: en0\nflags: <UP,HOST>\n recvpipe sendpipe ssthresh rtt,msec rttvar hopcount mtu expire\n 0 0 1 152 11 0 9000 0\n";
         let interface = "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1280\n";
         assert_eq!(parse_macos_route_mtu(route, interface).unwrap(), 1280);
     }

@@ -642,10 +642,26 @@ impl Device {
     /// # Errors
     /// Returns route-netlink errors.
     pub fn routes(peers: &[Peer], remove: bool) -> io::Result<()> {
+        Self::routes_with_mtu_overrides(peers, &BTreeMap::new(), remove)
+    }
+
+    /// Install peer routes using live relay MTUs where one is active, otherwise the direct route.
+    /// # Errors
+    /// Returns route-netlink errors.
+    pub(crate) fn routes_with_mtu_overrides(
+        peers: &[Peer],
+        overrides: &BTreeMap<PublicKey, u16>,
+        remove: bool,
+    ) -> io::Result<()> {
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         let index = index()?;
         for peer in peers {
-            let mtu = (!remove).then(|| crate::mesh_mtu::for_endpoint(peer.endpoint));
+            let mtu = (!remove).then(|| {
+                overrides
+                    .get(&peer.key)
+                    .copied()
+                    .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint))
+            });
             for (family, prefix, address) in [
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
@@ -1084,9 +1100,9 @@ fn set_link_mtu(index: u32, mtu: u32) -> io::Result<()> {
 }
 /// Look up the effective route MTU for a peer endpoint, falling back to its egress link MTU.
 ///
-/// The route may carry a smaller MTU than the interface, so prefer `RTAX_MTU` when present.
-/// `RTM_GETROUTE` and `RTM_GETLINK` are acknowledged requests and each uses one short-lived
-/// route-netlink socket.
+/// An explicit route MTU may be smaller than the interface, so use the lower value. A larger
+/// metric is not a usable packet budget because the egress link cannot carry it. `RTM_GETROUTE`
+/// and `RTM_GETLINK` are acknowledged requests and each uses one short-lived route-netlink socket.
 /// # Errors
 /// Reports an unreachable endpoint, a missing egress link, or malformed kernel replies.
 pub(crate) fn route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
@@ -1113,10 +1129,10 @@ pub(crate) fn route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
             _ => {}
         }
     }
-    if let Some(mtu) = route_mtu.filter(|mtu| *mtu > 0) {
-        return Ok(mtu);
-    }
-    link_mtu(output_index.ok_or(io::ErrorKind::NotFound)?)
+    let link_mtu = link_mtu(output_index.ok_or(io::ErrorKind::NotFound)?)?;
+    Ok(route_mtu
+        .filter(|mtu| *mtu > 0)
+        .map_or(link_mtu, |mtu| mtu.min(link_mtu)))
 }
 
 /// Read one egress link's MTU when the route has no explicit MTU metric.

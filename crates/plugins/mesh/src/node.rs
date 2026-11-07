@@ -6,13 +6,42 @@ use crate::{
     gotatun_node::Engine,
     wireguard::{Client, Device, Key},
 };
-#[cfg(feature = "relay")]
-use std::sync::Arc;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     net::IpAddr,
+    sync::{Arc, Mutex, MutexGuard},
 };
+
+/// Serializes relay route budgets shared by config updates and active path callbacks.
+type RelayRouteMtuOverrides = BTreeMap<crate::policy::model::PublicKey, u16>;
+
+/// Recover route-budget state after a callback panics while holding its mutex.
+fn lock_route_mtu_overrides(
+    overrides: &Mutex<RelayRouteMtuOverrides>,
+) -> MutexGuard<'_, RelayRouteMtuOverrides> {
+    overrides
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Apply a route snapshot while retaining relay budgets, restoring state if the write fails.
+fn refresh_peer_routes_from(
+    state: &Mutex<RelayRouteMtuOverrides>,
+    peers: &[crate::dataplane::Peer],
+    clear_overrides_for: &BTreeSet<crate::policy::model::PublicKey>,
+) -> io::Result<RelayRouteMtuOverrides> {
+    let mut overrides = lock_route_mtu_overrides(state);
+    let previous = overrides.clone();
+    for key in clear_overrides_for {
+        overrides.remove(key);
+    }
+    if let Err(error) = Device::routes_with_mtu_overrides(peers, &overrides, false) {
+        *overrides = previous;
+        return Err(error);
+    }
+    Ok(previous)
+}
 
 pub use crate::dataplane::Chunk;
 
@@ -280,6 +309,8 @@ pub struct Node {
     config: Option<Config>,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
+    /// Live relay budgets are retained across full snapshots and route re-derivation.
+    relay_route_mtu_overrides: Arc<Mutex<RelayRouteMtuOverrides>>,
     firewall: Firewall,
     proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
@@ -307,6 +338,7 @@ impl Default for Node {
             config: None,
             pending: None,
             routes: BTreeSet::new(),
+            relay_route_mtu_overrides: Arc::default(),
             firewall: Firewall::default(),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
@@ -749,6 +781,71 @@ impl Node {
                 .handshake_preparer(peer.key, peer.endpoint.ok_or(io::ErrorKind::InvalidInput)?)),
         }
     }
+
+    /// Return a callback that keeps this peer's kernel route on its active path budget.
+    ///
+    /// The direct endpoint remains in the accepted peer record. `Some(mtu)` records the active
+    /// relay's derived route MTU; `None` removes that override and re-derives from the direct path.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_route_mtu_updater(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> crate::relay_path::RouteMtuUpdater {
+        let overrides = Arc::clone(&self.relay_route_mtu_overrides);
+        let peer = peer.clone();
+        Arc::new(move |relay_mtu| {
+            let mut overrides = lock_route_mtu_overrides(&overrides);
+            let previous = match relay_mtu {
+                Some(mtu) => overrides.insert(peer.key, mtu),
+                None => overrides.remove(&peer.key),
+            };
+            let result = Device::routes_with_mtu_overrides(
+                std::slice::from_ref(&peer),
+                &overrides,
+                false,
+            );
+            if result.is_err() {
+                if let Some(previous) = previous {
+                    overrides.insert(peer.key, previous);
+                } else {
+                    overrides.remove(&peer.key);
+                }
+            }
+            result
+        })
+    }
+
+    /// Refresh peer host routes using active relay budgets where present.
+    /// # Errors
+    /// Returns route-netlink errors without changing relay override state.
+    fn install_peer_routes(
+        &self,
+        peers: &[crate::dataplane::Peer],
+        remove: bool,
+    ) -> io::Result<()> {
+        let overrides = lock_route_mtu_overrides(&self.relay_route_mtu_overrides);
+        Device::routes_with_mtu_overrides(peers, &overrides, remove)
+    }
+
+    /// Apply a full route refresh after clearing overrides for peers that returned to direct paths.
+    ///
+    /// The returned snapshot lets the caller restore the previous relay budgets if a later part of
+    /// the enclosing configuration transaction rolls back.
+    /// # Errors
+    /// Returns route-netlink errors and restores the override map if route installation fails.
+    fn refresh_peer_routes(
+        &self,
+        peers: &[crate::dataplane::Peer],
+        clear_overrides_for: &BTreeSet<crate::policy::model::PublicKey>,
+    ) -> io::Result<RelayRouteMtuOverrides> {
+        refresh_peer_routes_from(&self.relay_route_mtu_overrides, peers, clear_overrides_for)
+    }
+
+    /// Restore relay budgets after a failed configuration transaction.
+    fn restore_peer_route_mtu_overrides(&self, previous: RelayRouteMtuOverrides) {
+        *lock_route_mtu_overrides(&self.relay_route_mtu_overrides) = previous;
+    }
+
     fn apply_peer_changes(
         &mut self,
         config: &Config,
@@ -777,6 +874,7 @@ impl Node {
             store.record_routes(&BTreeSet::new())?;
         }
         self.routes.clear();
+        lock_route_mtu_overrides(&self.relay_route_mtu_overrides).clear();
         Ok(())
     }
     /// The key an interrupted kernel rotation left as this node's identity (#285): the candidate
@@ -1709,6 +1807,15 @@ impl Node {
                 // if the process stops between the save and kernel installation.
                 self.save(Some(&config), true)?;
                 self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.1.max(mesh_mtu.2))?;
+                let route_overrides_to_clear: BTreeSet<_> =
+                    updates.iter().map(|(previous, _)| previous.key).collect();
+                let route_mtu_overrides = Arc::clone(&self.relay_route_mtu_overrides);
+                let peers: Vec<_> = config
+                    .peers
+                    .values()
+                    .map(|policy| policy.peer.clone())
+                    .collect();
+                let mut previous_route_overrides = None;
                 let installed: io::Result<()> = (|| {
                     match self.engine_kind {
                         EngineKind::Kernel => {
@@ -1724,16 +1831,21 @@ impl Node {
                                 .apply(config.clone())?;
                         }
                     }
-                    let peers: Vec<_> = config
-                        .peers
-                        .values()
-                        .map(|policy| policy.peer.clone())
-                        .collect();
-                    Device::routes(&peers, false)
+                    previous_route_overrides = Some(
+                        refresh_peer_routes_from(
+                            &route_mtu_overrides,
+                            &peers,
+                            &route_overrides_to_clear,
+                        )?,
+                    );
+                    Ok(())
                 })();
                 // Release the engine-field borrow before updating the shared interface MTU.
                 let installed = installed.and_then(|()| self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.2));
                 if let Err(error) = installed {
+                    if let Some(previous) = previous_route_overrides {
+                        self.restore_peer_route_mtu_overrides(previous);
+                    }
                     match self.engine_kind {
                         EngineKind::Kernel => {
                             let client = self.client.as_mut().ok_or(io::ErrorKind::NotConnected)?;
@@ -1760,7 +1872,7 @@ impl Node {
                         .values()
                         .map(|policy| policy.peer.clone())
                         .collect();
-                    Device::routes(&restore, false)?;
+                    self.install_peer_routes(&restore, false)?;
                     self.set_mesh_mtu(
                         mesh_mtu.0,
                         mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
@@ -1809,6 +1921,18 @@ impl Node {
             .filter(|key| !desired.contains(key))
             .copied()
             .collect();
+        let mut route_overrides_to_clear: BTreeSet<_> = retired_keys.iter().copied().collect();
+        if let Some(old) = &self.config {
+            for (node, peer) in &config.peers {
+                if old
+                    .peers
+                    .get(node)
+                    .is_some_and(|old| old.peer.endpoint != peer.peer.endpoint)
+                {
+                    route_overrides_to_clear.insert(peer.peer.key);
+                }
+            }
+        }
         #[cfg(feature = "cutoff-measure")]
         drop(inventory);
         if changed.is_empty()
@@ -1892,6 +2016,7 @@ impl Node {
         self.apply_fence(&fence, &config)?;
         #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
+        let mut previous_route_overrides = None;
         let result = (|| {
             if self
                 .config
@@ -1907,7 +2032,13 @@ impl Node {
             // link stays IPv6-safe; its final size follows the largest peer budget.
             self.set_mesh_mtu(ifindex, previous_mtu.max(requested_mtu))?;
             self.apply_peer_changes(&config, &changed, &retired_keys)?;
-            Device::routes(&changed, false)?;
+            // A full accepted snapshot also re-derives routes for unchanged peers: the endpoint
+            // route or its egress link MTU may have changed since their last peer update.
+            let configured_peers: Vec<_> =
+                config.peers.values().map(|policy| policy.peer.clone()).collect();
+            previous_route_overrides = Some(
+                self.refresh_peer_routes(&configured_peers, &route_overrides_to_clear)?,
+            );
             if self.config.is_none()
                 || self
                     .routes
@@ -1932,6 +2063,9 @@ impl Node {
             saved
         })();
         if let Err(error) = result {
+            if let Some(previous) = previous_route_overrides {
+                self.restore_peer_route_mtu_overrides(previous);
+            }
             #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
             if !dns_was_running && self.config.is_none() {
                 self.dns_resolver = None;
@@ -1969,7 +2103,7 @@ impl Node {
                     mesh_mtu.0,
                     mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
                 )?;
-                Device::routes(&restore, false)?;
+                self.install_peer_routes(&restore, false)?;
                 let retained: Vec<_> = std::iter::once(old.addresses)
                     .chain(restore.iter().map(|peer| peer.addresses))
                     .collect();
