@@ -2401,7 +2401,7 @@ dependencies = [
  "nix",
  "openssl",
  "quinn",
- "rand 0.9.5",
+ "rand 0.10.3",
  "serde",
  "serde_cbor_2",
  "serde_json",
