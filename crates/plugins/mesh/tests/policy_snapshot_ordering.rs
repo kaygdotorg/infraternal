@@ -96,6 +96,7 @@ fn install(fallback: bool) -> (Node, Config) {
     (node, config)
 }
 
+/// Check replay handling and refusal of conflicting or differently bound snapshots.
 fn snapshot_change(fallback: bool, identity: bool) {
     let (mut node, old) = install(fallback);
     // Identical equal-version replay remains useful after reconnect.
@@ -105,6 +106,10 @@ fn snapshot_change(fallback: bool, identity: bool) {
     let mut proposed = old.clone();
     if identity {
         proposed.node = NodeId(3);
+        // A new routing ID alone remains valid when the authenticated authority
+        // still binds the enrolled key. Model an attempted identity replacement
+        // by changing the key the snapshot claims belongs to this node.
+        proposed.local_key = Some(Key::generate().unwrap().1);
         proposed.version += 1;
     }
     proposed.peers.get_mut(&NodeId(2)).unwrap().inbound = TrafficPolicy::All;
