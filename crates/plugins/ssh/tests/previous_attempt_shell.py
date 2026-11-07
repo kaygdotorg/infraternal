@@ -2048,11 +2048,39 @@ manager=kill_manager
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(self.takeover_aside().exists())
 
-    def test_check_deletes_a_taken_over_install_a_crash_left_beside_the_new_host(self):
+    def committed_install_in_place(self, source, owner='5' * 32):
+        """A new install committed in $base for `owner`, built from the files of
+        `source`, with its own unit, wants link and launcher."""
+        shutil.copytree(source, self.base, symlinks=True,
+                        ignore=shutil.ignore_patterns('.bootstrap-lock', '.superseded-service', '.superseded-unit'))
+        (self.base / '.bootstrap-owner').write_text(owner + '\n')
+        binary_dir = self.base / 'bin'
+        self.unit.write_text(
+            f'# infraternal bootstrap {owner}\n[Unit]\n[Service]\n'
+            f'ExecStart="{binary_dir / "current"}" agent --data "{self.base / "state"}" '
+            f'--state "{self.base / "sessions"}" run\n[Install]\nWantedBy=default.target\n'
+        )
+        self.unit.chmod(0o600)
+        wants = self.unit.parent / 'default.target.wants/infraternal-agent.service'
+        wants.unlink(missing_ok=True)
+        wants.symlink_to(self.unit)
+        self.launcher.unlink(missing_ok=True)
+        self.launcher.symlink_to(binary_dir / 'current')
+
+    def test_check_keeps_a_taken_over_install_beside_a_base_that_is_not_finished(self):
+        # J342 P1-1's shape: a base holding only an owner record, beside the
+        # install Take over set aside. Nothing committed: the old install stays.
         record = self.make_takeover_fixture()
         self.assertEqual(self.take_over(record).returncode, 0)
         self.new_host_in_place()
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed('5' * 32))
+        self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertTrue((self.takeover_aside() / 'install/state/identity.json').exists(), 'nothing committed: the old install stays')
+
+    def test_check_deletes_a_taken_over_install_a_crash_left_beside_the_new_host(self):
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.committed_install_in_place(self.takeover_aside() / 'install')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed('5' * 32, takeover='ready'))
         self.assertFalse(self.takeover_aside().exists(), 'the new install committed; no copy is kept')
 
     def test_restore_refuses_while_the_new_install_is_in_place(self):

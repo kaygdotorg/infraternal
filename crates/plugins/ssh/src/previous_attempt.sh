@@ -600,7 +600,13 @@ discard_committed_set_aside() {
    "$base".bootstrap-replaced-*) $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || continue;;
    # A Take over killed before it moved the old install: $base is still
    # that install, so the set-aside holds its service state; Put it back.
-   "$base".bootstrap-takeover-*) [ -d "$set_aside/install" ] && [ ! -L "$set_aside/install" ] || continue;;
+   # Otherwise the set-aside goes only beside a base that is provably a
+   # finished install: a base with no journal is not proof enough (J342
+   # P1-1: a bare owner record once deleted the only remaining install).
+   "$base".bootstrap-takeover-*)
+    [ -d "$set_aside/install" ] && [ ! -L "$set_aside/install" ] || continue
+    probe validate_finished_install
+    [ "$probed" = 0 ] || continue;;
   esac
   rm -rf "$set_aside"
  done
