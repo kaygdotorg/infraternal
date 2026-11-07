@@ -576,8 +576,10 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
     let report = |line: &str| AccessReport {
         state: State::Changed,
         reason: None,
+        omitted_accounts: 0,
         accounts: vec![AccountReport {
             account: "deploy".to_owned(),
+            recorded_at: 1,
             state: State::Changed,
             reason: None,
             files: vec![AccessFile {
@@ -693,6 +695,7 @@ async fn hidden_reports_still_decide_the_outcome() {
         state: State::Changed,
         accounts: vec![AccountReport {
             account: "old".to_owned(),
+            recorded_at: 1,
             state: State::Changed,
             files: vec![crate::access_report::AccessFile {
                 path: "~/.bashrc".to_owned(),

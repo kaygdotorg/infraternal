@@ -301,6 +301,7 @@ async fn access_report(
     .unwrap_or_else(|_| crate::access_files::Access {
         state: crate::access_files::State::NotChecked,
         reason: Some(crate::access_files::Reason::RecordMissing),
+        omitted_accounts: 0,
         accounts: Vec::new(),
     })
 }

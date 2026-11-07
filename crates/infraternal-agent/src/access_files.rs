@@ -70,7 +70,7 @@ const RECORD_BYTES: usize = 2 * 1024 * 1024;
 const REPORTED_LINES: usize = 64;
 /// Characters of one reported line before it is cut in the middle.
 const LINE_CHARS: usize = 200;
-/// Accounts with records looked at per revocation.
+/// Accounts whose files are scanned per revocation; any excess is counted.
 const ACCOUNTS: usize = 64;
 /// Bytes read from one spool file or command.
 const SPOOL_BYTES: usize = 256 * 1024;
@@ -444,8 +444,8 @@ pub struct AccountReport {
     /// How many rows of [`WATCHED`] this report covers (its coverage).
     #[serde(default)]
     pub watched: usize,
-    /// How many places (files, links, spool jobs) were checked: the count a
-    /// "no changes found" report names (D360).
+    /// Entries observed (files, links and spool jobs), for diagnostics.
+    /// The coverage sentence uses `watched`, including absent places.
     #[serde(default)]
     pub places: usize,
     /// The categories watched, in plain words (D360).
@@ -506,6 +506,8 @@ impl AccountReport {
         } else if own.is_some() {
             // No record to compare with: that, not "incomplete", is why.
             own
+        } else if self.recorded_at == 0 {
+            Some(Reason::RecordMissing)
         } else if self.privileged {
             Some(Reason::Privileged)
         } else if !self.complete
@@ -522,12 +524,12 @@ impl AccountReport {
                 .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed))
         };
         if !self.files.is_empty() || self.omitted_files > 0 {
-            self.state = if rootless {
+            self.state = if rootless || self.recorded_at == 0 {
                 State::NotChecked
             } else {
                 State::Changed
             };
-            self.reason = reason.filter(|_| rootless);
+            self.reason = reason.filter(|_| rootless || self.recorded_at == 0);
         } else if let Some(reason) = reason {
             self.state = State::NotChecked;
             self.reason = Some(reason);
@@ -556,6 +558,9 @@ pub struct Access {
     pub reason: Option<Reason>,
     /// Each account the person had a grant or a login on.
     pub accounts: Vec<AccountReport>,
+    /// Accounts beyond the bounded list, preserved even when text is trimmed.
+    #[serde(default)]
+    pub omitted_accounts: usize,
 }
 
 impl Access {
@@ -579,6 +584,7 @@ impl Access {
             state,
             reason,
             accounts,
+            omitted_accounts: 0,
         }
     }
 }
@@ -600,8 +606,7 @@ struct Ended {
     unscanned: Vec<String>,
     /// Watched places gone through.
     watched: usize,
-    /// Entries checked (files, links, spool jobs): the places a report says
-    /// it watched (D360).
+    /// Entries observed (files, links and spool jobs), separate from coverage.
     places: usize,
 }
 
@@ -1840,28 +1845,26 @@ pub(crate) fn record_grant(
 
 /// The accounts `person` has records (or failed records) on, from the store
 /// itself (not from runtime state, which a reboot empties).
-fn recorded_accounts(store: &Path, person: uuid::Uuid) -> Vec<u32> {
+fn recorded_accounts(store: &Path, person: uuid::Uuid) -> impl Iterator<Item = u32> + '_ {
     let failed = format!("-{}.failed", person.simple());
-    let mut uids: Vec<u32> = std::fs::read_dir(store)
+    std::fs::read_dir(store)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
-        .filter_map(|entry| {
+        .filter_map(move |entry| {
             let name = entry.file_name().into_string().ok()?;
             match name.strip_suffix(&failed) {
-                // A failure marker in the store's root names its account.
-                Some(uid) => uid.parse().ok(),
+                // A baseline and its failure marker name the same account.
+                Some(uid) => {
+                    let uid = uid.parse().ok()?;
+                    (!record_path(store, person, uid).is_file()).then_some(uid)
+                }
                 None => name
                     .parse()
                     .ok()
                     .filter(|uid| record_path(store, person, *uid).is_file()),
             }
         })
-        .take(ACCOUNTS)
-        .collect();
-    uids.sort_unstable();
-    uids.dedup();
-    uids
 }
 
 /// What the revocation knows about an account beyond its files.
@@ -1903,7 +1906,16 @@ pub(crate) fn since_grant(
     extra: &Extra,
     rootless: bool,
 ) -> Access {
-    let mut uids = recorded_accounts(store, person);
+    let mut uids = Vec::new();
+    let mut omitted = 0_usize;
+    for uid in recorded_accounts(store, person) {
+        if uids.len() < ACCOUNTS {
+            uids.push(uid);
+        } else {
+            omitted = omitted.saturating_add(1);
+        }
+    }
+    uids.sort_unstable();
     if uids.is_empty()
         && let Some(kept) = std::fs::read(report_path(store, person))
             .ok()
@@ -1912,9 +1924,18 @@ pub(crate) fn since_grant(
     {
         return kept;
     }
-    for uid in live {
-        if !uids.contains(uid) && uids.len() < ACCOUNTS {
+    for (index, uid) in live.iter().enumerate() {
+        if uids.contains(uid)
+            || live[..index].contains(uid)
+            || record_path(store, person, *uid).is_file()
+            || failed_path(store, person, *uid).exists()
+        {
+            continue;
+        }
+        if uids.len() < ACCOUNTS {
             uids.push(*uid);
+        } else {
+            omitted = omitted.saturating_add(1);
         }
     }
     let mut budget = REPORTED_LINES;
@@ -1954,7 +1975,19 @@ pub(crate) fn since_grant(
         report.decide(rootless);
         accounts.push(report);
     }
+    if omitted > 0
+        && let Some(last) = accounts.last_mut()
+    {
+        last.complete = false;
+        last.truncated = true;
+        last.decide(rootless);
+    }
     let mut access = Access::of(accounts);
+    access.omitted_accounts = omitted;
+    if omitted > 0 {
+        access.state = State::NotChecked;
+        access.reason = Some(Reason::Incomplete);
+    }
     if rootless {
         access.state = State::NotChecked;
         access.reason = Some(Reason::RootlessUnverified);

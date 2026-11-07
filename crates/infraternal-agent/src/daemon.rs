@@ -538,6 +538,7 @@ mod revoke_reply_tests {
             access: Access {
                 state: State::Changed,
                 reason: None,
+                omitted_accounts: 3,
                 accounts: vec![AccountReport {
                     account: "deploy".into(),
                     state: State::Changed,
@@ -550,6 +551,7 @@ mod revoke_reply_tests {
         let bytes = super::revoke_reply(&revoked);
         assert!(bytes.len() <= super::REVOKE_REPLY_BUDGET);
         let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["access"]["omitted_accounts"], 3);
         let account = &reply["access"]["accounts"][0];
         assert_eq!(account["truncated"], true);
         let listed = account["files"].as_array().unwrap().len();

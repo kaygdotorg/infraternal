@@ -145,8 +145,7 @@ pub(crate) struct AccountReport {
     /// How many rows of the agent's watched table the report covers.
     #[serde(default)]
     pub(crate) watched: u64,
-    /// How many places were checked: the count a "no changes found"
-    /// report names (D360).
+    /// Entries observed, separate from the watched-place coverage count.
     #[serde(default)]
     pub(crate) places: u64,
     /// The categories watched, in plain words (D360).
@@ -179,6 +178,9 @@ pub(crate) struct AccessReport {
     pub(crate) reason: Option<Reason>,
     /// Each account.
     pub(crate) accounts: Vec<AccountReport>,
+    /// Accounts not listed, kept independently of text trimming.
+    #[serde(default)]
+    pub(crate) omitted_accounts: u64,
     /// D353: background programs of an account may still be running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) warning: Option<String>,
@@ -275,6 +277,7 @@ impl AccessReport {
             state: State::NotChecked,
             reason: Some(reason),
             accounts: Vec::new(),
+            omitted_accounts: 0,
             warning: None,
         }
     }
@@ -289,7 +292,16 @@ impl AccessReport {
             .warning
             .map(|warning| printable(&warning, TEXT_CHARS, &mut ignored));
         if self.accounts.len() > ACCOUNTS {
+            self.omitted_accounts = self
+                .omitted_accounts
+                .saturating_add(u64::try_from(self.accounts.len() - ACCOUNTS).unwrap_or(u64::MAX));
             self.accounts.truncate(ACCOUNTS);
+        }
+        if self.omitted_accounts > 0
+            && let Some(last) = self.accounts.last_mut()
+        {
+            last.complete = false;
+            last.truncated = true;
         }
         let mut files_left = FILES;
         let mut lines_left = LINES;
@@ -357,6 +369,8 @@ impl AccessReport {
         for account in &mut self.accounts {
             let reason = if rootless {
                 Some(Reason::RootlessUnverified)
+            } else if account.recorded_at == 0 {
+                Some(Reason::RecordMissing)
             } else if account.privileged {
                 Some(Reason::Privileged)
             } else if !account.complete
@@ -383,12 +397,12 @@ impl AccessReport {
                 _ => reason,
             };
             if !account.files.is_empty() || account.omitted_files > 0 {
-                account.state = if rootless {
+                account.state = if rootless || account.recorded_at == 0 {
                     State::NotChecked
                 } else {
                     State::Changed
                 };
-                account.reason = reason.filter(|_| rootless);
+                account.reason = reason.filter(|_| rootless || account.recorded_at == 0);
             } else if let Some(reason) = reason {
                 account.state = State::NotChecked;
                 account.reason = Some(reason);
@@ -405,6 +419,9 @@ impl AccessReport {
         if rootless {
             self.state = State::NotChecked;
             self.reason = Some(Reason::RootlessUnverified);
+        } else if self.omitted_accounts > 0 {
+            self.state = State::NotChecked;
+            self.reason = Some(Reason::Incomplete);
         } else if self.accounts.iter().any(|a| a.state == State::Changed) {
             self.state = State::Changed;
             self.reason = None;
@@ -564,8 +581,10 @@ mod tests {
         AccessReport {
             state,
             reason: None,
+            omitted_accounts: 0,
             accounts: vec![AccountReport {
                 account: "deploy".to_owned(),
+                recorded_at: 1,
                 state,
                 files,
                 complete: true,
@@ -713,6 +732,40 @@ mod tests {
         let lines: Vec<&str> = std::iter::repeat_n(long.as_str(), LINES + 1).collect();
         let cut = report(State::Unchanged, vec![file("~/.zshrc", &lines)]).bounded();
         assert!(cut.accounts[0].truncated);
+    }
+
+    /// A missing baseline cannot justify a since-time or a clean result.
+    #[test]
+    fn a_missing_baseline_is_not_checked() {
+        for files in [Vec::new(), vec![file("~/.bashrc", &["plant"])]] {
+            let mut input = report(State::Unchanged, files);
+            input.accounts[0].recorded_at = 0;
+            let result = input.decided(false);
+            assert_eq!(result.state, State::NotChecked);
+        }
+    }
+
+    /// Bounding the account list must say how many accounts were not checked.
+    #[test]
+    fn accounts_past_the_bound_are_not_silently_clean() {
+        let mut input = report(State::Unchanged, Vec::new());
+        input.accounts[0].recorded_at = 1;
+        input.accounts = vec![input.accounts[0].clone(); 67];
+        let result = input.bounded().decided(false);
+        assert_eq!(result.state, State::NotChecked, "{result:?}");
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["omitted_accounts"], 3);
+    }
+
+    /// Reducing a large reply must preserve its omitted-account count.
+    #[test]
+    fn trimming_preserves_the_number_of_omitted_accounts() {
+        let mut input = report(State::Changed, vec![file("~/.bashrc", &["plant"])]);
+        input.accounts = vec![input.accounts[0].clone(); 67];
+        let mut result = input.bounded();
+        while result.trim() {}
+        assert_eq!(result.omitted_accounts, 3);
+        assert_eq!(result.decided(false).state, State::NotChecked);
     }
 
     /// J334 P3: a field this server does not know inside the report is

@@ -1206,3 +1206,38 @@ fn both_at_spools_detect_their_plants() {
         );
     }
 }
+
+/// A missing grant time cannot support the required since-time sentence.
+#[test]
+fn missing_baseline_time_is_not_checked() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let path = record_path(&granted.store, granted.person, granted.user.uid.as_raw());
+    let mut record: Record = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record.recorded_at = 0;
+    write_private(&path, &serde_json::to_vec(&record).unwrap()).unwrap();
+    assert_eq!(granted.report(&no_extra).state, State::NotChecked);
+    std::fs::write(granted.home.join(".bashrc"), "plant\n").unwrap();
+    assert_eq!(granted.report(&no_extra).state, State::NotChecked);
+}
+
+/// Accounts beyond the report budget must be counted as not checked.
+#[test]
+fn account_overflow_is_counted_and_incomplete() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    forget(&granted.store, granted.person).unwrap();
+    let baseline = serde_json::to_vec(&capture(&granted.user, &no_extra)).unwrap();
+    for uid in 20000..20067 {
+        write_private(&record_path(&granted.store, granted.person, uid), &baseline).unwrap();
+    }
+    let report = since_grant(
+        &granted.store,
+        granted.person,
+        &[],
+        &|_| Some(granted.user.clone()),
+        &no_facts,
+        &no_extra,
+        false,
+    );
+    assert_eq!(report.state, State::NotChecked, "{report:?}");
+    assert_eq!(report.omitted_accounts, 3);
+}

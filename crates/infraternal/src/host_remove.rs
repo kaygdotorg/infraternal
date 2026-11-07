@@ -278,8 +278,13 @@ fn report_message(value: &Value) -> (CommandState, String) {
                     .flat_map(|report| report["accounts"].as_array().into_iter().flatten())
             };
             let places = accounts()
-                .filter_map(|account| account["places"].as_u64())
-                .sum();
+                .fold(std::collections::BTreeMap::<&str, u64>::new(), |mut places, account| {
+                    let name = account["account"].as_str().unwrap_or("?");
+                    let watched = account["watched"].as_u64().unwrap_or(0);
+                    places.entry(name).and_modify(|count| *count = (*count).max(watched)).or_insert(watched);
+                    places
+                })
+                .values().fold(0_u64, |total, count| total.saturating_add(*count));
             let mut categories: Vec<String> = Vec::new();
             for category in accounts().flat_map(categories_of) {
                 if !categories.contains(&category) {
@@ -289,8 +294,14 @@ fn report_message(value: &Value) -> (CommandState, String) {
             let since = accounts()
                 .filter_map(|account| account["recorded_at"].as_u64())
                 .filter(|seconds| *seconds > 0)
-                .min()
+                .max()
                 .and_then(utc);
+            if value["more"].as_u64().unwrap_or(0) > 0 {
+                return (CommandState::Ready, "No changes found; per-account coverage is shown below, with more reports not shown.".to_owned());
+            }
+            if since.is_none() || accounts().any(|a| a["recorded_at"].as_u64().filter(|t| *t > 0).and_then(utc).is_none()) {
+                return (CommandState::Ready, "The host's access files were not fully checked; the time access was granted is missing.".to_owned());
+            }
             (
                 CommandState::Ready,
                 format!("{}.", no_changes_found(places, &categories, since)),
@@ -356,6 +367,10 @@ fn report_body(report: &Value) -> Option<String> {
         if let Some(warning) = entry["warning"].as_str() {
             lines.push(format!("Warning: {warning}"));
         }
+        let omitted = entry["omitted_accounts"].as_u64().unwrap_or(0);
+        if omitted > 0 {
+            lines.push(format!("{omitted} more accounts were not checked."));
+        }
         let accounts = entry["accounts"].as_array().map_or(&[][..], Vec::as_slice);
         if accounts.is_empty() && entry["state"] == "not_checked" {
             let reason = entry["reason"].as_str().unwrap_or("");
@@ -380,14 +395,18 @@ fn report_body(report: &Value) -> Option<String> {
 /// One account's lines in [`report_body`].
 fn account_lines(account: &Value, lines: &mut Vec<String>, files_shown: &mut bool) {
     let name = account["account"].as_str().unwrap_or("?");
-    let since = account["recorded_at"].as_u64().and_then(utc);
+    let since = account["recorded_at"]
+        .as_u64()
+        .filter(|time| *time > 0)
+        .and_then(utc);
     let outcome = match account["state"].as_str() {
         Some("changed") => "changed since the grant".to_owned(),
-        Some("unchanged") => no_changes_found(
-            account["places"].as_u64().unwrap_or(0),
+        Some("unchanged") if since.is_some() => no_changes_found(
+            account["watched"].as_u64().unwrap_or(0),
             &categories_of(account),
             since.clone(),
         ),
+        Some("unchanged") => reason_words("record_missing").to_owned(),
         _ => reason_words(account["reason"].as_str().unwrap_or("")).to_owned(),
     };
     lines.push(format!("Account {name}: {outcome}."));
@@ -647,7 +666,7 @@ mod tests {
         let value = serde_json::json!({"host_id": host, "state": "reported", "outcome": "unchanged", "more": 0, "reports": [
             {"person_id": host, "state": "unchanged", "accounts": [
                 {"account": "me", "state": "unchanged", "files": [], "truncated": false, "unscanned": [], "omitted_files": 0,
-                 "complete": true, "watched": 22, "places": 214, "categories": ["SSH keys", "cron and at jobs", "user services", "shell startup files"],
+                 "complete": true, "watched": 214, "places": 22, "categories": ["SSH keys", "cron and at jobs", "user services", "shell startup files"],
                  "recorded_at": 1_700_000_000_u64, "scanned_at": 1_700_000_100_u64}
             ]}
         ]});
@@ -659,6 +678,39 @@ mod tests {
             "{clean}"
         );
         assert!(!clean.contains("unchanged"), "{clean}");
+    }
+
+    /// Shared accounts count once, and the headline uses the latest baseline.
+    #[test]
+    fn headline_counts_watched_places_once_and_uses_the_latest_baseline() {
+        let account = |name: &str, watched: u64, recorded_at: u64| {
+            serde_json::json!({
+                "account": name, "state": "unchanged", "watched": watched,
+                "places": 1, "categories": ["SSH keys"], "recorded_at": recorded_at
+            })
+        };
+        let value = serde_json::json!({"state":"reported", "outcome":"unchanged", "reports":[
+            {"accounts":[account("deploy", 28, 1_700_000_000), account("ops", 28, 1_700_000_120)]},
+            {"accounts":[account("deploy", 28, 1_700_000_060)]}
+        ]});
+        let (_, message) = super::report_message(&value);
+        assert!(message.contains("56 places"), "{message}");
+        assert!(message.contains("22:15 UTC"), "{message}");
+    }
+
+    /// Older replies without a grant time cannot produce a clean sentence.
+    #[test]
+    fn missing_baselines_and_omitted_accounts_are_visible() {
+        let value = serde_json::json!({"state":"reported", "outcome":"unchanged", "reports":[
+            {"state":"not_checked", "omitted_accounts":3, "accounts":[
+                {"account":"deploy", "state":"unchanged", "watched":30, "recorded_at":0}
+            ]}
+        ]});
+        let (_, message) = super::report_message(&value);
+        assert!(!message.contains("No changes found"), "{message}");
+        let body = super::report_body(&value).unwrap();
+        assert!(body.contains("3 more accounts were not checked"), "{body}");
+        assert!(!body.contains("No changes found"), "{body}");
     }
 
     /// J334: a shared account says changes may be someone else's, a removed
