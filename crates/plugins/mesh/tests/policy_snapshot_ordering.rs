@@ -52,10 +52,10 @@ fn install(fallback: bool) -> (Node, Config) {
         Firewall::default()
     })
     .with_engine(EngineKind::Kernel);
-    node.up().unwrap();
+    let identity = node.up().unwrap();
     let config = Config {
         authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
-        local_key: None,
+        local_key: Some(identity.public_key),
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns-spike")]
