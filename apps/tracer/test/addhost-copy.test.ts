@@ -170,7 +170,7 @@ test("an install this server didn't make is named once, with no chore and no pat
 });
 
 test("a login name with no account says so, by name, and offers the two ways forward", () => {
-  const failure = { kind: "no_account", message: "This host has no account with that user name.", log_tail: [] } as const;
+  const failure = { kind: "no_account", message: "This host couldn't find an account with that user name.", log_tail: [] } as const;
   const guide = guideFor("minipc01", { ...failure, log_tail: [] }, false, "kayg");
   expect(guide.title).toBe("minipc01 couldn't find an account named kayg");
   expect(guide.happened).toBe("Use an account that exists there, or add it as root.");
@@ -200,5 +200,16 @@ test("each staging refusal has its own title and no retry", () => {
     titles.add(guide.title);
   }
   expect(titles.size).toBe(4);
+});
+
+// D359: a root-mode add may take a finished install of another server over. The page offers Take over only when
+// the server sent the offer (its old install's id); without it the page stays a plain "try again".
+test("an install of another server offers Take over only with the server's offer", () => {
+  const base = { kind: "unrecognized_install", failed_step: "connect", message: "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.", log_tail: ["Setup location: /var/lib/infraternal"] } as const;
+  const offered = guideFor("minipc01", { ...base, log_tail: [...base.log_tail], takeover: { install: "c10909d16e8147a3b0f2e5d4c3b2a190", live: true } });
+  expect(offered.fix).toBe("take-over");
+  expect(offered.tone).toBe("info");
+  expect(offered.title).toBe("minipc01 is set up elsewhere");
+  expect(guideFor("minipc01", { ...base, log_tail: [...base.log_tail] }).fix).toBe("retry");
 });
 
