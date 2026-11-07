@@ -98,6 +98,25 @@ fn unoffered_nist_ecdh_is_not_registered() {
     }
 }
 
+/// Unoffered AES variants must not keep transport implementations linked in.
+#[test]
+fn unoffered_aes_ciphers_are_not_registered() {
+    for name in [
+        "aes128-cbc",
+        "aes192-cbc",
+        "aes256-cbc",
+        "aes128-gcm@openssh.com",
+    ] {
+        assert!(
+            russh::cipher::Name::try_from(name).is_err(),
+            "{name} is still registered"
+        );
+    }
+    for name in russh::Preferred::DEFAULT.cipher.iter() {
+        assert!(russh::cipher::Name::try_from(name.as_ref()).is_ok());
+    }
+}
+
 /// Removing ECDH must retain every existing NIST ECDSA signer and verifier.
 #[test]
 fn ecdsa_keys_still_sign_and_verify() {

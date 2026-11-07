@@ -42,7 +42,10 @@ default = [
     "aws-lc-rs",
     "rsa",
     "nist-ecdh",
+    "extra-ciphers",
 ]
+# Ciphers outside the mesh offer remain available to callers that opt in.
+extra-ciphers = []
 # Optional exchanges outside the mesh offer; ECDSA signing and verification stay enabled.
 nist-ecdh = ["elliptic-curve/ecdh", "p256/ecdh", "p384/ecdh", "p521/ecdh"]
 des = ["dep:des"]

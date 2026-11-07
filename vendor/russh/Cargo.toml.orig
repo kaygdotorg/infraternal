@@ -13,7 +13,9 @@ version = "0.64.1"
 rust-version = "1.89"
 
 [features]
-default = ["flate2", "aws-lc-rs", "rsa", "nist-ecdh"]
+default = ["flate2", "aws-lc-rs", "rsa", "nist-ecdh", "extra-ciphers"]
+# Ciphers outside the mesh offer remain available to callers that opt in.
+extra-ciphers = []
 # Optional exchanges outside the mesh offer; ECDSA keys remain supported.
 nist-ecdh = ["elliptic-curve/ecdh", "p256/ecdh", "p384/ecdh", "p521/ecdh"]
 # Crypto backends: enable at least one of `aws-lc-rs` or `ring`.
