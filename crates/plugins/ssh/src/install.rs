@@ -1185,7 +1185,7 @@ fi
 
     /// Commit this transaction on the host, within `timeout` when one is given:
     /// its journal goes and what it replaced is deleted, after the new install
-    /// is durable (COMMIT_RETIRE).
+    /// is durable (`COMMIT_RETIRE`).
     /// # Errors
     /// Reports a refused or failed commit; nothing is marked committed then.
     async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
