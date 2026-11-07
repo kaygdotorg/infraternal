@@ -316,9 +316,10 @@ fn a_missing_record_reads_not_checked() {
     assert_eq!(live.state, State::NotChecked);
     assert_eq!(live.accounts[0].reason, Some(Reason::RecordMissing));
     assert_eq!(live.accounts[0].account, user.name);
+    // A different person: the first call kept its report for a retry.
     let none = since_grant(
         &store,
-        person,
+        uuid::Uuid::new_v4(),
         &[],
         &lookup(&user),
         &no_facts,
