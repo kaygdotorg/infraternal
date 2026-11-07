@@ -20,6 +20,8 @@ CONSTANTS = dict(re.findall(r'(?:pub\(crate\) )?const (\w+): &str = r#"(.*?)"#;'
 HOST, TRANSACTION = '1' * 32, '2' * 32
 # A Take over's own token: names its set-aside and its cancel (D359).
 TAKEOVER = '7' * 32
+# The fresh install that follows a Take over: its own host id and transaction.
+NEW_HOST, NEW_TRANSACTION = '6' * 32, '8' * 32
 
 class EarlierSetup(unittest.TestCase):
     def setUp(self):
@@ -1850,13 +1852,16 @@ mock_manager() {{
     def take_over(self, expected, token=TAKEOVER, prefix=''):
         return self.run_shell(f'{prefix}\ntake_over_finished_install "{expected}" {token}\n')
 
-    def killing(self, at):
+    def killing(self, at, writes=False):
         """Shell lines that SIGKILL the script right after its `at`-th change:
-        every directory, move, copy, delete, link and service-manager call.
+        every directory, move, copy, delete, link and service-manager call,
+        and with `writes` every printf too (each file the script writes).
         SIGKILL runs no trap, as with a power loss."""
+        printf = 'printf() { command printf "$@"; kill_step; }' if writes else ''
         return f'''
 kill_steps=0
 kill_step() {{ kill_steps=$((kill_steps + 1)); [ "$kill_steps" != {at} ] || kill -KILL $$; }}
+{printf}
 mkdir() {{ command mkdir "$@"; kill_step; }}
 mv() {{ command mv "$@"; kill_step; }}
 cp() {{ command cp "$@"; kill_step; }}
@@ -2151,6 +2156,47 @@ manager=terminating_manager''')
             self.assertFalse(aside.exists(), step)
             self.assertFalse(Path(f'{self.base}.bootstrap-taking-{token}').exists(), step)
         self.assertGreater(step, 8, 'every change of the take over was interrupted once')
+
+    def stage_new_attempt(self, prefix=''):
+        """The upload step's staging as the fresh install that follows a Take
+        over: a new host id and a new transaction (STAGE_TRANSACTION)."""
+        return self.run_shell(f'{prefix}\nhost={NEW_HOST}\ntransaction={NEW_TRANSACTION}\n' + CONSTANTS['STAGE_TRANSACTION'])
+
+    def roll_back_new_attempt(self):
+        """The server's rollback of that attempt (Installation::rollback)."""
+        return self.run_shell(f'\nhost={NEW_HOST}\ntransaction={NEW_TRANSACTION}\n' + CONSTANTS['FRESH_CLEANUP'] + '\npreserve_session=no\n' + CONSTANTS['ROLLBACK_TRANSACTION'])
+
+    def test_staging_cut_at_any_step_after_a_take_over_never_loses_the_old_install(self):
+        # J342 P1-1, reproduced as real root: staging cut right after it wrote
+        # the new owner record left a base with nothing else in it; the next
+        # Check read that as a finished install and deleted the set-aside, so
+        # neither install was left. Cut the staging after every change and
+        # every write: Check never deletes the old install, and the server's
+        # rollback then restore put it back exactly.
+        step = 0
+        while True:
+            step += 1
+            record = self.make_takeover_fixture()
+            found = self.found_install()
+            self.assertEqual(self.take_over(record).returncode, 0)
+            aside = self.takeover_aside()
+            result = self.stage_new_attempt(self.killing(step, writes=True))
+            finished = result.returncode == 0
+            if not finished:
+                self.assertEqual(result.returncode, -9, (step, result.stderr.decode()))
+            check = self.run_shell('\nsetup_check=yes\ninspect_previous')
+            self.assertTrue((aside / 'install').is_dir(), f'step {step}: Check {check.stdout!r} deleted the old install')
+            rollback = self.roll_back_new_attempt()
+            self.assertEqual(rollback.returncode, 0, (step, rollback.stderr.decode()))
+            restore = self.run_shell(f'\nrestore_taken_over_install {TAKEOVER}\n')
+            self.assertEqual(restore.returncode, 0, (step, restore.stderr.decode()))
+            self.assertEqual(restore.stdout, b'restored\n', step)
+            self.assertEqual(self.found_install(), found, f'step {step}: put back exactly')
+            self.assertFalse(Path(f'{self.base}.bootstrap-new-{NEW_TRANSACTION}').exists(), step)
+            self.assertFalse(Path(f'{self.base}.bootstrap-rollback-{NEW_TRANSACTION}').exists(), step)
+            if finished:
+                break
+        self.assertGreater(step, 4, 'every change and write of the staging was cut once')
 
     def test_a_restore_killed_at_any_step_finishes_when_run_again(self):
         step = 0
