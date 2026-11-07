@@ -103,6 +103,7 @@ fn configure(node: &mut Node) {
     assert_eq!(Device::counters().unwrap().len(), 1000);
 }
 
+/// Create a mesh state at the requested boundary and hold it for the parent restart proof.
 #[test]
 #[ignore = "Child-only fixture: started by the weighted restart proof inside its namespace; does nothing alone."]
 fn crash_child() {
