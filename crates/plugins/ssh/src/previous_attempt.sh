@@ -286,6 +286,14 @@ validate_upgrade_root() {
  done
  private_tree "$base/state"
  if [ -e "$base/sessions" ] || [ -L "$base/sessions" ]; then validate_upgrade_sessions "$base/sessions"; fi
+ # Nothing at or under it is a mount point: Take over and Re-enroll move the
+ # whole tree and later delete it, and that delete must never reach into a
+ # mounted filesystem (J342 P3-1). A same-filesystem bind mount keeps the
+ # device number, so mountinfo is read rather than comparing devices.
+ setup_real=$(CDPATH= cd -P "$base" && pwd -P) || exit 71
+ [ -r /proc/self/mountinfo ] || exit 71
+ setup_mounted=$(awk -v under="$setup_real/" 'index($5 "/", under) == 1 { print $5; exit }' /proc/self/mountinfo) || exit 71
+ [ -z "$setup_mounted" ] || exit 71
  for entry in "$base/bin"/* "$base/bin"/.[!.]* "$base/bin"/..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   case "${entry##*/}" in live) :;; current) [ -L "$entry" ] && [ "$(readlink "$entry")" = "$base/bin/live" ] || exit 71;; *) exit 71;; esac

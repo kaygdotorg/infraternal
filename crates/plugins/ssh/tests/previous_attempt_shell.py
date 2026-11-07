@@ -1985,6 +1985,27 @@ manager=kill_manager
         self.hold_a_file()
         self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='busy'))
 
+    def check_in_mount_namespace(self, mount):
+        """Check, run in a private mount namespace after the shell line `mount`."""
+        script = self.shell_script('\nsetup_check=yes\ninspect_previous')
+        return subprocess.run(['unshare', '-Urm', 'sh', '-c', f'{mount} && exec /bin/sh -c "$1"', '_', script],
+                              capture_output=True, env=dict(os.environ, HOME=str(self.home)))
+
+    def test_an_install_with_a_mount_inside_is_never_offered(self):
+        # J342 P3-1: Take over's commit deletes the whole set-aside tree; a
+        # bind mount inside it would have its contents deleted.
+        if subprocess.run(['unshare', '-Urm', 'true'], capture_output=True).returncode != 0:
+            self.skipTest('no unprivileged mount namespaces here')
+        self.make_takeover_fixture()
+        victim = Path(self.temp).resolve() / 'victim'
+        victim.mkdir(mode=0o700)
+        mounted = self.base / 'state/mounted'
+        mounted.mkdir(mode=0o700)
+        plain = self.check_in_mount_namespace('true')
+        self.assertTrue(plain.stdout.endswith(b' ready\n'), plain.stdout + plain.stderr)
+        bound = self.check_in_mount_namespace(f'mount --bind "{victim}" "{mounted}"')
+        self.assertTrue(bound.stdout.endswith(b' unproven\n'), bound.stdout + bound.stderr)
+
     def test_an_install_another_process_uses_is_busy_and_never_stopped(self):
         record = self.make_takeover_fixture()
         self.hold_a_file()
