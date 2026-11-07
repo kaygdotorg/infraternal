@@ -19,7 +19,7 @@ mesh-dns = []
 
 [dependencies]
 libfuzzer-sys = "0.4"
-nix = { version = "0.30", features = ["poll", "socket", "time"] }
+nix = { version = "0.30", features = ["poll", "socket", "time", "user"] }
 infraternal-mesh = { path = "../../../infraternal-mesh" }
 serde = "1.0"
 hickory-proto = { version = "=0.26.3", default-features = false, features = ["std"] }
