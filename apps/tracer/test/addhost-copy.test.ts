@@ -170,7 +170,7 @@ test("an install this server didn't make is named once, with no chore and no pat
 });
 
 test("a login name with no account says so, by name, and offers the two ways forward", () => {
-  const failure = { kind: "no_account", message: "This host has no account with that user name.", log_tail: [] } as const;
+  const failure = { kind: "no_account", message: "This host couldn't find an account with that user name.", log_tail: [] } as const;
   const guide = guideFor("minipc01", { ...failure, log_tail: [] }, false, "kayg");
   expect(guide.title).toBe("minipc01 couldn't find an account named kayg");
   expect(guide.happened).toBe("Use an account that exists there, or add it as root.");

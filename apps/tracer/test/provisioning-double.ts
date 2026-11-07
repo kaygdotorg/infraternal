@@ -183,7 +183,7 @@ function failureOf(target: Target): Failure | undefined {
   for (const refusal of ["cache", "prepared", "foreign"] as const) {
     if (name.startsWith(`unproven-${refusal}`)) return { failed_step: "upload", phase: 1, beforeLogin: false, kind: "unproven_files", refusal, message: "Setup changed nothing.", evidence: "Setup location: /var/lib/infraternal" };
   }
-  if (/^noacct/.test(name)) return { phase: 0, beforeLogin: false, kind: "no_account", message: "This host has no account with that user name.", evidence: "The host's SSH server reported no such account." };
+  if (/^noacct/.test(name)) return { phase: 0, beforeLogin: false, kind: "no_account", message: "This host couldn't find an account with that user name.", evidence: "The host's SSH server reported no such account." };
   if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;
 }
