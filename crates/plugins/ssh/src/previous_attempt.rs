@@ -269,7 +269,9 @@ pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal a
 pub const TAKEOVER_OFFER: &str = "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.";
 
 /// The refusal for a finished install that something still uses (D359).
-pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something is using it right now, such as an open terminal. Nothing was changed. Close it, then try again.";
+/// It holds before the stop (nothing touched) and after it (the agent was put
+/// back as it was found), so it never claims that nothing changed (J342 P3-4).
+pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something is using it right now, such as an open terminal. It was left as it was found. Close it, then try again.";
 
 impl FinishedInstall {
     /// The exact record the host compares before it changes anything.
