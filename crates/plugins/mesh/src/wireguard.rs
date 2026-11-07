@@ -946,8 +946,10 @@ impl Device {
 /// Routes from before per-peer MTUs may have no metrics at all; callers accept
 /// that legacy shape separately. Extra, repeated, malformed or out-of-range
 /// metrics stay foreign so restart cleanup cannot delete an operator route.
+/// Linux clears `NLA_F_NESTED` in route dumps, so the `RTA_METRICS` type identifies
+/// the nested payload even when that flag is absent.
 fn mesh_route_metrics_are_owned(field: netlink::Attribute<'_>) -> bool {
-    if field.kind != RTA_METRICS || !field.nested {
+    if field.kind != RTA_METRICS {
         return false;
     }
     let Ok(metrics) = netlink::attributes(field.payload) else {
@@ -1447,6 +1449,17 @@ mod route_metric_tests {
             return false;
         };
         mesh_route_metrics_are_owned(*field)
+    }
+
+    /// Accept the nested MTU payload when the kernel clears `NLA_F_NESTED` on route dumps.
+    #[test]
+    fn route_retirement_accepts_kernel_normalized_metrics() {
+        let encoded = encoded_metrics(
+            RTA_METRICS,
+            false,
+            &[(RTAX_MTU, false, 1200_u32.to_ne_bytes().to_vec())],
+        );
+        assert!(owns_encoded_metrics(&encoded));
     }
 
     /// Route cleanup recognizes exactly one nested MTU in the range the mesh can install.
