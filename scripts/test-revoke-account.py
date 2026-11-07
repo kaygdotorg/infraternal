@@ -8,6 +8,7 @@ Never run against a production host.
 """
 import json
 import filecmp
+import grp
 import os
 from pathlib import Path
 import pwd
@@ -55,7 +56,7 @@ def prepare(client, number, person, account):
         person=str(person), account=account, uid=pwd.getpwnam(account).pw_uid, cols=80, rows=24))
 
 
-def prove(binary):
+def prove(binary, scenario="sessions"):
     """Plant a detached local-SSH process, revoke shared then sole access, and clean up."""
     assert os.geteuid() == 0, 'requires real host root, not a user namespace'
     assert Path('/run/systemd/system').is_dir(), 'D354 root logins require systemd'
@@ -70,6 +71,8 @@ def prove(binary):
     existed = {path: path.exists() for path in directories}
     client = None
     uid = None
+    sudoers = Path("/etc/sudoers.d") / account
+    sudoers_created = False
     with tempfile.TemporaryDirectory(prefix='rv-', dir='/root') as scratch:
         root = Path(scratch)
         state = root / 's'
@@ -81,6 +84,26 @@ def prove(binary):
             print(json.dumps(dict(account=account, uid=uid)), flush=True)
             client = Binary(binary, state)
             prepare(client, 100, people[0], account)
+            if scenario in ("sudoers", "docker"):
+                if scenario == "sudoers":
+                    with sudoers.open("x") as rule:
+                        sudoers_created = True
+                        rule.write(f"{account} ALL=(ALL) NOPASSWD: ALL\n")
+                    sudoers.chmod(0o440)
+                    command("visudo", "-cf", str(sudoers))
+                    command("sudo", "-n", "-l", "-U", account)
+                else:
+                    grp.getgrnam("docker")  # The compute01 fixture already has this group.
+                    command("usermod", "-aG", "docker", account)
+                    assert grp.getgrnam("docker").gr_gid in os.getgrouplist(account, user.pw_gid)
+                reply = control(client, 102, "terminal.login.revoke", dict(person=str(people[0])))
+                print(json.dumps(dict(scenario=scenario, reply=reply)), flush=True)
+                report = reply["access"]["accounts"][0]
+                assert report["privileged"] is True, report
+                assert report["state"] == "not_checked", report
+                assert report["reason"] == "privileged", report
+                print("PRIVILEGE_REAL_ROOT_PASS " + scenario, flush=True)
+                return
             prepare(client, 101, people[1], account)
             home = Path(user.pw_dir)
             keys = home / '.ssh'
@@ -121,6 +144,8 @@ def prove(binary):
         finally:
             if client is not None:
                 client.kill()
+            if sudoers_created:
+                sudoers.unlink(missing_ok=True)
             if uid is not None:
                 command('loginctl', 'terminate-user', str(uid), check=False)
                 command('systemctl', 'stop', f'user-{uid}.slice', check=False)
@@ -161,4 +186,4 @@ def prove(binary):
 
 
 if __name__ == '__main__':
-    prove(sys.argv[1])
+    prove(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "sessions")

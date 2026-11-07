@@ -331,7 +331,7 @@ fn reason_words(reason: &str) -> &'static str {
             "not verified: infraternal runs as this account itself, so the person could have changed the record; anything below is only a hint, check by hand"
         }
         "privileged" => {
-            "not verified: this account is root or can become root, so it could have changed the record and files anywhere; check by hand"
+            "Not checked: this account may have root authority, so it could have changed the record and files anywhere; check by hand"
         }
         "incomplete" => "not fully checked: some places were not scanned (listed below)",
         "programs_may_remain" => "Not checked: programs may still be running",

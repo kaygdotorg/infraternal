@@ -284,13 +284,13 @@ async fn access_report(
                     processes: Vec::new(),
                 }
             });
+            facts.privileged = !rootless
+                && lookup(uid).is_none_or(|user| crate::access_privilege::privileged(&user));
             if !rootless {
                 let snapshot = crate::account_processes::scan(&proc_root, uid);
                 facts.programs_may_remain |= !snapshot.empty();
                 facts.processes = snapshot.processes;
             }
-            facts.privileged =
-                !rootless && lookup(uid).is_none_or(|user| crate::access_files::privileged(&user));
             facts
         };
         let access = crate::access_files::since_grant(

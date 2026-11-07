@@ -496,7 +496,9 @@ impl AccountReport {
     }
 
     /// The one rule for an account's outcome (the server applies the same
-    /// rule again and has the last word). Remaining programs require
+    /// rule again and has the last word). Root authority always requires
+    /// `not_checked: privileged`, including when changed files are listed.
+    /// Remaining programs otherwise require
     /// `not_checked` even when changed files are listed (D362).
     /// Otherwise `unchanged` holds only when the scan was complete over every
     /// watched place, the account cannot rewrite its record (not rootless,
@@ -529,7 +531,10 @@ impl AccountReport {
             self.reason
                 .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed))
         };
-        if !rootless && self.programs_may_remain {
+        if !rootless && self.privileged {
+            self.state = State::NotChecked;
+            self.reason = Some(Reason::Privileged);
+        } else if !rootless && self.programs_may_remain {
             self.state = State::NotChecked;
             self.reason = Some(Reason::ProgramsMayRemain);
         } else if !self.files.is_empty() || self.omitted_files > 0 {
@@ -1923,21 +1928,8 @@ pub(crate) struct Facts {
     pub(crate) programs_may_remain: bool,
     /// PIDs and command names observed after the access scan.
     pub(crate) processes: Vec<String>,
-    /// The account is root or may become root ([`privileged`]).
+    /// The account is root or may become root (host policy query).
     pub(crate) privileged: bool,
-}
-
-/// Whether `account` is root or may become root: a member of a group that
-/// usually grants sudo. Such an account can rewrite its record and plant
-/// anywhere, so its report is never vouched for (J334 P1-4).
-pub(crate) fn privileged(account: &User) -> bool {
-    account.uid.is_root()
-        || ["sudo", "wheel", "admin"].iter().any(|name| {
-            nix::unistd::Group::from_name(name)
-                .ok()
-                .flatten()
-                .is_some_and(|group| group.gid == account.gid || group.mem.contains(&account.name))
-        })
 }
 
 /// What changed on each account `person` had a grant on, since that grant.

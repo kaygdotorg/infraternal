@@ -812,8 +812,8 @@ fn a_removed_mask_is_reported() {
 }
 
 /// J334 P2-1 and P1-4: an account shared with others, whose programs may
-/// still run, or a privileged one, is never "unchanged"; listed files still
-/// read "changed".
+/// still run, or a privileged one, is never "unchanged". Privilege remains
+/// unverified even when changed files and running programs are also listed.
 #[test]
 fn shared_or_privileged_accounts_are_never_unchanged() {
     let granted = Granted::new(|_| {}, &no_extra);
@@ -840,6 +840,7 @@ fn shared_or_privileged_accounts_are_never_unchanged() {
         processes: Vec::new(),
     });
     assert_eq!(changed.accounts[0].state, State::NotChecked);
+    assert_eq!(changed.accounts[0].reason, Some(Reason::Privileged));
 }
 
 /// J334 P2-7: a failed recording leaves a marker; a later login does not

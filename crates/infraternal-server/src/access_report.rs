@@ -408,7 +408,10 @@ impl AccessReport {
                 }
                 _ => reason,
             };
-            if !rootless && account.programs_may_remain {
+            if !rootless && account.privileged {
+                account.state = State::NotChecked;
+                account.reason = Some(Reason::Privileged);
+            } else if !rootless && account.programs_may_remain {
                 account.state = State::NotChecked;
                 account.reason = Some(Reason::ProgramsMayRemain);
             } else if !account.files.is_empty() || account.omitted_files > 0 {
@@ -731,6 +734,10 @@ mod tests {
         let mut privileged = clean();
         privileged.accounts[0].privileged = true;
         assert_eq!(reason(privileged, false), Some(Reason::Privileged));
+        let mut privileged_changed = report(State::Changed, vec![file("~/.bashrc", &["id"])]);
+        privileged_changed.accounts[0].privileged = true;
+        privileged_changed.accounts[0].programs_may_remain = true;
+        assert_eq!(reason(privileged_changed, false), Some(Reason::Privileged));
         let mut incomplete = clean();
         incomplete.accounts[0].unscanned =
             vec!["~/.config/systemd/user (more than 1024 entries)".into()];
