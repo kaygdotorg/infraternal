@@ -399,8 +399,8 @@ fn spawn_revocation(
                 .await
                 .map(|revoked| {
                     if revoked.background_may_remain {
-                        // D353: others still share the account, so its own services stayed.
-                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, so its services were not stopped.\"}".to_vec()
+                        // D353: others still share the account, or linger came back (J308).
+                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, or its own programs turned linger back on.\"}".to_vec()
                     } else {
                         b"{\"revoked\":true}".to_vec()
                     }
