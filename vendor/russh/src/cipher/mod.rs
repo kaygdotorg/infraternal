@@ -14,6 +14,8 @@
 
 //!
 //! This module exports cipher names for use with [Preferred].
+//! AES-CBC and AES-128-GCM require `extra-ciphers`: the mesh never offers them.
+//! Initial clear packets, negotiated ciphers and their crypto backends stay unchanged.
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -23,24 +25,34 @@ use std::num::Wrapping;
 use std::sync::LazyLock;
 
 use aes::{Aes128, Aes192, Aes256};
+#[cfg(all(feature = "aws-lc-rs", feature = "extra-ciphers"))]
+use aws_lc_rs::aead::AES_128_GCM as ALGORITHM_AES_128_GCM;
 #[cfg(feature = "aws-lc-rs")]
-use aws_lc_rs::aead::{AES_128_GCM as ALGORITHM_AES_128_GCM, AES_256_GCM as ALGORITHM_AES_256_GCM};
-use byteorder::{BigEndian, ByteOrder};
+use aws_lc_rs::aead::AES_256_GCM as ALGORITHM_AES_256_GCM;
 use block::CtrWrapper;
+use byteorder::{BigEndian, ByteOrder};
 use ctr::Ctr128BE;
 use delegate::delegate;
 use log::trace;
+#[cfg(all(
+    not(feature = "aws-lc-rs"),
+    feature = "ring",
+    feature = "extra-ciphers"
+))]
+use ring::aead::AES_128_GCM as ALGORITHM_AES_128_GCM;
 #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring"))]
-use ring::aead::{AES_128_GCM as ALGORITHM_AES_128_GCM, AES_256_GCM as ALGORITHM_AES_256_GCM};
+use ring::aead::AES_256_GCM as ALGORITHM_AES_256_GCM;
 use ssh_encoding::Encode;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+#[cfg(any(feature = "extra-ciphers", feature = "des"))]
 use self::cbc::CbcWrapper;
 use crate::Error;
 use crate::mac::MacAlgorithm;
 use crate::sshbuffer::SSHBuffer;
 
 pub(crate) mod block;
+#[cfg(any(feature = "extra-ciphers", feature = "des"))]
 pub(crate) mod cbc;
 pub(crate) mod chacha20poly1305;
 pub(crate) mod clear;
@@ -107,10 +119,14 @@ static _3DES_CBC: SshBlockCipher<CbcWrapper<des::TdesEde3>> = SshBlockCipher(Pha
 static _AES_128_CTR: SshBlockCipher<CtrWrapper<Ctr128BE<Aes128>>> = SshBlockCipher(PhantomData);
 static _AES_192_CTR: SshBlockCipher<CtrWrapper<Ctr128BE<Aes192>>> = SshBlockCipher(PhantomData);
 static _AES_256_CTR: SshBlockCipher<CtrWrapper<Ctr128BE<Aes256>>> = SshBlockCipher(PhantomData);
+#[cfg(feature = "extra-ciphers")]
 static _AES_128_GCM: GcmCipher = GcmCipher(&ALGORITHM_AES_128_GCM);
 static _AES_256_GCM: GcmCipher = GcmCipher(&ALGORITHM_AES_256_GCM);
+#[cfg(feature = "extra-ciphers")]
 static _AES_128_CBC: SshBlockCipher<CbcWrapper<Aes128>> = SshBlockCipher(PhantomData);
+#[cfg(feature = "extra-ciphers")]
 static _AES_192_CBC: SshBlockCipher<CbcWrapper<Aes192>> = SshBlockCipher(PhantomData);
+#[cfg(feature = "extra-ciphers")]
 static _AES_256_CBC: SshBlockCipher<CbcWrapper<Aes256>> = SshBlockCipher(PhantomData);
 static _CHACHA20_POLY1305: SshChacha20Poly1305Cipher = SshChacha20Poly1305Cipher {};
 
@@ -122,10 +138,14 @@ pub static ALL_CIPHERS: &[&Name] = &[
     &AES_128_CTR,
     &AES_192_CTR,
     &AES_256_CTR,
+    #[cfg(feature = "extra-ciphers")]
     &AES_128_GCM,
     &AES_256_GCM,
+    #[cfg(feature = "extra-ciphers")]
     &AES_128_CBC,
+    #[cfg(feature = "extra-ciphers")]
     &AES_192_CBC,
+    #[cfg(feature = "extra-ciphers")]
     &AES_256_CBC,
     &CHACHA20_POLY1305,
 ];
@@ -140,10 +160,14 @@ pub(crate) static CIPHERS: LazyLock<HashMap<&'static Name, &(dyn Cipher + Send +
         h.insert(&AES_128_CTR, &_AES_128_CTR);
         h.insert(&AES_192_CTR, &_AES_192_CTR);
         h.insert(&AES_256_CTR, &_AES_256_CTR);
+        #[cfg(feature = "extra-ciphers")]
         h.insert(&AES_128_GCM, &_AES_128_GCM);
         h.insert(&AES_256_GCM, &_AES_256_GCM);
+        #[cfg(feature = "extra-ciphers")]
         h.insert(&AES_128_CBC, &_AES_128_CBC);
+        #[cfg(feature = "extra-ciphers")]
         h.insert(&AES_192_CBC, &_AES_192_CBC);
+        #[cfg(feature = "extra-ciphers")]
         h.insert(&AES_256_CBC, &_AES_256_CBC);
         h.insert(&CHACHA20_POLY1305, &_CHACHA20_POLY1305);
         assert_eq!(h.len(), ALL_CIPHERS.len());

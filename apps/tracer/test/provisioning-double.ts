@@ -33,6 +33,9 @@
  * - `installed*`: a finished install this server doesn't know (#394); `noacct*`: the login name is no account there
  * - `unproven-cache*` / `unproven-prepared*` / `unproven-foreign*`: a staging step refused files it can't prove are its own (`unproven_files`
  *   with that `refusal`, J314 P2-1)
+ * - `takeover*`: the same, but proven ours: in root mode the attempt pauses on the Take over offer (D359), carrying
+ *   `failure.takeover` (the old install's id) and `leftovers`; `start-fresh` with that challenge sets it aside and
+ *   continues to done. A rootless add of it fails like `installed*`
  * HTTP side (`handleBootstrapHttp`): the proposed endpoints of #87 (ssh-key, discovery, credential, host-key,
  * install-command) plus `/__mock/bootstrap/*` switches the specs use to reach empty and error states.
  */
@@ -44,6 +47,8 @@ import { publishSetup, runSetup } from "./setup-double";
 import { addHostFixtures } from "./prototype-fixtures";
 
 const MAX_COMMAND_BYTES = 32 * 1024;
+/** The old install's id that `takeover*` hosts report (D359): 32 lowercase hex characters, as in `.bootstrap-owner`. */
+export const TAKEOVER_INSTALL = "c10909d16e8147a3b0f2e5d4c3b2a190";
 const MAX_TARGETS = 100;
 const MAX_ATTEMPTS = 8;
 const MAX_ACTIVE = 8;
@@ -72,7 +77,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string };
+  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string; takeover?: { install: string; live: boolean } };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -174,11 +179,11 @@ function failureOf(target: Target): Failure | undefined {
   if (/^added/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "This host is already added. Open its terminal from Console.", evidence: "", alreadyAdded: true };
   if (/^nodetail/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "Setup stopped before this host was ready.", evidence: "Setup stopped before this host was ready." };
   if (/^connectfail/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "install", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", evidence: "The SSH connection setup failed." };
-  if (/^installed/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: false, kind: "unrecognized_install", message: "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.", evidence: "Setup location: /var/lib/infraternal" };
+  if (/^(installed|takeover)/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: false, kind: "unrecognized_install", message: "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.", evidence: "Setup location: /var/lib/infraternal" };
   for (const refusal of ["cache", "prepared", "foreign"] as const) {
     if (name.startsWith(`unproven-${refusal}`)) return { failed_step: "upload", phase: 1, beforeLogin: false, kind: "unproven_files", refusal, message: "Setup changed nothing.", evidence: "Setup location: /var/lib/infraternal" };
   }
-  if (/^noacct/.test(name)) return { phase: 0, beforeLogin: false, kind: "no_account", message: "This host has no account with that user name.", evidence: "The host's SSH server reported no such account." };
+  if (/^noacct/.test(name)) return { phase: 0, beforeLogin: false, kind: "no_account", message: "This host couldn't find an account with that user name.", evidence: "The host's SSH server reported no such account." };
   if (/^broken/.test(name)) return { failed_step: "start", phase: 1, beforeLogin: false, kind: "install", message: "The installation did not finish and was rolled back.", evidence: "Uploaded the binary.\nThe unit failed to start." };
   return undefined;
 }
@@ -350,6 +355,23 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
               challenge: target.challenge,
               mode: target.mode,
               findings: ["Enrolled with another server: monitor01.example", "It joins this server as a new host; the old install and its key are deleted once it has joined", "1 open terminal session will end"],
+            });
+            return;
+          }
+          // Hosts named `takeover*`, added as root: the old install is offered for Take over, named by its id (D359).
+          if (/^takeover/.test(target.name) && target.mode === "root" && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "This machine has an infraternal agent from an earlier setup", {
+              failed_step: "connect",
+              kind: "unrecognized_install",
+              message: "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.",
+              log_tail: ["Setup location: /var/lib/infraternal"],
+              takeover: { install: TAKEOVER_INSTALL, live: true },
+            }, undefined, {
+              challenge: target.challenge,
+              mode: target.mode,
+              findings: ["An infraternal agent from an earlier setup that isn't one of this server's hosts", "Its infraternal agent is running; Take over stops it", "It is set aside, put back if setup fails, and deleted once this machine has joined"],
             });
             return;
           }
