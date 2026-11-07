@@ -929,7 +929,7 @@ if [ -e "$cache" ]; then
     mv -Tf "$prepared/payload" "$cache/payload"
 else
     mv -Tn "$prepared" "$cache"
-    [ ! -e "$prepared" ] || exit 71
+    [ ! -e "$prepared" ] || {{ printf 'INFRATERNAL_REFUSED prepared\n' >&2; exit 71; }}
 fi
 "#,
                 shell_quote(&digest),
@@ -1023,11 +1023,13 @@ fi
         } else {
             "700"
         };
+        // A base that is a link, not ours or not private was not made by setup:
+        // its refusal names the `foreign` cause for the server (Refusal, #394).
         // The shared routines read their control flags with defaults; a login
         // environment must never preset them (an inherited setup_check=yes would
         // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || {{ printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71; }}\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71 ;; esac\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -1340,10 +1342,10 @@ stage="$base/.bootstrap-lock"
 if [ -e "$stage" ] || [ -L "$stage" ]; then
     [ -d "$stage" ] && [ ! -L "$stage" ] && [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 fi
-[ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] || exit 71
+[ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] || cache_refused
 digest=$(sha256sum < "$cache/payload")
 digest=${{digest%% *}}
-case "$digest" in {allowed}) :;; *) exit 71;; esac
+case "$digest" in {allowed}) :;; *) cache_refused;; esac
 exec 9<&-
 exec "$cache/payload" __ssh-session --state "$base/sessions" --session {id}
 "#
@@ -1507,19 +1509,24 @@ pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats
 // ownership, link, private-parent and fixed-marker checks before any content read.
+// cache_refused names the refusal for the server (Refusal::Cache, #394).
+/// Shell routines for the private payload cache beside the setup location
+/// (`$base.bootstrap-cache`): `validate_cache` proves it is setup's own before
+/// any read, and `cache_refused` refuses (71) with the `cache` cause line.
 const PAYLOAD_CACHE: &str = r#"
 cache="$base.bootstrap-cache"
+cache_refused() { printf 'INFRATERNAL_REFUSED cache\n' >&2; exit 71; }
 validate_cache() {
     if [ -e "$cache" ] || [ -L "$cache" ]; then
         parent=$(dirname "$cache")
-        [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+        [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || cache_refused
         mode=$(stat -c '%a' "$parent")
-        [ "$((0$mode & 022))" -eq 0 ] || exit 71
-        [ -d "$cache" ] && [ ! -L "$cache" ] && [ -O "$cache" ] && [ "$(stat -c '%a' "$cache")" = 700 ] || exit 71
-        [ -f "$cache/owner" ] && [ ! -L "$cache/owner" ] && [ -O "$cache/owner" ] && [ "$(stat -c '%a' "$cache/owner")" = 600 ] || exit 71
-        [ "$(stat -c '%s' "$cache/owner")" = 29 ] && [ "$(cat "$cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 71
+        [ "$((0$mode & 022))" -eq 0 ] || cache_refused
+        [ -d "$cache" ] && [ ! -L "$cache" ] && [ -O "$cache" ] && [ "$(stat -c '%a' "$cache")" = 700 ] || cache_refused
+        [ -f "$cache/owner" ] && [ ! -L "$cache/owner" ] && [ -O "$cache/owner" ] && [ "$(stat -c '%a' "$cache/owner")" = 600 ] || cache_refused
+        [ "$(stat -c '%s' "$cache/owner")" = 29 ] && [ "$(cat "$cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || cache_refused
         if [ -e "$cache/payload" ] || [ -L "$cache/payload" ]; then
-            [ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] && [ -O "$cache/payload" ] && [ "$(stat -c '%a' "$cache/payload")" = 700 ] || exit 71
+            [ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] && [ -O "$cache/payload" ] && [ "$(stat -c '%a' "$cache/payload")" = 700 ] || cache_refused
         fi
     fi
 }
@@ -1533,6 +1540,10 @@ validate_cache() {
 // Admit no replacement until its receipt is removed after successful cleanup.
 // The private acquisition journal precedes mkdir. It proves this attempt's
 // empty lock if the command stops before the lock's ordinary receipts exist.
+/// The upload step's staging prologue: under the setup guard it admits only a
+/// missing setup location or one whose owner record names this attempt's host,
+/// then opens this attempt's journal. Its 71s name their cause (`foreign`,
+/// `owner`) for the server (Refusal, #394).
 const STAGE_TRANSACTION: &str = r#"
 parent=$(dirname "$base")
 if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
@@ -1544,7 +1555,9 @@ for receipt in "$base".bootstrap-rollback-*; do
     [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
 done
 if [ -e "$base" ] || [ -L "$base" ]; then
-    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
+    # The server names each refusal by its fixed stderr line (Refusal, #394).
+    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] || { printf 'INFRATERNAL_REFUSED foreign\n' >&2; exit 71; }
+    [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || { printf 'INFRATERNAL_REFUSED owner\n' >&2; exit 71; }
 else
     mkdir -p "$base"
     printf '%s\n' "$host" > "$base/.bootstrap-owner"
