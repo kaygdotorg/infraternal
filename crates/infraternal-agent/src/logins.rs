@@ -956,7 +956,12 @@ async fn revoke_once(
     let registry = root.join("infraternal-login-locks");
     if rootless {
         // A rootless agent's user manager may be the agent's own (D18): D353
-        // applies to root agents only.
+        // applies to root agents only. So does D362's account-wide stop: the
+        // infraternal agent, its shims and the uninstall helper run as this
+        // same account, so stopping the account would take the host offline
+        // and a later removal could never deliver its uninstall (J328, #409).
+        // Only this person's own sessions end here, and the report is never
+        // vouched for (rootless_unverified).
         crate::rootless_sessions::revoke(root, person, Some(person_guard), admission).await?;
         let uid = Uid::effective().as_raw();
         return Ok(Revoked {
@@ -2465,6 +2470,51 @@ mod tests {
             !calls.contains(&format!("stop user-{uid}.slice")),
             "{calls}"
         );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// D362 and J328 (#409): on a rootless host the infraternal agent, its
+    /// shims and the uninstall helper run as the revoked person's account,
+    /// so a sole-holder revoke ends only that person's sessions. It never
+    /// terminates the account's sessions, stops its slice or user manager,
+    /// or turns linger off, and a process of the account (the agent's own,
+    /// here) is left alone. The report is never vouched for.
+    #[tokio::test]
+    async fn a_rootless_revoke_never_stops_the_account() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        let agent = host.host.join("proc/4242");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(
+            agent.join("status"),
+            format!("Name:\tinfraternal\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
+        )
+        .unwrap();
+        std::fs::write(agent.join("comm"), "infraternal\n").unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, true)
+            .await
+            .unwrap();
+        let calls = host.calls();
+        for forbidden in [
+            "terminate-user".to_owned(),
+            format!("user-{uid}.slice"),
+            format!("user@{uid}"),
+            "disable-linger".to_owned(),
+        ] {
+            assert!(
+                !calls.contains(&forbidden),
+                "rootless revoke ran {forbidden}: {calls}"
+            );
+        }
+        assert!(
+            agent.join("status").exists(),
+            "the agent's stand-in was touched"
+        );
+        let report = serde_json::to_value(&revoked.access).unwrap();
+        assert_eq!(report["state"], "not_checked");
+        assert_eq!(report["reason"], "rootless_unverified");
         drop(host);
         std::fs::remove_dir_all(root).unwrap();
     }
