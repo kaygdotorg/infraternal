@@ -13,7 +13,13 @@ version = "0.64.1"
 rust-version = "1.89"
 
 [features]
-default = ["flate2", "aws-lc-rs", "rsa"]
+default = ["flate2", "aws-lc-rs", "rsa", "nist-ecdh", "extra-ciphers", "legacy-transport"]
+# Ciphers outside the mesh offer remain available to callers that opt in.
+extra-ciphers = []
+# Optional SHA-1 exchanges/MACs and unencrypted key exchange, never offered by the mesh.
+legacy-transport = []
+# Optional exchanges outside the mesh offer; ECDSA keys remain supported.
+nist-ecdh = ["elliptic-curve/ecdh", "p256/ecdh", "p384/ecdh", "p521/ecdh"]
 # Crypto backends: enable at least one of `aws-lc-rs` or `ring`.
 aws-lc-rs = ["dep:aws-lc-rs"] # Default crypto backend.
 async-trait = ["dep:async-trait"]
@@ -46,7 +52,7 @@ der = "0.8"
 des = { version = "0.9", optional = true }
 ecdsa = "0.17"
 ed25519-dalek = { version = "3", features = ["alloc", "rand_core", "pkcs8"] }
-elliptic-curve = { version = "0.14", features = ["ecdh"] }
+elliptic-curve = "0.14"
 enum_dispatch = "0.3.13"
 flate2 = { version = "1.0.15", optional = true }
 futures.workspace = true
@@ -62,9 +68,9 @@ md5 = "0.8"
 ml-kem = "0.3"
 module-lattice = "0.2"
 num-bigint = { version = "0.5", features = ["rand_0_10"] }
-p256 = { version = "0.14", features = ["ecdh"] }
-p384 = { version = "0.14", features = ["ecdh"] }
-p521 = { version = "0.14", features = ["ecdh"] }
+p256 = "0.14"
+p384 = "0.14"
+p521 = "0.14"
 pbkdf2 = "0.13"
 pkcs1 = { version = "=0.8.0-rc.4", optional = true }
 pkcs5 = "0.8"
