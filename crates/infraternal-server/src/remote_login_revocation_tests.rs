@@ -275,7 +275,7 @@ async fn an_older_agents_revocation_reads_not_checked() {
 
 /// J334 P1-3: on a rootless host the account owns the infraternal agent, so
 /// it can answer "unchanged, complete". The server takes the host's mode
-/// from its own record and stores "not checked: rootless_unverified".
+/// from its own record and stores `not_checked` with `rootless_unverified`.
 #[tokio::test]
 async fn a_rootless_host_cannot_claim_unchanged() {
     let fixture = login_host(None).await;
