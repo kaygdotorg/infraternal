@@ -51,6 +51,16 @@ async function choosePaletteValue(page: Page, value: string): Promise<void> {
   await option.click();
 }
 
+/** Changes the browser's OS colour-scheme signal and waits until its media query reports the new value. */
+async function changeColorScheme(page: Page, colorScheme: "dark" | "light"): Promise<void> {
+  const wasDark = await page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches);
+  const isDark = colorScheme === "dark";
+  if (wasDark === isDark) return;
+  const mediaChanged = page.waitForFunction((initial) => matchMedia("(prefers-color-scheme: dark)").matches !== initial, wasDark);
+  await page.emulateMedia({ colorScheme });
+  await mediaChanged;
+}
+
 /** Returns the world transform that represents this tab's camera framing. */
 async function cameraTransform(page: Page): Promise<string> {
   return page.locator(".cl-world").evaluate((world) => (world as HTMLElement).style.transform);
@@ -240,7 +250,7 @@ test("theme and font changes reach the same account live and after reload withou
   console.log(`APPEARANCE_NEUTRAL_FRAMES ${JSON.stringify({ intervalsMs: neutralFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: neutralFrames.samples.filter(({ focused }) => focused).length })}`);
   await neutralPage.close();
   const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
-  const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
+  const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true, colorScheme: "light" });
   /** Keeps the first assertion or navigation error if a disconnected remote browser also rejects cleanup. */
   let bodyFailure: { error: unknown } | undefined;
   let rendererProbe: Awaited<ReturnType<typeof startRendererMetrics>> | undefined;
@@ -324,6 +334,20 @@ test("theme and font changes reach the same account live and after reload withou
       themeFrames.mutations.filter(({ attribute, value }) => attribute === "data-look" && value === "solid"),
       "one remote look update applies its selected theme once",
     ).toHaveLength(1);
+
+    // The OS colour-scheme fallback is only for an account without a saved look; it cannot replace the canonical look on a new device.
+    const accountLookBeforeMediaChange = (await cache(b)).canonical.look!;
+    const accountColors = accountLookBeforeMediaChange.themes.find((theme) => theme.id === accountLookBeforeMediaChange.selected)?.colors;
+    if (!accountColors) throw new Error("the account's selected theme has no saved colour scheme");
+    const fallbackScheme: "dark" | "light" = accountColors === "mocha" ? "light" : "dark";
+    if ((await b.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)) === (fallbackScheme === "dark")) {
+      await changeColorScheme(b, fallbackScheme === "dark" ? "light" : "dark");
+      await expect(b.locator("html")).toHaveAttribute("data-theme", accountColors);
+    }
+    await changeColorScheme(b, fallbackScheme);
+    await expect(b.locator("html")).toHaveAttribute("data-theme", accountColors);
+    expect((await cache(b)).canonical.look).toEqual(accountLookBeforeMediaChange);
+
     expect(await cameraTransform(a)).toBe(aCamera);
     expect(await cameraTransform(b)).toBe(bCamera);
 
