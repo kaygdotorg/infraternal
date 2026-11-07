@@ -1504,6 +1504,13 @@ fn failed_path(store: &Path, person: uuid::Uuid, uid: u32) -> PathBuf {
     store.join(format!("{uid}-{}.failed", person.simple()))
 }
 
+/// The marker that account `uid` was shared when someone's access to it
+/// ended: their programs may have written to it later, so every later
+/// report on the account says it was shared (J334 P2-1).
+fn shared_path(store: &Path, uid: u32) -> PathBuf {
+    store.join(uid.to_string()).join("shared")
+}
+
 /// The last report sent for `person`, kept so a retried revocation whose
 /// reply was lost sends it again instead of "no record" (J334 P2-2).
 fn report_path(store: &Path, person: uuid::Uuid) -> PathBuf {
@@ -1671,7 +1678,14 @@ pub(crate) fn since_grant(
             ),
         };
         let known = facts(uid);
-        report.shared = known.shared;
+        // Shared now, or shared when an earlier person's access ended.
+        report.shared = known.shared || shared_path(store, uid).exists();
+        if known.shared {
+            let _ = write_private(
+                &shared_path(store, uid),
+                report.scanned_at.to_string().as_bytes(),
+            );
+        }
         report.programs_may_remain = known.programs_may_remain;
         report.privileged = known.privileged;
         report.decide(rootless);
@@ -1702,9 +1716,19 @@ pub(crate) fn forget(store: &Path, person: uuid::Uuid) -> io::Result<()> {
                 _ => {}
             }
         }
-        // The account's directory goes with its last record; one that still
-        // holds another person's record stays (the removal fails).
-        let _ = std::fs::remove_dir(store.join(uid.to_string()));
+        // The account's directory goes with its last record, and with it
+        // the shared marker; one that still holds another person's record
+        // stays.
+        let directory = store.join(uid.to_string());
+        let others = std::fs::read_dir(&directory)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name() != "shared");
+        if !others {
+            let _ = std::fs::remove_file(shared_path(store, uid));
+            let _ = std::fs::remove_dir(&directory);
+        }
     }
     Ok(())
 }

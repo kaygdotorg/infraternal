@@ -862,3 +862,60 @@ fn a_report_carries_its_baseline_time() {
     assert_eq!(account.watched, WATCHED.len());
     assert!(account.complete);
 }
+
+/// J334 P2-1, the second person: the account was shared when the first
+/// person's access ended, so a key their program wrote afterwards shows up
+/// in the second person's report marked as a shared account (it may not
+/// be theirs).
+#[test]
+fn a_later_report_on_a_shared_account_says_it_was_shared() {
+    let (user, home) = account();
+    let store = home.join(".test-store");
+    let (first, second) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    record_grant(&store, first, &user, &no_extra).unwrap();
+    record_grant(&store, second, &user, &no_extra).unwrap();
+    let uid = user.uid.as_raw();
+    let shared = |_: u32| Facts {
+        shared: true,
+        programs_may_remain: true,
+        privileged: false,
+    };
+    let early = since_grant(
+        &store,
+        first,
+        &[uid],
+        &lookup(&user),
+        &shared,
+        &no_extra,
+        false,
+    );
+    assert_eq!(early.accounts[0].reason, Some(Reason::ProgramsMayRemain));
+    forget(&store, first).unwrap();
+    // The first person's program writes after their revocation.
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::write(
+        home.join(".ssh/authorized_keys"),
+        "ssh-ed25519 AAAAlate late\n",
+    )
+    .unwrap();
+    let later = since_grant(
+        &store,
+        second,
+        &[uid],
+        &lookup(&user),
+        &no_facts,
+        &no_extra,
+        false,
+    );
+    assert_eq!(later.accounts[0].state, State::Changed);
+    assert!(
+        later.accounts[0].shared,
+        "the later report hid that the account was shared"
+    );
+    forget(&store, second).unwrap();
+    assert!(
+        !store.join(uid.to_string()).exists(),
+        "the shared marker outlived the account's records"
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
