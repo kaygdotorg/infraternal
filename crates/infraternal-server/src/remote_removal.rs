@@ -11,6 +11,9 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 
+/// How long a removal waits for the person's revocation before an uninstall,
+/// inside the removal routes' 15-second deadline.
+const EARLY_REVOKE: std::time::Duration = std::time::Duration::from_secs(8);
 /// How long a browser dry run's review stays usable, as for a key's review token.
 const REVIEW_SECONDS: i64 = 120;
 
@@ -153,6 +156,20 @@ impl Removal {
         }))
     }
 
+    /// Revokes `user`'s logins on `host` over its live link, if it has one and
+    /// answers within `EARLY_REVOKE`, returning the confirmation and report.
+    async fn revoke_first(&self, host: Uuid, user: &str) -> Option<crate::embedded::Revoked> {
+        let person = Uuid::parse_str(user).ok()?;
+        let actor = self.hosts.actor(host).await?;
+        tokio::time::timeout(
+            EARLY_REVOKE,
+            crate::remote_guard::durable_cleanup(actor.downgrade(), person),
+        )
+        .await
+        .ok()
+        .flatten()
+    }
+
     /// Remove the host a review from this session's dry run named. A review for another host
     /// is refused without spending it.
     pub(crate) async fn finish_host(
@@ -270,6 +287,15 @@ impl Removal {
         authority: RemovalAuthority,
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
+        // J334 P2-6: an uninstall removes the infraternal agent and its access
+        // records, so the person's revocation, with its D356 report, goes
+        // first, over the live link and bounded, before the writer lock is
+        // taken. A host that does not answer in time keeps the outbox path.
+        let early = if entry.uninstall {
+            self.revoke_first(entry.host, &entry.user).await
+        } else {
+            None
+        };
         let mut tx = self.pool.begin().await?;
         // Acquire SQLite's writer lock before authority checks and the bounded
         // node handoff: concurrent logout/revocation cannot invalidate them in between.
@@ -388,11 +414,23 @@ impl Removal {
         }
         #[cfg(not(feature = "ssh"))]
         let _ = (&self.trust, lookup);
-        let pending = self
+        let mut pending = self
             .store
             .commit_revocation_intent(tx, entry.host, live)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
+        // The early revocation is the durable receipt; keep its report with it.
+        if pending
+            && let Some(revoked) = early
+            && let Ok(person) = Uuid::parse_str(&entry.user)
+            && self
+                .store
+                .confirm_login_cleanup_with_report(entry.host, person, revoked.report.as_ref())
+                .await
+                .is_ok()
+        {
+            pending = false;
+        }
         let installation = installed_by_setup.then(|| entry.host.simple().to_string());
         let (message, manual) = outcome(
             cleanup,
