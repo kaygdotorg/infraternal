@@ -929,12 +929,12 @@ impl Bootstrap {
                 }
                 let mut rolled_back = true;
                 if let Some(installation) = resources.installation {
-                    // A fresh install that committed before a later step failed
-                    // (its login check, completion) has no journal left to roll
-                    // back: remove it, or it keeps running for a host the server
-                    // revokes and blocks every retry (#305 F-B). A Replace or
-                    // Re-enroll keeps the enrolled host, so it is never removed.
-                    let cleanup = if installation.committed() && resources.set_aside.is_none() {
+                    // See uninstall_after_commit: a committed fresh install or Take
+                    // over is removed, a Replace or Re-enroll is rolled back.
+                    let cleanup = if uninstall_after_commit(
+                        installation.committed(),
+                        resources.set_aside.as_ref().map(|aside| aside.kind),
+                    ) {
                         tokio::time::timeout(
                             Duration::from_secs(30),
                             installation.uninstall_committed(),
@@ -2363,6 +2363,17 @@ struct SetAside {
     /// What set it aside: a Replace moved only the journal; a Re-enroll (D335)
     /// or a Take over (D359) moved the whole install.
     kind: previous_attempt::AsideKind,
+}
+
+/// Whether a failed attempt removes the install it already committed, rather
+/// than rolling back. A fresh install that committed before a later step failed
+/// (its login check, completion) has no journal left to roll back: removed, or it
+/// keeps running for a host the server revokes and blocks every retry (#305 F-B).
+/// A Take over commits a new host the same way, and its old install was deleted
+/// at that commit, so it is removed too (J342 P2-1, D359). A Replace or Re-enroll
+/// keeps the enrolled host, so it is rolled back, never removed.
+fn uninstall_after_commit(committed: bool, set_aside: Option<previous_attempt::AsideKind>) -> bool {
+    committed && set_aside.is_none_or(|kind| kind == previous_attempt::AsideKind::TakenOver)
 }
 
 /// Whether a failed host step is the script's own exit, so its trap has run.
