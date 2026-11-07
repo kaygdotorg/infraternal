@@ -469,13 +469,50 @@ async fn retire_session(path: &Path, uid: u32) -> io::Result<()> {
     retire_shim(path, uid).await
 }
 
+/// Removes the socket file a gone shim left at `path` (#409).
+///
+/// Only a socket owned by `uid`, this installation's account, is removed. Any
+/// other kind of file there (or another owner) refuses, and stays. A path that
+/// is already gone is fine.
+fn remove_stale_socket(path: &Path, uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        metadata => metadata?,
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != uid {
+        return Err(denied());
+    }
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
 /// Retires the shim at `path`, owned by `uid`: authenticates its Hello, kills
 /// its foreground job and then its restored shell (signalling every 100 ms),
 /// and acknowledges its exit. Each step is hang-bounded; nothing bounds the
 /// whole retirement, which ends when the shim has exited.
 async fn retire_shim(path: &Path, uid: u32) -> io::Result<()> {
     use infraternal_shim::frame::Frame;
-    let mut peer = retire_step(UnixStream::connect(path)).await?;
+    let mut peer = match retire_step(UnixStream::connect(path)).await {
+        Ok(peer) => peer,
+        // A shim listens on its socket for its whole life, so a refused or
+        // vanished socket means no shim serves this session any more: its
+        // shell went with it. That is the normal state on a root host after
+        // the login revocation the removal outbox delivers first, which kills
+        // the login's unit outright (D354, #409). The session is retired;
+        // only the stale socket file of this installation's account is left.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            return remove_stale_socket(path, uid);
+        }
+        Err(error) => return Err(error),
+    };
     if peer.peer_cred()?.uid() != uid {
         return Err(denied());
     }
@@ -1043,6 +1080,42 @@ mod tests {
             retired.map_err(|error| error.kind()).err(),
             Some(io::ErrorKind::TimedOut)
         );
+    }
+
+    /// A session socket nobody listens on is a session already gone: on a
+    /// root host the login revocation that precedes the uninstall kills the
+    /// login's unit outright, and its shim never removes its socket (#409).
+    /// Retirement removes that stale socket and succeeds, instead of
+    /// refusing the whole uninstall with "Connection refused".
+    #[tokio::test]
+    async fn a_stale_session_socket_counts_as_retired_and_is_removed() {
+        let directory = nix::unistd::mkdtemp("/tmp/rs-XXXXXX").unwrap();
+        let path = directory.join("00000000000000000000000000000002.sock");
+        // Binding and dropping the listener leaves the socket file behind,
+        // exactly what a killed shim leaves.
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        let retired = retire_shims_at(&path).await;
+        let left = path.exists();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            retired.is_ok(),
+            "a stale socket refused the uninstall: {retired:?}"
+        );
+        assert!(!left, "the stale socket stayed");
+    }
+
+    /// Only a real socket counts as stale: a regular file at a session's
+    /// socket path still refuses retirement, and stays.
+    #[tokio::test]
+    async fn a_regular_file_at_a_session_path_still_refuses() {
+        let directory = nix::unistd::mkdtemp("/tmp/rs-XXXXXX").unwrap();
+        let path = directory.join("00000000000000000000000000000003.sock");
+        std::fs::write(&path, b"not a socket").unwrap();
+        let retired = retire_shims_at(&path).await;
+        let left = path.exists();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(retired.is_err());
+        assert!(left);
     }
 
     /// Retires one shim the way `cleanup` does for each session socket.
