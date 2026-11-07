@@ -975,6 +975,7 @@ mod tests {
     }
 }
 
+/// Checks that split-DNS route arguments follow the real CLI parser grammar.
 #[cfg(all(test, target_os = "linux", feature = "mesh-dns"))]
 #[path = "review_j354_integration.rs"]
 mod review_j354_integration;

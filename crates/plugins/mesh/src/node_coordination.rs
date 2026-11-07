@@ -2089,6 +2089,7 @@ mod tests {
     }
 }
 
+/// Checks that DNS capability negotiation leaves legacy identity probes intact.
 #[cfg(all(test, feature = "mesh-dns"))]
 #[path = "review_j354_identity.rs"]
 mod review_j354_identity;
