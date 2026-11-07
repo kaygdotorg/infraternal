@@ -31,6 +31,7 @@
  * Labels are read live, so a control whose aria-label changes (copy → "Copied")
  * updates an open tooltip through `refreshTip`.
  */
+import { attachGlassBed } from "./glass-bed";
 
 const DELAY = 400, WARM = 300, GRACE = 80, LONG_PRESS = 500, SLOP = 10;
 const POP = 160, SWAP = 140, SHIFT = 10, TRAVEL = 200, OUT = 100;
@@ -110,10 +111,6 @@ const STYLE = `
 /* Two named actions sit side by side and share the row; the dismissal is a real button with a quiet flat fill, not loose text. */
 .ui-confirm-tip[data-named]:not([data-stack]) .ui-confirm-tip-actions { flex-wrap: nowrap; }
 .ui-confirm-tip[data-named] .ui-confirm-no { background: color-mix(in oklab, var(--fg) 10%, transparent); color: var(--fg); }
-/* A confirmation is a decision, so it is a solid card in the theme's surface colour at every transparency setting, never glass.
-   A backdrop blur does not reliably reach a terminal's own drawing layer (the text stayed readable through blur(32px) in a
-   production build), so no blur value can promise that nothing behind is legible. The arrow inherits this fill. */
-.ui-confirm-tip.ui-overlay-surface { --ui-overlay-background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
 .ui-confirm-tip[data-side="center"] .ui-confirm-tip-arrow { display: none; }
 .ui-confirm-tip-message { overflow-wrap: anywhere; }
 @media (pointer: coarse) {
@@ -146,6 +143,7 @@ function build() {
   document.fonts?.addEventListener("loadingdone", () => { if (shown && current) place(current, false); });
 }
 
+/** What a trigger-anchored confirmation says and does: its title and effect lines, the two actions, and where focus goes afterwards. */
 export interface ConfirmTipOptions {
   /** Accessible name for the small, trigger-anchored confirmation group. */
   label: string;
@@ -186,6 +184,12 @@ export interface ConfirmTipOptions {
   secondary?: { label: string; onSelect(): void };
   onConfirm(): void;
   onCancel?(): void;
+  /**
+   * Where focus goes when a centred card (no anchor) is dismissed with Escape or "Keep". An anchored card hands focus back to its
+   * trigger; a centred one has none, so the caller that knows where the person was (the terminal the palette was opened from) says so.
+   * Without it focus returns to whatever held it when the card opened, which is the page body when a palette action opened it.
+   */
+  returnFocus?(): void;
   /** A card the confirmation must stay inside (a window), with the same 9 px inset the window's own overlays keep. */
   boundary?: HTMLElement | null;
 }
@@ -205,6 +209,9 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   // No anchor means the question is not about anything on screen (it started from the palette): it sits centred, with no tail.
   const anchor = anchorOrNull ?? document.createElement("span");
   const centred = anchorOrNull === null;
+  // A centred question has no trigger to hand focus back to, so it returns to whatever held focus when it opened (the
+  // terminal the palette was opened from): without this, Escape would drop focus to the page body.
+  const previouslyFocused = centred && document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
   activeConfirmTip?.close(false);
   buildStyleOnly();
 
@@ -223,12 +230,16 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   text.className = "ui-confirm-tip-text";
   const message = document.createElement("p");
   message.className = "ui-confirm-tip-message";
+  message.id = `${tip.id}-title`;
+  tip.setAttribute("aria-labelledby", message.id);
   if (options.titleNode) message.append(options.titleNode); else message.textContent = options.title ?? options.message ?? options.label;
   text.append(message);
   const effectText = options.effect ?? options.detail;
   if (effectText || options.effectNode) {
     const detail = document.createElement("p");
     detail.className = "ui-confirm-tip-detail";
+    detail.id = `${tip.id}-effect`;
+    tip.setAttribute("aria-describedby", detail.id);
     if (options.effectNode) detail.append(options.effectNode); else detail.textContent = effectText!;
     text.append(detail);
   }
@@ -263,6 +274,8 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
   document.body.append(tip);
+  // A confirmation's own blur fades at its small box's edges and lets the page show through; the bed under it keeps text unreadable.
+  const bed = attachGlassBed(tip);
 
   anchor.setAttribute("aria-expanded", "true");
   anchor.setAttribute("aria-controls", tip.id);
@@ -275,12 +288,15 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     const bound = options.boundary?.getBoundingClientRect();
     if (centred) {
       // Centred in the boundary (or the viewport); `data-side="center"` hides the tail.
-      tip.style.maxWidth = `${Math.max(160, Math.floor((bound ? bound.width : innerWidth) - 18))}px`;
+      // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps it as compact as an anchored card; only a
+      // narrower boundary (a phone window) shrinks it further.
+      if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
       const w = tip.offsetWidth, h = tip.offsetHeight;
       tip.style.left = `${Math.max(9, (bound ? bound.left + bound.width / 2 : innerWidth / 2) - w / 2)}px`;
       tip.style.top = `${Math.max(9, (bound ? bound.top + bound.height / 2 : innerHeight / 2) - h / 2)}px`;
       tip.style.transformOrigin = "50% 50%";
       tip.dataset.side = "center";
+      bed.sync();
       return;
     }
     const anchorRect = anchor.getBoundingClientRect();
@@ -302,6 +318,7 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     // Grow from the tail, so the popover visibly comes out of its trigger.
     tip.style.transformOrigin = `${tail}px ${side === "bottom" ? "0%" : "100%"}`;
     tip.dataset.side = side;
+    bed.sync();
   };
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
@@ -328,9 +345,13 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
       anchor.setAttribute("aria-expanded", "false");
       anchor.removeAttribute("aria-controls");
       tip.dataset.open = "false";
-      if (restoreFocus && anchor.isConnected) anchor.focus({ preventScroll: true });
+      bed.setOpen(false);
+      if (restoreFocus) {
+        if (centred && options.returnFocus) options.returnFocus();
+        else { const returnTo = centred ? previouslyFocused : anchor; if (returnTo?.isConnected) returnTo.focus({ preventScroll: true }); }
+      }
       if (activeConfirmTip === controller) activeConfirmTip = undefined;
-      window.setTimeout(() => { tip.remove(); }, 190);
+      window.setTimeout(() => { tip.remove(); bed.dispose(); }, 190);
     },
   };
   controller = instance;
@@ -346,6 +367,7 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   requestAnimationFrame(() => {
     if (closing || !tip.isConnected) return;
     tip.dataset.open = "true";
+    bed.setOpen(true);
     cancel.focus({ preventScroll: true });
   });
   return instance;
