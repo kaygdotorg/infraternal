@@ -1,6 +1,12 @@
 """Tests for the loss-aware ICMP summaries in the GotaTun rotation proof."""
 
+import importlib.util
+import io
+import json
+import os
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import mesh_rotation_latency
 from mesh_rotation_latency import (
@@ -89,6 +95,75 @@ class D348CpuPlacementTests(unittest.TestCase):
             mesh_rotation_latency.cpu_scope_unit_name("relay1", 123, 456),
             "j279-relay1-123-456.scope",
         )
+
+
+class RelayStreamDescriptorTests(unittest.TestCase):
+    """Protect descriptors owned by concurrent D348 latency probes."""
+
+    def test_stream_cleanup_does_not_close_a_reused_probe_pipe(self):
+        """Do not close a probe pipe when gate descriptors were already closed."""
+        proof_path = Path(__file__).with_name("mesh-relay-proof.py")
+        spec = importlib.util.spec_from_file_location("mesh_relay_proof", proof_path)
+        proof = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(proof)
+
+        report = json.dumps({"bytes": 128, "sha256": "fixture", "seconds": 0.1})
+
+        class CompletedProcess:
+            """Supply one fixture's complete JSON result without launching a tunnel."""
+
+            def __init__(self, output, stdout=None):
+                """Keep the response text and optional readiness stream for one fake process."""
+                self.output = output
+                self.stdout = stdout
+
+            def communicate(self, timeout=None):
+                """Return the prepared output in the subprocess API's tuple shape."""
+                return self.output, None
+
+        def spawn(namespace, *args, **kwargs):
+            """Return a receiver or sender fixture with the matching output stream."""
+            stdout = io.StringIO("ready\n") if namespace == "nodeB" else None
+            return CompletedProcess(report, stdout), 12345
+
+        real_pipe = os.pipe
+        allocated_pipes = []
+
+        def record_pipe():
+            """Remember each real pipe so the test can prove descriptor-number reuse."""
+            descriptors = real_pipe()
+            allocated_pipes.append(descriptors)
+            return descriptors
+
+        borrowed_pipe = []
+
+        def during(_sender, _gate_read, _resume_write):
+            """Allocate probe descriptors during the callback, after parent endpoints close."""
+            borrowed_pipe.extend(proof.os.pipe())
+
+        try:
+            with (
+                mock.patch.object(proof, "spawn_namespace_process", side_effect=spawn),
+                mock.patch.object(proof.os, "pipe", side_effect=record_pipe),
+            ):
+                sender, receiver = proof.stream(
+                    "nodeA", "nodeB", "127.0.0.1", 5205, 128,
+                    during=during, gate_after=64,
+                )
+
+            self.assertEqual(sender["bytes"], 128)
+            self.assertEqual(receiver["bytes"], 128)
+            self.assertEqual(len(allocated_pipes), 3)
+            self.assertEqual(borrowed_pipe[0], allocated_pipes[0][1])
+            self.assertEqual(borrowed_pipe[1], allocated_pipes[1][0])
+            os.fstat(borrowed_pipe[0])
+            os.fstat(borrowed_pipe[1])
+        finally:
+            for descriptor in borrowed_pipe:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":

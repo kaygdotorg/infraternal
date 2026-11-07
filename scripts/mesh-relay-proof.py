@@ -343,7 +343,9 @@ def stream(sender_ns, receiver_ns, address, port, size, during=None, pace_second
         receiver_ns, *receiver_args, stdout=subprocess.PIPE, text=True,
         pass_fds=tuple(fd for fd in (gate_write, resume_read) if fd is not None))
     if gate_after:
-        os.close(gate_write); os.close(resume_read)
+        # The callback can reuse these descriptor numbers for live probe pipes.
+        os.close(gate_write); gate_write = None
+        os.close(resume_read); resume_read = None
     if receiver.stdout.readline().strip() != "ready":
         raise RuntimeError("receiver failed")
     sender_args = [sys.executable, "-c", SENDER, address, str(port), str(size)]
