@@ -82,7 +82,7 @@ infraternal-shim = { version = "0.1.0", path = "crates/infraternal-shim" }
 infraternal-protocol = { version = "0.1.0", path = "crates/infraternal-protocol" }
 infraternal-server = { version = "0.1.0", path = "crates/infraternal-server" }
 clap = { version = "4.5", features = ["derive", "string"] }
-criterion = "0.7"
+criterion = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
