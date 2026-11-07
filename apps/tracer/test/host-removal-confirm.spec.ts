@@ -12,14 +12,36 @@
  * focus to where it was, and Enter right after opening keeps the host.
  */
 import { expect, test } from "playwright/test";
-import { tracerEvidencePath } from "./evidence-path";
-import { measureLegibility } from "./glyph-legibility";
-import { LEVELS, openDenseConsole, openRemovalOverDenseTerminal, SIZES, startRemovalFromPalette, THEMES } from "./removal-fixture";
+import { type CardPixels, LEVELS, measureOpenCard, openDenseConsole, openRemovalOverDenseTerminal, SIZES, startRemovalFromPalette, startRemovalFromSidebar, THEMES } from "./removal-fixture";
 
-/** Above this correlation with the unblurred text, characters are still legible through the glass. */
-const LEGIBLE_CORRELATION = 0.2;
+/** Above this correlation with the unblurred text (whole card, rim included), characters are still legible through the glass. */
+const LEGIBLE_CORRELATION = 0.15;
+/** The same limit for the card's outer 14 px rim alone, where the blur of a small card used to fade out. */
+const LEGIBLE_RIM_CORRELATION = 0.3;
 /** Below this stroke energy behind the card the case proved nothing: the card must sit over dense text. */
-const MIN_TEXT_BEHIND = 6;
+const MIN_TEXT_BEHIND_PALETTE = 30;
+/** The same floor for the sidebar-started card, set from measurement (see the numbers in the issue). */
+const MIN_TEXT_BEHIND_SIDEBAR = 8;
+/** Above this correlation of colour and shape with a coloured block behind it, the card shows its surroundings: it is glass. */
+const GLASS_COLOUR_CORRELATION = 0.4;
+/** At or below this the card shows none of what is behind it: it is opaque. */
+const OPAQUE_COLOUR_CORRELATION = 0.2;
+
+/**
+ * The glass checks for one open card: no character legible through the whole card or its rim, dense text really behind it
+ * (so a card over a blank part of the terminal cannot pass), and at the translucent levels colour and shape from behind
+ * showing through (so an opaque card cannot pass as glass); the Solid level is opaque by design and must show none.
+ */
+function expectGlass(label: string, pixels: CardPixels, level: string, minTextBehind: number): void {
+  const { text, colour } = pixels;
+  const numbers = `corr ${text.corr.toFixed(3)}, rim ${text.ringCorr.toFixed(3)}, inner ${text.innerCorr.toFixed(3)}, text behind ${text.behindRms.toFixed(2)}, colour ${colour.corr.toFixed(3)}`;
+  console.log(`LEGIBILITY ${label}: ${numbers}`);
+  expect(text.behindRms, `the test has teeth: dense text sits behind the card (${numbers})`).toBeGreaterThan(minTextBehind);
+  expect(text.corr, `no character behind the card is legible (${numbers})`).toBeLessThan(LEGIBLE_CORRELATION);
+  expect(text.ringCorr, `no character is legible in the card's rim (${numbers})`).toBeLessThan(LEGIBLE_RIM_CORRELATION);
+  if (level === "solid") expect(colour.corr, `Solid is opaque (${numbers})`).toBeLessThan(OPAQUE_COLOUR_CORRELATION);
+  else expect(colour.corr, `the card is glass: colour and shape from behind show through (${numbers})`).toBeGreaterThan(GLASS_COLOUR_CORRELATION);
+}
 
 for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS) test(`removal from the palette ${size.id} ${theme} ${level}: centred, plain buttons, no legible text behind`, async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, hasTouch: size.touch, isMobile: size.touch });
@@ -73,17 +95,25 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS
     expect(m.box.l, "inside the viewport").toBeGreaterThanOrEqual(0);
     expect(m.box.r).toBeLessThanOrEqual(m.vw);
 
-    // Pixels: the card as shown, then the same page with only the card hidden (the unblurred text behind it).
-    const withCard = await page.screenshot({ path: tracerEvidencePath("removal-confirm", `${size.id}-${theme}-${level}.png`), animations: "disabled" });
-    // The baseline hides the card and the glass bed under it, so the unblurred text behind both is what is compared.
-    await page.evaluate(() => { for (const element of document.querySelectorAll<HTMLElement>(".ui-confirm-tip, .ui-glass-bed")) element.style.visibility = "hidden"; });
-    await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
-    const withoutCard = await page.screenshot({ animations: "disabled" });
-    const legibility = await measureLegibility(page, withCard, withoutCard);
-    const numbers = `corr ${legibility.corr.toFixed(3)}, text behind ${legibility.behindRms.toFixed(2)}, text shown ${legibility.shownRms.toFixed(2)}`;
-    console.log(`LEGIBILITY ${size.id} ${theme} ${level}: ${numbers}`);
-    expect(legibility.behindRms, `the test has teeth: dense text sits behind the card (${numbers})`).toBeGreaterThan(MIN_TEXT_BEHIND);
-    expect(legibility.corr, `no character behind the card is legible (${numbers})`).toBeLessThan(LEGIBLE_CORRELATION);
+    const pixels = await measureOpenCard(page, `${size.id}-${theme}-${level}`);
+    expectGlass(`${size.id} ${theme} ${level}`, pixels, level, MIN_TEXT_BEHIND_PALETTE);
+  } finally { await context.close(); }
+});
+
+/** The card started from the sidebar's host row is anchored to that row and is glass too (same checks, a lower text floor: the sidebar's own rows are half of what is behind it). */
+for (const size of SIZES) for (const theme of THEMES) for (const level of ["tinted", "frosted"] as const) test(`removal from the sidebar ${size.id} ${theme} ${level}: anchored, no legible text behind`, async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: 2, hasTouch: size.touch, isMobile: size.touch });
+  const page = await context.newPage();
+  try {
+    await openDenseConsole(page, theme, level);
+    await startRemovalFromSidebar(page);
+    // sleep: the open animation (scale 0.96 to 1) must finish before boxes and pixels are measured
+    await page.waitForTimeout(400);
+    const side = await page.locator(".ui-confirm-tip").getAttribute("data-side");
+    expect(["top", "bottom"], "anchored to the host's own row, with a tail").toContain(side);
+    expect(await page.locator(".ui-confirm-tip-message").textContent()).toBe("Remove edge-arm?");
+    const pixels = await measureOpenCard(page, `sidebar-${size.id}-${theme}-${level}`);
+    expectGlass(`sidebar ${size.id} ${theme} ${level}`, pixels, level, MIN_TEXT_BEHIND_SIDEBAR);
   } finally { await context.close(); }
 });
 

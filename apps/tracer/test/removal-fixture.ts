@@ -3,6 +3,8 @@
  * card transparency level chosen, and "Remove host" started from the palette for a host other than the focused window's.
  */
 import { expect, type Page } from "playwright/test";
+import { tracerEvidencePath } from "./evidence-path";
+import { measureColour, measureLegibility, type Legibility } from "./glyph-legibility";
 
 /** The three review viewports. `touch` runs them as a phone (coarse pointer, 44 px targets). */
 export const SIZES = [
@@ -76,4 +78,65 @@ export async function startRemovalFromPalette(page: Page): Promise<string> {
 export async function openRemovalOverDenseTerminal(page: Page, theme: string, level: Level): Promise<string> {
   await openDenseConsole(page, theme, level);
   return await startRemovalFromPalette(page);
+}
+
+/** Waits two frames, so a style change has been painted before a screenshot. */
+async function settled(page: Page): Promise<void> {
+  await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+}
+
+/** Hides or shows the card and the glass bed under it, so a screenshot shows the unblurred page behind both. */
+async function setCardHidden(page: Page, hidden: boolean): Promise<void> {
+  await page.evaluate((hide) => { for (const element of document.querySelectorAll<HTMLElement>(".ui-confirm-tip, .ui-glass-bed")) element.style.visibility = hide ? "hidden" : "visible"; }, hidden);
+  await settled(page);
+}
+
+/** What the two pixel measures say about one open card. */
+export interface CardPixels { text: Legibility; colour: Legibility }
+
+/**
+ * Measures the open `.ui-confirm-tip` twice, at rest. First over the dense text: the card as shown against the same page
+ * with the card and its bed hidden (`measureLegibility`). Then over a coloured block placed just under the card's glass
+ * (`measureColour`): glass shows its colours and shapes, an opaque card does not. The shot of the card as shown over the
+ * text is saved as `removal-confirm/<name>.png`, and the coloured one as `removal-confirm/<name>-colour.png`.
+ */
+export async function measureOpenCard(page: Page, name: string): Promise<CardPixels> {
+  const withCard = await page.screenshot({ path: tracerEvidencePath("removal-confirm", `${name}.png`), animations: "disabled" });
+  await setCardHidden(page, true);
+  const withoutCard = await page.screenshot({ animations: "disabled" });
+  const text = await measureLegibility(page, withCard, withoutCard);
+  await setCardHidden(page, false);
+  // Three hard-edged colour bands behind the card (under the bed, over the terminal), far past the card on every side.
+  await page.evaluate(() => {
+    const box = document.querySelector<HTMLElement>(".ui-confirm-tip")!.getBoundingClientRect();
+    const block = document.createElement("div");
+    block.id = "j300-colour-block";
+    Object.assign(block.style, {
+      position: "fixed", zIndex: "999", pointerEvents: "none", left: `${box.left - 160}px`, top: `${box.top - 160}px`, width: `${box.width + 320}px`, height: `${box.height + 320}px`,
+      background: "linear-gradient(90deg, #e03030 0 30%, #2060e0 30% 55%, #e0c020 55% 80%, #20a060 80%)",
+    });
+    document.body.append(block);
+  });
+  await settled(page);
+  const colourWith = await page.screenshot({ path: tracerEvidencePath("removal-confirm", `${name}-colour.png`), animations: "disabled" });
+  await setCardHidden(page, true);
+  const colourWithout = await page.screenshot({ animations: "disabled" });
+  const colour = await measureColour(page, colourWith, colourWithout);
+  await page.evaluate(() => document.getElementById("j300-colour-block")?.remove());
+  await setCardHidden(page, false);
+  return { text, colour };
+}
+
+/**
+ * Starts "Remove host" for edge-arm from the sidebar's host caption (Delete), over the dense Console. The card is
+ * anchored to that caption, the host's own row. Returns once the card is open.
+ */
+export async function startRemovalFromSidebar(page: Page): Promise<void> {
+  await page.click("#sidebar-toggle");
+  await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1);
+  // sleep: the sidebar's own open animation
+  await page.waitForTimeout(700);
+  await page.locator('#tree li.bm-subhead[data-id="h:edge-arm"]').focus();
+  await page.keyboard.press("Delete");
+  await expect(page.locator(".ui-confirm-tip[data-open='true']")).toBeVisible();
 }
