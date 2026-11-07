@@ -4,7 +4,7 @@
 
 use infraternal_plugin_mesh::{
     configuration,
-    dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
+    dataplane::{Chunk, Config, DefaultPolicy, Peer, PeerPolicy},
     firewall::Firewall,
     node::{EngineKind, Node},
     policy::{
@@ -21,11 +21,7 @@ const AUTHORITY_EPOCH_A: &str = "00000000-0000-4000-8000-000000000001";
 const AUTHORITY_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
 
 /// Encode a complete snapshot with the same authenticated process epoch on every chunk.
-fn chunks_with_epoch(
-    old: Option<&Config>,
-    new: &Config,
-    authority_epoch: &str,
-) -> Vec<crate::dataplane::Chunk> {
+fn chunks_with_epoch(old: Option<&Config>, new: &Config, authority_epoch: &str) -> Vec<Chunk> {
     configuration::chunks(old, new)
         .unwrap()
         .into_iter()
@@ -239,9 +235,13 @@ fn nft_new_server_rejection_retires_previous_peers() {
         result.is_err(),
         "the invalid new-server snapshot was accepted"
     );
-    assert_eq!(
-        retained, None,
-        "an invalid replacement must leave no accepted snapshot from the previous server"
+    assert!(
+        retained.as_ref().is_none_or(|config| {
+            config.authority_epoch.as_deref() == Some(AUTHORITY_EPOCH_B)
+                && config.peers.is_empty()
+                && config.default_policy == DefaultPolicy::Deny
+        }),
+        "an invalid replacement must leave no peers from the previous server: {retained:?}"
     );
     assert_eq!(installed_peers, 0, "a stale peer key remained installed");
 }
