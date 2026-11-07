@@ -67,6 +67,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) {
     let chunk = Chunk {
         local_key: Some(local_key),
         server: Some(NodeId(1)),
+        authority_epoch: None,
         node: NodeId(2),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,

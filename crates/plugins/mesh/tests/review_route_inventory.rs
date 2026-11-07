@@ -22,6 +22,7 @@ fn fixture() -> (PathBuf, Node) {
         access_updates: Vec::new(),
         local_key: None,
         server: None,
+        authority_epoch: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,

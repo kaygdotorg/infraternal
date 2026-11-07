@@ -85,6 +85,7 @@ fn snapshot(local: (u32, PublicKey), peer: (u32, PublicKey), endpoint: SocketAdd
     Chunk {
         local_key: Some(local.1),
         server: Some(NodeId(1)),
+        authority_epoch: None,
         node: NodeId(local.0.into()),
         #[cfg(feature = "mesh-dns-spike")]
         name: None,
