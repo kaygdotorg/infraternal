@@ -403,7 +403,7 @@ fn outcome(
             _ => {
                 let commands = manual_uninstall(mode, installation.unwrap_or_default());
                 let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
-                (format!("infraternal is still installed on it, so remove it there {account} with: {commands}"), Some(commands))
+                (format!("infraternal is still installed on it, so remove it there {account} by running: {commands}"), Some(commands))
             }
         };
         let punctuation = if manual.is_some() { "" } else { "." };
@@ -445,7 +445,7 @@ fn outcome(
             };
             (
                 format!(
-                    "{name} was removed here, but infraternal is still installed on it. Remove it there {account} with: {commands}"
+                    "{name} was removed here, but infraternal is still installed on it. Remove it there {account} by running: {commands}"
                 ),
                 Some(commands),
             )

@@ -113,3 +113,24 @@ fn pending_uninstall_says_when_and_keeps_the_manual_command() {
     );
     assert_eq!(manual.as_deref(), Some(command.as_str()));
 }
+
+/// A rootless leftover names its account once: "as the account it was added
+/// with by running", never "added with with" (#409).
+#[test]
+fn rootless_manual_wording_reads_once() {
+    for pending in [true, false] {
+        let (message, _) = outcome(
+            "unreachable",
+            "rootless",
+            "host.example",
+            &[],
+            Some(HOST),
+            pending,
+        );
+        assert!(
+            message.contains("as the account it was added with by running: ~/.local/bin/"),
+            "{message}"
+        );
+        assert!(!message.contains("with with"), "{message}");
+    }
+}
