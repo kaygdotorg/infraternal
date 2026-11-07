@@ -103,7 +103,7 @@ let
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-o9hhp0aYmmnLsfo1u9ZaA81ldO8hnF1ZSbhrkyB5d4Y=";
+    outputHash = "sha256-OWo43tRTqASAQWrgDuV9MPSbmF8oAsB/4jvgVy46TEI=";
     dontFixup = true;
   };
   rustupShim = writeShellScriptBin "rustup" ''
