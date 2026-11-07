@@ -15,7 +15,7 @@ import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { renameDataset } from "../docs-dataset";
 import { createPerfSink } from "./perf-sink";
-import { appwinCall, appwinEnabled, appwinFrame, appwinHosts, appwinHttp, appwinSocketClosed, appwinLayoutFrame, appwinLayoutRead, appwinLayoutReplace, appwinLayoutReset } from "./appwin-double";
+import { appwinCall, appwinEnabled, appwinFrame, appwinHosts, appwinHttp, appwinSocketClosed, appwinLayoutFrame, appwinLayoutHold, appwinLayoutRead, appwinLayoutReplace, appwinLayoutReset } from "./appwin-double";
 
 /**
  * Run for the docs' figures (`TRACER_DATASET=docs`, #302): every JSON answer carries the plain names of docs-dataset.ts, and the
@@ -253,6 +253,7 @@ server.listen(PORT, HOST, () => {
   process.stdout.write(`tracer TEST DOUBLE listening on http://${HOST}:${PORT}\n`);
 });
 
+/** Serves the double's HTTP side: the `/__mock/*` controls the specs drive, auth, and the built app. */
 async function routeHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
   response.setHeader(TEST_DOUBLE_HEADER, "true");
   ensurePreviewSession(request, response);
@@ -628,6 +629,13 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     return sendJson(response, 200, { session_id: session.sessionIdText });
   }
   if (request.method === "GET" && url.pathname === "/__mock/layout") return sendJson(response, 200, appwinLayoutRead());
+  // Holds or releases the answers to layout saves, like a stalled connection (D358: "Not saved" after about a second).
+  if (request.method === "POST" && url.pathname === "/__mock/layout/hold") {
+    const body = await readJson(request);
+    if (typeof body?.hold !== "boolean") return sendJson(response, 400, {});
+    appwinLayoutHold(body.hold);
+    return sendJson(response, 200, {});
+  }
   if (request.method === "POST" && url.pathname === "/__mock/layout") {
     const body = await readJson(request);
     return sendJson(response, appwinLayoutReplace(body?.document) ? 200 : 400, {});

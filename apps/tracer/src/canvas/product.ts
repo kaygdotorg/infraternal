@@ -49,6 +49,7 @@ import { createRowsDocs } from "./settings-rows/docs-adapter";
 import { createProductRows } from "./settings-rows/product-source";
 
 import type { CanvasStore } from "./model/store";
+import { watchPendingNotice } from "./pending-notice";
 
 /** How long the host list waits for the first terminal to settle before it starts on its own. */
 const HOSTS_FALLBACK_MS = 2000;
@@ -161,15 +162,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     // the layout is waiting and already says to keep the tab open. A second transient toast said the same and stacked on it (#377).
   }, options.onSessionRevoked);
   const pendingNotice = mountToast(core.stage, { aboveNotifications: true });
-  let pendingShown = false;
-  const showPending = (): void => {
-    const pending = store.pending === true;
-    if (pending === pendingShown) return;
-    pendingShown = pending;
-    if (pending) pendingNotice.show({ message: "Not saved — keep this tab open", icon: ICON_INFO, duration: 0 });
-    else pendingNotice.dismiss();
-  };
-  const offPending = store.onPending?.(showPending); showPending();
+  // Shown only when an edit is still unsaved after about a second, so a normal move never flashes it (D358).
+  const pendingWatch = watchPendingNotice(() => store.pending === true, {
+    show: () => { pendingNotice.show({ message: "Not saved — keep this tab open", icon: ICON_INFO, duration: 0 }); },
+    hide: () => { pendingNotice.dismiss(); },
+  });
+  const offPending = store.onPending?.(() => pendingWatch.update()); pendingWatch.update();
 
   const details: DetailsSourceLoader = () => onDemand(() => import("./sessions/details-live.on-demand"))
     .then((m) => m.createLiveDetails({ host: embedded, connection, inventory, roundTrip: () => roundTrip }));
@@ -211,7 +209,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   })).then((adapter) => { readyRemoval = adapter; });
   const saved = await store.load();
   if (options.isCurrent?.() === false) {
-    disposed = true; offPending?.(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
+    disposed = true; offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
     throw Error("The signed-in screen changed while layout was loading.");
   }
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
@@ -375,7 +373,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       versionArea?.dispose();
       account?.dispose();
       canvas.flush();
-      offLayout(); offPending?.(); pendingNotice.dispose();
+      offLayout(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose();
       window.removeEventListener("pointerup", dropped);
       window.removeEventListener("pointercancel", dropped);
       offRoundTrip();
