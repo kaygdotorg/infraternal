@@ -929,8 +929,8 @@ impl Bootstrap {
                 }
                 let mut rolled_back = true;
                 if let Some(installation) = resources.installation {
-                    // See uninstall_after_commit: a committed fresh install or Take
-                    // over is removed, a Replace or Re-enroll is rolled back.
+                    // See uninstall_after_commit: a committed fresh install, Take
+                    // over or Re-enroll is removed; a Replace is rolled back.
                     let cleanup = if uninstall_after_commit(
                         installation.committed(),
                         resources.set_aside.as_ref().map(|aside| aside.kind),
@@ -2369,11 +2369,12 @@ struct SetAside {
 /// than rolling back. A fresh install that committed before a later step failed
 /// (its login check, completion) has no journal left to roll back: removed, or it
 /// keeps running for a host the server revokes and blocks every retry (#305 F-B).
-/// A Take over commits a new host the same way, and its old install was deleted
-/// at that commit, so it is removed too (J342 P2-1, D359). A Replace or Re-enroll
-/// keeps the enrolled host, so it is rolled back, never removed.
+/// A Take over (D359) and a Re-enroll (D335) commit a new host id the same way,
+/// and their old install was deleted at that commit, so they are removed too
+/// (J342 P2-1). Only a Replace keeps the enrolled host, so it is rolled back,
+/// never removed.
 fn uninstall_after_commit(committed: bool, set_aside: Option<previous_attempt::AsideKind>) -> bool {
-    committed && set_aside.is_none_or(|kind| kind == previous_attempt::AsideKind::TakenOver)
+    committed && set_aside != Some(previous_attempt::AsideKind::Replaced)
 }
 
 /// Whether a failed host step is the script's own exit, so its trap has run.
