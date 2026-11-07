@@ -15,8 +15,12 @@
 
 //!
 //! This module exports kex algorithm names for use with [Preferred].
+//! NIST ECDH implementations require `nist-ecdh`; the mesh never offers them,
+//! so its ring-only build avoids their factory entries and enum dispatch.
+//! ECDSA host keys and certificate verification are independent of this feature.
 mod curve25519;
 pub mod dh;
+#[cfg(feature = "nist-ecdh")]
 mod ecdh_nistp;
 mod hybrid_mlkem;
 mod none;
@@ -35,14 +39,20 @@ use dh::{
     DhGroup18Sha512KexType,
 };
 use digest::Digest;
+#[cfg(feature = "nist-ecdh")]
 use ecdh_nistp::{EcdhNistP256KexType, EcdhNistP384KexType, EcdhNistP521KexType};
 use enum_dispatch::enum_dispatch;
 use hybrid_mlkem::MlKem768X25519KexType;
+#[cfg(feature = "nist-ecdh")]
 use p256::NistP256;
+#[cfg(feature = "nist-ecdh")]
 use p384::NistP384;
+#[cfg(feature = "nist-ecdh")]
 use p521::NistP521;
 use sha1::Sha1;
-use sha2::{Sha256, Sha384, Sha512};
+#[cfg(feature = "nist-ecdh")]
+use sha2::Sha384;
+use sha2::{Sha256, Sha512};
 use ssh_encoding::{Encode, Writer};
 use ssh_key::{Certificate, PublicKey};
 
@@ -133,14 +143,21 @@ pub(crate) enum KexProgress<T> {
     },
 }
 
+/// Keeps the active exchange state and dispatches only compiled-in algorithms.
 #[enum_dispatch(KexAlgorithmImplementor)]
 pub(crate) enum KexAlgorithm {
     DhGroupKexSha1(dh::DhGroupKex<Sha1>),
     DhGroupKexSha256(dh::DhGroupKex<Sha256>),
     DhGroupKexSha512(dh::DhGroupKex<Sha512>),
     Curve25519Kex(curve25519::Curve25519Kex),
+    /// Optional P-256 ECDH, independent of ECDSA key support.
+    #[cfg(feature = "nist-ecdh")]
     EcdhNistP256Kex(ecdh_nistp::EcdhNistPKex<NistP256, Sha256>),
+    /// Optional P-384 ECDH, independent of ECDSA key support.
+    #[cfg(feature = "nist-ecdh")]
     EcdhNistP384Kex(ecdh_nistp::EcdhNistPKex<NistP384, Sha384>),
+    /// Optional P-521 ECDH, independent of ECDSA key support.
+    #[cfg(feature = "nist-ecdh")]
     EcdhNistP521Kex(ecdh_nistp::EcdhNistPKex<NistP521, Sha512>),
     MlKem768X25519Kex(hybrid_mlkem::MlKem768X25519Kex),
     None(none::NoneKexAlgorithm),
@@ -287,8 +304,11 @@ const _DH_G15_SHA512: DhGroup15Sha512KexType = DhGroup15Sha512KexType {};
 const _DH_G16_SHA512: DhGroup16Sha512KexType = DhGroup16Sha512KexType {};
 const _DH_G17_SHA512: DhGroup17Sha512KexType = DhGroup17Sha512KexType {};
 const _DH_G18_SHA512: DhGroup18Sha512KexType = DhGroup18Sha512KexType {};
+#[cfg(feature = "nist-ecdh")]
 const _ECDH_SHA2_NISTP256: EcdhNistP256KexType = EcdhNistP256KexType {};
+#[cfg(feature = "nist-ecdh")]
 const _ECDH_SHA2_NISTP384: EcdhNistP384KexType = EcdhNistP384KexType {};
+#[cfg(feature = "nist-ecdh")]
 const _ECDH_SHA2_NISTP521: EcdhNistP521KexType = EcdhNistP521KexType {};
 const _MLKEM768X25519_SHA256: MlKem768X25519KexType = MlKem768X25519KexType {};
 const _NONE: none::NoneKexType = none::NoneKexType {};
@@ -306,8 +326,11 @@ pub const ALL_KEX_ALGORITHMS: &[&Name] = &[
     &DH_G16_SHA512,
     &DH_G17_SHA512,
     &DH_G18_SHA512,
+    #[cfg(feature = "nist-ecdh")]
     &ECDH_SHA2_NISTP256,
+    #[cfg(feature = "nist-ecdh")]
     &ECDH_SHA2_NISTP384,
+    #[cfg(feature = "nist-ecdh")]
     &ECDH_SHA2_NISTP521,
     &NONE,
 ];
@@ -327,8 +350,11 @@ pub(crate) static KEXES: LazyLock<HashMap<&'static Name, &(dyn KexType + Send + 
         h.insert(&DH_G14_SHA256, &_DH_G14_SHA256);
         h.insert(&DH_G14_SHA1, &_DH_G14_SHA1);
         h.insert(&DH_G1_SHA1, &_DH_G1_SHA1);
+        #[cfg(feature = "nist-ecdh")]
         h.insert(&ECDH_SHA2_NISTP256, &_ECDH_SHA2_NISTP256);
+        #[cfg(feature = "nist-ecdh")]
         h.insert(&ECDH_SHA2_NISTP384, &_ECDH_SHA2_NISTP384);
+        #[cfg(feature = "nist-ecdh")]
         h.insert(&ECDH_SHA2_NISTP521, &_ECDH_SHA2_NISTP521);
         h.insert(&NONE, &_NONE);
         assert_eq!(ALL_KEX_ALGORITHMS.len(), h.len());
