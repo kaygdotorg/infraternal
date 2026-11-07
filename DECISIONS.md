@@ -4199,3 +4199,20 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      adds no power. Rootless adds of another account's install still
      refuse. The rejected options were keeping D337 strict (a by-hand
      uninstall when the old server is gone) and never offering a button.
+
+360. **A revoke report names what it checked, never "unchanged" (owner,
+     2026-11-07, #355; refines D356):** J334's review showed that a report
+     could say "unchanged" when access was left behind: a folder with more
+     than 1,024 entries was skipped, and systemd and bash read places the
+     scan did not cover. No scan can prove nothing was left. The owner chose
+     "Say what was checked": when the scan finds nothing, the report says
+     what it watched and since when, for example "No changes found in the
+     214 places we watch (SSH keys, cron, user services, shell startup
+     files) since 3 Nov, 14:02". It never uses the word "unchanged". The
+     server decides that outcome itself, only when the scan was complete,
+     covered every category D356 names, ran in an account that could not
+     rewrite its record or the infraternal agent, and nothing of the person's
+     could write afterwards. Otherwise it says "Not checked" with the reason.
+     The rejected options were keeping "unchanged" for complete scans (it
+     still reads as a guarantee) and listing changes only (silence can't tell
+     "checked, nothing found" from "couldn't check").
