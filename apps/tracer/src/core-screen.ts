@@ -19,7 +19,7 @@ import { readLocal as readPref, writeLocal as writePref } from "../../../package
 import { aboutSection, createSettingsOverlay, type SettingsSection } from "../../../packages/ui/src/settings-overlay";
 import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
-import { startThemes } from "./canvas/themes/controller";
+import { lookBridge, startThemes } from "./canvas/themes/controller";
 import { readCachedLook, readLegacyAppearance } from "./canvas/themes/persist";
 import { applyFontVars, fontById, FONTS, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { readLocal, writeLocal } from "../../../packages/ui/src/local-pref";
@@ -862,8 +862,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }
     }, 250);
   };
+  /** Keeps the OS scheme as a fallback only until the account document supplies its saved look. */
   const systemThemeChange = (): void => {
-    if (!themeId(params.get("theme")) && !savedThemeId) {
+    if (!themeId(params.get("theme")) && !savedThemeId && !lookBridge()?.hasAccountLook()) {
       currentThemeId = systemDark.matches ? "mocha" : "latte";
       void applyLook();
     }

@@ -45,6 +45,8 @@ interface AppearanceDefaults {
 /** What the canvas needs: one complete look to save, a place to apply canonical look updates, and server-confirmation cleanup. */
 export interface LookAdapter {
   snapshot(): DocLook | undefined;
+  /** Reports whether this account's canvas document has supplied a valid look to this page. */
+  hasAccountLook(): boolean;
   /** Applies the look from a canvas snapshot or revisioned edit; `undefined` means the account has none yet. */
   apply(look: DocLook | undefined): void;
   /** Confirms a complete canonical look after the canvas store has no unacknowledged edits. */
@@ -175,6 +177,8 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   };
   let applyingDocument = false;
   let applyingLook = false;
+  // Once the canvas has supplied a valid account look, the OS scheme is no longer an appearance authority.
+  let accountLookApplied = false;
   let appliedUiSize = store.selected().uiSize;
   const render = (): void => {
     applyingLook = true;
@@ -216,12 +220,14 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
 
   const mine: LookAdapter = {
     snapshot: () => (previewing ? undefined : snapshot()),
+    hasAccountLook: () => accountLookApplied,
     apply(look) {
       if (previewing) return;
       if (look === undefined) { window.clearTimeout(announceTimer); announce(); return; }
       const canonical = parseLook(look);
       const restored = canonical ? restore(canonical) : undefined;
       if (!canonical || !restored) return;
+      accountLookApplied = Boolean(accountId);
       const nextDefaults: AppearanceDefaults = {
         windowSizes: {
           phone: canonical.windowSizes?.phone ?? defaults.windowSizes.phone,
