@@ -616,6 +616,15 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
     assert_eq!(value["more"], 0);
     let shown = &value["reports"][0];
     assert_eq!(shown["person_id"], json!(person));
+    // J323 (84303): the owner sees who, not only an id.
+    let expected: String = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(display_name,''), NULLIF(name,''), username) FROM users WHERE id=?",
+    )
+    .bind(person.to_string())
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    assert_eq!(shown["person_name"], json!(expected));
     assert_eq!(shown["state"], "changed");
     assert_eq!(
         shown["accounts"][0]["files"],

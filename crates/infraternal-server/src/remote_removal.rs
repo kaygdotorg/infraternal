@@ -139,20 +139,23 @@ impl Removal {
                 reports,
                 more,
                 overall,
-            } => json!({
-                "host_id": host,
-                "state": "reported",
-                "outcome": overall,
-                "more": more,
-                "reports": reports
-                    .into_iter()
-                    .map(|(person, report)| {
-                        let mut entry = serde_json::to_value(report).unwrap_or_default();
-                        entry["person_id"] = json!(person);
-                        entry
-                    })
-                    .collect::<Vec<_>>(),
-            }),
+            } => {
+                let mut shown = Vec::with_capacity(reports.len());
+                for (person, report) in reports {
+                    let mut entry = serde_json::to_value(report).unwrap_or_default();
+                    entry["person_id"] = json!(person);
+                    entry["person_name"] =
+                        json!(crate::access_report::person_name(&self.pool, person).await?);
+                    shown.push(entry);
+                }
+                json!({
+                    "host_id": host,
+                    "state": "reported",
+                    "outcome": overall,
+                    "more": more,
+                    "reports": shown,
+                })
+            }
         }))
     }
 

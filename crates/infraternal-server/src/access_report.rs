@@ -497,6 +497,25 @@ impl AccessReport {
     }
 }
 
+/// The display name of `person` for the owner reading a report (J323,
+/// 84303): the display name, else the name, else the username, cleaned and
+/// bounded like every other string shown; `None` for a person no longer on
+/// this server.
+pub(crate) async fn person_name(
+    pool: &SqlitePool,
+    person: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let name: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(display_name,''), NULLIF(name,''), username) FROM users WHERE id=?",
+    )
+    .bind(person.to_string())
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    let mut ignored = false;
+    Ok(name.map(|name| printable(&name, ACCOUNT_CHARS, &mut ignored)))
+}
+
 /// Keeps `report` for `host` and `person` inside the transaction that
 /// confirms the revocation, so a confirmed revocation always has one.
 pub(crate) async fn store(
