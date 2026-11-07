@@ -132,11 +132,21 @@ impl EnrollmentStore {
                 });
             // Every confirmed revocation keeps a report. Without a host
             // reply (the agent was removed), it says that nothing was checked.
-            let removed = crate::access_report::AccessReport::not_checked(
-                crate::access_report::Reason::AgentRemoved,
-            );
-            let report = report.unwrap_or(&removed);
-            crate::access_report::store(&mut transaction, host, person, report, now).await?;
+            // The outcome is decided here, by the server's rule, with the
+            // host's mode from the server's own record (J334 P1-3).
+            let mode: Option<String> =
+                sqlx::query_scalar("SELECT mode FROM remote_hosts WHERE id=?")
+                    .bind(host.as_bytes().as_slice())
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            let rootless = mode.as_deref() != Some("rootful");
+            let report = report.cloned().unwrap_or_else(|| {
+                crate::access_report::AccessReport::not_checked(
+                    crate::access_report::Reason::AgentRemoved,
+                )
+            });
+            let report = report.decided(rootless);
+            crate::access_report::store(&mut transaction, host, person, &report, now).await?;
         }
         // Keep tombstoning and its trigger effects in the same transaction as
         // the durable receipt. A foreign or duplicate receipt changes nothing.

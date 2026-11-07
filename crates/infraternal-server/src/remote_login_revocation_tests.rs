@@ -210,7 +210,7 @@ async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
     });
     reconnect_cleanup_reporting(&fixture, Some(true), Some(extra)).await;
     retirement.await.unwrap().unwrap();
-    let Some(crate::access_report::Reading::Reported(reports)) =
+    let Some(crate::access_report::Reading::Reported { reports, .. }) =
         crate::access_report::read(&fixture.pool, &owner, fixture.host)
             .await
             .unwrap()
@@ -220,7 +220,13 @@ async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
     assert_eq!(reports.len(), 1);
     let (person, report) = &reports[0];
     assert_eq!(*person, fixture.person);
-    assert_eq!(report.state, crate::access_report::State::Changed);
+    // This fixture host is rootless: the server, not the host, says the
+    // report cannot be vouched for, and keeps the files as hints.
+    assert_eq!(report.state, crate::access_report::State::NotChecked);
+    assert_eq!(
+        report.reason,
+        Some(crate::access_report::Reason::RootlessUnverified)
+    );
     assert!(report.warning.is_some(), "D353's warning was dropped");
     let account = &report.accounts[0];
     assert_eq!(account.account, "deploy");
@@ -252,7 +258,7 @@ async fn an_older_agents_revocation_reads_not_checked() {
     let retirement = pending_retirement(&fixture).await;
     reconnect_cleanup(&fixture, Some(true)).await;
     retirement.await.unwrap().unwrap();
-    let Some(crate::access_report::Reading::Reported(reports)) =
+    let Some(crate::access_report::Reading::Reported { reports, .. }) =
         crate::access_report::read(&fixture.pool, &fixture.person.to_string(), fixture.host)
             .await
             .unwrap()
@@ -262,7 +268,38 @@ async fn an_older_agents_revocation_reads_not_checked() {
     assert_eq!(reports[0].1.state, crate::access_report::State::NotChecked);
     assert_eq!(
         reports[0].1.reason,
-        Some(crate::access_report::Reason::OlderAgent)
+        Some(crate::access_report::Reason::RootlessUnverified),
+        "a rootless host's report is never vouched for, older agent or not"
+    );
+}
+
+/// J334 P1-3: on a rootless host the account owns the infraternal agent, so
+/// it can answer "unchanged, complete". The server takes the host's mode
+/// from its own record and stores "not checked: rootless_unverified".
+#[tokio::test]
+async fn a_rootless_host_cannot_claim_unchanged() {
+    let fixture = login_host(None).await;
+    let retirement = pending_retirement(&fixture).await;
+    let forged = serde_json::json!({"access": {"state": "unchanged", "accounts": [{
+        "account": "deploy", "state": "unchanged", "files": [], "truncated": false,
+        "unscanned": [], "omitted_files": 0, "complete": true, "watched": 999,
+        "privileged": false, "shared": false, "programs_may_remain": false,
+        "recorded_at": 1, "scanned_at": 2
+    }]}});
+    reconnect_cleanup_reporting(&fixture, Some(true), Some(forged)).await;
+    retirement.await.unwrap().unwrap();
+    let Some(crate::access_report::Reading::Reported {
+        reports, overall, ..
+    }) = crate::access_report::read(&fixture.pool, &fixture.person.to_string(), fixture.host)
+        .await
+        .unwrap()
+    else {
+        panic!("the confirmed revocation has no report");
+    };
+    assert_eq!(overall, crate::access_report::State::NotChecked);
+    assert_eq!(
+        reports[0].1.accounts[0].reason,
+        Some(crate::access_report::Reason::RootlessUnverified)
     );
 }
 

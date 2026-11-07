@@ -41,6 +41,8 @@ const TEXT_CHARS: usize = 400;
 const ACCOUNT_CHARS: usize = 64;
 /// Not-scanned names kept per account.
 const UNSCANNED: usize = 32;
+/// Reports returned per host; the rest are counted (J334 P2-5).
+pub(crate) const SHOWN: i64 = 16;
 /// Largest stored report in bytes; the table checks the same bound.
 pub(crate) const STORED_BYTES: usize = 32 * 1024;
 /// What the owner is told when anything was cut from a file's lines.
@@ -73,6 +75,16 @@ pub(crate) enum Reason {
     AgentRemoved,
     /// The revocation was confirmed before these reports were kept.
     NotRecorded,
+    /// The account is root or may become root (J334 P1-4).
+    Privileged,
+    /// Something was not scanned (J334 P1-1).
+    Incomplete,
+    /// The account's programs may still run and change its files (P2-1).
+    ProgramsMayRemain,
+    /// Recording the grant failed (P2-7).
+    RecordFailed,
+    /// The agent watches fewer places than this server expects.
+    CoverageMissing,
 }
 
 /// Whether a file is new since the grant or was changed.
@@ -83,11 +95,14 @@ pub(crate) enum ChangeKind {
     Added,
     /// There at the grant, different now.
     Changed,
+    /// There at the grant, gone now.
+    Removed,
 }
 
-/// One changed access file.
+/// One changed access file. Unknown fields inside a report are ignored
+/// (J334 P3: a future field must not make a revocation a protocol error);
+/// the revoke reply's envelope stays strict.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct AccessFile {
     /// Its path under the account's home, or `crontab`, `at job …`.
     pub(crate) path: String,
@@ -101,8 +116,7 @@ pub(crate) struct AccessFile {
 }
 
 /// The outcome for one host account.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AccountReport {
     /// The account's name.
     pub(crate) account: String,
@@ -121,11 +135,31 @@ pub(crate) struct AccountReport {
     /// Changed files not listed.
     #[serde(default)]
     pub(crate) omitted_files: u64,
+    /// The agent scanned every watched place, at the grant and now.
+    #[serde(default)]
+    pub(crate) complete: bool,
+    /// How many watched places the report covers.
+    #[serde(default)]
+    pub(crate) watched: u64,
+    /// Root, or may become root.
+    #[serde(default)]
+    pub(crate) privileged: bool,
+    /// Other people still have access to the account.
+    #[serde(default)]
+    pub(crate) shared: bool,
+    /// The account's programs may still run after the revoke.
+    #[serde(default)]
+    pub(crate) programs_may_remain: bool,
+    /// When the grant was recorded (seconds since the epoch; 0 if unknown).
+    #[serde(default)]
+    pub(crate) recorded_at: u64,
+    /// When the account was scanned.
+    #[serde(default)]
+    pub(crate) scanned_at: u64,
 }
 
 /// One person's report from one host.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct AccessReport {
     /// The overall outcome.
     pub(crate) state: State,
@@ -144,8 +178,17 @@ pub(crate) struct AccessReport {
 pub(crate) enum Reading {
     /// A revocation is waiting for the host to confirm it.
     Pending,
-    /// Confirmed revocations, with each person's report.
-    Reported(Vec<(Uuid, AccessReport)>),
+    /// Confirmed revocations: the newest reports, how many more there are,
+    /// and the outcome over all of them (never only the ones shown).
+    Reported {
+        /// The newest reports, at most [`SHOWN`].
+        reports: Vec<(Uuid, AccessReport)>,
+        /// Reports not shown.
+        more: u64,
+        /// Changed if any report changed, else not checked if any was not
+        /// checked, else unchanged.
+        overall: State,
+    },
     /// No revocation has run on this host.
     NotRevoked,
 }
@@ -274,42 +317,94 @@ impl AccessReport {
                     *line = printable(line, LINE_CHARS, &mut cut);
                 }
             }
-            if account.state == State::Unchanged
-                && (!account.files.is_empty() || account.omitted_files > 0)
-            {
-                account.state = State::Changed;
-            }
             account.truncated = cut;
         }
-        self.settle();
         while self.json().len() > STORED_BYTES && self.trim() {}
         self
     }
 
-    /// The overall outcome from the accounts: changed if any changed, else
-    /// not checked if any was not checked (or there is no account and the
-    /// report did not already say why), else unchanged.
-    fn settle(&mut self) {
+    /// THE rule for what the owner is told, applied by the server to every
+    /// report it keeps, whatever state the host sent (J334): an account
+    /// listing files is `changed`; otherwise it is `not_checked` with the
+    /// first reason that applies; only when none does is it `unchanged`.
+    /// The reasons, in order: the host runs rootless (taken from the
+    /// server's own record of the host, never from the host, P1-3); the
+    /// account is privileged (P1-4); anything was not scanned, cut or
+    /// omitted, including by the server's own bounds (P1-1, P2-2); the
+    /// agent watches fewer places than this server knows of; programs may
+    /// still run (P2-1); the record failed or is missing. No account at all
+    /// is never `unchanged`.
+    #[must_use]
+    pub(crate) fn decided(mut self, rootless: bool) -> Self {
+        let watched =
+            u64::try_from(infraternal_agent::access_files::WATCHED_PLACES).unwrap_or(u64::MAX);
+        for account in &mut self.accounts {
+            let reason = if rootless {
+                Some(Reason::RootlessUnverified)
+            } else if account.privileged {
+                Some(Reason::Privileged)
+            } else if !account.complete
+                || account.truncated
+                || account.omitted_files > 0
+                || !account.unscanned.is_empty()
+            {
+                Some(Reason::Incomplete)
+            } else if account.watched < watched {
+                Some(Reason::CoverageMissing)
+            } else if account.programs_may_remain {
+                Some(Reason::ProgramsMayRemain)
+            } else {
+                account
+                    .reason
+                    .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed))
+            };
+            // A record the agent did not have is never "complete": keep its
+            // own reason ahead of "incomplete".
+            let reason = match account.reason {
+                Some(own @ (Reason::RecordMissing | Reason::RecordFailed)) if !rootless => {
+                    Some(own)
+                }
+                _ => reason,
+            };
+            if !account.files.is_empty() || account.omitted_files > 0 {
+                account.state = if rootless {
+                    State::NotChecked
+                } else {
+                    State::Changed
+                };
+                account.reason = reason.filter(|_| rootless);
+            } else if let Some(reason) = reason {
+                account.state = State::NotChecked;
+                account.reason = Some(reason);
+            } else {
+                account.state = State::Unchanged;
+                account.reason = None;
+            }
+        }
         let unchecked = self
             .accounts
             .iter()
             .find(|account| account.state == State::NotChecked)
-            .map(|account| account.reason);
-        if self.accounts.iter().any(|a| a.state == State::Changed)
-            && self.state != State::NotChecked
-        {
+            .and_then(|account| account.reason);
+        if rootless {
+            self.state = State::NotChecked;
+            self.reason = Some(Reason::RootlessUnverified);
+        } else if self.accounts.iter().any(|a| a.state == State::Changed) {
             self.state = State::Changed;
             self.reason = None;
         } else if let Some(reason) = unchecked {
             self.state = State::NotChecked;
-            self.reason = self.reason.or(reason);
+            self.reason = Some(reason);
         } else if self.accounts.is_empty() {
+            // Keep the reason the server or agent gave (older agent, agent
+            // removed), else say there was no record.
             self.state = State::NotChecked;
             self.reason = self.reason.or(Some(Reason::RecordMissing));
-        } else if self.state != State::NotChecked {
+        } else {
             self.state = State::Unchanged;
             self.reason = None;
         }
+        self
     }
 
     /// Drops one line, or failing that one file (counted), from the end.
@@ -383,10 +478,19 @@ pub(crate) async fn read(
     if pending {
         return Ok(Some(Reading::Pending));
     }
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT person_id,report FROM remote_access_reports WHERE host_id=? ORDER BY recorded_at,person_id LIMIT 16",
+    // Newest first; the outcome comes from every row, so a hidden report
+    // can never leave the headline reading "unchanged" (J334 P2-5).
+    let (total, changed, unchecked): (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*), coalesce(sum(json_extract(report,'$.state')='changed'),0), coalesce(sum(json_extract(report,'$.state')<>'unchanged' AND json_extract(report,'$.state')<>'changed'),0) FROM remote_access_reports WHERE host_id=?",
     )
     .bind(host.as_bytes().as_slice())
+    .fetch_one(pool)
+    .await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT person_id,report FROM remote_access_reports WHERE host_id=? ORDER BY recorded_at DESC,person_id LIMIT ?",
+    )
+    .bind(host.as_bytes().as_slice())
+    .bind(SHOWN)
     .fetch_all(pool)
     .await?;
     let mut reports: Vec<(Uuid, AccessReport)> = rows
@@ -400,15 +504,27 @@ pub(crate) async fn read(
             Some((person, report))
         })
         .collect();
+    let mut overall = if changed > 0 {
+        State::Changed
+    } else if unchecked > 0 {
+        State::NotChecked
+    } else {
+        State::Unchanged
+    };
     if reports.is_empty()
         && let Some(person) = confirmed.and_then(|person| Uuid::parse_str(&person).ok())
     {
         reports.push((person, AccessReport::not_checked(Reason::NotRecorded)));
+        overall = State::NotChecked;
     }
     Ok(Some(if reports.is_empty() {
         Reading::NotRevoked
     } else {
-        Reading::Reported(reports)
+        Reading::Reported {
+            more: u64::try_from(total - i64::try_from(reports.len()).unwrap_or(0)).unwrap_or(0),
+            reports,
+            overall,
+        }
     }))
 }
 
@@ -435,11 +551,10 @@ mod tests {
             accounts: vec![AccountReport {
                 account: "deploy".to_owned(),
                 state,
-                reason: None,
                 files,
-                truncated: false,
-                unscanned: Vec::new(),
-                omitted_files: 0,
+                complete: true,
+                watched: u64::try_from(infraternal_agent::access_files::WATCHED_PLACES).unwrap(),
+                ..AccountReport::default()
             }],
             warning: None,
         }
@@ -528,17 +643,71 @@ mod tests {
     /// with no account is "not checked", never "unchanged".
     #[test]
     fn unchanged_is_only_said_when_nothing_was_listed() {
-        let listed = report(State::Unchanged, vec![file("~/.bashrc", &["x"])]).bounded();
+        let listed = report(State::Unchanged, vec![file("~/.bashrc", &["x"])]).decided(false);
         assert_eq!(listed.state, State::Changed);
         assert_eq!(listed.accounts[0].state, State::Changed);
         let empty = AccessReport {
             state: State::Unchanged,
             ..AccessReport::default()
         }
-        .bounded();
+        .decided(false);
         assert_eq!(empty.state, State::NotChecked);
         assert_eq!(empty.reason, Some(Reason::RecordMissing));
-        let clean = report(State::Unchanged, Vec::new()).bounded();
+        let older = AccessReport::not_checked(Reason::OlderAgent).decided(false);
+        assert_eq!(older.reason, Some(Reason::OlderAgent));
+        let clean = report(State::Unchanged, Vec::new()).decided(false);
         assert_eq!(clean.state, State::Unchanged);
+    }
+
+    /// J334: each of the four conditions, broken, turns a clean account into
+    /// "not checked" with its reason, whatever state the host sent; the
+    /// server's own bounds count as incomplete too.
+    #[test]
+    fn the_server_decides_unchanged_only_when_all_four_conditions_hold() {
+        let clean = || report(State::Unchanged, Vec::new());
+        let reason = |report: AccessReport, rootless: bool| {
+            let report = report.decided(rootless);
+            assert_eq!(report.state, State::NotChecked, "{report:?}");
+            report.accounts[0].reason
+        };
+        assert_eq!(reason(clean(), true), Some(Reason::RootlessUnverified));
+        let mut privileged = clean();
+        privileged.accounts[0].privileged = true;
+        assert_eq!(reason(privileged, false), Some(Reason::Privileged));
+        let mut incomplete = clean();
+        incomplete.accounts[0].unscanned =
+            vec!["~/.config/systemd/user (more than 1024 entries)".into()];
+        assert_eq!(reason(incomplete, false), Some(Reason::Incomplete));
+        let mut partial = clean();
+        partial.accounts[0].complete = false;
+        assert_eq!(reason(partial, false), Some(Reason::Incomplete));
+        let mut older = clean();
+        older.accounts[0].watched = 14;
+        assert_eq!(reason(older, false), Some(Reason::CoverageMissing));
+        let mut remaining = clean();
+        remaining.accounts[0].programs_may_remain = true;
+        assert_eq!(reason(remaining, false), Some(Reason::ProgramsMayRemain));
+        // A host that claims "unchanged" and "complete" with files to show is
+        // still "changed".
+        let mut claimed = report(State::Unchanged, vec![file("~/.bashrc", &["curl x | sh"])]);
+        claimed.accounts[0].reason = None;
+        assert_eq!(claimed.decided(false).state, State::Changed);
+        // The server's own bound cutting the report makes it incomplete.
+        let long = "x".repeat(LINE_CHARS * 2);
+        let lines: Vec<&str> = std::iter::repeat_n(long.as_str(), LINES + 1).collect();
+        let cut = report(State::Unchanged, vec![file("~/.zshrc", &lines)]).bounded();
+        assert!(cut.accounts[0].truncated);
+    }
+
+    /// J334 P3: a field this server does not know inside the report is
+    /// ignored, so a newer agent's report is still kept.
+    #[test]
+    fn unknown_fields_inside_a_report_are_ignored() {
+        let report: AccessReport = serde_json::from_value(serde_json::json!({
+            "state": "changed", "future": 1,
+            "accounts": [{"account": "deploy", "state": "changed", "files": [], "truncated": false, "later": true}]
+        }))
+        .unwrap();
+        assert_eq!(report.accounts[0].account, "deploy");
     }
 }

