@@ -57,7 +57,9 @@ async function cameraTransform(page: Page): Promise<string> {
 
 /** Turns canvas lock off and pans through the same wheel path used by trackpads. */
 async function panCamera(page: Page): Promise<void> {
-  await page.keyboard.press("Control+Shift+G");
+  // The browser may run on a different OS from the Playwright runner, so use the visible control instead of a platform chord.
+  await page.getByRole("button", { name: /^Canvas lock on/ }).first().click();
+  await expect(page.getByRole("button", { name: /^Canvas lock off/ }).first()).toBeVisible();
   await page.evaluate(() => new Promise<void>((done) => {
     const target = document.querySelector(".cl-viewport")!;
     const start = performance.now();
@@ -202,6 +204,8 @@ test("theme and font changes reach the same account live and after reload withou
   await mkdir(evidence, { recursive: true });
   const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
   const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
+  /** Keeps the first assertion or navigation error if a disconnected remote browser also rejects cleanup. */
+  let bodyFailure: { error: unknown } | undefined;
   try {
     const a = watchLayout(await first.newPage());
     await enrol(a, server); await settled(a);
@@ -298,7 +302,17 @@ test("theme and font changes reach the same account live and after reload withou
     await b.screenshot({ path: `${evidence}/client-b-synced-look.png` });
     await writeFile(`${evidence}/live-sync.json`, JSON.stringify(measurement, null, 2));
     console.log(`APPEARANCE_SYNC ${JSON.stringify(measurement)}`);
-  } finally { await second.close(); await first.close(); await server.dispose(); }
+  } catch (error) {
+    bodyFailure = { error };
+  } finally {
+    /** Cleanup failures matter only when the test body itself succeeded. */
+    const cleanupErrors: unknown[] = [];
+    try { await second.close(); } catch (error) { cleanupErrors.push(error); }
+    try { await first.close(); } catch (error) { cleanupErrors.push(error); }
+    try { await server.dispose(); } catch (error) { cleanupErrors.push(error); }
+    if (bodyFailure) throw bodyFailure.error;
+    if (cleanupErrors.length > 0) throw cleanupErrors[0];
+  }
 });
 
 test("legacy appearance values migrate once into the new account document", async ({ browser }) => {
