@@ -92,8 +92,12 @@ pub(crate) enum Watch {
     /// A systemd user unit directory: its entries, and the `*.wants`,
     /// `*.requires`, `*.upholds` and drop-in `*.d` directories systemd reads.
     Units,
-    /// The host's crontab and `at` spools for the account.
+    /// The host's crontab for the account.
     Spools,
+    /// An atd spool directory; only this account's regular jobs are read.
+    AtSpool,
+    /// Effective SSH key sources, resolved for this account by sshd.
+    Sshd,
 }
 
 /// One place the agent watches for a way back into an account.
@@ -141,7 +145,7 @@ pub(crate) const WATCHED: &[Watched] = &[
     },
     Watched {
         category: "cron and at jobs",
-        path: "crontab and at jobs",
+        path: "crontab",
         watch: Watch::Spools,
     },
     Watched {
@@ -238,6 +242,46 @@ pub(crate) const WATCHED: &[Watched] = &[
         category: "programs on PATH",
         path: ".local/bin",
         watch: Watch::Directory,
+    },
+    Watched {
+        category: "programs on PATH",
+        path: "bin",
+        watch: Watch::Directory,
+    },
+    Watched {
+        category: "user services",
+        path: ".config/systemd/user.conf",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup files",
+        path: ".config/fish/functions",
+        watch: Watch::Directory,
+    },
+    Watched {
+        category: "shell startup files",
+        path: ".zlogout",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup files",
+        path: ".bashrc.d",
+        watch: Watch::Directory,
+    },
+    Watched {
+        category: "cron and at jobs",
+        path: "/var/spool/cron/atjobs",
+        watch: Watch::AtSpool,
+    },
+    Watched {
+        category: "cron and at jobs",
+        path: "/var/spool/at",
+        watch: Watch::AtSpool,
+    },
+    Watched {
+        category: "SSH keys",
+        path: "sshd effective configuration",
+        watch: Watch::Sshd,
     },
 ];
 
@@ -602,15 +646,26 @@ impl<'a> Scan<'a> {
             scan.skip("~ (the home directory could not be opened)");
         }
         let mut watched = 0;
+        let mut extra_read = false;
         for place in WATCHED {
             let path = Path::new(place.path);
             match place.watch {
                 Watch::File => scan.file(path, visit),
                 Watch::Directory => scan.directory(path, false, visit),
                 Watch::Units => scan.directory(path, true, visit),
-                Watch::Spools => extra(account, &mut |path, content| {
-                    scan.spool(path, content, visit);
-                }),
+                Watch::Spools if !extra_read => {
+                    // Host sources keep their early table priority, so a home
+                    // file flood cannot hide an account's scheduled jobs.
+                    extra(account, &mut |path, content| {
+                        if path == "sshd effective configuration" {
+                            scan.ssh_keys(content, visit);
+                        } else {
+                            scan.spool(path, content, visit);
+                        }
+                    });
+                    extra_read = true;
+                }
+                Watch::Spools | Watch::AtSpool | Watch::Sshd => {}
             }
             watched += 1;
         }
@@ -622,7 +677,11 @@ impl<'a> Scan<'a> {
         Ended {
             truncated: scan.truncated,
             unscanned: scan.unscanned,
-            watched,
+            watched: if cfg!(target_os = "macos") {
+                0
+            } else {
+                watched
+            },
             places: scan.entries,
         }
     }
@@ -669,6 +728,54 @@ impl<'a> Scan<'a> {
                 };
                 visit(path, entry, Some(&bytes));
             }
+        }
+    }
+
+    /// Scans the key files sshd actually reads for this account. Commands,
+    /// certificate principals and outside-home paths are unsupported sources,
+    /// so the account is incomplete instead of being vouched for.
+    fn ssh_keys(&mut self, config: io::Result<Vec<u8>>, visit: &mut Visit<'_>) {
+        let Some(config) = config.ok().and_then(|bytes| String::from_utf8(bytes).ok()) else {
+            self.skip("sshd effective configuration (could not be read)");
+            return;
+        };
+        let mut keys_seen = false;
+        for line in config.lines() {
+            let mut words = line.split_whitespace();
+            let Some(option) = words.next() else { continue };
+            match option {
+                "authorizedkeysfile" => {
+                    keys_seen = true;
+                    let paths: Vec<_> = words.collect();
+                    if paths.is_empty() {
+                        self.skip("sshd AuthorizedKeysFile (no paths returned)");
+                    }
+                    for path in paths {
+                        if path == "none" {
+                            continue;
+                        }
+                        let inside = ssh_key_path(self.account, path);
+                        match inside {
+                            Some(inside) => self.file(&inside, visit),
+                            None => self.skip(
+                                "sshd AuthorizedKeysFile (outside the home or unsupported path)",
+                            ),
+                        }
+                    }
+                }
+                "authorizedkeyscommand"
+                | "authorizedprincipalsfile"
+                | "authorizedprincipalscommand"
+                | "trustedusercakeys"
+                    if words.next().is_none_or(|value| value != "none") =>
+                {
+                    self.skip(&format!("sshd {option} (key source not scanned)"));
+                }
+                _ => {}
+            }
+        }
+        if !keys_seen {
+            self.skip("sshd AuthorizedKeysFile (not returned)");
         }
     }
 
@@ -1079,6 +1186,27 @@ fn beneath_home(account: &User, rel: &Path, target: &str) -> Option<PathBuf> {
     (!inside.as_os_str().is_empty()).then_some(inside)
 }
 
+/// Expands only sshd's documented key-path tokens, then confines the path
+/// lexically to the home. An unknown token cannot silently name another file.
+fn ssh_key_path(account: &User, template: &str) -> Option<PathBuf> {
+    let mut expanded = String::new();
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            expanded.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '%' => expanded.push('%'),
+            'h' => expanded.push_str(account.dir.to_str()?),
+            'u' => expanded.push_str(&account.name),
+            'U' => expanded.push_str(&account.uid.as_raw().to_string()),
+            _ => return None,
+        }
+    }
+    beneath_home(account, Path::new("keys"), &expanded)
+}
+
 /// Non-blank lines of `bytes`, without their line ending.
 fn split(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     bytes
@@ -1469,34 +1597,93 @@ pub(crate) fn host_spools(account: &User, visit: &mut dyn FnMut(String, io::Resu
         if let Some(path) = crontab {
             visit("crontab".to_owned(), read_spool(&path, account));
         }
-        let mut jobs = Vec::new();
-        if let Ok(entries) = std::fs::read_dir("/var/spool/cron/atjobs") {
-            // The account's own jobs, then the bound: another account's many
-            // jobs cannot push this one's out (J322 P3).
-            for entry in entries.filter_map(Result::ok) {
-                if entry
-                    .metadata()
-                    .is_ok_and(|m| m.is_file() && m.uid() == account.uid.as_raw())
-                {
-                    jobs.push(entry.path());
-                    if jobs.len() > ENTRIES {
-                        break;
-                    }
-                }
-            }
+        for place in WATCHED.iter().filter(|place| place.watch == Watch::AtSpool) {
+            at_spool(account, Path::new(place.path), visit);
         }
-        jobs.sort();
-        for job in jobs {
-            let name = job
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            visit(format!("at job {name}"), read_spool(&job, account));
-        }
+        visit(
+            "sshd effective configuration".to_owned(),
+            sshd_configuration(account),
+        );
     } else {
         visit("crontab".to_owned(), command_output("crontab", &["-l"]));
         visit("at queue".to_owned(), command_output("atq", &[]));
     }
+}
+
+/// Reads this account's jobs from one watched atd spool. Missing spools are
+/// absent; unreadable listings or metadata make coverage incomplete.
+fn at_spool(account: &User, spool: &Path, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)) {
+    let entries = match std::fs::read_dir(spool) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            visit(format!("at jobs {}", spool.display()), Err(error));
+            return;
+        }
+    };
+    let mut jobs = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                visit(format!("at jobs {}", spool.display()), Err(error));
+                continue;
+            }
+        };
+        match entry.metadata() {
+            Ok(metadata) if metadata.is_file() && metadata.uid() == account.uid.as_raw() => {
+                jobs.push(entry.path());
+                // One beyond the scanner's budget ensures it names omissions.
+                if jobs.len() > ENTRIES {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => visit(format!("at jobs {}", spool.display()), Err(error)),
+        }
+    }
+    jobs.sort();
+    for job in jobs {
+        visit(
+            format!("at job {}", job.display()),
+            read_spool(&job, account),
+        );
+    }
+}
+
+/// Gets sshd's effective per-account settings as root, with bounded output
+/// and a two-second process deadline. Missing tools or refusals are incomplete;
+/// neither the effective configuration nor diagnostics are ever logged.
+fn sshd_configuration(account: &User) -> io::Result<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/usr/bin/timeout")
+        .args(["--signal=KILL", "2s", "/usr/sbin/sshd", "-T", "-C"])
+        .arg(format!("user={}", account.name))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let result = (|| {
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("no sshd output"))?
+            .take(u64::try_from(SPOOL_BYTES + 1).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > SPOOL_BYTES {
+            return Err(io::Error::other("sshd output exceeded its bound"));
+        }
+        if !child.wait()?.success() {
+            return Err(io::Error::other("sshd configuration unavailable"));
+        }
+        Ok(bytes)
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 /// A spool file of the account: opened without following a symlink, owned by

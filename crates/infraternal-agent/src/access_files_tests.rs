@@ -106,8 +106,13 @@ fn new_access_lines_since_the_grant_are_reported_exactly() {
         &no_extra,
     );
     let clean = granted.report(&no_extra);
-    assert_eq!(clean.state, State::Unchanged, "{clean:?}");
-    assert_eq!(clean.accounts[0].state, State::Unchanged);
+    let clean_state = if cfg!(target_os = "macos") {
+        State::NotChecked
+    } else {
+        State::Unchanged
+    };
+    assert_eq!(clean.state, clean_state, "{clean:?}");
+    assert_eq!(clean.accounts[0].state, clean_state);
     let home = &granted.home;
     std::fs::write(
         home.join(".ssh/authorized_keys"),
@@ -577,9 +582,21 @@ fn flood_probe() {
 fn every_watched_place_is_detected() {
     let planted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let spool = planted.clone();
-    let extra = move |_: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
-        if spool.load(std::sync::atomic::Ordering::SeqCst) {
+    let extra = move |account: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+        let planted = spool.load(std::sync::atomic::Ordering::SeqCst);
+        visit(
+            "sshd effective configuration".into(),
+            Ok(b"authorizedkeysfile .ssh/effective-keys\n".to_vec()),
+        );
+        if planted {
             visit("crontab".into(), Ok(b"@reboot /tmp/back\n".to_vec()));
+        }
+        for place in WATCHED.iter().filter(|p| p.watch == Watch::AtSpool) {
+            at_spool(
+                account,
+                &account.dir.join(place.path.trim_start_matches('/')),
+                visit,
+            );
         }
     };
     let granted = Granted::new(|_| {}, &extra);
@@ -599,6 +616,23 @@ fn every_watched_place_is_detected() {
                 .unwrap();
             }
             Watch::Spools => {}
+            Watch::AtSpool => {
+                let directory = granted.home.join(place.path.trim_start_matches('/'));
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join("planted.conf"),
+                    "#!/bin/sh\ncd /tmp || {\n exit 1\n}\n/tmp/back\n",
+                )
+                .unwrap();
+            }
+            Watch::Sshd => {
+                std::fs::create_dir_all(granted.home.join(".ssh")).unwrap();
+                std::fs::write(
+                    granted.home.join(".ssh/effective-keys"),
+                    "ssh-ed25519 AAAAplant\n",
+                )
+                .unwrap();
+            }
         }
     }
     planted.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -606,6 +640,10 @@ fn every_watched_place_is_detected() {
     for place in WATCHED {
         let found = match place.watch {
             Watch::Spools => files.iter().any(|f| f.path == "crontab"),
+            Watch::AtSpool => files
+                .iter()
+                .any(|f| f.path.ends_with(&format!("{}/planted.conf", place.path))),
+            Watch::Sshd => files.iter().any(|f| f.path == "~/.ssh/effective-keys"),
             Watch::File => files.iter().any(|f| f.path == format!("~/{}", place.path)),
             Watch::Directory | Watch::Units => files
                 .iter()
@@ -863,7 +901,14 @@ fn a_report_carries_its_baseline_time() {
     );
     let account = &granted.report(&no_extra).accounts[0];
     assert!(account.recorded_at > 0 && account.scanned_at >= account.recorded_at);
-    assert_eq!(account.watched, WATCHED.len());
+    assert_eq!(
+        account.watched,
+        if cfg!(target_os = "macos") {
+            0
+        } else {
+            WATCHED.len()
+        }
+    );
     assert_eq!(account.places, 1, "one file was there to check");
     assert!(account.complete);
     // D360: the report names what it watched.
@@ -1059,4 +1104,105 @@ fn a_linked_drop_in_directory_exposes_its_plant() {
     )
     .unwrap();
     assert_eq!(granted.report(&no_extra).state, State::Changed);
+}
+
+/// Each newly watched home place must report a plant, not merely raise a count.
+#[test]
+fn newly_watched_home_places_detect_plants() {
+    for path in [
+        "bin/sudo",
+        ".config/systemd/user.conf",
+        ".config/fish/functions/sudo.fish",
+        ".zlogout",
+        ".bashrc.d/back.sh",
+    ] {
+        let granted = Granted::new(|_| {}, &no_extra);
+        let plant = granted.home.join(path);
+        std::fs::create_dir_all(plant.parent().unwrap()).unwrap();
+        std::fs::write(&plant, "j347-plant\n").unwrap();
+        let report = granted.report(&no_extra);
+        assert!(
+            report.accounts[0]
+                .files
+                .iter()
+                .any(|f| f.path == format!("~/{path}") && f.lines == ["j347-plant"]),
+            "{path}: {report:?}"
+        );
+    }
+}
+
+/// Effective sshd key files inside the home are scanned with the same safe walker.
+#[test]
+fn effective_sshd_key_files_are_watched() {
+    let extra = |_: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+        visit("sshd effective configuration".into(), Ok(b"authorizedkeysfile .ssh/custom-%u %%keys\nauthorizedkeyscommand none\nauthorizedprincipalsfile none\nauthorizedprincipalscommand none\n".to_vec()));
+    };
+    let granted = Granted::new(|_| {}, &extra);
+    std::fs::create_dir_all(granted.home.join(".ssh")).unwrap();
+    let path = format!(".ssh/custom-{}", granted.user.name);
+    std::fs::write(granted.home.join(&path), "ssh-ed25519 AAAAj347 plant\n").unwrap();
+    let report = granted.report(&extra);
+    assert!(
+        report.accounts[0]
+            .files
+            .iter()
+            .any(|f| f.path == format!("~/{path}") && f.lines == ["ssh-ed25519 AAAAj347 plant"]),
+        "{report:?}"
+    );
+}
+
+/// Unsupported or unreadable key sources cannot justify a clean report.
+#[test]
+fn unknown_sshd_key_sources_are_not_checked() {
+    for config in [
+        "authorizedkeysfile /etc/ssh/keys/%u\n",
+        "authorizedkeysfile .ssh/authorized_keys\nauthorizedkeyscommand /usr/bin/keys\n",
+        "authorizedkeysfile .ssh/authorized_keys\nauthorizedprincipalsfile .ssh/principals\n",
+        "authorizedkeysfile .ssh/authorized_keys\nauthorizedprincipalscommand /usr/bin/principals\n",
+        "authorizedkeysfile .ssh/%x\n",
+        "unrecognised configuration\n",
+    ] {
+        let extra = |_: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+            visit(
+                "sshd effective configuration".into(),
+                Ok(config.as_bytes().to_vec()),
+            );
+        };
+        let granted = Granted::new(|_| {}, &extra);
+        let report = granted.report(&extra);
+        assert_eq!(report.state, State::NotChecked, "{config}: {report:?}");
+    }
+}
+
+/// Each supported atd spool detects an owned job through the watched table.
+#[test]
+fn both_at_spools_detect_their_plants() {
+    let extra = |account: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+        for place in WATCHED.iter().filter(|p| p.watch == Watch::AtSpool) {
+            at_spool(
+                account,
+                &account.dir.join(place.path.trim_start_matches('/')),
+                visit,
+            );
+        }
+    };
+    for spool in ["var/spool/cron/atjobs", "var/spool/at"] {
+        let granted = Granted::new(|_| {}, &extra);
+        let directory = granted.home.join(spool);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("a00001"),
+            "#!/bin/sh\ncd /tmp || {\n exit 1\n}\n/tmp/j347-plant\n",
+        )
+        .unwrap();
+        let report = granted.report(&extra);
+        assert!(
+            report.accounts[0]
+                .files
+                .iter()
+                .any(|f| f.path.ends_with(&format!("{spool}/a00001"))
+                    && f.lines.iter().any(|l| l.contains("j347-plant"))),
+            "{spool}: {report:?}"
+        );
+    }
 }
