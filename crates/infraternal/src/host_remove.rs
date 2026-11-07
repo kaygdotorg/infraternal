@@ -222,6 +222,9 @@ fn categories_of(account: &Value) -> Vec<String> {
 /// the year and the zone, since a host's and a reader's clocks differ), or
 /// `None` for 0.
 fn utc(seconds: u64) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     if seconds == 0 {
         return None;
     }
@@ -242,9 +245,6 @@ fn utc(seconds: u64) -> Option<String> {
         month_index - 9
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     let name = MONTHS.get(usize::try_from(month - 1).ok()?)?;
     Some(format!(
         "{day} {name} {year}, {:02}:{:02} UTC",
