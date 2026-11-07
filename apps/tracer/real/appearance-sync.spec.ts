@@ -5,6 +5,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
+import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { createThemeStore } from "../src/canvas/themes/model";
 import { cache, watchLayout } from "./layout-observer";
 import { expect, test, type Page } from "playwright/test";
@@ -40,9 +41,9 @@ async function enrol(page: Page, server: { origin: string; token: string }): Pro
   await expect(windows(page)).toHaveCount(1);
 }
 
-/** Changes one palette value through the real command palette. */
+/** Changes one palette value through the real command palette with the browser's platform shortcut. */
 async function choosePaletteValue(page: Page, value: string): Promise<void> {
-  await page.keyboard.press("Control+Shift+K");
+  await page.keyboard.press(await page.evaluate(isMacPlatform) ? "Meta+K" : "Control+Shift+K");
   await expect(page.locator("#palette")).toBeVisible({ timeout: 10_000 });
   await page.locator("#palette-input").fill(value);
   const option = page.locator("#palette-results [role=option]").filter({ hasText: value }).first();
@@ -82,6 +83,7 @@ interface FrameSample {
   to: number;
   intervalMs: number;
   visibility: DocumentVisibilityState;
+  focused: boolean;
 }
 
 /** A root appearance attribute changed while the browser was rendering frames. */
@@ -120,8 +122,9 @@ function measureAppearanceFrames(trace: FrameTrace, attribute: string, value: st
   return { mutations, samples: [...indexes].sort((left, right) => left - right).map((index) => trace.samples[index]!) };
 }
 
-/** Records rendered frame intervals and appearance changes until {@link stopFrameCapture} ends the sample. */
+/** Records rendered frame intervals on the foreground client so background scheduling cannot masquerade as lost appearance frames. */
 async function startFrameCapture(page: Page): Promise<void> {
+  await page.bringToFront();
   await page.evaluate(() => {
     const root = document.documentElement;
     const samples: FrameSample[] = [];
@@ -138,7 +141,7 @@ async function startFrameCapture(page: Page): Promise<void> {
     (window as unknown as { __appearanceFrameCapture?: typeof capture }).__appearanceFrameCapture = capture;
     const frame = (now: number): void => {
       if (!active) return;
-      samples.push({ from: previous, to: now, intervalMs: now - previous, visibility: document.visibilityState });
+      samples.push({ from: previous, to: now, intervalMs: now - previous, visibility: document.visibilityState, focused: document.hasFocus() });
       previous = now;
       requestAnimationFrame(frame);
     };
@@ -202,6 +205,13 @@ test("theme and font changes reach the same account live and after reload withou
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
   const evidence = tracerEvidencePath("appearance-sync");
   await mkdir(evidence, { recursive: true });
+  const neutralPage = await browser.newPage({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 });
+  await neutralPage.goto("about:blank");
+  await startFrameCapture(neutralPage);
+  await waitForFrames(neutralPage, APPEARANCE_FRAME_WINDOW);
+  const neutralFrames = await stopFrameCapture(neutralPage);
+  console.log(`APPEARANCE_NEUTRAL_FRAMES ${JSON.stringify({ intervalsMs: neutralFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: neutralFrames.samples.filter(({ focused }) => focused).length })}`);
+  await neutralPage.close();
   const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
   const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
   /** Keeps the first assertion or navigation error if a disconnected remote browser also rejects cleanup. */
@@ -225,6 +235,11 @@ test("theme and font changes reach the same account live and after reload withou
     await expect.poll(() => cameraTransform(a)).not.toBe(aCameraBefore);
     const aCamera = await cameraTransform(a);
     expect(await cameraTransform(b)).toBe(bCamera);
+
+    await startFrameCapture(b);
+    await waitForFrames(b, APPEARANCE_FRAME_WINDOW);
+    const baselineFrames = await stopFrameCapture(b);
+    console.log(`APPEARANCE_BASELINE_FRAMES ${JSON.stringify({ intervalsMs: baselineFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: baselineFrames.samples.filter(({ focused }) => focused).length })}`);
 
     await startFrameCapture(b);
     await choosePaletteValue(a, "Theme: Solid");
@@ -259,7 +274,7 @@ test("theme and font changes reach the same account live and after reload withou
     expect(fontFrames.mutations.length).toBeGreaterThan(0);
     expect(themeFrames.samples.length).toBeGreaterThan(0);
     expect(fontFrames.samples.length).toBeGreaterThan(0);
-    console.log(`APPEARANCE_FRAMES ${JSON.stringify({ visibility: [...new Set(frameTraces.flatMap((trace) => trace.samples.map(({ visibility }) => visibility)))], theme: { mutations: themeFrames.mutations, intervalsMs: themeFrames.samples.map(({ intervalMs }) => intervalMs) }, font: { mutations: fontFrames.mutations, intervalsMs: fontFrames.samples.map(({ intervalMs }) => intervalMs) }, allFrameSamples: frameIntervalsMs.length, allFramesOver20ms, maxAppearanceFrameIntervalMs: maxFrameIntervalMs, appearanceFramesOver20ms: framesOver20ms })}`);
+    console.log(`APPEARANCE_FRAMES ${JSON.stringify({ visibility: [...new Set(frameTraces.flatMap((trace) => trace.samples.map(({ visibility }) => visibility)))], theme: { mutations: themeFrames.mutations, intervalsMs: themeFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: themeFrames.samples.filter(({ focused }) => focused).length }, font: { mutations: fontFrames.mutations, intervalsMs: fontFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: fontFrames.samples.filter(({ focused }) => focused).length }, allFrameSamples: frameIntervalsMs.length, allFramesOver20ms, maxAppearanceFrameIntervalMs: maxFrameIntervalMs, appearanceFramesOver20ms: framesOver20ms })}`);
     expect(themeFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote theme application and its 20 following frames stay within budget").toBe(0);
     expect(fontFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote font application and its 20 following frames stay within budget").toBe(0);
     expect(framesOver20ms).toBe(0);
