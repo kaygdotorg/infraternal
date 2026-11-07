@@ -16,7 +16,9 @@ export const LEGACY_KEYS = [
 ] as const;
 /** The old theme cache key, kept only to read previous releases and isolated mock pages. */
 export const CACHE_KEY = "tracer.look";
+/** Prefixes the first-paint cache with the authenticated account id. */
 const ACCOUNT_CACHE_PREFIX = "tracer.look.account.";
+/** Names the account that owns legacy device-wide appearance values during migration. */
 const LEGACY_OWNER_KEY = "tracer.look.legacy-owner";
 
 /** The old browser preferences, returned raw so the caller can validate each value against its own model. */

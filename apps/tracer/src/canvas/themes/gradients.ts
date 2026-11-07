@@ -20,18 +20,22 @@ import { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, MIN_STOPS, SOLID_CUSTO
 // The ids and defaults live in backgrounds.ts (they are on the critical path, this module is not); everything that used to import them from here still can.
 export { CUSTOM_ID, DEFAULT_CUSTOM, DEFAULT_CUSTOM_SOLID, DEFAULT_GRADIENT, GRADIENT_IDS, isSolid, MAX_STOPS, MIN_STOPS, SOLID_CUSTOM_ID, SOLID_IDS, type CustomGradient } from "./backgrounds";
 
+/** A gradient option with its stable id, display label, and CSS image. */
 export interface NamedGradient { id: string; name: string; css: string }
 
+/** A solid background option; an empty colour selects the scheme's own background. */
 export interface NamedSolid { id: string; name: string; /** "" for the scheme's own colour, else the colour. */ colour: string }
 
 
 /** Where each blob sits (percent of the width and height) for the three colours of a recipe. */
 type At = [number, number];
+/** Coordinates and palette roles for a named three-colour mesh recipe. */
 interface Recipe { id: string; name: string; /** Indices into the scheme's palette. */ colours: [number, number, number]; at: [At, At, At] }
 
 /** The scheme's palette: 0 accent, 1 red, 2 green, 3 yellow, 4 blue, 5 magenta, 6 cyan. */
 const palette = (theme: Theme): string[] => [theme.accent, theme.ansi[1], theme.ansi[2], theme.ansi[3], theme.ansi[4], theme.ansi[5], theme.ansi[6]];
 
+/** Shared gradient layouts recoloured from each product scheme's palette. */
 const RECIPES: readonly Recipe[] = [
   { id: "aurora", name: "Aurora", colours: [0, 6, 5], at: [[15, 20], [85, 15], [55, 95]] },
   { id: "dusk", name: "Dusk", colours: [5, 1, 0], at: [[10, 85], [90, 60], [50, 5]] },
@@ -49,8 +53,10 @@ export function toned(theme: Theme, hex: string): string {
   const [, a, b] = hexToOklab(hex);
   return oklabToHex([bgL + (theme.dark ? 0.13 : -0.07), a * 0.85, b * 0.85]);
 }
+/** Adds zero alpha to a hex stop so the gradient fades without changing its hue. */
 const clear = (hex: string): string => `${hex}00`;
 
+/** Builds a CSS mesh gradient from one recipe and the selected scheme palette. */
 function meshOf(theme: Theme, recipe: Recipe): string {
   const colours = palette(theme);
   const layers = recipe.colours.map((index, i) => {

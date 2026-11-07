@@ -130,6 +130,7 @@ test("the palette keeps at least the shared 16 px blur in every theme, so no gho
   const blurs: Record<string, number> = {};
   for (const id of ["solid", "tinted", "frosted"]) {
     await page.evaluate((theme) => window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: theme } })), id);
+    // sleep: let theme application settle before reading the palette's computed blur.
     await page.waitForTimeout(400);
     await page.keyboard.press(PALETTE_KEY);
     await expect(page.locator(".palette")).toBeVisible();

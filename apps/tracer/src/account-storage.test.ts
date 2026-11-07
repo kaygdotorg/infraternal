@@ -15,6 +15,7 @@ const g = globalThis as unknown as { localStorage: FakeStorage; sessionStorage: 
 
 beforeEach(() => { g.localStorage = new FakeStorage(); g.sessionStorage = new FakeStorage(); });
 
+/** Seeds account-local canvas and appearance values for cleanup assertions. */
 function fill(account: string): void {
   g.localStorage.setItem(canvasKey(account), "{}");
   g.localStorage.setItem(`tracer.look.account.${encodeURIComponent(account)}`, "{}");

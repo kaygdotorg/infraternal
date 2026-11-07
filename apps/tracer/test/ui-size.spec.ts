@@ -13,6 +13,7 @@ const open = async (page: Page, width = 1440, height = 900): Promise<void> => {
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(900);
 };
+/** Opens the Appearance › Themes settings window through the command palette. */
 const showAppearance = async (page: Page): Promise<void> => {
   await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(350);

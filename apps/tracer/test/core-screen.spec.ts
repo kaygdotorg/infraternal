@@ -13,6 +13,7 @@ async function waitForAttached(page: Page): Promise<void> {
   await expect(page.locator("#rtt")).toHaveText(/^\d+ ms$/, { timeout: 10_000 });
 }
 
+/** Saves a screen capture outside the checkout and attaches it to the Playwright result. */
 async function saveScreenshot(page: Page, testInfo: TestInfo, name: string): Promise<string> {
   const path = tracerEvidencePath("playwright", "core-screen", `${name}.png`);
   await mkdir(resolve(path, ".."), { recursive: true });

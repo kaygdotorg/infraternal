@@ -29,6 +29,7 @@ import { TICK_PATH } from "./tick";
 /** The look of a theme's Colors: the four colours of the card, and the palette dots drawn on it. */
 export interface ThemeHalf { bg: string; fg: string; fg2: string; accent: string; dots: string[] }
 
+/** Theme values used to paint one selectable material card. */
 export interface ThemeCard {
   id: string;
   name: string;
@@ -53,6 +54,7 @@ export interface ThemeCard {
   resettable?: boolean;
 }
 
+/** Content and callbacks supplied when creating a strip of theme cards. */
 export interface ThemeStripOptions {
   /** The group's accessible name. */
   label: string;
@@ -65,6 +67,7 @@ export interface ThemeStripOptions {
   onReset(id: string): void;
 }
 
+/** Stable strip surface whose cards update in place when slider values change. */
 export interface ThemeStrip {
   readonly root: HTMLElement;
   /** Draws the cards. Existing cards are updated in place (a slider drag repaints one card, never rebuilds the strip). */
@@ -74,7 +77,7 @@ export interface ThemeStrip {
   dispose(): void;
 }
 
-/* The card's blur is `--p-blur` (0 to 100) times 0.24 px in styles.css: D322's scale, 0 px = 0% and 24 px = 100%. */
+/** Creates the small, decorative glyphs used by card controls. */
 const SVG = (inner: string): string => `<svg viewBox="0 0 24 24" aria-hidden="true">${inner}</svg>`;
 /** The face of a card: the material over the terminal text, and the caption. */
 function halfMarkup(behind: readonly string[]): string {
@@ -84,8 +87,10 @@ function halfMarkup(behind: readonly string[]): string {
     + `<span class="ui-theme-cap"><span class="ui-theme-name"></span><span class="ui-theme-meta"></span><span class="ui-theme-dots"><i></i><i></i><i></i></span></span>`;
 }
 
+/** DOM handles and updater for one card retained in the strip. */
 interface Drawn { root: HTMLElement; pick: HTMLButtonElement; reset: HTMLButtonElement; paint(card: ThemeCard, selected: boolean): void }
 
+/** Builds one card and wires its selection and reset controls. */
 function drawCard(behind: readonly string[], handlers: { select(id: string): void; reset(id: string): void }): Drawn {
   const root = document.createElement("div");
   root.className = "ui-theme";
@@ -143,6 +148,7 @@ function drawCard(behind: readonly string[], handlers: { select(id: string): voi
   };
 }
 
+/** Creates an accessible, in-place-updatable row of theme cards. */
 export function createThemeStrip(options: ThemeStripOptions): ThemeStrip {
   const root = document.createElement("div");
   root.className = "ui-theme-strip";

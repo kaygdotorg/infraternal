@@ -71,6 +71,7 @@ function renderKeys(pane: HTMLElement, keys: readonly KeyDef[]): () => void {
 /** The panels a window shows, from the table's `panel` (one or several). */
 const panelsOf = (group: GroupDef): readonly PanelId[] => group.panel === undefined ? [] : typeof group.panel === "string" ? [group.panel] : group.panel;
 
+/** Mounts one settings group and returns cleanup for its rows and subscriptions. */
 export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp, group }: Spot): () => void {
   const disposers: Array<() => void> = [];
   const mine = new Map<string, SettingRow>();

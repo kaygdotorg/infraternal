@@ -11,6 +11,7 @@ export function reduce(doc: CanvasDocument, intent: Intent): void {
     for (let at = columns.length - 1; at >= 0; at--) if (!columns[at]!.windows.length && !columns.slice(0, at).some((c, from) => c.windows.some((w) => (w.span ?? 1) > at - from))) columns.splice(at, 1);
   }
 }
+/** Applies one already-validated intent to its canonical document. */
 function apply(doc: CanvasDocument, intent: Intent): void {
   if (intent.type === "look.set") { doc.look = structuredClone(intent.look); return; }
   if (intent.type === "view.add") { if (!doc.views.some((v) => v.id === intent.view.id)) doc.views.push(structuredClone(intent.view)); return; }

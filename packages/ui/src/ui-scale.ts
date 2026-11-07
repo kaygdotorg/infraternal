@@ -31,6 +31,7 @@ const LEGACY_KEY = "tracer.ui-size";
 
 /** The signed-in canvas supplies and records the account's size without a second local source of truth. */
 export interface UiSizePreference { read(): number; write(percent: number): void }
+/** Active account-backed size source; absent only before sign-in or after disposal. */
 let accountPreference: UiSizePreference | undefined;
 
 /** Uses the active account's canvas look until its owning page is disposed. */
@@ -45,6 +46,7 @@ export const clampUiSize = (percent: number): number => Math.min(UI_SIZE.max, Ma
 /** An old stored size (a percentage of 16 px) as a size relative to the base: the same pixels, to the slider's step. */
 export const migrateLegacy = (legacy: number): number => legacy === UI_SIZE.standard ? UI_SIZE.standard : clampUiSize(legacy / UI_BASE);
 
+/** Reads the account size when signed in and falls back to the legacy local value. */
 export function readUiSize(): number {
   if (accountPreference) return accountPreference.read();
   const stored = Number(readLocal(KEY));

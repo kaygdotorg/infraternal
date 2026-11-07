@@ -9,8 +9,11 @@ import { edits, reduce } from "./operations";
 import { FORMAT, MAX_THEMES, parseDocument, parseLook, VERSION, type CanvasDocument, type DocLook } from "./schema";
 import { createThemeStore } from "../themes/model";
 
+/** Baseline account appearance for the serialized look cases. */
 const basics = { colors: "mocha", font: "maple-mono-nf", uiSize: 100 };
+/** An empty canvas document at its first revision. */
 const empty = (): CanvasDocument => ({ format: FORMAT, version: VERSION, revision: 1, views: [] });
+/** A complete persisted look with both canvas-level defaults present. */
 const look = (): DocLook => ({
   ...structuredClone(createThemeStore(basics).snapshot()),
   windowSizes: { phone: "edge", desktop: "comfortable" },

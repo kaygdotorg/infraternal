@@ -112,10 +112,14 @@ export interface ThemeStore {
   onChange(listener: () => void): () => void;
 }
 
+/** Compares every saved field to detect a real theme edit. */
 const same = (a: AppearanceTheme, b: AppearanceTheme): boolean => a.tint === b.tint && a.blur === b.blur && a.grain === b.grain && a.font === b.font && a.colors === b.colors && a.uiSize === b.uiSize && a.background === b.background && a.custom.angle === b.custom.angle && a.custom.stops.join() === b.custom.stops.join() && a.customSolid === b.customSolid;
 
+/** Rounds a finite value into its supported range or uses the supplied fallback. */
 const clamp = (v: unknown, lo: number, hi: number, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : fallback);
+/** Accepts one six-digit CSS hex colour. */
 const isHex = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
+/** Checks whether a saved background id belongs to a built-in option. */
 const isBackground = (v: unknown): v is string => typeof v === "string" && (v === CUSTOM_ID || v === SOLID_CUSTOM_ID || SOLID_IDS.includes(v) || GRADIENT_IDS.includes(v));
 
 /**

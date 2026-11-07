@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+/** @module Creates deterministic grain tiles for theme surfaces. */
 /**
  * Film grain for the window surfaces (D341, #323). The owner: "grain should be applied to the window, not the background", and
  * "how much is 100% grain btw? it looks too much, can our slider be tamed a little like we did with blur 0 being 0 and 100% being 24px?"
@@ -16,6 +17,7 @@
  * amount is baked into the tile (a different tile for each whole percent, made once and kept), because a background layer has no opacity of its own.
  */
 export const GRAIN_MAX = 0.04;
+/** Reuses a generated tile for each whole-percent grain amount. */
 const made = new Map<number, string>();
 
 /** A CSS image for an amount of grain, 0 to 100: "none" for none, else a data URL of a 128 px tile. The same amount gives the same tile. */

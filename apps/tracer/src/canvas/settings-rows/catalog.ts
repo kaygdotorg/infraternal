@@ -38,6 +38,7 @@ export type PanelId = "windows" | "hosts" | "toolbar" | "shortcuts" | "account" 
 /** The docs heading a window's "?" opens (`docs/docs-adapter.ts`). Absent on a group: no page yet. */
 export type { DocsLink };
 
+/** Describes a group of settings rows and the panel that owns them. */
 export interface GroupDef {
   id: string;
   title: string;
@@ -64,6 +65,7 @@ export interface ComponentDef {
 }
 
 
+/** Maps product setting windows to their shared row groups. */
 export const SETTINGS_MAP: readonly ComponentDef[] = [
   { id: "appearance", title: "Appearance", icon: "appearance", groups: [
     // A theme holds Colour, backgrounds, tint, blur, grain, font and UI size, so one window edits all of them (D322, D338): the Font and Size windows are part of it.

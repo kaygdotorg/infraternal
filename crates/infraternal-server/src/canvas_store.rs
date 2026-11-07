@@ -535,6 +535,7 @@ impl infraternal_plugin_canvas::store::LayoutStore for Store {
         Box::pin(async move { Store::events(self, account, after).await.map_err(|_| ()) })
     }
 }
+/// SQLite-backed canvas store behavior and account-isolation tests.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,8 +649,8 @@ mod tests {
     #[tokio::test]
     async fn appearance_edits_are_persisted_for_only_the_authorized_account() {
         let store = fixture().await;
-        let init = serde_json::to_vec(&json!({"op_id":"init-a","document":Document::default()}))
-            .unwrap();
+        let init =
+            serde_json::to_vec(&json!({"op_id":"init-a","document":Document::default()})).unwrap();
         assert_eq!(store.initialize("a", &init).await.unwrap(), 1);
 
         let look = json!({

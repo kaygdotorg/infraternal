@@ -1298,6 +1298,7 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
       // Sideways, to the next window of the row: the group changes with the window in view.
       // The Appearance row (Themes, Layout) fits a desktop screen, so it has no sideways step; the Terminal row has four windows and does.
       await goTo(page, "canvas:settings:terminal.typing");
+      // sleep: let the camera settle on the newly targeted window before the sideways wheel gesture.
       await page.waitForTimeout(1200);
       await page.mouse.wheel(300, 0);
       await page.waitForTimeout(1200);

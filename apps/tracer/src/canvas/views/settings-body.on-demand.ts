@@ -57,6 +57,7 @@ function authorityPref(control: AuthorityControl): StatusActionPref {
   };
 }
 
+/** Renders one settings section inside a canvas window and returns its cleanup callback. */
 export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement): () => void {
   const { core } = cx;
   // Plain names; the technical detail (the percentage) is in each option's subtitle (the plain-names rule).

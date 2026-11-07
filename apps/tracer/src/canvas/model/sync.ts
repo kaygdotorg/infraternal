@@ -20,6 +20,7 @@ export interface DocumentSync {
   dispose(): void;
 }
 
+/** Saves structural canvas edits and shared look changes through the same document adapter. */
 export function createDocumentSync(cx: Ctx, persisted: (id: string) => boolean = () => true): DocumentSync {
   let queued = false;
   let disposed = false;

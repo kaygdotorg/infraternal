@@ -108,6 +108,7 @@ export interface CanvasState {
   recent: Map<ViewId, RecentList<string>>;
 }
 
+/** Runtime services supplied to a canvas context by its host. */
 export interface Adapters {
   /** Registry-labelled removal, shared by the palette and machine popover. */
   /** Raises an agent's privileges after the person's consent (#215); absent, the machine details show no "Access level" row. */

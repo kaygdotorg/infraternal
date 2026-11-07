@@ -15,6 +15,7 @@ import { hexToOklab, oklabToHex } from "../packages/ui/src/color";
 import type { Ansi, Theme } from "../packages/ui/src/themes";
 import { gradientColours } from "../apps/tracer/src/canvas/themes/gradients";
 
+/** Published palette values and provenance used as input to the D80 contrast repair. */
 interface Published {
   id: string; name: string; dark: boolean; source: string;
   bg: string; fg: string; fg2: string; fg3: string; accent: string;
@@ -26,6 +27,7 @@ interface Published {
   black?: string; white?: string;
 }
 
+/** Source palettes to audit and print in the product's scheme format. */
 const SCHEMES: Published[] = [
   { id: "solarized-light", name: "Solarized Light", dark: false, source: "Solarized (Ethan Schoonover), base3 background",
     bg: "#fdf6e3", fg: "#586e75", fg2: "#657b83", fg3: "#93a1a1", accent: "#268bd2",
@@ -86,7 +88,9 @@ const SCHEMES: Published[] = [
 /** Moves a colour's OKLab lightness by `delta`, keeping hue and chroma. */
 const shifted = (hex: string, delta: number): string => { const [l, a, b] = hexToOklab(hex); return oklabToHex([Math.max(0, Math.min(1, l + delta)), a, b]); };
 
+/** Contrast changes recorded for the D80 repair report. */
 const log: string[] = [];
+/** Generated scheme declarations printed for review and copying into themes.ts. */
 const out: string[] = [];
 for (const s of SCHEMES) {
   const note = (role: string, from: string, to: string): void => { if (from !== to) log.push(`| ${s.name} | ${role} | ${from} (${contrast(from, s.bg).toFixed(2)}:1) | ${to} (${contrast(to, s.bg).toFixed(2)}:1) |`); };

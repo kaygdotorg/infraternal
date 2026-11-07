@@ -14,6 +14,7 @@
  */
 import { THEMES } from "../../../../../packages/ui/src/themes";
 
+/** One colour family, with optional light and dark versions. */
 export interface Family {
   id: string;
   name: string;
@@ -22,6 +23,7 @@ export interface Family {
   dark?: string;
 }
 
+/** Scheme ids that share one picker row, in the product's display order. */
 const PAIRS: ReadonlyArray<{ id: string; name: string; light: string; dark: string }> = [
   { id: "catppuccin", name: "Catppuccin", light: "latte", dark: "mocha" },
   { id: "rosepine", name: "Rosé Pine", light: "dawn", dark: "rosepine" },
@@ -50,6 +52,7 @@ export const FAMILIES: readonly Family[] = (() => {
 
 /** The row a theme belongs to. */
 export const familyOf = (themeId: string): Family => FAMILIES.find((f) => f.light === themeId || f.dark === themeId) ?? FAMILIES[0]!;
+/** Indicates that the family has both light and dark variants. */
 export const hasBoth = (f: Family): boolean => Boolean(f.light && f.dark);
 /** The version a click on a scheme's name picks: the one in the mode the person is in now, or the only one the scheme has. */
 export const versionIn = (f: Family, dark: boolean): string => ((dark ? f.dark ?? f.light : f.light ?? f.dark))!;

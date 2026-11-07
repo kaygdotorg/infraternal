@@ -65,7 +65,9 @@ interface StartThemesOptions {
   preview?: string;
 }
 
+/** The page's one theme store, shared by settings, palette, and canvas adapters. */
 let shared: ThemeStore | undefined;
+/** The active account-document adapter for this page's appearance. */
 let bridge: LookAdapter | undefined;
 
 /** The page's one theme store; undefined before {@link startThemes} has run. */
@@ -299,4 +301,5 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   return stop;
 }
 
+/** Cleanup for the current page theme controller, if it has started. */
 let stopRunning: (() => void) | undefined;

@@ -20,15 +20,20 @@ import { writeFileSync, appendFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** Base URL for the production tracer served by the benchmark fixture. */
 const BASE = process.env.BENCH_BASE ?? "http://localhost:5400";
 const [browser, out, repeatsArg] = process.argv.slice(2);
 if (!["safari", "chrome"].includes(browser ?? "") || !out) { console.error("usage: node bench-blur-mac.mjs safari|chrome <out.jsonl> [repeats]"); process.exit(2); }
+/** Number of times the look and window-count matrix is measured. */
 const REPEATS = Number(repeatsArg ?? 1);
+/** Duration of each idle or drag frame recording. */
 const SPAN_MS = 5000;
+/** Waits for a browser transition or recording interval to finish. */
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** The three looks, as the saved themes the page starts from (null: nothing saved, so a new person's default, Tinted). */
 const BASICS = { colors: "mocha", font: "maple-mono-nf", uiSize: 100 };
+/** Appearance states compared by the benchmark. */
 const LOOKS = {
   solid: { v: 1, selected: "solid", basics: BASICS, themes: [] },
   tinted: null,
@@ -68,6 +73,7 @@ async function safariDriver() {
   };
 }
 
+/** Starts Chrome with a clean profile and drives its tab through the DevTools protocol. */
 async function chromeDriver() {
   const dir = mkdtempSync(join(tmpdir(), "j206-chrome-"));
   const port = 9333;
@@ -128,11 +134,11 @@ function stats(times) {
   return { frames: times.length, fps: +(times.length / seconds).toFixed(1), p50: +q(sorted, 0.5).toFixed(1), p95: +q(sorted, 0.95).toFixed(1), worst: +sorted.at(-1).toFixed(1), dropped: gaps.filter((g) => g > 25).length, droppedPercent: +((100 * gaps.filter((g) => g > 25).length) / gaps.length).toFixed(1) };
 }
 
-// Each recording has its own object, held by its own loop: a loop left over from the last recording would otherwise see the new one switched on and keep adding samples.
+/** Starts a fresh animation-frame recorder; each loop owns its buffer and stop flag. */
 const RECORD_START = "const rec = { t: [], on: true }; window.__fr = rec; const loop = (now) => { if (!rec.on) return; rec.t.push(now); requestAnimationFrame(loop); }; requestAnimationFrame(loop); return true;";
+/** Stops the active frame recorder and returns its timestamps. */
 const RECORD_STOP = "const rec = window.__fr; rec.on = false; return rec.t;";
 
-/** Seeds the saved themes (device and account), reloads, and brings the canvas to `count` terminal windows in the Console view. */
 /** Waits (up to `ms`) until the page's own probe of the canvas exists, so nothing is driven before the canvas has mounted. */
 async function ready(driver, ms = 45_000) {
   for (let waited = 0; waited < ms; waited += 500) {
@@ -142,6 +148,7 @@ async function ready(driver, ms = 45_000) {
   throw new Error("the canvas did not mount");
 }
 
+/** Seeds a saved look, reloads the canvas, and arranges `count` visible terminal windows. */
 async function prepare(driver, look, count, attempt = 1) {
   await driver.goto(`${BASE}/?mock=1&proto=clusters&scene=3&theme=mocha&bg=soft`);
   await ready(driver);
@@ -185,6 +192,7 @@ async function prepare(driver, look, count, attempt = 1) {
   }
 }
 
+/** Records idle and dragged frame intervals for one look, window count, and repetition. */
 async function measure(driver, look, count, run) {
   await prepare(driver, look, count);
   const meta = await driver.run(`
@@ -212,6 +220,7 @@ async function measure(driver, look, count, run) {
 }
 
 writeFileSync(out, "");
+/** The selected browser automation driver used for the full measurement matrix. */
 const driver = await (browser === "safari" ? safariDriver() : chromeDriver());
 try {
   for (let run = 1; run <= REPEATS; run++) for (const count of (process.env.BENCH_COUNTS ?? "4,12").split(",").map(Number)) for (const look of Object.keys(LOOKS)) await measure(driver, look, count, run);

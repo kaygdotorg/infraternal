@@ -18,6 +18,7 @@ type Probe = {
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
+/** Opens a named mock canvas scene for cluster geometry and gesture assertions. */
 async function open(page: Page, scene: number, query = ""): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 900 });
   // These specs check gestures, geometry and timing, not a look: they run on the Solid theme (`look=solid`). Under the default Tinted theme the windows' 6 px blur costs

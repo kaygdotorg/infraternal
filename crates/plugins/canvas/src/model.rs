@@ -129,6 +129,7 @@ pub(crate) fn view(value: &Value) -> bool {
 }
 /// How many themes one account's look may hold. An intent carries the whole list, and an intent is at most `MAX_INPUT` bytes.
 pub(crate) const MAX_THEMES: usize = 16;
+/// Accepts an integer numeric field inside the supplied inclusive bounds.
 fn whole(value: &Value, key: &str, low: f64, high: f64) -> bool {
     numeric(value, key, low, high)
         && value
@@ -136,6 +137,7 @@ fn whole(value: &Value, key: &str, low: f64, high: f64) -> bool {
             .and_then(Value::as_f64)
             .is_some_and(|v| v.fract() == 0.0)
 }
+/// Checks for a six-digit CSS hex colour string.
 fn hex(value: &Value) -> bool {
     value.as_str().is_some_and(|s| {
         s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())
@@ -189,8 +191,7 @@ pub(crate) fn look(value: &Value) -> bool {
             "windowSizes",
             "extendedInfo",
         ],
-    )
-        && value.get("v").and_then(Value::as_u64) == Some(1)
+    ) && value.get("v").and_then(Value::as_u64) == Some(1)
         && string(value, "selected").is_some()
         && value.get("basics").is_some_and(|basics| {
             shape(basics, &["colors", "font", "uiSize"])
@@ -221,9 +222,7 @@ pub(crate) fn look(value: &Value) -> bool {
                     Some("comfortable" | "wide" | "full")
                 )
         })
-        && value
-            .get("extendedInfo")
-            .is_none_or(Value::is_boolean)
+        && value.get("extendedInfo").is_none_or(Value::is_boolean)
 }
 pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
     doc.get("views")

@@ -12,9 +12,13 @@ import { mkdirSync } from "node:fs";
 import { expect, test, type Browser, type Page } from "playwright/test";
 import { paletteOpen } from "./settings-palette";
 
+/** Optional directory for the review screenshots written by the capture cases. */
 const SHOTS = process.env.THEMES_SHOTS;
+/** Selector for the Themes settings window in both test canvases. */
 const WINDOW = '[data-window-id="s-appearance-themes"]';
+/** Maximum accepted geometry difference, in CSS pixels, for alignment assertions. */
 const HALF = 0.5;
+/** Asserts that two measured CSS positions differ by at most half a pixel. */
 const near = (a: number, b: number, what: string): void => { expect(Math.abs(a - b), `${what}: ${a.toFixed(2)} vs ${b.toFixed(2)}`).toBeLessThanOrEqual(HALF); };
 
 /** Opens the product canvas on the Themes window. `theme` is the colour scheme the page starts in (a new person starts Tinted over it). */
@@ -22,6 +26,7 @@ async function open(page: Page, theme = "mocha"): Promise<void> {
   await page.goto(`/?mock=1&proto=clusters&docs=1&scene=3&theme=${theme}&at=appearance.themes`);
   await expect(page.locator(`${WINDOW} .ui-theme-strip`)).toBeVisible({ timeout: 25_000 });
   await expect(page.locator(`${WINDOW} .ui-theme[data-id="tinted"]`)).toBeVisible();
+  // sleep: let the opening camera and panel transitions settle before geometry assertions.
   await page.waitForTimeout(1500);
 }
 /** The numbers the page is showing for the selected theme. */
@@ -99,8 +104,13 @@ test.describe("the Themes window", () => {
     const edge = (await page.locator(`${WINDOW} .ui-window-resize[data-edge="e"]`).boundingBox())!;
     const x = edge.x + edge.width / 2, y = edge.y + edge.height / 2 + 100;
     await page.mouse.move(x, y); await page.mouse.down();
-    for (let k = 1; k <= 12; k++) { await page.mouse.move(x + k * 40, y); await page.waitForTimeout(25); }
+    for (let k = 1; k <= 12; k++) {
+      await page.mouse.move(x + k * 40, y);
+      // sleep: pace pointer movement so each resize sample can be rendered during the drag.
+      await page.waitForTimeout(25);
+    }
     await page.mouse.up();
+    // sleep: let the window resize spring settle before comparing the new column positions.
     await page.waitForTimeout(600);
     await windows.scrollIntoViewIfNeeded();
     await expect.poll(async () => { const w = await where(); return Math.abs(w[0]!.y - w[1]!.y) < HALF && Math.abs(w[1]!.y - w[2]!.y) < HALF && w[0]!.x < w[1]!.x; }, { timeout: 5000 }).toBe(true);
@@ -158,6 +168,7 @@ test.describe("the Themes window", () => {
     await page.locator("#palette-input").fill("Theme: ");
     await expect(page.locator('#palette-results .result[data-action="themes:frosted"]')).toBeVisible();
     await page.locator("#palette-input").fill("transparency");
+    // sleep: allow the debounced palette search to finish before reading its rows.
     await page.waitForTimeout(500);
     const rows = await page.locator("#palette-results .result").allTextContents();
     expect(rows.filter((r) => /(card|window) transparency/i.test(r)), "no Card or Window transparency rows").toEqual([]);
@@ -194,12 +205,16 @@ test.describe("the Themes window", () => {
 // ---- in the product: the look is the account's, in the canvas document (D322, D178, D180) ----------------------------------------------------------------
 // Against the real layout store (`layout=server`) and the test double's server, which applies the same edits as the real one: a look chosen on one device is the
 // look of the account on every other; the browser keeps only a first-paint cache of the selected theme.
+/** Product-canvas route backed by the real per-account layout adapter. */
 const PRODUCT = "/?mock=1&proto=product&layout=server&theme=mocha&bg=none";
+/** Appearance fields read from the account document in the test double. */
 interface DocLookLike { selected: string; themes: Array<{ id: string; name: string; tint: number; blur: number; font: string }> }
+/** Base URL for the local real-server fixture used by product-canvas cases. */
 const baseURL = (): string => `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`;
 /** The look the account's document holds right now, as the test double has it (null: none yet). */
 const accountLook = (page: Page): Promise<DocLookLike | null> => page.evaluate(() => fetch("/__mock/layout").then((r) => r.json()).then((d: { document: { look?: unknown } }) => (d.document.look ?? null) as never));
 
+/** Opens one product-canvas page and optionally preserves its account document. */
 async function openProduct(page: Page, query = "", reset = true): Promise<void> {
   if (reset) {
     expect((await page.context().request.post("/__mock/reset")).ok()).toBe(true);
@@ -209,6 +224,7 @@ async function openProduct(page: Page, query = "", reset = true): Promise<void> 
   await page.goto(`${PRODUCT}${query}`);
   await expect(page.locator('.cl[data-view="console"] .ui-window')).toHaveCount(1, { timeout: 30_000 });
 }
+/** Navigates the active product page to the Themes settings window. */
 async function openThemes(page: Page): Promise<void> {
   await paletteOpen(page, "Appearance › Themes", "appearance.themes");
   await expect(page.locator(`${WINDOW} .ui-theme-strip`)).toBeVisible({ timeout: 25_000 });
@@ -283,6 +299,7 @@ test.describe("the look is the account's, saved in the canvas document", () => {
     await tint.scrollIntoViewIfNeeded();
     await tint.fill("30");
     await page.locator(`${WINDOW} .ui-theme[data-id="tinted"] .ui-theme-pick`).click();
+    // sleep: exceed the account-edit debounce window so any erroneous preview save becomes visible.
     await page.waitForTimeout(2000);
     expect(await page.evaluate(() => localStorage.getItem("tracer.look")), "the first-paint cache is exactly what it was").toBe(cache);
     expect((await accountLook(page))?.selected, "the account still has the person's own choice").toBe("frosted");
@@ -294,11 +311,13 @@ test.describe("the look is the account's, saved in the canvas document", () => {
 });
 
 // The review captures: written only when THEMES_SHOTS is set.
+/** Desktop and phone viewports used for the review captures. */
 const SIZES = [
   { name: "desktop-1440x900", viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
   { name: "phone-393x852", viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
   { name: "phone-375x667", viewport: { width: 375, height: 667 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true },
 ] as const;
+/** Representative dark and light schemes for the capture set. */
 const MODES = { dark: "mocha", light: "latte" } as const;
 for (const size of SIZES) for (const [mode, theme] of Object.entries(MODES)) {
   test.describe(`captures ${size.name} ${mode}`, () => {
@@ -312,6 +331,7 @@ for (const size of SIZES) for (const [mode, theme] of Object.entries(MODES)) {
       for (const [n, title] of ["Colour", "Backgrounds", "Windows", "Fonts"].entries()) {
         await page.locator(`${WINDOW} .ui-ts-title:text-is("${title}")`).scrollIntoViewIfNeeded();
         await pane.evaluate((el, t) => { const h = [...el.querySelectorAll(".ui-ts-title")].find((x) => x.textContent === t)!; (el as HTMLElement).scrollTop += h.getBoundingClientRect().top - el.getBoundingClientRect().top - 8; }, title);
+        // sleep: let the scrolled settings section settle before capturing it.
         await page.waitForTimeout(250);
         await page.screenshot({ path: `${SHOTS}/${size.name}-${mode}-${n + 1}-${title.toLowerCase()}.png` });
       }

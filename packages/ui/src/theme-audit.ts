@@ -39,6 +39,7 @@ export interface AuditFailure { role: string; colour: string; ratio: number; nee
 
 /** The ANSI hue slots held to 4.5:1: red, green, yellow, blue, magenta, cyan (indices 1 to 6 of the eight-colour tables). */
 const HUES = [1, 2, 3, 4, 5, 6] as const;
+/** Readable labels corresponding to the ANSI hue slots in {@link HUES}. */
 const HUE_NAMES = ["red", "green", "yellow", "blue", "magenta", "cyan"] as const;
 
 /** Every colour of a scheme with the ratio D80 asks of it, in the order they are reported. */

@@ -57,6 +57,7 @@ export interface DocLook {
 
 export { MAX_THEMES };
 
+/** The persistent canvas document shared by an account's devices. */
 export interface CanvasDocument {
   format: typeof FORMAT;
   version: typeof VERSION;
@@ -79,6 +80,7 @@ const shape = (v: Record<string, unknown>, keys: readonly string[]): boolean => 
 const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= MAX_TEXT;
 const finite = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
+/** Validates an untrusted window target and retains only its supported fields. */
 function parseTarget(v: unknown): DocTarget | undefined {
   if (!isObject(v)) return undefined;
   if (v.type === "session" && text(v.id) && text(v.host) && (v.hostId === undefined || isCanonicalUuid(v.hostId)) && (v.pinned === undefined || typeof v.pinned === "boolean")) return { type: "session", id: v.id, host: v.host, ...(isCanonicalUuid(v.hostId) ? { hostId: v.hostId, ...(text(v.user) ? { user: v.user } : {}), ...(text(v.address) ? { address: v.address } : {}) } : {}), ...(text(v.name) ? { name: v.name } : {}), ...(v.pinned === true ? { pinned: true } : {}) };
@@ -87,7 +89,9 @@ function parseTarget(v: unknown): DocTarget | undefined {
   return undefined;
 }
 
+/** Accepts an integer within the supplied inclusive bounds. */
 const whole = (v: unknown, lo: number, hi: number): v is number => finite(v, lo, hi) && Number.isInteger(v);
+/** Accepts one six-digit CSS hex colour. */
 const hex = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
 
 /** Checks an untrusted look with the server's bounds (text up to 200 characters, percentages 0 to 100, size 50 to 150, hex colours, at most 16 distinct themes). */

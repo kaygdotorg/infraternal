@@ -5,6 +5,7 @@ import { blurPercent, blurPx, createThemeStore, restore } from "./model";
 import { THEMES } from "../../../../../packages/ui/src/themes";
 import { backgroundCss, customGradient, GRADIENT_IDS, gradientColours, gradientsFor, isSolid, SOLID_IDS, solidsFor } from "./gradients";
 
+/** Standard appearance used as the starting point for store behavior tests. */
 const basics = { colors: "mocha", font: "maple-mono-nf", uiSize: 100 };
 
 test("blur is a percentage: 0 px is 0% and 24 px is 100%", () => {
@@ -143,6 +144,7 @@ test("a solid choice takes part in Reset and Add like any other", () => {
   store.reset("solid");
   expect(store.themes().find((p) => p.id === "solid")).toMatchObject({ background: "solid", customSolid: "#3b4252" });
 });
+/** Expected starting custom gradient shared with the model defaults. */
 const DEFAULT_CUSTOM_FOR_TEST = { stops: ["#7a9cff", "#cba6f7"], angle: 135 };
 
 test("grain is part of a theme: none to start, in Reset and in Add", () => {

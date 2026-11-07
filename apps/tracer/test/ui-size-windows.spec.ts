@@ -33,6 +33,7 @@ const drawn = (page: Page): Promise<number[]> => page.evaluate((sel) => [...docu
  *  itself drawn in rem (its gutters grow and shrink with the UI size), so it is read where it is. */
 const expectedDefault = async (page: Page, f: number): Promise<number> => Math.min(Math.round((await canvasWidth(page)) * 0.99), Math.round(Math.max(400, Math.min(640, Math.round(((await canvasWidth(page)) - 24) / 3))) * f));
 const canvasWidth = (page: Page): Promise<number> => page.evaluate((sel) => document.querySelector<HTMLElement>(sel)!.clientWidth, VIEWPORT);
+/** Opens the Appearance › Themes settings window through the command palette. */
 const showAppearance = async (page: Page): Promise<void> => {
   await page.keyboard.press("Control+Shift+K");
   await page.waitForTimeout(350);

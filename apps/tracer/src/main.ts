@@ -104,6 +104,7 @@ let deviceApprovalLink: ApprovalLink = consumeDeviceApprovalLink();
 let deviceApprovalComplete = false;
 type UiFont = "sans" | "mono";
 
+/** UI font chosen for the signed-out authentication flow. */
 const authUiFont = uiFontPreference();
 document.documentElement.dataset.uiFont = authUiFont;
 
@@ -416,6 +417,7 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
+/** Opens the authenticated terminal screen, reusing a startup session when available. */
 async function showTerminal(knownSession?: DrawingIdentity, instant = false): Promise<void> {
   // Startup already authenticated this snapshot. Reuse it rather than adding
   // another network round trip; the socket still checks authority on connection.
