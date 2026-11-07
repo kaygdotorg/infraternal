@@ -472,8 +472,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   try {
     const { mountCoreScreen } = await import("./core-screen");
     // The screen mounts only after its selected face is ready, preventing a one-frame
-    // fallback and keeping the mobile layout stable while the font loads.
-    await (uiFont === "mono" ? loadFont(initialFont(activeUserId)) : document.fonts.load('450 14px "Geist Sans"'));
+    // fallback and keeping the mobile layout stable while the font loads. The pre-auth
+    // bootstrap may have applied a different face, so apply the account face it just loaded.
+    if (uiFont === "mono") {
+      const font = initialFont(activeUserId);
+      await loadFont(font);
+      applyFontVars(font, document.documentElement);
+    } else await document.fonts.load('450 14px "Geist Sans"');
     if (generation !== sessionGeneration) return;
     // Geist Mono is the product face (TASTE §2); `?ui=` is a page-only preview and is never stored.
     document.documentElement.dataset.uiFont = uiFont;

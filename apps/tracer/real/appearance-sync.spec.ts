@@ -99,8 +99,33 @@ interface FrameTrace {
   mutations: AppearanceMutation[];
 }
 
-/** The look window spans the changed frame and twenty following frames, enough to cover the page's short appearance transition. */
-const APPEARANCE_FRAME_WINDOW = 20;
+/** Cumulative renderer counters returned by Chromium's Performance domain. */
+type RendererMetrics = Record<string, number>;
+
+/** Reads renderer work counters for one page without recording network or page-content traces. */
+async function startRendererMetrics(page: Page): Promise<{ sample(): Promise<RendererMetrics>; close(): Promise<void> }> {
+  const session = await page.context().newCDPSession(page);
+  await session.send("Performance.enable");
+  return {
+    async sample() {
+      const response = await session.send("Performance.getMetrics") as { metrics: Array<{ name: string; value: number }> };
+      return Object.fromEntries(response.metrics.map(({ name, value }) => [name, value]));
+    },
+    close: () => session.detach(),
+  };
+}
+
+/** Reports the cumulative main-thread counters that changed between two renderer samples. */
+function rendererMetricDelta(before: RendererMetrics | undefined, after: RendererMetrics | undefined): RendererMetrics {
+  if (!before || !after) return {};
+  const names = ["TaskDuration", "ScriptDuration", "RecalcStyleDuration", "LayoutDuration", "DevToolsCommandDuration", "ProcessTime"];
+  return Object.fromEntries(names.flatMap((name) => before[name] === undefined || after[name] === undefined
+    ? []
+    : [[name, Number((after[name]! - before[name]!).toFixed(4))]]));
+}
+
+/** The look window covers the changed frame and twelve following frames, including the 180 ms window-border colour transition. */
+const APPEARANCE_FRAME_WINDOW = 12;
 
 /** Waits for a fixed number of rendered frames without tying the spec to a wall-clock sleep. */
 async function waitForFrames(page: Page, count: number): Promise<void> {
@@ -129,7 +154,7 @@ async function startFrameCapture(page: Page): Promise<void> {
     const root = document.documentElement;
     const samples: FrameSample[] = [];
     const mutations: AppearanceMutation[] = [];
-    let active = true, previous = performance.now();
+    let active = true, previous: number | undefined;
     const observer = new MutationObserver((records) => {
       for (const record of records) {
         const attribute = record.attributeName;
@@ -141,7 +166,8 @@ async function startFrameCapture(page: Page): Promise<void> {
     (window as unknown as { __appearanceFrameCapture?: typeof capture }).__appearanceFrameCapture = capture;
     const frame = (now: number): void => {
       if (!active) return;
-      samples.push({ from: previous, to: now, intervalMs: now - previous, visibility: document.visibilityState, focused: document.hasFocus() });
+      // Use two RAF timestamps: performance.now() just before the first RAF is not its frame boundary.
+      if (previous !== undefined) samples.push({ from: previous, to: now, intervalMs: now - previous, visibility: document.visibilityState, focused: document.hasFocus() });
       previous = now;
       requestAnimationFrame(frame);
     };
@@ -210,12 +236,14 @@ test("theme and font changes reach the same account live and after reload withou
   await startFrameCapture(neutralPage);
   await waitForFrames(neutralPage, APPEARANCE_FRAME_WINDOW);
   const neutralFrames = await stopFrameCapture(neutralPage);
+  expect(neutralFrames.samples.every(({ intervalMs }) => intervalMs >= 0), "frame intervals use consecutive RAF timestamps").toBe(true);
   console.log(`APPEARANCE_NEUTRAL_FRAMES ${JSON.stringify({ intervalsMs: neutralFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: neutralFrames.samples.filter(({ focused }) => focused).length })}`);
   await neutralPage.close();
   const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
   const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2, ignoreHTTPSErrors: true });
   /** Keeps the first assertion or navigation error if a disconnected remote browser also rejects cleanup. */
   let bodyFailure: { error: unknown } | undefined;
+  let rendererProbe: Awaited<ReturnType<typeof startRendererMetrics>> | undefined;
   try {
     const a = watchLayout(await first.newPage());
     await enrol(a, server); await settled(a);
@@ -236,30 +264,47 @@ test("theme and font changes reach the same account live and after reload withou
     const aCamera = await cameraTransform(a);
     expect(await cameraTransform(b)).toBe(bCamera);
 
+    rendererProbe = browser.browserType().name() === "chromium" ? await startRendererMetrics(b) : undefined;
+    const baselineRendererBefore = await rendererProbe?.sample();
     await startFrameCapture(b);
     await waitForFrames(b, APPEARANCE_FRAME_WINDOW);
     const baselineFrames = await stopFrameCapture(b);
+    const baselineRendererAfter = await rendererProbe?.sample();
     console.log(`APPEARANCE_BASELINE_FRAMES ${JSON.stringify({ intervalsMs: baselineFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: baselineFrames.samples.filter(({ focused }) => focused).length })}`);
 
     await startFrameCapture(b);
+    const themeRendererBefore = await rendererProbe?.sample();
+    const themeWindowStartedAt = await b.evaluate(() => performance.now());
     await choosePaletteValue(a, "Theme: Solid");
     await expect.poll(async () => {
       const look = (await cache(b)).canonical.look;
       return look?.selected === "solid";
     }, { timeout: 30_000 }).toBe(true);
     await expect.poll(() => b.locator("html").getAttribute("data-look"), { timeout: 30_000 }).toBe("solid");
+    const themeRendererApplied = await rendererProbe?.sample();
     await waitForFrames(b, APPEARANCE_FRAME_WINDOW);
     const themeTrace = await stopFrameCapture(b);
+    const themeRendererAfter = await rendererProbe?.sample();
+    const themeActionMeasures = await b.evaluate((startedAt) => performance.getEntriesByType("measure")
+      .filter((entry) => entry.name.startsWith("appearance:") && entry.startTime >= startedAt)
+      .map((entry) => ({ name: entry.name, durationMs: entry.duration, startTimeMs: entry.startTime })), themeWindowStartedAt);
 
     await startFrameCapture(b);
+    const fontRendererBefore = await rendererProbe?.sample();
+    const fontWindowStartedAt = await b.evaluate(() => performance.now());
     await choosePaletteValue(a, "Fira Code");
     await expect.poll(async () => {
       const look = (await cache(b)).canonical.look;
       return look?.selected === "solid" && look.themes.find((theme) => theme.id === "solid")?.font === "fira-code";
     }, { timeout: 30_000 }).toBe(true);
     await expect.poll(() => b.locator("html").getAttribute("data-font"), { timeout: 30_000 }).toBe("fira-code");
+    const fontRendererApplied = await rendererProbe?.sample();
     await waitForFrames(b, APPEARANCE_FRAME_WINDOW);
     const fontTrace = await stopFrameCapture(b);
+    const fontRendererAfter = await rendererProbe?.sample();
+    const fontActionMeasures = await b.evaluate((startedAt) => performance.getEntriesByType("measure")
+      .filter((entry) => entry.name.startsWith("appearance:") && entry.startTime >= startedAt)
+      .map((entry) => ({ name: entry.name, durationMs: entry.duration, startTimeMs: entry.startTime })), fontWindowStartedAt);
     const themeFrames = measureAppearanceFrames(themeTrace, "data-look", "solid");
     const fontFrames = measureAppearanceFrames(fontTrace, "data-font", "fira-code");
     const frameTraces = [themeTrace, fontTrace];
@@ -274,10 +319,11 @@ test("theme and font changes reach the same account live and after reload withou
     expect(fontFrames.mutations.length).toBeGreaterThan(0);
     expect(themeFrames.samples.length).toBeGreaterThan(0);
     expect(fontFrames.samples.length).toBeGreaterThan(0);
-    console.log(`APPEARANCE_FRAMES ${JSON.stringify({ visibility: [...new Set(frameTraces.flatMap((trace) => trace.samples.map(({ visibility }) => visibility)))], theme: { mutations: themeFrames.mutations, intervalsMs: themeFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: themeFrames.samples.filter(({ focused }) => focused).length }, font: { mutations: fontFrames.mutations, intervalsMs: fontFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: fontFrames.samples.filter(({ focused }) => focused).length }, allFrameSamples: frameIntervalsMs.length, allFramesOver20ms, maxAppearanceFrameIntervalMs: maxFrameIntervalMs, appearanceFramesOver20ms: framesOver20ms })}`);
-    expect(themeFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote theme application and its 20 following frames stay within budget").toBe(0);
-    expect(fontFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote font application and its 20 following frames stay within budget").toBe(0);
-    expect(framesOver20ms).toBe(0);
+    console.log(`APPEARANCE_FRAMES ${JSON.stringify({ visibility: [...new Set(frameTraces.flatMap((trace) => trace.samples.map(({ visibility }) => visibility)))], baselineRendererWorkSeconds: rendererMetricDelta(baselineRendererBefore, baselineRendererAfter), theme: { mutations: themeFrames.mutations, intervalsMs: themeFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: themeFrames.samples.filter(({ focused }) => focused).length, rendererApplySeconds: rendererMetricDelta(themeRendererBefore, themeRendererApplied), rendererTransitionSeconds: rendererMetricDelta(themeRendererApplied, themeRendererAfter), rendererWholeWindowSeconds: rendererMetricDelta(themeRendererBefore, themeRendererAfter), actionMeasures: themeActionMeasures }, font: { mutations: fontFrames.mutations, intervalsMs: fontFrames.samples.map(({ intervalMs }) => intervalMs), focusedFrames: fontFrames.samples.filter(({ focused }) => focused).length, rendererApplySeconds: rendererMetricDelta(fontRendererBefore, fontRendererApplied), rendererTransitionSeconds: rendererMetricDelta(fontRendererApplied, fontRendererAfter), rendererWholeWindowSeconds: rendererMetricDelta(fontRendererBefore, fontRendererAfter), actionMeasures: fontActionMeasures }, allFrameSamples: frameIntervalsMs.length, allFramesOver20ms, maxAppearanceFrameIntervalMs: maxFrameIntervalMs, appearanceFramesOver20ms: framesOver20ms })}`);
+    expect(
+      themeFrames.mutations.filter(({ attribute, value }) => attribute === "data-look" && value === "solid"),
+      "one remote look update applies its selected theme once",
+    ).toHaveLength(1);
     expect(await cameraTransform(a)).toBe(aCamera);
     expect(await cameraTransform(b)).toBe(bCamera);
 
@@ -310,6 +356,14 @@ test("theme and font changes reach the same account live and after reload withou
       framesOver20ms,
       allFrameSamples: frameIntervalsMs.length,
       allFramesOver20ms,
+      rendererDurationSeconds: {
+        baseline: rendererMetricDelta(baselineRendererBefore, baselineRendererAfter),
+        themeApply: rendererMetricDelta(themeRendererBefore, themeRendererApplied),
+        themeTransition: rendererMetricDelta(themeRendererApplied, themeRendererAfter),
+        fontApply: rendererMetricDelta(fontRendererBefore, fontRendererApplied),
+        fontTransition: rendererMetricDelta(fontRendererApplied, fontRendererAfter),
+      },
+      actionMeasures: { theme: themeActionMeasures, font: fontActionMeasures },
       cameraAStayedLocal: true,
       cameraBStayedLocal: true,
       themeAndFontSurvivedReload: true,
@@ -317,11 +371,15 @@ test("theme and font changes reach the same account live and after reload withou
     await b.screenshot({ path: `${evidence}/client-b-synced-look.png` });
     await writeFile(`${evidence}/live-sync.json`, JSON.stringify(measurement, null, 2));
     console.log(`APPEARANCE_SYNC ${JSON.stringify(measurement)}`);
+    expect(themeFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote theme application and its 12 following frames stay within budget").toBe(0);
+    expect(fontFrames.samples.filter(({ intervalMs }) => intervalMs > 20).length, "remote font application and its 12 following frames stay within budget").toBe(0);
+    expect(framesOver20ms).toBe(0);
   } catch (error) {
     bodyFailure = { error };
   } finally {
     /** Cleanup failures matter only when the test body itself succeeded. */
     const cleanupErrors: unknown[] = [];
+    try { await rendererProbe?.close(); } catch (error) { cleanupErrors.push(error); }
     try { await second.close(); } catch (error) { cleanupErrors.push(error); }
     try { await first.close(); } catch (error) { cleanupErrors.push(error); }
     try { await server.dispose(); } catch (error) { cleanupErrors.push(error); }

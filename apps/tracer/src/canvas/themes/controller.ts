@@ -239,9 +239,10 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
       applyingDocument = true;
       defaults.windowSizes = { ...nextDefaults.windowSizes };
       defaults.extendedInfo = nextDefaults.extendedInfo;
-      store.load(restored);
-      render();
-      applyingDocument = false;
+      try {
+        // Loading emits synchronously, so the store listener already renders this remote look once.
+        store.load(restored);
+      } finally { applyingDocument = false; }
       if (changedWindowSizes) window.dispatchEvent(new CustomEvent(SIZE_EVENT));
       if (changedExtendedInfo) window.dispatchEvent(new CustomEvent(EXTENDED_INFO_EVENT));
       writeCache(accountId, snapshot());
