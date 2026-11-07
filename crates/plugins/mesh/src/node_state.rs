@@ -456,7 +456,14 @@ impl Store {
             .open(self.path.parent().ok_or(io::ErrorKind::InvalidInput)?)?;
         let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
             .map_err(|(_, error)| error)?;
-        let previous = read_public::<State>(&self.path)?;
+        // No-config intent carries no access revision. Avoid parsing the old file
+        // so explicit off can replace unreadable retained state; peer-bearing and
+        // full-snapshot writes still require a readable revision base.
+        let previous = if state.config.is_none() && full_snapshot_base.is_none() {
+            None
+        } else {
+            read_public::<State>(&self.path)?
+        };
         if let Some(expected) = full_snapshot_base {
             let previous = previous.as_ref().ok_or(io::ErrorKind::InvalidData)?;
             let old = previous.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
@@ -471,8 +478,6 @@ impl Store {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
-        // Disabled/unconfigured intent carries no access revision. It must
-        // remain publishable even if the retained public snapshot is unreadable.
         if let Some(next) = &state.config
             && let Some(previous) = previous.as_ref()
             && let Some(old) = previous.config.as_ref()
