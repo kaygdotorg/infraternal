@@ -1623,6 +1623,36 @@ async fn unknown_ordinary_result_remains_a_protocol_failure() {
     );
 }
 
+/// A revocation that carries D353's warning ("background programs of this
+/// host account may still be running") is a completed revocation: the server
+/// confirms it, instead of reading a protocol error and retrying forever
+/// (#355). An unknown field is still refused.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn a_revocation_with_the_d353_warning_confirms_cleanup() {
+    let (mut link, _peer) = connection();
+    let (reply, result) = oneshot::channel();
+    let mut pending = HashMap::from([(1, PendingCall::Revoke(reply))]);
+    assert!(
+        process_incoming(
+            Incoming::Result {
+                call_id: 1,
+                ok: true,
+                json: br#"{"revoked":true,"warning":"Background programs of this host account may still be running."}"#.to_vec()
+            },
+            &mut link,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &mut pending
+        )
+        .await
+    );
+    assert!(
+        result.await.unwrap().is_ok(),
+        "a revocation with the D353 warning was not confirmed"
+    );
+}
+
 #[cfg(feature = "remote")]
 #[tokio::test]
 async fn invalid_login_revocation_ack_never_confirms_cleanup() {
@@ -1963,4 +1993,26 @@ fn query_reply_compatibility_notice_is_strict_and_session_bound() {
     let mut extra = json;
     extra["bytes"] = serde_json::json!("unexpected");
     assert!(serde_json::from_value::<TerminalNotice>(extra).is_err());
+}
+
+/// An open refusal with a reason this server does not know (from a newer
+/// infraternal agent) reads as "could not start a shell, try again", not as
+/// an offline host. Known reasons pass through, and non-refusal replies stay
+/// protocol errors (J308 P3-3, #355).
+#[test]
+fn an_unknown_refusal_reason_reads_as_could_not_start_a_shell() {
+    use infraternal_plugin_api::admission::OpenRefusal;
+    assert_eq!(
+        super::refused_open(br#"{"error":"terminal unavailable","reason":"some_future_reason"}"#),
+        AgentError::OpenRefused(OpenRefusal::ResourceUnavailable)
+    );
+    assert_eq!(
+        super::refused_open(br#"{"error":"terminal unavailable","reason":"invalid"}"#),
+        AgentError::OpenRefused(OpenRefusal::Invalid)
+    );
+    assert_eq!(super::refused_open(b"not json"), AgentError::Rejected);
+    assert_eq!(
+        super::refused_open(br#"{"ok":false}"#),
+        AgentError::Rejected
+    );
 }
