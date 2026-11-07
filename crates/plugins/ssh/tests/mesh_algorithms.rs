@@ -117,6 +117,30 @@ fn unoffered_aes_ciphers_are_not_registered() {
     }
 }
 
+/// Deprecated transport algorithms are absent; internal clear/AEAD support remains.
+#[test]
+fn unoffered_legacy_transport_is_not_registered() {
+    for name in [
+        "diffie-hellman-group-exchange-sha1",
+        "diffie-hellman-group1-sha1",
+        "diffie-hellman-group14-sha1",
+        "none",
+    ] {
+        assert!(
+            russh::kex::Name::try_from(name).is_err(),
+            "{name} is still registered"
+        );
+    }
+    for name in ["hmac-sha1", "hmac-sha1-etm@openssh.com"] {
+        assert!(
+            russh::mac::Name::try_from(name).is_err(),
+            "{name} is still registered"
+        );
+    }
+    assert!(russh::mac::Name::try_from("none").is_ok());
+    assert!(russh::cipher::Name::try_from("clear").is_ok());
+}
+
 /// Removing ECDH must retain every existing NIST ECDSA signer and verifier.
 #[test]
 fn ecdsa_keys_still_sign_and_verify() {

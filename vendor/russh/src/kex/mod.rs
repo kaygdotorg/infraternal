@@ -18,11 +18,13 @@
 //! NIST ECDH implementations require `nist-ecdh`; the mesh never offers them,
 //! so its ring-only build avoids their factory entries and enum dispatch.
 //! ECDSA host keys and certificate verification are independent of this feature.
+//! `legacy-transport` gates SHA-1 and unencrypted exchanges, absent from mesh preferences.
 mod curve25519;
 pub mod dh;
 #[cfg(feature = "nist-ecdh")]
 mod ecdh_nistp;
 mod hybrid_mlkem;
+#[cfg(feature = "legacy-transport")]
 mod none;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -33,10 +35,11 @@ use std::sync::LazyLock;
 use curve25519::Curve25519KexType;
 use delegate::delegate;
 use dh::groups::DhGroup;
+#[cfg(feature = "legacy-transport")]
+use dh::{DhGexSha1KexType, DhGroup1Sha1KexType, DhGroup14Sha1KexType};
 use dh::{
-    DhGexSha1KexType, DhGexSha256KexType, DhGroup1Sha1KexType, DhGroup14Sha1KexType,
-    DhGroup14Sha256KexType, DhGroup15Sha512KexType, DhGroup16Sha512KexType, DhGroup17Sha512KexType,
-    DhGroup18Sha512KexType,
+    DhGexSha256KexType, DhGroup14Sha256KexType, DhGroup15Sha512KexType, DhGroup16Sha512KexType,
+    DhGroup17Sha512KexType, DhGroup18Sha512KexType,
 };
 use digest::Digest;
 #[cfg(feature = "nist-ecdh")]
@@ -49,6 +52,7 @@ use p256::NistP256;
 use p384::NistP384;
 #[cfg(feature = "nist-ecdh")]
 use p521::NistP521;
+#[cfg(feature = "legacy-transport")]
 use sha1::Sha1;
 #[cfg(feature = "nist-ecdh")]
 use sha2::Sha384;
@@ -146,6 +150,7 @@ pub(crate) enum KexProgress<T> {
 /// Keeps the active exchange state and dispatches only compiled-in algorithms.
 #[enum_dispatch(KexAlgorithmImplementor)]
 pub(crate) enum KexAlgorithm {
+    #[cfg(feature = "legacy-transport")]
     DhGroupKexSha1(dh::DhGroupKex<Sha1>),
     DhGroupKexSha256(dh::DhGroupKex<Sha256>),
     DhGroupKexSha512(dh::DhGroupKex<Sha512>),
@@ -160,6 +165,7 @@ pub(crate) enum KexAlgorithm {
     #[cfg(feature = "nist-ecdh")]
     EcdhNistP521Kex(ecdh_nistp::EcdhNistPKex<NistP521, Sha512>),
     MlKem768X25519Kex(hybrid_mlkem::MlKem768X25519Kex),
+    #[cfg(feature = "legacy-transport")]
     None(none::NoneKexAlgorithm),
 }
 
@@ -295,9 +301,12 @@ pub const EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT: Name = Name("kex-strict-c-v00@
 pub const EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER: Name = Name("kex-strict-s-v00@openssh.com");
 
 const _CURVE25519: Curve25519KexType = Curve25519KexType {};
+#[cfg(feature = "legacy-transport")]
 const _DH_GEX_SHA1: DhGexSha1KexType = DhGexSha1KexType {};
 const _DH_GEX_SHA256: DhGexSha256KexType = DhGexSha256KexType {};
+#[cfg(feature = "legacy-transport")]
 const _DH_G1_SHA1: DhGroup1Sha1KexType = DhGroup1Sha1KexType {};
+#[cfg(feature = "legacy-transport")]
 const _DH_G14_SHA1: DhGroup14Sha1KexType = DhGroup14Sha1KexType {};
 const _DH_G14_SHA256: DhGroup14Sha256KexType = DhGroup14Sha256KexType {};
 const _DH_G15_SHA512: DhGroup15Sha512KexType = DhGroup15Sha512KexType {};
@@ -311,15 +320,19 @@ const _ECDH_SHA2_NISTP384: EcdhNistP384KexType = EcdhNistP384KexType {};
 #[cfg(feature = "nist-ecdh")]
 const _ECDH_SHA2_NISTP521: EcdhNistP521KexType = EcdhNistP521KexType {};
 const _MLKEM768X25519_SHA256: MlKem768X25519KexType = MlKem768X25519KexType {};
+#[cfg(feature = "legacy-transport")]
 const _NONE: none::NoneKexType = none::NoneKexType {};
 
 pub const ALL_KEX_ALGORITHMS: &[&Name] = &[
     &MLKEM768X25519_SHA256,
     &CURVE25519,
     &CURVE25519_PRE_RFC_8731,
+    #[cfg(feature = "legacy-transport")]
     &DH_GEX_SHA1,
     &DH_GEX_SHA256,
+    #[cfg(feature = "legacy-transport")]
     &DH_G1_SHA1,
+    #[cfg(feature = "legacy-transport")]
     &DH_G14_SHA1,
     &DH_G14_SHA256,
     &DH_G15_SHA512,
@@ -332,6 +345,7 @@ pub const ALL_KEX_ALGORITHMS: &[&Name] = &[
     &ECDH_SHA2_NISTP384,
     #[cfg(feature = "nist-ecdh")]
     &ECDH_SHA2_NISTP521,
+    #[cfg(feature = "legacy-transport")]
     &NONE,
 ];
 
@@ -341,6 +355,7 @@ pub(crate) static KEXES: LazyLock<HashMap<&'static Name, &(dyn KexType + Send + 
         h.insert(&MLKEM768X25519_SHA256, &_MLKEM768X25519_SHA256);
         h.insert(&CURVE25519, &_CURVE25519);
         h.insert(&CURVE25519_PRE_RFC_8731, &_CURVE25519);
+        #[cfg(feature = "legacy-transport")]
         h.insert(&DH_GEX_SHA1, &_DH_GEX_SHA1);
         h.insert(&DH_GEX_SHA256, &_DH_GEX_SHA256);
         h.insert(&DH_G18_SHA512, &_DH_G18_SHA512);
@@ -348,7 +363,9 @@ pub(crate) static KEXES: LazyLock<HashMap<&'static Name, &(dyn KexType + Send + 
         h.insert(&DH_G16_SHA512, &_DH_G16_SHA512);
         h.insert(&DH_G15_SHA512, &_DH_G15_SHA512);
         h.insert(&DH_G14_SHA256, &_DH_G14_SHA256);
+        #[cfg(feature = "legacy-transport")]
         h.insert(&DH_G14_SHA1, &_DH_G14_SHA1);
+        #[cfg(feature = "legacy-transport")]
         h.insert(&DH_G1_SHA1, &_DH_G1_SHA1);
         #[cfg(feature = "nist-ecdh")]
         h.insert(&ECDH_SHA2_NISTP256, &_ECDH_SHA2_NISTP256);
@@ -356,6 +373,7 @@ pub(crate) static KEXES: LazyLock<HashMap<&'static Name, &(dyn KexType + Send + 
         h.insert(&ECDH_SHA2_NISTP384, &_ECDH_SHA2_NISTP384);
         #[cfg(feature = "nist-ecdh")]
         h.insert(&ECDH_SHA2_NISTP521, &_ECDH_SHA2_NISTP521);
+        #[cfg(feature = "legacy-transport")]
         h.insert(&NONE, &_NONE);
         assert_eq!(ALL_KEX_ALGORITHMS.len(), h.len());
         h

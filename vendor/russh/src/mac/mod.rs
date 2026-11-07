@@ -12,15 +12,20 @@
 //
 
 //!
-//! This module exports cipher names for use with [Preferred].
+//! Exports MAC names for use with [Preferred].
+//! SHA-1 MAC factories require `legacy-transport`; the mesh offers only SHA-2.
+//! The internal no-MAC implementation stays available for AEAD ciphers.
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::marker::PhantomData;
 use std::sync::LazyLock;
 
 use delegate::delegate;
-use digest::typenum::{U20, U32, U64};
+#[cfg(feature = "legacy-transport")]
+use digest::typenum::U20;
+use digest::typenum::{U32, U64};
 use hmac::Hmac;
+#[cfg(feature = "legacy-transport")]
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use ssh_encoding::Encode;
@@ -85,12 +90,14 @@ pub const HMAC_SHA256_ETM: Name = Name("hmac-sha2-256-etm@openssh.com");
 pub const HMAC_SHA512_ETM: Name = Name("hmac-sha2-512-etm@openssh.com");
 
 pub(crate) static _NONE: NoMacAlgorithm = NoMacAlgorithm {};
+#[cfg(feature = "legacy-transport")]
 pub(crate) static _HMAC_SHA1: CryptoMacAlgorithm<Hmac<Sha1>, U20> =
     CryptoMacAlgorithm(PhantomData, PhantomData);
 pub(crate) static _HMAC_SHA256: CryptoMacAlgorithm<Hmac<Sha256>, U32> =
     CryptoMacAlgorithm(PhantomData, PhantomData);
 pub(crate) static _HMAC_SHA512: CryptoMacAlgorithm<Hmac<Sha512>, U64> =
     CryptoMacAlgorithm(PhantomData, PhantomData);
+#[cfg(feature = "legacy-transport")]
 pub(crate) static _HMAC_SHA1_ETM: CryptoEtmMacAlgorithm<Hmac<Sha1>, U20> =
     CryptoEtmMacAlgorithm(PhantomData, PhantomData);
 pub(crate) static _HMAC_SHA256_ETM: CryptoEtmMacAlgorithm<Hmac<Sha256>, U32> =
@@ -100,9 +107,11 @@ pub(crate) static _HMAC_SHA512_ETM: CryptoEtmMacAlgorithm<Hmac<Sha512>, U64> =
 
 pub const ALL_MAC_ALGORITHMS: &[&Name] = &[
     &NONE,
+    #[cfg(feature = "legacy-transport")]
     &HMAC_SHA1,
     &HMAC_SHA256,
     &HMAC_SHA512,
+    #[cfg(feature = "legacy-transport")]
     &HMAC_SHA1_ETM,
     &HMAC_SHA256_ETM,
     &HMAC_SHA512_ETM,
@@ -112,9 +121,11 @@ pub(crate) static MACS: LazyLock<HashMap<&'static Name, &(dyn MacAlgorithm + Sen
     LazyLock::new(|| {
         let mut h: HashMap<&'static Name, &(dyn MacAlgorithm + Send + Sync)> = HashMap::new();
         h.insert(&NONE, &_NONE);
+        #[cfg(feature = "legacy-transport")]
         h.insert(&HMAC_SHA1, &_HMAC_SHA1);
         h.insert(&HMAC_SHA256, &_HMAC_SHA256);
         h.insert(&HMAC_SHA512, &_HMAC_SHA512);
+        #[cfg(feature = "legacy-transport")]
         h.insert(&HMAC_SHA1_ETM, &_HMAC_SHA1_ETM);
         h.insert(&HMAC_SHA256_ETM, &_HMAC_SHA256_ETM);
         h.insert(&HMAC_SHA512_ETM, &_HMAC_SHA512_ETM);
