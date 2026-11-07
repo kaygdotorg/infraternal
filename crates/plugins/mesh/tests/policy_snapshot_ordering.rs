@@ -32,6 +32,11 @@ fn chunks_with_epoch(old: Option<&Config>, new: &Config, authority_epoch: &str) 
         .collect()
 }
 
+/// Give each persistence regression its own short state directory.
+fn j330_state_path(test_name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("j330-{test_name}-{}", std::process::id()))
+}
+
 /// Bring up a node with a policy snapshot, with or without the fallback policy.
 fn install(fallback: bool) -> (Node, Config) {
     assert!(
@@ -252,7 +257,7 @@ fn nft_new_server_rejection_retires_previous_peers() {
 fn j330_persisted_rollback_accepts_replacement() {
     let (mut initial, mut accepted) = install(false);
     initial.down().unwrap();
-    let path = std::path::PathBuf::from(format!("/tmp/j330-state-{}", std::process::id()));
+    let path = j330_state_path("rollback");
     std::fs::create_dir_all(&path).unwrap();
     std::fs::set_permissions(
         &path,
@@ -267,7 +272,7 @@ fn j330_persisted_rollback_accepts_replacement() {
     accepted.version = 11;
     accepted.peers.get_mut(&NodeId(2)).unwrap().inbound = TrafficPolicy::All;
     accepted.peers.get_mut(&NodeId(2)).unwrap().outbound = TrafficPolicy::All;
-    for chunk in configuration::chunks(None, &accepted).unwrap() {
+    for chunk in chunks_with_epoch(None, &accepted, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).unwrap();
     }
     let mut restored = accepted.clone();
@@ -276,6 +281,7 @@ fn j330_persisted_rollback_accepts_replacement() {
     restored.peers.clear();
     let result = node.chunk(chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_A).remove(0));
     let retained = node.config().cloned();
+    let installed_peers = Device::counters().unwrap().len();
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("mesh-public.json")).unwrap()).unwrap();
     println!(
@@ -290,6 +296,10 @@ fn j330_persisted_rollback_accepts_replacement() {
     );
     assert_eq!(retained, Some(restored));
     assert_eq!(saved["enabled"], true);
+    assert_eq!(saved["config"]["authority_epoch"], AUTHORITY_EPOCH_A);
+    assert_eq!(saved["config"]["version"], 2);
+    assert!(saved["config"]["peers"].as_object().unwrap().is_empty());
+    assert_eq!(installed_peers, 0, "the replaced peer remained installed");
 }
 
 /// A failed retirement write must not leave the old peer installed.
@@ -298,7 +308,7 @@ fn j330_persisted_rollback_accepts_replacement() {
 fn j330_failed_retirement_stops_mesh_even_if_disabled_write_fails() {
     let (mut initial, mut accepted) = install(false);
     initial.down().unwrap();
-    let path = std::path::PathBuf::from(format!("/tmp/j330-state-{}", std::process::id()));
+    let path = j330_state_path("retirement");
     std::fs::create_dir_all(&path).unwrap();
     std::fs::set_permissions(
         &path,
@@ -341,6 +351,13 @@ fn j330_failed_retirement_stops_mesh_even_if_disabled_write_fails() {
         saved["config"]["authority_epoch"], AUTHORITY_EPOCH_B,
         "a failed replacement must retain the new peer-free authority epoch"
     );
+    assert!(saved["config"]["peers"].as_object().unwrap().is_empty());
+    assert_eq!(saved["config"]["default_policy"], "Deny");
+    assert!(retained.as_ref().is_some_and(|config| {
+        config.authority_epoch.as_deref() == Some(AUTHORITY_EPOCH_B)
+            && config.peers.is_empty()
+            && config.default_policy == DefaultPolicy::Deny
+    }));
     assert!(
         installed_peers.is_err() || installed_peers.as_ref().is_ok_and(|n| *n == 0),
         "stale peers remain installed after retirement and shutdown fail"
@@ -373,6 +390,8 @@ fn j330_equal_revision_restore_retires_stale_peers() {
         retained.as_ref().map(|c| c.peers.len())
     );
     node.down().unwrap();
+    assert!(result.is_ok(), "the new authority snapshot was refused: {result:?}");
+    assert_eq!(retained, Some(restored));
     assert_eq!(
         installed, 0,
         "same-id equal-revision server restore retained the previous authority's peers"

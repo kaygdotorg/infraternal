@@ -2156,6 +2156,51 @@ mod tests {
         assert!(applied_configs[0].peers.is_empty());
     }
 
+    /// A same-authority full snapshot cannot change accepted contents at an equal revision.
+    #[test]
+    fn same_authority_equal_revision_conflict_is_refused() {
+        let mut current = config();
+        current.version = 11;
+        let mut conflicting = current.clone();
+        conflicting.peers.clear();
+        let identity = Identity {
+            public_key: current.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: true,
+        };
+        let applied_configs = Arc::new(Mutex::new(Vec::new()));
+        let mut node = Node {
+            enabled: true,
+            worker: Some(recording_worker(Arc::clone(&applied_configs))),
+            identity: Some(identity),
+            config: Some(current.clone()),
+            authority_reset_pending: false,
+            pending: None,
+            routes: route_addresses(&current),
+            interface: Some("utun-test".to_owned()),
+            port: 51820,
+            path: None,
+            binding: None,
+        };
+        let result = chunks_with_epoch(None, &conflicting, AUTHORITY_EPOCH_A)
+            .into_iter()
+            .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
+        let retained = node.config().cloned();
+        let applied_configs = applied_configs.lock().expect("recorded configs").clone();
+        node.down().expect("stop test worker");
+
+        assert!(
+            result.is_err(),
+            "same-authority equal-revision conflict was accepted"
+        );
+        assert_eq!(retained, Some(current));
+        assert!(applied_configs.is_empty(), "the conflicting config reached the worker");
+    }
+
     /// A same-revision restore from another authority must retire the previous peer set.
     #[test]
     fn equal_revision_restore_retires_stale_peers() {
