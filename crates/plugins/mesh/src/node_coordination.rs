@@ -30,27 +30,39 @@ async fn update_listener(
 /// a rotation is open (J273 P3-2). Each probe is a few small calls on an authenticated channel.
 const UNKNOWN_SUPPORT_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Probe before advertising an extension. Strict older nodes reject the probe,
-/// then answer the ordinary request without enabling a new representation.
+/// Reads the stable identity shape before independently probing optional capabilities.
 ///
-/// Returns the identity and its rotation support as far as the replies prove it (J262).
+/// The first two requests stay byte-for-byte compatible with pre-DNS nodes. A strict older node
+/// may refuse the DNS extension, but that refusal cannot erase identity or rotation support (J262).
 async fn read_identity(channel: &dyn NodeChannel) -> Option<(Identity, Option<bool>)> {
-    #[cfg(feature = "mesh-dns")]
-    let (probe, before_rotation) = (
-        br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.as_slice(),
-        br#"{"compact_access":true,"dns_names":true}"#.as_slice(),
-    );
-    #[cfg(not(feature = "mesh-dns"))]
     let (probe, before_rotation) = (
         br#"{"compact_access":true,"key_rotation":true}"#.as_slice(),
         br#"{"compact_access":true}"#.as_slice(),
     );
-    probe_identity(
+    let (identity, rotation) = probe_identity(
         |input| channel.call("mesh.identity", input),
         probe,
         before_rotation,
     )
-    .await
+    .await?;
+    #[cfg(feature = "mesh-dns")]
+    let identity = {
+        let mut identity = identity;
+        identity.dns_names = read_dns_names(channel).await;
+        identity
+    };
+    Some((identity, rotation))
+}
+
+/// Requests DNS support on its own so a strict pre-DNS node can reject it without losing identity.
+#[cfg(feature = "mesh-dns")]
+async fn read_dns_names(channel: &dyn NodeChannel) -> bool {
+    channel
+        .call("mesh.identity", br#"{"dns_names":true}"#.to_vec())
+        .await
+        .ok()
+        .and_then(|reply| parse_identity(&reply))
+        .is_some_and(|identity| identity.dns_names)
 }
 
 /// Classify a node's identity replies into its rotation support (J262).
@@ -2076,3 +2088,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "mesh-dns"))]
+#[path = "review_j354_identity.rs"]
+mod review_j354_identity;
