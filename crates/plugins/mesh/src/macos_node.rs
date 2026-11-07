@@ -1450,9 +1450,11 @@ fn macos_snapshot_binding_is_authorized(
         return Ok(false);
     };
     if rotation.completed {
-        // The completion marker selects exactly one key; a saved public snapshot can still carry
-        // its predecessor until a new coordinator revision arrives.
-        return Ok(private_public == candidate_public && recorded == candidate_public);
+        // The candidate files prove the active identity; the marker bounds any stale snapshot to
+        // this rotation's predecessor or candidate.
+        return Ok(private_public == candidate_public
+            && recorded == candidate_public
+            && rotation.completed_binding_matches(bound, candidate_public));
     }
     let previous_public = RotationKey::from_private(&rotation.previous)?.1;
     let bound_authorized =
@@ -1733,7 +1735,7 @@ impl Node {
             store.save_rotation_secret(&crate::node_state::RotationSecret {
                 operation_id: rotation.operation_id.clone(),
                 sequence: rotation.sequence,
-                previous: [0; 32],
+                previous: previous_public.0,
                 candidate: rotation.previous,
                 commit_requested: true,
                 completed: true,
@@ -1884,7 +1886,7 @@ impl Node {
     }
 
     /// Finish an acknowledged rotation after saving its new local binding.
-    /// The retained journal makes completion safe to retry and erases the predecessor key.
+    /// The retained journal makes completion safe to retry and clears predecessor private bytes.
     /// # Errors
     /// Refuses a stale or uncommitted operation, an identity mismatch or a failed durable write.
     pub(crate) fn finish_rotation(&mut self, operation_id: &str, sequence: u64) -> io::Result<()> {
@@ -2045,9 +2047,10 @@ mod tests {
 
     use super::{
         BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, SavedState, UdpSocketFactory,
-        UdpTransportFactoryParams, parse_utun_payload, peers_for_config, read_public_state,
-        reconcile, rotation_crash_checkpoint, route_addresses, stage_chunk, utun_family,
-        valid_utun_name, validate_config, validate_underlay_routes, write_public_state,
+        UdpTransportFactoryParams, macos_snapshot_binding_is_authorized, parse_utun_payload,
+        peers_for_config, read_public_state, reconcile, rotation_crash_checkpoint, route_addresses,
+        stage_chunk, utun_family, valid_utun_name, validate_config, validate_underlay_routes,
+        write_public_state,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -2448,6 +2451,49 @@ mod tests {
         );
     }
 
+    /// A finished Mac marker authorizes only its predecessor or candidate snapshot key.
+    #[test]
+    fn macos_completed_snapshot_binding_rejects_an_unrelated_key() {
+        let directory = test_directory();
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let public = |private| {
+            let secret = gotatun::x25519::StaticSecret::from(private);
+            PublicKey(*gotatun::x25519::PublicKey::from(&secret).as_bytes())
+        };
+        let previous_public = public(previous);
+        let candidate_public = public(candidate);
+        let unrelated_public = public(unrelated);
+        let store = crate::node_state::Store::open_for_macos(&directory.0).expect("open Mac store");
+        store
+            .record_interface(&candidate_public)
+            .expect("candidate interface record");
+        store
+            .write_private_key(&candidate)
+            .expect("candidate key file");
+        store
+            .save_rotation_secret(&crate::node_state::RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("commit intent");
+        store
+            .complete_rotation_secret("00000000-0000-4000-8000-000000000367", 1)
+            .expect("finish rotation");
+
+        assert!(macos_snapshot_binding_is_authorized(&store, previous_public).expect("old"));
+        assert!(macos_snapshot_binding_is_authorized(&store, candidate_public).expect("new"));
+        assert!(
+            !macos_snapshot_binding_is_authorized(&store, unrelated_public).expect("unrelated"),
+            "a completed marker does not authorize an unrelated saved binding"
+        );
+    }
+
     /// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
     #[test]
     #[ignore = "Run on the macOS VM with system service privileges."]
@@ -2684,10 +2730,18 @@ mod tests {
                 }
             );
             if completed {
-                assert_eq!(&journal[53..85], &[0; 32], "finish erases the predecessor");
+                assert_eq!(
+                    &journal[53..85],
+                    &previous,
+                    "finish keeps only the predecessor's public key"
+                );
             }
             let previous_public = if completed {
-                PublicKey(previous)
+                PublicKey(
+                    journal[53..85]
+                        .try_into()
+                        .expect("predecessor public bytes"),
+                )
             } else {
                 mac_private_public(&journal[53..85])
             };

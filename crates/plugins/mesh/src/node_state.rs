@@ -55,15 +55,19 @@ pub struct Store {
     route_body: Mutex<Vec<u8>>,
 }
 
-/// A locally retained old/candidate pair makes an interrupted key switch retryable.
-/// The fixed-size binary record never enters diagnostics or the public snapshot.
+/// A fixed-size local record makes an interrupted key switch retryable.
+/// While open it stores predecessor and candidate private keys; completion clears the predecessor
+/// private bytes and keeps only its public key for binding checks. The record never enters logs or
+/// the public snapshot.
 pub(crate) struct RotationSecret {
     pub(crate) operation_id: String,
     pub(crate) sequence: u64,
+    /// The predecessor private key while the journal is open; its public key after completion.
     pub(crate) previous: [u8; 32],
+    /// The candidate private key selected by commit intent and retained for retry.
     pub(crate) candidate: [u8; 32],
     pub(crate) commit_requested: bool,
-    /// The candidate is now the retained interface key and the predecessor is erased.
+    /// The candidate is the retained interface key; `previous` no longer contains private bytes.
     pub(crate) completed: bool,
 }
 impl Drop for RotationSecret {
@@ -72,10 +76,25 @@ impl Drop for RotationSecret {
         self.candidate.zeroize();
     }
 }
+impl RotationSecret {
+    /// Whether a completed marker authorizes this saved predecessor or candidate binding.
+    ///
+    /// New markers retain the predecessor's public bytes. Older markers contain zero here and
+    /// can therefore authorize only the candidate they already select.
+    pub(crate) fn completed_binding_matches(
+        &self,
+        bound: crate::policy::model::PublicKey,
+        candidate: crate::policy::model::PublicKey,
+    ) -> bool {
+        self.completed
+            && (bound == candidate || (self.previous != [0; 32] && bound.0 == self.previous))
+    }
+}
 
 /// Marks the private rotation-secret file format, version 1.
 const ROTATION_MAGIC: &[u8; 8] = b"IMKEYV1\0";
-/// Exact size of that file: magic, phase, sequence, operation ID, previous and candidate private keys.
+/// Exact size of that file: magic, phase, sequence, operation ID, predecessor identity and
+/// candidate private key.
 const ROTATION_FIXED_BYTES: usize = 8 + 1 + 8 + 36 + 32 + 32;
 
 /// A canonical hyphenated UUID text, the only operation ID the secret file accepts.
@@ -299,9 +318,6 @@ impl Store {
         let candidate = bytes[85..117]
             .try_into()
             .map_err(|_| io::ErrorKind::InvalidData)?;
-        if phase == 2 && previous != [0; 32] {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
         Ok(Some(RotationSecret {
             operation_id,
             sequence,
@@ -311,14 +327,14 @@ impl Store {
             completed: phase == 2,
         }))
     }
-    /// Durably replace the pending key pair before a server can publish its candidate.
+    /// Durably replace pending keys or a finished marker before the server publishes a candidate.
     /// # Errors
     /// Refuses malformed state, unsafe paths or failed fsync/rename.
     pub(crate) fn save_rotation_secret(&self, state: &RotationSecret) -> io::Result<()> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         if state.sequence == 0
             || !valid_operation_id(&state.operation_id)
-            || (state.completed && (!state.commit_requested || state.previous != [0; 32]))
+            || (state.completed && !state.commit_requested)
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -384,7 +400,7 @@ impl Store {
         }
         result
     }
-    /// Retire the predecessor and keep a small retry marker after server acknowledgement.
+    /// Retire the predecessor private bytes and keep its public key in the retry marker.
     /// # Errors
     /// Refuses a stale operation or a failed atomic durable replacement.
     pub(crate) fn complete_rotation_secret(
@@ -402,7 +418,9 @@ impl Store {
         if !state.commit_requested {
             return Err(io::ErrorKind::InvalidData.into());
         }
+        let predecessor_public = rotation_public_key(&state.previous)?;
         state.previous.zeroize();
+        state.previous.copy_from_slice(&predecessor_public.0);
         state.completed = true;
         self.save_rotation_secret(&state)
     }
@@ -544,8 +562,9 @@ impl Store {
     ///
     /// Restart may finish applying an already committed identity while replaying the same public
     /// revision. The journal must select the candidate, and both the private key file and recorded
-    /// interface identity must already name it. An open journal also proves the snapshot's
-    /// predecessor; a completed journal has erased that predecessor but still proves the candidate.
+    /// interface identity must already name it. An open journal proves the snapshot's predecessor
+    /// from its private key; a completed marker checks the retained predecessor public key, when
+    /// present, and accepts no other snapshot binding.
     fn rotation_binding_advance_is_proven(
         &self,
         previous: crate::policy::model::PublicKey,
@@ -566,6 +585,8 @@ impl Store {
             if previous != journal_previous {
                 return Ok(false);
             }
+        } else if !rotation.completed_binding_matches(previous, journal_candidate) {
+            return Ok(false);
         }
         #[cfg(target_os = "linux")]
         if self.recorded_engine()? != Some(crate::gotatun_node::EngineKind::GotaTun) {
@@ -988,6 +1009,57 @@ pub(crate) mod tests {
             .expect("normalize the stale binding after finish");
     }
 
+    /// A completed marker cannot authorize replacing an unrelated predecessor binding.
+    #[test]
+    fn a_completed_journal_refuses_an_unrelated_predecessor_binding() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        let unrelated_public = crate::wireguard::Key::from_private(&unrelated)
+            .expect("unrelated key")
+            .1;
+        store
+            .save(&binding_state(unrelated_public))
+            .expect("save the unrelated old binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: operation_id.to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("finish the rotation");
+
+        assert_eq!(
+            store
+                .save(&binding_state(candidate_public))
+                .expect_err("an unrelated prior binding cannot advance after finish")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
     /// A same-revision binding cannot move to a key that the commit journal does not select.
     #[test]
     fn an_unproven_same_version_gotatun_binding_advance_is_refused() {
@@ -1067,11 +1139,14 @@ pub(crate) mod tests {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let operation_id = "00000000-0000-4000-8000-000000000001";
+        let previous = [0x11; 32];
+        let previous_public =
+            rotation_public_key(&previous).expect("derive predecessor public key");
         store
             .save_rotation_secret(&RotationSecret {
                 operation_id: operation_id.to_owned(),
                 sequence: 1,
-                previous: [0x11; 32],
+                previous,
                 candidate: [0x22; 32],
                 commit_requested: true,
                 completed: false,
@@ -1089,10 +1164,11 @@ pub(crate) mod tests {
             .expect("read completed marker")
             .expect("completion marker retained");
         assert!(completed.completed);
-        assert_eq!(completed.previous, [0; 32]);
+        assert_eq!(completed.previous, previous_public.0);
         assert_eq!(completed.candidate, [0x22; 32]);
         let bytes = fs::read(&store.rotation_path).expect("private rotation record");
-        assert!(!bytes.windows(32).any(|window| window == [0x11; 32]));
+        assert!(!bytes.windows(32).any(|window| window == previous));
+        assert!(bytes.windows(32).any(|window| window == previous_public.0));
         assert_eq!(
             fs::metadata(&store.rotation_path)
                 .expect("private record mode")

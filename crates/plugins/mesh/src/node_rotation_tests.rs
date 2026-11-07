@@ -119,8 +119,11 @@ fn gotatun_rotation_recovers_after_sigkill_at_every_durable_step() {
             .expect("read the journal")
             .expect("prepared rotation survives SIGKILL");
         let previous_public = if journal.completed {
-            assert!(journal.previous == [0; 32], "finish erases the predecessor");
-            crate::policy::model::PublicKey(previous)
+            assert_eq!(
+                journal.previous, previous,
+                "finish retains only its public predecessor"
+            );
+            crate::policy::model::PublicKey(journal.previous)
         } else {
             Key::from_private(&journal.previous).unwrap().1
         };

@@ -315,9 +315,11 @@ fn gotatun_snapshot_binding_is_authorized(
     let candidate_public = Key::from_private(&rotation.candidate)?.1;
     let recorded = store.recorded_interface()?;
     if rotation.completed {
-        // Finish erased the predecessor secret. The candidate's private file and public record
-        // now prove the new identity; the accepted snapshot can still name its old predecessor.
-        return Ok(private_public == candidate_public && recorded == Some(candidate_public));
+        // Only the candidate's private file and public record prove the new identity. The finished
+        // marker also binds a stale snapshot to this rotation's predecessor, if that key is known.
+        return Ok(private_public == candidate_public
+            && recorded == Some(candidate_public)
+            && rotation.completed_binding_matches(bound, candidate_public));
     }
     let previous_public = Key::from_private(&rotation.previous)?.1;
     let candidate_is_authorized = rotation.commit_requested;
@@ -1245,7 +1247,8 @@ impl Node {
     /// Linux engines, so settlement rewrites the journal instead of deleting it (J262).
     /// - The link holds the candidate (commit was requested and the key was sent): finish the
     ///   local commit steps a stop may have left (marker, recorded key, identity), then complete
-    ///   the journal, which erases the predecessor. The candidate is now our key.
+    ///   the journal, which clears predecessor private bytes and keeps its public key. The candidate
+    ///   is now our key.
     /// - The link still holds the predecessor (commit never requested, or stopped before the key
     ///   was sent): the candidate never went live. Record the predecessor as the completed key and
     ///   erase the candidate.
@@ -1309,7 +1312,7 @@ impl Node {
         store.save_rotation_secret(&crate::node_state::RotationSecret {
             operation_id: existing.operation_id.clone(),
             sequence: existing.sequence,
-            previous: [0; 32],
+            previous: previous_public.0,
             candidate: existing.previous,
             commit_requested: true,
             completed: true,
@@ -2407,6 +2410,46 @@ mod tests {
             key_before_recovery.is_some()
         );
         assert!(resurrected.is_none(), "recovery recreated a retired key");
+    }
+
+    /// A finished `GotaTun` marker authorizes only its predecessor or candidate snapshot key.
+    #[test]
+    fn j356_completed_snapshot_binding_rejects_an_unrelated_key() {
+        let directory = crate::node_state::tests::Directory::new();
+        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let previous_public = Key::from_private(&previous).expect("previous key").1;
+        let candidate_public = Key::from_private(&candidate).expect("candidate key").1;
+        let unrelated_public = Key::from_private(&unrelated).expect("unrelated key").1;
+        store.record_engine(EngineKind::GotaTun).expect("engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("candidate interface record");
+        store
+            .write_private_key(&candidate)
+            .expect("candidate key file");
+        store
+            .save_rotation_secret(&crate::node_state::RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("commit intent");
+        store
+            .complete_rotation_secret("00000000-0000-4000-8000-000000000367", 1)
+            .expect("finish rotation");
+
+        assert!(gotatun_snapshot_binding_is_authorized(&store, previous_public).expect("old"));
+        assert!(gotatun_snapshot_binding_is_authorized(&store, candidate_public).expect("new"));
+        assert!(
+            !gotatun_snapshot_binding_is_authorized(&store, unrelated_public).expect("unrelated"),
+            "a completed marker does not authorize an unrelated saved binding"
+        );
     }
 
     /// Both Linux engines require a live identity and owned link before rotation can start.
