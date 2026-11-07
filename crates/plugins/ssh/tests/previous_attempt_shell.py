@@ -2012,6 +2012,13 @@ manager=dropin_manager'''
         self.assertEqual(self.run_shell(reported + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
         everyone = reported.replace('/run/systemd/system/infraternal-agent.service.d/zz.conf', '/usr/lib/systemd/system/service.d/10-timeout-abort.conf')
         self.assertEqual(self.run_shell(everyone + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        # J349 P3-3: systemd also applies the prefix form infraternal-.service.d.
+        prefixed = reported.replace('/run/systemd/system/infraternal-agent.service.d/zz.conf', '/etc/systemd/system/infraternal-.service.d/zz.conf')
+        self.assertEqual(self.run_shell(prefixed + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+        prefix_beside = self.unit.parent / 'infraternal-.service.d'
+        prefix_beside.mkdir(mode=0o700)
+        (prefix_beside / 'override.conf').write_text('[Service]\nExecStart=\nExecStart=/bin/false\n')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
 
     def test_an_install_with_a_mount_inside_is_never_offered(self):
         # J342 P3-1: Take over's commit deletes the whole set-aside tree; a
