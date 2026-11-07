@@ -4216,3 +4216,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      The rejected options were keeping "unchanged" for complete scans (it
      still reads as a guarantee) and listing changes only (silence can't tell
      "checked, nothing found" from "couldn't check").
+
+361. **The nightly fuzz run follows dev (owner, 2026-11-07, #353; changes
+     PROCESS §12):** the nightly fuzz runner on dev-02 was pinned to the
+     commit chosen at install, and only a reinstall moved it. It stayed on a
+     5 November commit, re-reported a parser bug already fixed on dev, and
+     never ran the newer runner checks. The owner chose "Follow latest dev":
+     before each night's run the runner fetches `dev` as the fuzz account and
+     fuzzes that head, and the night fails if the fetch fails. Its token
+     still only meets reviewed code, because only the orchestrator merges
+     into dev. The rejected option was keeping the pin and reinstalling after
+     merges, which drifts whenever a reinstall is forgotten.
