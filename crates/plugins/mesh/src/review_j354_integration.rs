@@ -1,4 +1,5 @@
 //! Checks the property/value grammar used by the Linux split-DNS fallback (#266).
+#![allow(clippy::expect_used)]
 use super::*;
 use std::process::Command;
 
@@ -12,18 +13,14 @@ fn review_j354_nmcli_search_list_is_one_property_value() {
     );
     for command in commands {
         assert_eq!(command[0..3], ["device", "modify", "infraternal0"]);
-        let mut properties = command[3..].chunks_exact(2);
-        for pair in properties.by_ref() {
+        let (properties, remainder) = command[3..].as_chunks::<2>();
+        for [property, _value] in properties {
             assert!(
-                ["ipv4.dns", "ipv4.dns-search"].contains(&pair[0].as_str()),
-                "nmcli treats this search-domain value as a property: {}",
-                pair[0]
+                ["ipv4.dns", "ipv4.dns-search"].contains(&property.as_str()),
+                "nmcli treats this search-domain value as a property: {property}"
             );
         }
-        assert!(
-            properties.remainder().is_empty(),
-            "nmcli requires property/value pairs"
-        );
+        assert!(remainder.is_empty(), "nmcli requires property/value pairs");
     }
 }
 

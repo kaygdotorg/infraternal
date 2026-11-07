@@ -203,8 +203,9 @@ fn tcp_poll_timeout(clients: &[TcpClient]) -> PollTimeout {
         .iter()
         .map(|client| TCP_IDLE_TIMEOUT.saturating_sub(client.last_activity.elapsed()))
         .min()
-        .map(|remaining| PollTimeout::try_from(remaining).unwrap_or(PollTimeout::MAX))
-        .unwrap_or(PollTimeout::NONE)
+        .map_or(PollTimeout::NONE, |remaining| {
+            PollTimeout::try_from(remaining).unwrap_or(PollTimeout::MAX)
+        })
 }
 
 /// Accepts a bounded batch so a flood of TCP handshakes cannot starve UDP queries.
@@ -217,9 +218,9 @@ fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) 
                 }
                 clients.push(TcpClient::new(stream, source));
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-            Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => continue,
+            Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => {}
             Err(error) => return Err(error),
         }
     }
@@ -280,7 +281,7 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
                     client.expected_message_length = Some(message_length);
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return true,
             Err(_) => return false,
         }
@@ -296,7 +297,7 @@ fn write_tcp_response(client: &mut TcpClient) -> bool {
                 client.output_offset += length;
                 client.last_activity = Instant::now();
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return true,
             Err(_) => return false,
         }

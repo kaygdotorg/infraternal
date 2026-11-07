@@ -1,12 +1,12 @@
 //! Reviews capability negotiation against a strict pre-DNS infraternal agent (#266).
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 use super::*;
 
 /// Emulates the previous shipping identity action: rotation and compact access, without DNS.
 struct OldNode;
 impl NodeChannel for OldNode {
     /// Identifies only this synthetic channel.
-    fn id(&self) -> &str {
+    fn id(&self) -> &'static str {
         "j354-old-node"
     }
     /// Uses a documentation-only underlay address without opening a socket.
