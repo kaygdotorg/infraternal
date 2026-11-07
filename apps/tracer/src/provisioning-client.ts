@@ -20,7 +20,8 @@
 import { isCanonicalUuid } from "./identifiers";
 
 export type BootstrapStep = "check" | "install" | "facts" | "connect" | "done" | "failed";
-export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running";
+/** Public failure categories from the server (contracts/ssh-bootstrap.md); the page for each lives in addhost/model.ts. */
+export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account";
 export type BootstrapMode = "rootless" | "root";
 
 /** Phases a target passes through in order, before `done` (or `failed` at any point). */
@@ -46,6 +47,7 @@ export type AuthMethod = "network" | "server-key" | "user-key" | "password";
 export type NetworkProvider = "netbird" | "tailscale" | "twingate" | "other";
 export interface AuthenticationInfo { method: AuthMethod; network?: NetworkProvider }
 
+/** A failed or paused step as the server describes it: the public failure fields the add-host pages read. */
 export interface FailureDetail {
   kind: FailureKind;
   message: string;
@@ -66,6 +68,14 @@ export interface FailureDetail {
     /** Another server's install runs with open terminals and may be in use there: refused, not offered (D337). */
     in_use?: boolean;
   };
+  /** Which staging check refused, only on `unproven_files`, when the host named it (#394). */
+  refusal?: "cache" | "prepared" | "foreign";
+  /**
+   * A finished install of another server that a root-mode add may take over (D359), only on
+   * `unrecognized_install`: the old install's id (32 lowercase hex characters), which the
+   * confirmation names, and whether its infraternal agent is running (Take over stops it).
+   */
+  takeover?: { install: string; live: boolean };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -137,7 +147,8 @@ export interface OneUseAuth { key?: string; passphrase?: string; password?: stri
 
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 const STEPS: readonly string[] = ["check", "install", "facts", "connect", "done", "failed"];
-const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running"];
+/** Every failure kind the server may send; anything else is dropped rather than shown (see {@link FailureKind}). */
+const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running", "unrecognized_install", "unproven_files", "no_account"];
 
 /** Turns a host label into a valid request-local id (`[A-Za-z0-9._-]{1,128}`). */
 export function targetIdFor(label: string): string {
@@ -179,12 +190,18 @@ function parseSetupLock(value: unknown): FailureDetail["setup_lock"] | undefined
   return lock;
 }
 
+/** Keeps only the known, well-formed fields of a server failure; anything else is dropped, never shown. */
 function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
   if (value.kind === "setup_running" || value.kind === "stale_previous_attempt") {
     const setupLock = parseSetupLock(value.setup_lock);
     if (setupLock) failure.setup_lock = setupLock;
+  }
+  if (value.kind === "unproven_files" && (value.refusal === "cache" || value.refusal === "prepared" || value.refusal === "foreign")) failure.refusal = value.refusal;
+  if (value.kind === "unrecognized_install" && isRecord(value.takeover) && typeof value.takeover.install === "string"
+    && /^[0-9a-f]{32}$/.test(value.takeover.install) && typeof value.takeover.live === "boolean") {
+    failure.takeover = { install: value.takeover.install, live: value.takeover.live };
   }
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
@@ -215,6 +232,10 @@ function parseLeftovers(value: unknown): Leftovers | undefined {
   return { challenge: value.challenge, mode: value.mode === "root" ? "root" : "rootless", findings: value.findings.slice(0, 16) };
 }
 
+/**
+ * Validates one server event. Its failure is kept only in its known shape, and `leftovers` only on a failure that
+ * pauses for confirmation (pausesForConfirmation).
+ */
 function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined {
   const { sequence, target, attempt, step, message, elapsed_ms: elapsed } = value;
   if (typeof sequence !== "number" || typeof target !== "string" || typeof attempt !== "number" || typeof step !== "string" || !STEPS.includes(step)
@@ -228,7 +249,7 @@ function parseEvent(value: Record<string, unknown>): BootstrapEvent | undefined 
   if (failure) event.failure = failure;
   const leftovers = parseLeftovers(value.leftovers);
   // Leftovers without the matching failure kind would offer a cleanup nobody proved; ignore them.
-  if (leftovers && failure?.kind === "stale_previous_attempt") event.leftovers = leftovers;
+  if (leftovers && pausesForConfirmation(failure)) event.leftovers = leftovers;
   const authentication = parseAuthentication(value.authentication);
   if (authentication) event.authentication = authentication;
   return event;
@@ -370,6 +391,14 @@ export interface TargetView {
  */
 export const awaitingKey = (view: TargetView): boolean =>
   view.state === "failed" && view.failure?.kind === "host-key" && view.failure.host_key_changed !== true && !!view.failure.fingerprints?.length;
+/**
+ * Whether a failure pauses its attempt for the person's confirmation: earlier-setup leftovers (#169), or a finished
+ * install of another server offered for Take over (D359). Only these carry `leftovers` and its challenge.
+ */
+function pausesForConfirmation(failure: FailureDetail | undefined): boolean {
+  return failure?.kind === "stale_previous_attempt" || (failure?.kind === "unrecognized_install" && !!failure.takeover);
+}
+
 /** True while the attempt is paused on earlier-setup leftovers: it waits for the person, nothing is running. */
 export const awaitingFresh = (view: TargetView): boolean => view.state === "running" && !!view.leftovers;
 
@@ -387,7 +416,7 @@ export function foldEvent(view: TargetView, event: BootstrapEvent): TargetView {
   if (event.step === "failed") return { ...base, state: "failed", message: event.message, failure: event.failure, leftovers: event.leftovers, elapsedMs: event.elapsed_ms };
   // Earlier-setup leftovers are a pause inside the open attempt (a `check` event, #169): the attempt stays running and
   // waits for `startFresh`. The next event of the attempt clears the pause.
-  const paused = event.failure?.kind === "stale_previous_attempt" && !!event.leftovers;
+  const paused = pausesForConfirmation(event.failure) && !!event.leftovers;
   // Rollback and warnings may emit extra install events; the phase never moves backwards.
   return { ...base, state: "running", phase: Math.max(base.phase, phase), message: event.message, failure: paused ? event.failure : undefined, leftovers: paused ? event.leftovers : undefined, elapsedMs: event.elapsed_ms };
 }

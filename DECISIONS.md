@@ -4227,3 +4227,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      still only meets reviewed code, because only the orchestrator merges
      into dev. The rejected option was keeping the pin and reinstalling after
      merges, which drifts whenever a reinstall is forgotten.
+
+362. **A sole-holder revoke stops every process of the account (owner,
+     2026-11-07, #355; extends D353):** D353 stops the account's user
+     services and turns linger off when the revoked person is the account's
+     last holder. J343's review (#355 comment 84293) showed that a program
+     started some other way (a background job, or a session over the host's
+     local SSH socket) survives that, and can write a new SSH key after the
+     revoke. The owner chose "Stop all its processes": when no one else holds
+     the account, the revoke ends every remaining process running as that
+     account, then scans. A shared account's processes are left alone, and
+     its report says "Not checked: programs may still be running" with the
+     list. The rejected option was only reporting the surviving programs,
+     which leaves the access open until someone acts.

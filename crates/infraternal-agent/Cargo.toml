@@ -52,6 +52,9 @@ zeroize = { workspace = true, optional = true }
 # login-session placement replaces them, so the feature stays Linux-only.
 infraternal-shim = { workspace = true, features = ["async-fd", "host-login"] }
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true, default-features = false, features = ["agent"] }
+# Labels published login images executable on SELinux hosts (#401). Already
+# shipped by the proxy plugin; safe fd-based calls keep this crate unsafe-free.
+xattr = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true, default-features = false, features = ["agent"] }

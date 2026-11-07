@@ -292,8 +292,10 @@ impl<R: SessionRuntime> LoginGuard for Guard<'_, R> {
     }
 }
 
-/// The file service in slice 1: never constructed, refuses every request.
-pub struct NoFiles;
+/// A file handler that cannot exist while production file access is refused.
+/// The empty type makes that invariant visible to generic channel code, so
+/// an unreachable file service does not need to ship in the host binary.
+pub enum NoFiles {}
 impl russh_sftp::server::Handler for NoFiles {
     type Error = russh_sftp::protocol::StatusCode;
     fn unimplemented(&self) -> Self::Error {

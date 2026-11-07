@@ -10,6 +10,8 @@
  *    dismisses it. A bare `dismiss()` spares errors for the same reason.
  *  - A repeat with the same key (default: tone + message) updates its toast in place and counts (×N), so
  *    twelve identical events are one toast. Different messages, tones or keys stay separate.
+ *  - A toast shown again while its card is still leaving takes that card back from where its exit is: a status
+ *    that goes and returns quickly is one card that dips, never a second copy stacked on the fading one.
  *  - Layout reads (heights) are batched into one animation frame; the stack's transforms come from CSS custom
  *    properties, so nothing runs per frame after a toast settles.
  */
@@ -450,6 +452,14 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
         it.count = it.message === value.message ? it.count + 1 : 1;
         pause(it);
         finish(it);
+        items.splice(items.indexOf(it), 1);
+      } else if ((it = items.find((other) => other.leaving && other.key === key))) {
+        // Its exit is interrupted: the same card comes back (the open transition reverses it from where it is).
+        // This is a new showing, not a repeat, so it counts from one; its old close hand-over already ran.
+        window.clearTimeout(it.exitTimer);
+        it.exitTimer = 0;
+        it.leaving = false;
+        it.count = 1;
         items.splice(items.indexOf(it), 1);
       } else {
         it = build();

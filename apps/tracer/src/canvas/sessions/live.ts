@@ -277,6 +277,9 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
           if (first) settle();
           // The refusal is an answer: the window is not "slow" any more, it says why in its own strip.
           this.endSlow();
+          // A new shell that was refused has no session and none is coming: the window leaves the saved layout
+          // rather than holding its birth as "waiting for a session id" (and the "Not saved" status with it, #395).
+          if (!this.model.sessionId && !this.model.openRefused) { this.model.openRefused = true; this.changed(); }
           if (this.refused?.(message, action)) return true;
           // A refusal that names a way forward is long (about 150 characters); the default 4.2 s is too short to read it.
           core.toast.show({ message, tone: "error", duration: sessionList ? 0 : Math.max(4200, message.length * 70),
@@ -287,6 +290,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
         onSessionCreated: (id) => {
           this.retired = undefined;
           this.model.sessionId = id;
+          delete this.model.openRefused;
           this.changed();
           options.onSessionCreated?.(id);
           options.onStartupSession?.(id, this.model.hostId, this.model.host);
