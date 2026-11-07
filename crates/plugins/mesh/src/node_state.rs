@@ -521,11 +521,51 @@ impl Store {
         }
         Ok(())
     }
+    /// Prove a same-version binding advance from an accepted `GotaTun` predecessor to its candidate.
+    ///
+    /// Restart may finish applying an already committed identity while replaying the same public
+    /// revision. The journal must select the candidate, and both the private key file and recorded
+    /// interface identity must already name it. An open journal also proves the snapshot's
+    /// predecessor; a completed journal has erased that predecessor but still proves the candidate.
+    fn rotation_binding_advance_is_proven(
+        &self,
+        previous: crate::policy::model::PublicKey,
+        candidate: crate::policy::model::PublicKey,
+    ) -> io::Result<bool> {
+        let Some(rotation) = self.rotation_secret()? else {
+            return Ok(false);
+        };
+        if !rotation.commit_requested {
+            return Ok(false);
+        }
+        let (_, journal_candidate) = crate::wireguard::Key::from_private(&rotation.candidate)?;
+        if candidate != journal_candidate {
+            return Ok(false);
+        }
+        if !rotation.completed {
+            let (_, journal_previous) = crate::wireguard::Key::from_private(&rotation.previous)?;
+            if previous != journal_previous {
+                return Ok(false);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if self.recorded_engine()? != Some(crate::gotatun_node::EngineKind::GotaTun) {
+            return Ok(false);
+        }
+        if self.recorded_interface()? != Some(journal_candidate) {
+            return Ok(false);
+        }
+        let Some(private_key) = self.read_private_key()? else {
+            return Ok(false);
+        };
+        let private_public = crate::gotatun_node::secret_from_bytes(&private_key)?.1;
+        Ok(private_public == journal_candidate)
+    }
     /// Atomically publish public intent and fsync the replacement and directory.
     /// # Errors
     /// Refuses stale/conflicting revisions or incomplete persistence; no existing
-    /// temporary file is overwritten. Identical replay and exact legacy-key
-    /// metadata upgrades retain their established semantics.
+    /// temporary file is overwritten. Identical replay, legacy binding upgrades and journal-proven
+    /// `GotaTun` binding advances retain their established semantics.
     pub fn save(&self, state: &State) -> io::Result<()> {
         // The directory inode is stable across atomic snapshot replacement.
         // Lock it, not the replaced file, so independent Store instances cannot
@@ -546,12 +586,20 @@ impl Store {
                 return Err(io::ErrorKind::InvalidData.into());
             }
             if next.version == old.version && next != &old {
-                // An existing exact legacy-key upgrade changes metadata only;
-                // Node's authenticated binding check still authorizes that key.
-                let mut bound = old;
-                if bound.local_key.is_some() || next.local_key.is_none() {
+                // Legacy snapshots may gain their first binding. An existing binding may advance
+                // only when the local GotaTun commit journal and identity files prove that exact
+                // candidate; equal revision alone never authorizes new policy.
+                let binding_advance = match (old.local_key, next.local_key) {
+                    (Some(previous), Some(candidate)) if previous != candidate => {
+                        self.rotation_binding_advance_is_proven(previous, candidate)?
+                    }
+                    _ => false,
+                };
+                let legacy_binding = old.local_key.is_none() && next.local_key.is_some();
+                if !binding_advance && !legacy_binding {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
+                let mut bound = old;
                 bound.local_key = next.local_key;
                 if &bound != next {
                     return Err(io::ErrorKind::InvalidData.into());
@@ -726,6 +774,179 @@ pub(crate) mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    /// Build a minimal accepted mesh view with one local identity binding.
+    fn binding_state(local_key: crate::policy::model::PublicKey) -> State {
+        State {
+            enabled: true,
+            config: Some(Config {
+                local_key: Some(local_key),
+                server: None,
+                node: crate::policy::model::NodeId(1),
+                #[cfg(feature = "mesh-dns-spike")]
+                name: None,
+                #[cfg(feature = "mesh-dns-spike")]
+                dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+                version: 7,
+                addresses: crate::policy::model::Addresses {
+                    ipv4: "10.254.0.1".parse().expect("IPv4"),
+                    ipv6: "fd01::1".parse().expect("IPv6"),
+                },
+                default_policy: crate::dataplane::DefaultPolicy::Deny,
+                exposure: None,
+                peers: std::collections::BTreeMap::new(),
+                #[cfg(feature = "mesh-dns-spike")]
+                peer_names: std::collections::BTreeMap::new(),
+            }),
+            #[cfg(target_os = "linux")]
+            backend: Some(crate::firewall::Backend::Nft),
+        }
+    }
+
+    /// A committed `GotaTun` journal authorizes persisting its candidate binding at the same revision.
+    #[test]
+    fn a_commit_journal_authorizes_the_same_version_gotatun_binding_advance() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+
+        store
+            .save(&binding_state(candidate_public))
+            .expect("journal-proven binding advance at the same config revision");
+
+        let (_, restored) = Store::open(&directory.0).expect("restore candidate binding");
+        assert_eq!(
+            restored.config.and_then(|config| config.local_key),
+            Some(candidate_public),
+            "the candidate binding is durable after snapshot replacement"
+        );
+    }
+
+    /// A completed journal still authorizes normalizing a snapshot that retained its old binding.
+    #[test]
+    fn a_completed_journal_authorizes_normalizing_a_stale_gotatun_binding() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: operation_id.to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("retire the predecessor before snapshot normalization");
+
+        store
+            .save(&binding_state(candidate_public))
+            .expect("normalize the stale binding after finish");
+    }
+
+    /// A same-revision binding cannot move to a key that the commit journal does not select.
+    #[test]
+    fn an_unproven_same_version_gotatun_binding_advance_is_refused() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        let unrelated_public = crate::wireguard::Key::from_private(&unrelated)
+            .expect("unrelated key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+
+        assert_eq!(
+            store
+                .save(&binding_state(unrelated_public))
+                .expect_err("an unrelated key cannot replace the accepted binding")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
     #[test]
     fn explicit_off_survives_restart_and_snapshot_contains_only_public_fields() {
         let directory = Directory::new();
