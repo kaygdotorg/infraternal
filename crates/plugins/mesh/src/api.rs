@@ -532,6 +532,17 @@ impl MeshService {
         )
     }
 
+    /// Build a service with a different authority epoch to model another server process in tests.
+    #[cfg(test)]
+    pub(crate) fn with_authority_epoch_for_test(
+        pool: SqlitePool,
+        authority_epoch: std::sync::Arc<str>,
+    ) -> Self {
+        let store =
+            crate::store::Store::with_authority_epoch_for_test(pool.clone(), authority_epoch);
+        Self::with_store(pool, store)
+    }
+
     /// Build the service around an already opened store, with a fresh change broadcast.
     fn with_store(pool: SqlitePool, store: crate::store::Store) -> Self {
         let (updates, _) = broadcast::channel(CHANGE_BUFFER);

@@ -588,6 +588,8 @@ async fn audit_renames(
 pub struct Store {
     pool: SqlitePool,
     cache: std::sync::Arc<tokio::sync::Mutex<Option<Loaded>>>,
+    /// Server-process authority shared by every Store handle and persisted before a snapshot is published.
+    authority_epoch: std::sync::Arc<str>,
     // Applied-view receipts are valid only for this server process lifetime.
     server_instance: std::sync::Arc<str>,
     load_diagnostics: StorageDiagnostics,
@@ -609,6 +611,15 @@ pub type ControlPlane = std::sync::Arc<dyn Fn() -> TrafficPolicy + Send + Sync>;
 /// timer (J273 P3-2, J284 P3-a).
 pub(crate) const ROTATION_IN_PROGRESS: &str = "Mesh key rotation is in progress.";
 
+/// Share one authority across all stores in this server process; a new process gets a fresh UUID.
+static PROCESS_AUTHORITY_EPOCH: std::sync::LazyLock<std::sync::Arc<str>> =
+    std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string().into());
+
+/// Return this process's stable Mesh authority epoch to every Store handle.
+fn process_authority_epoch() -> std::sync::Arc<str> {
+    std::sync::Arc::clone(&PROCESS_AUTHORITY_EPOCH)
+}
+
 impl Store {
     #[must_use]
     pub fn new(pool: SqlitePool) -> Self {
@@ -622,10 +633,20 @@ impl Store {
     /// An explicit Mesh suffix still takes precedence when that resolver feature is enabled.
     #[must_use]
     pub fn with_public_origin(pool: SqlitePool, public_origin: &str) -> Self {
+        Self::with_authority_epoch(pool, public_origin, process_authority_epoch())
+    }
+
+    /// Create a store that shares its process authority with every other handle from this server.
+    fn with_authority_epoch(
+        pool: SqlitePool,
+        public_origin: &str,
+        authority_epoch: std::sync::Arc<str>,
+    ) -> Self {
         let default_dns_suffix = configuration::default_dns_suffix_from_origin(public_origin);
         Self {
             pool,
             cache: std::sync::Arc::default(),
+            authority_epoch,
             server_instance: uuid::Uuid::new_v4().to_string().into(),
             load_diagnostics: StorageDiagnostics::new("mesh.coordinator.load"),
             config_diagnostics: StorageDiagnostics::new("mesh.coordinator.config"),
@@ -633,6 +654,15 @@ impl Store {
             default_dns_suffix,
             control_plane: std::sync::Arc::default(),
         }
+    }
+
+    /// Give unit tests a distinct process authority without changing the production singleton.
+    #[cfg(test)]
+    pub(crate) fn with_authority_epoch_for_test(
+        pool: SqlitePool,
+        authority_epoch: std::sync::Arc<str>,
+    ) -> Self {
+        Self::with_authority_epoch(pool, "", authority_epoch)
     }
     /// The server instance ID that tags acknowledgment receipts.
     #[cfg(test)]
@@ -1802,19 +1832,20 @@ impl Store {
         .await
         .map_err(|error| storage_sql_error(error))?;
         let authority_epoch = match stored_authority_epoch {
-            Some(epoch) if crate::dataplane::valid_authority_epoch(&epoch) => epoch,
-            Some(_) => return Err(storage_error("Mesh authority epoch invalid.")),
-            None => {
-                // A restore reset remains pending until this UUID is durably committed. A failed
-                // update aborts snapshot compilation, so no node sees a process-local substitute.
-                let epoch = uuid::Uuid::new_v4().to_string();
-                let updated = sqlx::query(
-                    "UPDATE mesh_state SET authority_epoch=? WHERE singleton=1 AND authority_epoch IS NULL",
-                )
-                .bind(&epoch)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| storage_sql_error(error))?;
+            Some(epoch) if !crate::dataplane::valid_authority_epoch(&epoch) => {
+                return Err(storage_error("Mesh authority epoch invalid."));
+            }
+            Some(epoch) if epoch.as_str() == self.authority_epoch.as_ref() => epoch,
+            _ => {
+                // Each server process gets a fresh authority. Commit it inside this writer
+                // transaction before compiling a snapshot, so a failed write publishes nothing.
+                let epoch = self.authority_epoch.to_string();
+                let updated =
+                    sqlx::query("UPDATE mesh_state SET authority_epoch=? WHERE singleton=1")
+                        .bind(&epoch)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|error| storage_sql_error(error))?;
                 if updated.rows_affected() != 1 {
                     return Err(storage_error("Mesh authority epoch reset was not stored."));
                 }

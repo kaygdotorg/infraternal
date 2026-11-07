@@ -1025,7 +1025,7 @@ mod tests {
         assert_eq!(channel.leases.load(Ordering::Acquire), 0);
     }
 
-    /// A restore epoch must reach a node even when the restored policy is otherwise identical.
+    /// A restarted server sends its fresh authority epoch when policy is otherwise identical.
     #[tokio::test]
     async fn authority_epoch_change_reapplies_identical_mesh_snapshot() {
         let service = service().await;
@@ -1050,18 +1050,35 @@ mod tests {
         ));
         channel.wait().await;
         let before = store.snapshot().await.unwrap();
-        let old_epoch = before.config(node).unwrap().authority_epoch.unwrap();
+        let old_epoch = before
+            .config(node)
+            .unwrap()
+            .authority_epoch
+            .as_deref()
+            .unwrap()
+            .to_owned();
 
-        sqlx::query("UPDATE mesh_state SET authority_epoch=NULL WHERE singleton=1")
-            .execute(&service.pool_for_tests())
-            .await
-            .unwrap();
-        let restored = store.snapshot().await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        let restarted = MeshService::with_authority_epoch_for_test(
+            service.pool_for_tests(),
+            uuid::Uuid::new_v4().to_string().into(),
+        );
+        let restarted_store = restarted.dataplane();
+        let restored = restarted_store.snapshot().await.unwrap();
         let new_config = restored.config(node).unwrap();
         let new_epoch = new_config.authority_epoch.as_deref().unwrap();
         assert_ne!(old_epoch, new_epoch);
+        assert_eq!(new_config.version, before.config(node).unwrap().version);
         let restored_version = new_config.version;
-        service.invalidate_dataplane().await;
+
+        let task = tokio::spawn(run(
+            restarted_store,
+            restarted,
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
 
         let permit =
             tokio::time::timeout(std::time::Duration::from_secs(5), channel.applied.acquire())

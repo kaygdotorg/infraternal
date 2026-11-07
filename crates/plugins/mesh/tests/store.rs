@@ -81,9 +81,9 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
     assert!(after.version > before.version);
 }
 
-/// Persist one authority epoch across process restarts and rotate it for an explicit restore.
+/// Keep one authority epoch across every store handle in a server process.
 #[tokio::test]
-async fn mesh_authority_epoch_survives_restart_and_changes_on_restore_reset() {
+async fn mesh_authority_epoch_is_shared_by_store_handles_in_one_process() {
     let pool = pool().await;
     let first = Store::new(pool.clone());
     let (server, _) = first.attach("server", key(1), None, true).await.unwrap();
@@ -93,26 +93,37 @@ async fn mesh_authority_epoch_survives_restart_and_changes_on_restore_reset() {
         .clone()
         .expect("server snapshot must carry its authority epoch");
 
-    let restarted = Store::new(pool.clone());
-    let after_restart = restarted.config(server).await.unwrap();
+    let same_process = first.config(server).await.unwrap();
     assert_eq!(
-        after_restart.authority_epoch.as_deref(),
-        Some(first_epoch.as_str())
+        same_process.authority_epoch.as_deref(),
+        Some(first_epoch.as_str()),
+        "one server process must keep its authority epoch stable"
     );
 
-    sqlx::query("UPDATE mesh_state SET authority_epoch=NULL WHERE singleton=1")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let after_restore = Store::new(pool).config(server).await.unwrap();
-    let restored_epoch = after_restore
+    let second_handle = Store::new(pool.clone());
+    let second_snapshot = second_handle.config(server).await.unwrap();
+    let second_epoch = second_snapshot
         .authority_epoch
-        .expect("restore reset must create a new authority epoch");
-    assert_ne!(restored_epoch, first_epoch);
-    assert!(infraternal_plugin_mesh::dataplane::valid_authority_epoch(
-        &restored_epoch
-    ));
-    assert_eq!(after_restore.version, before.version);
+        .as_deref()
+        .expect("every server snapshot must carry its process authority epoch");
+    assert_eq!(
+        second_epoch, first_epoch,
+        "separate Store handles in one server process must share one authority"
+    );
+    let persisted_epoch: String =
+        sqlx::query_scalar("SELECT authority_epoch FROM mesh_state WHERE singleton=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        persisted_epoch, first_epoch,
+        "the process authority must be committed before its snapshot is published"
+    );
+    assert_eq!(
+        second_snapshot.authority_epoch.as_deref(),
+        Some(first_epoch.as_str())
+    );
+    assert_eq!(second_snapshot.version, before.version);
 }
 
 #[tokio::test]

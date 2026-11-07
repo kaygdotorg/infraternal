@@ -183,20 +183,16 @@ request must say so and name the backup to restore.
 
 ## Restoring an older Mesh authority
 
-The Mesh deployment authority epoch survives ordinary server restarts. After
-restoring an older database backup, clear that epoch while the server is stopped
-and before starting the restored server:
+Each server process creates a fresh Mesh authority UUID. Before publishing a
+snapshot, it commits that UUID to `mesh_state`; if the write fails, it sends no
+snapshot. After restoring any database backup, start the server normally. Its
+new process UUID makes enrolled nodes fence the previous peer set before they
+apply the restored snapshot, even when the backup was taken after the epoch
+column was added.
 
-```sql
-UPDATE mesh_state SET authority_epoch = NULL WHERE singleton = 1;
-```
-
-The first Mesh snapshot then durably creates a fresh UUID before it is sent.
-Backups from before the authority-epoch migration get a NULL column when the
-current server migrates them and follow the same initialization path. If the
-fresh epoch cannot be committed, the server refuses to compile or publish Mesh
-snapshots. Do not clear the epoch for ordinary restarts or an in-deploy binary
-rollback: those keep the same authority and the peers' last-known rules (D166).
+Nodes keep their last-known rules while the server is unreachable (D166). When a
+restarted server reconnects, nodes briefly reapply the full snapshot under the
+new authority. No manual SQL reset is needed.
 
 Migration `0029_remote_host_hostname` (#236) adds the retained hostname column
 and replaces existing UUID-shaped Mesh placeholders with audited unnamed
