@@ -391,7 +391,7 @@ fn revoke_reply(revoked: &crate::logins::Revoked) -> Vec<u8> {
         let mut reply = serde_json::json!({ "revoked": true });
         if revoked.background_may_remain {
             // D353: others still share the account, or linger came back (J308).
-            reply["warning"] = "Background programs of this host account may still be running: other people still have access to it, or its own programs turned linger back on.".into();
+            reply["warning"] = "Background programs of this host account may still be running: other people still have access to it, linger returned, or account shutdown could not be verified.".into();
         }
         // D356: always sent, so "nothing changed" is never confused with
         // "not checked" (an older agent sends none).
@@ -438,6 +438,13 @@ fn trim_report(access: &mut crate::access_files::Access) -> bool {
         Unscanned,
         /// A whole file worth this much.
         File(u8),
+    }
+    for account in access.accounts.iter_mut().rev() {
+        if !account.processes.is_empty() {
+            account.processes.truncate(account.processes.len() / 2);
+            // Keep programs_may_remain: trimming evidence never proves shutdown.
+            return true;
+        }
     }
     let order = [
         Step::Line(1),
@@ -567,6 +574,38 @@ mod revoke_reply_tests {
         let clean = super::revoke_reply(&crate::logins::Revoked::default());
         let clean: serde_json::Value = serde_json::from_slice(&clean).unwrap();
         assert_eq!(clean["access"]["state"], "unchanged");
+    }
+    /// D362 process evidence cannot overflow a reply or lose its warning during trimming.
+    #[test]
+    fn process_lists_fit_the_reply_without_claiming_shutdown() {
+        use crate::access_files::{Access, AccountReport, Reason, State};
+        let account = AccountReport {
+            state: State::NotChecked,
+            reason: Some(Reason::ProgramsMayRemain),
+            programs_may_remain: true,
+            processes: vec![format!("1234 {}", "w".repeat(64)); 64],
+            ..AccountReport::default()
+        };
+        let revoked = crate::logins::Revoked {
+            background_may_remain: true,
+            access: Access {
+                state: State::NotChecked,
+                reason: Some(Reason::ProgramsMayRemain),
+                omitted_accounts: 0,
+                accounts: vec![account; 64],
+            },
+        };
+        let bytes = super::revoke_reply(&revoked);
+        assert!(bytes.len() <= super::REVOKE_REPLY_BUDGET);
+        let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            reply["access"]["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|account| account["programs_may_remain"] == true
+                    && account["state"] == "not_checked")
+        );
     }
 }
 

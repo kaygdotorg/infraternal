@@ -160,6 +160,9 @@ pub(crate) struct AccountReport {
     /// The account's programs may still run after the revoke.
     #[serde(default)]
     pub(crate) programs_may_remain: bool,
+    /// PIDs and printable kernel command names remaining after the scan (D362).
+    #[serde(default)]
+    pub(crate) processes: Vec<String>,
     /// When the grant was recorded (seconds since the epoch; 0 if unknown).
     #[serde(default)]
     pub(crate) recorded_at: u64,
@@ -315,6 +318,12 @@ impl AccessReport {
             for name in &mut account.unscanned {
                 *name = printable(name, TEXT_CHARS, &mut cut);
             }
+            account.programs_may_remain |= !account.processes.is_empty();
+            account.processes.truncate(64);
+            for process in &mut account.processes {
+                let mut shortened = false;
+                *process = printable(process, 80, &mut shortened);
+            }
             account.categories.truncate(CATEGORIES);
             let mut ignored = false;
             for category in &mut account.categories {
@@ -353,7 +362,9 @@ impl AccessReport {
 
     /// THE rule for what the owner is told, applied by the server to every
     /// report it keeps, whatever state the host sent (J334): an account
-    /// listing files is `changed`; otherwise it is `not_checked` with the
+    /// with remaining programs is `not_checked` (D362), retaining any file
+    /// changes for review. Otherwise listed files mean `changed`, or it is
+    /// `not_checked` with the
     /// first reason that applies; only when none does is it `unchanged`.
     /// The reasons, in order: the host runs rootless (taken from the
     /// server's own record of the host, never from the host, P1-3); the
@@ -367,6 +378,7 @@ impl AccessReport {
         let watched =
             u64::try_from(infraternal_agent::access_files::WATCHED_PLACES).unwrap_or(u64::MAX);
         for account in &mut self.accounts {
+            account.programs_may_remain |= !account.processes.is_empty();
             let reason = if rootless {
                 Some(Reason::RootlessUnverified)
             } else if account.recorded_at == 0 {
@@ -396,7 +408,10 @@ impl AccessReport {
                 }
                 _ => reason,
             };
-            if !account.files.is_empty() || account.omitted_files > 0 {
+            if !rootless && account.programs_may_remain {
+                account.state = State::NotChecked;
+                account.reason = Some(Reason::ProgramsMayRemain);
+            } else if !account.files.is_empty() || account.omitted_files > 0 {
                 account.state = if rootless || account.recorded_at == 0 {
                     State::NotChecked
                 } else {
@@ -442,6 +457,13 @@ impl AccessReport {
 
     /// Drops one line, or failing that one file (counted), from the end.
     fn trim(&mut self) -> bool {
+        for account in self.accounts.iter_mut().rev() {
+            if !account.processes.is_empty() {
+                account.processes.truncate(account.processes.len() / 2);
+                // The surviving-process flag stays true even if its list is shortened.
+                return true;
+            }
+        }
         for account in self.accounts.iter_mut().rev() {
             if let Some(file) = account.files.iter_mut().rev().find(|f| !f.lines.is_empty()) {
                 file.lines.pop();
@@ -795,5 +817,22 @@ mod tests {
         assert_eq!(account.categories.len(), CATEGORIES);
         assert!(!account.categories[0].contains('\u{1b}'));
         assert_eq!(kept.state, State::Unchanged);
+    }
+    /// D362: process evidence cannot be hidden by a clean state, false flag or file changes.
+    #[test]
+    fn surviving_processes_prevent_a_clean_report_and_stay_printable() {
+        let mut access = report(State::Unchanged, vec![file("~/.bashrc", &["new"])]);
+        access.accounts[0].processes = vec!["4321 worker\u{1b}\u{202e}".to_owned(); 100];
+        let access = access.bounded().decided(false);
+        assert_eq!(access.accounts[0].state, State::NotChecked);
+        assert_eq!(access.accounts[0].reason, Some(Reason::ProgramsMayRemain));
+        assert_eq!(access.accounts[0].processes.len(), 64);
+        assert!(
+            access.accounts[0]
+                .processes
+                .iter()
+                .all(|row| !row.contains('\u{1b}') && !row.contains('\u{202e}'))
+        );
+        assert_eq!(access.accounts[0].files.len(), 1);
     }
 }

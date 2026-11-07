@@ -12,6 +12,8 @@ pub mod daemon;
 pub use control as daemon;
 /// Fingerprints of an account's access files at grant, compared on revoke (D356).
 pub mod access_files;
+/// Kernel UID observations that verify session shutdown and report leftovers.
+mod account_processes;
 #[path = "daemon_portable.rs"]
 pub mod control;
 mod daemon_writer;

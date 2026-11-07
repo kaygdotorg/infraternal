@@ -460,6 +460,9 @@ pub struct AccountReport {
     /// The account's programs may still be running after the revoke.
     #[serde(default)]
     pub programs_may_remain: bool,
+    /// PIDs and printable kernel command names still running, bounded to 64 entries.
+    #[serde(default)]
+    pub processes: Vec<String>,
     /// When the grant was recorded (seconds since the epoch; 0 if unknown).
     #[serde(default)]
     pub recorded_at: u64,
@@ -486,18 +489,21 @@ impl AccountReport {
             privileged: false,
             shared: false,
             programs_may_remain: false,
+            processes: Vec::new(),
             recorded_at: 0,
             scanned_at: now(),
         }
     }
 
     /// The one rule for an account's outcome (the server applies the same
-    /// rule again and has the last word). Listed files mean `changed`.
+    /// rule again and has the last word). Remaining programs require
+    /// `not_checked` even when changed files are listed (D362).
     /// Otherwise `unchanged` holds only when the scan was complete over every
     /// watched place, the account cannot rewrite its record (not rootless,
     /// not privileged), and nothing of the person's may still run; anything
     /// else is `not_checked` with the first reason that applies.
     pub(crate) fn decide(&mut self, rootless: bool) {
+        self.programs_may_remain |= !self.processes.is_empty();
         let own = self
             .reason
             .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed));
@@ -523,7 +529,10 @@ impl AccountReport {
             self.reason
                 .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed))
         };
-        if !self.files.is_empty() || self.omitted_files > 0 {
+        if !rootless && self.programs_may_remain {
+            self.state = State::NotChecked;
+            self.reason = Some(Reason::ProgramsMayRemain);
+        } else if !self.files.is_empty() || self.omitted_files > 0 {
             self.state = if rootless || self.recorded_at == 0 {
                 State::NotChecked
             } else {
@@ -1481,6 +1490,7 @@ fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> 
         privileged: false,
         shared: false,
         programs_may_remain: false,
+        processes: Vec::new(),
         recorded_at: base.recorded_at,
         scanned_at,
     };
@@ -1845,7 +1855,10 @@ pub(crate) fn record_grant(
 
 /// The accounts `person` has records (or failed records) on, from the store
 /// itself (not from runtime state, which a reboot empties).
-fn recorded_accounts(store: &Path, person: uuid::Uuid) -> impl Iterator<Item = u32> + '_ {
+pub(crate) fn recorded_accounts(
+    store: &Path,
+    person: uuid::Uuid,
+) -> impl Iterator<Item = u32> + '_ {
     let failed = format!("-{}.failed", person.simple());
     std::fs::read_dir(store)
         .into_iter()
@@ -1867,13 +1880,49 @@ fn recorded_accounts(store: &Path, person: uuid::Uuid) -> impl Iterator<Item = u
         })
 }
 
+/// Durable holders of `uid`, including failed grant recordings. These records
+/// outlive runtime scope files, so D362 must consult them before stopping a
+/// whole account. Missing directories mean no record; unreadable state is an
+/// error that the caller treats as shared. Records disappear only on revoke.
+pub(crate) fn recorded_holders(store: &Path, uid: u32) -> io::Result<Vec<uuid::Uuid>> {
+    let mut holders = Vec::new();
+    for (directory, failed) in [
+        (store.join(uid.to_string()), false),
+        (store.to_owned(), true),
+    ] {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let name = entry?.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| io::Error::other("invalid grant record name"))?;
+            let person = if failed {
+                name.strip_prefix(&format!("{uid}-"))
+                    .and_then(|name| name.strip_suffix(".failed"))
+            } else {
+                name.strip_suffix(".json")
+            };
+            if let Some(person) = person {
+                holders.push(uuid::Uuid::parse_str(person).map_err(io::Error::other)?);
+            }
+        }
+    }
+    Ok(holders)
+}
+
 /// What the revocation knows about an account beyond its files.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Facts {
     /// Other people still have access to the account (D353).
     pub(crate) shared: bool,
     /// The account's programs may still run after the revoke.
     pub(crate) programs_may_remain: bool,
+    /// PIDs and command names observed after the access scan.
+    pub(crate) processes: Vec<String>,
     /// The account is root or may become root ([`privileged`]).
     pub(crate) privileged: bool,
 }
@@ -1971,6 +2020,7 @@ pub(crate) fn since_grant(
             );
         }
         report.programs_may_remain = known.programs_may_remain;
+        report.processes = known.processes;
         report.privileged = known.privileged;
         report.decide(rootless);
         accounts.push(report);

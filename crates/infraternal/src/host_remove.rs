@@ -334,9 +334,7 @@ fn reason_words(reason: &str) -> &'static str {
             "not verified: this account is root or can become root, so it could have changed the record and files anywhere; check by hand"
         }
         "incomplete" => "not fully checked: some places were not scanned (listed below)",
-        "programs_may_remain" => {
-            "not verified: programs of this account may still be running and can change its files after this check"
-        }
+        "programs_may_remain" => "Not checked: programs may still be running",
         "coverage_missing" => {
             "not fully checked: the host's infraternal agent watches fewer places than this server knows of"
         }
@@ -425,6 +423,11 @@ fn account_lines(account: &Value, lines: &mut Vec<String>, files_shown: &mut boo
             "  Other people also have access to this account: changes may be theirs, and nothing after this check is known."
                 .to_owned(),
         );
+    }
+    for process in account["processes"].as_array().into_iter().flatten() {
+        if let Some(process) = process.as_str() {
+            lines.push(format!("  Running: {process}"));
+        }
     }
     for file in account["files"].as_array().into_iter().flatten() {
         *files_shown = true;

@@ -258,7 +258,8 @@ async fn record_grant(root: &Path, person: uuid::Uuid, user: &User) {
 /// accounts come from the persistent record store, so a reboot that emptied
 /// `/run` still reports; `live` adds accounts with logins but no record.
 /// `known` holds what this revocation learnt per account (shared, and
-/// whether programs may remain); an account found only in the store (after
+/// whether programs may remain). Every account is observed again after its
+/// access scan; an account found only in the store (after
 /// a reboot) is asked the same of the durable registry, and counts as
 /// shared when that cannot be read.
 async fn access_report(
@@ -270,17 +271,24 @@ async fn access_report(
 ) -> crate::access_files::Access {
     let store = crate::access_files::store(root);
     let registry_root = root.to_owned();
+    let proc_root = process_root();
     tokio::task::spawn_blocking(move || {
         let lookup = |uid| User::from_uid(Uid::from_raw(uid)).ok().flatten();
         let facts = |uid: u32| {
-            let mut facts = known.get(&uid).copied().unwrap_or_else(|| {
+            let mut facts = known.get(&uid).cloned().unwrap_or_else(|| {
                 let shared = rootless || others_share(&registry_root, person, uid).unwrap_or(true);
                 crate::access_files::Facts {
                     shared,
                     programs_may_remain: shared,
                     privileged: false,
+                    processes: Vec::new(),
                 }
             });
+            if !rootless {
+                let snapshot = crate::account_processes::scan(&proc_root, uid);
+                facts.programs_may_remain |= !snapshot.empty();
+                facts.processes = snapshot.processes;
+            }
             facts.privileged =
                 !rootless && lookup(uid).is_none_or(|user| crate::access_files::privileged(&user));
             facts
@@ -917,7 +925,8 @@ pub struct Revoked {
     /// Background programs of a host account the person used may still run:
     /// someone else still has access, so its services were left running
     /// (D353), or linger came back on after they were stopped, which only
-    /// the account's own code outside the login does (J308 P3-2).
+    /// the account's own code outside the login does (J308 P3-2), or the
+    /// whole-UID check could not prove shutdown after D362 session termination.
     pub background_may_remain: bool,
     /// What changed in the access files of the person's accounts since
     /// their grant, or why it was not checked, for the person revoking to
@@ -971,6 +980,9 @@ async fn revoke_once(
     let mut revoked = Revoked::default();
     let mut accounts = Vec::new();
     let mut known = std::collections::HashMap::new();
+    // Every account with a record, not only the first ones: D362 stops each.
+    let mut candidates: Vec<u32> =
+        crate::access_files::recorded_accounts(&crate::access_files::store(root), person).collect();
     for entry in std::fs::read_dir(&registry)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -984,6 +996,11 @@ async fn revoke_once(
             continue;
         };
         let uid = uid.parse::<u32>().map_err(io::Error::other)?;
+        if !candidates.contains(&uid) {
+            candidates.push(uid);
+        }
+    }
+    for uid in candidates {
         let unit = self::name(person, uid);
         let _account = acquire(root, &unit).await?;
         let stopped = stop_login(root, manager, person, uid, &unit).await;
@@ -998,6 +1015,9 @@ async fn revoke_once(
                 let shared = others_share(root, person, uid)?;
                 let mut remain = shared;
                 if !shared {
+                    // End outside sessions before disabling linger: otherwise their
+                    // code can keep re-enabling it while D353 tries to turn it off.
+                    remain |= end_account_sessions(uid).await;
                     match stop_user_services(uid).await {
                         Err(error) => failure = Some(error),
                         // Linger came back after the account's services were
@@ -1013,6 +1033,7 @@ async fn revoke_once(
                         shared,
                         programs_may_remain: remain,
                         privileged: false,
+                        processes: Vec::new(),
                     },
                 );
             }
@@ -1026,6 +1047,7 @@ async fn revoke_once(
                         shared,
                         programs_may_remain: shared,
                         privileged: false,
+                        processes: Vec::new(),
                     },
                 );
             }
@@ -1039,12 +1061,17 @@ async fn revoke_once(
     // grant, reported, never edited. Only a completed revocation forgets
     // the records, so a retried attempt compares again.
     revoked.access = access_report(root, person, accounts, known, false).await;
+    revoked.background_may_remain |= revoked
+        .access
+        .accounts
+        .iter()
+        .any(|account| account.programs_may_remain);
     Ok(revoked)
 }
 
 /// Whether another person still has access to host account `uid` here, as
 /// far as this host can tell from its durable, root-only state: a recorded
-/// scope of a login of theirs on that account (written only when an open
+/// scope or a persistent grant record on that account (written only when an open
 /// succeeded, and removed when they are revoked), without a revocation
 /// marker or a pending revocation. Lock files do not count: any open
 /// attempt creates one and none is ever removed, so they would keep D353
@@ -1058,6 +1085,20 @@ fn others_share(root: &Path, person: uuid::Uuid, uid: u32) -> io::Result<bool> {
         return Ok(true);
     }
     let registry = root.join("infraternal-login-locks");
+    let Ok(holders) = crate::access_files::recorded_holders(&crate::access_files::store(root), uid)
+    else {
+        return Ok(true);
+    };
+    for other in holders {
+        if other != person
+            && !revocations::denied(root, other)
+            && !registry
+                .join(format!("{}.revoked", other.simple()))
+                .exists()
+        {
+            return Ok(true);
+        }
+    }
     let suffix = format!("-{uid}.scope");
     for entry in std::fs::read_dir(&registry)? {
         let name = entry?.file_name();
@@ -1087,7 +1128,7 @@ fn others_share(root: &Path, person: uuid::Uuid, uid: u32) -> io::Result<bool> {
 /// which holds every `systemd-run --user` unit), stops the manager and
 /// requires that cgroup to be empty, then turns linger off, and reports
 /// success only once linger is verified off and the manager has stayed gone.
-/// The account's other, non-infraternal sessions are not touched.
+/// D362 ends other sessions first, so they cannot keep re-enabling linger.
 async fn stop_user_services(uid: u32) -> io::Result<bool> {
     let name = User::from_uid(Uid::from_raw(uid))
         .map_err(io::Error::from)?
@@ -1147,6 +1188,69 @@ async fn stop_user_services(uid: u32) -> io::Result<bool> {
     Err(io::Error::other(
         "host account linger or user manager kept coming back; revocation will retry",
     ))
+}
+
+/// D362 ends every account session through the operating system, then stops its
+/// whole user slice. This is systemd-only: D354 refuses root logins elsewhere.
+/// Command errors are not proof either way; the UID observation decides whether
+/// programs may remain. Both commands are attempted even if logind fails.
+async fn end_account_sessions(uid: u32) -> bool {
+    let _ = tokio::time::timeout(
+        UNIT_STOP_HANG,
+        loginctl()
+            .args(["terminate-user", &uid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        UNIT_STOP_HANG,
+        systemctl()
+            .args(["stop", &format!("user-{uid}.slice")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + process_wait();
+    loop {
+        let root = process_root();
+        let empty =
+            tokio::task::spawn_blocking(move || crate::account_processes::scan(&root, uid).empty())
+                .await
+                .unwrap_or(false);
+        if empty {
+            return false;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return true;
+        }
+        // sleep: bounded polling observes the kernel retiring account processes.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Five seconds to observe account shutdown; a scripted host uses its short settle.
+fn process_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(host) = stand_in() {
+        return host.settle;
+    }
+    Duration::from_secs(5)
+}
+
+/// Kernel process records, replaced only by the scripted host in unit tests.
+fn process_root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(host) = stand_in() {
+        return host.proc_root;
+    }
+    PathBuf::from("/proc")
 }
 
 /// How many kill, linger-off, verify rounds one revocation attempt makes.
@@ -1360,6 +1464,8 @@ struct HostStandIn {
     probe: Option<Manager>,
     /// Stand-in for `/var/lib/systemd/linger`.
     linger: PathBuf,
+    /// Stand-in for the UID verification process filesystem.
+    proc_root: PathBuf,
     /// Replaces [`LINGER_SETTLE`].
     settle: Duration,
 }
@@ -1383,7 +1489,7 @@ fn systemctl() -> tokio::process::Command {
     if let Some(host) = stand_in() {
         return crate::sessions::isolated(&host.systemctl);
     }
-    crate::sessions::isolated(Path::new("systemctl"))
+    crate::sessions::isolated(&account_tool("systemctl").unwrap_or_else(|| PathBuf::from("/")))
 }
 
 /// A `loginctl` command, isolated like every host-manager child.
@@ -1392,7 +1498,51 @@ fn loginctl() -> tokio::process::Command {
     if let Some(host) = stand_in() {
         return crate::sessions::isolated(&host.loginctl);
     }
-    crate::sessions::isolated(Path::new("loginctl"))
+    crate::sessions::isolated(&account_tool("loginctl").unwrap_or_else(|| PathBuf::from("/")))
+}
+
+/// Fixed root-owned tools for account revocation and its access probes. The
+/// original and canonical parent chains must both be protected, including
+/// symlink parents. An untrusted first candidate is refused, never skipped.
+/// Callers fail closed when none exists; executing `/` also always fails.
+pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    if !matches!(name, "systemctl" | "loginctl" | "sudo") {
+        return None;
+    }
+    for directory in [
+        "/usr/bin",
+        "/bin",
+        "/run/current-system/sw/bin",
+        "/run/wrappers/bin",
+    ] {
+        let candidate = Path::new(directory).join(name);
+        let canonical = match std::fs::canonicalize(&candidate) {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let metadata = std::fs::metadata(&canonical).ok()?;
+        let protected = candidate
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .chain(canonical.parent().into_iter().flat_map(Path::ancestors))
+            .all(|parent| {
+                std::fs::metadata(parent).is_ok_and(|meta| {
+                    meta.is_dir()
+                        && meta.uid() == 0
+                        && (meta.mode() & 0o022 == 0 || meta.mode() & 0o1000 != 0)
+                })
+            });
+        return (metadata.is_file()
+            && metadata.uid() == 0
+            && metadata.mode() & 0o022 == 0
+            && metadata.mode() & 0o111 != 0
+            && protected)
+            .then_some(canonical);
+    }
+    None
 }
 
 /// Root of the unified cgroup hierarchy that cgroup paths are relative to.
@@ -1989,6 +2139,7 @@ mod tests {
                     }
                 });
             }
+            std::fs::create_dir_all(host.join("proc")).unwrap();
             HOST_UNITS.with(|units| {
                 *units.borrow_mut() = Some(HostStandIn {
                     systemctl,
@@ -1997,6 +2148,7 @@ mod tests {
                     empty_hang: Duration::from_secs(2),
                     probe: Some(Manager::System),
                     linger: host.join("linger"),
+                    proc_root: host.join("proc"),
                     settle: Duration::from_millis(500),
                 });
             });
@@ -2130,6 +2282,9 @@ mod tests {
         .unwrap();
         let revoked = revoke_at(&root, Manager::System, person, false).await;
         let calls = host.calls();
+        let terminate = calls.find(&format!("loginctl terminate-user {uid}"));
+        let slice = calls.find(&format!("systemctl stop user-{uid}.slice"));
+        assert!(terminate.is_some() && slice > terminate, "{calls}");
         assert_eq!(
             revoked
                 .as_ref()
@@ -2305,7 +2460,73 @@ mod tests {
             !calls.contains("user@"),
             "a shared account's services were stopped: {calls:?}"
         );
+        assert!(!calls.contains("terminate-user"), "{calls}");
+        assert!(
+            !calls.contains(&format!("stop user-{uid}.slice")),
+            "{calls}"
+        );
         drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// D362: a process outside systemd's stopped slice must prevent a clean report.
+    #[tokio::test]
+    async fn a_surviving_uid_process_is_reported_after_session_termination() {
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        let process = host.host.join("proc/4321");
+        std::fs::create_dir_all(&process).unwrap();
+        std::fs::write(
+            process.join("status"),
+            format!("Name:\tworker\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
+        )
+        .unwrap();
+        std::fs::write(process.join("comm"), "worker\x1b\n").unwrap();
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+        let revoked = revoke_at(&root, Manager::System, person, false)
+            .await
+            .unwrap();
+        assert!(revoked.background_may_remain, "{revoked:?}");
+        let report = serde_json::to_value(&revoked.access).unwrap();
+        assert_eq!(report["accounts"][0]["processes"][0], "4321 worker�");
+        assert_ne!(report["accounts"][0]["state"], "unchanged");
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// D362 must not stop an account whose other holder survived only in grant records after reboot.
+    #[tokio::test]
+    async fn a_persisted_other_holder_still_makes_the_account_shared() {
+        let (root, person, uid, _) = system_login_fixture().await;
+        let store = crate::access_files::store(&root);
+        std::fs::create_dir_all(store.join(uid.to_string())).unwrap();
+        let other = uuid::Uuid::new_v4();
+        std::fs::write(
+            store
+                .join(uid.to_string())
+                .join(format!("{}.json", other.simple())),
+            b"{}",
+        )
+        .unwrap();
+        assert!(others_share(&root, person, uid).unwrap());
+        std::fs::remove_file(
+            store
+                .join(uid.to_string())
+                .join(format!("{}.json", other.simple())),
+        )
+        .unwrap();
+        std::fs::write(
+            store.join(format!("{uid}-{}.failed", other.simple())),
+            b"failed",
+        )
+        .unwrap();
+        assert!(others_share(&root, person, uid).unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 
