@@ -1993,25 +1993,51 @@ async fn active_transaction_is_live_between_ssh_setup_commands() {
 }
 
 /// #394: a finished install is named, not reported clear; only the exact
-/// record with a canonical host id is accepted.
+/// record is accepted: a canonical host id, a root identity, the agent's
+/// liveness and whether Take over may act on it (D359).
 #[test]
 fn a_finished_install_record_is_recognized_exactly() {
-    use infraternal_plugin_ssh::previous_attempt::{Remains, parse_check_with_absence};
+    use infraternal_plugin_ssh::previous_attempt::{Remains, Takeover, parse_check_with_absence};
     let check = "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n1002\nno\nyes\nyes\nno\n";
-    let valid = format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "1".repeat(32));
-    let (_, previous, remains) = parse_check_with_absence(valid.as_bytes()).unwrap();
-    assert!(previous.is_none());
-    assert_eq!(remains, Remains::Installed);
+    let host = "1".repeat(32);
+    for (live, takeover, expected) in [
+        ("live", "ready", Takeover::Ready),
+        ("idle", "busy", Takeover::Busy),
+        ("live", "unproven", Takeover::Unproven),
+    ] {
+        let valid =
+            format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1234 {live} {takeover}\n");
+        let (_, previous, remains) = parse_check_with_absence(valid.as_bytes()).unwrap();
+        assert!(previous.is_none());
+        let Remains::Installed(installed) = remains else {
+            panic!("{valid}: {remains:?}");
+        };
+        assert_eq!(installed.host.simple().to_string(), host);
+        assert_eq!(installed.live, live == "live");
+        assert_eq!(installed.takeover, expected);
+    }
     let clear = format!("{check}INFRATERNAL_SETUP_CLEAR\n");
     assert_eq!(
         parse_check_with_absence(clear.as_bytes()).unwrap().2,
         Remains::Unproven
     );
     for invalid in [
-        format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "1".repeat(31)),
-        format!("{check}INFRATERNAL_SETUP_INSTALLED {}\n", "G".repeat(32)),
-        format!("{check}INFRATERNAL_SETUP_INSTALLED {} x\n", "1".repeat(32)),
-        format!("{check}INFRATERNAL_SETUP_INSTALLED {}", "1".repeat(32)),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host}\n"),
+        format!(
+            "{check}INFRATERNAL_SETUP_INSTALLED {} 64:1 live ready\n",
+            "1".repeat(31)
+        ),
+        format!(
+            "{check}INFRATERNAL_SETUP_INSTALLED {} 64:1 live ready\n",
+            "G".repeat(32)
+        ),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64 live ready\n"),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:x live ready\n"),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1 running ready\n"),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1 live yes\n"),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1 live ready x\n"),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host}  64:1 live ready\n"),
+        format!("{check}INFRATERNAL_SETUP_INSTALLED {host} 64:1 live ready"),
     ] {
         assert!(
             parse_check_with_absence(invalid.as_bytes()).is_err(),
