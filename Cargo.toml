@@ -165,7 +165,7 @@ opt-level = "s"
 [profile.release.package.infraternal-plugin-canvas]
 opt-level = "s"
 
-# Keep the D289 SSH engine sources reviewable and apply only their audited transport API patch.
+# Keep the D289 SSH engine's transport fixes and optional algorithms reviewable.
 [patch.crates-io]
 russh = { path = "vendor/russh" }
 russh-sftp = { path = "vendor/russh-sftp" }
