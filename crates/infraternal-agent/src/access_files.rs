@@ -359,7 +359,9 @@ pub struct Change {
     pub note: Option<String>,
 }
 
-/// The outcome for one host account.
+/// The outcome for one host account. Each flag is an independent fact the
+/// outcome rule reads, so they stay separate fields.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountReport {
     /// The account's name.
