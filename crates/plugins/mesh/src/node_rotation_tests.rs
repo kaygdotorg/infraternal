@@ -260,13 +260,12 @@ fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() 
     restored.down().unwrap();
 }
 
-/// An explicit down removes the engine key file, so startup restores the journal-selected key before reattaching.
+/// A finished rotation leaves no identity behind when `down` retires this node (#367).
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-fn gotatun_rotation_recovers_its_private_key_after_down() {
+fn gotatun_rotation_down_retires_identity_and_uses_a_fresh_key() {
     let state = RotationState::new();
     let first = "00000000-0000-4000-8000-000000000047";
-    let second = "00000000-0000-4000-8000-000000000048";
     let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
     node.up().unwrap();
     let candidate = node.prepare_rotation(first, 1).unwrap();
@@ -275,12 +274,14 @@ fn gotatun_rotation_recovers_its_private_key_after_down() {
     node.down().unwrap();
     drop(node);
 
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    assert!(store.rotation_secret().unwrap().is_none());
+    assert!(store.recorded_interface().unwrap().is_none());
+    assert!(store.read_private_key().unwrap().is_none());
+    drop(store);
+
     let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
-    assert_eq!(restored.up().unwrap().public_key, candidate);
-    let next = restored.prepare_rotation(second, 3).unwrap();
-    assert_ne!(next, candidate);
-    restored.commit_rotation(second, 3).unwrap();
-    restored.finish_rotation(second, 3).unwrap();
+    assert_ne!(restored.up().unwrap().public_key, candidate);
     restored.down().unwrap();
 }
 

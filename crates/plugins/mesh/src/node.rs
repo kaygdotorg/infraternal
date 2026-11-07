@@ -1629,6 +1629,7 @@ impl Node {
         self.connection_cleanup_pending = false;
         self.pending = None;
         if let Some(store) = &self.store {
+            store.discard_rotation_state()?;
             store.remove_private_key()?;
         }
         Ok(())
@@ -2315,10 +2316,11 @@ impl Retirement {
                 Err(error) => return Err(error),
             }
         }
-        // The key is this installation's own state, whoever holds the interface now. Removing it
-        // here, after the engine is gone, does not rely on uninstall deleting the directory
-        // (#260 J143 P3-3).
+        // This installation's key and journal are ours, whoever holds the interface now. Retire
+        // both after the engine is gone; uninstall must not leave a completed marker that can
+        // recreate the key (#260 J143 P3-3, #367).
         if let Some(store) = &self.store {
+            store.discard_rotation_state()?;
             store.remove_private_key()?;
         }
         Ok(self.left)
@@ -2346,6 +2348,65 @@ mod tests {
         };
         assert_eq!(retirement.execute().expect("retire"), Vec::<&str>::new());
         assert!(!key.exists(), "retirement leaves no private key behind");
+    }
+
+    /// A completed journal must not recreate the key after host-uninstall retirement (#367).
+    #[test]
+    fn j356_retirement_after_rotation_leaves_no_private_key() {
+        let directory = crate::node_state::tests::Directory::new();
+        let (store, _) = crate::node_state::Store::open(&directory.0).expect("store");
+        let (candidate_key, candidate_public) = Key::generate().expect("candidate");
+        let candidate: [u8; 32] = candidate_key.private_bytes().try_into().expect("32 bytes");
+        store.record_engine(EngineKind::GotaTun).expect("engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("interface");
+        store.write_private_key(&candidate).expect("key");
+        store
+            .save_rotation_secret(&crate::node_state::RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000356".to_owned(),
+                sequence: 1,
+                previous: [0; 32],
+                candidate,
+                commit_requested: true,
+                completed: true,
+            })
+            .expect("completed marker");
+        let retirement = Retirement {
+            interface: false,
+            interface_index: None,
+            filter: None,
+            left: Vec::new(),
+            store: Some(store),
+        };
+        retirement.execute().expect("retire");
+        assert!(!directory.0.join("mesh-private-key").exists());
+        let (store, _) = crate::node_state::Store::open(&directory.0).expect("reopen");
+        let residue = store.rotation_secret().expect("read journal");
+        let interface = store.recorded_interface().expect("read interface record");
+        let key_before_recovery = store.read_private_key().expect("read key");
+        eprintln!(
+            "J356 R1: retirement leaves journal={} interface={} private_key={}",
+            residue.is_some(),
+            interface.is_some(),
+            key_before_recovery.is_some()
+        );
+        recover_gotatun_private_key_from_journal(&store).expect("recover");
+        let resurrected = store.read_private_key().expect("read key");
+        eprintln!(
+            "J356 R1: key file recreated after retirement={}",
+            resurrected
+                .as_ref()
+                .is_some_and(|k| k.as_slice() == candidate)
+        );
+        assert!(
+            residue.is_none() && interface.is_none() && key_before_recovery.is_none(),
+            "retirement left identity state: journal={}, interface={}, private_key={}",
+            residue.is_some(),
+            interface.is_some(),
+            key_before_recovery.is_some()
+        );
+        assert!(resurrected.is_none(), "recovery recreated a retired key");
     }
 
     /// Both Linux engines require a live identity and owned link before rotation can start.

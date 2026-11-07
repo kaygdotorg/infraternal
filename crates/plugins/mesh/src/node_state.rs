@@ -1,7 +1,9 @@
 //! Persists accepted public node intent, engine identity records and journaled key rotation
 //! [166,198]. Kernel `WireGuard` keeps its key in kernel memory; Linux and Mac `GotaTun` keep it in
 //! a private 0600 file. That key never leaves its node (D163), so backups (D147: database, CA key,
-//! configuration) must never include this directory's private Mesh key.
+//! configuration) must never include this directory's private Mesh key. A clean `down` or host
+//! uninstall retires the key, interface record and rotation journal, so a later `up` starts with a
+//! fresh identity (#260, #367).
 use crate::dataplane::Config;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -221,10 +223,11 @@ impl Store {
         Ok(())
     }
 
-    /// Remove this node's saved identity and open rotation after its enrolment changes.
+    /// Remove the saved interface identity and rotation journal when this node forgets or retires its mesh identity.
+    ///
+    /// Call after the engine has stopped; `remove_private_key` separately retires its key file.
     /// # Errors
     /// Refuses unsafe records and reports failed removals or directory syncs.
-    #[cfg(target_os = "macos")]
     pub(crate) fn discard_rotation_state(&self) -> io::Result<()> {
         let mut removed = false;
         for path in [&self.rotation_path, &self.interface_path] {
