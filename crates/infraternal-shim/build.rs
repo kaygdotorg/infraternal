@@ -31,8 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !status.success() {
         return Err("pinned libghostty-vt build failed".into());
     }
+    // The release installs a static archive and shared library side by side.
+    // A static-only search directory prevents macOS from resolving `-l` to
+    // the shared library, which omits our private snapshot adapter exports.
     println!(
-        "cargo:rustc-link-search=native={}/native/lib",
+        "cargo:rustc-link-search=native={}/native/static-link",
         output.display()
     );
     println!("cargo:rustc-link-lib=static=ghostty-vt");
