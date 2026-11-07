@@ -2120,6 +2120,44 @@ manager=dropin_manager'''
         self.launcher.unlink(missing_ok=True)
         self.launcher.symlink_to(binary_dir / 'current')
 
+    def commit_new_install(self, prelude):
+        """Run the end of the new install's commit (COMMIT_RETIRE), after `prelude`."""
+        (self.base / '.bootstrap-lock').mkdir(mode=0o700, exist_ok=True)
+        return self.run_shell(prelude + '\nstage="$base/.bootstrap-lock"\n' + CONSTANTS['COMMIT_RETIRE'])
+
+    def test_a_commit_makes_the_new_install_durable_before_it_deletes_anything(self):
+        # J349 P2-1, modelled as real root on an ext4 loop image
+        # (compute01:/root/j349/ev/powercut.txt): renames and deletes reach the
+        # disk through the journal within seconds, file data can wait ~30 s, so
+        # a power cut right after the commit left the old install deleted and
+        # the new binary empty. The commit now syncs the filesystem before it
+        # deletes the journal or the set-aside; a failed sync deletes nothing.
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.committed_install_in_place(self.takeover_aside() / 'install')
+        trace = Path(self.temp).resolve() / 'commit.trace'
+        tracing = f'''
+sync() {{ printf 'sync %s\\n' "$*" >> "{trace}"; command sync "$@"; }}
+rm() {{ printf 'rm %s\\n' "$*" >> "{trace}"; command rm "$@"; }}'''
+        failing = self.commit_new_install('\nsync() { return 1; }')
+        self.assertNotEqual(failing.returncode, 0)
+        self.assertTrue((self.takeover_aside() / 'install/state/identity.json').exists(), 'a failed sync deletes nothing')
+        self.assertTrue((self.base / '.bootstrap-lock').exists(), 'not even the journal')
+        result = self.commit_new_install(tracing)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        steps = trace.read_text().splitlines()
+        # Durable before each delete: the journal's, then the set-aside's.
+        self.assertEqual(steps[0], f'sync -f {self.base}', steps)
+        journal = steps.index(f'rm -rf {self.base}/.bootstrap-lock')
+        aside = steps.index(f'rm -rf {self.takeover_aside()}')
+        self.assertIn(f'sync -f {self.base}', steps[journal + 1:aside], steps)
+        self.assertFalse(self.takeover_aside().exists())
+        self.assertFalse((self.base / '.bootstrap-lock').exists())
+        trace.unlink()
+        plain = self.commit_new_install(tracing)
+        self.assertEqual(plain.returncode, 0, plain.stderr.decode())
+        self.assertNotIn('sync', trace.read_text() if trace.exists() else '', 'a commit with nothing set aside pays no sync')
+
     def test_check_keeps_a_taken_over_install_beside_a_base_that_is_not_finished(self):
         # J342 P1-1's shape: a base holding only an owner record, beside the
         # install Take over set aside. Nothing committed: the old install stays.

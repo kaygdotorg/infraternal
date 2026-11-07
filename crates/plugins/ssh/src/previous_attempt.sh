@@ -1197,6 +1197,8 @@ finish_stuck_upgrade() {
  # that has stopped since keeps everything, and the next add-host sees it
  # again (#305, J202 P2).
  $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || exit 75
+ # As every commit does (COMMIT_RETIRE in install.rs): durable first (J349 P2-1).
+ settle_set_aside
  retire_setup_lease
  rm -rf "$stage"
  retire_set_aside

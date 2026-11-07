@@ -1184,11 +1184,11 @@ fi
     }
 
     async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
-        let script = self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
+        let script = self.script(&format!(
+            r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
 stage="$base/.bootstrap-lock"
-retire_setup_lease
-rm -rf "$stage"
-retire_set_aside"#);
+{COMMIT_RETIRE}"#
+        ));
         let result = if let Some(timeout) = timeout {
             self.session
                 .run_with_timeout(&script, Input::Empty, timeout)
@@ -1234,9 +1234,7 @@ read -r approved || exit 1
 [ -z "$approved" ] || exit 1
 setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
-retire_setup_lease
-rm -rf "$stage"
-retire_set_aside"#
+{COMMIT_RETIRE}"#
             ),
         );
         let result = if let Some(timeout) = timeout {
@@ -1634,6 +1632,17 @@ fi
 // An acknowledged refusal is staging-only cleanup and must not restart it.
 // An incomplete upload is owned by this transaction. Reclaim it before
 // allocating the outside receipt, including when the home filesystem is full.
+/// The end of every commit (J349 P2-1, D359): make the new install durable,
+/// then delete its journal, then what it replaced. `settle_set_aside` syncs the
+/// filesystem first whenever a set-aside exists, so a power cut can never leave
+/// the old install deleted beside a new one whose data never reached the disk.
+/// Its sync comes before the journal goes too: a structurally finished base
+/// with an empty binary would otherwise let a later Check delete the set-aside.
+pub(crate) const COMMIT_RETIRE: &str = r#"settle_set_aside
+retire_setup_lease
+rm -rf "$stage"
+retire_set_aside"#;
+
 /// Roll back this transaction's setup on the host: an acquired or staged fresh
 /// install is removed through its receipt, an upgrade is put back from its
 /// rollback copies, and a new setup location it began but never renamed into

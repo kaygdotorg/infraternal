@@ -106,7 +106,21 @@ handoff_setup_lease() {
 # rollback and Put it back. Every commit runs this, including
 # finish_stuck_upgrade (#305 P2-3). Only our own private directories under
 # those fixed names are removed.
+# Make the committed install durable before anything it replaces is deleted
+# (J349 P2-1): renames and deletes reach the disk through the filesystem
+# journal within seconds, file data can wait much longer, so after a power cut
+# the old install could be gone beside a new binary that is empty. Only when a
+# set-aside exists (Replace, Re-enroll, Take over): one syncfs of the
+# filesystem holding $base. If it fails, refuse rather than delete.
+settle_set_aside() {
+ for settle_aside in "$base".bootstrap-replaced-* "$base".bootstrap-superseded-* "$base".bootstrap-takeover-*; do
+  [ -d "$settle_aside" ] && [ ! -L "$settle_aside" ] || continue
+  sync -f "$base" || exit 1
+  return 0
+ done
+}
 retire_set_aside() {
+ settle_set_aside
  for set_aside in "$base".bootstrap-replaced-* "$base".bootstrap-superseded-* "$base".bootstrap-takeover-* "$base".bootstrap-taking-*; do
   [ -d "$set_aside" ] && [ ! -L "$set_aside" ] && [ -O "$set_aside" ] || continue
   rm -rf "$set_aside"
