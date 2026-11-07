@@ -1476,13 +1476,23 @@ supersede_stuck_install "{expected}"
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(aside.exists())
 
+    def test_check_keeps_a_superseded_install_beside_a_base_that_is_not_finished(self):
+        # J342 P1-1 for Re-enroll (D335): a base holding only an owner
+        # record is not a committed new host; the old install stays.
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
+        self.new_host_in_place()
+        self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertTrue((aside / 'state/identity.json').exists(), 'nothing committed: the old install stays')
+
     def test_check_deletes_an_old_install_a_crash_left_beside_a_new_host(self):
         # D337: a crash between the commit and its delete leaves the old
         # install beside the new one; the next Check deletes it.
         self.make_upgrade_fixture()
         self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
         aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
-        self.new_host_in_place()
+        self.committed_install_in_place(aside)
         # Nothing to offer: the new host's finished install is named (#394).
         self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed('5' * 32))
         self.assertFalse(aside.exists(), 'the old install and its key are gone')

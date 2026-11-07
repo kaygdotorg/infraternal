@@ -598,6 +598,11 @@ discard_committed_set_aside() {
   [ -d "$set_aside" ] && [ ! -L "$set_aside" ] && [ -O "$set_aside" ] || continue
   case "$set_aside" in
    "$base".bootstrap-replaced-*) $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || continue;;
+   # A Re-enroll's whole old install goes only beside a base that is provably
+   # a finished install, as for Take over below (J342 P1-1, D335).
+   "$base".bootstrap-superseded-*)
+    probe validate_finished_install
+    [ "$probed" = 0 ] || continue;;
    # A Take over killed before it moved the old install: $base is still
    # that install, so the set-aside holds its service state; Put it back.
    # Otherwise the set-aside goes only beside a base that is provably a
