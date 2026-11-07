@@ -74,7 +74,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
 libghostty-vt = { version = "0.2.2", default-features = false }
 libfuzzer-sys = "0.4"
-vt100 = "0.16"
+vt100 = "0.18"
 vte = "0.15"
 alacritty_terminal = "0.26"
 nix = { version = "0.31", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
