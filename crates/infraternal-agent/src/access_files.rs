@@ -99,7 +99,10 @@ pub(crate) enum Watch {
 /// One place the agent watches for a way back into an account.
 #[derive(Debug)]
 pub(crate) struct Watched {
-    /// What kind of access it gives, in plain words.
+    /// What kind of access it gives, in plain words: the table's own
+    /// documentation, and what the coverage test names when a place is
+    /// missed. Not read by the scan.
+    #[allow(dead_code)]
     pub(crate) category: &'static str,
     /// Its path under the home (or a name, for the spools).
     pub(crate) path: &'static str,
