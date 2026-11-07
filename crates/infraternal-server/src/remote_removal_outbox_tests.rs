@@ -45,7 +45,45 @@ struct Removed {
 async fn removed() -> Removed {
     let (certificate, key) = signing_certificate();
     let fingerprint = certificate.digest(MessageDigest::sha256()).unwrap();
-    let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+    // The shared fixture gives every test the same host id, but the cleanup
+    // lane is process-wide and admits one cleanup per host at a time. So each
+    // test enrolls a host of its own, with its own certificate, or parallel
+    // tests refuse each other's reconnects.
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let host = Uuid::new_v4();
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("INSERT INTO remote_hosts (id, owner_id, mode, execution_uid, created_at) VALUES (?, 'owner', 'rootless', 1002, ?)")
+        .bind(host.as_bytes().as_slice())
+        .bind(now - 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let token = store
+        .issue(
+            "owner",
+            host,
+            crate::enrollment::Mode::Rootless,
+            now,
+            &openssl::sha::sha256(&[3u8; 32]),
+        )
+        .await
+        .unwrap();
+    store
+        .redeem(
+            token.secret(),
+            host,
+            crate::enrollment::Mode::Rootless,
+            now,
+            &crate::enrollment::CertificateRecord {
+                fingerprint: fingerprint.as_ref().try_into().unwrap(),
+                issuer_fingerprint: [9; 32],
+                public_key: [3; 32],
+                not_before: now - 1,
+                not_after: now - 1 + 604_800,
+            },
+        )
+        .await
+        .unwrap();
     let person = Uuid::new_v4();
     sqlx::query("INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,'cleanup','cleanup',0,'test')")
         .bind(person.to_string()).execute(&pool).await.unwrap();
@@ -55,8 +93,6 @@ async fn removed() -> Removed {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE remote_certificates SET fingerprint=?,not_before=unixepoch()-1,not_after=unixepoch()+604799")
-        .bind(fingerprint.as_ref()).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES (?,?)")
         .bind(host.as_bytes().as_slice())
         .bind(person.to_string())
