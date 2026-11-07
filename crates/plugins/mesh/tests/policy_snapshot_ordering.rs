@@ -390,7 +390,10 @@ fn j330_equal_revision_restore_retires_stale_peers() {
         retained.as_ref().map(|c| c.peers.len())
     );
     node.down().unwrap();
-    assert!(result.is_ok(), "the new authority snapshot was refused: {result:?}");
+    assert!(
+        result.is_ok(),
+        "the new authority snapshot was refused: {result:?}"
+    );
     assert_eq!(retained, Some(restored));
     assert_eq!(
         installed, 0,

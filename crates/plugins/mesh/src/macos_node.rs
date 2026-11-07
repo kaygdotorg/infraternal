@@ -2198,7 +2198,10 @@ mod tests {
             "same-authority equal-revision conflict was accepted"
         );
         assert_eq!(retained, Some(current));
-        assert!(applied_configs.is_empty(), "the conflicting config reached the worker");
+        assert!(
+            applied_configs.is_empty(),
+            "the conflicting config reached the worker"
+        );
     }
 
     /// A same-revision restore from another authority must retire the previous peer set.
