@@ -107,6 +107,10 @@ pub(crate) struct Watched {
     pub(crate) watch: Watch,
 }
 
+/// How many places this agent watches; a report covering fewer comes from
+/// an older agent, and the server never vouches for it.
+pub const WATCHED_PLACES: usize = WATCHED.len();
+
 /// Every place D356 watches, in scan order: what admits a login first, then
 /// what runs without one, then what runs at a login. A report covers
 /// `WATCHED.len()` places; a place not in this table is not watched, and
