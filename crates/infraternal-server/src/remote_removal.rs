@@ -14,6 +14,13 @@ use uuid::Uuid;
 /// How long a browser dry run's review stays usable, as for a key's review token.
 const REVIEW_SECONDS: i64 = 120;
 
+/// How long a removal waits, after its commit, for a connected host's answer to
+/// arrive through the outbox (#409). A connected host reconnects and answers
+/// within about a second of the cut; the root and rootless end-to-end runs
+/// measured whole uninstalls of 0.4–3.7 s. Past this the person gets the
+/// pending answer, which stays true: the cleanup still completes.
+const REMOVAL_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 struct Pending {
     hash: String,
     user: String,
@@ -291,6 +298,9 @@ impl Removal {
         // can no longer stop the agent before its receipt is in. Legacy owners
         // have no outbox and keep a single immediate attempt.
         let outbox = Uuid::parse_str(&entry.user).is_ok();
+        // Read before the commit cuts the link: only a host connected right now
+        // can answer within the short wait below.
+        let connected = outbox && entry.uninstall && self.hosts.actor(entry.host).await.is_some();
         let (cleanup, left) = match (entry.uninstall, outbox) {
             (false, _) => ("retained", Vec::new()),
             (true, true) => ("pending", Vec::new()),
@@ -349,6 +359,32 @@ impl Removal {
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         let installation = installed_by_setup.then(|| entry.host.simple().to_string());
+        // A connected host answers through the outbox within about a second of
+        // the cut (#409). Wait for that, after the commit and so outside the
+        // writer lock, so the result can say what happened and which kernel
+        // objects stayed, as the live call did (#235). A host that is slower,
+        // or offline, gets the pending answer: its cleanup still completes.
+        if pending && connected {
+            let answered = self
+                .store
+                .wait_removal_outcome(entry.host, REMOVAL_ANSWER_WAIT)
+                .await
+                .map_err(|_| crate::auth::Error::Denied)?;
+            if let Some((cleanup, retained)) = answered {
+                let left = known_left(retained.iter().map(String::as_str));
+                let (message, manual) = outcome(
+                    &cleanup,
+                    &mode,
+                    display_name(&name),
+                    &left,
+                    installation.as_deref(),
+                    false,
+                );
+                return Ok(
+                    json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual,"left":left}),
+                );
+            }
+        }
         let (message, manual) = outcome(
             cleanup,
             &mode,
@@ -358,7 +394,7 @@ impl Removal {
             pending,
         );
         Ok(
-            json!({"host_id":entry.host,"state":if pending { "pending" } else { "removed" },"host_cleanup":cleanup,"message":message,"manual":manual}),
+            json!({"host_id":entry.host,"state":if pending { "pending" } else { "removed" },"host_cleanup":cleanup,"message":message,"manual":manual,"left":left}),
         )
     }
 }
@@ -466,6 +502,26 @@ pub(crate) enum UninstallReply {
     Lost,
 }
 
+/// The kernel objects a host may report leaving in place because its
+/// installation did not create them (#235). These are the only names a
+/// removal message ever shows.
+const KNOWN_LEFT: [&str; 3] = [
+    "infraternal0",
+    "infraternal_mesh",
+    "the IFM_* iptables chains",
+];
+
+/// Keep only the names in `names` this server knows, in the server's own order
+/// and spelling. A host never puts its own text into the owner's message: this
+/// applies to its live reply and to the copy the removal outbox stores (#409).
+pub(crate) fn known_left<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<&'static str> {
+    let names: Vec<&str> = names.into_iter().collect();
+    KNOWN_LEFT
+        .into_iter()
+        .filter(|known| names.contains(known))
+        .collect()
+}
+
 /// Ask the infraternal agent behind `actor` to uninstall itself (D273, #235).
 ///
 /// The removal outbox calls this on the host's cleanup-only reconnect, after
@@ -477,11 +533,6 @@ pub(crate) async fn ask_uninstall(
     actor: &crate::embedded::EmbeddedAgent,
     host: Uuid,
 ) -> UninstallReply {
-    const KNOWN: [&str; 3] = [
-        "infraternal0",
-        "infraternal_mesh",
-        "the IFM_* iptables chains",
-    ];
     let Ok(input) = serde_json::to_vec(&json!({"host":host.simple().to_string(),"dry_run":false}))
     else {
         return UninstallReply::Lost;
@@ -496,14 +547,13 @@ pub(crate) async fn ask_uninstall(
         Err(_) => return UninstallReply::Lost,
     };
     match reply {
-        Some(reply) if reply["state"] == "accepted" => {
-            UninstallReply::Accepted(reply["left"].as_array().map_or_else(Vec::new, |left| {
-                KNOWN
-                    .into_iter()
-                    .filter(|known| left.iter().any(|name| name == known))
-                    .collect()
-            }))
-        }
+        Some(reply) if reply["state"] == "accepted" => UninstallReply::Accepted(known_left(
+            reply["left"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        )),
         _ => UninstallReply::Refused,
     }
 }

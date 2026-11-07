@@ -27,6 +27,9 @@ type Socket =
 struct Removed {
     /// The server's database, read to check the removal's ledger.
     pool: sqlx::SqlitePool,
+    /// A clone of the server's own enrollment store: it shares the change
+    /// signal a removal waits on.
+    store: crate::enrollment::EnrollmentStore,
     /// The removed host.
     host: Uuid,
     /// The host's enrolled certificate, still valid and individually unrevoked.
@@ -105,6 +108,7 @@ async fn removed() -> Removed {
         .execute(&pool)
         .await
         .unwrap();
+    let waiter = store.clone();
     let api = Api {
         hosts: RemoteHosts::default(),
         store,
@@ -126,6 +130,7 @@ async fn removed() -> Removed {
     });
     Removed {
         pool,
+        store: waiter,
         host,
         certificate,
         key,
@@ -186,6 +191,15 @@ impl Removed {
     /// The removal's ledger: (receipt confirmed, entry retired, uninstall state).
     async fn ledger(&self) -> (bool, bool, String) {
         sqlx::query_as("SELECT q.confirmed=1, h.revoked_at IS NOT NULL, r.host_cleanup FROM remote_hosts h JOIN remote_login_cleanup q ON q.host_id=h.id JOIN remote_host_removals r ON r.host_id=h.id WHERE h.id=?")
+            .bind(self.host.as_bytes().as_slice())
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+
+    /// The kernel objects the removal recorded as left, as stored.
+    async fn retained(&self) -> Option<String> {
+        sqlx::query_scalar("SELECT retained FROM remote_host_removals WHERE host_id=?")
             .bind(self.host.as_bytes().as_slice())
             .fetch_one(&self.pool)
             .await
@@ -315,16 +329,50 @@ async fn outbox_asks_for_the_uninstall_after_the_receipt_then_retires() {
     );
     // Nothing is retired while the uninstall answer is outstanding.
     assert_eq!(removed.ledger().await, (false, false, "pending".to_owned()));
+    // A removal waiting for the answer, as `publish` does for a connected host.
+    let store = removed.store.clone();
+    let host = removed.host;
+    let waiting = tokio::spawn(async move {
+        store
+            .wait_removal_outcome(host, Duration::from_secs(5))
+            .await
+            .unwrap()
+    });
+    // The host reports one object the server knows and one string of its own.
     send(
         &mut socket,
         &Frame::Result {
             call_id,
             ok: true,
-            json: br#"{"state":"accepted","cleanup":"pending","left":[]}"#,
+            json: br#"{"state":"accepted","cleanup":"pending","left":["infraternal0","run me"]}"#,
         },
     )
     .await;
     removed.settles((true, true, "requested")).await;
+    // Only the server-known name is kept, and the waiter gets it (#235, #409).
+    assert_eq!(
+        removed.retained().await.as_deref(),
+        Some(r#"["infraternal0"]"#)
+    );
+    assert_eq!(
+        waiting.await.unwrap(),
+        Some(("requested".to_owned(), vec!["infraternal0".to_owned()]))
+    );
+    removed.server.abort();
+}
+
+/// A removal whose host does not answer in time gets no outcome, and the
+/// wait changes nothing: the removal stays pending for the outbox.
+#[tokio::test]
+async fn an_unanswered_removal_wait_ends_without_an_outcome() {
+    let removed = removed().await;
+    let answered = removed
+        .store
+        .wait_removal_outcome(removed.host, Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert_eq!(answered, None);
+    assert_eq!(removed.ledger().await, (false, false, "pending".to_owned()));
     removed.server.abort();
 }
 

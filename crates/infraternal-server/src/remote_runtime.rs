@@ -127,10 +127,12 @@ async fn deliver_login_cleanup(
                         return Some(None);
                     }
                     match crate::remote_removal::ask_uninstall(&actor, host).await {
-                        crate::remote_removal::UninstallReply::Accepted(_) => Some(Some("requested")),
+                        // Its report of the kernel objects it leaves is kept
+                        // with the answer, for the removal result (#235, #409).
+                        crate::remote_removal::UninstallReply::Accepted(left) => Some(Some(("requested", left))),
                         // The host answered no: the install stays, and the
                         // removal toast already handed over the manual command.
-                        crate::remote_removal::UninstallReply::Refused => Some(Some("unreachable")),
+                        crate::remote_removal::UninstallReply::Refused => Some(Some(("unreachable", Vec::new()))),
                         crate::remote_removal::UninstallReply::Lost => None,
                     }
                 } => delivered,
@@ -142,9 +144,15 @@ async fn deliver_login_cleanup(
         },
     )
     .await;
-    if let Ok(Some(host_cleanup)) = result {
+    if let Ok(Some(answer)) = result {
         store
-            .confirm_removal_cleanup(host, person, host_cleanup)
+            .confirm_removal_cleanup(
+                host,
+                person,
+                answer
+                    .as_ref()
+                    .map(|(cleanup, left)| (*cleanup, left.as_slice())),
+            )
             .await
             .map_err(io::Error::other)?;
     }
