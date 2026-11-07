@@ -322,6 +322,17 @@ mod refusal_tests {
         );
     }
 
+    /// #401: a login image that `SELinux` would not let us mark executable is a
+    /// host or policy condition, so the open is refused as unavailable, never
+    /// as a malformed request.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn selinux_label_failure_is_not_an_invalid_request() {
+        let failure = crate::login_binary::label_failure("test");
+        assert_eq!(failure.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(open_refusal(&failure), OpenRefusal::ResourceUnavailable);
+    }
+
     /// A root open whose manager probe stayed silent names its own reason, so
     /// the browser can say "busy, try again" rather than a generic failure.
     #[test]
@@ -399,8 +410,8 @@ fn spawn_revocation(
                 .await
                 .map(|revoked| {
                     if revoked.background_may_remain {
-                        // D353: others still share the account, so its own services stayed.
-                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, so its services were not stopped.\"}".to_vec()
+                        // D353: others still share the account, or linger came back (J308).
+                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, or its own programs turned linger back on.\"}".to_vec()
                     } else {
                         b"{\"revoked\":true}".to_vec()
                     }
