@@ -187,18 +187,40 @@ fn report_result(host: Uuid, value: &Value, machine: bool) -> CommandResult<Valu
     result
 }
 
-/// The owner-facing words for an account (or host) that was checked and
-/// showed no change (D356). The owner has not decided this wording yet
-/// (#355): it lives here only, so it changes in one place. It names how
-/// many places were watched and since when, never "unchanged".
-fn no_changes_found(watched: u64, since: Option<String>) -> String {
-    match since {
-        Some(since) => format!("No changes found in {watched} watched places since {since}"),
-        None => format!("No changes found in {watched} watched places"),
+/// D360: the owner-facing words for an account (or host) that was checked
+/// and where nothing was found: what was watched and since when, never
+/// "unchanged". The only place this sentence is built.
+fn no_changes_found(places: u64, categories: &[String], since: Option<String>) -> String {
+    let mut sentence = format!(
+        "No changes found in the {places} {} we watch",
+        if places == 1 { "place" } else { "places" }
+    );
+    if !categories.is_empty() {
+        sentence.push_str(" (");
+        sentence.push_str(&categories.join(", "));
+        sentence.push(')');
     }
+    if let Some(since) = since {
+        sentence.push_str(" since ");
+        sentence.push_str(&since);
+    }
+    sentence
 }
 
-/// `seconds` since the epoch as `YYYY-MM-DD HH:MM UTC`, or `None` for 0.
+/// The categories in `account`'s report.
+fn categories_of(account: &Value) -> Vec<String> {
+    account["categories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `seconds` since the epoch as `3 Nov 2026, 14:02 UTC` (D360's form, with
+/// the year and the zone, since a host's and a reader's clocks differ), or
+/// `None` for 0.
 fn utc(seconds: u64) -> Option<String> {
     if seconds == 0 {
         return None;
@@ -220,8 +242,12 @@ fn utc(seconds: u64) -> Option<String> {
         month_index - 9
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let name = MONTHS.get(usize::try_from(month - 1).ok()?)?;
     Some(format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        "{day} {name} {year}, {:02}:{:02} UTC",
         rest / 3600,
         rest % 3600 / 60
     ))
@@ -251,16 +277,24 @@ fn report_message(value: &Value) -> (CommandState, String) {
                     .iter()
                     .flat_map(|report| report["accounts"].as_array().into_iter().flatten())
             };
-            let watched = accounts()
-                .filter_map(|account| account["watched"].as_u64())
-                .min()
-                .unwrap_or(0);
+            let places = accounts()
+                .filter_map(|account| account["places"].as_u64())
+                .sum();
+            let mut categories: Vec<String> = Vec::new();
+            for category in accounts().flat_map(categories_of) {
+                if !categories.contains(&category) {
+                    categories.push(category);
+                }
+            }
             let since = accounts()
                 .filter_map(|account| account["recorded_at"].as_u64())
                 .filter(|seconds| *seconds > 0)
                 .min()
                 .and_then(utc);
-            (CommandState::Ready, format!("{}.", no_changes_found(watched, since)))
+            (
+                CommandState::Ready,
+                format!("{}.", no_changes_found(places, &categories, since)),
+            )
         }
         Some("reported") => (
             CommandState::Ready,
@@ -349,9 +383,11 @@ fn account_lines(account: &Value, lines: &mut Vec<String>, files_shown: &mut boo
     let since = account["recorded_at"].as_u64().and_then(utc);
     let outcome = match account["state"].as_str() {
         Some("changed") => "changed since the grant".to_owned(),
-        Some("unchanged") => {
-            no_changes_found(account["watched"].as_u64().unwrap_or(0), since.clone())
-        }
+        Some("unchanged") => no_changes_found(
+            account["places"].as_u64().unwrap_or(0),
+            &categories_of(account),
+            since.clone(),
+        ),
         _ => reason_words(account["reason"].as_str().unwrap_or("")).to_owned(),
     };
     lines.push(format!("Account {name}: {outcome}."));
@@ -611,11 +647,12 @@ mod tests {
         let value = serde_json::json!({"host_id": host, "state": "reported", "outcome": "unchanged", "more": 0, "reports": [
             {"person_id": host, "state": "unchanged", "accounts": [
                 {"account": "me", "state": "unchanged", "files": [], "truncated": false, "unscanned": [], "omitted_files": 0,
-                 "complete": true, "watched": 22, "recorded_at": 1_700_000_000_u64, "scanned_at": 1_700_000_100_u64}
+                 "complete": true, "watched": 22, "places": 214, "categories": ["SSH keys", "cron and at jobs", "user services", "shell startup files"],
+                 "recorded_at": 1_700_000_000_u64, "scanned_at": 1_700_000_100_u64}
             ]}
         ]});
         let clean = render_pretty(&super::report_result(host, &value, false), options).unwrap();
-        let sentence = "No changes found in 22 watched places since 2023-11-14 22:13 UTC.";
+        let sentence = "No changes found in the 214 places we watch (SSH keys, cron and at jobs, user services, shell startup files) since 14 Nov 2023, 22:13 UTC.";
         assert!(clean.contains(sentence), "{clean}");
         assert!(
             clean.contains(&format!("Account me: {sentence}")),
@@ -647,7 +684,7 @@ mod tests {
         for expected in [
             "removed: ~/.config/systemd/user/m.service",
             "Other people also have access to this account",
-            "Baseline from 2023-11-14 22:13 UTC; checked at 2023-11-14 22:15 UTC.",
+            "Baseline from 14 Nov 2023, 22:13 UTC; checked at 14 Nov 2023, 22:15 UTC.",
             "3 more reports are not shown.",
         ] {
             assert!(
