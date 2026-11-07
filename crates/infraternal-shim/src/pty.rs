@@ -1086,6 +1086,10 @@ pub(crate) fn prepare_proxy_child(
         })?;
     #[cfg(target_os = "linux")]
     let owner = unistd::getpid();
+    // Establish the allowlist before admitting the mapped set. Marking every
+    // other descriptor CLOEXEC preserves Command's error pipe until exec, while
+    // preventing unrelated inheritable parent capabilities from crossing it.
+    only_standard_descriptors(command);
     // SAFETY: the established shim hooks set signal defaults, close the trusted
     // control descriptor, and bind the process to its owner before this hook.
     // This hook only joins the pre-opened cgroup, remaps pre-opened descriptors,

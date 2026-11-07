@@ -129,3 +129,79 @@ fn proxy_mapping_preserves_spawn_errors_at_reserved_slots() {
         .expect_err("exec failure must reach the parent");
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
 }
+
+/// A proxy's descriptor allowlist must exclude an unrelated inheritable parent file.
+#[test]
+fn proxy_exec_excludes_unmapped_inheritable_descriptors() {
+    if isolated("proxy_exec_excludes_unmapped_inheritable_descriptors") {
+        return;
+    }
+    let cwd = File::open("/").unwrap();
+    let source = File::open("/dev/null").unwrap();
+    let pinned = reserve_proxy_descriptor(&source, 64).unwrap();
+    // SAFETY: F_DUPFD returns a fresh owned descriptor, deliberately without
+    // CLOEXEC to model an inherited descriptor or a non-atomic external opener.
+    let unrelated = fcntl(&source, FcntlArg::F_DUPFD(200)).unwrap();
+    let unrelated = unsafe { File::from_raw_fd(unrelated) };
+    let mut child = Command::new("/usr/bin/python3");
+    child.args(["-c", &format!(
+        "import os; os.fstat({}); assert not os.path.exists('/proc/self/fd/{}'), 'unmapped parent descriptor survived proxy exec'",
+        pinned.as_raw_fd(), unrelated.as_raw_fd()
+    )]);
+    // Match spawn_proxy_command's production callback order exactly.
+    prepare_child_without_control(&mut child);
+    prepare_parent_bound_child(&mut child);
+    prepare_proxy_child(
+        &mut child,
+        &cwd,
+        &[(pinned.as_raw_fd(), pinned.as_raw_fd())],
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(child.status().unwrap().success());
+}
+
+/// A mixed self-map, cycle and repeated source must keep every original listener.
+#[test]
+fn proxy_mixed_permutation_preserves_sources_and_closes_temporaries() {
+    if isolated("proxy_mixed_permutation_preserves_sources_and_closes_temporaries") {
+        return;
+    }
+    let first = TcpListener::bind("127.0.0.1:0").unwrap();
+    let second = TcpListener::bind("127.0.0.1:0").unwrap();
+    let third = TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = at(&first, 64);
+    let b = at(&second, 65);
+    let c = at(&third, 66);
+    let null = File::open("/dev/null").unwrap();
+    let destination = at(&null, 67);
+    let cwd = File::open("/").unwrap();
+    let mut child = Command::new("/usr/bin/python3");
+    let expected = [
+        first.local_addr().unwrap().port(),
+        third.local_addr().unwrap().port(),
+        second.local_addr().unwrap().port(),
+        second.local_addr().unwrap().port(),
+    ];
+    child.args(["-c", &format!(
+        "import os,socket; expected={expected:?}; sockets=[socket.socket(fileno=fd) for fd in range(64,68)]; assert [s.getsockname()[1] for s in sockets] == expected; live=[]\nfor fd in range(3,256):\n try: os.fstat(fd); live.append(fd)\n except OSError: pass\nassert live == [64,65,66,67], live"
+    )]);
+    // An allowlist installed first also lets this probe check temporary cleanup.
+    only_standard_descriptors(&mut child);
+    prepare_child_without_control(&mut child);
+    prepare_proxy_child(
+        &mut child,
+        &cwd,
+        &[
+            (a.as_raw_fd(), 64),
+            (b.as_raw_fd(), 66),
+            (c.as_raw_fd(), 65),
+            (b.as_raw_fd(), destination.as_raw_fd()),
+        ],
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(child.status().unwrap().success());
+}

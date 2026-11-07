@@ -194,6 +194,8 @@ pub fn reserve_proxy_descriptor(
 ///
 /// Callers must own every destination slot until spawn returns, using
 /// [`reserve_proxy_descriptor`] on Linux, so Command cannot allocate a private pipe there.
+/// Only standard input, output, error and the mapped descriptors survive exec. This hook
+/// marks all other descriptors CLOEXEC before mapping, preserving the private spawn-error pipe.
 /// Overlapping mappings are copied through temporary slots above every destination before
 /// credentials are dropped. Sources already at their targets have CLOEXEC cleared. The working
 /// directory is entered before remapping, while its pinned descriptor is intact and the parent
