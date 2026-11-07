@@ -9,17 +9,23 @@
  * card's blur or tint cannot fix this; the blur has to start well outside the card.
  *
  * What it does. `attachGlassBed(card)` puts one `fixed` element under the card. It is as large as the card plus a margin
- * on every side (twice the blur), carries the strong blur, and is clipped to the card's own rounded shape, so the blur
- * sees the page far beyond the card's edge and nothing fades inside it. The card keeps its own translucent material on
- * top, so the glass still shows colour and shape. The bed is not a tint and draws no border or shadow.
+ * on every side (three times the blur radius), carries the blur, and is clipped to the card's own rounded shape, so the
+ * blur sees the page far beyond the card's edge and nothing fades inside it. The blur is the card's own per-level value
+ * (`--ui-overlay-blur`, read from its computed `backdrop-filter`), so the bed follows the one shared material: Tinted
+ * blurs less than Frosted, and nothing is tuned per card. The bed adds no saturation (the card's own filter already does)
+ * and is not a tint; it draws no border or shadow. The card keeps its translucent material on top.
  *
  * Usage. The card must be `position: fixed` with its `left` and `top` written inline in pixels. Call `sync()` after each
  * placement, `setOpen(true)` when the card's open state starts (the bed fades and scales with the card), and `dispose()`
  * when the card is removed. It does nothing when the card has no backdrop blur (the Solid level, reduced transparency).
  */
 
-/** The blur of the bed in CSS pixels: about 1.5 terminal lines, so dense text reads as colour and shape, never as text (TASTE). */
-export const GLASS_BED_BLUR = 32;
+/**
+ * How far past the card the bed reaches, in multiples of the blur radius. A CSS blur's radius is a standard deviation and
+ * its kernel runs to about three of them, so a layer smaller than that has its own edge fade inside the blur and lets a
+ * faint trace of the page through the card's outer rim (J344 measured one at Clear and Frosted with 2x).
+ */
+const REACH_IN_BLURS = 3;
 
 /** Handle for one bed; see the module note. */
 export interface GlassBed {
@@ -44,12 +50,14 @@ export function attachGlassBed(card: HTMLElement): GlassBed {
       const style = getComputedStyle(card);
       // No backdrop blur on the card (Solid level, reduced transparency): it is opaque or flat, so there is nothing to hide.
       if (style.backdropFilter === "none" || style.backdropFilter === "") { bed.hidden = true; return; }
-      const reach = GLASS_BED_BLUR * 2;
+      const blur = parseFloat(/blur\(([\d.]+)px\)/.exec(style.backdropFilter)?.[1] ?? "0");
+      if (!(blur > 0)) { bed.hidden = true; return; }
+      const reach = Math.ceil(blur * REACH_IN_BLURS);
       const left = parseFloat(card.style.left), top = parseFloat(card.style.top);
       if (!Number.isFinite(left) || !Number.isFinite(top)) return;
       const [originX = 0, originY = 0] = style.transformOrigin.split(" ").map(parseFloat);
       bed.hidden = false;
-      bed.style.setProperty("--ui-glass-bed-blur", `${GLASS_BED_BLUR}px`);
+      bed.style.setProperty("--ui-glass-bed-blur", `${blur}px`);
       bed.style.setProperty("--ui-glass-bed-reach", `${reach}px`);
       bed.style.setProperty("--ui-glass-bed-radius", style.borderTopLeftRadius);
       bed.style.left = `${left - reach}px`;
