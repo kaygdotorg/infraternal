@@ -76,6 +76,7 @@ fn main() -> std::io::Result<()> {
             store.save(&infraternal_plugin_mesh::node_state::State {
                 enabled: true,
                 config: Some(config),
+                authority_reset_pending: false,
                 backend: Some(if fallback {
                     infraternal_plugin_mesh::firewall::Backend::NfTables
                 } else {

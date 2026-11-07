@@ -25,6 +25,7 @@ fn key(id: u64) -> PublicKey {
     key[..8].copy_from_slice(&id.to_le_bytes());
     PublicKey(key)
 }
+/// A peer key replacement keeps that host's identity and address allocation across restart.
 #[tokio::test]
 async fn key_replacement_preserves_identity_and_addresses_after_restart() {
     let pool = pool().await;
@@ -78,6 +79,40 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
     let after = Store::new(pool.clone()).config(node).await.unwrap();
     assert_eq!(before.addresses, after.addresses);
     assert!(after.version > before.version);
+}
+
+/// Persist one authority epoch across process restarts and rotate it for an explicit restore.
+#[tokio::test]
+async fn mesh_authority_epoch_survives_restart_and_changes_on_restore_reset() {
+    let pool = pool().await;
+    let first = Store::new(pool.clone());
+    let (server, _) = first.attach("server", key(1), None, true).await.unwrap();
+    let before = first.config(server).await.unwrap();
+    let first_epoch = before
+        .authority_epoch
+        .clone()
+        .expect("server snapshot must carry its authority epoch");
+
+    let restarted = Store::new(pool.clone());
+    let after_restart = restarted.config(server).await.unwrap();
+    assert_eq!(
+        after_restart.authority_epoch.as_deref(),
+        Some(first_epoch.as_str())
+    );
+
+    sqlx::query("UPDATE mesh_state SET authority_epoch=NULL WHERE singleton=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let after_restore = Store::new(pool).config(server).await.unwrap();
+    let restored_epoch = after_restore
+        .authority_epoch
+        .expect("restore reset must create a new authority epoch");
+    assert_ne!(restored_epoch, first_epoch);
+    assert!(infraternal_plugin_mesh::dataplane::valid_authority_epoch(
+        &restored_epoch
+    ));
+    assert_eq!(after_restore.version, before.version);
 }
 
 #[tokio::test]

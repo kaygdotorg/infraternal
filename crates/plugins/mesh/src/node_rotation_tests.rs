@@ -22,7 +22,7 @@ fn command(program: &str, args: &[&str]) {
             .success()
     );
 }
-// Keep the retained address, recovery fence and packet observation in one scenario.
+/// Exercise the retained address, recovery fence, and packet observation together.
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
     node.up().unwrap();
@@ -32,6 +32,7 @@ fn check(backend: Backend) {
     };
     Device::addresses(proposed).unwrap();
     let accepted = Config {
+        authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(1),

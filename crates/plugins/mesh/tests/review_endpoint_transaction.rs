@@ -58,6 +58,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
     let (_, key) = Key::generate().unwrap();
     let initial: SocketAddr = "192.0.2.1:51820".parse().unwrap();
     let mut config = Config {
+        authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(1),

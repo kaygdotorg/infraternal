@@ -15,6 +15,27 @@ use infraternal_plugin_mesh::{
 };
 use std::{collections::BTreeMap, process::Command};
 
+/// Stable server process epochs used to distinguish one authenticated authority from another.
+const AUTHORITY_EPOCH_A: &str = "00000000-0000-4000-8000-000000000001";
+/// A second server process epoch for restore and retirement regressions.
+const AUTHORITY_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
+
+/// Encode a complete snapshot with the same authenticated process epoch on every chunk.
+fn chunks_with_epoch(
+    old: Option<&Config>,
+    new: &Config,
+    authority_epoch: &str,
+) -> Vec<crate::dataplane::Chunk> {
+    configuration::chunks(old, new)
+        .unwrap()
+        .into_iter()
+        .map(|mut chunk| {
+            chunk.authority_epoch = Some(authority_epoch.to_owned());
+            chunk
+        })
+        .collect()
+}
+
 /// Bring up a node with a policy snapshot, with or without the fallback policy.
 fn install(fallback: bool) -> (Node, Config) {
     assert!(
@@ -32,6 +53,7 @@ fn install(fallback: bool) -> (Node, Config) {
     .with_engine(EngineKind::Kernel);
     node.up().unwrap();
     let config = Config {
+        authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
         local_key: None,
         server: None,
         node: NodeId(1),
@@ -162,16 +184,17 @@ fn nft_server_revision_rollback_replaces_stale_peers() {
     let identity = node.up().unwrap();
     accepted.local_key = Some(identity.public_key);
     accepted.server = Some(NodeId(1));
+    accepted.authority_epoch = Some(AUTHORITY_EPOCH_A.to_owned());
     accepted.version = 11;
-    for chunk in configuration::chunks(None, &accepted).unwrap() {
+    for chunk in chunks_with_epoch(None, &accepted, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).unwrap();
     }
 
     let mut restored = accepted.clone();
     restored.version = 2;
+    restored.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
     restored.peers.clear();
-    let result = configuration::chunks(None, &restored)
-        .unwrap()
+    let result = chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B)
         .into_iter()
         .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
     let retained = node.config().cloned();
@@ -194,17 +217,18 @@ fn nft_new_server_rejection_retires_previous_peers() {
     let identity = node.up().unwrap();
     accepted.local_key = Some(identity.public_key);
     accepted.server = Some(NodeId(1));
+    accepted.authority_epoch = Some(AUTHORITY_EPOCH_A.to_owned());
     accepted.version = 11;
-    for chunk in configuration::chunks(None, &accepted).unwrap() {
+    for chunk in chunks_with_epoch(None, &accepted, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).unwrap();
     }
 
     let mut invalid = accepted.clone();
     invalid.server = Some(NodeId(2));
     invalid.version = 12;
+    invalid.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
     invalid.peers.get_mut(&NodeId(2)).unwrap().peer.key = identity.public_key;
-    let result = configuration::chunks(None, &invalid)
-        .unwrap()
+    let result = chunks_with_epoch(None, &invalid, AUTHORITY_EPOCH_B)
         .into_iter()
         .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
     let retained = node.config().cloned();
@@ -220,4 +244,137 @@ fn nft_new_server_rejection_retires_previous_peers() {
         "an invalid replacement must leave no accepted snapshot from the previous server"
     );
     assert_eq!(installed_peers, 0, "a stale peer key remained installed");
+}
+
+/// Persistent rollback must install the restored snapshot and keep mesh enabled.
+#[test]
+#[ignore = "Run in an isolated user/network namespace; J330 review."]
+fn j330_persisted_rollback_accepts_replacement() {
+    let (mut initial, mut accepted) = install(false);
+    initial.down().unwrap();
+    let path = std::path::PathBuf::from(format!("/tmp/j330-state-{}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::set_permissions(
+        &path,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let mut node = Node::restore_with_engine(&path, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    accepted.local_key = Some(identity.public_key);
+    accepted.server = Some(NodeId(1));
+    accepted.authority_epoch = Some(AUTHORITY_EPOCH_A.to_owned());
+    accepted.version = 11;
+    accepted.peers.get_mut(&NodeId(2)).unwrap().inbound = TrafficPolicy::All;
+    accepted.peers.get_mut(&NodeId(2)).unwrap().outbound = TrafficPolicy::All;
+    for chunk in configuration::chunks(None, &accepted).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let mut restored = accepted.clone();
+    restored.version = 2;
+    restored.authority_epoch = Some(AUTHORITY_EPOCH_A.to_owned());
+    restored.peers.clear();
+    let result = node.chunk(chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_A).remove(0));
+    let retained = node.config().cloned();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.join("mesh-public.json")).unwrap()).unwrap();
+    println!(
+        "J330_RESULT={result:?} RETAINED_VERSION={:?} DURABLE={saved}",
+        retained.as_ref().map(|c| c.version)
+    );
+    node.down().unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+    assert!(
+        result.is_ok(),
+        "persistent restored snapshot rejected: {result:?}"
+    );
+    assert_eq!(retained, Some(restored));
+    assert_eq!(saved["enabled"], true);
+}
+
+/// A failed retirement write must not leave the old peer installed.
+#[test]
+#[ignore = "Run in an isolated user/network namespace; J330 review."]
+fn j330_failed_retirement_stops_mesh_even_if_disabled_write_fails() {
+    let (mut initial, mut accepted) = install(false);
+    initial.down().unwrap();
+    let path = std::path::PathBuf::from(format!("/tmp/j330-state-{}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::set_permissions(
+        &path,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    let mut node = Node::restore_with_engine(&path, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    accepted.local_key = Some(identity.public_key);
+    accepted.server = Some(NodeId(1));
+    accepted.authority_epoch = Some(AUTHORITY_EPOCH_A.to_owned());
+    accepted.version = 11;
+    accepted.peers.get_mut(&NodeId(2)).unwrap().inbound = TrafficPolicy::All;
+    accepted.peers.get_mut(&NodeId(2)).unwrap().outbound = TrafficPolicy::All;
+    for chunk in chunks_with_epoch(None, &accepted, AUTHORITY_EPOCH_A) {
+        node.chunk(chunk).unwrap();
+    }
+    let mut restored = accepted.clone();
+    restored.version = 2;
+    restored.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
+    restored.peers.clear();
+    // An occupied temporary name injects a failure publishing disabled intent.
+    let obstruction = path.join(format!("mesh-public.{}.new", std::process::id()));
+    std::fs::write(&obstruction, b"occupied temporary name").unwrap();
+    let result = node.chunk(chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B).remove(0));
+    let retained = node.config().cloned();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.join("mesh-public.json")).unwrap()).unwrap();
+    println!(
+        "J330_RESULT={result:?} RETAINED_VERSION={:?} DURABLE={saved}",
+        retained.as_ref().map(|c| c.version)
+    );
+    let installed_peers = Device::counters().map(|p| p.len());
+    println!("J330_INSTALLED_PEERS={installed_peers:?}");
+    std::fs::remove_file(obstruction).unwrap();
+    node.down().unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+    assert!(result.is_err());
+    assert_eq!(
+        saved["config"]["authority_epoch"], AUTHORITY_EPOCH_B,
+        "a failed replacement must retain the new peer-free authority epoch"
+    );
+    assert!(
+        installed_peers.is_err() || installed_peers.as_ref().is_ok_and(|n| *n == 0),
+        "stale peers remain installed after retirement and shutdown fail"
+    );
+}
+
+/// A fresh authority reusing server node 1 must not retain peers at an equal revision.
+#[test]
+#[ignore = "Run in an isolated user/network namespace; J330 review."]
+fn j330_equal_revision_restore_retires_stale_peers() {
+    let (mut node, mut accepted) = install(false);
+    let identity = node.up().unwrap();
+    accepted.local_key = Some(identity.public_key);
+    accepted.server = Some(NodeId(1));
+    accepted.authority_epoch = Some(AUTHORITY_EPOCH_A.to_owned());
+    accepted.version = 11;
+    accepted.peers.get_mut(&NodeId(2)).unwrap().inbound = TrafficPolicy::All;
+    accepted.peers.get_mut(&NodeId(2)).unwrap().outbound = TrafficPolicy::All;
+    for chunk in chunks_with_epoch(None, &accepted, AUTHORITY_EPOCH_A) {
+        node.chunk(chunk).unwrap();
+    }
+    let mut restored = accepted.clone();
+    restored.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
+    restored.peers.clear();
+    let result = node.chunk(chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B).remove(0));
+    let retained = node.config().cloned();
+    let installed = Device::counters().unwrap().len();
+    println!(
+        "J330_EQUAL_RESTORE={result:?} RETAINED_PEERS={:?} INSTALLED_PEERS={installed}",
+        retained.as_ref().map(|c| c.peers.len())
+    );
+    node.down().unwrap();
+    assert_eq!(
+        installed, 0,
+        "same-id equal-revision server restore retained the previous authority's peers"
+    );
 }

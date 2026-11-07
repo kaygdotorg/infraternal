@@ -272,6 +272,7 @@ async fn node() {
         match command {
             Command::Peers(list) => {
                 let mut next = Config {
+                    authority_epoch: None,
                     local_key: Some(public),
                     server: None,
                     node: NodeId(1),

@@ -91,8 +91,10 @@ fn configuration(granted_ports: &[u16]) -> Config {
     configuration_with(&[(3, granted_ports)])
 }
 
+/// Build a policy config with the requested per-peer ingress grants for namespace tests.
 fn configuration_with(grants: &[(u8, &[u16])]) -> Config {
     Config {
+        authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(1),

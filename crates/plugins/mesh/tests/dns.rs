@@ -36,6 +36,7 @@ fn query(name: &str, qtype: u16) -> Vec<u8> {
 fn config() -> Config {
     let peer = NodeId(1);
     Config {
+        authority_epoch: None,
         local_key: Some(PublicKey([2; 32])),
         server: Some(peer),
         node: NodeId(2),

@@ -30,52 +30,49 @@ async fn update_listener(
 /// a rotation is open (J273 P3-2). Each probe is a few small calls on an authenticated channel.
 const UNKNOWN_SUPPORT_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Probe before advertising an extension. Strict older nodes reject the probe,
-/// then answer the ordinary request without enabling a new representation.
-///
-/// Returns the identity and its rotation support as far as the replies prove it (J262).
+/// Probe before advertising an extension. Strict older nodes reject the epoch field, then
+/// answer the previous rotation probe or legacy request without receiving a new chunk shape.
+/// Returns only capabilities proved by an authenticated identity reply (D166, D352).
 async fn read_identity(channel: &dyn NodeChannel) -> Option<(Identity, Option<bool>)> {
     #[cfg(feature = "mesh-dns-spike")]
-    let (probe, before_rotation) = (
+    let (probe, without_epoch, before_rotation) = (
+        br#"{"compact_access":true,"dns_names":true,"key_rotation":true,"authority_epoch":true}"#
+            .as_slice(),
         br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.as_slice(),
         br#"{"compact_access":true,"dns_names":true}"#.as_slice(),
     );
     #[cfg(not(feature = "mesh-dns-spike"))]
-    let (probe, before_rotation) = (
+    let (probe, without_epoch, before_rotation) = (
+        br#"{"compact_access":true,"key_rotation":true,"authority_epoch":true}"#.as_slice(),
         br#"{"compact_access":true,"key_rotation":true}"#.as_slice(),
         br#"{"compact_access":true}"#.as_slice(),
     );
     probe_identity(
         |input| channel.call("mesh.identity", input),
         probe,
+        without_epoch,
         before_rotation,
     )
     .await
 }
 
-/// Classify a node's identity replies into its rotation support (J262).
+/// Classify the node's identity reply and each optional capability (J262, D166, D352).
 ///
-/// - The full probe answers, first or on one immediate retry: the reply says whether the node rotates.
-/// - The node refuses the full probe both times ([`CALL_REFUSED`](infraternal_plugin_api::node_channel::CALL_REFUSED))
-///   and answers the same request without `key_rotation`: it deterministically rejects that field, so it is an
-///   older binary without rotation support (`Some(false)`), and the coordinator may abandon its open rotation. A
-///   timeout or a lost channel proves nothing, and leaves support unknown (J273 P3-1).
-/// - Only the legacy `{}` request answers: the failures prove nothing about rotation, so support is unknown
-///   (`None`) unless the reply itself claims it. A transient failure must not abandon a rotation, since that is
-///   what left kernel nodes with an open journal (J262 P2); the node also settles such a journal itself.
-///   While a rotation is open, the coordinator refuses such an attach and retries on a timer. A binary older than
-///   `compact_access` (2026-10-13) always lands here, so a downgrade to one in the middle of its own rotation is
-///   refused until it is upgraded again; no supported install runs one, since updates are lockstep (D135).
+/// A strict receiver is first asked about authority epochs and rotation together. If it rejects that
+/// additive field, the coordinator retries the previous rotation request; rotation remains enabled
+/// only when that response proves support. Timeouts never prove an older binary or an epoch-capable
+/// receiver, so neither rotation nor the new chunk field is sent on an ambiguous reply.
 async fn probe_identity<F, R>(
     call: F,
     probe: &[u8],
+    without_epoch: &[u8],
     before_rotation: &[u8],
 ) -> Option<(Identity, Option<bool>)>
 where
     F: Fn(Vec<u8>) -> R,
     R: std::future::Future<Output = Result<Vec<u8>, &'static str>>,
 {
-    let mut refused = true;
+    let mut epoch_refused = true;
     for _ in 0..2 {
         match call(probe.to_vec()).await {
             Ok(reply) => {
@@ -85,15 +82,31 @@ where
                 });
             }
             Err(error) => {
-                refused &= error == infraternal_plugin_api::node_channel::CALL_REFUSED;
+                epoch_refused &= error == infraternal_plugin_api::node_channel::CALL_REFUSED;
+            }
+        }
+    }
+    let mut rotation_refused = true;
+    for _ in 0..2 {
+        match call(without_epoch.to_vec()).await {
+            Ok(reply) => {
+                return parse_identity(&reply).map(|identity| {
+                    let supported = if epoch_refused {
+                        Some(identity.key_rotation)
+                    } else {
+                        identity.key_rotation.then_some(true)
+                    };
+                    (identity, supported)
+                });
+            }
+            Err(error) => {
+                rotation_refused &= error == infraternal_plugin_api::node_channel::CALL_REFUSED;
             }
         }
     }
     if let Ok(reply) = call(before_rotation.to_vec()).await {
         return parse_identity(&reply).map(|identity| {
-            // Only a node that refused the full probe both times rejected it deterministically; a timeout or a
-            // lost channel says nothing about rotation (J273 P3-1).
-            let supported = if refused {
+            let supported = if epoch_refused && rotation_refused {
                 Some(identity.key_rotation)
             } else {
                 identity.key_rotation.then_some(true)
@@ -143,6 +156,7 @@ pub async fn run(
     let mut refresh_identity = true;
     let mut current_identity: Option<Identity> = None;
     let mut compact_access = false;
+    let mut authority_epoch_supported = false;
     #[cfg(feature = "mesh-dns-spike")]
     let mut dns_names = false;
     let mut ack_retry: Option<(infraternal_mesh::model::NodeId, u64)> = None;
@@ -161,6 +175,7 @@ pub async fn run(
             let identity = read_identity(channel.as_ref()).await;
             if let Some((identity, key_rotation)) = identity {
                 compact_access = identity.compact_access;
+                authority_epoch_supported = identity.authority_epoch;
                 #[cfg(feature = "mesh-dns-spike")]
                 {
                     dns_names = identity.dns_names;
@@ -217,11 +232,13 @@ pub async fn run(
                     binding = None;
                     installed = None;
                     current_identity = None;
+                    authority_epoch_supported = false;
                 }
             } else {
                 binding = None;
                 installed = None;
                 current_identity = None;
+                authority_epoch_supported = false;
                 attach_retry = None;
             }
         }
@@ -257,6 +274,10 @@ pub async fn run(
             let old = installed
                 .as_ref()
                 .and_then(|snapshot| snapshot.config(config.node).ok());
+            // A new authority epoch retires the prior server even when policy is identical.
+            let authority_changed = old.as_ref().is_some_and(|old| {
+                old.authority_epoch.as_deref() != config.authority_epoch.as_deref()
+            });
             // Liveness and management-role edits advance inventory revision but
             // do not change packet policy. Keep the node's acknowledged version
             // as the delta base, avoiding an unchanged snapshot/fsync per node.
@@ -278,6 +299,7 @@ pub async fn run(
                     || old.exposure != config.exposure
                     || old.default_policy != config.default_policy
                     || old.peers != config.peers
+                    || authority_changed
             });
             if changed {
                 if !channel.is_server()
@@ -296,19 +318,39 @@ pub async fn run(
                         }
                     }
                 }
-                let was_delta = old.is_some();
+                // A reset needs a full snapshot so the receiver irreversibly fences old peers.
+                let delta_base = if authority_changed {
+                    None
+                } else {
+                    old.as_ref()
+                };
+                let was_delta = delta_base.is_some();
                 // Never send additive fields to an older strict receiver. A
                 // refused compact delta still retries the original full snapshot.
                 let encoded = if compact_access {
-                    crate::access_updates::chunks(old.as_ref(), &config)
+                    crate::access_updates::chunks(delta_base, &config)
                 } else {
-                    configuration::chunks(old.as_ref(), &config)
+                    configuration::chunks(delta_base, &config)
                 };
                 let Ok(chunks) = encoded else {
                     return;
                 };
+                let authority_epoch = if authority_epoch_supported {
+                    let Some(epoch) = config.authority_epoch.clone() else {
+                        tracing::error!(
+                            node = ?config.node,
+                            "mesh authority-capable node has no durable server epoch"
+                        );
+                        installed = None;
+                        continue;
+                    };
+                    Some(epoch)
+                } else {
+                    None
+                };
                 let mut failed = false;
                 for mut chunk in chunks {
+                    chunk.authority_epoch.clone_from(&authority_epoch);
                     if !channel.supports_server_paths() {
                         chunk.server = None;
                     }
@@ -482,6 +524,8 @@ mod tests {
         queried: tokio::sync::Notify,
         applied: tokio::sync::Semaphore,
         frames: Mutex<Vec<(Option<u64>, u64, bool)>>,
+        /// Authority epochs carried by each mesh chunk received by this test node.
+        authority_epochs: Mutex<Vec<Option<String>>>,
         hostname: Option<&'static str>,
         /// The full identity probe answers instead of failing (J273 P3-2).
         probe_answers: AtomicBool,
@@ -513,6 +557,7 @@ mod tests {
                 queried: tokio::sync::Notify::new(),
                 applied: tokio::sync::Semaphore::new(0),
                 frames: Mutex::new(Vec::new()),
+                authority_epochs: Mutex::new(Vec::new()),
                 hostname,
                 probe_answers: AtomicBool::new(false),
                 legacy_hides_rotation: AtomicBool::new(false),
@@ -613,6 +658,9 @@ mod tests {
                     }
                     let key_rotation = self.key_rotation
                         && !(legacy && self.legacy_hides_rotation.load(Ordering::Acquire));
+                    let authority_epoch = self.probe_answers.load(Ordering::Acquire)
+                        && serde_json::from_slice::<serde_json::Value>(&input)
+                            .is_ok_and(|probe| probe["authority_epoch"] == true);
                     self.queried.notify_one();
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
@@ -620,6 +668,7 @@ mod tests {
                             #[cfg(feature = "mesh-dns-spike")]
                             dns_names: false,
                             key_rotation,
+                            authority_epoch,
                             public_key: if self.server {
                                 PublicKey([1; 32])
                             } else {
@@ -661,6 +710,10 @@ mod tests {
                     );
                 }
                 let chunk: crate::dataplane::Chunk = serde_json::from_slice(&input).unwrap();
+                self.authority_epochs
+                    .lock()
+                    .unwrap()
+                    .push(chunk.authority_epoch.clone());
                 #[cfg(feature = "mesh-dns-spike")]
                 {
                     assert!(chunk.name.is_none());
@@ -971,6 +1024,65 @@ mod tests {
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(channel.leases.load(Ordering::Acquire), 0);
     }
+
+    /// A restore epoch must reach a node even when the restored policy is otherwise identical.
+    #[tokio::test]
+    async fn authority_epoch_change_reapplies_identical_mesh_snapshot() {
+        let service = service().await;
+        let store = service.dataplane();
+        let host = "00000000-0000-4000-8000-000000000001";
+        let (node, _) = store
+            .attach(
+                host,
+                PublicKey([2; 32]),
+                Some("192.0.2.1:44000".parse().unwrap()),
+                false,
+            )
+            .await
+            .unwrap();
+        let channel = Channel::new();
+        channel.probe_answers.store(true, Ordering::Release);
+        let task = tokio::spawn(run(
+            store.clone(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        channel.wait().await;
+        let before = store.snapshot().await.unwrap();
+        let old_epoch = before.config(node).unwrap().authority_epoch.unwrap();
+
+        sqlx::query("UPDATE mesh_state SET authority_epoch=NULL WHERE singleton=1")
+            .execute(&service.pool_for_tests())
+            .await
+            .unwrap();
+        let restored = store.snapshot().await.unwrap();
+        let new_config = restored.config(node).unwrap();
+        let new_epoch = new_config.authority_epoch.as_deref().unwrap();
+        assert_ne!(old_epoch, new_epoch);
+        let restored_version = new_config.version;
+        service.invalidate_dataplane().await;
+
+        let permit =
+            tokio::time::timeout(std::time::Duration::from_secs(5), channel.applied.acquire())
+                .await
+                .expect("authority-only restore did not send config")
+                .unwrap();
+        permit.forget();
+        let frames = channel.frames.lock().unwrap().clone();
+        let epochs = channel.authority_epochs.lock().unwrap().clone();
+        assert_eq!(frames.len(), 2, "the authority change sent no replacement");
+        assert_eq!(frames[1].0, None, "the new authority needs a full snapshot");
+        assert_eq!(frames[1].1, restored_version);
+        assert_eq!(epochs, [Some(old_epoch), Some(new_epoch.to_owned())]);
+
+        channel.notices.lock().unwrap().take();
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn refused_delta_recovers_immediately_and_closed_channel_retires_worker() {
         let service = service().await;
@@ -1490,13 +1602,28 @@ mod tests {
         assert_eq!(phase, None);
     }
 
-    /// An identity reply for the probe tests, with the given rotation flag.
+    /// An identity reply from a receiver without authority-epoch support.
     fn identity_reply(key_rotation: bool) -> Vec<u8> {
         serde_json::to_vec(&Some(Identity {
             compact_access: false,
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
             key_rotation,
+            authority_epoch: false,
+            public_key: PublicKey([2; 32]),
+            port: 44000,
+        }))
+        .unwrap()
+    }
+
+    /// An identity reply from a receiver that explicitly accepts authority epochs.
+    fn epoch_identity_reply() -> Vec<u8> {
+        serde_json::to_vec(&Some(Identity {
+            compact_access: false,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: true,
+            authority_epoch: true,
             public_key: PublicKey([2; 32]),
             port: 44000,
         }))
@@ -1507,7 +1634,7 @@ mod tests {
     /// requests made.
     async fn classify(
         replies: Vec<Result<Vec<u8>, &'static str>>,
-    ) -> (Option<Option<bool>>, Vec<Vec<u8>>) {
+    ) -> (Option<(Option<bool>, bool)>, Vec<Vec<u8>>) {
         let replies = Mutex::new(replies.into_iter());
         let requests = Mutex::new(Vec::new());
         let result = probe_identity(
@@ -1517,10 +1644,11 @@ mod tests {
                 async move { reply }
             },
             b"FULL",
+            b"WITHOUT_EPOCH",
             b"BEFORE",
         )
         .await
-        .map(|(_, supported)| supported);
+        .map(|(identity, supported)| (supported, identity.authority_epoch));
         (result, requests.into_inner().unwrap())
     }
 
@@ -1536,7 +1664,7 @@ mod tests {
         ] {
             let (supported, requests) =
                 classify(vec![Err(failure), Err(failure), Ok(identity_reply(false))]).await;
-            assert_eq!(supported, Some(None), "{failure}");
+            assert_eq!(supported, Some((None, false)), "{failure}");
             assert_eq!(requests.len(), 3, "{failure}");
         }
         // One refusal and one timeout is still not a deterministic rejection.
@@ -1546,7 +1674,7 @@ mod tests {
             Ok(identity_reply(false)),
         ])
         .await;
-        assert_eq!(supported, Some(None));
+        assert_eq!(supported, Some((None, false)));
     }
 
     /// J262 (b): one transient probe failure is retried and the retry proves support.
@@ -1557,22 +1685,21 @@ mod tests {
             Ok(identity_reply(true)),
         ])
         .await;
-        assert_eq!(supported, Some(Some(true)));
+        assert_eq!(supported, Some((Some(true), false)));
         assert_eq!(requests, vec![b"FULL".to_vec(), b"FULL".to_vec()]);
     }
 
-    /// An older binary rejects the full probe every time but answers the same request without `key_rotation`:
-    /// that proves no support.
+    /// A node that rejects the epoch field still reports its rotation support on the previous probe.
     #[tokio::test]
-    async fn an_older_binary_that_rejects_only_the_rotation_field_reports_no_support() {
+    async fn an_epoch_unsupported_node_keeps_rotation_negotiation() {
         let (supported, requests) = classify(vec![
             Err(infraternal_plugin_api::node_channel::CALL_REFUSED),
             Err(infraternal_plugin_api::node_channel::CALL_REFUSED),
-            Ok(identity_reply(false)),
+            Ok(identity_reply(true)),
         ])
         .await;
-        assert_eq!(supported, Some(Some(false)));
-        assert_eq!(requests.last().unwrap(), b"BEFORE");
+        assert_eq!(supported, Some((Some(true), false)));
+        assert_eq!(requests.last().unwrap(), b"WITHOUT_EPOCH");
     }
 
     /// When only the legacy request answers, the failures prove nothing about rotation: support is unknown.
@@ -1582,11 +1709,37 @@ mod tests {
             Err("Node control timed out."),
             Err("Node control timed out."),
             Err("Node control timed out."),
+            Err("Node control timed out."),
+            Err("Node control timed out."),
             Ok(identity_reply(false)),
         ])
         .await;
-        assert_eq!(supported, Some(None));
+        assert_eq!(supported, Some((None, false)));
         assert_eq!(requests.last().unwrap(), b"{}");
+    }
+
+    /// A pre-rotation strict decoder is still marked unsupported, which keeps the D166 rotation gate closed.
+    #[tokio::test]
+    async fn a_pre_rotation_node_refuses_rotation_and_epoch_extensions() {
+        let refusal = infraternal_plugin_api::node_channel::CALL_REFUSED;
+        let (supported, requests) = classify(vec![
+            Err(refusal),
+            Err(refusal),
+            Err(refusal),
+            Err(refusal),
+            Ok(identity_reply(false)),
+        ])
+        .await;
+        assert_eq!(supported, Some((Some(false), false)));
+        assert_eq!(requests.last().unwrap(), b"BEFORE");
+    }
+
+    /// A positive epoch bit from the full identity probe permits epoch-bearing configuration chunks.
+    #[tokio::test]
+    async fn epoch_support_requires_the_explicit_full_probe() {
+        let (supported, requests) = classify(vec![Ok(epoch_identity_reply())]).await;
+        assert_eq!(supported, Some((Some(true), true)));
+        assert_eq!(requests, vec![b"FULL".to_vec()]);
     }
 
     /// A coordinator restart in the overlap phase still publishes the previous key to peers.

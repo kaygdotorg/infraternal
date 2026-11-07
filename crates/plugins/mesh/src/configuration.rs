@@ -195,6 +195,7 @@ fn compile_inner(
         );
     }
     Ok(Config {
+        authority_epoch: None,
         local_key: Some(local_member.keys.current),
         server: Some(checkpoint.server),
         node,
@@ -287,53 +288,32 @@ pub fn chunks(
     if old.is_some_and(|old| old.node != new.node || old.addresses != new.addresses) {
         return Err("Mesh address transition needs overlap.");
     }
+    let base =
+        old.filter(|old| old.authority_epoch == new.authority_epoch && old.version < new.version);
     let mut builder = Chunks {
-        part: crate::dataplane::Chunk {
-            access_updates: Vec::new(),
-            local_key: new.local_key,
-            server: new.server,
-            node: new.node,
-            #[cfg(feature = "mesh-dns-spike")]
-            name: new.name.clone(),
-            #[cfg(feature = "mesh-dns-spike")]
-            dns_suffix: new.dns_suffix.clone(),
-            from_version: old.map(|old| old.version),
-            version: new.version,
-            index: 0,
-            last: false,
-            addresses: new.addresses,
-            default_policy: new.default_policy,
-            exposure: new.exposure.clone(),
-            upserted: BTreeMap::new(),
-            merged: BTreeMap::new(),
-            removed: Vec::new(),
-            #[cfg(feature = "mesh-dns-spike")]
-            peer_names: BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
-            removed_peer_names: Vec::new(),
-        },
+        part: chunk_header(new, base.map(|old| old.version)),
         output: Vec::new(),
     };
     for (node, peer) in &new.peers {
-        if old.and_then(|old| old.peers.get(node)) != Some(peer) {
+        if base.and_then(|old| old.peers.get(node)) != Some(peer) {
             builder.peer(*node, peer)?;
         }
     }
     #[cfg(feature = "mesh-dns-spike")]
     for (node, name) in &new.peer_names {
-        if old.and_then(|old| old.peer_names.get(node)) != Some(name) {
+        if base.and_then(|old| old.peer_names.get(node)) != Some(name) {
             builder.peer_name(*node, name)?;
         }
     }
     #[cfg(feature = "mesh-dns-spike")]
-    for node in old
+    for node in base
         .into_iter()
         .flat_map(|old| old.peer_names.keys())
         .filter(|node| new.peers.contains_key(node) && !new.peer_names.contains_key(node))
     {
         builder.remove_peer_name(*node)?;
     }
-    for node in old
+    for node in base
         .into_iter()
         .flat_map(|old| old.peers.keys())
         .filter(|node| !new.peers.contains_key(node))
@@ -349,6 +329,40 @@ pub fn chunks(
     builder.output.push(builder.part);
     Ok(builder.output)
 }
+
+/// Build one chunk header without encoding any peer changes.
+///
+/// Compact policy updates use this header because their range list carries the only changed
+/// fields; a normal peer diff would repeat each changed policy as an upsert.
+#[must_use]
+pub(crate) fn chunk_header(new: &Config, from_version: Option<u64>) -> crate::dataplane::Chunk {
+    crate::dataplane::Chunk {
+        access_updates: Vec::new(),
+        local_key: new.local_key,
+        authority_epoch: new.authority_epoch.clone(),
+        server: new.server,
+        node: new.node,
+        #[cfg(feature = "mesh-dns-spike")]
+        name: new.name.clone(),
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: new.dns_suffix.clone(),
+        from_version,
+        version: new.version,
+        index: 0,
+        last: false,
+        addresses: new.addresses,
+        default_policy: new.default_policy,
+        exposure: new.exposure.clone(),
+        upserted: BTreeMap::new(),
+        merged: BTreeMap::new(),
+        removed: Vec::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: BTreeMap::new(),
+        #[cfg(feature = "mesh-dns-spike")]
+        removed_peer_names: Vec::new(),
+    }
+}
+
 struct Chunks {
     part: crate::dataplane::Chunk,
     output: Vec<crate::dataplane::Chunk>,
@@ -550,5 +564,36 @@ mod tests {
 
         assert_eq!(peer["key"], serde_json::to_value(new_key).unwrap());
         assert_eq!(peer["previous_key"], serde_json::to_value(old_key).unwrap());
+    }
+
+    /// A lower full snapshot within one authority is not encoded as a delta.
+    #[test]
+    fn lower_same_authority_snapshot_starts_without_a_revision_base() {
+        let node = |id: u8| Node {
+            id: NodeId(u64::from(id)),
+            public_key: PublicKey([id; 32]),
+            host: format!("host-{id}"),
+            tags: BTreeSet::new(),
+        };
+        let mut coordinator = Coordinator::new(MeshSettings::new([7; 5]), &[], node(0)).unwrap();
+        coordinator.join(node(1)).unwrap();
+        let mut old = compile(
+            &coordinator,
+            NodeId(1),
+            DefaultPolicy::Deny,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        old.version = 11;
+        old.authority_epoch = Some("11111111-1111-4111-8111-111111111111".to_owned());
+        let mut restored = old.clone();
+        restored.version = 2;
+
+        let chunks = chunks(Some(&old), &restored).unwrap();
+
+        assert!(
+            chunks.iter().all(|chunk| chunk.from_version.is_none()),
+            "a lower full snapshot cannot be sent as a delta from the newer revision"
+        );
     }
 }

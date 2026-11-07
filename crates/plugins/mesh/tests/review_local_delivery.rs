@@ -10,6 +10,7 @@ use infraternal_plugin_mesh::{
 };
 use std::{collections::BTreeMap, net::UdpSocket, process::Command, time::Duration};
 
+/// Run the loopback service delivery scenario with the selected firewall backend.
 fn check(firewall: Firewall) {
     assert!(
         Command::new("ip")
@@ -23,6 +24,7 @@ fn check(firewall: Firewall) {
     node.chunk(Chunk {
         access_updates: Vec::new(),
         local_key: None,
+        authority_epoch: None,
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns-spike")]

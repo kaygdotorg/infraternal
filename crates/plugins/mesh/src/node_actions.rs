@@ -347,7 +347,7 @@ impl Default for MeshNodePlugin {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 /// Optional explicit negotiation keeps ordinary replies compatible with strict older decoders.
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct IdentityProbe {
     #[serde(default)]
@@ -357,6 +357,8 @@ struct IdentityProbe {
     dns_names: bool,
     #[serde(default)]
     key_rotation: bool,
+    #[serde(default)]
+    authority_epoch: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -406,6 +408,7 @@ pub enum Request {
         #[cfg(feature = "mesh-dns-spike")]
         dns_names: bool,
         key_rotation: bool,
+        authority_epoch: bool,
     },
     RotationPrepare(RotationOperation),
     RotationCommit(RotationOperation),
@@ -428,6 +431,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 #[cfg(feature = "mesh-dns-spike")]
                 dns_names: probe.dns_names,
                 key_rotation: probe.key_rotation,
+                authority_epoch: probe.authority_epoch,
             })
         }
         "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
@@ -479,19 +483,16 @@ fn rotation_response(
 /// The identity reply, offering each optional capability only when both the node and the requester support it.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
-    requested_compact_access: bool,
-    requested_dns_names: bool,
-    requested_key_rotation: bool,
+    requested: IdentityProbe,
 ) -> Option<IdentityResponse> {
-    #[cfg(not(feature = "mesh-dns-spike"))]
-    let _ = requested_dns_names;
     identity.map(|identity| IdentityResponse {
         public_key: identity.public_key,
         port: identity.port,
-        compact_access: identity.compact_access && requested_compact_access,
-        key_rotation: identity.key_rotation && requested_key_rotation,
+        compact_access: identity.compact_access && requested.compact_access,
+        key_rotation: identity.key_rotation && requested.key_rotation,
+        authority_epoch: identity.authority_epoch && requested.authority_epoch,
         #[cfg(feature = "mesh-dns-spike")]
-        dns_names: identity.dns_names && requested_dns_names,
+        dns_names: identity.dns_names && requested.dns_names,
     })
 }
 /// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
@@ -503,6 +504,8 @@ struct IdentityResponse {
     compact_access: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     key_rotation: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    authority_epoch: bool,
     #[cfg(feature = "mesh-dns-spike")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dns_names: bool,
@@ -569,24 +572,24 @@ impl AgentPlugin for MeshNodePlugin {
                     #[cfg(feature = "mesh-dns-spike")]
                     dns_names,
                     key_rotation,
+                    authority_epoch,
                 } => {
-                    #[cfg(feature = "mesh-dns-spike")]
-                    let requested_dns_names = dns_names;
-                    #[cfg(not(feature = "mesh-dns-spike"))]
-                    let requested_dns_names = false;
+                    let requested = IdentityProbe {
+                        compact_access,
+                        #[cfg(feature = "mesh-dns-spike")]
+                        dns_names,
+                        key_rotation,
+                        authority_epoch,
+                    };
                     json!(identity_response(
                         node.ensure().map_err(|_| PluginError::Rejected)?,
-                        compact_access,
-                        requested_dns_names,
-                        key_rotation,
+                        requested,
                     ))
                 }
                 Request::Up => {
                     json!(identity_response(
                         Some(node.up().map_err(|_| PluginError::Rejected)?),
-                        false,
-                        false,
-                        false,
+                        IdentityProbe::default(),
                     ))
                 }
                 request @ (Request::RotationPrepare(_)
@@ -770,6 +773,7 @@ mod tests {
         let (_, key) = crate::wireguard::Key::generate().expect("public peer fixture");
         let mut chunk = Chunk {
             access_updates: Vec::new(),
+            authority_epoch: None,
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
@@ -897,6 +901,7 @@ mod tests {
         );
         let (_, peer_key) = Key::generate().expect("peer key");
         let chunk = Chunk {
+            authority_epoch: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -1009,6 +1014,7 @@ mod tests {
         assert!(parse_action("mesh.up", br#"{"enabled":false}"#).is_err());
         assert!(matches!(parse_action("mesh.up", b"{}"), Ok(Request::Up)));
     }
+    /// Cleanup failure remains visible, and reconnect cannot override the user's explicit local off choice.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off() {
@@ -1024,6 +1030,7 @@ mod tests {
         plugin.call("mesh.up", b"{}").expect("start");
         let chunk = Chunk {
             access_updates: Vec::new(),
+            authority_epoch: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -1106,30 +1113,40 @@ mod identity_upgrade_tests {
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: true,
             key_rotation: true,
+            authority_epoch: true,
         };
         let legacy = serde_json::json!(super::identity_response(
             Some(identity.clone()),
-            false,
-            false,
-            false
+            super::IdentityProbe::default(),
         ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
         assert!(legacy.get("compact_access").is_none());
         let negotiated = serde_json::json!(super::identity_response(
             Some(identity.clone()),
-            true,
-            true,
-            true
+            super::IdentityProbe {
+                compact_access: true,
+                #[cfg(feature = "mesh-dns-spike")]
+                dns_names: true,
+                key_rotation: true,
+                authority_epoch: true,
+            },
         ));
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
+        assert_eq!(negotiated["authority_epoch"], true);
         #[cfg(feature = "mesh-dns-spike")]
         assert_eq!(negotiated["dns_names"], true);
-        let compact_only =
-            serde_json::json!(super::identity_response(Some(identity), true, false, false));
+        let compact_only = serde_json::json!(super::identity_response(
+            Some(identity),
+            super::IdentityProbe {
+                compact_access: true,
+                ..super::IdentityProbe::default()
+            },
+        ));
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
+        assert!(compact_only.get("authority_epoch").is_none());
         #[cfg(feature = "mesh-dns-spike")]
         assert!(compact_only.get("dns_names").is_none());
     }
@@ -1157,6 +1174,7 @@ mod peer_page_tests {
             }
         };
         Config {
+            authority_epoch: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(1),

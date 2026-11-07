@@ -181,6 +181,23 @@ COMMIT;
 A migration that rewrites or drops data cannot be rewound this way; its pull
 request must say so and name the backup to restore.
 
+## Restoring an older Mesh authority
+
+The Mesh deployment authority epoch survives ordinary server restarts. After
+restoring an older database backup, clear that epoch while the server is stopped
+and before starting the restored server:
+
+```sql
+UPDATE mesh_state SET authority_epoch = NULL WHERE singleton = 1;
+```
+
+The first Mesh snapshot then durably creates a fresh UUID before it is sent.
+Backups from before the authority-epoch migration get a NULL column when the
+current server migrates them and follow the same initialization path. If the
+fresh epoch cannot be committed, the server refuses to compile or publish Mesh
+snapshots. Do not clear the epoch for ordinary restarts or an in-deploy binary
+rollback: those keep the same authority and the peers' last-known rules (D166).
+
 Migration `0029_remote_host_hostname` (#236) adds the retained hostname column
 and replaces existing UUID-shaped Mesh placeholders with audited unnamed
 labels. A deliberate rewind across it restores the pre-migration database

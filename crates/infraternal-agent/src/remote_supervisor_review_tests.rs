@@ -328,6 +328,7 @@ mod durable_state {
                 enabled: true,
                 config: Some(Config {
                     local_key: None,
+                    authority_epoch: None,
                     server: None,
                     node: NodeId(1),
                     version: 1,
@@ -339,6 +340,7 @@ mod durable_state {
                     exposure: None,
                     peers: std::collections::BTreeMap::new(),
                 }),
+                authority_reset_pending: false,
                 backend: None,
             })
             .unwrap();

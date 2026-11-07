@@ -6,6 +6,19 @@ use crate::policy::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, net::SocketAddr};
 
+/// Accept only the canonical UUID text used to identify one durable server deployment authority.
+#[must_use]
+pub fn valid_authority_epoch(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
 /// Public node identity and actual UDP socket coordinates; private material has no field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +35,9 @@ pub struct Identity {
     /// This node supports durable automatic key rotation actions.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub key_rotation: bool,
+    /// This node accepts authenticated authority epochs on configuration chunks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_epoch: bool,
 }
 
 /// Explicit pair rules replace this fallback, so port grants also narrow an open mesh.
@@ -94,6 +110,11 @@ pub struct Config {
     /// Explicit server identity; older persisted snapshots cannot propose a route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,
+    /// Authenticated server deployment authority retained beside this peer snapshot.
+    /// Missing values are legacy snapshots; once an epoch is present, an epoch-less replacement
+    /// must retire the old peers and be refused instead of silently downgrading authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_epoch: Option<String>,
     pub node: NodeId,
     /// The coordinator's canonical single-label name for this node; absent on legacy snapshots.
     #[cfg(feature = "mesh-dns-spike")]
@@ -159,6 +180,9 @@ pub struct Chunk {
     /// Repeated in every part so a split snapshot cannot change its binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_key: Option<PublicKey>,
+    /// Repeated in every part so a changed authenticated deployment epoch retires old peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_epoch: Option<String>,
     /// Repeated on every chunk and checked before applying the complete policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<NodeId>,

@@ -163,6 +163,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) -> std::io::Result
     let (_, peer_key) = Key::generate()?;
     let chunk = Chunk {
         local_key: Some(local_key),
+        authority_epoch: None,
         server: Some(NodeId(1)),
         node: NodeId(2),
         #[cfg(feature = "mesh-dns-spike")]

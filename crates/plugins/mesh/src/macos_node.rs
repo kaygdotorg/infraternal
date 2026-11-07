@@ -323,6 +323,9 @@ fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<
 struct SavedState {
     enabled: bool,
     config: Option<crate::dataplane::Config>,
+    /// True while a peer-free reset snapshot awaits the new authority's full config.
+    #[serde(default, skip_serializing_if = "is_false")]
+    authority_reset_pending: bool,
     #[serde(default)]
     routes: BTreeSet<IpAddr>,
     #[serde(default)]
@@ -335,6 +338,11 @@ struct SavedState {
     /// The enrolment that issued `config`; absent only in state written by slice-1 builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     binding: Option<Enrolment>,
+}
+
+/// Omit the reset marker from legacy state files when it is not needed.
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// The enrolment a saved configuration belongs to (#265 P2-1, #325).
@@ -396,6 +404,7 @@ fn reconcile(mut state: SavedState, enrolment: Option<&Enrolment>) -> (SavedStat
     let rotate = state.binding.as_ref() != Some(enrolment);
     if rotate {
         state.config = None;
+        state.authority_reset_pending = false;
         // The old utun closed with the old process, which retired its routes.
         state.routes.clear();
         state.interface = None;
@@ -426,6 +435,7 @@ impl Default for SavedState {
         Self {
             enabled: true,
             config: None,
+            authority_reset_pending: false,
             routes: BTreeSet::new(),
             interface: None,
             port: 0,
@@ -510,9 +520,18 @@ fn read_public_state(path: &Path) -> io::Result<Option<SavedState>> {
     }
     let mut body = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut body)?;
-    serde_json::from_slice(&body)
-        .map(Some)
-        .map_err(|_| io::ErrorKind::InvalidData.into())
+    let state: SavedState =
+        serde_json::from_slice(&body).map_err(|_| io::ErrorKind::InvalidData)?;
+    if state.authority_reset_pending
+        && state.config.as_ref().is_none_or(|config| {
+            config.authority_epoch.is_none()
+                || !config.peers.is_empty()
+                || config.default_policy != crate::dataplane::DefaultPolicy::Deny
+        })
+    {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(Some(state))
 }
 
 /// Atomically persist a bounded public snapshot with root-only file permissions.
@@ -550,6 +569,47 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+/// Overwrite an existing private Mac snapshot after runtime peers have already been fenced.
+///
+/// This is the last safe write when a directory rename fails. A torn write leaves malformed state
+/// that restore refuses instead of replaying the old peer set; atomic replacement stays the normal
+/// path.
+/// # Errors
+/// Refuses unsafe parent/file metadata, oversized state or failed durable writes.
+fn write_public_state_in_place(path: &Path, state: &SavedState) -> io::Result<()> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let directory_metadata = fs::symlink_metadata(parent)?;
+    let uid = nix::unistd::Uid::effective().as_raw();
+    if !directory_metadata.is_dir()
+        || directory_metadata.uid() != uid
+        || directory_metadata.mode() & 0o077 != 0
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let body = serde_json::to_vec(state).map_err(io::Error::other)?;
+    if body.len() as u64 > MAX_PUBLIC_STATE_BYTES {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(parent)?;
+    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o600 {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    file.set_len(0)?;
+    file.write_all(&body)?;
+    file.sync_all()?;
+    File::open(parent)?.sync_all()
 }
 
 fn validate_state_file(path: &Path, uid: u32) -> io::Result<()> {
@@ -631,11 +691,14 @@ fn stage_chunk(
     identity: &crate::dataplane::Identity,
     chunk: crate::dataplane::Chunk,
 ) -> io::Result<Option<Config>> {
-    let current = if needs_authority_reset(current, &chunk) {
-        None
-    } else {
-        current
-    };
+    if chunk
+        .authority_epoch
+        .as_deref()
+        .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+        || current.is_some_and(|old| old.authority_epoch != chunk.authority_epoch)
+    {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
     if !chunk.access_updates.is_empty()
         && (chunk.from_version.is_none()
             || chunk.index != 0
@@ -654,7 +717,7 @@ fn stage_chunk(
             old.node != chunk.node
                 && (chunk.local_key.is_none()
                     || chunk.from_version.is_some()
-                    || chunk.version <= old.version)
+                    || old.authority_epoch == chunk.authority_epoch && chunk.version <= old.version)
         })
     {
         return Err(io::ErrorKind::InvalidData.into());
@@ -662,9 +725,8 @@ fn stage_chunk(
     if chunk.index == 0 {
         let current_version = current.map(|config| config.version);
         if chunk.from_version.is_some() && chunk.from_version != current_version
-            || current_version.is_some_and(|version| {
-                chunk.version < version || chunk.from_version.is_some() && chunk.version == version
-            })
+            || current_version
+                .is_some_and(|version| chunk.from_version.is_some() && chunk.version <= version)
         {
             return Err(io::ErrorKind::InvalidData.into());
         }
@@ -672,6 +734,7 @@ fn stage_chunk(
             current.cloned().ok_or(io::ErrorKind::InvalidData)?
         } else {
             Config {
+                authority_epoch: chunk.authority_epoch.clone(),
                 local_key: chunk.local_key,
                 server: chunk.server,
                 node: chunk.node,
@@ -714,6 +777,7 @@ fn stage_chunk(
     #[cfg(not(feature = "mesh-dns-spike"))]
     let dns_suffix_changed = false;
     if staged.server != chunk.server
+        || staged.config.authority_epoch != chunk.authority_epoch
         || staged.next != chunk.index
         || staged.config.local_key != chunk.local_key
         || staged.config.node != chunk.node
@@ -790,9 +854,9 @@ fn stage_chunk(
     }
 }
 
-/// Check whether an incoming snapshot starts a new server or restored revision authority.
+/// Check whether an incoming chunk carries a different authenticated server process epoch.
 fn needs_authority_reset(current: Option<&Config>, chunk: &crate::dataplane::Chunk) -> bool {
-    current.is_some_and(|old| old.server != chunk.server || chunk.version < old.version)
+    current.is_some_and(|old| old.authority_epoch != chunk.authority_epoch)
 }
 
 #[derive(Clone)]
@@ -802,8 +866,14 @@ struct RuntimeInfo {
     routes: BTreeSet<IpAddr>,
 }
 
+/// Commands the macOS worker applies serially, including the irreversible peer-retirement fence.
 enum WorkerCommand {
     Apply {
+        config: Config,
+        reply: sync::SyncSender<io::Result<RuntimeInfo>>,
+    },
+    /// Drop the current peer set without restoring it if retirement fails.
+    Retire {
         config: Config,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
@@ -992,6 +1062,17 @@ impl Worker {
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
 
+    /// Fence old peers without keeping them as an internal rollback target.
+    /// # Errors
+    /// Reports a worker or peer-removal failure; callers stop the worker on failure.
+    fn retire(&self, config: Config) -> io::Result<RuntimeInfo> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::Retire { config, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
     fn counters(&self) -> io::Result<CounterMap> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
@@ -1039,6 +1120,10 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
         match command {
             WorkerCommand::Apply { config, reply } => {
                 let result = state.apply(config).await;
+                let _ = reply.send(result);
+            }
+            WorkerCommand::Retire { config, reply } => {
+                let result = state.retire(config).await;
                 let _ = reply.send(result);
             }
             WorkerCommand::Counters(reply) => {
@@ -1105,6 +1190,28 @@ impl RuntimeState {
             interface,
             port: self.port,
             routes: new_routes,
+        })
+    }
+
+    /// Remove every current peer and route without using the ordinary apply rollback path.
+    /// # Errors
+    /// Reports peer or route retirement errors; the caller then stops this worker.
+    async fn retire(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+        let interface = self
+            .utun
+            .as_ref()
+            .map(MacUtun::name)
+            .ok_or(io::ErrorKind::NotConnected)?
+            .to_owned();
+        let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        replace_peers(device, Vec::new()).await?;
+        remove_routes(&interface, &self.routes)?;
+        self.routes.clear();
+        self.config = Some(config);
+        Ok(RuntimeInfo {
+            interface,
+            port: self.port,
+            routes: BTreeSet::new(),
         })
     }
 
@@ -1190,11 +1297,15 @@ async fn rollback_device(device: &GotaDevice, interface: &str, config: Option<&C
     }
 }
 
+/// Owns one macOS mesh runtime and its accepted public state for an enrolled host.
+/// The worker handles tunnel mutations, while the binding scopes restored config to one enrollment.
 pub struct Node {
     enabled: bool,
     worker: Option<Worker>,
     identity: Option<crate::dataplane::Identity>,
     config: Option<Config>,
+    /// Marks the peer-free snapshot left by an authority fence until its full replacement arrives.
+    authority_reset_pending: bool,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
     interface: Option<String>,
@@ -1210,6 +1321,7 @@ impl Default for Node {
             worker: None,
             identity: None,
             config: None,
+            authority_reset_pending: false,
             pending: None,
             routes: BTreeSet::new(),
             interface: None,
@@ -1263,6 +1375,7 @@ impl Node {
         let mut node = Self {
             enabled: state.enabled,
             config: state.config,
+            authority_reset_pending: state.authority_reset_pending,
             port: state.port,
             path: Some(path),
             binding: state.binding,
@@ -1368,6 +1481,7 @@ impl Node {
             dns_names: false,
             // Key rotation is not implemented on macOS yet, so the coordinator rotates no node (#285).
             key_rotation: false,
+            authority_epoch: true,
         };
         self.identity = Some(identity.clone());
         Ok(identity)
@@ -1426,6 +1540,7 @@ impl Node {
         self.worker = None;
         self.identity = None;
         self.config = None;
+        self.authority_reset_pending = false;
         self.pending = None;
         self.routes.clear();
         self.interface = None;
@@ -1458,26 +1573,67 @@ impl Node {
             );
             return Err(io::ErrorKind::InvalidData.into());
         }
+        if chunk
+            .authority_epoch
+            .as_deref()
+            .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
+        {
+            self.pending = None;
+            tracing::warn!("Mac mesh configuration chunk refused: authority epoch is malformed");
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         if needs_authority_reset(self.config.as_ref(), &chunk) {
+            let old_epoch = self
+                .config
+                .as_ref()
+                .and_then(|old| old.authority_epoch.as_deref());
+            let old_epoch_was_present = old_epoch.is_some();
             if let Some(old) = self.config.as_ref() {
                 tracing::warn!(
-                    old_server = ?old.server,
-                    new_server = ?chunk.server,
+                    old_epoch = ?old.authority_epoch,
+                    new_epoch = ?chunk.authority_epoch,
                     old_node = old.node.0,
                     new_node = chunk.node.0,
                     old_version = old.version,
                     new_version = chunk.version,
-                    "retiring retained Mac mesh peers before applying a changed authority or older revision"
+                    "retiring retained Mac mesh peers before applying a changed authority epoch"
                 );
             }
-            if let Err(error) = self.retire_stale_configuration() {
+            let retirement_epoch = if old_epoch_was_present && chunk.authority_epoch.is_none() {
+                old_epoch.map(str::to_owned)
+            } else {
+                chunk.authority_epoch.clone()
+            };
+            if let Err(error) = self.retire_authority(retirement_epoch) {
                 self.pending = None;
                 tracing::warn!(
                     error_kind = ?error.kind(),
-                    "Mac mesh configuration chunk refused after authority reset"
+                    "Mac mesh configuration chunk refused after authority retirement"
                 );
                 return Err(error);
             }
+            if old_epoch_was_present && chunk.authority_epoch.is_none() {
+                self.pending = None;
+                tracing::warn!(
+                    "Mac mesh configuration chunk refused after retirement: an epoch-bound authority cannot be downgraded"
+                );
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if chunk.from_version.is_some() || chunk.index != 0 {
+                self.pending = None;
+                tracing::warn!(
+                    "Mac mesh configuration chunk refused after retirement: a new authority must start with a full snapshot"
+                );
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        }
+        if self.authority_reset_pending && chunk.from_version.is_some() {
+            self.pending = None;
+            tracing::warn!(
+                error_kind = ?io::ErrorKind::InvalidData,
+                "Mac mesh configuration chunk refused: an authority reset needs a full snapshot"
+            );
+            return Err(io::ErrorKind::InvalidData.into());
         }
         let result = stage_chunk(&mut self.pending, self.config.as_ref(), &identity, chunk);
         if let Err(error) = &result {
@@ -1500,14 +1656,39 @@ impl Node {
         }
         let desired_routes = route_addresses(&config);
         validate_underlay_routes(&config, &desired_routes)?;
+        let completes_authority_reset = self.authority_reset_pending;
+        let reset_config = completes_authority_reset
+            .then(|| self.config.clone())
+            .flatten();
+        if completes_authority_reset {
+            self.authority_reset_pending = false;
+        }
         let mut cleanup_routes = self.routes.clone();
         cleanup_routes.extend(desired_routes.iter().copied());
-        self.persist(true, Some(&config), cleanup_routes, self.interface.clone())?;
-        let info = self
+        if let Err(error) =
+            self.persist(true, Some(&config), cleanup_routes, self.interface.clone())
+        {
+            if let Some(denied) = reset_config.as_ref() {
+                self.authority_reset_pending = true;
+                return self.stop_after_retirement_failure(error, denied);
+            }
+            return Err(error);
+        }
+        let applied = self
             .worker
             .as_ref()
-            .ok_or(io::ErrorKind::NotConnected)?
-            .apply(config.clone())?;
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+            .and_then(|worker| worker.apply(config.clone()));
+        let info = match applied {
+            Ok(info) => info,
+            Err(error) => {
+                if let Some(denied) = reset_config.as_ref() {
+                    self.authority_reset_pending = true;
+                    return self.stop_after_retirement_failure(error, denied);
+                }
+                return Err(error);
+            }
+        };
         self.config = Some(config);
         self.routes = info.routes;
         self.interface = Some(info.interface);
@@ -1521,74 +1702,90 @@ impl Node {
         Ok(true)
     }
 
-    /// Replace the accepted Mac peer set with an empty deny config before staging a new authority.
+    /// Irreversibly retire the old Mac peer set before accepting another authority epoch.
     ///
-    /// Persisting the empty intent first ensures a restart cannot restore peers that the new server
-    /// has removed. If that update cannot be saved or applied, stop the GotaTun device so the old
-    /// peers cannot stay reachable while the caller reports the refusal.
+    /// The empty peer set reaches a dedicated worker command before persistence. This command has
+    /// no rollback target; on error the worker stops and cannot restore peers from the old epoch.
     /// # Errors
-    /// Returns persistence, worker, or shutdown errors; a failed reset leaves the node stopped.
-    fn retire_stale_configuration(&mut self) -> io::Result<()> {
+    /// Returns worker or persistence errors after the previous peers have been fenced or the worker stopped.
+    fn retire_authority(&mut self, authority_epoch: Option<String>) -> io::Result<()> {
         let Some(mut deny) = self.config.clone() else {
+            self.pending = None;
             return Ok(());
         };
+        deny.authority_epoch = authority_epoch;
         deny.default_policy = crate::dataplane::DefaultPolicy::Deny;
         deny.peers.clear();
         #[cfg(feature = "mesh-dns-spike")]
         deny.peer_names.clear();
         self.pending = None;
         self.config = Some(deny.clone());
-
-        let mut cleanup_routes = self.routes.clone();
-        cleanup_routes.extend(route_addresses(&deny));
-        if let Err(error) = self.persist(true, Some(&deny), cleanup_routes, self.interface.clone())
-        {
-            return self.stop_after_retirement_failure(error);
-        }
+        self.authority_reset_pending = true;
         let applied = match self.worker.as_ref() {
-            Some(worker) => worker.apply(deny),
+            Some(worker) => worker.retire(deny.clone()),
             None => Err(io::ErrorKind::NotConnected.into()),
         };
         let info = match applied {
             Ok(info) => info,
-            Err(error) => return self.stop_after_retirement_failure(error),
+            Err(error) => return self.stop_after_retirement_failure(error, &deny),
         };
         self.routes = info.routes;
         self.interface = Some(info.interface);
         self.port = info.port;
-        if let Err(error) = self.persist(true, None, self.routes.clone(), self.interface.clone()) {
-            return self.stop_after_retirement_failure(error);
-        }
-        self.config = None;
-        Ok(())
-    }
-
-    /// Stop the node when the empty peer config cannot be durably applied.
-    /// # Errors
-    /// Returns the reset cause unless shutdown reports a more immediate failure.
-    fn stop_after_retirement_failure(&mut self, reset_error: io::Error) -> io::Result<()> {
-        self.enabled = false;
         if let Err(error) = self.persist(
-            false,
-            self.config.as_ref(),
+            true,
+            Some(&deny),
             self.routes.clone(),
             self.interface.clone(),
         ) {
-            tracing::error!(
-                error_kind = ?error.kind(),
-                "could not persist disabled Mac mesh state after peer retirement failed"
-            );
+            return self.stop_after_retirement_failure(error, &deny);
         }
+        Ok(())
+    }
+
+    /// Stop the node without restoring peers when a retirement step cannot be completed.
+    /// # Errors
+    /// Returns the reset cause unless shutdown reports a more immediate failure.
+    fn stop_after_retirement_failure<T>(
+        &mut self,
+        reset_error: io::Error,
+        denied: &Config,
+    ) -> io::Result<T> {
+        self.enabled = false;
         let stop_result = self
             .worker
             .take()
             .map_or(Ok(()), |mut worker| worker.stop());
         self.identity = None;
-        self.config = None;
+        self.config = Some(denied.clone());
+        self.authority_reset_pending = true;
         self.pending = None;
         self.routes.clear();
         self.interface = None;
-        if let Err(error) = self.persist(false, None, BTreeSet::new(), None) {
+        let state = SavedState {
+            enabled: false,
+            config: Some(denied.clone()),
+            authority_reset_pending: true,
+            routes: BTreeSet::new(),
+            interface: None,
+            port: self.port,
+            backend: None,
+            binding: self.binding.clone(),
+        };
+        let persistence = self.path.as_ref().map_or(Ok(()), |path| {
+            match write_public_state(path, &state) {
+                Ok(()) => Ok(()),
+                Err(atomic_error) => write_public_state_in_place(path, &state).map_err(|error| {
+                    tracing::error!(
+                        atomic_error_kind = ?atomic_error.kind(),
+                        fallback_error_kind = ?error.kind(),
+                        "could not persist peer-free disabled Mac mesh state after retirement failed"
+                    );
+                    error
+                }),
+            }
+        });
+        if let Err(error) = persistence {
             tracing::error!(
                 error_kind = ?error.kind(),
                 "could not persist stopped Mac mesh state after peer retirement failed"
@@ -1613,6 +1810,7 @@ impl Node {
         }
     }
 
+    /// Save enabled state, accepted public config, and route ownership for restart recovery.
     fn persist(
         &self,
         enabled: bool,
@@ -1626,6 +1824,7 @@ impl Node {
                 &SavedState {
                     enabled,
                     config: config.cloned(),
+                    authority_reset_pending: self.authority_reset_pending,
                     routes,
                     interface,
                     port: self.port,
@@ -1692,9 +1891,31 @@ mod tests {
         thread,
     };
 
+    /// Stable process epochs used to distinguish authenticated server authorities in regressions.
+    const AUTHORITY_EPOCH_A: &str = "00000000-0000-4000-8000-000000000001";
+    /// A second process epoch for restored-server cases.
+    const AUTHORITY_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
+
+    /// Encode a complete snapshot with one epoch repeated across every chunk.
+    fn chunks_with_epoch(
+        old: Option<&Config>,
+        new: &Config,
+        authority_epoch: &str,
+    ) -> Vec<crate::dataplane::Chunk> {
+        crate::configuration::chunks(old, new)
+            .expect("full snapshot")
+            .into_iter()
+            .map(|mut chunk| {
+                chunk.authority_epoch = Some(authority_epoch.to_owned());
+                chunk
+            })
+            .collect()
+    }
+
     /// A one-peer configuration for the macOS node tests.
     fn config() -> Config {
         Config {
+            authority_epoch: Some(AUTHORITY_EPOCH_A.to_owned()),
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -1793,6 +2014,16 @@ mod tests {
                             routes: route_addresses(&config),
                         }));
                     }
+                    WorkerCommand::Retire { config, reply } => {
+                        if let Ok(mut configs) = applied.lock() {
+                            configs.push(config);
+                        }
+                        let _ = reply.send(Ok(RuntimeInfo {
+                            interface: "utun-test".to_owned(),
+                            port: 51820,
+                            routes: BTreeSet::new(),
+                        }));
+                    }
                     WorkerCommand::Counters(reply) => {
                         let _ = reply.send(super::CounterMap::new());
                     }
@@ -1852,6 +2083,7 @@ mod tests {
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
             key_rotation: false,
+            authority_epoch: true,
         };
         assert_eq!(installed_keys(&old), BTreeSet::from([[2; 32]]));
 
@@ -1878,6 +2110,7 @@ mod tests {
         current.version = 11;
         let mut restored = current.clone();
         restored.version = 2;
+        restored.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
         restored.peers.clear();
         let identity = Identity {
             public_key: current.local_key.expect("bound key"),
@@ -1886,6 +2119,7 @@ mod tests {
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
             key_rotation: false,
+            authority_epoch: true,
         };
         let applied_configs = Arc::new(Mutex::new(Vec::new()));
         let mut node = Node {
@@ -1893,6 +2127,7 @@ mod tests {
             worker: Some(recording_worker(Arc::clone(&applied_configs))),
             identity: Some(identity),
             config: Some(current.clone()),
+            authority_reset_pending: false,
             pending: None,
             routes: route_addresses(&current),
             interface: Some("utun-test".to_owned()),
@@ -1900,11 +2135,15 @@ mod tests {
             path: None,
             binding: None,
         };
+        for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
+            node.chunk(chunk).expect("initial epoch snapshot");
+        }
+        applied_configs.lock().expect("recorded configs").clear();
         let mut applied = false;
-        for chunk in crate::configuration::chunks(None, &restored).expect("full restore") {
+        for chunk in chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_A) {
             applied = node
                 .chunk(chunk)
-                .expect("restored snapshot should establish a fresh authority");
+                .expect("same-authority lower revision should replace the snapshot");
         }
 
         assert!(applied, "the full restored snapshot was not committed");
@@ -1913,14 +2152,155 @@ mod tests {
         assert!(installed.peers.is_empty());
         assert!(installed_keys(installed).is_empty());
         let applied_configs = applied_configs.lock().expect("recorded configs");
+        assert_eq!(applied_configs.len(), 1, "one ordinary replacement apply");
+        assert!(applied_configs[0].peers.is_empty());
+    }
+
+    /// A same-revision restore from another authority must retire the previous peer set.
+    #[test]
+    fn equal_revision_restore_retires_stale_peers() {
+        let mut current = config();
+        current.version = 11;
+        let mut restored = current.clone();
+        restored.peers.clear();
+        restored.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
+        let identity = Identity {
+            public_key: current.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: true,
+        };
+        let applied_configs = Arc::new(Mutex::new(Vec::new()));
+        let mut node = Node {
+            enabled: true,
+            worker: Some(recording_worker(Arc::clone(&applied_configs))),
+            identity: Some(identity),
+            config: Some(current.clone()),
+            authority_reset_pending: false,
+            pending: None,
+            routes: route_addresses(&current),
+            interface: Some("utun-test".to_owned()),
+            port: 51820,
+            path: None,
+            binding: None,
+        };
+        for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
+            node.chunk(chunk).expect("current epoch snapshot");
+        }
+        applied_configs.lock().expect("recorded configs").clear();
+        let result = chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B)
+            .into_iter()
+            .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
+        let retained = node.config().cloned();
+        let applied_configs = applied_configs.lock().expect("recorded configs").clone();
+        node.down().expect("stop test worker");
+
+        assert!(
+            result.is_ok(),
+            "equal-revision restore was refused: {result:?}"
+        );
+        assert_eq!(retained, Some(restored));
         assert_eq!(
             applied_configs.len(),
             2,
             "retire, then install the snapshot"
         );
         assert!(applied_configs[0].peers.is_empty());
-        assert_eq!(applied_configs[0].default_policy, DefaultPolicy::Deny);
         assert!(applied_configs[1].peers.is_empty());
+    }
+
+    /// A failed retirement save must not leave the old snapshot enabled for restart.
+    #[test]
+    fn failed_retirement_does_not_preserve_a_persisted_peer_rollback() {
+        let mut current = config();
+        current.version = 11;
+        let mut restored = current.clone();
+        restored.version = 2;
+        restored.peers.clear();
+        let directory =
+            std::env::temp_dir().join(format!("infraternal-j330-mac-{}", std::process::id()));
+        fs::create_dir(&directory).expect("state directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("private state directory");
+        let state_path = directory.join(PUBLIC_STATE);
+        write_public_state(
+            &state_path,
+            &SavedState {
+                enabled: true,
+                config: Some(current.clone()),
+                routes: route_addresses(&current),
+                interface: Some("utun-test".to_owned()),
+                port: 51820,
+                ..SavedState::default()
+            },
+        )
+        .expect("accepted snapshot");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
+            .expect("make state directory unwritable");
+        let identity = Identity {
+            public_key: current.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: true,
+        };
+        let applied_configs = Arc::new(Mutex::new(Vec::new()));
+        let mut node = Node {
+            enabled: true,
+            worker: Some(recording_worker(Arc::clone(&applied_configs))),
+            identity: Some(identity),
+            config: Some(current.clone()),
+            authority_reset_pending: false,
+            pending: None,
+            routes: route_addresses(&current),
+            interface: Some("utun-test".to_owned()),
+            port: 51820,
+            path: Some(state_path.clone()),
+            binding: None,
+        };
+        let result = chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B)
+            .into_iter()
+            .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
+        let saved = read_public_state(&state_path)
+            .expect("read saved state")
+            .expect("saved state exists");
+        let runtime_configs = applied_configs.lock().expect("recorded configs").clone();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("restore state directory permissions");
+        node.down().expect("stop test worker");
+        fs::remove_dir_all(&directory).expect("remove state directory");
+
+        assert!(
+            result.is_err(),
+            "the injected persistence failure was ignored"
+        );
+        assert_eq!(
+            runtime_configs.len(),
+            1,
+            "retirement did not fence the worker first"
+        );
+        assert!(runtime_configs[0].peers.is_empty());
+        assert_eq!(
+            saved
+                .config
+                .as_ref()
+                .and_then(|config| config.authority_epoch.as_deref()),
+            Some(AUTHORITY_EPOCH_B),
+            "a failed replacement must retain the new peer-free authority epoch"
+        );
+        assert!(
+            !saved.enabled
+                || saved
+                    .config
+                    .as_ref()
+                    .is_none_or(|config| config.peers.is_empty()),
+            "a restart could restore the retired peer: {saved:?}"
+        );
     }
 
     #[test]
@@ -1948,6 +2328,7 @@ mod tests {
             #[cfg(feature = "mesh-dns-spike")]
             dns_names: false,
             key_rotation: false,
+            authority_epoch: true,
         };
         let mut chunks = crate::configuration::chunks(None, &config).expect("full snapshot");
         assert_eq!(chunks.len(), 1);
@@ -2002,6 +2383,7 @@ mod tests {
         assert!(parse_utun_payload(&oversized).is_err());
     }
 
+    /// The saved public snapshot restores without carrying any private key material.
     #[test]
     fn saved_public_config_restores_without_private_key_material() {
         let directory = test_directory();
@@ -2009,6 +2391,7 @@ mod tests {
         let state = SavedState {
             enabled: true,
             config: Some(config()),
+            authority_reset_pending: false,
             routes: route_addresses(&config()),
             interface: Some("utun7".to_owned()),
             port: 51831,
@@ -2043,12 +2426,14 @@ mod tests {
         assert!(state.routes.is_empty());
     }
 
+    /// Restore creates public state in the directory owned by the macOS service.
     #[test]
     fn restore_uses_the_agent_state_directory() {
         let directory = test_directory();
         let state = SavedState {
             enabled: false,
             config: None,
+            authority_reset_pending: false,
             routes: BTreeSet::new(),
             interface: None,
             port: 0,
@@ -2068,10 +2453,12 @@ mod tests {
         Enrolment::new(coordinator, "8c1f0d2e-host", b"agent public key")
     }
 
+    /// Build saved state with the requested enrollment binding for restore tests.
     fn bound_state(binding: Option<Enrolment>) -> SavedState {
         SavedState {
             enabled: false,
             config: Some(config()),
+            authority_reset_pending: false,
             routes: route_addresses(&config()),
             interface: Some("utun7".to_owned()),
             port: 51831,
@@ -2235,12 +2622,14 @@ mod tests {
         assert!(!valid_utun_name("en0"));
     }
 
+    /// Invalid saved utun names never authorize deleting routes from another interface.
     #[test]
     fn restore_does_not_delete_routes_using_a_released_utun_name() {
         let directory = test_directory();
         let state = SavedState {
             enabled: false,
             config: None,
+            authority_reset_pending: false,
             routes: ["192.0.2.1".parse().expect("stale route")].into(),
             interface: Some("utun99999".to_owned()),
             port: 0,

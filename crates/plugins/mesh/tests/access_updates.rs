@@ -17,6 +17,7 @@ use std::{
 /// A configuration with one peer for access update tests.
 fn config() -> Config {
     Config {
+        authority_epoch: None,
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),

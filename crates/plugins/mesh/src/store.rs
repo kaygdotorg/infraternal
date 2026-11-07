@@ -34,6 +34,8 @@ struct Loaded {
     endpoints: std::sync::Arc<BTreeMap<NodeId, SocketAddr>>,
     default: DefaultPolicy,
     revision: u64,
+    /// The durable authenticated deployment authority for every compiled node snapshot.
+    authority_epoch: String,
     /// Durable key rotation phase per node; compiling a view rewrites peer keys from it.
     rotations: std::sync::Arc<BTreeMap<NodeId, RotationRecord>>,
     /// Synthetic unnamed labels remain reachable without creating DNS records.
@@ -123,6 +125,7 @@ impl Snapshot {
             MeshError::UnknownNode => MeshApiError::NotFound,
             _ => storage_error("configuration compilation failed"),
         })?;
+        config.authority_epoch = Some(self.loaded.authority_epoch.clone());
         #[cfg(feature = "mesh-dns-spike")]
         {
             if self.loaded.dns_placeholders.contains(&node) {
@@ -1762,19 +1765,22 @@ impl Store {
             )
         }).await
     }
+    /// Load mesh policy and refresh the cache when its revision or authority epoch changes.
     async fn load(&self) -> Result<Loaded, crate::api::MeshApiError> {
         self.load_diagnostics
             .run(async {
                 let mut cached = self.cache.lock().await;
-                let revision: i64 =
-                    sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
-                        .fetch_one(&self.pool)
-                        .await
-                        .map_err(|error| storage_sql_error(error))?;
+                let (revision, authority_epoch): (i64, Option<String>) = sqlx::query_as(
+                    "SELECT revision,authority_epoch FROM mesh_state WHERE singleton=1",
+                )
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| storage_sql_error(error))?;
                 let revision =
                     u64::try_from(revision).map_err(|_| storage_error("Mesh revision invalid."))?;
                 if let Some(loaded) = cached.as_ref()
                     && loaded.revision == revision
+                    && authority_epoch.as_deref() == Some(loaded.authority_epoch.as_str())
                 {
                     return Ok(loaded.clone());
                 }
@@ -1789,6 +1795,32 @@ impl Store {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await
             .map_err(|error| storage_sql_error(error))?;
+        let stored_authority_epoch: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT authority_epoch FROM mesh_state WHERE singleton=1",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| storage_sql_error(error))?;
+        let authority_epoch = match stored_authority_epoch {
+            Some(epoch) if crate::dataplane::valid_authority_epoch(&epoch) => epoch,
+            Some(_) => return Err(storage_error("Mesh authority epoch invalid.")),
+            None => {
+                // A restore reset remains pending until this UUID is durably committed. A failed
+                // update aborts snapshot compilation, so no node sees a process-local substitute.
+                let epoch = uuid::Uuid::new_v4().to_string();
+                let updated = sqlx::query(
+                    "UPDATE mesh_state SET authority_epoch=? WHERE singleton=1 AND authority_epoch IS NULL",
+                )
+                .bind(&epoch)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| storage_sql_error(error))?;
+                if updated.rows_affected() != 1 {
+                    return Err(storage_error("Mesh authority epoch reset was not stored."));
+                }
+                epoch
+            }
+        };
         let serialized: Option<String> = sqlx::query_scalar::<_, Option<String>>(
             "SELECT allocation_json FROM mesh_dataplane WHERE singleton=1",
         )
@@ -2161,6 +2193,7 @@ impl Store {
             default,
             revision: u64::try_from(revision)
                 .map_err(|_| storage_error("Mesh revision invalid."))?,
+            authority_epoch,
             rotations: std::sync::Arc::new(rotations),
             #[cfg(feature = "mesh-dns-spike")]
             dns_placeholders: std::sync::Arc::new(dns_placeholders),
