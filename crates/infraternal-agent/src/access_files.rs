@@ -435,8 +435,14 @@ impl AccountReport {
     /// not privileged), and nothing of the person's may still run; anything
     /// else is `not_checked` with the first reason that applies.
     pub(crate) fn decide(&mut self, rootless: bool) {
+        let own = self
+            .reason
+            .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed));
         let reason = if rootless {
             Some(Reason::RootlessUnverified)
+        } else if own.is_some() {
+            // No record to compare with: that, not "incomplete", is why.
+            own
         } else if self.privileged {
             Some(Reason::Privileged)
         } else if !self.complete
@@ -675,16 +681,14 @@ impl<'a> Scan<'a> {
                         let inside = self
                             .read_link(&prefix)
                             .and_then(|target| beneath_home(self.account, &prefix, &target));
-                        match inside {
-                            Some(inside) => next = Some(inside.join(rest)),
-                            None => {
-                                self.skip(&format!(
-                                    "~/{} (a link that leaves the home; not followed)",
-                                    prefix.display()
-                                ));
-                                return None;
-                            }
-                        }
+                        let Some(inside) = inside else {
+                            self.skip(&format!(
+                                "~/{} (a link that leaves the home; not followed)",
+                                prefix.display()
+                            ));
+                            return None;
+                        };
+                        next = Some(inside.join(rest));
                         break;
                     }
                     // Missing or unreadable: the caller's open says which.
@@ -708,16 +712,16 @@ impl<'a> Scan<'a> {
         if self.seen.contains(&shown_path) {
             return;
         }
-        let Some(real) = self.resolve(rel) else {
+        let Some(resolved) = self.resolve(rel) else {
             return;
         };
         let Some(home) = &self.home else {
             return;
         };
-        let Some(name) = real.file_name().map(std::ffi::OsStr::to_owned) else {
+        let Some(name) = resolved.file_name().map(std::ffi::OsStr::to_owned) else {
             return;
         };
-        let parent = match real.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let parent = match resolved.parent().filter(|p| !p.as_os_str().is_empty()) {
             Some(parent) => match open_beneath(home, parent, true) {
                 Ok(directory) => OwnedFd::from(directory),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return,
@@ -756,7 +760,7 @@ impl<'a> Scan<'a> {
         let kind =
             nix::sys::stat::SFlag::from_bits_truncate(stat.st_mode) & nix::sys::stat::SFlag::S_IFMT;
         if kind == nix::sys::stat::SFlag::S_IFLNK {
-            let entry = self.link(&real);
+            let entry = self.link(&resolved);
             visit(shown_path, entry, None);
         } else if kind == nix::sys::stat::SFlag::S_IFREG {
             let opened = openat(
@@ -873,20 +877,20 @@ impl<'a> Scan<'a> {
     /// subdirectories systemd reads too; other subdirectories run nothing.
     fn directory(&mut self, rel: &Path, units: bool, visit: &mut Visit<'_>) {
         let shown_path = format!("~/{}", rel.display());
-        let Some(real) = self.resolve(rel) else {
+        let Some(resolved) = self.resolve(rel) else {
             return;
         };
         let Some(home) = &self.home else {
             return;
         };
-        let opened = open_beneath(home, &real, true);
+        let opened = open_beneath(home, &resolved, true);
         let directory = match opened {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
             Err(error) if is_link_error(&error) => {
                 // The directory itself is a link (to /etc/xdg/autostart, say).
                 if self.admit(&shown_path) {
                     self.seen.insert(shown_path.clone());
-                    let entry = self.link(&real);
+                    let entry = self.link(&resolved);
                     visit(shown_path, entry, None);
                 }
                 return;
@@ -921,7 +925,7 @@ impl<'a> Scan<'a> {
             let Some(home) = &self.home else {
                 return;
             };
-            if open_beneath(home, &real.join(&name), true).is_ok() {
+            if open_beneath(home, &resolved.join(&name), true).is_ok() {
                 let name = name.to_string_lossy();
                 if units
                     && (name.ends_with(".wants")
@@ -1494,8 +1498,10 @@ fn record_path(store: &Path, person: uuid::Uuid, uid: u32) -> PathBuf {
 }
 
 /// The marker left when recording `person`'s grant on account `uid` failed.
+/// It sits in the store's root, not in the account's directory, so a failure
+/// to create or write that directory can still be marked.
 fn failed_path(store: &Path, person: uuid::Uuid, uid: u32) -> PathBuf {
-    record_path(store, person, uid).with_extension("failed")
+    store.join(format!("{uid}-{}.failed", person.simple()))
 }
 
 /// The last report sent for `person`, kept so a retried revocation whose
@@ -1565,17 +1571,26 @@ pub(crate) fn record_grant(
 /// The accounts `person` has records (or failed records) on, from the store
 /// itself (not from runtime state, which a reboot empties).
 fn recorded_accounts(store: &Path, person: uuid::Uuid) -> Vec<u32> {
+    let failed = format!("-{}.failed", person.simple());
     let mut uids: Vec<u32> = std::fs::read_dir(store)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
-        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-        .filter(|uid| {
-            record_path(store, person, *uid).is_file() || failed_path(store, person, *uid).is_file()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            match name.strip_suffix(&failed) {
+                // A failure marker in the store's root names its account.
+                Some(uid) => uid.parse().ok(),
+                None => name
+                    .parse()
+                    .ok()
+                    .filter(|uid| record_path(store, person, *uid).is_file()),
+            }
         })
         .take(ACCOUNTS)
         .collect();
     uids.sort_unstable();
+    uids.dedup();
     uids
 }
 
@@ -1599,10 +1614,7 @@ pub(crate) fn privileged(account: &User) -> bool {
             nix::unistd::Group::from_name(name)
                 .ok()
                 .flatten()
-                .is_some_and(|group| {
-                    group.gid == account.gid
-                        || group.mem.iter().any(|member| *member == account.name)
-                })
+                .is_some_and(|group| group.gid == account.gid || group.mem.contains(&account.name))
         })
 }
 

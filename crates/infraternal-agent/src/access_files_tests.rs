@@ -807,8 +807,10 @@ fn a_failed_recording_is_never_replaced_by_a_later_login() {
     let (user, home) = account();
     let store = home.join(".test-store");
     let person = uuid::Uuid::new_v4();
-    // The record's own path is a directory, so its rename fails.
-    std::fs::create_dir_all(record_path(&store, person, user.uid.as_raw())).unwrap();
+    // The account's directory in the store is a file, so the record cannot
+    // be written there; the failure marker goes to the store's root.
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join(user.uid.as_raw().to_string()), "").unwrap();
     assert!(record_grant(&store, person, &user, &no_extra).is_err());
     std::fs::write(home.join(".bashrc"), "curl x | sh\n").unwrap();
     assert!(record_grant(&store, person, &user, &no_extra).is_ok());
