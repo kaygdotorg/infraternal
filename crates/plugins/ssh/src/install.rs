@@ -1634,6 +1634,10 @@ fi
 // An acknowledged refusal is staging-only cleanup and must not restart it.
 // An incomplete upload is owned by this transaction. Reclaim it before
 // allocating the outside receipt, including when the home filesystem is full.
+/// Roll back this transaction's setup on the host: an acquired or staged fresh
+/// install is removed through its receipt, an upgrade is put back from its
+/// rollback copies, and a new setup location it began but never renamed into
+/// place goes. Nothing another transaction owns is touched.
 pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
 # A new setup location this transaction began but never renamed into place
 # (STAGE_TRANSACTION): only its owner record and journal are in it.
