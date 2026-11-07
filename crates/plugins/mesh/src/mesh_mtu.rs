@@ -20,8 +20,10 @@ pub(crate) const FALLBACK_MESH_MTU: u16 = 1200;
 pub(crate) const IPV6_MINIMUM_MTU: u16 = 1280;
 /// The largest `WireGuard` UDP overhead for an outer IPv6 packet.
 const OUTER_OVERHEAD: u32 = 80;
+#[cfg(any(all(feature = "relay", target_os = "linux"), test))]
 /// The encrypted `WireGuard` transport header and tag in one data packet.
 const WIREGUARD_PACKET_OVERHEAD: u32 = 32;
+#[cfg(any(all(feature = "relay", target_os = "linux"), test))]
 /// The peer link id prefixed to each relayed datagram.
 const RELAY_LINK_ID_OVERHEAD: u32 = 4;
 /// The lowest useful interface MTU and the minimum MTU we accept on an owned peer route.
@@ -53,15 +55,14 @@ pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
 /// Quinn's `max_datagram_size` already accounts for QUIC packet and DATAGRAM framing. The relay
 /// adds only the `WireGuard` data-packet overhead and its four-byte link id before sending.
 /// Unknown limits use the same conservative fallback as unresolved direct endpoints.
+#[cfg(any(all(feature = "relay", target_os = "linux"), test))]
 pub(crate) fn for_relay_datagram(max_datagram_size: Option<usize>) -> u16 {
-    max_datagram_size
-        .map(|size| u32::try_from(size).unwrap_or(u32::MAX))
-        .map(|size| {
-            mtu_for_inner_budget(
-                size.saturating_sub(WIREGUARD_PACKET_OVERHEAD + RELAY_LINK_ID_OVERHEAD),
-            )
-        })
-        .unwrap_or(FALLBACK_MESH_MTU)
+    max_datagram_size.map_or(FALLBACK_MESH_MTU, |size| {
+        let size = u32::try_from(size).unwrap_or(u32::MAX);
+        mtu_for_inner_budget(
+            size.saturating_sub(WIREGUARD_PACKET_OVERHEAD + RELAY_LINK_ID_OVERHEAD),
+        )
+    })
 }
 
 /// Keep a shared link at IPv6's minimum while allowing larger peer route budgets.

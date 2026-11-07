@@ -863,6 +863,9 @@ impl Node {
                 .map(|_| ()),
         }
     }
+    /// Retire the recorded routes only after kernel teardown has completed.
+    ///
+    /// Keeping the inventory after a failure preserves the ordering of an explicit retry.
     fn retire_routes(&mut self) -> io::Result<()> {
         // Publish an empty inventory only after kernel teardown is complete.
         // Keep the in-memory inventory on failure so an explicit retry remains

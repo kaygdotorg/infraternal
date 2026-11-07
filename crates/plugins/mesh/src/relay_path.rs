@@ -200,6 +200,7 @@ struct Live {
     links: RwLock<HashMap<LinkId, HostId>>,
 }
 
+/// Tracks one peer's relay control state and active path callbacks.
 struct Peer {
     host: HostId,
     /// Moves the peer to the shim once a relay link is active (see `settle`).
@@ -879,6 +880,7 @@ async fn drive(shared: Arc<Shared>, index: usize) {
     }
 }
 
+/// Serve one relay connection until its control stream closes, watching path MTU changes too.
 async fn serve(shared: &Arc<Shared>, index: usize, client: Client, mut notices: Notices) {
     let live = Arc::new(Live {
         client,
@@ -1032,6 +1034,7 @@ mod tests {
         UNIX_EPOCH + Duration::new(seconds, nanoseconds)
     }
 
+    /// A peer is a relay candidate when its endpoint has no newer handshake.
     #[test]
     fn a_pair_is_relayed_only_without_a_handshake_since_its_endpoint() {
         let since = 1_800_000_000;
