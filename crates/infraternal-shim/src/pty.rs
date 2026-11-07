@@ -1018,6 +1018,7 @@ pub(super) fn prepare_child(command: &mut Command) {
     }
 }
 
+/// Bind the child to its parent before exec; refuse a lost parent without allocating.
 #[cfg(target_os = "linux")]
 pub(crate) fn prepare_parent_bound_child(command: &mut Command) {
     let owner = unistd::getpid();
@@ -1027,7 +1028,8 @@ pub(crate) fn prepare_parent_bound_child(command: &mut Command) {
         command.pre_exec(move || {
             nix::sys::prctl::set_pdeathsig(Signal::SIGTERM).map_err(io::Error::from)?;
             if unistd::getppid() != owner {
-                return Err(io::Error::other("proxy owner exited before child startup"));
+                // A boxed custom error could lock the inherited allocator after fork.
+                return Err(io::Error::from_raw_os_error(nix::libc::ESRCH));
             }
             Ok(())
         });
@@ -1160,7 +1162,8 @@ pub(crate) fn prepare_proxy_child(
             {
                 nix::sys::prctl::set_pdeathsig(Signal::SIGKILL).map_err(io::Error::from)?;
                 if unistd::getppid() != owner {
-                    return Err(io::Error::other("proxy owner exited before child startup"));
+                    // Keep this error path allocation-free, just like the syscalls above.
+                    return Err(io::Error::from_raw_os_error(nix::libc::ESRCH));
                 }
             }
             Ok(())
