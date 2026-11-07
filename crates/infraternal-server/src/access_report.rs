@@ -41,6 +41,8 @@ const TEXT_CHARS: usize = 400;
 const ACCOUNT_CHARS: usize = 64;
 /// Not-scanned names kept per account.
 const UNSCANNED: usize = 32;
+/// Watched categories kept per account, and their length (D360).
+const CATEGORIES: usize = 16;
 /// Reports returned per host; the rest are counted (J334 P2-5).
 pub(crate) const SHOWN: i64 = 16;
 /// Largest stored report in bytes; the table checks the same bound.
@@ -140,9 +142,16 @@ pub(crate) struct AccountReport {
     /// The agent scanned every watched place, at the grant and now.
     #[serde(default)]
     pub(crate) complete: bool,
-    /// How many watched places the report covers.
+    /// How many rows of the agent's watched table the report covers.
     #[serde(default)]
     pub(crate) watched: u64,
+    /// How many places were checked: the count a "no changes found"
+    /// report names (D360).
+    #[serde(default)]
+    pub(crate) places: u64,
+    /// The categories watched, in plain words (D360).
+    #[serde(default)]
+    pub(crate) categories: Vec<String>,
     /// Root, or may become root.
     #[serde(default)]
     pub(crate) privileged: bool,
@@ -293,6 +302,11 @@ impl AccessReport {
             }
             for name in &mut account.unscanned {
                 *name = printable(name, TEXT_CHARS, &mut cut);
+            }
+            account.categories.truncate(CATEGORIES);
+            let mut ignored = false;
+            for category in &mut account.categories {
+                *category = printable(category, ACCOUNT_CHARS, &mut ignored);
             }
             if account.files.len() > files_left {
                 let dropped = account.files.len() - files_left;
@@ -711,5 +725,22 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(report.accounts[0].account, "deploy");
+    }
+
+    /// D360: the places count and categories a "no changes found" report
+    /// names are kept, printable and bounded.
+    #[test]
+    fn the_watched_places_and_categories_are_kept() {
+        let mut sent = report(State::Unchanged, Vec::new());
+        sent.accounts[0].places = 214;
+        sent.accounts[0].categories = std::iter::once("SSH keys\u{1b}[2J".to_owned())
+            .chain((0..40).map(|index| format!("kind {index}")))
+            .collect();
+        let kept = sent.bounded().decided(false);
+        let account = &kept.accounts[0];
+        assert_eq!(account.places, 214);
+        assert_eq!(account.categories.len(), CATEGORIES);
+        assert!(!account.categories[0].contains('\u{1b}'));
+        assert_eq!(kept.state, State::Unchanged);
     }
 }
