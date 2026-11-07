@@ -1647,6 +1647,22 @@ impl Node {
             return Ok(false);
         };
         validate_config(&config, identity.public_key)?;
+        // A complete snapshot may replay its revision only with identical contents. Authority
+        // reset is handled separately because the new epoch may reuse a revision.
+        if !self.authority_reset_pending
+            && self.config.as_ref().is_some_and(|accepted| {
+                accepted.authority_epoch == config.authority_epoch
+                    && accepted.version == config.version
+                    && accepted != &config
+            })
+        {
+            tracing::warn!(
+                authority_epoch = ?config.authority_epoch,
+                version = config.version,
+                "Mac mesh configuration conflict at an accepted authority revision"
+            );
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         if self
             .config
             .as_ref()
