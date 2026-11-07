@@ -407,45 +407,78 @@ fn revoke_reply(revoked: &crate::logins::Revoked) -> Vec<u8> {
     }
 }
 
-/// Drops one reported line, or failing that one whole file (counted in
-/// `omitted_files`), from the last account that has one, and marks that
-/// account truncated. `false` when nothing is left to drop.
-fn trim_report(access: &mut crate::access_files::Access) -> bool {
-    if let Some(account) = access
-        .accounts
-        .iter_mut()
-        .rev()
-        .find(|account| account.files.iter().any(|file| !file.lines.is_empty()))
+/// How much the person revoking needs to see a reported file: what admits
+/// a login most, then what runs without one, then the rest. Trimming takes
+/// from the least first, so `authorized_keys*` goes last (J334 P2-2).
+fn report_value(path: &str) -> u8 {
+    if path.contains("/.ssh/authorized_keys") {
+        3
+    } else if path == "crontab"
+        || path.starts_with("at job")
+        || path.contains("/systemd/user")
+        || path.contains("/environment.d")
     {
-        if let Some(file) = account
-            .files
-            .iter_mut()
-            .rev()
-            .find(|file| !file.lines.is_empty())
-        {
-            file.lines.pop();
-            let more = "more new lines than the report shows";
-            match &mut file.note {
-                Some(note) if note.contains(more) => {}
-                Some(note) => {
-                    note.push_str("; ");
-                    note.push_str(more);
-                }
-                None => file.note = Some(more.to_owned()),
+        2
+    } else {
+        1
+    }
+}
+
+/// Makes the report smaller by one step, marking the account it took from
+/// truncated: one line from the least valuable file that has lines, else
+/// one not-scanned name, else the least valuable file (counted in
+/// `omitted_files`). `false` when nothing is left to take.
+fn trim_report(access: &mut crate::access_files::Access) -> bool {
+    let least = |access: &crate::access_files::Access, with_lines: bool| {
+        access
+            .accounts
+            .iter()
+            .enumerate()
+            .flat_map(|(a, account)| {
+                account
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, file)| !with_lines || !file.lines.is_empty())
+                    .map(move |(f, file)| (report_value(&file.path), std::cmp::Reverse(f), a, f))
+            })
+            .min()
+            .map(|(_, _, a, f)| (a, f))
+    };
+    if let Some((a, f)) = least(access, true) {
+        let account = &mut access.accounts[a];
+        let file = &mut account.files[f];
+        file.lines.pop();
+        let more = "more new lines than the report shows";
+        match &mut file.note {
+            Some(note) if note.contains(more) => {}
+            Some(note) => {
+                note.push_str("; ");
+                note.push_str(more);
             }
+            None => file.note = Some(more.to_owned()),
         }
         account.truncated = true;
+        account.complete = false;
         return true;
     }
     if let Some(account) = access
         .accounts
         .iter_mut()
         .rev()
-        .find(|account| !account.files.is_empty())
+        .find(|account| !account.unscanned.is_empty())
     {
-        account.files.pop();
+        account.unscanned.pop();
+        account.truncated = true;
+        account.complete = false;
+        return true;
+    }
+    if let Some((a, f)) = least(access, false) {
+        let account = &mut access.accounts[a];
+        account.files.remove(f);
         account.omitted_files += 1;
         account.truncated = true;
+        account.complete = false;
         return true;
     }
     false
@@ -457,8 +490,11 @@ mod revoke_reply_tests {
     use crate::access_files::{Access, AccountReport, Change, ChangeKind, State};
 
     /// A report far over the frame budget is cut to fit; lines go first,
-    /// then whole files, which are counted, and the account says truncated.
-    /// A report with nothing changed still carries its outcome.
+    /// then not-scanned names, then whole files, which are counted, and the
+    /// account says truncated. J334's hostile reply (P2-2): 300 not-scanned
+    /// names of control characters and 400 big files cannot push out the
+    /// planted key, which is the last thing trimmed. A report with nothing
+    /// changed still carries its outcome.
     #[test]
     fn the_reply_fits_a_frame_and_counts_what_it_drops() {
         let file = |index: usize| Change {
@@ -467,6 +503,13 @@ mod revoke_reply_tests {
             lines: vec!["x".repeat(190); 4],
             note: None,
         };
+        let mut files = vec![Change {
+            path: "~/.ssh/authorized_keys".into(),
+            change: ChangeKind::Added,
+            lines: vec!["ssh-ed25519 AAAAplanted left-behind".into()],
+            note: None,
+        }];
+        files.extend((0..400).map(file));
         let revoked = crate::logins::Revoked {
             background_may_remain: true,
             access: Access {
@@ -475,11 +518,9 @@ mod revoke_reply_tests {
                 accounts: vec![AccountReport {
                     account: "deploy".into(),
                     state: State::Changed,
-                    reason: None,
-                    files: (0..400).map(file).collect(),
-                    truncated: false,
-                    unscanned: Vec::new(),
-                    omitted_files: 0,
+                    files,
+                    unscanned: (0..300).map(|_| "\u{fffd}".repeat(200)).collect(),
+                    ..AccountReport::default()
                 }],
             },
         };
@@ -491,7 +532,11 @@ mod revoke_reply_tests {
         let listed = account["files"].as_array().unwrap().len();
         assert_eq!(
             listed + usize::try_from(account["omitted_files"].as_u64().unwrap()).unwrap(),
-            400
+            401
+        );
+        assert_eq!(
+            account["files"][0]["lines"][0], "ssh-ed25519 AAAAplanted left-behind",
+            "the planted key was trimmed before less valuable files"
         );
         assert!(reply["warning"].is_string(), "D353's warning was dropped");
         let clean = super::revoke_reply(&crate::logins::Revoked::default());

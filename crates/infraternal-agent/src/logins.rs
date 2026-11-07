@@ -257,20 +257,40 @@ async fn record_grant(root: &Path, person: uuid::Uuid, user: &User) {
 /// (D356), read off the event loop, then the records are forgotten. The
 /// accounts come from the persistent record store, so a reboot that emptied
 /// `/run` still reports; `live` adds accounts with logins but no record.
+/// `known` holds what this revocation learnt per account (shared, and
+/// whether programs may remain); an account found only in the store (after
+/// a reboot) is asked the same of the durable registry, and counts as
+/// shared when that cannot be read.
 async fn access_report(
     root: &Path,
     person: uuid::Uuid,
     live: Vec<u32>,
+    known: std::collections::HashMap<u32, crate::access_files::Facts>,
     rootless: bool,
 ) -> crate::access_files::Access {
     let store = crate::access_files::store(root);
+    let registry_root = root.to_owned();
     tokio::task::spawn_blocking(move || {
         let lookup = |uid| User::from_uid(Uid::from_raw(uid)).ok().flatten();
+        let facts = |uid: u32| {
+            let mut facts = known.get(&uid).copied().unwrap_or_else(|| {
+                let shared = rootless || others_share(&registry_root, person, uid).unwrap_or(true);
+                crate::access_files::Facts {
+                    shared,
+                    programs_may_remain: shared,
+                    privileged: false,
+                }
+            });
+            facts.privileged =
+                !rootless && lookup(uid).is_none_or(|user| crate::access_files::privileged(&user));
+            facts
+        };
         let access = crate::access_files::since_grant(
             &store,
             person,
             &live,
             &lookup,
+            &facts,
             &crate::access_files::host_spools,
             rootless,
         );
@@ -930,7 +950,14 @@ async fn revoke_once(
         crate::rootless_sessions::revoke(root, person, Some(person_guard), admission).await?;
         let uid = Uid::effective().as_raw();
         return Ok(Revoked {
-            access: access_report(root, person, vec![uid], true).await,
+            access: access_report(
+                root,
+                person,
+                vec![uid],
+                std::collections::HashMap::new(),
+                true,
+            )
+            .await,
             ..Revoked::default()
         });
     }
@@ -942,6 +969,7 @@ async fn revoke_once(
     let mut failure = None;
     let mut revoked = Revoked::default();
     let mut accounts = Vec::new();
+    let mut known = std::collections::HashMap::new();
     for entry in std::fs::read_dir(&registry)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -966,19 +994,40 @@ async fn revoke_once(
             // D353: background services of the account go with its last
             // holder; while others share it, they stay and the result warns.
             Ok(()) if matches!(manager, Manager::System) => {
-                if others_share(root, person, uid)? {
-                    revoked.background_may_remain = true;
-                } else {
+                let shared = others_share(root, person, uid)?;
+                let mut remain = shared;
+                if !shared {
                     match stop_user_services(uid).await {
                         Err(error) => failure = Some(error),
                         // Linger came back after the account's services were
                         // gone: its code runs outside the login (J308 P3-2).
-                        Ok(true) => revoked.background_may_remain = true,
+                        Ok(true) => remain = true,
                         Ok(false) => {}
                     }
                 }
+                revoked.background_may_remain |= remain;
+                known.insert(
+                    uid,
+                    crate::access_files::Facts {
+                        shared,
+                        programs_may_remain: remain,
+                        privileged: false,
+                    },
+                );
             }
-            Ok(()) => {}
+            Ok(()) => {
+                // Without a system manager the login's processes went with
+                // its scope; others' access is still what the registry says.
+                let shared = others_share(root, person, uid)?;
+                known.insert(
+                    uid,
+                    crate::access_files::Facts {
+                        shared,
+                        programs_may_remain: shared,
+                        privileged: false,
+                    },
+                );
+            }
         }
     }
     crate::login_auth::forget(person);
@@ -988,7 +1037,7 @@ async fn revoke_once(
     // D356: what each account's access files gained since this person's
     // grant, reported, never edited. Only a completed revocation forgets
     // the records, so a retried attempt compares again.
-    revoked.access = access_report(root, person, accounts, false).await;
+    revoked.access = access_report(root, person, accounts, known, false).await;
     Ok(revoked)
 }
 

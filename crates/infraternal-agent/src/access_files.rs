@@ -77,28 +77,152 @@ const SPOOL_BYTES: usize = 256 * 1024;
 /// Not-scanned names kept per account (the count past it still truncates).
 const UNSCANNED_NAMES: usize = 32;
 
-/// Files that admit a login: checked first.
-const KEY_FILES: &[&str] = &[".ssh/authorized_keys", ".ssh/authorized_keys2"];
-/// Startup files and other single files under the home that can run code.
-const HOME_FILES: &[&str] = &[
-    ".ssh/rc",
-    ".ssh/config",
-    ".bashrc",
-    ".bash_profile",
-    ".bash_login",
-    ".bash_logout",
-    ".profile",
-    ".zshrc",
-    ".zprofile",
-    ".zshenv",
-    ".zlogin",
-    ".config/fish/config.fish",
+/// Directories visited per account (each costs a walk from the home).
+const DIRECTORIES: usize = 256;
+/// Links followed lexically inside the home to resolve one path.
+const LINK_HOPS: usize = 8;
+
+/// What a watched place is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Watch {
+    /// One file.
+    File,
+    /// A directory's entries.
+    Directory,
+    /// A systemd user unit directory: its entries, and the `*.wants`,
+    /// `*.requires`, `*.upholds` and drop-in `*.d` directories systemd reads.
+    Units,
+    /// The host's crontab and `at` spools for the account.
+    Spools,
+}
+
+/// One place the agent watches for a way back into an account.
+#[derive(Debug)]
+pub(crate) struct Watched {
+    /// What kind of access it gives, in plain words.
+    pub(crate) category: &'static str,
+    /// Its path under the home (or a name, for the spools).
+    pub(crate) path: &'static str,
+    /// How it is scanned.
+    pub(crate) watch: Watch,
+}
+
+/// Every place D356 watches, in scan order: what admits a login first, then
+/// what runs without one, then what runs at a login. A report covers
+/// `WATCHED.len()` places; a place not in this table is not watched, and
+/// the owner is told how many places were.
+pub(crate) const WATCHED: &[Watched] = &[
+    Watched {
+        category: "SSH keys",
+        path: ".ssh/authorized_keys",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "SSH keys",
+        path: ".ssh/authorized_keys2",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "scheduled jobs",
+        path: "crontab and at jobs",
+        watch: Watch::Spools,
+    },
+    Watched {
+        category: "systemd user units",
+        path: ".config/systemd/user",
+        watch: Watch::Units,
+    },
+    Watched {
+        category: "systemd user units",
+        path: ".local/share/systemd/user",
+        watch: Watch::Units,
+    },
+    Watched {
+        category: "systemd user environment",
+        path: ".config/environment.d",
+        watch: Watch::Directory,
+    },
+    Watched {
+        category: "SSH login commands",
+        path: ".ssh/rc",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "SSH client settings",
+        path: ".ssh/config",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".bashrc",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".bash_profile",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".bash_login",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".bash_logout",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".bash_aliases",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".profile",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".zshrc",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".zprofile",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".zshenv",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".zlogin",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".config/fish/config.fish",
+        watch: Watch::File,
+    },
+    Watched {
+        category: "shell startup",
+        path: ".config/fish/conf.d",
+        watch: Watch::Directory,
+    },
+    Watched {
+        category: "desktop autostart",
+        path: ".config/autostart",
+        watch: Watch::Directory,
+    },
+    Watched {
+        category: "programs on PATH",
+        path: ".local/bin",
+        watch: Watch::Directory,
+    },
 ];
-/// The systemd user unit directory: units, timers, and the `*.wants`,
-/// `*.requires` and drop-in `*.d` directories systemd reads in it.
-const UNIT_DIRECTORY: &str = ".config/systemd/user";
-/// Directories whose entries run at login.
-const HOME_DIRECTORIES: &[&str] = &[".config/autostart", ".config/fish/conf.d"];
 
 /// What one access file was, at the grant or now. Never its content.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +290,9 @@ pub(crate) struct Record {
     /// What was not scanned at the grant.
     #[serde(default)]
     unscanned: Vec<String>,
+    /// When it was taken (seconds since the epoch); 0 for older records.
+    #[serde(default)]
+    recorded_at: u64,
 }
 
 /// The outcome for one account, or for the whole revocation.
@@ -190,6 +317,16 @@ pub enum Reason {
     /// A rootless agent runs as the account itself (D18): the person could
     /// have changed the record, so nothing found can be vouched for.
     RootlessUnverified,
+    /// The account is root or may become root (sudo, wheel, admin): it can
+    /// rewrite the record and plant anywhere (J334 P1-4).
+    Privileged,
+    /// Something was not scanned, at the grant or now (J334 P1-1).
+    Incomplete,
+    /// The account's programs may still run after the revoke and can change
+    /// its files later (D353, J334 P2-1).
+    ProgramsMayRemain,
+    /// Recording the grant failed, so no later login may set the baseline.
+    RecordFailed,
 }
 
 /// Whether a reported file is new or was there at the grant.
@@ -200,6 +337,8 @@ pub enum ChangeKind {
     Added,
     /// There at the grant, different now.
     Changed,
+    /// There at the grant, gone now (J334 P2-3).
+    Removed,
 }
 
 /// One changed access file.
@@ -217,7 +356,7 @@ pub struct Change {
 }
 
 /// The outcome for one host account.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountReport {
     /// The account's name.
     pub account: String,
@@ -236,6 +375,27 @@ pub struct AccountReport {
     /// Changed files not listed because the reply had no room for them.
     #[serde(default)]
     pub omitted_files: usize,
+    /// Every place watched was scanned, at the grant and now.
+    #[serde(default)]
+    pub complete: bool,
+    /// How many watched places (see [`WATCHED`]) this report covers.
+    #[serde(default)]
+    pub watched: usize,
+    /// Root, or may become root.
+    #[serde(default)]
+    pub privileged: bool,
+    /// Other people still have access to the account (D353).
+    #[serde(default)]
+    pub shared: bool,
+    /// The account's programs may still be running after the revoke.
+    #[serde(default)]
+    pub programs_may_remain: bool,
+    /// When the grant was recorded (seconds since the epoch; 0 if unknown).
+    #[serde(default)]
+    pub recorded_at: u64,
+    /// When the account was scanned for this report.
+    #[serde(default)]
+    pub scanned_at: u64,
 }
 
 impl AccountReport {
@@ -249,8 +409,62 @@ impl AccountReport {
             truncated: false,
             unscanned: Vec::new(),
             omitted_files: 0,
+            complete: false,
+            watched: 0,
+            privileged: false,
+            shared: false,
+            programs_may_remain: false,
+            recorded_at: 0,
+            scanned_at: now(),
         }
     }
+
+    /// The one rule for an account's outcome (the server applies the same
+    /// rule again and has the last word). Listed files mean `changed`.
+    /// Otherwise `unchanged` holds only when the scan was complete over every
+    /// watched place, the account cannot rewrite its record (not rootless,
+    /// not privileged), and nothing of the person's may still run; anything
+    /// else is `not_checked` with the first reason that applies.
+    pub(crate) fn decide(&mut self, rootless: bool) {
+        let reason = if rootless {
+            Some(Reason::RootlessUnverified)
+        } else if self.privileged {
+            Some(Reason::Privileged)
+        } else if !self.complete
+            || self.truncated
+            || self.omitted_files > 0
+            || !self.unscanned.is_empty()
+            || self.watched < WATCHED.len()
+        {
+            Some(Reason::Incomplete)
+        } else if self.programs_may_remain {
+            Some(Reason::ProgramsMayRemain)
+        } else {
+            self.reason
+                .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed))
+        };
+        if !self.files.is_empty() || self.omitted_files > 0 {
+            self.state = if rootless {
+                State::NotChecked
+            } else {
+                State::Changed
+            };
+            self.reason = reason.filter(|_| rootless);
+        } else if let Some(reason) = reason {
+            self.state = State::NotChecked;
+            self.reason = Some(reason);
+        } else {
+            self.state = State::Unchanged;
+            self.reason = None;
+        }
+    }
+}
+
+/// Seconds since the epoch, 0 if the clock is before it.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// What a revocation found, per account, with the overall outcome.
@@ -299,8 +513,19 @@ pub(crate) type Extra = dyn Fn(&User, &mut dyn FnMut(String, io::Result<Vec<u8>>
 /// One observed entry, with its content when it is small enough to show.
 type Visit<'a> = dyn FnMut(String, Entry, Option<&[u8]>) + 'a;
 
-/// A walk over one account's access files, in a fixed order with the most
-/// valuable first, bounded in entries and bytes.
+/// How a scan ended: what was left out, and how many watched places it
+/// went through.
+struct Ended {
+    /// Something was left out.
+    truncated: bool,
+    /// What was left out.
+    unscanned: Vec<String>,
+    /// Watched places gone through.
+    watched: usize,
+}
+
+/// A walk over one account's access files, in the order of [`WATCHED`],
+/// bounded in entries, directories and bytes.
 struct Scan<'a> {
     /// The account being walked.
     account: &'a User,
@@ -308,6 +533,8 @@ struct Scan<'a> {
     home: Option<OwnedFd>,
     /// Entries taken from the budget so far.
     entries: usize,
+    /// Directories visited so far.
+    directories: usize,
     /// Bytes hashed so far.
     hashed: u64,
     /// Something was left out.
@@ -321,13 +548,13 @@ struct Scan<'a> {
 }
 
 impl<'a> Scan<'a> {
-    /// Walks `account`'s access files, handing each to `visit`. Returns
-    /// whether anything was left out, and what.
-    fn run(account: &'a User, extra: &Extra, visit: &mut Visit<'_>) -> (bool, Vec<String>) {
+    /// Walks `account`'s watched places, handing each entry to `visit`.
+    fn run(account: &'a User, extra: &Extra, visit: &mut Visit<'_>) -> Ended {
         let mut scan = Scan {
             account,
             home: home(account).ok(),
             entries: 0,
+            directories: 0,
             hashed: 0,
             truncated: false,
             unscanned: Vec::new(),
@@ -335,38 +562,46 @@ impl<'a> Scan<'a> {
             seen: BTreeSet::new(),
         };
         if scan.home.is_none() {
-            scan.truncated = true;
-            scan.unscanned
-                .push("~ (the home directory could not be opened)".to_owned());
+            scan.skip("~ (the home directory could not be opened)");
         }
-        for rel in KEY_FILES {
-            scan.file(Path::new(rel), visit);
-        }
-        extra(account, &mut |path, content| {
-            scan.spool(path, content, visit);
-        });
-        scan.directory(Path::new(UNIT_DIRECTORY), true, visit);
-        for rel in HOME_FILES {
-            scan.file(Path::new(rel), visit);
-        }
-        for rel in HOME_DIRECTORIES {
-            scan.directory(Path::new(rel), false, visit);
+        let mut watched = 0;
+        for place in WATCHED {
+            let path = Path::new(place.path);
+            match place.watch {
+                Watch::File => scan.file(path, visit),
+                Watch::Directory => scan.directory(path, false, visit),
+                Watch::Units => scan.directory(path, true, visit),
+                Watch::Spools => extra(account, &mut |path, content| {
+                    scan.spool(path, content, visit);
+                }),
+            }
+            watched += 1;
         }
         // A link's target inside the home is what actually runs; it is opened
         // beneath the home like any entry (a link there is not followed again).
         for target in std::mem::take(&mut scan.targets) {
             scan.file(&target, visit);
         }
-        (scan.truncated, scan.unscanned)
+        Ended {
+            truncated: scan.truncated,
+            unscanned: scan.unscanned,
+            watched,
+        }
+    }
+
+    /// Names `what` as not scanned (printable, bounded) and marks the scan
+    /// incomplete.
+    fn skip(&mut self, what: &str) {
+        self.truncated = true;
+        if self.unscanned.len() < UNSCANNED_NAMES {
+            self.unscanned.push(shown(what.as_bytes()));
+        }
     }
 
     /// Takes one entry from the budget, or names `what` as not scanned.
     fn admit(&mut self, what: &str) -> bool {
         if self.entries >= ENTRIES {
-            self.truncated = true;
-            if self.unscanned.len() < UNSCANNED_NAMES {
-                self.unscanned.push(what.to_owned());
-            }
+            self.skip(what);
             return false;
         }
         self.entries += 1;
@@ -396,53 +631,152 @@ impl<'a> Scan<'a> {
         }
     }
 
-    /// One file under the home, if present.
+    /// The target text of the link at `rel`, read from its parent directory.
+    fn read_link(&self, rel: &Path) -> Option<String> {
+        let home = self.home.as_ref()?;
+        let name = rel.file_name()?;
+        let target = match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(parent) => {
+                let directory = open_beneath(home, parent, true).ok()?;
+                nix::fcntl::readlinkat(&directory, name).ok()?
+            }
+            None => nix::fcntl::readlinkat(home, name).ok()?,
+        };
+        Some(target.to_string_lossy().into_owned())
+    }
+
+    /// `rel` with every link among its directories resolved lexically inside
+    /// the home (a dotfile manager's `~/.ssh -> .dotfiles/ssh`, J334 P2-4).
+    /// Nothing is followed on disk: each hop is opened again beneath the home
+    /// with `O_NOFOLLOW`. A link that leaves the home, or too many hops,
+    /// makes the account incomplete and returns `None`.
+    fn resolve(&mut self, rel: &Path) -> Option<PathBuf> {
+        let mut path = rel.to_owned();
+        for _ in 0..LINK_HOPS {
+            let home = self.home.as_ref()?;
+            let parts: Vec<_> = path.components().collect();
+            let mut prefix = PathBuf::new();
+            let mut next = None;
+            for part in &parts[..parts.len().saturating_sub(1)] {
+                prefix.push(part);
+                match open_beneath(home, &prefix, true) {
+                    Ok(_) => {}
+                    Err(error) if is_link_error(&error) => {
+                        let rest = path.strip_prefix(&prefix).ok()?.to_owned();
+                        let inside = self
+                            .read_link(&prefix)
+                            .and_then(|target| beneath_home(self.account, &prefix, &target));
+                        match inside {
+                            Some(inside) => next = Some(inside.join(rest)),
+                            None => {
+                                self.skip(&format!(
+                                    "~/{} (a link that leaves the home; not followed)",
+                                    prefix.display()
+                                ));
+                                return None;
+                            }
+                        }
+                        break;
+                    }
+                    // Missing or unreadable: the caller's open says which.
+                    Err(_) => return Some(path),
+                }
+            }
+            match next {
+                Some(next) => path = next,
+                None => return Some(path),
+            }
+        }
+        self.skip(&format!("~/{} (too many links)", rel.display()));
+        None
+    }
+
+    /// One file under the home, if present. Its kind is read with
+    /// `fstatat` first, so only a regular file is ever opened: a FIFO is
+    /// not, and no writer blocked on it learns of the scan (J334 P3).
     fn file(&mut self, rel: &Path, visit: &mut Visit<'_>) {
-        let shown = format!("~/{}", rel.display());
-        if self.seen.contains(&shown) {
+        let shown_path = format!("~/{}", rel.display());
+        if self.seen.contains(&shown_path) {
             return;
         }
+        let Some(real) = self.resolve(rel) else {
+            return;
+        };
         let Some(home) = &self.home else {
             return;
         };
-        let opened = open_beneath(home, rel, false);
-        if matches!(&opened, Err(error) if error.kind() == io::ErrorKind::NotFound) {
+        let Some(name) = real.file_name().map(std::ffi::OsStr::to_owned) else {
+            return;
+        };
+        let parent = match real.parent().filter(|p| !p.as_os_str().is_empty()) {
+            Some(parent) => match open_beneath(home, parent, true) {
+                Ok(directory) => OwnedFd::from(directory),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+                Err(error) => {
+                    if self.admit(&shown_path) {
+                        self.seen.insert(shown_path.clone());
+                        visit(shown_path, error_entry(&error), None);
+                    }
+                    return;
+                }
+            },
+            None => match home.try_clone() {
+                Ok(home) => home,
+                Err(_) => return,
+            },
+        };
+        let stat = match nix::sys::stat::fstatat(
+            &parent,
+            name.as_os_str(),
+            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
+            Ok(stat) => stat,
+            Err(nix::errno::Errno::ENOENT) => return,
+            Err(errno) => {
+                if self.admit(&shown_path) {
+                    self.seen.insert(shown_path.clone());
+                    visit(shown_path, error_entry(&io::Error::from(errno)), None);
+                }
+                return;
+            }
+        };
+        if !self.admit(&shown_path) {
             return;
         }
-        if !self.admit(&shown) {
-            return;
-        }
-        self.seen.insert(shown.clone());
-        match opened {
-            Err(error) if is_link_error(&error) => {
-                let entry = self.link(rel);
-                visit(shown, entry, None);
+        self.seen.insert(shown_path.clone());
+        let kind =
+            nix::sys::stat::SFlag::from_bits_truncate(stat.st_mode) & nix::sys::stat::SFlag::S_IFMT;
+        if kind == nix::sys::stat::SFlag::S_IFLNK {
+            let entry = self.link(&real);
+            visit(shown_path, entry, None);
+        } else if kind == nix::sys::stat::SFlag::S_IFREG {
+            let opened = openat(
+                &parent,
+                name.as_os_str(),
+                OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            );
+            match opened {
+                Ok(fd) => {
+                    let (entry, bytes) = self.read(std::fs::File::from(fd));
+                    visit(shown_path, entry, bytes.as_deref());
+                }
+                Err(errno) => visit(shown_path, error_entry(&io::Error::from(errno)), None),
             }
-            Err(error) => visit(shown, error_entry(&error), None),
-            Ok(file) => {
-                let (entry, bytes) = self.read(file);
-                visit(shown, entry, bytes.as_deref());
-            }
+        } else {
+            let entry = Entry {
+                kind: "other".to_owned(),
+                owner: stat.st_uid,
+                ..Entry::default()
+            };
+            visit(shown_path, entry, None);
         }
     }
 
     /// A symbolic link at `rel`: its target text, never followed. A target
     /// inside the home is queued to be checked as its own entry.
     fn link(&mut self, rel: &Path) -> Entry {
-        let target = self
-            .home
-            .as_ref()
-            .and_then(|home| {
-                let name = rel.file_name()?;
-                match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    Some(parent) => {
-                        let directory = open_beneath(home, parent, true).ok()?;
-                        nix::fcntl::readlinkat(&directory, name).ok()
-                    }
-                    None => nix::fcntl::readlinkat(home, name).ok(),
-                }
-            })
-            .map(|target| target.to_string_lossy().into_owned());
+        let target = self.read_link(rel);
         if let Some(inside) = target
             .as_deref()
             .and_then(|target| beneath_home(self.account, rel, target))
@@ -525,44 +859,52 @@ impl<'a> Scan<'a> {
         }
     }
 
-    /// The entries of a directory under the home. `units`: the systemd user
-    /// directory, whose `*.wants`, `*.requires` and `*.d` subdirectories
-    /// systemd reads too; other subdirectories run nothing and are skipped.
+    /// The entries of a directory under the home. `units`: a systemd user
+    /// unit directory, whose `*.wants`, `*.requires`, `*.upholds` and `*.d`
+    /// subdirectories systemd reads too; other subdirectories run nothing.
     fn directory(&mut self, rel: &Path, units: bool, visit: &mut Visit<'_>) {
-        let shown = format!("~/{}", rel.display());
+        let shown_path = format!("~/{}", rel.display());
+        let Some(real) = self.resolve(rel) else {
+            return;
+        };
         let Some(home) = &self.home else {
             return;
         };
-        let opened = open_beneath(home, rel, true);
+        let opened = open_beneath(home, &real, true);
         let directory = match opened {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
             Err(error) if is_link_error(&error) => {
                 // The directory itself is a link (to /etc/xdg/autostart, say).
-                if self.admit(&shown) {
-                    self.seen.insert(shown.clone());
-                    let entry = self.link(rel);
-                    visit(shown, entry, None);
+                if self.admit(&shown_path) {
+                    self.seen.insert(shown_path.clone());
+                    let entry = self.link(&real);
+                    visit(shown_path, entry, None);
                 }
                 return;
             }
             Err(error) => {
-                if self.admit(&shown) {
-                    visit(shown, error_entry(&error), None);
+                if self.admit(&shown_path) {
+                    visit(shown_path, error_entry(&error), None);
                 }
                 return;
             }
             Ok(directory) => OwnedFd::from(directory),
         };
         if self.entries >= ENTRIES {
-            self.admit(&shown);
+            self.skip(&shown_path);
+            return;
+        }
+        self.directories += 1;
+        if self.directories > DIRECTORIES {
+            self.skip(&format!(
+                "{shown_path} (more than {DIRECTORIES} directories)"
+            ));
             return;
         }
         let Some(names) = names(directory) else {
-            self.truncated = true;
-            if self.unscanned.len() < UNSCANNED_NAMES {
-                self.unscanned
-                    .push(format!("{shown} (more than {DIRECTORY_NAMES} entries)"));
-            }
+            self.skip(&format!(
+                "{shown_path} (more than {DIRECTORY_NAMES} entries)"
+            ));
             return;
         };
         for name in names {
@@ -570,11 +912,12 @@ impl<'a> Scan<'a> {
             let Some(home) = &self.home else {
                 return;
             };
-            if open_beneath(home, &child, true).is_ok() {
+            if open_beneath(home, &real.join(&name), true).is_ok() {
                 let name = name.to_string_lossy();
                 if units
                     && (name.ends_with(".wants")
                         || name.ends_with(".requires")
+                        || name.ends_with(".upholds")
                         || name.ends_with(".d"))
                 {
                     self.directory(&child, false, visit);
@@ -734,14 +1077,15 @@ fn hex(bytes: &[u8]) -> String {
 /// Takes the record of `account`'s access files.
 pub(crate) fn capture(account: &User, extra: &Extra) -> Record {
     let mut entries = BTreeMap::new();
-    let (truncated, unscanned) = Scan::run(account, extra, &mut |path, entry, _| {
+    let ended = Scan::run(account, extra, &mut |path, entry, _| {
         entries.insert(path, entry);
     });
     let mut record = Record {
         account: account.name.clone(),
         entries,
-        truncated,
-        unscanned,
+        truncated: ended.truncated,
+        unscanned: ended.unscanned,
+        recorded_at: now(),
     };
     bound(&mut record);
     record
@@ -777,7 +1121,10 @@ fn bound(record: &mut Record) {
 fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> AccountReport {
     let mut files = Vec::new();
     let mut line_cut = false;
-    let (truncated, mut unscanned) = Scan::run(account, extra, &mut |path, now, bytes| {
+    let mut present = BTreeSet::new();
+    let scanned_at = now();
+    let ended = Scan::run(account, extra, &mut |path, now, bytes| {
+        present.insert(path.clone());
         let before = base.entries.get(&path);
         if before.is_some_and(|before| before.same(&now)) {
             return;
@@ -868,24 +1215,63 @@ fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> 
             note: (!notes.is_empty()).then(|| notes.join("; ")),
         });
     });
+    let mut unscanned = ended.unscanned;
     for skipped in &base.unscanned {
         if !unscanned.contains(skipped) && unscanned.len() < UNSCANNED_NAMES {
             unscanned.push(format!("{skipped} (at the grant)"));
         }
     }
-    AccountReport {
+    let complete = !ended.truncated && !base.truncated && unscanned.is_empty();
+    // What was there at the grant and is gone now (J334 P2-3: a deleted
+    // mask re-enables a unit). Only claimed when both scans were complete,
+    // and for home paths only when the path is really absent now (a link
+    // target that is merely no longer linked is still there).
+    if complete {
+        let gone = |path: &str| {
+            path.strip_prefix("~/")
+                .is_none_or(|rel| absent_beneath(account, Path::new(rel)))
+        };
+        for (path, before) in &base.entries {
+            if present.contains(path) || !gone(path) {
+                continue;
+            }
+            files.push(Change {
+                path: shown(path.as_bytes()),
+                change: ChangeKind::Removed,
+                lines: Vec::new(),
+                note: Some(format!(
+                    "{} at the grant; gone now",
+                    kind_words(&before.kind)
+                )),
+            });
+        }
+    }
+    let mut report = AccountReport {
         account: account.name.clone(),
-        state: if files.is_empty() {
-            State::Unchanged
-        } else {
-            State::Changed
-        },
+        state: State::Unchanged,
         reason: None,
         files,
-        truncated: truncated || base.truncated || line_cut,
+        truncated: ended.truncated || base.truncated || line_cut,
         unscanned,
         omitted_files: 0,
-    }
+        complete,
+        watched: ended.watched,
+        privileged: false,
+        shared: false,
+        programs_may_remain: false,
+        recorded_at: base.recorded_at,
+        scanned_at,
+    };
+    report.decide(false);
+    report
+}
+
+/// Whether `rel` is absent beneath `account`'s home (opened without
+/// following a link); an unreadable path is not called absent.
+fn absent_beneath(account: &User, rel: &Path) -> bool {
+    home(account).is_ok_and(|home| {
+        matches!(open_beneath(&home, rel, false), Err(error) if error.kind() == io::ErrorKind::NotFound)
+    })
 }
 
 /// What differs between two observations of one path, beyond its lines.
@@ -1098,30 +1484,35 @@ fn record_path(store: &Path, person: uuid::Uuid, uid: u32) -> PathBuf {
         .join(format!("{}.json", person.simple()))
 }
 
-/// Records `account`'s access files for `person` if nothing is recorded:
-/// the first login of that person on that account is the grant, and a later
-/// login cannot record over a plant.
-pub(crate) fn record_grant(
-    store: &Path,
-    person: uuid::Uuid,
-    account: &User,
-    extra: &Extra,
-) -> io::Result<()> {
+/// The marker left when recording `person`'s grant on account `uid` failed.
+fn failed_path(store: &Path, person: uuid::Uuid, uid: u32) -> PathBuf {
+    record_path(store, person, uid).with_extension("failed")
+}
+
+/// The last report sent for `person`, kept so a retried revocation whose
+/// reply was lost sends it again instead of "no record" (J334 P2-2).
+fn report_path(store: &Path, person: uuid::Uuid) -> PathBuf {
+    store
+        .join("reports")
+        .join(format!("{}.json", person.simple()))
+}
+
+/// Writes `bytes` to `path` atomically, private (0600), in a private
+/// (0700) directory, without following a link at `path`.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::{
         fs::DirBuilder,
         io::Write as _,
         os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _},
     };
-    let path = record_path(store, person, account.uid.as_raw());
-    if path.exists() {
-        return Ok(());
-    }
-    let directory = path.parent().unwrap_or(store);
+    let directory = path
+        .parent()
+        .ok_or_else(|| io::Error::other("no directory"))?;
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(directory)?;
-    let staging = path.with_extension("json.staging");
+    let staging = path.with_extension("staging");
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -1129,40 +1520,107 @@ pub(crate) fn record_grant(
         .mode(0o600)
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(&staging)?;
-    file.write_all(&serde_json::to_vec(&capture(account, extra)).map_err(io::Error::other)?)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
-    std::fs::rename(&staging, &path)?;
+    std::fs::rename(&staging, path)?;
     std::fs::File::open(directory)?.sync_all()
 }
 
-/// The accounts `person` has records on, from the store itself (not from
-/// runtime state, which a reboot empties).
+/// Records `account`'s access files for `person` if nothing is recorded:
+/// the first login of that person on that account is the grant, and a later
+/// login cannot record over a plant. If recording fails, a marker says so,
+/// and no later login may record instead (J334 P2-7): that revocation will
+/// read "not checked: recording failed".
+pub(crate) fn record_grant(
+    store: &Path,
+    person: uuid::Uuid,
+    account: &User,
+    extra: &Extra,
+) -> io::Result<()> {
+    let uid = account.uid.as_raw();
+    let path = record_path(store, person, uid);
+    if path.exists() || failed_path(store, person, uid).exists() {
+        return Ok(());
+    }
+    // A new grant: an earlier revocation's kept report is over.
+    let _ = std::fs::remove_file(report_path(store, person));
+    let recorded = serde_json::to_vec(&capture(account, extra))
+        .map_err(io::Error::other)
+        .and_then(|bytes| write_private(&path, &bytes));
+    if recorded.is_err() {
+        let _ = write_private(&failed_path(store, person, uid), b"");
+    }
+    recorded
+}
+
+/// The accounts `person` has records (or failed records) on, from the store
+/// itself (not from runtime state, which a reboot empties).
 fn recorded_accounts(store: &Path, person: uuid::Uuid) -> Vec<u32> {
     let mut uids: Vec<u32> = std::fs::read_dir(store)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-        .filter(|uid| record_path(store, person, *uid).is_file())
+        .filter(|uid| {
+            record_path(store, person, *uid).is_file() || failed_path(store, person, *uid).is_file()
+        })
         .take(ACCOUNTS)
         .collect();
     uids.sort_unstable();
     uids
 }
 
+/// What the revocation knows about an account beyond its files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Facts {
+    /// Other people still have access to the account (D353).
+    pub(crate) shared: bool,
+    /// The account's programs may still run after the revoke.
+    pub(crate) programs_may_remain: bool,
+    /// The account is root or may become root ([`privileged`]).
+    pub(crate) privileged: bool,
+}
+
+/// Whether `account` is root or may become root: a member of a group that
+/// usually grants sudo. Such an account can rewrite its record and plant
+/// anywhere, so its report is never vouched for (J334 P1-4).
+pub(crate) fn privileged(account: &User) -> bool {
+    account.uid.is_root()
+        || ["sudo", "wheel", "admin"].iter().any(|name| {
+            nix::unistd::Group::from_name(name)
+                .ok()
+                .flatten()
+                .is_some_and(|group| {
+                    group.gid == account.gid
+                        || group.mem.iter().any(|member| *member == account.name)
+                })
+        })
+}
+
 /// What changed on each account `person` had a grant on, since that grant.
 /// `live` adds accounts the person still had logins on, so an account with a
 /// login but no record reads "not checked: no record". `lookup` finds an
-/// account by uid. Rootless reports are never vouched for.
+/// account by uid; `facts` says what the revocation knows about it. Each
+/// account's outcome comes from [`AccountReport::decide`]. The report is
+/// kept so that a retry, after the records are forgotten, sends it again.
 pub(crate) fn since_grant(
     store: &Path,
     person: uuid::Uuid,
     live: &[u32],
     lookup: &dyn Fn(u32) -> Option<User>,
+    facts: &dyn Fn(u32) -> Facts,
     extra: &Extra,
     rootless: bool,
 ) -> Access {
     let mut uids = recorded_accounts(store, person);
+    if uids.is_empty()
+        && let Some(kept) = std::fs::read(report_path(store, person))
+            .ok()
+            .filter(|bytes| bytes.len() <= RECORD_BYTES)
+            .and_then(|bytes| serde_json::from_slice::<Access>(&bytes).ok())
+    {
+        return kept;
+    }
     for uid in live {
         if !uids.contains(uid) && uids.len() < ACCOUNTS {
             uids.push(*uid);
@@ -1176,19 +1634,26 @@ pub(crate) fn since_grant(
             .ok()
             .filter(|bytes| bytes.len() <= RECORD_BYTES)
             .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok());
-        let mut report = match (record, user) {
-            (Some(record), Some(user)) => compare(&record, &user, extra, &mut budget),
+        let failed = failed_path(store, person, uid).exists();
+        let mut report = match (record, &user) {
+            (Some(record), Some(user)) => compare(&record, user, extra, &mut budget),
             (record, user) => AccountReport::not_checked(
-                user.map(|user| user.name)
+                user.as_ref()
+                    .map(|user| user.name.clone())
                     .or(record.map(|record| record.account))
                     .unwrap_or_else(|| format!("uid {uid}")),
-                Reason::RecordMissing,
+                if failed {
+                    Reason::RecordFailed
+                } else {
+                    Reason::RecordMissing
+                },
             ),
         };
-        if rootless {
-            report.state = State::NotChecked;
-            report.reason = Some(Reason::RootlessUnverified);
-        }
+        let known = facts(uid);
+        report.shared = known.shared;
+        report.programs_may_remain = known.programs_may_remain;
+        report.privileged = known.privileged;
+        report.decide(rootless);
         accounts.push(report);
     }
     let mut access = Access::of(accounts);
@@ -1196,16 +1661,25 @@ pub(crate) fn since_grant(
         access.state = State::NotChecked;
         access.reason = Some(Reason::RootlessUnverified);
     }
+    if let Ok(bytes) = serde_json::to_vec(&access) {
+        let _ = write_private(&report_path(store, person), &bytes);
+    }
     access
 }
 
-/// Forgets `person`'s records once their revocation is done, and an
-/// account directory left empty.
+/// Forgets `person`'s records once their revocation is done (the last
+/// report stays until their next grant), and an account directory left
+/// empty.
 pub(crate) fn forget(store: &Path, person: uuid::Uuid) -> io::Result<()> {
     for uid in recorded_accounts(store, person) {
-        match std::fs::remove_file(record_path(store, person, uid)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
+        for path in [
+            record_path(store, person, uid),
+            failed_path(store, person, uid),
+        ] {
+            match std::fs::remove_file(path) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
         }
         // The account's directory goes with its last record; one that still
         // holds another person's record stays (the removal fails).
