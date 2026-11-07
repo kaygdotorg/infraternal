@@ -43,6 +43,7 @@ function isComposingKey(event: KeyboardEvent): boolean {
   return event.isComposing || event.keyCode === 229;
 }
 
+/** Startup flags and identity values needed to create the main terminal screen. */
 export interface CoreScreenOptions {
   hostName: string;
   mockMode: boolean;
@@ -80,6 +81,7 @@ export interface ToolbarRow {
   dispose(): void;
 }
 
+/** UI actions and surfaces exposed to the canvas runtime. */
 export interface CoreScreen {
   stage: HTMLElement;
   /** The pane area under the top bar; the window canvas mounts here (src/canvas.ts). */
@@ -391,7 +393,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const legacyAppearance = options.accountId ? readLegacyAppearance(options.accountId) : undefined;
   const cachedLook = options.accountId ? readCachedLook(options.accountId) : undefined;
   const cachedTheme = cachedLook?.themes.find((theme) => theme.id === cachedLook.selected);
-  const savedThemeId = themeId(legacyAppearance?.theme) ?? themeId(cachedTheme?.colors)
+  const savedThemeId = themeId(legacyAppearance?.theme ?? null) ?? themeId(cachedTheme?.colors ?? null)
     ?? (!options.accountId ? themeId(readLocal("tracer.theme")) : undefined);
   let currentThemeId = themeId(params.get("theme")) ?? savedThemeId ?? (systemDark.matches ? "mocha" : "latte");
   // The font follows the same order as the theme: URL, then the saved choice, then the default.
@@ -1680,9 +1682,11 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // The person's Themes (D322): the page shows the selected one from now on. Only the product's screens have Settings windows to edit them in.
   // `?look=<theme id>` previews a theme for this page load only (tests and screenshots, like `?theme=`): honoured on the test double alone, so a link sent to a person of
   // a real server cannot change their look, and a preview never saves (see `startThemes`).
+  /** A mock-only URL preview; null keeps the account's saved appearance authoritative. */
+  const previewThemeId = options.mockMode ? new URLSearchParams(location.search).get("look") : null;
   const stopThemes = options.settingsView ? startThemes(api, {
     ...(options.accountId ? { accountId: options.accountId } : {}),
-    ...(options.mockMode ? { preview: new URLSearchParams(location.search).get("look") ?? undefined } : {}),
+    ...(previewThemeId !== null ? { preview: previewThemeId } : {}),
   }) : undefined;
   return api;
 }
