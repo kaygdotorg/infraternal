@@ -76,7 +76,7 @@ libghostty-vt = { version = "0.2.2", default-features = false }
 libfuzzer-sys = "0.4"
 vt100 = "0.16"
 vte = "0.15"
-alacritty_terminal = "0.25"
+alacritty_terminal = "0.26"
 nix = { version = "0.31", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
 infraternal-shim = { version = "0.1.0", path = "crates/infraternal-shim" }
 infraternal-protocol = { version = "0.1.0", path = "crates/infraternal-protocol" }
