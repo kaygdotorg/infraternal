@@ -109,6 +109,7 @@ impl Store {
         let engine_path = parent.join("mesh-engine.json");
         let key_path = parent.join("mesh-private-key");
         sweep_private_temporaries(&key_path)?;
+        sweep_rotation_temporaries(&rotation_path)?;
         let state = read_public(&path)?.unwrap_or_default();
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
@@ -143,14 +144,16 @@ impl Store {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let key_path = parent.join(crate::macos_key::KEY_FILE);
+        let rotation_path = parent.join("mesh-key-rotation.bin");
         sweep_private_temporaries(&key_path)?;
+        sweep_rotation_temporaries(&rotation_path)?;
         let route_body =
             serde_json::to_vec(&BTreeSet::<IpAddr>::new()).map_err(io::Error::other)?;
         Ok(Self {
             path: parent.join("mesh-public.json"),
             route_path: parent.join("mesh-routes.json"),
             interface_path: parent.join("mesh-interface.json"),
-            rotation_path: parent.join("mesh-key-rotation.bin"),
+            rotation_path,
             key_path,
             route_body: Mutex::new(route_body),
         })
@@ -347,6 +350,19 @@ impl Store {
             nonce,
             ROTATION_MAGIC[6]
         ));
+        // Keep the directory lock through cleanup and replacement so a concurrent writer never
+        // sweeps another process's live journal temporary.
+        let parent = self
+            .rotation_path
+            .parent()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(parent)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        sweep_rotation_temporaries_locked(&self.rotation_path)?;
         let result = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -751,6 +767,62 @@ fn sweep_private_temporaries(key_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Remove journal replacement files left by a stop before rename while holding the state-directory lock.
+///
+/// Only the numeric `<pid>.<nonce>.<version>.new` form is ours. A symlink or directory with that
+/// name is left alone, and syncing the parent makes successful removals durable.
+fn sweep_rotation_temporaries(rotation_path: &Path) -> io::Result<()> {
+    let parent = rotation_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(parent)?;
+    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    sweep_rotation_temporaries_locked(rotation_path)
+}
+
+/// Remove regular journal temporaries; the caller holds the exclusive parent-directory lock.
+fn sweep_rotation_temporaries_locked(rotation_path: &Path) -> io::Result<()> {
+    let parent = rotation_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let stem = rotation_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let prefix = format!("{stem}.");
+    let mut removed = false;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let is_temporary = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .is_some_and(|rest| {
+                let mut fields = rest.split('.');
+                let pid = fields.next().unwrap_or_default();
+                let nonce = fields.next().unwrap_or_default();
+                let version = fields.next().unwrap_or_default();
+                !pid.is_empty()
+                    && !nonce.is_empty()
+                    && !version.is_empty()
+                    && [pid, nonce, version]
+                        .iter()
+                        .all(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+                    && fields.next() == Some("new")
+                    && fields.next().is_none()
+            });
+        // `file_type` does not follow symlinks; only interrupted regular-file writes belong here.
+        if is_temporary && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        FileSync::parent(rotation_path)?;
+    }
+    Ok(())
+}
+
 struct FileSync;
 impl FileSync {
     fn parent(path: &Path) -> io::Result<()> {
@@ -1110,6 +1182,85 @@ pub(crate) mod tests {
                 .as_slice(),
             &[9; 32],
             "the key itself is never swept"
+        );
+    }
+
+    /// A killed journal replacement may leave both private keys in a temporary that startup must sweep.
+    #[test]
+    fn j356_open_sweeps_rotation_journal_temporaries() {
+        let directory = Directory::new();
+        drop(Store::open(&directory.0).expect("initial state"));
+        let temporary = directory
+            .0
+            .join("mesh-key-rotation.4242.1762500000000000000.49.new");
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .expect("temporary");
+            file.write_all(&[0x5a; 117])
+                .expect("write journal-shaped bytes");
+        }
+        let unrelated = directory
+            .0
+            .join("mesh-key-rotation.4242.not-a-nonce.49.new");
+        fs::write(&unrelated, b"keep").expect("unrelated file");
+        let temporary_link = directory
+            .0
+            .join("mesh-key-rotation.99.1762500000000000001.49.new");
+        symlink(&temporary, &temporary_link).expect("temporary symlink");
+
+        drop(Store::open(&directory.0).expect("reopen after interrupted write"));
+
+        assert!(
+            !temporary.exists(),
+            "journal temporary with both keys survives restart"
+        );
+        assert!(
+            unrelated.exists(),
+            "a nonnumeric nonce is not a journal temporary"
+        );
+        assert!(
+            fs::symlink_metadata(&temporary_link).is_ok(),
+            "a symlink matching the temporary name is never followed or removed"
+        );
+    }
+
+    /// Every journal replacement sweeps an older crash-left temporary before it writes a new record.
+    #[test]
+    fn save_rotation_secret_sweeps_old_journal_temporaries() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let temporary = directory
+            .0
+            .join("mesh-key-rotation.4242.1762500000000000000.49.new");
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .expect("temporary");
+            file.write_all(&[0x5a; 117])
+                .expect("write journal-shaped bytes");
+        }
+
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous: [0x11; 32],
+                candidate: [0x22; 32],
+                commit_requested: false,
+                completed: false,
+            })
+            .expect("write prepared journal");
+
+        assert!(
+            !temporary.exists(),
+            "a journal write leaves no older temporary"
         );
     }
 
