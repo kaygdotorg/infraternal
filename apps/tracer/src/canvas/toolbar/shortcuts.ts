@@ -26,6 +26,7 @@ export const bindingText = (id: string): string => {
   return c ? comboLabel(c) : "";
 };
 
+/** Binds the canvas keys (window moves, the Escape overview, Control/Command + digit view jumps); flights they start jump, see Camera.flyTo. */
 export function installShortcuts(cx: Ctx): () => void {
   const { stage, signal, state, views } = cx;
   const removeRegistry = registerShortcuts({ id: "canvas", title: "Canvas", area: "canvas", shortcuts: [
