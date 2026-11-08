@@ -36,6 +36,8 @@ export interface WindowMenuOptions {
   /** With `at` and `side: "above"`: boxes it must not cover, and where it opens below instead; see anchored-popover.ts. */
   avoid?: AnchoredPopoverOptions["avoid"];
   atBelow?: number;
+  /** With `at`: a glass bed under the menu, so nothing behind it reads through; see anchored-popover.ts. */
+  glassBed?: boolean;
   /** An extra class on the menu, for a variant's own sizing. */
   className?: string;
 }
@@ -51,6 +53,7 @@ export function openWindowMenu(stage: HTMLElement, anchor: HTMLElement, items: W
     ...(options.bounds ? { bounds: options.bounds } : {}),
     ...(options.avoid ? { avoid: options.avoid } : {}),
     ...(options.atBelow !== undefined ? { atBelow: options.atBelow } : {}),
+    ...(options.glassBed ? { glassBed: true } : {}),
   }, source, onClosed);
   menu.root.setAttribute("role", "menu");
   const rows: HTMLButtonElement[] = [];

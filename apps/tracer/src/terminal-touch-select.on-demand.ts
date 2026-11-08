@@ -134,7 +134,7 @@ export function createTouchSelection(options: TouchSelectionOptions): TouchSelec
             });
           },
         }], "pointer", () => { if (menu === mine) menu = undefined; }, {
-          label: "Selected text", className: "ui-select-callout", side: "above", at: point, atAlign: "centre", atBelow: below, hug: true, maxWidth: 160,
+          label: "Selected text", className: "ui-select-callout", side: "above", at: point, atAlign: "centre", atBelow: below, hug: true, maxWidth: 160, glassBed: true,
           ...(frame ? { bounds: () => windowBoxes()?.bounds, avoid: () => windowBoxes()?.avoid ?? [] } : {}),
         });
         menu = mine;

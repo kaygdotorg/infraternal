@@ -21,6 +21,7 @@
  *   scroll on the compositor is behind by more; mounting it in the window cannot lag. An anchor outside any window (the sidebar's
  *   footer) floats over the screen, which does not move.
  */
+import { attachGlassBed, type GlassBed } from "./glass-bed";
 import { currentUiScale } from "./ui-scale";
 export type PopoverSource = "pointer" | "keyboard";
 
@@ -64,6 +65,13 @@ export interface AnchoredPopoverOptions {
    * point would cover one, it opens below instead, at `atBelow`.
    */
   avoid?(): { left: number; top: number; right: number; bottom: number }[];
+  /**
+   * With `at`: put the shared glass bed under the popover (glass-bed.ts), so nothing behind it can be read through it. For a small
+   * card over dense content, such as a callout over terminal text, the card's own backdrop blur fades at its edges and shows the
+   * page; the bed blurs from well outside the card. The popover is then `position: fixed` in the page, at client coordinates,
+   * because the bed is.
+   */
+  glassBed?: boolean;
   /** With `side: "above"` and `avoid`: the y where its top edge goes when it opens below the point instead. Default `at.y`. */
   atBelow?: number;
   /** The y below which the popover must not reach (a key tray's top); read on every placement. */
@@ -109,14 +117,16 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     const covers = (y: number): boolean => (options.avoid?.() ?? []).some((box) => left < box.right && left + width > box.left && y < box.bottom && y + height > box.top);
     if (above && flip && covers(at.y - height)) flip = false;
     const top = Math.round(Math.max(topEdge + INSET, flip ? at.y - height : Math.min(above ? options.atBelow ?? at.y : at.y, bottom - height)));
-    root.style.left = `${left - screen.left}px`;
-    root.style.top = `${top - screen.top}px`;
+    // A popover with a glass bed is fixed in the page, so its coordinates are the client's, not the stage's.
+    const [originX, originY] = options.glassBed ? [0, 0] : [screen.left, screen.top];
+    root.style.left = `${left - originX}px`;
+    root.style.top = `${top - originY}px`;
     root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;
     root.style.transformOrigin = `${Math.round(at.x - left)}px ${flip ? "100%" : "0"}`;
   };
   // Inside the anchor's window, unless the popover opens upward from a screen-level anchor (see the header comment).
   const inside = above || options.at ? null : anchor.closest<HTMLElement>(".ui-window");
-  const place = (): void => {
+  const placeBox = (): void => {
     if (options.at) { placeAt(options.at); return; }
     const box = anchor.getBoundingClientRect();
     if (inside) {
@@ -173,8 +183,19 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   };
   // Placed before it is attached: the measurements are read while no new content is pending, so the browser
   // lays out once, after the single write below.
+  let bed: GlassBed | undefined;
+  /** Places the popover, and the glass bed under it, in step. */
+  const place = (): void => { placeBox(); bed?.sync(); };
   place();
-  (inside ?? stage).append(root);
+  if (options.at && options.glassBed) {
+    root.style.position = "fixed";
+    // Above the bed (z-index 1000), which sits in the page.
+    root.style.zIndex = "1001";
+    document.body.append(root);
+    bed = attachGlassBed(root);
+    place();
+    bed.setOpen(true);
+  } else (inside ?? stage).append(root);
   if (source === "pointer") {
     if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
     else root.animate([{ opacity: 0, transform: `translateY(${above ? 4 : -4}px) scale(0.96)` }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
@@ -188,7 +209,8 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     closed = true;
     events.abort();
     anchor.setAttribute("aria-expanded", "false");
-    const done = (): void => { root.remove(); onClosed(); };
+    bed?.setOpen(false);
+    const done = (): void => { root.remove(); bed?.dispose(); onClosed(); };
     if (how === "keyboard" || reduced()) { done(); return; }
     root.style.pointerEvents = "none";
     root.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateY(${above ? 2 : -2}px) scale(0.98)` }],
