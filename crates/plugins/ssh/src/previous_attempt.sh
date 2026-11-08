@@ -585,11 +585,23 @@ install_process() {
  esac
  return 1
 }
-# Whether /proc entry $1 runs in an infraternal terminal session scope.
+# Whether /proc entry $1 runs in a terminal scope belonging to this install.
+# Scope names identify sessions, not installations: another install of this
+# account can use the same manager. Bind the scope's canonical session id to
+# an owned endpoint here, including a stale endpoint whose hidden holder is
+# still alive. A shim not yet bound is checked by its install path above.
 session_scope_process() {
  session_scope=no
  { while IFS= read -r scan_cgroup; do
-    case "$scan_cgroup" in */infraternal-session-*.scope|*/infraternal-session-*.scope/*) session_scope=yes;; esac
+    case "$scan_cgroup" in */infraternal-session-*.scope|*/infraternal-session-*.scope/*)
+     session_scope_id=${scan_cgroup##*/infraternal-session-}
+     session_scope_id=${session_scope_id%%.scope*}
+     case "$session_scope_id" in ''|*[!0-9a-f]*) continue;; esac
+     [ "${#session_scope_id}" = 32 ] || continue
+     for session_scope_socket in "$base/sessions/$session_scope_id.sock" "$base/sessions/sessions/$session_scope_id.sock"; do
+      if [ -S "$session_scope_socket" ] && [ ! -L "$session_scope_socket" ] && [ -O "$session_scope_socket" ]; then session_scope=yes; fi
+     done;;
+    esac
    done < "$1/cgroup"; } 2>/dev/null || :
  [ "$session_scope" = yes ]
 }

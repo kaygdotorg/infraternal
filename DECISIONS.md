@@ -4292,3 +4292,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      merges, and the remaining routes are tracked in an issue. The rejected
      options were reviewing until a round finds nothing (every round so far
      found something) and shipping with the known gaps.
+
+368. **Take over closes the old install's open terminals after confirmation
+     (owner, 2026-11-08, refines D359):** minipc01 kept an install from an
+     earlier server with one idle root shell open since 17 Oct. That server
+     is gone, so nothing could close the terminal, and Take over was refused
+     as "busy" with no way forward. The owner chose "Offer to close them":
+     when the only things using a finished install are its own terminal
+     sessions, Take over is offered and its confirmation lists each open
+     terminal (account, program, opened since); confirming closes them and
+     then takes over. Nothing closes without that confirmation. Rejected:
+     closing idle terminals without asking, and keeping the refusal with
+     instructions for closing them by hand. minipc01 is kept as it is so the
+     fix is proven on the real machine.

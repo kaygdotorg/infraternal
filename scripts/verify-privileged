@@ -623,7 +623,11 @@ def run(root, selected, target):
 
 
 def main():
-    """Pick areas from the diff against the merge base, then build and run their namespace tests."""
+    """Report the comparison base, select affected areas, and run their namespace tests.
+
+    Merge qualification must compare against pre-merge dev, not an already
+    updated origin/dev; printing the range makes an empty selection visible.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--base', default=os.environ.get('VERIFY_QUICK_BASE', 'origin/dev'))
     parser.add_argument('--self-check', action='store_true', help='only prove the sandbox contains planted escapes')
@@ -642,7 +646,10 @@ def main():
     base = subprocess.check_output(['git', 'merge-base', 'HEAD', args.base], cwd=root, text=True).strip()
     paths = subprocess.check_output(['git', 'diff', '--name-only', '-z', base], cwd=root).decode().split('\0')
     paths += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z'], cwd=root).decode().split('\0')
-    selected = areas([path for path in paths if path], dependency_directories(root, workspace_graph(root)))
+    paths = [path for path in paths if path]
+    print(f'privileged integration: comparison base={args.base} merge-base={base}; '
+          f'{len(paths)} changed paths', flush=True)
+    selected = areas(paths, dependency_directories(root, workspace_graph(root)))
     if not selected:
         print('privileged integration: SKIP (no change to install, proxy, mesh or shim code, or a crate they depend on)')
         # 77 is the gate's "skipped" code, so the summary reads SKIP, not PASS.
@@ -663,6 +670,8 @@ def main():
             print('privileged integration: SKIP (host lacks nf_tables frontend: '
                   + ', '.join(missing) + '; install the host iptables package)', flush=True)
             raise SystemExit(SKIP_EXIT)
+        print('privileged integration: nf_tables frontends executable: '
+              + ', '.join(tools), flush=True)
     for area in sorted(selected & set(NOT_COVERED)):
         print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
     areas_packages = {package for area in selected for package, _, _ in PACKAGES[area]}
