@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "native/snapshot.zig",
         "native/memory.zig",
         "native/history.zig",
+        "native/session_log.zig",
         "../../scripts/build-vt",
         "../../scripts/patch-libghostty-vt.py",
     ] {
@@ -24,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PROCESS_PER_USER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_COMPACT_HISTORY");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SESSION_IMAGE");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_VT_TEST_INPUT");
     let status = Command::new(root.join("../../scripts/build-vt"))
         .arg(&output)

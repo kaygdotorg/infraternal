@@ -135,6 +135,23 @@ def write_fake_tools(bin_dir: Path) -> Path:
             library = (source / "src/lib_vt.zig").read_text()
             if "infraternal_vt_snapshot" not in library:
                 raise SystemExit("snapshot adapter was not wired into the library")
+            definition = (source / "src/build/GhosttyLibVt.zig").read_text()
+            if "lib.link_function_sections = true;" not in definition:
+                raise SystemExit("function sections are required for final-link garbage collection")
+            if "lib.link_data_sections = true;" not in definition:
+                raise SystemExit("data sections are required for final-link garbage collection")
+            session_image = os.environ.get("CARGO_FEATURE_SESSION_IMAGE") == "1"
+            log_source = source / "src/infraternal_session_log.zig"
+            if session_image:
+                if "ghostty_sys_set" in library or "ghostty_sys_log_stderr" in library:
+                    raise SystemExit("private session image still exports unused log callbacks")
+                if "infraternal_session_log.zig" not in library or not log_source.is_file():
+                    raise SystemExit("private session image must use its callback-free log sink")
+            else:
+                if "ghostty_sys_set" not in library or "ghostty_sys_log_stderr" not in library:
+                    raise SystemExit("ordinary VT builds must retain the stable logging API")
+                if 'terminal/c/sys.zig").logFn' not in library:
+                    raise SystemExit("ordinary VT builds must retain callback logging")
             if "-Demit-lib-vt=true" not in args or "-Demit-xcframework=false" not in args:
                 raise SystemExit("VT library artifact selection is wrong")
             if not any(arg.startswith("-Dvt-features=") for arg in args):
@@ -153,6 +170,7 @@ def write_fake_tools(bin_dir: Path) -> Path:
                 "system": str(system),
                 "prefix": str(prefix),
                 "global_cache": str(global_cache),
+                "session_image": session_image,
             })
             """
         )
@@ -172,6 +190,12 @@ def make_fixture(base: Path) -> dict[str, Path]:
     for name in ("build-vt", "auth-toolchain", "patch-libghostty-vt.py", "zig.sha256"):
         shutil.copy2(root / "scripts" / name, scripts / name)
     shutil.copy2(root / "crates/infraternal-shim/native/snapshot.zig", native / "snapshot.zig")
+    (native / "session_log.zig").write_text(
+        "//! Test-only callback-free sink.\n"
+        "const std = @import(\"std\");\n"
+        "pub fn logFn(comptime _: std.log.Level, comptime _: @TypeOf(.EnumLiteral), "
+        "comptime _: []const u8, _: anytype) void {}\n"
+    )
 
     assets = base / "assets"
     assets.mkdir()
@@ -182,7 +206,14 @@ def make_fixture(base: Path) -> dict[str, Path]:
         f"libghostty-vt-{version}",
         {
             "LIB_VERSION": f"{version}\n",
-            "src/lib_vt.zig": "// source fixture\n",
+            "src/lib_vt.zig": (
+                "comptime {\n"
+                '        @export(&c.sys_log_stderr, .{ .name = "ghostty_sys_log_stderr" });\n'
+                '        @export(&c.sys_set, .{ .name = "ghostty_sys_set" });\n'
+                '        options.logFn = @import("terminal/c/sys.zig").logFn;\n'
+                "}\n"
+            ),
+            "src/build/GhosttyLibVt.zig": "        lib.bundle_compiler_rt = true;\n",
         },
     )
     write_archive(
@@ -280,6 +311,7 @@ def check_build_recipe() -> None:
         cases = (
             ("shipping", {}),
             ("mouse-probe", {"CARGO_FEATURE_VT_TEST_INPUT": "1"}),
+            ("session-image", {"CARGO_FEATURE_SESSION_IMAGE": "1"}),
         )
         for label, features in cases:
             result, output = run_build(fixture, label, features)
@@ -316,7 +348,7 @@ def check_build_recipe() -> None:
         verifications = [
             json.loads(line) for line in fixture["minisign_log"].read_text().splitlines()
         ]
-        assert len(verifications) == 4, "each build must verify both release archives"
+        assert len(verifications) == 2 * len(cases), "each build must verify both release archives"
         assert all(item["public_key"] == public_key for item in verifications)
         assert {
             Path(item["message"]).name for item in verifications
@@ -331,7 +363,7 @@ def check_build_recipe() -> None:
             for line in fixture["zig_log"].read_text().splitlines()
             if json.loads(line)["command"] == "build"
         ]
-        assert len(builds) == 2, "both build variants must invoke the pinned compiler"
+        assert len(builds) == 3, "each build profile must invoke the pinned compiler"
         feature_args = [
             next(arg for arg in build["args"] if arg.startswith("-Dvt-features="))
             for build in builds
@@ -339,7 +371,9 @@ def check_build_recipe() -> None:
         assert feature_args == [
             "-Dvt-features=-all",
             "-Dvt-features=-all,+input-encode",
+            "-Dvt-features=-all",
         ]
+        assert [build["session_image"] for build in builds] == [False, False, True]
         for build in builds:
             args = build["args"]
             assert args[0] == "build"
@@ -362,6 +396,10 @@ def check_build_recipe() -> None:
         after_signatures = fixture["minisign_log"].read_text().splitlines()
         assert len(after_signatures) == before_signatures, "bad checksums must fail before signature verification"
 
+    session_log = root / "crates/infraternal-shim/native/session_log.zig"
+    assert session_log.is_file(), "private session images need the callback-free log sink"
+    assert "pub fn logFn" in session_log.read_text(), "session log sink must keep the upstream callback signature"
+
 
 def check_release_lz4_safety_patch() -> None:
     """Verify that shared-host restores receive safety checks and ordinary builds do not."""
@@ -369,6 +407,15 @@ def check_release_lz4_safety_patch() -> None:
         source_root = Path(temporary)
         lz4 = source_root / "src/terminal/compress/lz4.zig"
         lz4.parent.mkdir(parents=True)
+        build_definition = source_root / "src/build/GhosttyLibVt.zig"
+        build_definition.parent.mkdir(parents=True)
+        build_definition.write_text("        lib.bundle_compiler_rt = true;\n")
+        library = source_root / "src/lib_vt.zig"
+        library.write_text(
+            '@export(&c.sys_log_stderr, .{ .name = "ghostty_sys_log_stderr" });\n'
+            '@export(&c.sys_set, .{ .name = "ghostty_sys_set" });\n'
+            'options.logFn = @import("terminal/c/sys.zig").logFn;\n'
+        )
         lz4.write_text(
             """\
 pub fn decompress(input: []const u8, output: []u8) DecompressError!usize {
@@ -397,6 +444,7 @@ inline fn copyIntAt(comptime Int: type) void {
                 sys.executable,
                 str(root / "scripts/patch-libghostty-vt.py"),
                 str(source_root),
+                "",
                 "",
                 "",
             ],

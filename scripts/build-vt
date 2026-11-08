@@ -83,6 +83,7 @@ optimize=ReleaseSafe
 [[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
 shared_host="${CARGO_FEATURE_PROCESS_PER_USER:-}"
 compact_history="${CARGO_FEATURE_COMPACT_HISTORY:-}"
+session_image="${CARGO_FEATURE_SESSION_IMAGE:-}"
 test_input="${CARGO_FEATURE_VT_TEST_INPUT:-}"
 vt_features=-all
 [[ -z "$test_input" ]] || vt_features=-all,+input-encode
@@ -100,10 +101,13 @@ key="$( {
     if [[ -n "$compact_history" ]]; then
         sha256sum "$root/crates/infraternal-shim/native/history.zig"
     fi
-    printf '%s %s %s %s %s %s %s %s\n' \
+    if [[ -n "$session_image" ]]; then
+        sha256sum "$root/crates/infraternal-shim/native/session_log.zig"
+    fi
+    printf '%s %s %s %s %s %s %s %s %s\n' \
         "$(awk -v file="$source_name" '$2 == file { print $1 }' "$root/scripts/libghostty-vt.sha256")" \
         "$(awk -v file="$deps_name" '$2 == file { print $1 }' "$root/scripts/libghostty-vt.sha256")" \
-        "$vt_target" "$optimize" "$strip" "$vt_features" "$shared_host" "$compact_history"
+        "$vt_target" "$optimize" "$strip" "$vt_features" "$shared_host" "$compact_history" "$session_image"
 } | sha256sum | cut -d ' ' -f1)"
 cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
@@ -170,11 +174,17 @@ comptime {
 }
 ZIG_HISTORY
 fi
-python3 "$root/scripts/patch-libghostty-vt.py" "$source_dir" "$shared_host" "$compact_history"
+if [[ -n "$session_image" ]]; then
+    cp "$root/crates/infraternal-shim/native/session_log.zig" "$source_dir/src/infraternal_session_log.zig"
+fi
+python3 "$root/scripts/patch-libghostty-vt.py" "$source_dir" "$shared_host" "$compact_history" "$session_image"
 
-# libghostty-vt 1.0's release graph is already VT-only and its section layout
-# and benchmark gating are upstream. --system plus a fresh global cache keeps
-# the Zig package build offline and proves it used only the signed deps tarball.
+# The release graph gates benchmark artifacts upstream, but its static library
+# has no per-function/data sections for final-link garbage collection. Restore
+# those sections for every build. Private session images have no C log callback
+# consumer, so the patcher also uses a no-op sink for those images only.
+# --system plus a fresh global cache keeps the Zig package build offline and
+# proves it used only the signed dependency tarball.
 global_cache="$cache_dir/zig-global-cache"
 rm -rf -- "$global_cache"
 mkdir -p "$global_cache"

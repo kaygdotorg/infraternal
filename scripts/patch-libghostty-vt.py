@@ -2,9 +2,10 @@
 """Apply the small D270 adapter patches required by libghostty-vt 1.0 [#419].
 
 The public C ABI owns ordinary terminal operations. These patches are limited
-to our bounded snapshot adapter, shared-host page accounting, and the optional
-in-process cold-history experiment. Every upstream edit is guarded so release
-source drift fails the build instead of silently changing terminal behavior.
+to our bounded snapshot adapter, final-link section garbage collection,
+callback-free private session logging, shared-host page accounting, and the
+optional in-process cold-history experiment. Every upstream edit is guarded so
+release source drift fails the build instead of silently changing behavior.
 """
 
 from pathlib import Path
@@ -17,6 +18,46 @@ def replace_once(source: str, before: str, after: str, purpose: str) -> str:
     if count != 1:
         raise SystemExit(f"expected one {purpose} boundary, found {count}")
     return source.replace(before, after, 1)
+
+
+def patch_static_section_gc(source_root: Path) -> None:
+    """Emit per-function/data sections so static consumers can discard unused exports."""
+    path = source_root / "src/build/GhosttyLibVt.zig"
+    source = path.read_text()
+    source = replace_once(
+        source,
+        "        lib.bundle_compiler_rt = true;\n",
+        "        lib.bundle_compiler_rt = true;\n"
+        "        lib.link_function_sections = true;\n"
+        "        lib.link_data_sections = true;\n",
+        "static VT section garbage collection",
+    )
+    path.write_text(source)
+
+
+def patch_session_image_logging(source_root: Path) -> None:
+    """Drop logging callbacks only from private session images that never register one."""
+    path = source_root / "src/lib_vt.zig"
+    source = path.read_text()
+    source = replace_once(
+        source,
+        '        @export(&c.sys_log_stderr, .{ .name = "ghostty_sys_log_stderr" });\n',
+        "",
+        "private session stderr logger export",
+    )
+    source = replace_once(
+        source,
+        '        @export(&c.sys_set, .{ .name = "ghostty_sys_set" });\n',
+        "",
+        "private session system callback setter export",
+    )
+    source = replace_once(
+        source,
+        '@import("terminal/c/sys.zig").logFn',
+        '@import("infraternal_session_log.zig").logFn',
+        "private session callback-free logger",
+    )
+    path.write_text(source)
 
 
 def patch_shared_host(source_root: Path) -> None:
@@ -362,11 +403,17 @@ def patch_compact_history(source_root: Path) -> None:
 
 def main() -> None:
     """Patch the verified extraction according to the Cargo feature set."""
-    if len(sys.argv) != 4:
-        raise SystemExit("usage: patch-libghostty-vt.py SOURCE_DIR SHARED_HOST COMPACT_HISTORY")
+    if len(sys.argv) != 5:
+        raise SystemExit(
+            "usage: patch-libghostty-vt.py SOURCE_DIR SHARED_HOST COMPACT_HISTORY SESSION_IMAGE"
+        )
     source_root = Path(sys.argv[1])
     shared_host = bool(sys.argv[2])
     compact_history = bool(sys.argv[3])
+    session_image = bool(sys.argv[4])
+    patch_static_section_gc(source_root)
+    if session_image:
+        patch_session_image_logging(source_root)
     if shared_host:
         # Shared-host restore runs release decompression under its bounded
         # allocator; ordinary builds keep upstream's hot LZ4 path unchanged.
