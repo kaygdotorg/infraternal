@@ -107,9 +107,9 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
         const off = cx.adapters.appWindows?.onChange(() => { if (cx.adapters.appWindows?.serverCan() === can) return; can = cx.adapters.appWindows?.serverCan(); stop(); stop = renderHosts(pane, hostsApi()); });
         return () => { off?.(); stop(); };
       }
-      case "toolbar": return core.settingsPanels.toolbar.render(pane);
-      case "shortcuts": return core.settingsPanels.shortcuts.render(pane);
-      case "about": return core.settingsPanels.about.render(pane);
+      case "toolbar": return core.settingsPanels.render("toolbar", pane);
+      case "shortcuts": return core.settingsPanels.render("shortcuts", pane);
+      case "about": return core.settingsPanels.render("about", pane);
       case "account": {
         const stop = renderAccount(pane, { groups: cx.adapters.settings.accountFacts?.() ?? [], statuses: cx.adapters.settings.accountStatuses?.() ?? [], signOut: (anchor) => { askSignOut(anchor, cx.toast); } });
         // Settings windows are prepared off screen. Fetch only when this one comes into view.

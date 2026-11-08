@@ -13,10 +13,10 @@ import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/sho
 import { askSignOut } from "./sign-out";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { createSidebarFoot } from "../../../packages/ui/src/sidebar-foot";
-import { shortcutsSection } from "../../../packages/ui/src/shortcuts-settings";
-import { toolbarSection } from "../../../packages/ui/src/toolbar-settings";
 import { readLocal as readPref, writeLocal as writePref } from "../../../packages/ui/src/local-pref";
-import { aboutSection, createSettingsOverlay, type SettingsSection } from "../../../packages/ui/src/settings-overlay";
+import type { SettingsOverlay, SettingsSection } from "../../../packages/ui/src/settings-overlay";
+import type { SettingsPanelId, SettingsUiOptions } from "./settings-ui.on-demand";
+import { onDemand } from "./on-demand";
 import { buildVersion } from "./build-version";
 import { pulseActivity } from "./perf-activity";
 import { lookBridge, startThemes } from "./canvas/themes/controller";
@@ -120,7 +120,7 @@ export interface CoreScreen {
   lockToolbarRow(row: "keys" | undefined): void;
   /** Runs a palette action (`theme:ink`, `font:geist-mono`, `card:2`, `bg:mesh`) as a click on its row would. */
   act(action: string): void;
-  /** The appearance choices in force, and the sections of Settings that live in core (for the Settings view). */
+  /** The appearance choices in force, and the shared Settings panels available after a person opens them. */
   appearance(): { theme: string; font: string; card: number; windows: number; background: string };
   /**
    * Paints the image behind the windows from a theme (`canvas/themes`): any CSS image, or "" for none. Used with the background
@@ -128,7 +128,8 @@ export interface CoreScreen {
    * theme draws its own gradient in plain CSS.
    */
   setBackdrop(image: string): void;
-  settingsPanels: { toolbar: SettingsSection; shortcuts: SettingsSection; about: SettingsSection };
+  /** Renders a shared panel after its action-only code has loaded; the returned function stops its listeners and DOM. */
+  settingsPanels: { render(id: SettingsPanelId, container: HTMLElement): () => void };
   /** The row that shows now. */
   toolbarRow(): "canvas" | "keys";
   setHostTree(sections: BranchSection[], activeLeaf: string, onSelect: (id: string) => void, extras?: Pick<BranchedOptions, "openRename">): BranchedMenu;
@@ -318,14 +319,37 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // Settings is a shell; About is the only section so far (the build's name, version, commit, date).
   const build = buildVersion();
   const canvasItems = new Map<string, ToolbarItem>();
-  const settingsSections: SettingsSection[] = [aboutSection({ name: "infraternal", version: build.short, commit: build.full, built: build.built })];
-  const shortcutsPanel = shortcutsSection(stage);
-  if (options.canvas && !options.settingsView) settingsSections.unshift(shortcutsPanel);
-  const aboutPanel = settingsSections[0]!;
-  const settings = options.canvas && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
+  let settingsSections: SettingsSection[] | undefined;
+  let settings: SettingsOverlay | undefined;
+  let settingsUi: typeof import("./settings-ui.on-demand") | undefined;
+  let settingsUiLoading: Promise<typeof import("./settings-ui.on-demand")> | undefined;
+  let settingsRequest = 0;
+  let settingsOpening = false;
+  let screenDisposed = false;
+  /** Opens the legacy Settings overlay after its action-only UI chunk has loaded. */
+  const openSettingsSection = (section: string, source: "pointer" | "keyboard"): void => {
+    if (options.settingsView) {
+      window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${section}`, source } }));
+      return;
+    }
+    settingsOpening = true;
+    const request = ++settingsRequest;
+    void loadSettingsUi().then((ui) => {
+      if (screenDisposed || request !== settingsRequest) return;
+      settingsOpening = false;
+      settingsSections ??= ui.createSettingsSections(settingsUiOptions(), Boolean(options.canvas), canvasItems.size > 0);
+      settings ??= ui.mountSettingsOverlay(stage, settingsSections);
+      settings.open(section, source);
+    }).catch(() => {
+      if (screenDisposed || request !== settingsRequest) return;
+      settingsOpening = false;
+      toast.show({ message: "Settings could not be loaded. Try again.", duration: 4000 });
+    });
+  };
+  /** Opens the app's About panel or sends the product canvas to its Appearance settings. */
   const openSettingsFrom = (source: "pointer" | "keyboard"): void => {
     if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance", source } }));
-    else settings?.open("about", source);
+    else openSettingsSection("about", source);
   };
   const askSignOutFrom = (anchor: HTMLElement): void => { askSignOut(anchor, toast); };
   const sidebarFoot = options.canvas
@@ -758,6 +782,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     palette.dataset.openKind = source;
     if (open) {
       shortcuts.close(true);
+      if (settingsOpening) { settingsOpening = false; settingsRequest++; }
       settings?.close("keyboard");
       indexScoped(false);
       scopedEntries = only;
@@ -840,6 +865,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return;
     }
     if (event.key === "Escape") {
+      if (settingsOpening) { settingsOpening = false; settingsRequest++; return; }
       if (settings?.isOpen || shortcuts.isOpen) return; // the open overlay takes this Escape itself
       // A control that holds something open (the inbox's expanded line) collapses it first (`data-owns-escape`).
       if (event.target instanceof Element && event.target.closest("[data-owns-escape]")) return;
@@ -1253,7 +1279,54 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       applyPrefs(true);
     },
   };
-  const toolbarSettings = toolbarSection(toolbarModel);
+  /** Provides current values to the Settings chunk without loading its panel code on the first screen. */
+  const settingsUiOptions = (): SettingsUiOptions => ({
+    stage,
+    about: { name: "infraternal", version: build.short, commit: build.full, built: build.built },
+    toolbar: toolbarModel,
+  });
+  /** Shares one late-loaded Settings module across overlay opens and panel renders. */
+  const loadSettingsUi = (): Promise<typeof import("./settings-ui.on-demand")> => {
+    if (settingsUi) return Promise.resolve(settingsUi);
+    if (!settingsUiLoading) {
+      settingsUiLoading = onDemand(() => import("./settings-ui.on-demand")).then((loaded) => {
+        settingsUi = loaded;
+        return loaded;
+      }).catch((error: unknown) => {
+        settingsUiLoading = undefined;
+        throw error;
+      });
+    }
+    return settingsUiLoading;
+  };
+  /** Renders a section from the on-demand chunk and releases it if its canvas window closes first. */
+  const renderSettingsPanel = (id: SettingsPanelId, container: HTMLElement): (() => void) => {
+    let disposed = false;
+    let stop: (() => void) | void;
+    const load = (): void => {
+      void loadSettingsUi().then((ui) => {
+        if (disposed) return;
+        stop = ui.createSettingsPanel(id, settingsUiOptions()).render(container);
+      }).catch(() => {
+        if (disposed) return;
+        const notice = document.createElement("span");
+        notice.textContent = "Settings could not be loaded.";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Try again";
+        retry.addEventListener("click", load, { once: true });
+        container.replaceChildren(notice, retry);
+      });
+    };
+    load();
+    return () => { disposed = true; stop?.(); };
+  };
+  /** Adds the Toolbar panel to an already-open legacy Settings list when its row becomes available. */
+  const addToolbarSettingsSection = (ui: typeof import("./settings-ui.on-demand")): void => {
+    if (!settingsSections || canvasItems.size === 0 || settingsSections.some((section) => section.id === "toolbar")) return;
+    settingsSections.unshift(ui.createSettingsPanel("toolbar", settingsUiOptions()));
+  };
+  /** Renders current toolbar items before an optional legacy Settings panel is needed. */
   applyPrefs(false);
 
   // ---- long-press the toolbar: edit it in place ---------------------------------------------------------------
@@ -1493,7 +1566,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (kind === "settings") {
       setPalette(false, source);
       if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${value ?? "appearance"}`, source } }));
-      else settings?.open(value ?? "about", source);
+      else openSettingsSection(value ?? "about", source);
       return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
@@ -1563,7 +1636,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     act(action) { runAction(action, "pointer"); },
     appearance: () => ({ theme: currentThemeId, font: committedFont.id, card: cardLevel, windows: windowLevel, background }),
     setBackdrop(image) { setMeshImages(image || "none", "none"); },
-    settingsPanels: { get toolbar() { return toolbarSettings; }, shortcuts: shortcutsPanel, about: aboutPanel },
+    settingsPanels: { render: renderSettingsPanel },
     toolbarRow: () => (rowIndex === 0 ? "canvas" : "keys"),
     lockToolbarRow(row) { rowLock = row; autoRow(); },
     setCanvasRow(items) {
@@ -1593,7 +1666,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       for (const item of items) paint(item.id);
       defaults.canvas = items.map((i) => i.id);
       applyPrefs(false);
-      if (items.length && !options.settingsView && !settingsSections.includes(toolbarSettings)) settingsSections.unshift(toolbarSettings);
+      if (items.length && !options.settingsView && settingsSections && settingsUi) addToolbarSettingsSection(settingsUi);
       rebuildStaticEntries();
       canvasRowEl.hidden = items.length === 0;
       keysRowEl.hidden = items.length > 0 && !isTerminalFocus(document.activeElement);
@@ -1602,7 +1675,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       else settleRow(keysRowEl.hidden ? 0 : 1, true);
       return {
         update(id, patch) { const cur = canvasItems.get(id); if (!cur) return; Object.assign(cur, patch); paint(id); },
-        dispose() { const at = settingsSections.indexOf(toolbarSettings); if (at >= 0) settingsSections.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keysRowEl.hidden = false; keytray.dataset.rows = "1"; settleRow(1, true); },
+        dispose() { const at = settingsSections?.findIndex((section) => section.id === "toolbar") ?? -1; if (at >= 0) settingsSections?.splice(at, 1); canvasItems.clear(); rebuildStaticEntries(); canvasRowEl.replaceChildren(); canvasRowEl.hidden = true; keysRowEl.hidden = false; keytray.dataset.rows = "1"; settleRow(1, true); },
       };
     },
     setHostTree(sections, activeLeaf, onSelect, extras) {
@@ -1659,6 +1732,9 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       cancelRecovery?.removeEventListener("click", cancelClick);
       branch.dispose();
       shortcuts.dispose();
+      screenDisposed = true;
+      settingsOpening = false;
+      settingsRequest++;
       settings?.dispose();
       for (const remove of removeShortcuts) remove();
       sidebarFoot?.dispose();
