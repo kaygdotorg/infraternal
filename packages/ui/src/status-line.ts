@@ -30,11 +30,11 @@ const STYLE = `
 .ui-status-line { display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; }
 .ui-status-icons { position: relative; display: inline-grid; flex: none; height: 1lh; align-items: center; }
 .ui-status-icons > .ui-icon { grid-area: 1 / 1; opacity: 0; transform: scale(0.6); filter: blur(2px);
-  transition: opacity 140ms ease-out, transform 160ms var(--ease-out), filter 140ms ease-out; }
+  transition: opacity var(--t-press) ease-out, transform var(--t-pop) var(--ease-out), filter var(--t-press) ease-out; }
 [data-state="idle"] > .ui-status-icons > .ui-status-info,
 [data-state="ok"] > .ui-status-icons > .ui-status-ok,
 [data-state="error"] > .ui-status-icons > .ui-status-alert { opacity: 1; transform: none; filter: none; }
-.ui-status-text { position: relative; min-width: 0; transition: color 160ms ease-out; }
+.ui-status-text { position: relative; min-width: 0; transition: color var(--t-pop) ease-out; }
 .ui-status-leaving { position: absolute; inset: 0 auto auto 0; width: 100%; pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .ui-status-icons > .ui-icon, .ui-status-text { transition: none; } }
 `;

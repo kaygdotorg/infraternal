@@ -26,7 +26,7 @@
   display: grid; grid-template-columns: 1.125rem minmax(0, 1fr) auto; align-items: center; column-gap: 0.5rem; width: 100%; min-height: 3rem; margin: 0; padding: 0.3125rem 0.5rem;
   border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); text-align: left; cursor: default;
   /* The press uses the individual `scale` property, so the swipe's own transform is never eased behind the finger. */
-  transition: scale 140ms var(--ease-out, ease-out), background-color 140ms ease;
+  transition: scale var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease;
 }
 .cl-sx-main:active { scale: var(--ui-press-scale-soft); }
 /* The window's own session is marked with a faint tinted fill, never a border or an outline. */
@@ -38,14 +38,14 @@
 .cl-sx-row[data-state="detached"] .cl-sx-sub-line, .cl-sx-row[data-state="exited"] .cl-sx-sub-line { color: var(--ui-text-secondary); }
 .cl-sx-pin { display: inline-grid; flex: none; place-items: center; color: var(--fg-3); }
 .cl-sx-pin svg, .cl-sx-viewers svg { width: 0.75rem; height: 0.75rem; }
-.cl-sx-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--fg-3); font: var(--sx-small); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: opacity 120ms ease; }
+.cl-sx-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--fg-3); font: var(--sx-small); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: opacity var(--t-press) ease; }
 .cl-sx-meta-top { display: inline-flex; align-items: center; gap: 0.5rem; }
 .cl-sx-viewers { display: inline-flex; align-items: center; gap: 0.1875rem; }
 .cl-sx-meta .is-fail { color: var(--danger); }
 /* The field itself is the shared `.ui-inline-rename`; the row only gives it the name's width. */
 .cl-sx-name-input { width: 100%; margin: 0 -6px; }
 /* Row actions: the shared header icon button, in place of the age and size while the row is hovered or focused. */
-.cl-sx-acts { position: absolute; top: 0; right: 0.25rem; bottom: 0; display: flex; align-items: center; gap: 0; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.cl-sx-acts { position: absolute; top: 0; right: 0.25rem; bottom: 0; display: flex; align-items: center; gap: 0; opacity: 0; pointer-events: none; transition: opacity var(--t-press) ease; }
 @media (hover: hover) and (pointer: fine) {
   .cl-sx-main:hover { background: var(--hover); }
   .cl-sx-row:hover .cl-sx-acts, .cl-sx-row:focus-within .cl-sx-acts { opacity: 1; pointer-events: auto; }
@@ -86,7 +86,7 @@
 .cl-sx-strip[data-result="fail"] .cl-sx-strip-text { color: var(--danger); }
 .cl-sx-again {
   display: inline-flex; align-items: center; gap: 0.375rem; height: calc(var(--pill-h, 2.375rem) - 0.625rem); padding: 0 0.75rem 0 0.625rem; border: 0; border-radius: var(--r-pill); background: var(--fg); color: var(--bg);
-  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: transform 140ms var(--ease-out, ease-out);
+  font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: transform var(--t-press) var(--ease-out, ease-out);
 }
 .cl-sx-again:active { transform: scale(var(--ui-press-scale)); }
 .cl-sx-again svg { width: 0.875rem; height: 0.875rem; }
@@ -135,7 +135,7 @@
   position: absolute; z-index: 2; left: 0.75rem; bottom: 0.75rem; display: inline-flex; align-items: center; gap: 0.375rem; height: 1.625rem; padding: 0 0.625rem 0 0.5rem;
   border: 1px solid var(--overlay-line); border-radius: var(--r-pill); background: color-mix(in oklab, var(--bg) 84%, transparent); color: var(--fg-2); cursor: pointer;
   font: 450 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: var(--ui-tracking); white-space: nowrap;
-  transition: transform 140ms var(--ease-out, ease-out), background-color 140ms ease;
+  transition: transform var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease;
 }
 .cl-sx-badge::after { content: ""; position: absolute; inset: -0.5625rem -0.25rem; }
 .cl-sx-badge svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
