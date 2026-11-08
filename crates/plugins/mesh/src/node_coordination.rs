@@ -1232,17 +1232,12 @@ mod tests {
             Arc::new(tokio::sync::Semaphore::new(1)),
         ));
         channel.wait().await;
-        let (node, _) = store
-            .attach(
-                "00000000-0000-4000-8000-000000000001",
-                PublicKey([2; 32]),
-                Some("192.0.2.1:44000".parse().unwrap()),
-                false,
-            )
+        let node = store
+            .node_for_host(channel.id())
             .await
-            .unwrap();
+            .expect("the worker attached the authenticated host");
         let before = store.config(node).await.unwrap();
-        // Drain any authenticated-attach update before the default-policy change under test.
+        // Wait for the worker's current snapshot without re-attaching through the legacy API.
         channel
             .wait_for_config_version(before.version, false)
             .await;
