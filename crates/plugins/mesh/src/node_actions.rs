@@ -349,6 +349,8 @@ struct Empty {}
 /// Optional explicit negotiation keeps ordinary replies compatible with strict older decoders.
 #[derive(Clone, Copy, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+// Each flag is an independently negotiated field; using a state enum would change the wire shape.
+#[allow(clippy::struct_excessive_bools)]
 struct IdentityProbe {
     #[serde(default)]
     compact_access: bool,
@@ -497,6 +499,8 @@ fn identity_response(
 }
 /// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
 #[derive(serde::Serialize)]
+// These flags are independent optional wire fields so older strict decoders keep their current shape.
+#[allow(clippy::struct_excessive_bools)]
 struct IdentityResponse {
     public_key: crate::policy::model::PublicKey,
     port: u16,

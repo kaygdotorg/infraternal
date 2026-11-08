@@ -22,6 +22,8 @@ pub fn valid_authority_epoch(value: &str) -> bool {
 /// Public node identity and actual UDP socket coordinates; private material has no field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+// These capability flags are independent additive fields in the authenticated identity wire shape.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Identity {
     pub public_key: PublicKey,
     pub port: u16,
@@ -174,7 +176,9 @@ impl Config {
 #[must_use]
 pub(crate) fn same_runtime_content(left: &Config, right: &Config) -> bool {
     let mut normalized = left.clone();
-    normalized.authority_epoch = right.authority_epoch.clone();
+    normalized
+        .authority_epoch
+        .clone_from(&right.authority_epoch);
     normalized.version = right.version;
     normalized == *right
 }
