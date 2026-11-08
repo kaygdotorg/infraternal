@@ -144,6 +144,7 @@ pub(crate) fn privileged(account: &User) -> bool {
         || !Uid::effective().is_root()
         || root_group_or_unknown(account)
         || doas_allows_or_unknown(Path::new("/etc/doas.conf"))
+        || crate::access_polkit::privileged(account)
     {
         return true;
     }

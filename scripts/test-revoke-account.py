@@ -73,8 +73,17 @@ def prove(binary, scenario="sessions"):
     uid = None
     sudoers = Path("/etc/sudoers.d") / account
     sudoers_created = False
+    polkit_dir = Path('/etc/polkit-1/rules.d')
+    polkit_existed = polkit_dir.exists()
+    polkit_parent_existed = polkit_dir.parent.exists()
+    polkit_rule = polkit_dir / f'50-{account}.rules'
+    polkit_created = False
+    root_unit = f'{account}-polkit'
     with tempfile.TemporaryDirectory(prefix='rv-', dir='/root') as scratch:
         root = Path(scratch)
+        # Root units write only under this private directory: a local user must
+        # never be able to plant a symlink at the output path.
+        root_plant = root / 'root-plant'
         state = root / 's'
         state.mkdir(mode=0o700)
         try:
@@ -84,6 +93,35 @@ def prove(binary, scenario="sessions"):
             print(json.dumps(dict(account=account, uid=uid)), flush=True)
             client = Binary(binary, state)
             prepare(client, 100, people[0], account)
+            if scenario == 'polkit':
+                def root_route():
+                    """Exercise J357's actual polkit-to-systemd root route without prompting."""
+                    return command('runuser', '-u', account, '--', 'systemd-run',
+                                   '--system', '--no-ask-password', '--wait', '--collect',
+                                   '--unit=' + root_unit, '/bin/sh', '-c',
+                                   f'id -u > {root_plant}', check=False)
+
+                assert root_route().returncode != 0, 'control unexpectedly has root access'
+                polkit_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+                with polkit_rule.open('x') as rule:
+                    polkit_created = True
+                    rule.write('polkit.addRule(function(action, subject) {\n'
+                               f'    if (subject.user == "{account}") return polkit.Result.YES;\n'
+                               '});\n')
+                polkit_rule.chmod(0o644)
+                wait_until(lambda: root_route().returncode == 0)
+                assert root_plant.read_text().strip() == '0'
+                assert root_plant.stat().st_uid == 0
+                print('POLKIT_ROOT_ROUTE_CONFIRMED uid=0', flush=True)
+                reply = control(client, 102, 'terminal.login.revoke', dict(person=str(people[0])))
+                print(json.dumps(dict(scenario=scenario, reply=reply)), flush=True)
+                assert root_plant.exists(), 'the root plant must survive until fixture cleanup'
+                report = reply['access']['accounts'][0]
+                assert report['privileged'] is True, report
+                assert report['state'] == 'not_checked', report
+                assert report['reason'] == 'privileged', report
+                print('POLKIT_REAL_ROOT_PASS', flush=True)
+                return
             if scenario in ("sudoers", "docker"):
                 if scenario == "sudoers":
                     with sudoers.open("x") as rule:
@@ -146,6 +184,22 @@ def prove(binary, scenario="sessions"):
                 client.kill()
             if sudoers_created:
                 sudoers.unlink(missing_ok=True)
+            if polkit_created:
+                polkit_rule.unlink(missing_ok=True)
+            if scenario == 'polkit':
+                command('systemctl', 'stop', root_unit + '.service', check=False)
+                command('systemctl', 'reset-failed', root_unit + '.service', check=False)
+                root_plant.unlink(missing_ok=True)
+                if not polkit_existed:
+                    try:
+                        polkit_dir.rmdir()
+                    except OSError:
+                        pass  # Concurrent policy belongs to the host, not this fixture.
+                if not polkit_parent_existed:
+                    try:
+                        polkit_dir.parent.rmdir()
+                    except OSError:
+                        pass  # Another policy user may have populated it meanwhile.
             if uid is not None:
                 command('loginctl', 'terminate-user', str(uid), check=False)
                 command('systemctl', 'stop', f'user-{uid}.slice', check=False)
