@@ -1199,6 +1199,9 @@ async fn stop_user_services(uid: u32) -> io::Result<bool> {
 /// whole user slice. This is systemd-only: D354 refuses root logins elsewhere.
 /// Command errors are not proof either way; the UID observation decides whether
 /// programs may remain. Both commands are attempted even if logind fails.
+/// System-started processes outside the user slice, including cron jobs and
+/// system services with `User=`, are observed and reported but never killed
+/// (D362, amended 2026-11-08). Their presence cannot produce a clean report.
 async fn end_account_sessions(uid: u32) -> bool {
     let _ = tokio::time::timeout(
         UNIT_STOP_HANG,

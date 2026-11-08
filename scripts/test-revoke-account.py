@@ -79,6 +79,8 @@ def prove(binary, scenario="sessions"):
     polkit_rule = polkit_dir / f'50-{account}.rules'
     polkit_created = False
     root_unit = f'{account}-polkit'
+    system_unit = f'{account}-system-process'
+    system_started = False
     with tempfile.TemporaryDirectory(prefix='rv-', dir='/root') as scratch:
         root = Path(scratch)
         # Root units write only under this private directory: a local user must
@@ -93,6 +95,25 @@ def prove(binary, scenario="sessions"):
             print(json.dumps(dict(account=account, uid=uid)), flush=True)
             client = Binary(binary, state)
             prepare(client, 100, people[0], account)
+            if scenario == 'system-process':
+                system_started = True
+                command('systemd-run', '--system', '--unit=' + system_unit,
+                        '--uid=' + account, '/bin/sleep', '600')
+                pid = int(command('systemctl', 'show', '--value', '-p', 'MainPID',
+                                  system_unit + '.service').stdout.strip())
+                wait_until(lambda: pid in processes(uid))
+                cgroup = Path(f'/proc/{pid}/cgroup').read_text().strip()
+                assert '/system.slice/' in cgroup, cgroup
+                reply = control(client, 102, 'terminal.login.revoke', dict(person=str(people[0])))
+                report = reply['access']['accounts'][0]
+                print(json.dumps(dict(scenario=scenario, pid=pid, cgroup=cgroup, reply=reply)), flush=True)
+                assert pid in processes(uid), 'revocation killed a system-owned process'
+                assert report['privileged'] is False, report
+                assert report['state'] == 'not_checked', report
+                assert report['reason'] == 'programs_may_remain', report
+                assert any(row.startswith(f'{pid} ') for row in report['processes']), report
+                print('SYSTEM_PROCESS_REPORTED_NOT_KILLED_PASS', flush=True)
+                return
             if scenario == 'polkit':
                 def root_route():
                     """Exercise J357's actual polkit-to-systemd root route without prompting."""
@@ -182,6 +203,9 @@ def prove(binary, scenario="sessions"):
         finally:
             if client is not None:
                 client.kill()
+            if system_started:
+                command('systemctl', 'stop', system_unit + '.service', check=False)
+                command('systemctl', 'reset-failed', system_unit + '.service', check=False)
             if sudoers_created:
                 sudoers.unlink(missing_ok=True)
             if polkit_created:

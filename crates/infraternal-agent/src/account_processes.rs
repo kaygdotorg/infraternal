@@ -1,6 +1,12 @@
-//! D362 verifies account shutdown through kernel UID records, including processes
+//! D362 observes remaining account processes through kernel UID records, including processes
 //! outside systemd's user slice. Root logins are systemd-only under D354; this
 //! module observes processes and never sends signals or implements a kill loop.
+//!
+//! The stop covers logind sessions and the account's user services. A system
+//! service or scheduler can run as the same UID in `system.slice`; these belong
+//! to the system and are reported, never killed by revocation (D362, amended
+//! 2026-11-08). Any observed survivor forces `not_checked/programs_may_remain`
+//! with its PID and printable command, even if every watched file is unchanged.
 use std::{
     fs::File,
     io::{self, Read},
