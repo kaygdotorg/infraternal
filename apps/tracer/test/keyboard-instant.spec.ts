@@ -244,6 +244,7 @@ async function openClusters(page: Page): Promise<void> {
 
 /** The camera as the clusters mockup reports it right now. */
 const cameraOf = (page: Page): Promise<Cam> => page.evaluate(() => (window as unknown as { __tracerClusters: { camera(): Cam } }).__tracerClusters.camera());
+/** True when two camera positions differ by more than a pixel on screen (or a little zoom). */
 const moved = (a: Cam, b: Cam): boolean => Math.abs(a.cx - b.cx) * b.z > 1 || Math.abs(a.cy - b.cy) * b.z > 1 || Math.abs(a.z - b.z) > 0.001;
 
 /**

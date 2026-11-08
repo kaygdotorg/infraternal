@@ -55,6 +55,7 @@ export interface PillMorph {
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
 const smooth = (from: number, to: number, value: number): number => { const t = clamp01((value - from) / (to - from)); return t * t * (3 - 2 * t); };
 
+/** Builds the morph for one pill and panel (see the module note); nothing is drawn until `open()`. */
 export function createPillMorph(options: PillMorphOptions): PillMorph {
   const { pill, stage, panel, content } = options;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)");

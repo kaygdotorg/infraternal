@@ -4,6 +4,7 @@ import { inputSource, installInputSource, triggeredByKeyboard } from "./input-so
 
 /** A stand-in animation-frame queue the test steps by hand, so it can check the two-frame window. */
 const queue = new Map<number, () => void>();
+/** The id the next queued frame callback gets. */
 let nextFrame = 1;
 (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = (callback: () => void): number => { queue.set(nextFrame, callback); return nextFrame++; };
 (globalThis as { cancelAnimationFrame?: unknown }).cancelAnimationFrame = (id: number): void => { queue.delete(id); };
