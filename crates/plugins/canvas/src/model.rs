@@ -145,30 +145,91 @@ fn hex(value: &Value) -> bool {
 }
 /// Colour schemes offered by `packages/ui/src/themes.ts`. Keep the server's wire validation in step with the browser's fixed choices.
 const SCHEME_IDS: &[&str] = &[
-    "paper", "ink", "latte", "mocha", "dawn", "rosepine", "nord", "tokyo", "gruvbox", "dracula",
-    "solarized-light", "solarized-dark", "everforest-light", "everforest-dark", "kanagawa-lotus",
-    "kanagawa-wave", "ayu-light", "ayu-dark", "github-light", "github-dark", "flexoki-light",
-    "flexoki-dark", "gruvbox-light", "tokyo-day", "frappe", "macchiato", "owl-light", "owl-night",
+    "paper",
+    "ink",
+    "latte",
+    "mocha",
+    "dawn",
+    "rosepine",
+    "nord",
+    "tokyo",
+    "gruvbox",
+    "dracula",
+    "solarized-light",
+    "solarized-dark",
+    "everforest-light",
+    "everforest-dark",
+    "kanagawa-lotus",
+    "kanagawa-wave",
+    "ayu-light",
+    "ayu-dark",
+    "github-light",
+    "github-dark",
+    "flexoki-light",
+    "flexoki-dark",
+    "gruvbox-light",
+    "tokyo-day",
+    "frappe",
+    "macchiato",
+    "owl-light",
+    "owl-night",
 ];
 
 /// Font ids offered by `packages/ui/src/fonts.ts`; these are account data, not arbitrary labels.
 const FONT_IDS: &[&str] = &[
-    "maple-mono-nf", "geist-mono", "jetbrains-mono", "commit-mono", "monaspace-neon", "ibm-plex-mono",
-    "cascadia-code", "fira-code", "source-code-pro", "iosevka", "victor-mono", "recursive-mono",
-    "martian-mono", "intel-one-mono", "fantasque-sans-mono", "hack", "inconsolata", "0xproto", "lilex",
-    "monaspace-argon", "monaspace-xenon", "monaspace-radon", "monaspace-krypton",
+    "maple-mono-nf",
+    "geist-mono",
+    "jetbrains-mono",
+    "commit-mono",
+    "monaspace-neon",
+    "ibm-plex-mono",
+    "cascadia-code",
+    "fira-code",
+    "source-code-pro",
+    "iosevka",
+    "victor-mono",
+    "recursive-mono",
+    "martian-mono",
+    "intel-one-mono",
+    "fantasque-sans-mono",
+    "hack",
+    "inconsolata",
+    "0xproto",
+    "lilex",
+    "monaspace-argon",
+    "monaspace-xenon",
+    "monaspace-radon",
+    "monaspace-krypton",
 ];
 
 /// Background ids offered by `apps/tracer/src/canvas/themes/backgrounds.ts` and `gradients.ts`.
 const BACKGROUND_IDS: &[&str] = &[
-    "custom", "solid-custom", "solid", "solid-accent", "solid-red", "solid-yellow", "solid-green", "solid-cyan",
-    "solid-blue", "solid-magenta", "aurora", "dusk", "lagoon", "ember", "meadow", "orchid", "sunrise", "haze",
+    "custom",
+    "solid-custom",
+    "solid",
+    "solid-accent",
+    "solid-red",
+    "solid-yellow",
+    "solid-green",
+    "solid-cyan",
+    "solid-blue",
+    "solid-magenta",
+    "aurora",
+    "dusk",
+    "lagoon",
+    "ember",
+    "meadow",
+    "orchid",
+    "sunrise",
+    "haze",
     "horizon",
 ];
 
 /// Checks that a JSON string is one of the choices shipped by the client.
 fn known_id(value: Option<&Value>, choices: &[&str]) -> bool {
-    value.and_then(Value::as_str).is_some_and(|id| choices.contains(&id))
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|id| choices.contains(&id))
 }
 
 /// Confirms that the selected theme id points to an entry carried by this account look.
@@ -176,9 +237,14 @@ fn selected_theme_exists(value: &Value) -> bool {
     let Some(selected) = string(value, "selected") else {
         return false;
     };
-    value.get("themes").and_then(Value::as_array).is_some_and(|themes| {
-        themes.iter().any(|entry| entry.get("id").and_then(Value::as_str) == Some(selected))
-    })
+    value
+        .get("themes")
+        .and_then(Value::as_array)
+        .is_some_and(|themes| {
+            themes
+                .iter()
+                .any(|entry| entry.get("id").and_then(Value::as_str) == Some(selected))
+        })
 }
 
 /// One theme of the account's look: ids must name shipped fonts, Colour schemes and backgrounds, with numbers within their ranges.
@@ -234,7 +300,9 @@ pub(crate) fn look(value: &Value) -> bool {
         ],
     ) && value.get("v").and_then(Value::as_u64) == Some(1)
         && string(value, "selected").is_some()
-        && value.get("uiFont").is_none_or(|font| matches!(font.as_str(), Some("mono" | "sans")))
+        && value
+            .get("uiFont")
+            .is_none_or(|font| matches!(font.as_str(), Some("mono" | "sans")))
         && value.get("basics").is_some_and(|basics| {
             shape(basics, &["colors", "font", "uiSize"])
                 && known_id(basics.get("colors"), SCHEME_IDS)
@@ -480,7 +548,10 @@ mod tests {
         let mut invalid = valid;
         invalid["selected"] = json!("custom-9");
         document.0["look"] = invalid;
-        assert!(!document.valid(), "accepted a selected theme missing from the list");
+        assert!(
+            !document.valid(),
+            "accepted a selected theme missing from the list"
+        );
     }
 
     #[test]

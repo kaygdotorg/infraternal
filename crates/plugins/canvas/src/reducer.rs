@@ -755,7 +755,8 @@ mod tests {
         reduce(&mut doc, &intent, &[]).unwrap();
         assert_eq!(doc, before);
         let mut next = look();
-        next["selected"] = json!("custom-1");
+        // The following pop removes the last theme, so keep selection on a retained id.
+        next["selected"] = json!("tinted");
         next["themes"].as_array_mut().unwrap().pop();
         reduce(&mut doc, &json!({"type":"look.set","look":next}), &[]).unwrap();
         assert_eq!(doc.0["look"]["themes"].as_array().unwrap().len(), 2);
@@ -817,6 +818,8 @@ mod tests {
     fn a_full_look_fits_in_one_intent() {
         let mut value = look();
         let one = value["themes"][0].clone();
+        // Selection must still point into the replacement list.
+        value["selected"] = json!("custom-0");
         let list = value["themes"].as_array_mut().unwrap();
         list.clear();
         for n in 0..16 {

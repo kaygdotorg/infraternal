@@ -19,7 +19,10 @@ fuzz_target!(|input: &[u8]| {
         // Wrap one arbitrary JSON value in a valid canvas envelope so mutations can reach look validation without first
         // inventing a valid layout and window tree.
         let mut canvas = Document::default().0;
-        canvas.as_object_mut().unwrap().insert("look".to_owned(), look);
+        canvas
+            .as_object_mut()
+            .unwrap()
+            .insert("look".to_owned(), look);
         let document = Document(canvas);
         if document.valid() {
             let encoded = serde_json::to_vec(&document).unwrap();
