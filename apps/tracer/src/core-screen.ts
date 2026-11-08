@@ -125,10 +125,11 @@ export interface CoreScreen {
   /** Refreshes visible contextual rows after authoritative data changes, keeping the query and selected action. */
   refreshPalette(): void;
   /**
-   * Opens the palette limited to `entries` only (a view's windows from its hover card, #121). The same search and
-   * keys apply; the next open (⌘K, the capsule) shows the whole palette again.
+   * Opens the palette limited to `entries` only (a view's windows from its hover card, #121), or the whole palette when
+   * there are none (the view list's Search everything row). The same search and keys apply; the next open (⌘K, the
+   * capsule) shows the whole palette again.
    */
-  showPalette(entries: PaletteEntry[]): void;
+  showPalette(entries?: PaletteEntry[]): void;
   setRoundTrip(milliseconds: number | undefined): void;
   setConnection(connected: boolean): void;
   setRecoveryPending(readyAt: number | undefined): void;

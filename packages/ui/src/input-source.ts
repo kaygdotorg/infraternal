@@ -18,6 +18,10 @@
  *   to `"pointer"`. Code reads the source to decide whether a camera flight springs, so a trackpad swipe through the windows
  *   must not be taken for a key press just because the person typed a moment before.
  *
+ * Only events the person made count. A script that dispatches a key or pointer event (`isTrusted` false) says nothing about how
+ * the person acted, so the tracker ignores it: a pointer click that happens to dispatch a synthetic shortcut still reads as a
+ * pointer.
+ *
  * The source is written to the root as `data-input="keyboard" | "pointer"`, in the same task as the event. CSS therefore
  * sees it in the same style recalculation that applies the surface's new state, so a rule such as
  * `:root[data-input="keyboard"] .palette { transition: none }` removes the transition for both an open and a close. Script
@@ -75,13 +79,14 @@ export function installInputSource(root: HTMLElement = document.documentElement)
   let freshWindow = 0;
   const endFresh = (): void => { cancelAnimationFrame(freshWindow); freshWindow = 0; delete root.dataset.inputFresh; };
   const key = (event: Event): void => {
+    if (!event.isTrusted) return;
     if (MODIFIER_KEYS.has((event as KeyboardEvent).key)) return;
     set("keyboard");
     cancelAnimationFrame(freshWindow);
     root.dataset.inputFresh = "";
     freshWindow = requestAnimationFrame(() => { freshWindow = requestAnimationFrame(endFresh); });
   };
-  const pointer = (): void => { set("pointer"); endFresh(); };
+  const pointer = (event: Event): void => { if (event.isTrusted) { set("pointer"); endFresh(); } };
   set("pointer");
   window.addEventListener("wheel", pointer, { capture: true, passive: true });
   window.addEventListener("keydown", key, { capture: true, passive: true });
