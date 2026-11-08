@@ -41,7 +41,7 @@ async function openCanvas(page: Page): Promise<void> {
 }
 
 /**
- * Arms a one-shot sampler: on the next keydown or pointerdown (capture, before any handler) it waits for the first animation
+ * Arms a one-shot sampler: on the next non-modifier keydown or pointerdown (capture, before any handler) it waits for the first animation
  * frame and records the surfaces' state in `window.__frame`. Returns nothing; read it back with {@link frame}.
  */
 async function arm(page: Page): Promise<void> {
@@ -68,9 +68,14 @@ async function arm(page: Page): Promise<void> {
         capsuleOpacity: getComputedStyle(document.querySelector("#capsule")!).opacity,
       } satisfies Frame;
     };
-    const arm = (): void => { requestAnimationFrame(sample); };
-    window.addEventListener("keydown", arm, { capture: true, once: true });
-    window.addEventListener("pointerdown", arm, { capture: true, once: true });
+    // One trigger arms it: whichever of the two listeners fires first removes both, so a stale one never resamples a later step.
+    const off = new AbortController();
+    const arm = (): void => { off.abort(); requestAnimationFrame(sample); };
+    // A chord such as Control+Shift+K sends a keydown for each modifier first. Arming on those would start the sampler before
+    // the shortcut's own key, so a slow open could look finished by timing alone: arm on the chord's final, non-modifier key.
+    const modifiers = new Set(["Control", "Shift", "Alt", "Meta", "AltGraph"]);
+    window.addEventListener("keydown", (event) => { if (!modifiers.has(event.key)) arm(); }, { capture: true, signal: off.signal });
+    window.addEventListener("pointerdown", arm, { capture: true, signal: off.signal });
   });
 }
 
