@@ -24,6 +24,12 @@
  * reads {@link triggeredByKeyboard} the same way. Because each new event overwrites the last one, a pointer close of a
  * keyboard-opened surface may animate and a keyboard close of a pointer-opened one is instant, with no extra bookkeeping.
  *
+ * CSS that drops a surface's open and close transitions must not outlive the key that opened or closed it, or the surface would
+ * lose its easing for good until the next pointer press. So a key also sets `data-input-fresh` on the root, and removes it two
+ * animation frames later (the same pattern as `data-look-swap`: the second frame is the one after the style recalculation that
+ * would have started the transitions). The rule in styles.css is keyed on `data-input-fresh`; script reads the persistent
+ * {@link triggeredByKeyboard}.
+ *
  * Before any input has happened, and for changes that no key caused (a timer, a network event), the source is `"pointer"`,
  * so those keep their animation.
  */
@@ -65,8 +71,17 @@ export function installInputSource(root: HTMLElement = document.documentElement)
     // One attribute write per change of source, never per event.
     if (root.dataset.input !== source) root.dataset.input = source;
   };
-  const key = (event: Event): void => { if (!MODIFIER_KEYS.has((event as KeyboardEvent).key)) set("keyboard"); };
-  const pointer = (): void => set("pointer");
+  /** Pending removal of `data-input-fresh`, so a quick second key restarts the two-frame window instead of being cut by the first. */
+  let freshWindow = 0;
+  const endFresh = (): void => { cancelAnimationFrame(freshWindow); freshWindow = 0; delete root.dataset.inputFresh; };
+  const key = (event: Event): void => {
+    if (MODIFIER_KEYS.has((event as KeyboardEvent).key)) return;
+    set("keyboard");
+    cancelAnimationFrame(freshWindow);
+    root.dataset.inputFresh = "";
+    freshWindow = requestAnimationFrame(() => { freshWindow = requestAnimationFrame(endFresh); });
+  };
+  const pointer = (): void => { set("pointer"); endFresh(); };
   set("pointer");
   window.addEventListener("wheel", pointer, { capture: true, passive: true });
   window.addEventListener("keydown", key, { capture: true, passive: true });
@@ -75,6 +90,7 @@ export function installInputSource(root: HTMLElement = document.documentElement)
     window.removeEventListener("keydown", key, { capture: true });
     window.removeEventListener("pointerdown", pointer, { capture: true });
     window.removeEventListener("wheel", pointer, { capture: true });
+    endFresh();
     delete root.dataset.input;
     current = "pointer";
     installed = undefined;
