@@ -672,6 +672,33 @@ mod tests {
                 .unwrap()
                 .forget();
         }
+        /// Wait until the last chunk of a config version arrives, optionally requiring a full snapshot.
+        async fn wait_for_config_version(&self, version: u64, full_snapshot: bool) {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if self.frames.lock().unwrap().iter().any(|(base, current, last)| {
+                        *current == version && *last && (!full_snapshot || base.is_none())
+                    }) {
+                        return;
+                    }
+                    self.applied.acquire().await.unwrap().forget();
+                }
+            })
+            .await
+            .expect("the requested config version was not received");
+        }
+        /// Count requests that explicitly probe the authenticated authority-epoch capability.
+        fn authority_epoch_probe_count(&self) -> usize {
+            self.identity_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| {
+                    serde_json::from_slice::<serde_json::Value>(request)
+                        .is_ok_and(|probe| probe["authority_epoch"] == true)
+                })
+                .count()
+        }
     }
     impl NodeChannel for Channel {
         fn id(&self) -> &'static str {
@@ -1215,6 +1242,11 @@ mod tests {
             .await
             .unwrap();
         let before = store.config(node).await.unwrap();
+        // Drain any authenticated-attach update before the default-policy change under test.
+        channel
+            .wait_for_config_version(before.version, false)
+            .await;
+        let baseline_frames = channel.frames.lock().unwrap().len();
         channel.refuse_delta.store(true, Ordering::Release);
         let next = if before.default_policy == crate::dataplane::DefaultPolicy::Allow {
             crate::dataplane::DefaultPolicy::Deny
@@ -1233,13 +1265,16 @@ mod tests {
             )
             .await
             .unwrap();
-        channel.wait().await;
+        let after = store.config(node).await.unwrap();
+        channel
+            .wait_for_config_version(after.version, true)
+            .await;
         let frames = channel.frames.lock().unwrap().clone();
-        assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0].0, None);
-        assert_eq!(frames[1].0, Some(before.version));
-        assert_eq!(frames[2].0, None);
-        assert_eq!(frames[1].1, frames[2].1);
+        assert_eq!(frames.len(), baseline_frames + 2);
+        assert_eq!(frames[baseline_frames].0, Some(before.version));
+        assert_eq!(frames[baseline_frames].1, after.version);
+        assert_eq!(frames[baseline_frames + 1].0, None);
+        assert_eq!(frames[baseline_frames + 1].1, after.version);
         channel.notices.lock().unwrap().take();
         tokio::time::timeout(std::time::Duration::from_secs(5), task)
             .await
@@ -1873,7 +1908,7 @@ mod tests {
 
         // sleep: bound the ambiguous probe response before checking that no config was sent.
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while channel.identity_calls.load(Ordering::Acquire) < 3 {
+            while channel.identity_requests.lock().unwrap().len() < 3 {
                 channel.identity_probed.notified().await;
             }
         })
@@ -1912,7 +1947,7 @@ mod tests {
         let reprobe = tokio::time::timeout(
             UNKNOWN_SUPPORT_RETRY + std::time::Duration::from_secs(2),
             async {
-                while channel.identity_calls.load(Ordering::Acquire) < 4 {
+                while channel.authority_epoch_probe_count() < 3 {
                     channel.identity_probed.notified().await;
                 }
             },
@@ -1921,7 +1956,15 @@ mod tests {
         presence_noise.abort();
         reprobe.expect("the full identity probe was not retried");
         let requests = channel.identity_requests.lock().unwrap().clone();
-        let retry: serde_json::Value = serde_json::from_slice(&requests[3]).unwrap();
+        let retry_request = requests
+            .iter()
+            .filter(|request| {
+                serde_json::from_slice::<serde_json::Value>(request)
+                    .is_ok_and(|probe| probe["authority_epoch"] == true)
+            })
+            .nth(2)
+            .expect("the retry did not include a full authority probe");
+        let retry: serde_json::Value = serde_json::from_slice(retry_request).unwrap();
         assert_eq!(
             retry["authority_epoch"], true,
             "retry omitted the epoch probe"
