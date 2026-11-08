@@ -404,8 +404,8 @@ button { color: inherit; }
 .tab:disabled { cursor: default; }
 .tab-host { color: var(--fg-3); }
 .tab-name { color: var(--fg); }
-.tab-add svg { width: 0.875rem; height: 0.875rem; }
-.capsule-os { display: none; flex: none; width: 1rem; height: 1rem; color: var(--fg-2); }
+.tab-add svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); }
+.capsule-os { display: none; flex: none; width: var(--ui-icon); height: var(--ui-icon); color: var(--fg-2); }
 .capsule-os svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
 .capsule-os svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 /* In the canvas preview the pill shows the host's OS mark in place of the connection dot. */
@@ -466,7 +466,7 @@ button { color: inherit; }
 /* The detached note is an icon, drawn like the marks beside it: small, quiet, on the right of the row. */
 .bm-meta.is-detached { display: grid; flex: none; place-items: center; }
 .bm-icon { display: grid; width: 1.125rem; height: 1.125rem; flex: none; place-items: center; color: var(--fg-3); }
-.bm-icon svg { width: 1rem; height: 1rem; fill: currentColor; stroke: none; }
+.bm-icon svg { width: var(--ui-icon); height: var(--ui-icon); fill: currentColor; stroke: none; }
 .bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--t-panel) var(--ease-out); }
 .bm-sec[data-open] > .bm-fold { grid-template-rows: 1fr; }
 .bm-sec.no-motion > .bm-fold { transition: none; }
@@ -539,7 +539,7 @@ button { color: inherit; }
 .result::before { content: ""; position: absolute; z-index: -1; inset: 0.1875rem 0; border-radius: var(--r-sm); background: transparent; }
 .result:disabled { color: var(--fg-3); cursor: default; opacity: 0.72; }
 .result[aria-selected="true"]::before { background: var(--accent-soft); }
-.result-icon.has-svg svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.result-icon.has-svg svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .result-icon { display: grid; place-items: center; width: 1.25rem; flex: none; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1 var(--font-mono); }
 /* The title wins the row: the hint takes only what the title leaves (to an ellipsis), so a long hint never squeezes the title to nothing
    on a narrow screen (the Settings row read as a row with no title on a phone). */

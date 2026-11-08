@@ -89,7 +89,7 @@
   font: var(--ui-type-button); letter-spacing: var(--ui-tracking); cursor: pointer; transition: transform var(--t-press) var(--ease-out, ease-out);
 }
 .cl-sx-again:active { transform: scale(var(--ui-press-scale)); }
-.cl-sx-again svg { width: 0.875rem; height: 0.875rem; }
+.cl-sx-again svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); }
 .cl-sx-dismiss { display: inline-grid; place-items: center; width: calc(var(--pill-h, 2.375rem) - 0.625rem); height: calc(var(--pill-h, 2.375rem) - 0.625rem); border: 0; border-radius: var(--r-pill); background: none; color: var(--fg-2); cursor: pointer; }
 .cl-sx-dismiss:active { transform: scale(var(--ui-press-scale)); }
 .cl-sx-strip .ui-mark { margin-left: -2px; }
@@ -138,7 +138,7 @@
   transition: transform var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease;
 }
 .cl-sx-badge::after { content: ""; position: absolute; inset: -0.5625rem -0.25rem; }
-.cl-sx-badge svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-sx-badge svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .cl-sx-badge:active { transform: scale(var(--ui-press-scale)); }
 @media (hover: hover) and (pointer: fine) { .cl-sx-badge:hover { background: var(--hover); color: var(--fg); } }
 @media (pointer: coarse) { .cl-sx-badge { height: 1.875rem; } }

@@ -35,7 +35,7 @@
 /* The pill's small mark (window-body.ts `paintPillMark`): control, view only or paused, 14 px like the connection dot beside
    it. Nothing about control or state is drawn over the picture. Its colour follows the quiet scale: the one thing the
    person is doing (controlling) is the full text colour, everything else is secondary. */
-.aw-pillmark { position: relative; z-index: 1; display: inline-grid; flex: none; place-items: center; width: 0.875rem; height: 0.875rem; color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
+.aw-pillmark { position: relative; z-index: 1; display: inline-grid; flex: none; place-items: center; width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
 .aw-pillmark[data-kind="controlled"] { color: var(--fg); }
 .aw-pillmark svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 @keyframes aw-in { from { opacity: 0; } }

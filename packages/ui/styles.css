@@ -22,8 +22,7 @@
 .countup { font-variant-numeric: tabular-nums; }
 .busy-count { font: var(--fw-label, 500) 0.8125rem/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
 /* Icons (icons.ts) follow the product's icon scale: 16 px on desktop, 18 px on touch, 1.5 stroke. */
-.ui-icon { width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-@media (pointer: coarse) { .ui-icon { width: 1.125rem; height: 1.125rem; } }
+.ui-icon { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
 
 /* The card tint is read by the element that carries it and by nothing inside it, so it does not inherit: a change then
@@ -111,7 +110,7 @@
    quiet tint of the foreground, and the label a stronger one (measured in test/top-centre.spec.ts). */
 .ui-button[data-button="primary"]:disabled { background: var(--ui-button-disabled-background, color-mix(in oklab, var(--fg) 12%, var(--bg))); color: var(--ui-button-disabled-color, color-mix(in oklab, var(--fg) 58%, var(--bg))); }
 @media (hover: hover) and (pointer: fine) { .ui-button[data-button="secondary"]:hover:not(:disabled) { color: var(--ui-button-hover-color, var(--fg)); } }
-.ui-source-icon { display: block; width: 1rem; height: 1rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-source-icon { display: block; width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 
 /* One native switch keeps pointer, keyboard, and assistive-technology state aligned. */
 .ui-switch {
@@ -227,7 +226,7 @@
 .ui-toast-marker { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; }
 .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
-.ui-toast-marker .tick svg { width: 0.875rem; height: 0.875rem; stroke: var(--bg); }
+.ui-toast-marker .tick svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); stroke: var(--bg); }
 .ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; }
 .ui-toast-actions[hidden] { display: none !important; }
 .ui-toast-action { min-height: 2rem; flex: none; padding: 0 0.5rem; border-radius: var(--r-sm); color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
@@ -419,7 +418,10 @@
   --ui-text-secondary: color-mix(in oklab, var(--fg) 70%, var(--bg));
   /* One height for controls and settings rows (D372): 32 px on desktop, 44 px on touch. List rows (--row, 28 px) and pills (--pill-h) keep their own. */
   --ui-control-h: 2rem;
+  /* Icons (D372): --ui-icon is the standard size, growing to 18 px on touch with the targets; --ui-icon-sm is the 14 px small icon
+     (chips, status marks, chevrons) and stays 14 px. A hard-coded icon size reads one of these. */
   --ui-icon: 1rem;
+  --ui-icon-sm: 0.875rem;
   /* Corner radius scale, one set for every surface (windows, cards, popovers, controls). Defined on :root, not on .terminal-screen,
      so the sign-in card, the docs pages and body-level popovers can read them too (#345). A corner nested in another is written calc(var(--r-…) - padding), never a number; any other radius is the
      nearest step (D372). The cluster and mesh frames keep 1.75rem, larger than any step (open question on #345). */
@@ -694,9 +696,9 @@
 .ui-kv-value > .ui-copied { right: 0; }
 .ui-kv-key > .ui-copied { left: 0; }
 .ui-kv-cell[data-copied] > .ui-copied { opacity: 1; transition: opacity var(--t-pop) ease-out 40ms; }
-.ui-copied-icon { display: inline-grid; place-items: center; width: 0.875rem; height: 0.875rem; transform: scale(0.7); transition: transform var(--t-pop) var(--ease-out); }
+.ui-copied-icon { display: inline-grid; place-items: center; width: var(--ui-icon-sm); height: var(--ui-icon-sm); transform: scale(0.7); transition: transform var(--t-pop) var(--ease-out); }
 .ui-kv-cell[data-copied] .ui-copied-icon { transform: none; }
-.ui-copied-icon svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-copied-icon svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-kv-cell[data-instant] > .ui-kv-text, .ui-kv-cell[data-instant] > .ui-copied, .ui-kv-cell[data-instant] .ui-copied-icon { transition: none; }
 @media (prefers-reduced-motion: reduce) { .ui-copied-icon { transform: none; transition: none; } }
 /* A value that is its row's action (kv-list `press`) reads as one: it keeps the pointer and takes the press scale. */
@@ -714,7 +716,7 @@
 .ui-kv-wide > .ui-kv-value { grid-column: 1 / -1; justify-self: stretch; padding-right: 1.25rem; text-align: left; }
 .ui-kv-wide:not(:has(.ui-kv-press)) > .ui-kv-value { color: var(--ui-text-secondary); padding-right: 0; }
 .ui-kv-wide > .ui-kv-value > .ui-copied { right: auto; left: 0; }
-.ui-kv-chevron { position: absolute; right: 0; top: calc(50% - 0.5rem); width: 0.875rem; height: 0.875rem; fill: none; stroke: var(--ui-text-secondary); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-kv-chevron { position: absolute; right: 0; top: calc(50% - 0.5rem); width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: var(--ui-text-secondary); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-kv-meter { grid-column: 1 / -1; position: relative; height: 0.1875rem; margin: 0.25rem 0 2px; overflow: hidden; border-radius: 2px; background: var(--line); }
 .ui-kv-meter::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--accent); transform: scaleX(var(--meter, 0)); transform-origin: left; }
 @media (hover: hover) and (pointer: fine) {
@@ -725,7 +727,7 @@
 }
 
 /* DECISION 120 icon slot for branched-menu hosts. */
-.bm-icon { display: grid; place-items: center; width: 1rem; height: 1rem; flex: none; color: var(--fg-2); }
+.bm-icon { display: grid; place-items: center; width: var(--ui-icon); height: var(--ui-icon); flex: none; color: var(--fg-2); }
 .bm-icon svg { display: block; width: 0.9375rem; height: 0.9375rem; fill: currentColor; stroke: none; }
 
 /* Shared step transitions (pane-stepper.ts): leaving panes stack over the incoming one. */
@@ -775,7 +777,7 @@
   transform-origin: left center;
   transition: background-color var(--t-press) ease;
 }
-.ui-chip > svg:first-child { width: 0.875rem; height: 0.875rem; flex: none; fill: currentColor; color: var(--fg-2); }
+.ui-chip > svg:first-child { width: var(--ui-icon-sm); height: var(--ui-icon-sm); flex: none; fill: currentColor; color: var(--fg-2); }
 .ui-chip > svg.is-line:first-child { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ui-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-chip-remove { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-3); cursor: pointer; }
@@ -887,7 +889,7 @@
   display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--r-sm); background: none; color: var(--fg);
   opacity: 0; pointer-events: none; cursor: pointer; transition: opacity var(--t-pop) ease-out, color var(--t-pop) ease-out;
 }
-.ui-window-lock svg { width: 1rem; height: 1rem; transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+.ui-window-lock svg { width: var(--ui-icon); height: var(--ui-icon); transform: translateY(0.5px); fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
 .ui-window[data-lock-near] .ui-window-lock { opacity: 0.35; pointer-events: auto; }
 .ui-window[data-locked] .ui-window-lock { opacity: 0.9; pointer-events: auto; color: var(--accent); }
 .ui-window-lock:focus-visible { opacity: 0.8; }
@@ -1238,7 +1240,7 @@
 .ui-sidebar-card-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: 1.375rem; padding: 2px 0.375rem 0; color: var(--ui-text-secondary); font-size: var(--text-caption); font-weight: var(--fw-label); line-height: 1.4; }
 /* The card's close control: an icon button, 24 px on desktop; its hit area is 44 px on touch without making the header taller. */
 .ui-sidebar-card-close { position: relative; display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; margin: -2px -0.25rem -2px 0; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-3); cursor: pointer; transition: transform var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease, color var(--t-press) ease; }
-.ui-sidebar-card-close svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.ui-sidebar-card-close svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .ui-sidebar-card-close:active { transform: scale(var(--ui-press-scale)); }
 @media (hover: hover) and (pointer: fine) { .ui-sidebar-card-close:hover { background: color-mix(in oklab, var(--fg) 8%, transparent); color: var(--fg); } }
 @media (pointer: coarse) { .ui-sidebar-card-close::after { content: ""; position: absolute; inset: -0.625rem; } }
@@ -1252,9 +1254,9 @@
 }
 @media (hover: hover) and (pointer: fine) { .ui-inbox-row:hover { background: color-mix(in oklab, var(--fg) 6%, transparent); } }
 .ui-inbox-row:active { transform: scale(var(--ui-press-scale-soft)); }
-.ui-inbox-glyph, .ui-inbox-chevron { flex: none; width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.ui-inbox-glyph, .ui-inbox-chevron { flex: none; width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .ui-inbox-glyph { color: var(--accent); }
-.ui-inbox-chevron { margin-left: auto; width: 0.875rem; height: 0.875rem; color: var(--ui-text-secondary); transition: transform var(--t-pop) var(--ease-out, ease-out); }
+.ui-inbox-chevron { margin-left: auto; width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--ui-text-secondary); transition: transform var(--t-pop) var(--ease-out, ease-out); }
 .ui-inbox-item[data-expanded="true"] .ui-inbox-chevron { transform: rotate(90deg); }
 .ui-inbox-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The panel's height is a grid track, so opening is a plain CSS transition: it can be reversed mid-way and costs no script. */

@@ -100,7 +100,7 @@
   cursor: pointer;
   transition: background-color var(--t-press) ease, color var(--t-press) ease, transform var(--t-press) var(--ease-out);
 }
-.ah-close svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.ah-close svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
 .ah-close::before { content: ""; position: absolute; inset: -0.5rem; }
 @media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
 .ah-close:active { transform: scale(var(--ui-press-scale-small)); }
@@ -190,7 +190,7 @@
 .ah-src { display: inline-grid; color: var(--fg-3); }
 .ah-src .ui-source-icon { width: 0.8125rem; height: 0.8125rem; stroke-width: 1.5; }
 .ah-status { display: inline-flex; align-items: center; gap: 0.375rem; color: var(--fg-2); font-size: 0.8125rem; white-space: nowrap; }
-.ah-status-icon { width: 0.875rem; height: 0.875rem; color: var(--fg-3); }
+.ah-status-icon { width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--fg-3); }
 .ah-status[data-tone="ok"] .ah-status-icon { color: var(--ok); }
 .ah-status[data-tone="warn"] .ah-status-icon { color: color-mix(in oklab, var(--danger) 55%, var(--ok)); }
 .ah-status[data-tone="off"] .ah-status-icon { color: var(--danger); }
@@ -231,7 +231,7 @@
 .ah-job[data-state="failed"] .ah-bar > span { background: var(--danger); }
 .ah-mark { --ui-step-status-size: var(--ah-icon); --ui-spinner-size: 0.875rem; }
 .ah-icon-button { display: grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-2); cursor: pointer; transition: background-color var(--t-press) ease, color var(--t-press) ease, transform var(--t-press) var(--ease-out); }
-.ah-icon-button .ah-icon { width: 1rem; height: 1rem; }
+.ah-icon-button .ah-icon { width: var(--ui-icon); height: var(--ui-icon); }
 .ah-icon-button[hidden] { display: none; }
 @media (hover: hover) and (pointer: fine) { .ah-icon-button:hover { background: var(--hover); color: var(--fg); } }
 .ah-icon-button:active { transform: scale(var(--ui-press-scale-small)); }
@@ -241,7 +241,7 @@
 .ah-details { margin-top: 0.25rem; }
 .ah-details summary { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0; color: var(--fg-2); cursor: pointer; list-style: none; }
 .ah-details summary::-webkit-details-marker { display: none; }
-.ah-details summary .ah-icon { width: 0.875rem; height: 0.875rem; transition: transform var(--t-pop) var(--ease-out); }
+.ah-details summary .ah-icon { width: var(--ui-icon-sm); height: var(--ui-icon-sm); transition: transform var(--t-pop) var(--ease-out); }
 .ah-details[open] summary .ah-icon { transform: rotate(90deg); }
 .ah-details pre { margin: 0.5rem 0 0; padding: 0.75rem 0.875rem; border-radius: var(--r-sm); background: var(--ah-field); color: var(--fg-2); font: var(--fw-body) 0.8125rem/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -302,13 +302,13 @@
   cursor: pointer;
   transition: transform var(--t-press) var(--ease-out);
 }
-.ah-sidebar-add .ah-icon { width: 1rem; height: 1rem; }
+.ah-sidebar-add .ah-icon { width: var(--ui-icon); height: var(--ui-icon); }
 @media (hover: hover) and (pointer: fine) { .ah-sidebar-add:hover { background: var(--hover); color: var(--fg); } }
 .ah-sidebar-add:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The root offer is a second window pill: the shared pill supplies size, hairline and type. */
 .ah-root-pill { gap: 0.375rem; padding: 0 0.625rem 0 0.5rem; color: var(--fg-2); }
 @media (max-width: 480px) { .ah-root-pill { width: var(--ui-control-h); justify-content: center; padding: 0; } .ah-root-pill > span { display: none; } }
-.ah-root-pill .ah-root-icon { width: 0.875rem; height: 0.875rem; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.ah-root-pill .ah-root-icon { width: var(--ui-icon-sm); height: var(--ui-icon-sm); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ah-root-pill .ui-spinner { --ui-spinner-size: 0.75rem; }
 .ah-root-pill:disabled { cursor: default; }
 
