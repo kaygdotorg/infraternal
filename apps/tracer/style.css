@@ -518,10 +518,9 @@ button { color: inherit; }
 .palette:not([hidden]) { transition-duration: 240ms; }
 @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -0.375rem) scale(0.98); } }
 .palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -0.25rem) scale(0.99); }
-/* Animation never gets in the way: a key-triggered open is a short 180 ms fade and scale (a pointer open
-   takes 240 ms), input is never blocked while it plays (the field is focused at once), and filtering,
-   arrowing and height changes are never animated. */
-.palette[data-open-kind="keyboard"]:not([hidden]) { transition-duration: 180ms; }
+/* A key-triggered open or close has no animation at all: .ui-key-instant (packages/ui/styles.css) drops every transition while
+   the last input was a key, so only a pointer or touch open grows out from under the capsule. Filtering, arrowing and height
+   changes are never animated either. */
 /* Desktop: the palette is centred in the viewport and sized by its results. It grows and shrinks
    symmetrically from the middle (top 50%, translated back by half its own height), is as tall as
    its content (a single result is compact), and never exceeds 50 % of the height, so it stays at

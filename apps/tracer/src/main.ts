@@ -145,6 +145,7 @@ function startPerfHud(bench: boolean): void {
 
 void start();
 
+/** Boots the page: installs the shared input trackers, then runs sign-in and, once authenticated, loads the terminal. */
 async function start(): Promise<void> {
   // First, so its capture listeners run before any shortcut handler registered later (#427).
   installInputSource();

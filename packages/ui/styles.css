@@ -66,6 +66,11 @@
   opacity: 0; transform: scale(0.96);
   transition: opacity 150ms ease-out, transform 180ms var(--ease-out);
 }
+/* Keyboard opens instantly (#427). While the last input was a key (input-source.ts keeps data-input on the root), anything that
+   opens or closes has no transition: the glass bed, and every surface that carries .ui-key-instant (the palette and its scrim, the
+   top-bar pills it covers, the sidebar). A pointer or touch press flips the attribute back before it opens, so those keep their
+   motion. This is the one place that decides it; a surface never has a per-surface "was it a key" rule. */
+:root[data-input="keyboard"] :is(.ui-glass-bed, .ui-key-instant) { transition: none; }
 .ui-glass-bed[hidden] { display: none; }
 .ui-glass-bed[data-open="true"] { opacity: 1; transform: none; }
 @media (prefers-reduced-motion: reduce) { .ui-glass-bed { transition: opacity 120ms ease; transform: none; } }

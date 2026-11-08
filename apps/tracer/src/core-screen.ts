@@ -155,6 +155,7 @@ const SVG = {
   paste: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="12" height="15" rx="2.5"/><path d="M9.5 5V4.5A1.5 1.5 0 0 1 11 3h2a1.5 1.5 0 0 1 1.5 1.5V5"/></svg>',
 };
 
+/** The markup of the core screen: top bar with the capsule and pills, sidebar, palette with its scrim, key tray and terminal stage. */
 const SCREEN = `
   <section class="terminal-screen" id="terminal-screen" aria-label="Terminal">
     <div class="backdrop" aria-hidden="true"></div>
@@ -165,10 +166,10 @@ const SCREEN = `
     </div>
     <!-- The one sidebar toggle. It lives outside the top bar so it can travel into the sidebar's
          header when the sidebar opens (see .sidebar-toggle in style.css); a spacer keeps its slot. -->
-    <button class="ui-pill ui-pill-icon sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false" aria-controls="sidebar">${SVG.menu}</button>
+    <button class="ui-pill ui-pill-icon sidebar-toggle ui-key-instant" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false" aria-controls="sidebar">${SVG.menu}</button>
     <header class="top" aria-label="Terminal controls">
       <span class="top-spacer" aria-hidden="true"></span>
-      <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <button class="ui-pill capsule ui-key-instant" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="capsule-os" id="capsule-os" aria-hidden="true"></span>
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
@@ -176,15 +177,15 @@ const SCREEN = `
         <span class="capsule-keys" id="capsule-keys" aria-hidden="true"></span>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
+        <button class="ui-pill ui-pill-icon tab tab-add ui-key-instant" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="ui-panel ui-overlay-surface sidebar" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
+    <aside class="ui-panel ui-overlay-surface sidebar ui-key-instant" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
-    <div class="palette-scrim" id="scrim" hidden></div>
-    <section class="palette ui-overlay-surface" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
+    <div class="palette-scrim ui-key-instant" id="scrim" hidden></div>
+    <section class="palette ui-overlay-surface ui-key-instant" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
       <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
@@ -463,7 +464,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     // after it. The attribute is set before anything changes, and removed after two frames, so the style recalculation that
     // would start the transitions always sees it. It costs one attribute and no forced layout (TASTE "No lag while animating").
     ROOT.setAttribute("data-look-swap", "");
-    setPalette(false, "keyboard");
+    setPalette(false);
     void applyLook(true);
     requestAnimationFrame(() => requestAnimationFrame(() => ROOT.removeAttribute("data-look-swap")));
   };
@@ -729,9 +730,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (overlaps) control.dataset.paletteCovered = ""; else delete control.dataset.paletteCovered;
     }
   };
-  const setPalette = (open: boolean, source: "keyboard" | "pointer" = "pointer", only?: PaletteEntry[]): void => {
-    // The source of the last open or close decides its motion (a key-triggered open is the shorter one).
-    palette.dataset.openKind = source;
+  // Whether it animates is not decided here: the last input (a key or a pointer press) does, through .ui-key-instant (#427).
+  const setPalette = (open: boolean, only?: PaletteEntry[]): void => {
     if (open) {
       shortcuts.close(true);
       settings?.close("keyboard");
@@ -790,7 +790,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
   removeShortcuts.push(bindShortcut("focus-resend-actions", () => { client?.focusInputResendActions(); }, (event) => !isComposingKey(event) && (client?.hasPendingInputResend() ?? false)));
   // The DOM may report "until-found"; both hidden states should open the palette.
-  removeShortcuts.push(bindShortcut("palette", () => setPalette(Boolean(palette.hidden), "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
+  removeShortcuts.push(bindShortcut("palette", () => setPalette(Boolean(palette.hidden)), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
   if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {
@@ -798,8 +798,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     shortcutsFromTerminal = !!(event.target as Element | null)?.closest?.(".terminal-host");
     shortcuts.toggle();
   }));
-  const capsuleClick = (event: MouseEvent): void => setPalette(true, event.detail === 0 ? "keyboard" : "pointer");
-  const scrimClick = (): void => setPalette(false, "pointer");
+  const capsuleClick = (): void => setPalette(true);
+  const scrimClick = (): void => setPalette(false);
 
   const keydown = (event: KeyboardEvent): void => {
     // Inert descendants cannot block global shortcuts while logout is in flight.
@@ -826,7 +826,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (palette.hidden && document.querySelector(".ui-anchored-popover, .ui-confirm-tip[data-open='true'], .ui-row-ask, [data-swiped]")) return;
       // The palette owns this Escape: it stops here, so a canvas flow (the add-host wizard listens in the document's
       // capture phase, after this window listener) stays open. The capture order is what makes stopping necessary.
-      if (!palette.hidden) { setPalette(false, "keyboard"); event.preventDefault(); event.stopPropagation(); }
+      if (!palette.hidden) { setPalette(false); event.preventDefault(); event.stopPropagation(); }
       else if (!sidebar.hidden) { setSidebar(false, true); event.preventDefault(); }
     }
   };
@@ -880,7 +880,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (event.key === "Enter") {
       const entry = visibleEntries[selected];
       if (entry) runAction(entry.action ?? "", "keyboard");
-      setPalette(false, "keyboard");
+      setPalette(false);
       event.preventDefault();
     }
   });
@@ -909,7 +909,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     if (!(target instanceof Element)) return;
     const result = target.closest<HTMLButtonElement>(".result");
     if (!result) return;
-    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false, "pointer");
+    if (!runAction(result.dataset.action ?? "", "pointer")) setPalette(false);
   });
   window.addEventListener("keydown", keydown, true);
   window.addEventListener("resize", resize);
@@ -1427,10 +1427,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       requestAnimationFrame(() => requestAnimationFrame(() => performance.measure(`appearance:${kind}`, { start, detail: { value } })));
     }
     if (kind === "account" && value === "recovery") {
-      setPalette(false, source);
+      setPalette(false);
       options.onRecovery?.();
     } else if (kind === "account" && value === "signout") {
-      setPalette(false, source);
+      setPalette(false);
       // Asked from where the person can see: the profile pill when the sidebar is open, else the top pill.
       requestAnimationFrame(() => askSignOutFrom(sidebarFoot && !sidebar.hidden ? sidebarFoot.user : get<HTMLElement>("#capsule")));
       return true;
@@ -1461,13 +1461,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       swapLook();
       return true;
     } else if (kind === "settings") {
-      setPalette(false, source);
+      setPalette(false);
       if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${value ?? "appearance"}`, source } }));
       else settings?.open(value ?? "about", source);
       return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.
-      setPalette(false, source);
+      setPalette(false);
       shortcutsFromTerminal = false;
       requestAnimationFrame(() => shortcuts.open());
       return true;
@@ -1527,7 +1527,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       refreshEntries();
       renderPalette(paletteInput.value, action);
     },
-    showPalette(only) { setPalette(true, "pointer", only); },
+    showPalette(only) { setPalette(true, only); },
     toast,
     inboxMount,
     act(action) { runAction(action, "pointer"); },
