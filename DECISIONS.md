@@ -4279,3 +4279,16 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      theme, terminal font and transparency follow the account across
      devices (D352). The owner chose "Follow the account" for the interface
      font too, over keeping it per device.
+
+367. **The revoke report ships with a coverage caveat (owner, 2026-11-08,
+     #355; refines D360 and D364):** six review rounds each found another
+     route a revoked person could keep root or write later that the scan
+     did not see. The owner chose "Fix cheap gaps, ship with caveat": the
+     scan adds the remaining polkit rule folders and the system timers and
+     /etc/cron.d lines that run as the account; any root-run job whose
+     script or unit the account can modify makes the report "Not checked"
+     (fail closed); and the "No changes found" sentence ends with "Access
+     outside these checks isn't covered." After one more review the stack
+     merges, and the remaining routes are tracked in an issue. The rejected
+     options were reviewing until a round finds nothing (every round so far
+     found something) and shipping with the known gaps.
