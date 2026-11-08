@@ -65,6 +65,19 @@ pub(crate) fn rotation_crash_checkpoint(name: &str) {
     }
 }
 
+/// Pause a Mac authority replacement after durable state is written but before peers are swapped.
+#[cfg(test)]
+pub(crate) fn authority_replacement_crash_checkpoint() {
+    let Some(ready) = std::env::var_os("INFRATERNAL_MAC_AUTHORITY_REPLACEMENT_READY") else {
+        return;
+    };
+    fs::write(ready, b"replacement persisted; worker swap not entered")
+        .expect("publish the reached Mac authority boundary");
+    loop {
+        std::thread::park();
+    }
+}
+
 type GotaDevice = WireGuardDevice<(BoundUdpFactory, MacUtunTx, MacUtunRx)>;
 
 /// A temporary Mac rotation key that clears its private bytes when dropped.
@@ -774,7 +787,7 @@ struct Pending {
     config: Config,
 }
 
-/// Stage a contiguous Mac snapshot, treating a changed authority as a fresh full snapshot.
+/// Stage a contiguous Mac snapshot, allowing a changed authority only in a fresh full snapshot.
 /// # Errors
 /// Refuses incomplete, stale, unbound, or inconsistent chunks.
 fn stage_chunk(
@@ -787,7 +800,6 @@ fn stage_chunk(
         .authority_epoch
         .as_deref()
         .is_some_and(|epoch| !crate::dataplane::valid_authority_epoch(epoch))
-        || current.is_some_and(|old| old.authority_epoch != chunk.authority_epoch)
     {
         return Err(io::ErrorKind::InvalidData.into());
     }
@@ -958,7 +970,7 @@ struct RuntimeInfo {
     routes: BTreeSet<IpAddr>,
 }
 
-/// Commands the macOS worker applies serially, including peer retirement and key changes.
+/// Commands the macOS worker applies serially, including authority replacement and key changes.
 enum WorkerCommand {
     Apply {
         config: Config,
@@ -966,6 +978,11 @@ enum WorkerCommand {
     },
     /// Drop the current peer set without restoring it if retirement fails.
     Retire {
+        config: Config,
+        reply: sync::SyncSender<io::Result<RuntimeInfo>>,
+    },
+    /// Replace one complete authority snapshot without rolling back to its predecessor.
+    ReplaceAuthority {
         config: Config,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
@@ -1170,6 +1187,17 @@ impl Worker {
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
 
+    /// Apply a complete authority replacement without retaining the previous authority as rollback.
+    /// # Errors
+    /// Reports a failed peer or route update; callers stop the worker on failure.
+    fn replace_authority(&self, config: Config) -> io::Result<RuntimeInfo> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::ReplaceAuthority { config, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
     fn counters(&self) -> io::Result<CounterMap> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
@@ -1234,6 +1262,10 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 let result = state.retire(config).await;
                 let _ = reply.send(result);
             }
+            WorkerCommand::ReplaceAuthority { config, reply } => {
+                let result = state.replace_authority(config).await;
+                let _ = reply.send(result);
+            }
             WorkerCommand::SetPrivateKey { private_key, reply } => {
                 let result = state.set_private_key(private_key).await;
                 let _ = reply.send(result);
@@ -1268,7 +1300,54 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("WireGuard private key could not be changed."))
     }
 
+    /// Apply an ordinary snapshot with the current runtime available for rollback.
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+        self.apply_with_rollback(config, true).await
+    }
+
+    /// Replace a complete authority snapshot without restoring the previous authority on failure.
+    ///
+    /// Identical installed content updates only saved metadata. All other replacements use one
+    /// peer-set operation, and the caller stops this worker if that operation fails.
+    /// # Errors
+    /// Reports an invalid config, failed peer query, or failed route/device update.
+    async fn replace_authority(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|old| crate::dataplane::same_runtime_content(old, &config))
+        {
+            let expected: BTreeSet<_> = peers_for_config(&config)?
+                .into_iter()
+                .map(|peer| crate::policy::model::PublicKey(*peer.public_key.as_bytes()))
+                .collect();
+            let installed: BTreeSet<_> = self.counters().await?.into_keys().collect();
+            if installed == expected {
+                let interface = self
+                    .utun
+                    .as_ref()
+                    .map(MacUtun::name)
+                    .ok_or(io::ErrorKind::NotConnected)?
+                    .to_owned();
+                self.config = Some(config);
+                return Ok(RuntimeInfo {
+                    interface,
+                    port: self.port,
+                    routes: self.routes.clone(),
+                });
+            }
+        }
+        self.apply_with_rollback(config, false).await
+    }
+
+    /// Apply a snapshot, optionally retaining ordinary rollback behavior for same-authority updates.
+    /// # Errors
+    /// Reports invalid routes or failed device/route configuration.
+    async fn apply_with_rollback(
+        &mut self,
+        config: Config,
+        rollback_on_failure: bool,
+    ) -> io::Result<RuntimeInfo> {
         let interface = self
             .utun
             .as_ref()
@@ -1283,10 +1362,12 @@ impl RuntimeState {
         configure_interface(&interface, Some(&config))?;
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         if let Err(error) = replace_peers(device, peers).await {
-            if let Some(old) = old_config.as_ref() {
-                let _ = configure_interface(&interface, Some(old));
-                let old_peers = peers_for_config(old).unwrap_or_default();
-                let _ = replace_peers(device, old_peers).await;
+            if rollback_on_failure {
+                if let Some(old) = old_config.as_ref() {
+                    let _ = configure_interface(&interface, Some(old));
+                    let old_peers = peers_for_config(old).unwrap_or_default();
+                    let _ = replace_peers(device, old_peers).await;
+                }
             }
             return Err(error);
         }
@@ -1294,7 +1375,9 @@ impl RuntimeState {
         for address in new_routes.difference(&old_routes) {
             if let Err(error) = route(&interface, *address, "add") {
                 let _ = remove_routes(&interface, &added);
-                rollback_device(device, &interface, old_config.as_ref()).await;
+                if rollback_on_failure {
+                    rollback_device(device, &interface, old_config.as_ref()).await;
+                }
                 return Err(error);
             }
             added.insert(*address);
@@ -1303,10 +1386,12 @@ impl RuntimeState {
         for address in old_routes.difference(&new_routes) {
             if let Err(error) = route(&interface, *address, "delete") {
                 let _ = remove_routes(&interface, &added);
-                for restored in &removed {
-                    let _ = route(&interface, *restored, "add");
+                if rollback_on_failure {
+                    for restored in &removed {
+                        let _ = route(&interface, *restored, "add");
+                    }
+                    rollback_device(device, &interface, old_config.as_ref()).await;
                 }
-                rollback_device(device, &interface, old_config.as_ref()).await;
                 return Err(error);
             }
             removed.insert(*address);
@@ -2100,47 +2185,51 @@ impl Node {
             tracing::warn!("Mac mesh configuration chunk refused: authority epoch is malformed");
             return Err(io::ErrorKind::InvalidData.into());
         }
-        if needs_authority_reset(self.config.as_ref(), &chunk) {
+        let authority_changed = needs_authority_reset(self.config.as_ref(), &chunk);
+        if authority_changed {
             let old_epoch = self
                 .config
                 .as_ref()
                 .and_then(|old| old.authority_epoch.as_deref());
-            let old_epoch_was_present = old_epoch.is_some();
-            if let Some(old) = self.config.as_ref() {
-                tracing::warn!(
-                    old_epoch = ?old.authority_epoch,
-                    new_epoch = ?chunk.authority_epoch,
-                    old_node = old.node.0,
-                    new_node = chunk.node.0,
-                    old_version = old.version,
-                    new_version = chunk.version,
-                    "retiring retained Mac mesh peers before applying a changed authority epoch"
-                );
-            }
-            let retirement_epoch = if old_epoch_was_present && chunk.authority_epoch.is_none() {
-                old_epoch.map(str::to_owned)
-            } else {
-                chunk.authority_epoch.clone()
-            };
-            if let Err(error) = self.retire_authority(retirement_epoch) {
+            if old_epoch.is_some() && chunk.authority_epoch.is_none() {
                 self.pending = None;
-                tracing::warn!(
-                    error_kind = ?error.kind(),
-                    "Mac mesh configuration chunk refused after authority retirement"
-                );
-                return Err(error);
-            }
-            if old_epoch_was_present && chunk.authority_epoch.is_none() {
+                if let Err(error) = self.retire_authority(old_epoch.map(str::to_owned)) {
+                    tracing::warn!(
+                        error_kind = ?error.kind(),
+                        "Mac mesh configuration chunk refused after authority retirement"
+                    );
+                    return Err(error);
+                }
                 self.pending = None;
                 tracing::warn!(
                     "Mac mesh configuration chunk refused after retirement: an epoch-bound authority cannot be downgraded"
                 );
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            if chunk.from_version.is_some() || chunk.index != 0 {
+            let pending_new_authority = self.pending.as_ref().is_some_and(|pending| {
+                pending.config.authority_epoch == chunk.authority_epoch
+                    && pending.from_version.is_none()
+            });
+            if chunk.index == 0 {
+                if chunk.from_version.is_some() {
+                    self.pending = None;
+                    tracing::warn!(
+                        "Mac mesh configuration chunk refused: a new authority must start with a full snapshot"
+                    );
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
                 self.pending = None;
                 tracing::warn!(
-                    "Mac mesh configuration chunk refused after retirement: a new authority must start with a full snapshot"
+                    old_epoch = ?old_epoch,
+                    new_epoch = ?chunk.authority_epoch,
+                    old_version = ?self.config.as_ref().map(|config| config.version),
+                    new_version = chunk.version,
+                    "staging a full Mac mesh snapshot from the changed authority"
+                );
+            } else if !pending_new_authority {
+                self.pending = None;
+                tracing::warn!(
+                    "Mac mesh configuration chunk refused: a new authority must start with a full snapshot"
                 );
                 return Err(io::ErrorKind::InvalidData.into());
             }
@@ -2176,6 +2265,9 @@ impl Node {
             return Ok(false);
         };
         validate_config(&config, identity.public_key)?;
+        if authority_changed {
+            self.prepare_authority_replacement(&config)?;
+        }
         // A complete snapshot may replay its revision only with identical contents. Authority
         // reset is handled separately because the new epoch may reuse a revision.
         if !self.authority_reset_pending
@@ -2223,7 +2315,13 @@ impl Node {
             .worker
             .as_ref()
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
-            .and_then(|worker| worker.apply(config.clone()));
+            .and_then(|worker| {
+                if reset_config.is_some() {
+                    worker.replace_authority(config.clone())
+                } else {
+                    worker.apply(config.clone())
+                }
+            });
         let info = match applied {
             Ok(info) => info,
             Err(error) => {
@@ -2247,7 +2345,45 @@ impl Node {
         Ok(true)
     }
 
-    /// Irreversibly retire the old Mac peer set before accepting another authority epoch.
+    /// Persist a complete authority change while leaving the current Mac peers untouched.
+    ///
+    /// The full replacement has already been authenticated and staged. This peer-free durable
+    /// checkpoint is therefore crash-safe, while the serialized worker receives the complete
+    /// replacement only after the checkpoint succeeds.
+    /// # Errors
+    /// Stops the worker if snapshot persistence or rotation-journal retirement fails.
+    fn prepare_authority_replacement(&mut self, replacement: &Config) -> io::Result<()> {
+        let mut denied = replacement.clone();
+        denied.default_policy = crate::dataplane::DefaultPolicy::Deny;
+        denied.peers.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        denied.peer_names.clear();
+        self.pending = None;
+        let rotation_error = self.settle_authority_rotation().err();
+        if let Some(identity) = &self.identity {
+            denied.local_key = Some(identity.public_key);
+        }
+        self.config = Some(denied.clone());
+        self.authority_reset_pending = true;
+        let persistence_error = self.persist_retired_snapshot(&denied).err();
+        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
+            self.store
+                .as_ref()
+                .map(crate::node_state::Store::discard_rotation_journal)
+                .transpose()
+                .err()
+        } else {
+            None
+        };
+        if let Some(error) = persistence_error.or(rotation_error).or(journal_error) {
+            return self.stop_after_retirement_failure(error, &denied);
+        }
+        #[cfg(test)]
+        authority_replacement_crash_checkpoint();
+        Ok(())
+    }
+
+    /// Irreversibly retire the old Mac peer set before refusing an authority downgrade.
     ///
     /// The peer-free state is persisted before the empty peer set reaches the dedicated worker
     /// command. On error the worker stops and cannot restore peers from the old epoch.
@@ -2721,6 +2857,16 @@ mod tests {
                             routes: BTreeSet::new(),
                         }));
                     }
+                    WorkerCommand::ReplaceAuthority { config, reply } => {
+                        if let Ok(mut configs) = applied.lock() {
+                            configs.push(config.clone());
+                        }
+                        let _ = reply.send(Ok(RuntimeInfo {
+                            interface: "utun-test".to_owned(),
+                            port: 51820,
+                            routes: route_addresses(&config),
+                        }));
+                    }
                     WorkerCommand::SetPrivateKey { reply, .. } => {
                         let _ = reply.send(Ok(()));
                     }
@@ -2956,11 +3102,78 @@ mod tests {
         assert_eq!(retained, Some(restored));
         assert_eq!(
             applied_configs.len(),
-            2,
-            "retire, then install the snapshot"
+            1,
+            "install the complete replacement once"
         );
         assert!(applied_configs[0].peers.is_empty());
-        assert!(applied_configs[1].peers.is_empty());
+    }
+
+    /// Keep current Mac peers live while a new authority snapshot is incomplete, then replace them once.
+    #[test]
+    fn authority_replacement_waits_for_complete_snapshot_before_worker_replacement() {
+        let current = config();
+        let mut replacement = current.clone();
+        replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
+        let identity = Identity {
+            public_key: current.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: true,
+        };
+        let applied_configs = Arc::new(Mutex::new(vec![current.clone()]));
+        let mut node = Node {
+            enabled: true,
+            worker: Some(recording_worker(Arc::clone(&applied_configs))),
+            store: None,
+            identity: Some(identity),
+            config: Some(current.clone()),
+            authority_reset_pending: false,
+            pending: None,
+            routes: route_addresses(&current),
+            interface: Some("utun-test".to_owned()),
+            port: 51820,
+            path: None,
+            binding: None,
+        };
+        let mut complete = chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_B)
+            .pop()
+            .expect("one full snapshot");
+        let mut first = complete.clone();
+        first.last = false;
+        complete.index = 1;
+        complete.last = true;
+        complete.upserted.clear();
+        complete.merged.clear();
+        complete.removed.clear();
+        #[cfg(feature = "mesh-dns-spike")]
+        {
+            complete.peer_names.clear();
+            complete.removed_peer_names.clear();
+        }
+
+        let staged = node.chunk(first);
+        let config_while_staged = node.config().cloned();
+        let runtime_while_staged = applied_configs.lock().expect("runtime log").clone();
+        let applied = node.chunk(complete);
+        let accepted = node.config().cloned();
+        let runtime = applied_configs.lock().expect("runtime log").clone();
+        node.down().expect("stop test worker");
+
+        assert!(
+            matches!(staged, Ok(false)),
+            "the first part should remain staged: {staged:?}"
+        );
+        assert_eq!(config_while_staged, Some(current.clone()));
+        assert_eq!(runtime_while_staged, vec![current.clone()]);
+        assert!(
+            matches!(applied, Ok(true)),
+            "the full snapshot should be applied: {applied:?}"
+        );
+        assert_eq!(accepted, Some(replacement.clone()));
+        assert_eq!(runtime, vec![current, replacement]);
     }
 
     /// A failed retirement save must not leave the old snapshot enabled for restart.
@@ -3022,6 +3235,7 @@ mod tests {
             .expect("read saved state")
             .expect("saved state exists");
         let runtime_configs = applied_configs.lock().expect("recorded configs").clone();
+        let stopped_after_failure = !node.enabled && node.worker.is_none();
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
             .expect("restore state directory permissions");
         node.down().expect("stop test worker");
@@ -3033,10 +3247,13 @@ mod tests {
         );
         assert_eq!(
             runtime_configs.len(),
-            1,
-            "retirement did not fence the worker first"
+            0,
+            "a failed durable checkpoint must not apply a partial replacement"
         );
-        assert!(runtime_configs[0].peers.is_empty());
+        assert!(
+            stopped_after_failure,
+            "a failed durable checkpoint must stop the runtime"
+        );
         assert_eq!(
             saved
                 .config
@@ -3214,7 +3431,11 @@ mod tests {
 
         assert!(journal.is_none(), "retired rotation journal remained");
         assert_eq!(retained_key, Some(active_key));
-        assert_eq!(retained_private_key.as_deref(), Some(&private_key[..]));
+        assert!(
+            retained_private_key
+                .as_ref()
+                .is_some_and(|key| key.as_slice() == private_key)
+        );
     }
 
     #[test]
@@ -3620,6 +3841,29 @@ mod tests {
         panic!("the requested Mac crash boundary was never reached");
     }
 
+    /// Exercise the child side of [`macos_authority_replacement_recovers_after_sigkill`].
+    #[test]
+    #[ignore = "launched by the Mac authority replacement SIGKILL proof"]
+    fn macos_authority_replacement_crash_child() {
+        let state = std::env::var_os("INFRATERNAL_MAC_AUTHORITY_STATE")
+            .expect("the parent supplies an isolated Mac state directory");
+        let state = PathBuf::from(state);
+        let mut node = Node::restore(&state, None).expect("restore Mac authority child");
+        let identity = node.up().expect("start the Mac mesh node");
+        let mut current = config();
+        current.local_key = Some(identity.public_key);
+        for chunk in crate::configuration::chunks(None, &current).expect("authority A snapshot") {
+            node.chunk(chunk).expect("install authority A");
+        }
+        let mut replacement = current;
+        replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
+        for chunk in crate::configuration::chunks(None, &replacement).expect("authority B snapshot")
+        {
+            node.chunk(chunk).expect("stage authority B");
+        }
+        panic!("the requested Mac authority crash boundary was never reached");
+    }
+
     /// SIGKILL at every Mac rotation write leaves a journal that restarts on an authorized key.
     #[test]
     #[ignore = "Run on the macOS VM with system service privileges."]
@@ -3766,6 +4010,69 @@ mod tests {
                 .expect("retry Mac finish after restart");
             restored.down().expect("stop restored Mac node");
         }
+    }
+
+    /// SIGKILL after the new epoch is saved but before worker replacement cannot restore A's peers.
+    #[test]
+    #[ignore = "Run on the macOS VM with system service privileges."]
+    fn macos_authority_replacement_recovers_after_sigkill() {
+        let directory = test_directory();
+        let ready = directory.join("authority-replacement-ready");
+        let mut child = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "macos_authority_replacement_crash_child",
+                "--nocapture",
+            ])
+            .env("INFRATERNAL_MAC_AUTHORITY_STATE", &directory.0)
+            .env("INFRATERNAL_MAC_AUTHORITY_REPLACEMENT_READY", &ready)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the Mac authority child");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().expect("check the Mac authority child") {
+                let output = child
+                    .wait_with_output()
+                    .expect("collect the Mac authority child failure");
+                panic!(
+                    "Mac child exited before replacement persistence: {status}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Mac child did not reach replacement persistence"
+            );
+            // sleep: let the child publish the durable replacement boundary.
+            thread::sleep(Duration::from_millis(10));
+        }
+        child
+            .kill()
+            .expect("send SIGKILL at the Mac authority boundary");
+        let status = child.wait().expect("reap the killed Mac authority child");
+        assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+
+        let saved = read_public_state(&directory.join(PUBLIC_STATE))
+            .expect("read replacement state")
+            .expect("replacement state survived SIGKILL");
+        let denied = saved.config.expect("peer-free replacement state");
+        assert_eq!(denied.authority_epoch.as_deref(), Some(AUTHORITY_EPOCH_B));
+        assert!(
+            denied.peers.is_empty(),
+            "authority A peers survived SIGKILL"
+        );
+        assert_eq!(denied.default_policy, DefaultPolicy::Deny);
+        assert!(saved.authority_reset_pending);
+
+        let mut restored = Node::restore(&directory.0, None).expect("restore Mac node");
+        restored.up().expect("start from peer-free saved state");
+        assert!(
+            restored.counters().expect("read restored peers").is_empty(),
+            "authority A peers were reinstalled after SIGKILL"
+        );
+        restored.down().expect("stop restored Mac node");
     }
 
     /// Derive a public identity from a private crash-fixture key without formatting its bytes.

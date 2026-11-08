@@ -166,6 +166,19 @@ impl Config {
     }
 }
 
+/// Whether two snapshots describe the same installed mesh while ignoring authority and revision metadata.
+///
+/// A coordinator restart can advance its authenticated authority epoch while returning the same
+/// policy. Nodes use this check to update that metadata without rebuilding peers or losing their
+/// existing handshakes.
+#[must_use]
+pub(crate) fn same_runtime_content(left: &Config, right: &Config) -> bool {
+    let mut normalized = left.clone();
+    normalized.authority_epoch = right.authority_epoch.clone();
+    normalized.version = right.version;
+    normalized == *right
+}
+
 /// Transport selector seam: a mesh destination never replaces the enrolled TLS server name [215].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerPath {
@@ -296,6 +309,38 @@ mod compatibility_tests {
         key: PublicKey,
         addresses: Addresses,
         endpoint: Option<SocketAddr>,
+    }
+
+    /// Authority and revision changes alone do not require a peer reconfiguration.
+    #[test]
+    fn same_runtime_content_ignores_authority_and_revision() {
+        let current = Config {
+            local_key: Some(PublicKey([1; 32])),
+            server: Some(NodeId(3)),
+            authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            node: NodeId(1),
+            #[cfg(feature = "mesh-dns-spike")]
+            name: None,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_suffix: DEFAULT_DNS_SUFFIX.to_owned(),
+            version: 10,
+            addresses: Addresses {
+                ipv4: "10.254.0.1".parse().unwrap(),
+                ipv6: "fd01::1".parse().unwrap(),
+            },
+            default_policy: DefaultPolicy::Deny,
+            exposure: None,
+            peers: BTreeMap::new(),
+            #[cfg(feature = "mesh-dns-spike")]
+            peer_names: BTreeMap::new(),
+        };
+        let mut restarted = current.clone();
+        restarted.authority_epoch = Some("00000000-0000-4000-8000-000000000002".to_owned());
+        restarted.version = 2;
+        assert!(same_runtime_content(&current, &restarted));
+
+        restarted.default_policy = DefaultPolicy::Allow;
+        assert!(!same_runtime_content(&current, &restarted));
     }
 
     /// A non-rotating peer keeps the old wire shape so an upgraded server can still configure it.

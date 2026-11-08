@@ -1086,3 +1086,63 @@ fn j363_epoch_change_retires_old_rotation_journal() {
         "retired authority journal blocks its replacement: {failures:?}"
     );
 }
+
+/// A new authority must stage the complete replacement before it changes live kernel peers.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j363b_authority_replacement_keeps_identical_peers_live_until_complete() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    let current = j363_config(identity.public_key);
+    for chunk in crate::configuration::chunks(None, &current).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    let mut replacement = current.clone();
+    replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
+    let mut complete = crate::configuration::chunks(None, &replacement)
+        .unwrap()
+        .pop()
+        .unwrap();
+    complete.authority_epoch = Some(J363_EPOCH_B.to_owned());
+    let mut first = complete.clone();
+    first.last = false;
+    complete.index = 1;
+    complete.last = true;
+    complete.upserted.clear();
+    complete.merged.clear();
+    complete.removed.clear();
+    #[cfg(feature = "mesh-dns-spike")]
+    {
+        complete.peer_names.clear();
+        complete.removed_peer_names.clear();
+    }
+
+    let staged = node.chunk(first);
+    let config_while_staged = node.config().cloned();
+    let peers_while_staged = Device::counters().unwrap().len();
+    let applied = node.chunk(complete);
+    let accepted = node.config().cloned();
+    let peers_after_replacement = Device::counters().unwrap().len();
+    node.down().unwrap();
+
+    assert!(
+        matches!(staged, Ok(false)),
+        "the first part should remain staged: {staged:?}"
+    );
+    assert_eq!(config_while_staged, Some(current.clone()));
+    assert_eq!(
+        peers_while_staged, 1,
+        "the old runtime was cut before staging ended"
+    );
+    assert!(
+        matches!(applied, Ok(true)),
+        "the full replacement should be applied: {applied:?}"
+    );
+    assert_eq!(accepted, Some(replacement));
+    assert_eq!(
+        peers_after_replacement, 1,
+        "the replacement peer disappeared"
+    );
+}
