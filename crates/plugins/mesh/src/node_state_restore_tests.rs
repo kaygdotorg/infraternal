@@ -41,9 +41,9 @@ fn public_state(peers: u16) -> State {
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
         version: 7,
         addresses: Addresses {
@@ -53,7 +53,7 @@ fn public_state(peers: u16) -> State {
         default_policy: DefaultPolicy::Deny,
         exposure: None,
         peers: BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
     };
     for index in 1..=peers {

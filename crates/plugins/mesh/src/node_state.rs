@@ -1101,9 +1101,9 @@ pub(crate) mod tests {
                 local_key: Some(local_key),
                 server: None,
                 node: crate::policy::model::NodeId(1),
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 name: None,
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
                 version: 7,
                 addresses: crate::policy::model::Addresses {
@@ -1113,7 +1113,7 @@ pub(crate) mod tests {
                 default_policy: crate::dataplane::DefaultPolicy::Deny,
                 exposure: None,
                 peers: std::collections::BTreeMap::new(),
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 peer_names: std::collections::BTreeMap::new(),
             }),
             #[cfg(target_os = "linux")]
@@ -1351,9 +1351,9 @@ pub(crate) mod tests {
             local_key: None,
             server: Some(crate::policy::model::NodeId(1)),
             node: crate::policy::model::NodeId(2),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 11,
             addresses: crate::policy::model::Addresses {
@@ -1363,7 +1363,7 @@ pub(crate) mod tests {
             default_policy: crate::dataplane::DefaultPolicy::Deny,
             exposure: None,
             peers: BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         };
         store
@@ -1695,7 +1695,7 @@ pub(crate) mod tests {
                 .any(|window| window == b"gotatun")
         );
     }
-    /// Route recording keeps older accepted-state files readable by the current node.
+    /// Records owned routes separately while preserving the legacy accepted-state bytes.
     #[test]
     fn route_recording_preserves_the_legacy_accepted_state_format() {
         let directory = Directory::new();
@@ -1705,9 +1705,9 @@ pub(crate) mod tests {
             local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 7,
             addresses: crate::policy::model::Addresses {
@@ -1717,7 +1717,7 @@ pub(crate) mod tests {
             default_policy: crate::dataplane::DefaultPolicy::Deny,
             exposure: None,
             peers: std::collections::BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         };
         store

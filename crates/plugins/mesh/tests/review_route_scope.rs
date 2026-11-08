@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Comm
 
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
-/// Preserve an operator gateway route while the mesh node restarts.
+/// Preserves an operator gateway route outside the mesh-owned peer-route inventory.
 fn restart_preserves_operator_gateway_host_route() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-route-scope-{}", std::process::id()));
@@ -25,9 +25,9 @@ fn restart_preserves_operator_gateway_host_route() {
         server: None,
         authority_epoch: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         from_version: None,
         version: 1,
@@ -42,9 +42,9 @@ fn restart_preserves_operator_gateway_host_route() {
         upserted: BTreeMap::new(),
         merged: BTreeMap::new(),
         removed: Vec::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         removed_peer_names: Vec::new(),
     })
     .unwrap();

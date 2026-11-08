@@ -352,7 +352,7 @@ struct Empty {}
 struct IdentityProbe {
     #[serde(default)]
     compact_access: bool,
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default)]
     dns_names: bool,
     #[serde(default)]
@@ -405,7 +405,7 @@ fn parse<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, PluginError>
 pub enum Request {
     Identity {
         compact_access: bool,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_names: bool,
         key_rotation: bool,
         authority_epoch: bool,
@@ -428,7 +428,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
             let probe: IdentityProbe = parse(input)?;
             Ok(Request::Identity {
                 compact_access: probe.compact_access,
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 dns_names: probe.dns_names,
                 key_rotation: probe.key_rotation,
                 authority_epoch: probe.authority_epoch,
@@ -491,7 +491,7 @@ fn identity_response(
         compact_access: identity.compact_access && requested.compact_access,
         key_rotation: identity.key_rotation && requested.key_rotation,
         authority_epoch: identity.authority_epoch && requested.authority_epoch,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_names: identity.dns_names && requested.dns_names,
     })
 }
@@ -506,7 +506,7 @@ struct IdentityResponse {
     key_rotation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     authority_epoch: bool,
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dns_names: bool,
 }
@@ -569,14 +569,14 @@ impl AgentPlugin for MeshNodePlugin {
             let result = match request {
                 Request::Identity {
                     compact_access,
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     dns_names,
                     key_rotation,
                     authority_epoch,
                 } => {
                     let requested = IdentityProbe {
                         compact_access,
-                        #[cfg(feature = "mesh-dns-spike")]
+                        #[cfg(feature = "mesh-dns")]
                         dns_names,
                         key_rotation,
                         authority_epoch,
@@ -750,9 +750,9 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+    /// Keeps kernel setup, staged intent and explicit cleanup in one namespace owner.
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
-    /// Keep kernel setup, staged intent and explicit cleanup in one namespace owner.
     fn applied_server_route_and_observed_link_survive_only_explicit_component_up() {
         use crate::{
             dataplane::{DefaultPolicy, Peer, PeerPolicy},
@@ -762,9 +762,16 @@ mod tests {
             },
         };
         assert_eq!(nix::unistd::geteuid().as_raw(), 0, "namespace owner");
+        // The privileged runner starts a new PID namespace, where /proc/1 is
+        // this sandbox's init process. Compare against its saved outer netns.
+        let outer_network_namespace = std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS")
+            .map_or_else(
+                || std::fs::read_link("/proc/1/ns/net").expect("host namespace"),
+                std::path::PathBuf::from,
+            );
         assert_ne!(
             std::fs::read_link("/proc/self/ns/net").expect("own namespace"),
-            std::fs::read_link("/proc/1/ns/net").expect("host namespace"),
+            outer_network_namespace,
             "kernel fixture requires a private network namespace"
         );
         let mut plugin = MeshNodePlugin::default();
@@ -777,9 +784,9 @@ mod tests {
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             from_version: None,
             version: 1,
@@ -811,9 +818,9 @@ mod tests {
             )]),
             merged: std::collections::BTreeMap::new(),
             removed: Vec::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             removed_peer_names: Vec::new(),
         };
         plugin
@@ -905,9 +912,9 @@ mod tests {
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             from_version: None,
             version: 1,
@@ -939,9 +946,9 @@ mod tests {
             )]),
             merged: BTreeMap::new(),
             removed: Vec::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             removed_peer_names: Vec::new(),
             access_updates: Vec::new(),
         };
@@ -1014,7 +1021,7 @@ mod tests {
         assert!(parse_action("mesh.up", br#"{"enabled":false}"#).is_err());
         assert!(matches!(parse_action("mesh.up", b"{}"), Ok(Request::Up)));
     }
-    /// Cleanup failure remains visible, and reconnect cannot override the user's explicit local off choice.
+    /// Preserves the stopping state after failed cleanup and explicit-off intent after reconnect.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
     fn failed_cleanup_reports_stopping_and_reconnect_keeps_explicit_off() {
@@ -1034,9 +1041,9 @@ mod tests {
             local_key: None,
             server: None,
             node: NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             from_version: None,
             version: 1,
@@ -1051,9 +1058,9 @@ mod tests {
             upserted: std::collections::BTreeMap::new(),
             merged: std::collections::BTreeMap::new(),
             removed: Vec::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             removed_peer_names: Vec::new(),
         };
         plugin
@@ -1110,7 +1117,7 @@ mod identity_upgrade_tests {
             public_key: crate::policy::model::PublicKey([1; 32]),
             port: 44000,
             compact_access: true,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: true,
             key_rotation: true,
             authority_epoch: true,
@@ -1126,7 +1133,7 @@ mod identity_upgrade_tests {
             Some(identity.clone()),
             super::IdentityProbe {
                 compact_access: true,
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 dns_names: true,
                 key_rotation: true,
                 authority_epoch: true,
@@ -1135,7 +1142,7 @@ mod identity_upgrade_tests {
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
         assert_eq!(negotiated["authority_epoch"], true);
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         assert_eq!(negotiated["dns_names"], true);
         let compact_only = serde_json::json!(super::identity_response(
             Some(identity),
@@ -1147,7 +1154,7 @@ mod identity_upgrade_tests {
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
         assert!(compact_only.get("authority_epoch").is_none());
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         assert!(compact_only.get("dns_names").is_none());
     }
 }
@@ -1178,9 +1185,9 @@ mod peer_page_tests {
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 4,
             addresses: address(1),
@@ -1209,7 +1216,7 @@ mod peer_page_tests {
                     )
                 })
                 .collect(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         }
     }

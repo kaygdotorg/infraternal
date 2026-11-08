@@ -48,6 +48,7 @@ fn endpoint(key: PublicKey) -> SocketAddr {
 /// A refused endpoint save keeps the kernel's endpoint.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
+/// Keeps the installed kernel endpoint when persisting its replacement is refused.
 fn refused_endpoint_persistence_preserves_kernel_endpoint() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-endpoint-{}", std::process::id()));
@@ -62,9 +63,9 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
         local_key: None,
         server: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
@@ -91,7 +92,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
                 access_ssh: None,
             },
         )]),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
     };
     for chunk in configuration::chunks(None, &config).unwrap() {

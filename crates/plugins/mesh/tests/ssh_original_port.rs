@@ -70,13 +70,17 @@ with socket.socket(socket.AF_PACKET,socket.SOCK_RAW) as raw:
  raw.bind(('sshpeer',0));raw.send(mac('infraternal0')+mac('sshpeer')+ether+header+tcp)
 ";
 
-/// A configuration for the SSH original-port tests.
+/// Builds an SSH test snapshot whose only peer cannot initiate SSH.
 fn configuration() -> Config {
     Config {
         authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(2),
+        #[cfg(feature = "mesh-dns")]
+        name: None,
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
             ipv4: "10.254.3.2".parse().unwrap(),
@@ -102,6 +106,8 @@ fn configuration() -> Config {
                 access_ssh: None,
             },
         )]),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: BTreeMap::new(),
     }
 }
 

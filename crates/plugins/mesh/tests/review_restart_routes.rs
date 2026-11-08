@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Comm
 /// A restart retires host routes of peers that are gone.
 #[test]
 #[ignore = "Run inside a dedicated user/network namespace with CAP_NET_ADMIN."]
+/// Removes orphan peer host routes after restart while retaining accepted routes.
 fn restart_retires_orphan_peer_host_routes() {
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-routes-{}", std::process::id()));
@@ -26,9 +27,9 @@ fn restart_retires_orphan_peer_host_routes() {
         authority_epoch: None,
         server: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         from_version: None,
         version: 1,
@@ -43,9 +44,9 @@ fn restart_retires_orphan_peer_host_routes() {
         upserted: BTreeMap::new(),
         merged: BTreeMap::new(),
         removed: Vec::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         removed_peer_names: Vec::new(),
     })
     .unwrap();

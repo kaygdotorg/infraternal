@@ -331,6 +331,10 @@ mod durable_state {
                     authority_epoch: None,
                     server: None,
                     node: NodeId(1),
+                    #[cfg(feature = "mesh")]
+                    name: None,
+                    #[cfg(feature = "mesh")]
+                    dns_suffix: "internal".to_owned(),
                     version: 1,
                     addresses: Addresses {
                         ipv4: "10.254.0.1".parse().unwrap(),
@@ -339,6 +343,8 @@ mod durable_state {
                     default_policy: DefaultPolicy::Allow,
                     exposure: None,
                     peers: std::collections::BTreeMap::new(),
+                    #[cfg(feature = "mesh")]
+                    peer_names: std::collections::BTreeMap::new(),
                 }),
                 authority_reset_pending: false,
                 backend: None,

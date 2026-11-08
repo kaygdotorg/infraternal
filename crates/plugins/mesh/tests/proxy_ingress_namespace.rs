@@ -91,13 +91,17 @@ fn configuration(granted_ports: &[u16]) -> Config {
     configuration_with(&[(3, granted_ports)])
 }
 
-/// Build a policy config with the requested per-peer ingress grants for namespace tests.
+/// Builds one node's snapshot with the requested peer port grants.
 fn configuration_with(grants: &[(u8, &[u16])]) -> Config {
     Config {
         authority_epoch: None,
         local_key: None,
         server: None,
         node: NodeId(1),
+        #[cfg(feature = "mesh-dns")]
+        name: None,
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
             ipv4: "10.254.0.1".parse().unwrap(),
@@ -109,6 +113,8 @@ fn configuration_with(grants: &[(u8, &[u16])]) -> Config {
         peers: std::iter::once(peer(2, tcp(&[3000])))
             .chain(grants.iter().map(|(id, ports)| peer(*id, tcp(ports))))
             .collect::<BTreeMap<_, _>>(),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: BTreeMap::new(),
     }
 }
 

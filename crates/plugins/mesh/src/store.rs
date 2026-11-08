@@ -39,7 +39,7 @@ struct Loaded {
     /// Durable key rotation phase per node; compiling a view rewrites peer keys from it.
     rotations: std::sync::Arc<BTreeMap<NodeId, RotationRecord>>,
     /// Synthetic unnamed labels remain reachable without creating DNS records.
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     dns_placeholders: std::sync::Arc<BTreeSet<NodeId>>,
 }
 
@@ -126,7 +126,7 @@ impl Snapshot {
             _ => storage_error("configuration compilation failed"),
         })?;
         config.authority_epoch = Some(self.loaded.authority_epoch.clone());
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         {
             if self.loaded.dns_placeholders.contains(&node) {
                 config.name = None;
@@ -628,7 +628,7 @@ impl Store {
 
     /// Use the configured server origin to derive the default proxy exposure suffix.
     ///
-    /// The optional Mesh DNS resolver remains controlled by `mesh-dns-spike`; carrying the public
+    /// The optional Mesh DNS resolver remains controlled by `mesh-dns`; carrying the public
     /// suffix here lets publication use the accepted coordinator identity in ordinary builds.
     /// An explicit Mesh suffix still takes precedence when that resolver feature is enabled.
     #[must_use]
@@ -1820,7 +1820,8 @@ impl Store {
             })
             .await
     }
-    /// Keep one writer snapshot, allocation rebuild and public persistence boundary together.
+    /// Loads coordinator and node records in one write transaction.
+    /// The shared snapshot keeps allocation repair and public configuration reads consistent.
     async fn load_uncached(&self) -> Result<Loaded, crate::api::MeshApiError> {
         let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
             .await
@@ -1859,11 +1860,11 @@ impl Store {
         .await
         .map_err(|error| storage_sql_error(error))?
         .flatten();
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         let nodes_query = sqlx::query(
             "SELECT id,name,name_source,public_key,dataplane_host,endpoint FROM mesh_nodes ORDER BY id",
         );
-        #[cfg(not(feature = "mesh-dns-spike"))]
+        #[cfg(not(feature = "mesh-dns"))]
         let nodes_query = sqlx::query(
             "SELECT id,name,public_key,dataplane_host,endpoint FROM mesh_nodes ORDER BY id",
         );
@@ -1873,7 +1874,7 @@ impl Store {
             .map_err(|error| storage_sql_error(error))?;
         let mut nodes = Vec::new();
         let mut endpoints = BTreeMap::new();
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         let mut dns_placeholders = BTreeSet::new();
         let mut server = None;
         let mut tags_by_node = std::collections::BTreeMap::<i64, BTreeSet<String>>::new();
@@ -1900,7 +1901,7 @@ impl Store {
                 .map_err(|error| storage_sql_error(error))?;
             let id =
                 NodeId(u64::try_from(raw_id).map_err(|_| storage_error("Mesh identity invalid."))?);
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             if row
                 .try_get::<String, _>("name_source")
                 .map_err(|error| storage_sql_error(error))?
@@ -1966,10 +1967,10 @@ impl Store {
                 .origin_dns_suffix
                 .as_deref()
                 .unwrap_or(crate::dataplane::DEFAULT_DNS_SUFFIX);
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             let changed = state.settings.dns_suffix == crate::dataplane::DEFAULT_DNS_SUFFIX
                 && previous != self.default_dns_suffix;
-            #[cfg(not(feature = "mesh-dns-spike"))]
+            #[cfg(not(feature = "mesh-dns"))]
             let changed = previous != self.default_dns_suffix;
             state.origin_dns_suffix = Some(self.default_dns_suffix.clone());
             changed
@@ -2226,7 +2227,7 @@ impl Store {
                 .map_err(|_| storage_error("Mesh revision invalid."))?,
             authority_epoch,
             rotations: std::sync::Arc::new(rotations),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_placeholders: std::sync::Arc::new(dns_placeholders),
         })
     }

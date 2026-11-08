@@ -129,17 +129,17 @@ fn compile_inner(
         .iter()
         .find(|member| member.node.id == node)
         .ok_or(MeshError::UnknownNode)?;
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let name = Some(local_member.node.host.clone());
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let dns_suffix = selected_dns_suffix(
         &checkpoint.settings.dns_suffix,
         checkpoint.settings.dns_suffix_is_explicit,
         default_dns_suffix,
     );
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let exposure_dns_suffix = dns_suffix.clone();
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     let exposure_dns_suffix = default_dns_suffix.to_owned();
     let fallback = if default == DefaultPolicy::Allow {
         TrafficPolicy::All
@@ -147,7 +147,7 @@ fn compile_inner(
         TrafficPolicy::None
     };
     let mut peers = BTreeMap::new();
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let mut peer_names = BTreeMap::new();
     let machine_name = local_member.node.host.clone();
     for member in &checkpoint.members {
@@ -169,7 +169,7 @@ fn compile_inner(
                 None,
             )
         };
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         if outbound != TrafficPolicy::None {
             // The same directional policy installed for this receiver decides whether it learns a name.
             peer_names.insert(other, member.node.host.clone());
@@ -199,9 +199,9 @@ fn compile_inner(
         local_key: Some(local_member.keys.current),
         server: Some(checkpoint.server),
         node,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix,
         version: checkpoint.generation,
         addresses: local,
@@ -211,12 +211,12 @@ fn compile_inner(
             dns_suffix: exposure_dns_suffix,
         }),
         peers,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names,
     })
 }
 
-#[cfg(any(feature = "mesh-dns-spike", test))]
+#[cfg(any(feature = "mesh-dns", test))]
 fn selected_dns_suffix(
     configured_suffix: &str,
     explicit: bool,
@@ -299,13 +299,13 @@ pub fn chunks(
             builder.peer(*node, peer)?;
         }
     }
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     for (node, name) in &new.peer_names {
         if base.and_then(|old| old.peer_names.get(node)) != Some(name) {
             builder.peer_name(*node, name)?;
         }
     }
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     for node in base
         .into_iter()
         .flat_map(|old| old.peer_names.keys())
@@ -342,9 +342,9 @@ pub(crate) fn chunk_header(new: &Config, from_version: Option<u64>) -> crate::da
         authority_epoch: new.authority_epoch.clone(),
         server: new.server,
         node: new.node,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: new.name.clone(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: new.dns_suffix.clone(),
         from_version,
         version: new.version,
@@ -356,9 +356,9 @@ pub(crate) fn chunk_header(new: &Config, from_version: Option<u64>) -> crate::da
         upserted: BTreeMap::new(),
         merged: BTreeMap::new(),
         removed: Vec::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         removed_peer_names: Vec::new(),
     }
 }
@@ -374,6 +374,7 @@ impl Chunks {
             .len()
             <= infraternal_plugin_api::MAX_ACTION_BYTES - 64)
     }
+    /// Stores a completed chunk and advances the next part while retaining revision identity.
     fn flush(&mut self, previous: crate::dataplane::Chunk) -> Result<(), &'static str> {
         self.part.index = self
             .part
@@ -383,9 +384,9 @@ impl Chunks {
         self.part.upserted.clear();
         self.part.merged.clear();
         self.part.removed.clear();
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         self.part.peer_names.clear();
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         self.part.removed_peer_names.clear();
         self.output.push(previous);
         Ok(())
@@ -429,7 +430,7 @@ impl Chunks {
         }
         Ok(())
     }
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     fn peer_name(&mut self, node: NodeId, name: &str) -> Result<(), &'static str> {
         let previous = self.part.clone();
         self.part.peer_names.insert(node, name.to_owned());
@@ -451,7 +452,7 @@ impl Chunks {
         }
         Err("Mesh name exceeds frame resource bound.")
     }
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     fn remove_peer_name(&mut self, node: NodeId) -> Result<(), &'static str> {
         let previous = self.part.clone();
         self.part.removed_peer_names.push(node);

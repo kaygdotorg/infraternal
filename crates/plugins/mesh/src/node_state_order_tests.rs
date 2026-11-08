@@ -6,7 +6,7 @@ use crate::{
     policy::model::{Addresses, NodeId},
 };
 
-/// Build persisted state at one mesh version for ordering and restart tests.
+/// Builds a stored node state at the supplied revision for ordering regressions.
 fn revision(version: u64) -> State {
     State {
         enabled: true,
@@ -15,9 +15,9 @@ fn revision(version: u64) -> State {
             local_key: None,
             server: None,
             node: NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version,
             addresses: Addresses {
@@ -31,7 +31,7 @@ fn revision(version: u64) -> State {
             },
             exposure: None,
             peers: std::collections::BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         }),
         authority_reset_pending: false,

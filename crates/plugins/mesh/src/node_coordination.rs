@@ -44,26 +44,34 @@ struct IdentityProbe {
 /// answer the previous rotation probe or legacy request without receiving a new chunk shape.
 /// Fallback replies keep epoch support unknown unless the full request was explicitly refused.
 async fn read_identity(channel: &dyn NodeChannel) -> Option<IdentityProbe> {
-    #[cfg(feature = "mesh-dns-spike")]
-    let (probe, without_epoch, before_rotation) = (
-        br#"{"compact_access":true,"dns_names":true,"key_rotation":true,"authority_epoch":true}"#
-            .as_slice(),
-        br#"{"compact_access":true,"dns_names":true,"key_rotation":true}"#.as_slice(),
-        br#"{"compact_access":true,"dns_names":true}"#.as_slice(),
-    );
-    #[cfg(not(feature = "mesh-dns-spike"))]
     let (probe, without_epoch, before_rotation) = (
         br#"{"compact_access":true,"key_rotation":true,"authority_epoch":true}"#.as_slice(),
         br#"{"compact_access":true,"key_rotation":true}"#.as_slice(),
         br#"{"compact_access":true}"#.as_slice(),
     );
-    probe_identity(
+    let mut identity = probe_identity(
         |input| channel.call("mesh.identity", input),
         probe,
         without_epoch,
         before_rotation,
     )
-    .await
+    .await?;
+    #[cfg(feature = "mesh-dns")]
+    {
+        identity.identity.dns_names = read_dns_names(channel).await;
+    }
+    Some(identity)
+}
+
+/// Requests DNS support on its own so a strict pre-DNS node can reject it without losing identity.
+#[cfg(feature = "mesh-dns")]
+async fn read_dns_names(channel: &dyn NodeChannel) -> bool {
+    channel
+        .call("mesh.identity", br#"{"dns_names":true}"#.to_vec())
+        .await
+        .ok()
+        .and_then(|reply| parse_identity(&reply))
+        .is_some_and(|identity| identity.dns_names)
 }
 
 /// Classify the identity and capabilities proved by each compatible request shape (J262, D166, D352).
@@ -181,7 +189,7 @@ pub async fn run(
     let mut current_identity: Option<Identity> = None;
     let mut compact_access = false;
     let mut authority_epoch_supported = None;
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let mut dns_names = false;
     let mut ack_retry: Option<(infraternal_mesh::model::NodeId, u64)> = None;
     let mut presence_updates = service.subscribe_presence();
@@ -207,7 +215,7 @@ pub async fn run(
                     .is_none()
                     .then(|| tokio::time::Instant::now() + UNKNOWN_SUPPORT_RETRY);
                 compact_access = identity.compact_access;
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 {
                     dns_names = identity.dns_names;
                 }
@@ -317,13 +325,13 @@ pub async fn run(
             // do not change packet policy. Keep the node's acknowledged version
             // as the delta base, avoiding an unchanged snapshot/fsync per node.
             let changed = old.as_ref().is_none_or(|old| {
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 let names_changed = old.name != config.name || old.peer_names != config.peer_names;
-                #[cfg(not(feature = "mesh-dns-spike"))]
+                #[cfg(not(feature = "mesh-dns"))]
                 let names_changed = false;
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 let dns_suffix_changed = old.dns_suffix != config.dns_suffix;
-                #[cfg(not(feature = "mesh-dns-spike"))]
+                #[cfg(not(feature = "mesh-dns"))]
                 let dns_suffix_changed = false;
                 old.server != config.server
                     || old.node != config.node
@@ -395,7 +403,7 @@ pub async fn run(
                     if !channel.supports_server_paths() {
                         chunk.server = None;
                     }
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     if !dns_names {
                         // Only negotiated resolvers receive host labels or a custom DNS zone.
                         chunk.name = None;
@@ -749,7 +757,7 @@ mod tests {
                     return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
                         Identity {
                             compact_access: false,
-                            #[cfg(feature = "mesh-dns-spike")]
+                            #[cfg(feature = "mesh-dns")]
                             dns_names: false,
                             key_rotation,
                             authority_epoch,
@@ -798,7 +806,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(chunk.authority_epoch.clone());
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 {
                     assert!(chunk.name.is_none());
                     assert!(chunk.peer_names.is_empty());
@@ -1707,7 +1715,7 @@ mod tests {
     fn identity_reply(key_rotation: bool) -> Vec<u8> {
         serde_json::to_vec(&Some(Identity {
             compact_access: false,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             key_rotation,
             authority_epoch: false,
@@ -1721,7 +1729,7 @@ mod tests {
     fn epoch_identity_reply() -> Vec<u8> {
         serde_json::to_vec(&Some(Identity {
             compact_access: false,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             key_rotation: true,
             authority_epoch: true,
@@ -2418,3 +2426,8 @@ mod tests {
         );
     }
 }
+
+/// Checks that DNS capability negotiation leaves legacy identity probes intact.
+#[cfg(all(test, feature = "mesh-dns"))]
+#[path = "review_j354_identity.rs"]
+mod review_j354_identity;

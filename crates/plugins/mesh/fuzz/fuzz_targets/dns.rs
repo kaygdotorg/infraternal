@@ -36,6 +36,7 @@ fn config() -> Config {
                 .expect("valid fixture address"),
         },
         default_policy: DefaultPolicy::Allow,
+        exposure: None,
         peers: BTreeMap::new(),
         peer_names: BTreeMap::new(),
     }
