@@ -25,6 +25,7 @@ import { icon, ICON_ALERT, ICON_CIRCLE_CHECK, ICON_INFO } from "./icons";
 export type StatusState = "idle" | "ok" | "error";
 export interface StatusLine { set(state: StatusState, text: string): void }
 
+/** The stylesheet of the status line, injected once on first use; every length is in rem and every transition reads a token from styles.css. */
 const STYLE = `
 .ui-status-line { display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; }
 .ui-status-icons { position: relative; display: inline-grid; flex: none; height: 1lh; align-items: center; }
