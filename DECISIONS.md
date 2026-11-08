@@ -4305,3 +4305,82 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      closing idle terminals without asking, and keeping the refusal with
      instructions for closing them by hand. minipc01 is kept as it is so the
      fix is proven on the real machine.
+
+369. **Forget a host stuck as "retired, unreachable" (owner, 2026-11-08,
+     J249 P3-3):** a host removed while offline whose certificate expires
+     before it reconnects can never receive its cleanup, so it stayed listed
+     forever. The owner chose "\"Forget\" action": an owner-only Forget on
+     the row removes it from the list, and its audit record stays. Rejected:
+     hiding it automatically once its certificate expires, and listing it
+     forever.
+
+370. **Scoped join keys, the #340 design questions (owner grill,
+     2026-11-08; refines D342, D343, D311, D337):** answered inline, all as
+     recommended unless marked.
+     - Scope `hosts:join`. A join key may also hold read scopes, never
+       write. The owner first asked: "so in this case if a machine joins with
+       join only, how do they get perms to reach other hosts?" (answer: a
+       key's scopes are API permissions; a joined machine reaches what the
+       tags the key assigns are granted).
+     - Owner of a key-joined machine: the creator in community, any person
+       in EE, or "Shared (nobody)" with at least one tag; the owner field
+       still records who added it.
+     - Use limit: one-time, at most N machines, or unlimited.
+     - Install mode is a per-key choice of system, user or both; both on
+       by default.
+     - A tag deleted before a join refuses the join and names the tag.
+     - Ephemeral machines are removed after 1 h offline by default
+       (choices 10 min, 1 h, 24 h, 7 d); a server restart gives every
+       machine a full window again.
+     - The secret is never returned to an AI agent: over MCP it shows only
+       on the approval page after the tap; the local CLI writes it to a
+       0600 file and returns the path.
+     - "Never expires" keys get a separate inactivity setting (owner's
+       choice; the recommendation was no inactivity end plus a 90-day
+       reminder).
+     - New keys use an `ifk_` prefix with a checksum; existing keys keep
+       working.
+     - A key file readable by others warns; a world-writable one is
+       refused.
+     - A one-time key is spent when its receipt is issued; a retry with the
+       same machine key gets the same receipt, and an expired unredeemed
+       receipt gives the use back.
+     - A key join takes over another server's broken install automatically,
+       following D337 (owner's choice; the recommendation was only with
+       `--take-over`).
+     - Rate limits: per key a burst of 10, then 1 every 6 s; per network 4x
+       the approval caps (20 per address or /64, 128 per /24 or /48, per
+       minute).
+     - The server stores each key's networks (IPv4 /24, IPv6 /48) with
+       first and last seen for 30 days. The owner asked first: "this needs
+       a bit more refining? what would knowing the network do here and how
+       would the warning look?" Joins are reported as one Inbox item per key
+       every 10 minutes, highlighted when the key is used from a network it
+       has not used before, naming that network and the key's usual ones.
+     - The keys list has fixed groups (Join keys, Sign-in keys, Ended
+       collapsed) and one filter field that turns words into chips.
+     - Removing every machine a key joined runs in the 15-minute admin
+       window, with the exact list in the confirmation.
+     - Keys never change after creation for now: create a new one and
+       revoke the old.
+     - Key-joined machines reach by default only what their tags are
+       granted; a per-key "Can reach: everything / only what its tags
+       allow" can widen it.
+     - No per-key source-network limit now; an "Only from" list may come as
+       a later slice.
+
+371. **Scopes for every area, an admin scope, and approval links over MCP
+     (owner, 2026-11-08; extends D333, D339):** the owner asked: "can't i
+     give my agent an admin key and have it manage everything in
+     infraternal for me without passkey taps? i am genuinely asking. yes we
+     should block imopratnt actions behind it but over mcp, we should
+     provide a way for the agent to get approval links from the server and
+     send them to me (the user)." Keys had only hosts, sessions, status and
+     terminal scopes. Decided: read and write scopes for every area
+     (settings, people, access rules, tags, mesh, keys) plus `admin`,
+     meaning all of them. Inside its scopes a key acts with no tap (D333).
+     Every action on D333's tap-each-time list, requested over MCP, answers
+     "approval needed" with a link the AI agent passes to the person, as
+     D339 does for root installs. `keys:write` revokes keys without a tap
+     and requests new ones only through an approval link. Rejected: one
+     `admin` scope on top of today's six.
