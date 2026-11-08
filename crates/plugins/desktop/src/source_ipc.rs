@@ -297,10 +297,10 @@ impl Reader {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod readiness_tests {
-    //! Holds a socket between `bind` and `listen`, so the startup window is
-    //! tested directly rather than by hoping the scheduler lands in it.
+    //! Linux socket-flag readiness test: hold a socket between `bind` and
+    //! `listen` to check startup without depending on scheduler timing.
     use super::*;
     use nix::sys::socket::{
         AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket,
