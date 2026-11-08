@@ -41,7 +41,7 @@ async function removeOffline(page: Page, hostCleanup: "unreachable" | "pending")
   await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("Remove host: offline-worker");
   await page.getByRole("option").filter({ hasText: "Remove host: offline-worker" }).click();
-  await page.getByRole("button", { name: "Remove host", exact: true }).click();
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
   return manual;
 }
 
