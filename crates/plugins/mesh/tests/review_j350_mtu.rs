@@ -195,7 +195,7 @@ fn full_peer_update_refreshes_existing_peer_route_mtu() {
     let added = ip(&["route", "show", "exact", "10.254.0.3/32"]);
     node.down().unwrap();
     println!("before={before}after={after}new_peer={added}");
-    assert!(before.contains("mtu 1420"), "{before}");
+    assert!(before.contains("mtu 1408"), "{before}");
     assert!(added.contains("mtu 1200"), "{added}");
     assert!(
         after.contains("mtu 1200"),
@@ -236,7 +236,7 @@ fn access_only_update_refreshes_existing_peer_route_mtu() {
     let after = ip(&["route", "show", "exact", "10.254.0.2/32"]);
     node.down().unwrap();
     println!("before={before}after_access_only_update={after}");
-    assert!(before.contains("mtu 1420"), "{before}");
+    assert!(before.contains("mtu 1408"), "{before}");
     assert!(
         after.contains("mtu 1200"),
         "unchanged peer kept an unsafe route budget: {after}"
