@@ -177,14 +177,16 @@ test("the close toast teaches once per sign-in, in the first five sign-ins only"
       await page.evaluate(() => {
         const w = window as unknown as { __toasts: string[] };
         w.__toasts = [];
-        // The toast host is one element that is revealed and re-filled, so a show is "revealed" or "text changed while shown".
-        const host = document.querySelector(".ui-toast") as HTMLElement;
-        let was = !host.hidden, last = "";
-        new MutationObserver(() => {
-          const now = !host.hidden, text = host.querySelector(".ui-toast-message")?.textContent ?? "";
-          if (now && text && (!was || text !== last)) w.__toasts.push(text);
-          was = now; last = text;
-        }).observe(host, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
+        // Toasts stack (D336): each show is a card of its own, so a show is a card the first time it has text, or a card whose
+        // text changed while it stayed (a repeat of the same message only counts up beside it and is not a new show).
+        const known = new WeakMap<Element, string>();
+        const scan = (): void => {
+          for (const card of document.querySelectorAll(".ui-toast")) {
+            const text = card.querySelector(".ui-toast-message")?.textContent ?? "";
+            if (text && known.get(card) !== text) { known.set(card, text); w.__toasts.push(text); }
+          }
+        };
+        new MutationObserver(scan).observe(document.body, { childList: true, subtree: true, characterData: true });
       });
       const seen = (): Promise<string[]> => page.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts);
       await windowOf(page, "build-01").locator("[data-action='close']").click();
