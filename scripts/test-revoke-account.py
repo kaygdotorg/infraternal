@@ -109,6 +109,7 @@ def prove(binary, scenario="sessions"):
                 print(json.dumps(dict(scenario=scenario, pid=pid, cgroup=cgroup, reply=reply)), flush=True)
                 assert pid in processes(uid), 'revocation killed a system-owned process'
                 assert report['privileged'] is False, report
+                assert set(report['root_checks']) == {'sudo', 'doas', 'polkit', 'admin groups'}, report
                 assert report['state'] == 'not_checked', report
                 assert report['reason'] == 'programs_may_remain', report
                 assert any(row.startswith(f'{pid} ') for row in report['processes']), report

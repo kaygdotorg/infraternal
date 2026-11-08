@@ -580,6 +580,7 @@ async fn the_owner_reads_a_removal_access_report_once_the_host_confirms() {
         accounts: vec![AccountReport {
             account: "deploy".to_owned(),
             recorded_at: 1,
+            root_checks: infraternal_agent::access_files::root_check_names(),
             state: State::Changed,
             reason: None,
             files: vec![AccessFile {

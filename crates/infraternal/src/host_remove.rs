@@ -190,7 +190,15 @@ fn report_result(host: Uuid, value: &Value, machine: bool) -> CommandResult<Valu
 /// D360: the owner-facing words for an account (or host) that was checked
 /// and where nothing was found: what was watched and since when, never
 /// "unchanged". The only place this sentence is built.
-fn no_changes_found(places: u64, categories: &[String], since: Option<String>) -> String {
+fn no_changes_found(
+    places: u64,
+    categories: &[String],
+    since: Option<String>,
+    root_checks: &[String],
+) -> String {
+    let Some((last, preceding)) = root_checks.split_last() else {
+        return "Not checked: root access was not verified".to_owned();
+    };
     let mut sentence = format!(
         "No changes found in the {places} {} we watch",
         if places == 1 { "place" } else { "places" }
@@ -204,7 +212,26 @@ fn no_changes_found(places: u64, categories: &[String], since: Option<String>) -
         sentence.push_str(" since ");
         sentence.push_str(&since);
     }
+    sentence.push_str(". They had no root access through ");
+    if !preceding.is_empty() {
+        sentence.push_str(&preceding.join(", "));
+        sentence.push_str(" or ");
+    }
+    sentence.push_str(last);
     sentence
+}
+
+/// The root routes the host actually checked for this account. No names are
+/// supplied by the CLI: older reports cannot gain evidence on presentation.
+fn root_checks_of(account: &Value) -> Vec<String> {
+    account["root_checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The categories in `account`'s report.
@@ -296,15 +323,20 @@ fn report_message(value: &Value) -> (CommandState, String) {
                 .filter(|seconds| *seconds > 0)
                 .max()
                 .and_then(utc);
+            let mut root_checks = accounts().next().map_or_else(Vec::new, root_checks_of);
+            for account in accounts() {
+                let checks = root_checks_of(account);
+                root_checks.retain(|check| checks.contains(check));
+            }
             if value["more"].as_u64().unwrap_or(0) > 0 {
-                return (CommandState::Ready, "No changes found; per-account coverage is shown below, with more reports not shown.".to_owned());
+                return (CommandState::Ready, "The reports below name their checked places and root access routes; more reports are not shown.".to_owned());
             }
             if since.is_none() || accounts().any(|a| a["recorded_at"].as_u64().filter(|t| *t > 0).and_then(utc).is_none()) {
                 return (CommandState::Ready, "The host's access files were not fully checked; the time access was granted is missing.".to_owned());
             }
             (
                 CommandState::Ready,
-                format!("{}.", no_changes_found(places, &categories, since)),
+                format!("{}.", no_changes_found(places, &categories, since, &root_checks)),
             )
         }
         Some("reported") => (
@@ -403,6 +435,7 @@ fn account_lines(account: &Value, lines: &mut Vec<String>, files_shown: &mut boo
             account["watched"].as_u64().unwrap_or(0),
             &categories_of(account),
             since.clone(),
+            &root_checks_of(account),
         ),
         Some("unchanged") => reason_words("record_missing").to_owned(),
         _ => reason_words(account["reason"].as_str().unwrap_or("")).to_owned(),
@@ -670,6 +703,7 @@ mod tests {
             {"person_id": host, "state": "unchanged", "accounts": [
                 {"account": "me", "state": "unchanged", "files": [], "truncated": false, "unscanned": [], "omitted_files": 0,
                  "complete": true, "watched": 214, "places": 22, "categories": ["SSH keys", "cron and at jobs", "user services", "shell startup files"],
+                 "root_checks": ["sudo", "doas", "polkit", "admin groups"],
                  "recorded_at": 1_700_000_000_u64, "scanned_at": 1_700_000_100_u64}
             ]}
         ]});
@@ -689,7 +723,8 @@ mod tests {
         let account = |name: &str, watched: u64, recorded_at: u64| {
             serde_json::json!({
                 "account": name, "state": "unchanged", "watched": watched,
-                "places": 1, "categories": ["SSH keys"], "recorded_at": recorded_at
+                "places": 1, "categories": ["SSH keys"], "recorded_at": recorded_at,
+                "root_checks": ["sudo", "doas", "polkit", "admin groups"]
             })
         };
         let value = serde_json::json!({"state":"reported", "outcome":"unchanged", "reports":[
@@ -699,6 +734,41 @@ mod tests {
         let (_, message) = super::report_message(&value);
         assert!(message.contains("56 places"), "{message}");
         assert!(message.contains("22:15 UTC"), "{message}");
+    }
+
+    /// The displayed root routes come from the host's actual result, so a new
+    /// check needs no second list in the presentation code.
+    #[test]
+    fn clean_report_names_the_root_checks_that_ran() {
+        let value = serde_json::json!({"state":"reported", "outcome":"unchanged", "reports":[
+            {"state":"unchanged", "accounts":[{
+                "account":"deploy", "state":"unchanged", "watched":30,
+                "recorded_at":1_700_000_000_u64,
+                "root_checks":["sudo", "doas", "polkit", "admin groups", "custom permission check"]
+            }]}
+        ]});
+        let (_, message) = super::report_message(&value);
+        let root_sentence = "They had no root access through sudo, doas, polkit, admin groups or custom permission check.";
+        assert!(message.contains(root_sentence), "{message}");
+        let body = super::report_body(&value).unwrap();
+        assert!(body.contains(root_sentence), "{body}");
+    }
+
+    /// A historical result with no root-check evidence cannot gain the new
+    /// clean sentence merely because this CLI knows about more checks.
+    #[test]
+    fn missing_root_checks_never_read_as_clean() {
+        let value = serde_json::json!({"state":"reported", "outcome":"unchanged", "reports":[
+            {"state":"unchanged", "accounts":[{
+                "account":"deploy", "state":"unchanged", "watched":30,
+                "recorded_at":1_700_000_000_u64
+            }]}
+        ]});
+        let (_, message) = super::report_message(&value);
+        assert!(!message.contains("No changes found"), "{message}");
+        let body = super::report_body(&value).unwrap();
+        assert!(!body.contains("No changes found"), "{body}");
+        assert!(body.contains("Not checked"), "{body}");
     }
 
     /// Older replies without a grant time cannot produce a clean sentence.

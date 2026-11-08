@@ -128,6 +128,14 @@ pub(crate) fn categories() -> Vec<String> {
 /// an older agent, and the server never vouches for it.
 pub const WATCHED_PLACES: usize = WATCHED.len();
 
+/// Names of the root routes the current detector checks. This is registry
+/// metadata, not an inspection: a host attaches it only after every check
+/// completed negatively. The server uses it to reject missing check evidence.
+#[must_use]
+pub fn root_check_names() -> Vec<String> {
+    crate::access_privilege::check_names()
+}
+
 /// Every place D356 watches, in scan order: what admits a login first, then
 /// what runs without one, then what runs at a login. A report covers
 /// `WATCHED.len()` places; a place not in this table is not watched, and
@@ -451,6 +459,10 @@ pub struct AccountReport {
     /// The categories watched, in plain words (D360).
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Root routes actually ruled out by this scan, from the check registry.
+    /// Empty for privileged, rootless and historical reports without evidence.
+    #[serde(default)]
+    pub root_checks: Vec<String>,
     /// Root, or may become root.
     #[serde(default)]
     pub privileged: bool,
@@ -486,6 +498,7 @@ impl AccountReport {
             watched: 0,
             places: 0,
             categories: Vec::new(),
+            root_checks: Vec::new(),
             privileged: false,
             shared: false,
             programs_may_remain: false,
@@ -1492,6 +1505,7 @@ fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> 
         watched: ended.watched,
         places: ended.places,
         categories: categories(),
+        root_checks: Vec::new(),
         privileged: false,
         shared: false,
         programs_may_remain: false,
@@ -2014,6 +2028,11 @@ pub(crate) fn since_grant(
         report.programs_may_remain = known.programs_may_remain;
         report.processes = known.processes;
         report.privileged = known.privileged;
+        report.root_checks = if !rootless && !known.privileged {
+            root_check_names()
+        } else {
+            Vec::new()
+        };
         report.decide(rootless);
         accounts.push(report);
     }

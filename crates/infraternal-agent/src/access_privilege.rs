@@ -20,6 +20,57 @@ const ROOT_GROUPS: &[&str] = &[
 /// makes the result unknown, which is privileged, without logging its content.
 const OUTPUT_BYTES: u64 = 64 * 1024;
 
+/// A root route and its owner-facing name. The same registry executes policy
+/// checks and supplies the completed-check evidence in a negative report.
+struct RootCheck {
+    /// Plain name displayed in the access report.
+    name: &'static str,
+    /// True means root authority is present or could not be ruled out.
+    inspect: fn(&User) -> bool,
+}
+
+/// Known root routes, ordered to avoid subprocess work for obvious privilege.
+/// Adding a route here also updates report evidence and server requirements.
+const ROOT_CHECKS: &[RootCheck] = &[
+    RootCheck {
+        name: "admin groups",
+        inspect: root_group_or_unknown,
+    },
+    RootCheck {
+        name: "doas",
+        inspect: doas_route,
+    },
+    RootCheck {
+        name: "polkit",
+        inspect: crate::access_polkit::privileged,
+    },
+    RootCheck {
+        name: "sudo",
+        inspect: sudo_route,
+    },
+];
+
+/// Names of the registered checks. Only a completed negative inspection may
+/// attach these as evidence; privileged or rootless reports carry no such claim.
+pub(crate) fn check_names() -> Vec<String> {
+    ROOT_CHECKS
+        .iter()
+        .map(|check| check.name.to_owned())
+        .collect()
+}
+
+/// Inspect the host doas configuration from the registry's account callback.
+fn doas_route(_account: &User) -> bool {
+    doas_allows_or_unknown(Path::new("/etc/doas.conf"))
+}
+
+/// Run sudo's bounded asynchronous query from the scan's blocking worker.
+fn sudo_route(account: &User) -> bool {
+    tokio::runtime::Handle::try_current().map_or(true, |runtime| {
+        runtime.block_on(sudo_allows_or_unknown(&account.name))
+    })
+}
+
 /// Recognize only sudo's explicit C-locale denial with no diagnostics. Some
 /// hosts return zero for this denial, others one; every other status or output
 /// is unknown or permits a command, and therefore cannot prove lack of power.
@@ -140,17 +191,10 @@ fn root_group_or_unknown(account: &User) -> bool {
 /// the access scan's blocking worker with a Tokio runtime available. Rootless
 /// reports already have their own unverified outcome and never call this.
 pub(crate) fn privileged(account: &User) -> bool {
-    if account.uid.is_root()
-        || !Uid::effective().is_root()
-        || root_group_or_unknown(account)
-        || doas_allows_or_unknown(Path::new("/etc/doas.conf"))
-        || crate::access_polkit::privileged(account)
-    {
+    if account.uid.is_root() || !Uid::effective().is_root() {
         return true;
     }
-    tokio::runtime::Handle::try_current().map_or(true, |runtime| {
-        runtime.block_on(sudo_allows_or_unknown(&account.name))
-    })
+    ROOT_CHECKS.iter().any(|check| (check.inspect)(account))
 }
 
 #[cfg(test)]

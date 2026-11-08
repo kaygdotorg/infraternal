@@ -151,6 +151,9 @@ pub(crate) struct AccountReport {
     /// The categories watched, in plain words (D360).
     #[serde(default)]
     pub(crate) categories: Vec<String>,
+    /// Root routes the host actually ruled out, never inferred by the server.
+    #[serde(default)]
+    pub(crate) root_checks: Vec<String>,
     /// Root, or may become root.
     #[serde(default)]
     pub(crate) privileged: bool,
@@ -308,6 +311,7 @@ impl AccessReport {
         }
         let mut files_left = FILES;
         let mut lines_left = LINES;
+        let mut root_check_bytes = STORED_BYTES / 8;
         for account in &mut self.accounts {
             let mut cut = account.truncated;
             account.account = printable(&account.account, ACCOUNT_CHARS, &mut cut);
@@ -329,6 +333,22 @@ impl AccessReport {
             for category in &mut account.categories {
                 *category = printable(category, ACCOUNT_CHARS, &mut ignored);
             }
+            if account.root_checks.len() > CATEGORIES {
+                account.root_checks.truncate(CATEGORIES);
+                cut = true;
+            }
+            for check in &mut account.root_checks {
+                *check = printable(check, ACCOUNT_CHARS, &mut cut);
+            }
+            account.root_checks.retain(|check| {
+                if let Some(left) = root_check_bytes.checked_sub(check.len()) {
+                    root_check_bytes = left;
+                    true
+                } else {
+                    cut = true;
+                    false
+                }
+            });
             if account.files.len() > files_left {
                 let dropped = account.files.len() - files_left;
                 account.files.truncate(files_left);
@@ -377,7 +397,15 @@ impl AccessReport {
     pub(crate) fn decided(mut self, rootless: bool) -> Self {
         let watched =
             u64::try_from(infraternal_agent::access_files::WATCHED_PLACES).unwrap_or(u64::MAX);
+        let required_checks = infraternal_agent::access_files::root_check_names();
         for account in &mut self.accounts {
+            // An old or incomplete reply cannot claim checks merely because
+            // this server knows how to run them in its embedded host runtime.
+            account.privileged |= !rootless
+                && account.recorded_at > 0
+                && required_checks
+                    .iter()
+                    .any(|check| !account.root_checks.contains(check));
             account.programs_may_remain |= !account.processes.is_empty();
             let reason = if rootless {
                 Some(Reason::RootlessUnverified)
@@ -484,6 +512,14 @@ impl AccessReport {
         }
         for account in self.accounts.iter_mut().rev() {
             if account.unscanned.pop().is_some() {
+                account.truncated = true;
+                return true;
+            }
+        }
+        for account in self.accounts.iter_mut().rev() {
+            if account.root_checks.pop().is_some() {
+                // Missing evidence is privileged when decided; never shorten
+                // the claim without invalidating the account's clean result.
                 account.truncated = true;
                 return true;
             }
@@ -633,6 +669,7 @@ mod tests {
                 files,
                 complete: true,
                 watched: u64::try_from(infraternal_agent::access_files::WATCHED_PLACES).unwrap(),
+                root_checks: infraternal_agent::access_files::root_check_names(),
                 ..AccountReport::default()
             }],
             warning: None,
@@ -780,6 +817,37 @@ mod tests {
         let lines: Vec<&str> = std::iter::repeat_n(long.as_str(), LINES + 1).collect();
         let cut = report(State::Unchanged, vec![file("~/.zshrc", &lines)]).bounded();
         assert!(cut.accounts[0].truncated);
+    }
+
+    /// Old saved reports have no evidence that newly added root routes ran.
+    #[test]
+    fn missing_root_check_evidence_cannot_be_clean() {
+        let sent = serde_json::to_value(report(State::Unchanged, vec![])).unwrap();
+        let mut legacy = sent;
+        legacy["accounts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("root_checks");
+        let received: AccessReport = serde_json::from_value(legacy).unwrap();
+        assert_eq!(received.decided(false).state, State::NotChecked);
+    }
+
+    /// A partial check list cannot hide the missing route, even with files to
+    /// show. Malformed display names stay bounded and cannot drive a terminal.
+    #[test]
+    fn root_check_evidence_is_complete_printable_and_bounded() {
+        let mut partial = report(State::Unchanged, vec![file("~/.bashrc", &["id"])]);
+        partial.accounts[0].root_checks.pop();
+        let partial = partial.decided(false);
+        assert_eq!(partial.accounts[0].reason, Some(Reason::Privileged));
+        assert_eq!(partial.accounts[0].state, State::NotChecked);
+        assert_eq!(partial.accounts[0].files.len(), 1);
+        let mut sent = report(State::Unchanged, vec![]);
+        sent.accounts[0].root_checks = vec!["sudo\u{1b}[2J".repeat(100); 100];
+        let kept = sent.bounded().decided(false);
+        assert!(kept.accounts[0].root_checks.len() <= CATEGORIES);
+        assert!(!kept.json().contains('\u{1b}'));
+        assert_eq!(kept.state, State::NotChecked);
     }
 
     /// A missing baseline cannot justify a since-time or a clean result.
