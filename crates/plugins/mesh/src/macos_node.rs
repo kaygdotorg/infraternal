@@ -1899,6 +1899,12 @@ impl Node {
         self.enabled && self.identity.is_some() && self.worker.is_some()
     }
 
+    /// Whether a retired authority still needs a complete snapshot from the enrolled server.
+    #[must_use]
+    pub fn awaiting_server_snapshot(&self) -> bool {
+        self.authority_reset_pending
+    }
+
     #[must_use]
     pub fn stopping(&self) -> bool {
         !self.enabled && self.worker.is_some()

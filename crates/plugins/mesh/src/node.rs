@@ -772,6 +772,11 @@ impl Node {
     pub fn active(&self) -> bool {
         self.identity.is_some()
     }
+    /// Whether a retired authority still needs a complete snapshot from the enrolled server.
+    #[must_use]
+    pub fn awaiting_server_snapshot(&self) -> bool {
+        self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
+    }
     /// Apply the proxy's Mesh routes and public gate to the owned firewall.
     ///
     /// `confirmed` is true only when Traefik has confirmed a route snapshot rendered from the

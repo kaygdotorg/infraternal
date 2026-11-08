@@ -606,7 +606,18 @@ impl AgentPlugin for MeshNodePlugin {
                     json!({"state":"Off","version":null})
                 }
                 Request::Status => {
-                    let mut status = json!({"state":if node.stopping() {"Stopping"} else if !node.enabled() {"Off"} else if node.active() && node.config().is_some() {"On"} else {"Waiting"},"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node)});
+                    let state = if node.stopping() {
+                        "Stopping"
+                    } else if !node.enabled() {
+                        "Off"
+                    } else if node.awaiting_server_snapshot() {
+                        "Waiting"
+                    } else if node.active() && node.config().is_some() {
+                        "On"
+                    } else {
+                        "Waiting"
+                    };
+                    let mut status = json!({"state":state,"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node)});
                     if let Some(probe) = &self.proxy_containment {
                         let (kind, detail) = probe();
                         status["proxy_containment"] = json!({"kind": kind, "detail": detail});
@@ -750,6 +761,77 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    /// A refused epoch downgrade leaves a peer-free node waiting for a trusted server snapshot.
+    #[test]
+    #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
+    fn refused_epoch_downgrade_reports_waiting_for_server() {
+        use crate::{
+            dataplane::{DefaultPolicy, Identity},
+            policy::model::{Addresses, NodeId},
+        };
+
+        let mut plugin = MeshNodePlugin::default();
+        let identity: Identity = serde_json::from_slice(
+            &plugin.call("mesh.up", b"{}").expect("mesh up"),
+        )
+        .expect("public identity");
+        let accepted = Chunk {
+            access_updates: Vec::new(),
+            authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            server: Some(NodeId(2)),
+            local_key: Some(identity.public_key),
+            node: NodeId(1),
+            #[cfg(feature = "mesh-dns")]
+            name: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            from_version: None,
+            version: 1,
+            index: 0,
+            last: true,
+            addresses: Addresses {
+                ipv4: "10.254.0.1".parse().expect("IPv4"),
+                ipv6: "fd01::1".parse().expect("IPv6"),
+            },
+            default_policy: DefaultPolicy::Deny,
+            exposure: None,
+            upserted: std::collections::BTreeMap::new(),
+            merged: std::collections::BTreeMap::new(),
+            removed: Vec::new(),
+            #[cfg(feature = "mesh-dns")]
+            peer_names: std::collections::BTreeMap::new(),
+            #[cfg(feature = "mesh-dns")]
+            removed_peer_names: Vec::new(),
+        };
+        plugin
+            .call(
+                "mesh.configure",
+                &serde_json::to_vec(&accepted).expect("accepted snapshot"),
+            )
+            .expect("accept epoch snapshot");
+        let mut downgrade = accepted;
+        downgrade.authority_epoch = None;
+        downgrade.version = 2;
+        assert!(
+            plugin
+                .call(
+                    "mesh.configure",
+                    &serde_json::to_vec(&downgrade).expect("downgrade snapshot"),
+                )
+                .is_err(),
+            "an epoch-bound node must refuse an epoch-less snapshot"
+        );
+
+        let status: serde_json::Value = serde_json::from_slice(
+            &plugin.call("mesh.status", b"{}").expect("mesh status"),
+        )
+        .expect("status JSON");
+        assert_eq!(status["state"], "Waiting");
+        assert_eq!(status["peer_count"], 0);
+        plugin.call("mesh.down", b"{}").expect("mesh down");
+    }
+
     /// Keeps kernel setup, staged intent and explicit cleanup in one namespace owner.
     #[test]
     #[ignore = "Run inside a dedicated kernel namespace with CAP_NET_ADMIN."]
