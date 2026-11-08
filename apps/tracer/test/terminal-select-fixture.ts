@@ -30,6 +30,8 @@ export async function openTerminal(browser: Browser, theme: string, touch?: { wi
     ? { viewport: touch, deviceScaleFactor: 3, hasTouch: true, isMobile: true, colorScheme: theme === "ink" ? "dark" : "light", permissions: ["clipboard-read", "clipboard-write"] }
     : { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1, colorScheme: theme === "ink" ? "dark" : "light", permissions: ["clipboard-read", "clipboard-write"] });
   const page = await context.newPage();
+  // A stuck action fails with its call log in half a minute instead of running out the whole test's time.
+  page.setDefaultTimeout(30_000);
   const cdp = touch ? await context.newCDPSession(page) : undefined;
   await context.request.post("/__mock/reset");
   await context.request.post("/__mock/open-terminal");
@@ -103,4 +105,46 @@ export function boxOf(page: Page, selector: string): Promise<Box | undefined> {
     const r = el.getBoundingClientRect();
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   }, selector);
+}
+
+/**
+ * Waits until the element matching `selector` has stopped moving and fading: its box and opacity identical for 10 animation
+ * frames in a row. (Not `document.getAnimations()`: some animations on the page are paused and never finish.)
+ */
+export async function settled(page: Page, selector: string): Promise<void> {
+  await page.evaluate((s) => new Promise<void>((resolve) => {
+    let last = "", still = 0;
+    const tick = (): void => {
+      const el = document.querySelector(s);
+      const key = el ? `${[...Object.values(el.getBoundingClientRect().toJSON() as Record<string, number>)].join()}|${getComputedStyle(el).opacity}` : "";
+      still = key && key === last ? still + 1 : 0;
+      last = key;
+      if (still >= 10) resolve(); else requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }), selector);
+}
+
+/**
+ * How much a screenshot varies along a thin strip: the mean absolute luminance step between horizontally neighbouring pixels
+ * (0 to 255; for a vertical strip, between vertically neighbouring ones). A strip over a flat colour or a heavy blur is near 0; one with text showing through it is several. `png` is a
+ * screenshot of the whole page and `strip` a box in CSS pixels: cropping the screenshot already taken, not capturing a clip,
+ * because a clipped capture is composited on its own and does not show the same glass.
+ */
+export async function detailAbove(page: Page, png: Buffer, strip: { x: number; y: number; width: number; height: number }, vertical = false): Promise<number> {
+  return page.evaluate(async ([base64, box, along]) => {
+    const bitmap = await createImageBitmap(await (await fetch(`data:image/png;base64,${base64}`)).blob());
+    const scale = bitmap.width / window.innerWidth;
+    const [sx, sy, sw, sh] = [box.x * scale, box.y * scale, Math.floor(box.width * scale), Math.floor(box.height * scale)].map(Math.round) as [number, number, number, number];
+    const canvas = new OffscreenCanvas(sw, sh);
+    const context = canvas.getContext("2d")!;
+    context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+    const { data, width, height } = context.getImageData(0, 0, sw, sh);
+    const luminance = (i: number): number => 0.2126 * data[i]! + 0.7152 * data[i + 1]! + 0.0722 * data[i + 2]!;
+    let total = 0, count = 0;
+    // Steps are taken along the strip: between horizontal neighbours, or for a vertical strip between vertical ones.
+    const [stepX, stepY] = along ? [0, 1] : [1, 0];
+    for (let y = 0; y + stepY < height; y++) for (let x = 0; x + stepX < width; x++) { total += Math.abs(luminance(((y + stepY) * width + x + stepX) * 4) - luminance((y * width + x) * 4)); count++; }
+    return count ? total / count : 0;
+  }, [png.toString("base64"), strip, vertical] as const);
 }

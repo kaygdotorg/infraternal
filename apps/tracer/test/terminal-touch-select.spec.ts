@@ -20,7 +20,7 @@
 import { mkdirSync } from "node:fs";
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
-import { boxOf, CALLOUT, cellCentre, hold, longPress, openTerminal, selected, show, SIZES, THEMES, touch, WINDOW } from "./terminal-select-fixture";
+import { boxOf, CALLOUT, cellCentre, columns, detailAbove, hold, longPress, openTerminal, selected, settled, show, SIZES, THEMES, touch, WINDOW } from "./terminal-select-fixture";
 
 /** Where this spec writes its captures (the external evidence directory). */
 const OUT = tracerEvidencePath("terminal-touch-select");
@@ -145,6 +145,72 @@ for (const size of SIZES) {
         await longPress(page, cdp!, { x: canvas.left - 6, y: row.y });
         expect(await selected(page), "padding selects nothing").toBe("");
         await expect(page.locator(CALLOUT)).toHaveCount(0);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+}
+
+for (const size of SIZES) {
+  for (const theme of THEMES) {
+    test(`Copy keeps the terminal focused, ${size.name} ${theme}`, async ({ browser }) => {
+      test.setTimeout(240_000);
+      const { context, page, cdp } = await openTerminal(browser, theme, size);
+      try {
+        await show(page, SCREEN, "third");
+        // A tap on the active window focuses the terminal's input (D191); that is the state Copy must leave alone.
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 200 } });
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 200 } });
+        const focused = (): Promise<string> => page.evaluate(() => {
+          const active = document.activeElement;
+          return active instanceof HTMLElement && active.closest(".terminal-host") ? active.tagName : `outside:${active?.tagName}`;
+        });
+        await expect.poll(focused, "the terminal's input has focus before the selection").toBe("TEXTAREA");
+        await longPress(page, cdp!, await cellCentre(page, 10, 0));
+        await expect.poll(() => selected(page)).toBe(CODE);
+        await page.locator(`${CALLOUT} button`).tap();
+        await expect(page.locator(`${CALLOUT} button`)).toContainText("Copied");
+        expect(await focused(), "tapping Copy leaves focus in the terminal").toBe("TEXTAREA");
+      } finally {
+        await context.close();
+      }
+    });
+
+    test(`nothing behind the Copy callout can be read, ${size.name} ${theme}`, async ({ browser }) => {
+      test.setTimeout(240_000);
+      mkdirSync(OUT, { recursive: true });
+      const { context, page, cdp } = await openTerminal(browser, theme, size);
+      try {
+        const cols = await columns(page);
+        // A dense page of text, so whatever shows through the callout is text.
+        const dense = "\u001b[2J\u001b[H" + Array.from({ length: 24 }, (_, i) => `row${String(i).padStart(2, "0")} ` + "lorem ipsum dolor sit amet ".repeat(3)).map((line) => line.slice(0, cols - 1)).join("\r\n");
+        await show(page, dense, "row23");
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 200 } });
+        await longPress(page, cdp!, await cellCentre(page, 9, 12));
+        await expect.poll(() => selected(page)).not.toBe("");
+        await expect(page.locator(CALLOUT)).toBeVisible();
+        await settled(page, CALLOUT);
+        const shot = await page.screenshot({ path: `${OUT}/${size.name}-${theme}-dense-callout.png` });
+        const callout = (await boxOf(page, CALLOUT))!;
+        // The callout's padding ring holds no content, so anything varying along it is the page showing through the glass. The
+        // backdrop blur fades towards a card's edge, so the ring is where a leak shows: four strips, 3 px in from each edge and
+        // 16 px in from the corners (past the 14 px radius, where the rounded edge and the page outside it vary by themselves).
+        const width = callout.right - callout.left, height = callout.bottom - callout.top;
+        const strips = {
+          top: { x: callout.left + 16, y: callout.top + 3, width: width - 32, height: 3 },
+          bottom: { x: callout.left + 16, y: callout.bottom - 6, width: width - 32, height: 3 },
+          // Vertical strips are measured along their length, so the step is taken across a 3 px wide, tall box transposed in the helper.
+          left: { x: callout.left + 3, y: callout.top + 16, width: 3, height: height - 32 },
+          right: { x: callout.right - 6, y: callout.top + 16, width: 3, height: height - 32 },
+        };
+        const details: Record<string, number> = {};
+        for (const [name, strip] of Object.entries(strips)) details[name] = await detailAbove(page, shot, strip, name === "left" || name === "right");
+        console.log(`GLASS_DETAIL ${size.name} ${theme} ${JSON.stringify(details)}`);
+        for (const [name, detail] of Object.entries(details)) {
+          expect.soft(detail, `${name} edge: the page behind the callout is blurred past reading (mean luminance step, 0-255)`).toBeLessThan(2);
+        }
+        await expect(page.locator(".ui-glass-bed:not([hidden])"), "the glass bed under the callout").toHaveCount(1);
       } finally {
         await context.close();
       }
