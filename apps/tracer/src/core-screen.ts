@@ -730,9 +730,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       if (overlaps) control.dataset.paletteCovered = ""; else delete control.dataset.paletteCovered;
     }
   };
+  // Where focus was when the palette opened, so closing it (Escape most of all) puts focus back there instead of on the page.
+  let paletteReturnFocus: HTMLElement | null = null;
   // Whether it animates is not decided here: the last input (a key or a pointer press) does, through .ui-key-instant (#427).
   const setPalette = (open: boolean, only?: PaletteEntry[]): void => {
     if (open) {
+      if (palette.hidden) paletteReturnFocus = document.activeElement instanceof HTMLElement && !palette.contains(document.activeElement) && document.activeElement !== document.body ? document.activeElement : null;
       shortcuts.close(true);
       settings?.close("keyboard");
       indexScoped(false);
@@ -749,12 +752,16 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       coverTopBar(true);
       paletteInput.focus({ preventScroll: true });
     } else {
+      // Only a close that left focus in the palette restores it: a picked action that moved focus on (to a window, a field) keeps it.
+      const focusInPalette = palette.contains(document.activeElement);
       indexScoped(false);
       scopedEntries = undefined;
       palette.hidden = true;
       scrim.hidden = true;
       coverTopBar(false);
       paletteInput.removeAttribute("aria-activedescendant");
+      if (focusInPalette && paletteReturnFocus?.isConnected) paletteReturnFocus.focus({ preventScroll: true });
+      paletteReturnFocus = null;
       syncFontPreview();
     }
   };
