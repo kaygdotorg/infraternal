@@ -31,7 +31,7 @@ test("a failure after the prompt is explained in the pill, and Try again finishe
   expect(await arcs(page)).toEqual(["done", "failed", "pending", "pending"]);
   await expect(page.locator('.ui-window .ui-setup-ring[data-phase="tick"]')).toHaveCount(0);
   // The wizard's own "ready" toast would contradict the failure: it is not shown.
-  await expect(page.locator(".ui-toast")).not.toContainText(/ready|added/i);
+  await expect(page.locator(".ui-toast").filter({ hasText: /ready|added/i })).toHaveCount(0);
 
   await pillOf(page, "instant-fail.lab").click();
   const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
