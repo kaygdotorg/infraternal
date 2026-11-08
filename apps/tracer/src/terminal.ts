@@ -2584,7 +2584,8 @@ export class TerminalClient {
   private startPings(): void {
     this.prediction?.setRoundTrip(undefined);
     this.config.onRoundTrip?.(undefined);
-    this.conn.sampleRoundTrip();
+    // The readout was just blanked above, so this probe's answer must be allowed to refill it (#430).
+    this.conn.sampleRoundTrip(true);
   }
 
   private sampleRoundTrip(): void {
