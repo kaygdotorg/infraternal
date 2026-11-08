@@ -36,8 +36,8 @@ async fn narrow_path_mesh_budget_fits_relay_datagram() {
     )
     .unwrap();
     let mut results = Vec::new();
-    for (id, underlay, previous_inner, expected_max) in
-        [(1, 1280, 1200, 1214), (2, 1500, 1420, 1434)]
+    for (id, underlay, previous_inner, safe_inner, expected_max) in
+        [(1, 1280, 1200, 1168, 1214), (2, 1500, 1420, 1392, 1434)]
     {
         let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         let mut config =
@@ -60,24 +60,30 @@ async fn narrow_path_mesh_budget_fits_relay_datagram() {
         .unwrap();
         let maximum = client.connection().max_datagram_size();
         assert_eq!(maximum, Some(expected_max));
-        // Quinn's maximum is the app payload accepted by send_datagram; it already reserves QUIC.
-        let inner = maximum.unwrap() - 32 - 4;
-        // Ciphertext adds 32 bytes of header/tag, and the relay adds a 4-byte id.
+        // Quinn reserves QUIC framing. WireGuard pads each inner packet to 16 bytes before
+        // adding its 32-byte header/tag; the relay prefixes a 4-byte link id.
+        let pad_to_wireguard_block = |size: u16| {
+            let size = usize::from(size);
+            (size + 15) & !15
+        };
+        let inner = usize::from(safe_inner);
+        let padded_inner = pad_to_wireguard_block(safe_inner);
+        let relay_frame = padded_inner + 32 + 4;
         let result = client
             .connection()
-            .send_datagram(bytes::Bytes::from(vec![0; inner + 32 + 4]));
+            .send_datagram(bytes::Bytes::from(vec![0; relay_frame]));
         // The previous direct-path budgets exceed both relay limits.
-        let legacy =
-            client
-                .connection()
-                .send_datagram(bytes::Bytes::from(vec![0; previous_inner + 32 + 4]));
+        let previous_frame = pad_to_wireguard_block(previous_inner) + 32 + 4;
+        let legacy = client
+            .connection()
+            .send_datagram(bytes::Bytes::from(vec![0; previous_frame]));
         // The shipped 1380-byte packet fitted a normal relay path but not a narrow one.
+        let shipped_frame = pad_to_wireguard_block(1380) + 32 + 4;
         let shipped = client
             .connection()
-            .send_datagram(bytes::Bytes::from(vec![0; 1380 + 32 + 4]));
+            .send_datagram(bytes::Bytes::from(vec![0; shipped_frame]));
         println!(
-            "underlay={underlay} inner_mtu={inner} relay_frame={} actual_max={maximum:?} send_result={result:?} previous_budget_send={legacy:?} shipped_1380_send={shipped:?}",
-            inner + 36
+            "underlay={underlay} inner_mtu={inner} padded_inner={padded_inner} relay_frame={relay_frame} actual_max={maximum:?} send_result={result:?} previous_budget_send={legacy:?} shipped_1380_send={shipped:?}"
         );
         assert!(
             legacy.is_err(),

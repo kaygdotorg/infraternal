@@ -1063,10 +1063,10 @@ mod tests {
     #[test]
     fn relay_route_budget_tracks_live_datagram_limit_changes() {
         let mut tracker = RelayMtuTracker::default();
-        assert_eq!(tracker.update(Some(1434)), Some(1398));
+        assert_eq!(tracker.update(Some(1434)), Some(1392));
         assert_eq!(tracker.update(Some(1434)), None);
-        assert_eq!(tracker.update(Some(1214)), Some(1178));
-        assert_eq!(tracker.update(Some(1434)), Some(1398));
+        assert_eq!(tracker.update(Some(1214)), Some(1168));
+        assert_eq!(tracker.update(Some(1434)), Some(1392));
     }
 
     #[test]

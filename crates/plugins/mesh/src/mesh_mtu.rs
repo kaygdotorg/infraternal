@@ -53,15 +53,18 @@ pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
 /// Derive a relayed peer's inner MTU from Quinn's current application-payload limit.
 ///
 /// Quinn's `max_datagram_size` already accounts for QUIC packet and DATAGRAM framing. The relay
-/// adds only the `WireGuard` data-packet overhead and its four-byte link id before sending.
-/// Unknown limits use the same conservative fallback as unresolved direct endpoints.
+/// adds the `WireGuard` data-packet overhead and its four-byte link id before sending. `WireGuard`
+/// pads each plaintext packet to a 16-byte boundary, so the returned MTU is rounded down to a
+/// boundary that still fits after that padding. Unknown limits use the same conservative fallback
+/// as unresolved direct endpoints.
 #[cfg(any(all(feature = "relay", target_os = "linux"), test))]
 pub(crate) fn for_relay_datagram(max_datagram_size: Option<usize>) -> u16 {
     max_datagram_size.map_or(FALLBACK_MESH_MTU, |size| {
         let size = u32::try_from(size).unwrap_or(u32::MAX);
-        mtu_for_inner_budget(
-            size.saturating_sub(WIREGUARD_PACKET_OVERHEAD + RELAY_LINK_ID_OVERHEAD),
-        )
+        let inner_budget = size
+            .saturating_sub(WIREGUARD_PACKET_OVERHEAD + RELAY_LINK_ID_OVERHEAD)
+            .min(u32::from(u16::MAX));
+        mtu_for_inner_budget(inner_budget & !15)
     })
 }
 
@@ -197,11 +200,20 @@ mod tests {
         assert_eq!(mtu_for_route(1500), 1420);
     }
 
-    /// Quinn's application payload already excludes QUIC framing; only the mesh wrappers remain.
+    /// Relay budgets include `WireGuard`'s 16-byte packet padding as well as its framing.
     #[test]
-    fn relay_route_budget_subtracts_wireguard_and_link_id() {
-        assert_eq!(for_relay_datagram(Some(1214)), 1178);
-        assert_eq!(for_relay_datagram(Some(1434)), 1398);
+    fn relay_route_budget_fits_padded_wireguard_packets() {
+        for (maximum, expected) in [(1214_u32, 1168_u16), (1434, 1392)] {
+            let mtu = for_relay_datagram(Some(maximum as usize));
+            assert_eq!(mtu, expected);
+
+            // A data packet pads to 16 bytes, then adds 32 WireGuard bytes and the 4-byte link id.
+            let padded_mtu = u32::from(mtu);
+            assert!(padded_mtu + 32 + 4 <= maximum);
+            let next_inner = padded_mtu + 1;
+            let next_padded = (next_inner + 15) & !15;
+            assert!(next_padded + 32 + 4 > maximum);
+        }
         assert_eq!(for_relay_datagram(Some(80)), MIN_MESH_MTU);
         assert_eq!(for_relay_datagram(None), FALLBACK_MESH_MTU);
     }
