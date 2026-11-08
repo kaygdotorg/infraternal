@@ -272,6 +272,7 @@ async fn access_report(
     let store = crate::access_files::store(root);
     let registry_root = root.to_owned();
     let proc_root = process_root();
+    let jobs_probe = job_inventory();
     tokio::task::spawn_blocking(move || {
         let lookup = |uid| User::from_uid(Uid::from_raw(uid)).ok().flatten();
         let facts = |uid: u32| {
@@ -282,6 +283,7 @@ async fn access_report(
                     programs_may_remain: shared,
                     privileged: false,
                     processes: Vec::new(),
+                    jobs: Vec::new(),
                 }
             });
             facts.privileged = !rootless
@@ -290,6 +292,13 @@ async fn access_report(
                 let snapshot = crate::account_processes::scan(&proc_root, uid);
                 facts.programs_may_remain |= !snapshot.empty();
                 facts.processes = snapshot.processes;
+                if let Some(user) = lookup(uid) {
+                    let jobs = jobs_probe(&user);
+                    facts.programs_may_remain |= !jobs.complete || !jobs.jobs.is_empty();
+                    facts.jobs = jobs.jobs;
+                } else {
+                    facts.programs_may_remain = true;
+                }
             }
             facts
         };
@@ -1039,6 +1048,7 @@ async fn revoke_once(
                         programs_may_remain: remain,
                         privileged: false,
                         processes: Vec::new(),
+                        jobs: Vec::new(),
                     },
                 );
             }
@@ -1053,6 +1063,7 @@ async fn revoke_once(
                         programs_may_remain: shared,
                         privileged: false,
                         processes: Vec::new(),
+                        jobs: Vec::new(),
                     },
                 );
             }
@@ -1250,6 +1261,17 @@ fn process_wait() -> Duration {
         return host.settle;
     }
     Duration::from_secs(5)
+}
+
+/// Capture a scripted host's empty job inventory before entering the blocking
+/// worker, just as its process-filesystem view is captured. Production always
+/// inspects real scheduler state; no environment switch can replace this probe.
+fn job_inventory() -> fn(&User) -> crate::access_jobs::Observation {
+    #[cfg(test)]
+    if stand_in().is_some() {
+        return |_| crate::access_jobs::Observation::empty();
+    }
+    crate::access_jobs::inspect
 }
 
 /// Kernel process records, replaced only by the scripted host in unit tests.

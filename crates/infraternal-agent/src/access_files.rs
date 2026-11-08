@@ -475,6 +475,9 @@ pub struct AccountReport {
     /// PIDs and printable kernel command names still running, bounded to 64 entries.
     #[serde(default)]
     pub processes: Vec<String>,
+    /// System jobs that may write later, or whose root authority is unknown.
+    #[serde(default)]
+    pub jobs: Vec<String>,
     /// When the grant was recorded (seconds since the epoch; 0 if unknown).
     #[serde(default)]
     pub recorded_at: u64,
@@ -503,6 +506,7 @@ impl AccountReport {
             shared: false,
             programs_may_remain: false,
             processes: Vec::new(),
+            jobs: Vec::new(),
             recorded_at: 0,
             scanned_at: now(),
         }
@@ -518,7 +522,7 @@ impl AccountReport {
     /// not privileged), and nothing of the person's may still run; anything
     /// else is `not_checked` with the first reason that applies.
     pub(crate) fn decide(&mut self, rootless: bool) {
-        self.programs_may_remain |= !self.processes.is_empty();
+        self.programs_may_remain |= !self.processes.is_empty() || !self.jobs.is_empty();
         let own = self
             .reason
             .filter(|reason| matches!(reason, Reason::RecordMissing | Reason::RecordFailed));
@@ -1510,6 +1514,7 @@ fn compare(base: &Record, account: &User, extra: &Extra, budget: &mut usize) -> 
         shared: false,
         programs_may_remain: false,
         processes: Vec::new(),
+        jobs: Vec::new(),
         recorded_at: base.recorded_at,
         scanned_at,
     };
@@ -1942,6 +1947,8 @@ pub(crate) struct Facts {
     pub(crate) programs_may_remain: bool,
     /// PIDs and command names observed after the access scan.
     pub(crate) processes: Vec<String>,
+    /// Named system work that can write as the account later.
+    pub(crate) jobs: Vec<String>,
     /// The account is root or may become root (host policy query).
     pub(crate) privileged: bool,
 }
@@ -2027,6 +2034,7 @@ pub(crate) fn since_grant(
         }
         report.programs_may_remain = known.programs_may_remain;
         report.processes = known.processes;
+        report.jobs = known.jobs;
         report.privileged = known.privileged;
         report.root_checks = if !rootless && !known.privileged {
             root_check_names()

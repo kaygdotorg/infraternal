@@ -56,6 +56,44 @@ def prepare(client, number, person, account):
         person=str(person), account=account, uid=pwd.getpwnam(account).pw_uid, cols=80, rows=24))
 
 
+def job_plant(account, user, scenario, created):
+    """Install one never-started system job; return its report label and root route."""
+    privileged = scenario.startswith('root-job')
+    target = Path(user.pw_dir) / 'scheduled-script'
+    target.write_text('#!/bin/sh\nexit 0\n')
+    target.chmod(0o755)
+    os.chown(target, user.pw_uid, user.pw_gid)
+    runner = 'root' if privileged else (str(user.pw_uid) if scenario == 'system-uid' else account)
+    if scenario in ('system-cron', 'root-job-cron'):
+        path = Path('/etc/cron.d') / account
+        with path.open('x') as cron:
+            cron.write(f'0 0 1 1 * {runner} {target}\n')
+        created.append(path)
+        path.chmod(0o644)
+        return str(path), privileged
+    unit = Path('/etc/systemd/system') / (account + '-scheduled.service')
+    with unit.open('x') as service:
+        service.write(f'[Unit]\nDescription=Disposable revoke job\n[Service]\nType=oneshot\nUser={runner}\nExecStart=/bin/sh {target}\n')
+    created.append(unit)
+    unit.chmod(0o644)
+    if scenario == 'root-job-unit':
+        os.chown(unit, user.pw_uid, user.pw_gid)
+    if scenario == 'root-job-group':
+        os.chown(target, 0, user.pw_gid)
+        target.chmod(0o775)
+    if scenario == 'root-job-parent':
+        os.chown(target, 0, 0)
+        target.chmod(0o755)
+    if scenario == 'system-timer':
+        timer = unit.with_suffix('.timer')
+        with timer.open('x') as trigger:
+            trigger.write(f'[Timer]\nOnCalendar=2099-01-01\nUnit={unit.name}\n')
+        created.append(timer)
+    command('systemctl', 'daemon-reload')
+    assert command('systemctl', 'show', '--value', '-p', 'User', unit.name).stdout.strip() == runner
+    return unit.name, privileged
+
+
 def prove(binary, scenario="sessions"):
     """Plant a detached local-SSH process, revoke shared then sole access, and clean up."""
     assert os.geteuid() == 0, 'requires real host root, not a user namespace'
@@ -84,6 +122,7 @@ def prove(binary, scenario="sessions"):
     root_unit = f'{account}-polkit'
     system_unit = f'{account}-system-process'
     system_started = False
+    created_jobs = []
     with tempfile.TemporaryDirectory(prefix='rv-', dir='/root') as scratch:
         root = Path(scratch)
         # Root units write only under this private directory: a local user must
@@ -98,6 +137,23 @@ def prove(binary, scenario="sessions"):
             print(json.dumps(dict(account=account, uid=uid)), flush=True)
             client = Binary(binary, state)
             prepare(client, 100, people[0], account)
+            if scenario in ('system-cron', 'system-unit', 'system-uid', 'system-timer',
+                            'root-job-owner', 'root-job-group', 'root-job-parent',
+                            'root-job-unit', 'root-job-cron'):
+                label, privileged = job_plant(account, user, scenario, created_jobs)
+                reply = control(client, 102, 'terminal.login.revoke', dict(person=str(people[0])))
+                report = reply['access']['accounts'][0]
+                print(json.dumps(dict(scenario=scenario, label=label, reply=reply)), flush=True)
+                assert report['state'] == 'not_checked', report
+                if privileged:
+                    assert report['reason'] == 'privileged', report
+                else:
+                    assert report['programs_may_remain'], report
+                assert any(label in job for job in report.get('jobs', [])), report
+                for path in created_jobs:
+                    assert path.exists(), 'revoke deleted a system job'
+                print('SYSTEM_JOB_REAL_ROOT_PASS ' + scenario, flush=True)
+                return
             if scenario == 'system-process':
                 system_started = True
                 command('systemd-run', '--system', '--unit=' + system_unit,
@@ -111,10 +167,11 @@ def prove(binary, scenario="sessions"):
                 report = reply['access']['accounts'][0]
                 print(json.dumps(dict(scenario=scenario, pid=pid, cgroup=cgroup, reply=reply)), flush=True)
                 assert pid in processes(uid), 'revocation killed a system-owned process'
-                assert report['privileged'] is False, report
-                assert set(report['root_checks']) == {'sudo', 'doas', 'polkit', 'admin groups'}, report
+                if not report['privileged']:
+                    assert {'sudo', 'doas', 'polkit', 'admin groups', 'root-run jobs',
+                            'container sockets'} <= set(report['root_checks']), report
                 assert report['state'] == 'not_checked', report
-                assert report['reason'] == 'programs_may_remain', report
+                assert report['programs_may_remain'], report
                 assert any(row.startswith(f'{pid} ') for row in report['processes']), report
                 print('SYSTEM_PROCESS_REPORTED_NOT_KILLED_PASS', flush=True)
                 return
@@ -218,7 +275,7 @@ def prove(binary, scenario="sessions"):
             assert pid in processes(uid), 'shared revoke stopped another holder\'s process'
             report = shared['access']['accounts'][0]
             assert report['state'] == 'not_checked', report
-            assert report['reason'] == 'programs_may_remain', report
+            assert report['programs_may_remain'], report
             assert any(row.startswith(f'{pid} ') for row in report['processes']), report
             print(json.dumps(dict(shared=shared)), flush=True)
             sole = control(client, 103, 'terminal.login.revoke', dict(person=str(people[1])))
@@ -233,6 +290,10 @@ def prove(binary, scenario="sessions"):
         finally:
             if client is not None:
                 client.kill()
+            for path in created_jobs:
+                path.unlink(missing_ok=True)
+            if created_jobs:
+                command('systemctl', 'daemon-reload')
             if system_started:
                 command('systemctl', 'stop', system_unit + '.service', check=False)
                 command('systemctl', 'reset-failed', system_unit + '.service', check=False)

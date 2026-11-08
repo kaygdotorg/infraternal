@@ -166,6 +166,9 @@ pub(crate) struct AccountReport {
     /// PIDs and printable kernel command names remaining after the scan (D362).
     #[serde(default)]
     pub(crate) processes: Vec<String>,
+    /// System jobs that may write later, or whose root authority is unknown.
+    #[serde(default)]
+    pub(crate) jobs: Vec<String>,
     /// When the grant was recorded (seconds since the epoch; 0 if unknown).
     #[serde(default)]
     pub(crate) recorded_at: u64,
@@ -322,7 +325,15 @@ impl AccessReport {
             for name in &mut account.unscanned {
                 *name = printable(name, TEXT_CHARS, &mut cut);
             }
-            account.programs_may_remain |= !account.processes.is_empty();
+            account.programs_may_remain |=
+                !account.processes.is_empty() || !account.jobs.is_empty();
+            if account.jobs.len() > 64 {
+                account.jobs.truncate(64);
+                cut = true;
+            }
+            for job in &mut account.jobs {
+                *job = printable(job, TEXT_CHARS, &mut cut);
+            }
             account.processes.truncate(64);
             for process in &mut account.processes {
                 let mut shortened = false;
@@ -406,7 +417,8 @@ impl AccessReport {
                 && required_checks
                     .iter()
                     .any(|check| !account.root_checks.contains(check));
-            account.programs_may_remain |= !account.processes.is_empty();
+            account.programs_may_remain |=
+                !account.processes.is_empty() || !account.jobs.is_empty();
             let reason = if rootless {
                 Some(Reason::RootlessUnverified)
             } else if account.recorded_at == 0 {
@@ -489,6 +501,11 @@ impl AccessReport {
     /// Drops one line, or failing that one file (counted), from the end.
     fn trim(&mut self) -> bool {
         for account in self.accounts.iter_mut().rev() {
+            if !account.jobs.is_empty() {
+                account.jobs.truncate(account.jobs.len() / 2);
+                account.truncated = true;
+                return true;
+            }
             if !account.processes.is_empty() {
                 account.processes.truncate(account.processes.len() / 2);
                 // The surviving-process flag stays true even if its list is shortened.
@@ -912,6 +929,27 @@ mod tests {
         assert!(!account.categories[0].contains('\u{1b}'));
         assert_eq!(kept.state, State::Unchanged);
     }
+    /// Future work prevents a clean result even if its sender cleared the flag.
+    /// Both the row cap and total byte budget can shorten long Unicode rows.
+    #[test]
+    fn system_jobs_are_bounded_printable_and_prevent_a_clean_report() {
+        let mut access = report(State::Unchanged, Vec::new());
+        access.accounts[0].jobs = vec!["system job\u{1b}\u{202e}".repeat(100); 100];
+        let access = access.bounded().decided(false);
+        assert_eq!(access.accounts[0].state, State::NotChecked);
+        assert_eq!(access.accounts[0].reason, Some(Reason::ProgramsMayRemain));
+        assert!(access.accounts[0].programs_may_remain);
+        assert!((1..=64).contains(&access.accounts[0].jobs.len()));
+        assert!(access.json().len() <= STORED_BYTES);
+        assert!(access.accounts[0].truncated);
+        assert!(
+            access.accounts[0]
+                .jobs
+                .iter()
+                .all(|job| !job.contains('\u{1b}') && !job.contains('\u{202e}'))
+        );
+    }
+
     /// D362: process evidence cannot be hidden by a clean state, false flag or file changes.
     #[test]
     fn surviving_processes_prevent_a_clean_report_and_stay_printable() {

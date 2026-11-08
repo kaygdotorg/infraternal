@@ -12,6 +12,8 @@ pub mod daemon;
 pub use control as daemon;
 /// Fingerprints of an account's access files at grant, compared on revoke (D356).
 pub mod access_files;
+/// Observe future system-account work without stopping it (D367).
+mod access_jobs;
 /// Conservative inspection of current and legacy polkit policy.
 mod access_polkit;
 /// Host policy checks for accounts that can exercise root authority.

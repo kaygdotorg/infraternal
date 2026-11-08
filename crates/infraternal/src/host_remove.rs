@@ -457,6 +457,11 @@ fn account_lines(account: &Value, lines: &mut Vec<String>, files_shown: &mut boo
                 .to_owned(),
         );
     }
+    for job in account["jobs"].as_array().into_iter().flatten() {
+        if let Some(job) = job.as_str() {
+            lines.push(format!("  Scheduled or root-run job: {job}"));
+        }
+    }
     for process in account["processes"].as_array().into_iter().flatten() {
         if let Some(process) = process.as_str() {
             lines.push(format!("  Running: {process}"));
