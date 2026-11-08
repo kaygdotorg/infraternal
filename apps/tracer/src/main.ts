@@ -10,6 +10,7 @@ import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/s
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
+import { installInputSource } from "../../../packages/ui/src/input-source";
 import { installAutoScrollbars } from "../../../packages/ui/src/scrollbars";
 import { applyFontVars, loadFont } from "../../../packages/ui/src/fonts";
 import { applyStoredUiSize } from "../../../packages/ui/src/ui-scale";
@@ -145,6 +146,8 @@ function startPerfHud(bench: boolean): void {
 void start();
 
 async function start(): Promise<void> {
+  // First, so its capture listeners run before any shortcut handler registered later (#427).
+  installInputSource();
   installFocusRing();
   installAutoScrollbars();
   installForegroundListener();

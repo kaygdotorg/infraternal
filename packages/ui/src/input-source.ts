@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+/**
+ * Where the last input came from: the keyboard or a pointer (mouse, pen or touch).
+ *
+ * Why it exists (#427, owner, 2026-11-08: "Keyboard opens instantly"). Anything opened or closed from a keyboard shortcut
+ * appears and disappears with no animation, while the same thing opened with the pointer or a finger keeps its motion. The
+ * source is a property of the event that flips the state, so it is tracked once, here, and every surface reads it instead of
+ * carrying its own "was this a key?" flag.
+ *
+ * How it works. One pair of passive listeners on `window`, in the capture phase, so they run before any shortcut or click
+ * handler of the same event:
+ *
+ * - `keydown` sets the source to `"keyboard"`;
+ * - `pointerdown` (which covers mouse, pen and touch) sets it to `"pointer"`.
+ *
+ * The source is written to the root as `data-input="keyboard" | "pointer"`, in the same task as the event. CSS therefore
+ * sees it in the same style recalculation that applies the surface's new state, so a rule such as
+ * `:root[data-input="keyboard"] .palette { transition: none }` removes the transition for both an open and a close. Script
+ * reads {@link triggeredByKeyboard} the same way. Because each new event overwrites the last one, a pointer close of a
+ * keyboard-opened surface may animate and a keyboard close of a pointer-opened one is instant, with no extra bookkeeping.
+ *
+ * Before any input has happened, and for changes that no key caused (a timer, a network event), the source is `"pointer"`,
+ * so those keep their animation.
+ */
+
+/** The two kinds of input that can open or close a surface. */
+export type InputSource = "keyboard" | "pointer";
+
+/** The source of the most recent key or pointer press. */
+let current: InputSource = "pointer";
+/** The disposer of the installed tracker, or `undefined` when none is installed. */
+let installed: (() => void) | undefined;
+
+/** The source of the most recent key or pointer press (`"pointer"` before any input). */
+export function inputSource(): InputSource {
+  return current;
+}
+
+/**
+ * True when the key that was pressed last is what is running the code now, so a surface that opens or closes should do it
+ * with no animation at all. Call it at the moment the state changes, not earlier.
+ * @example
+ * if (triggeredByKeyboard()) spring.set(1, true); else spring.set(1);
+ */
+export function triggeredByKeyboard(): boolean {
+  return current === "keyboard";
+}
+
+/**
+ * Installs the page-wide tracker once (a second call returns the first disposer) and returns its disposer. Marks the root
+ * `data-input="pointer"` until the first key is pressed.
+ */
+export function installInputSource(root: HTMLElement = document.documentElement): () => void {
+  if (installed) return installed;
+  const set = (source: InputSource): void => {
+    current = source;
+    // One attribute write per change of source, never per event.
+    if (root.dataset.input !== source) root.dataset.input = source;
+  };
+  const key = (): void => set("keyboard");
+  const pointer = (): void => set("pointer");
+  set("pointer");
+  window.addEventListener("keydown", key, { capture: true, passive: true });
+  window.addEventListener("pointerdown", pointer, { capture: true, passive: true });
+  installed = () => {
+    window.removeEventListener("keydown", key, { capture: true });
+    window.removeEventListener("pointerdown", pointer, { capture: true });
+    delete root.dataset.input;
+    current = "pointer";
+    installed = undefined;
+  };
+  return installed;
+}
