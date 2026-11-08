@@ -131,7 +131,7 @@
   align-items: center;
   gap: 0.625rem;
   margin-top: 0.875rem;
-  padding: 0.25rem 0.3125rem 0.25rem 0.75rem;
+  padding: 0.25rem 0.25rem 0.25rem 0.75rem;
   border: 1px dashed var(--line);
   border-radius: var(--r-sm);
   background: var(--wash);
@@ -271,7 +271,7 @@
 .auth-check[data-pressed] { transform: scale(0.98); }
 .auth-check .tick { width: 1.25rem; height: 1.25rem; }
 .auth-words { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.375rem 0.625rem; margin: 0.25rem 0 0; padding: 0.875rem; border: 1px solid var(--line); border-radius: var(--r-md); background: rgb(255 255 255 / 0.03); counter-reset: recovery; list-style: none; }
-.auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 0.3125rem; color: var(--fg); font: var(--fw-body) 0.8125rem/1.9 var(--font-face); }
+.auth-words li { display: flex; min-width: 0; align-items: baseline; gap: 0.25rem; color: var(--fg); font: var(--fw-body) 0.8125rem/1.9 var(--font-face); }
 .auth-word-number { width: 1.1875rem; flex: none; color: var(--fg-3); font-size: 0.65625rem; text-align: right; }
 .auth-actions { display: flex; justify-content: flex-end; gap: 0.25rem; margin: 0.625rem calc(-1 * var(--auth-overhang)) -0.25rem 0; }
 .icon-action { display: inline-grid; width: 2.5rem; height: 2.5rem; place-items: center; padding: 0; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--fg-2); cursor: pointer; }

@@ -9,7 +9,7 @@
 .cl-sx-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1rem 0.75rem; }
 .cl-sx-logo { display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; color: var(--fg); }
 .cl-sx-logo:empty { display: none; }
-.cl-sx-names { display: flex; flex-direction: column; gap: 0.1875rem; min-width: 0; }
+.cl-sx-names { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
 .cl-sx-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .cl-sx-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-sx-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); }
@@ -23,7 +23,7 @@
 .cl-sx-list { margin: 0; padding: 0; list-style: none; }
 .cl-sx-row { position: relative; border-radius: var(--r-sm); }
 .cl-sx-main {
-  display: grid; grid-template-columns: 1.125rem minmax(0, 1fr) auto; align-items: center; column-gap: 0.5rem; width: 100%; min-height: 3rem; margin: 0; padding: 0.3125rem 0.5rem;
+  display: grid; grid-template-columns: 1.125rem minmax(0, 1fr) auto; align-items: center; column-gap: 0.5rem; width: 100%; min-height: 3rem; margin: 0; padding: 0.25rem 0.5rem;
   border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); text-align: left; cursor: default;
   /* The press uses the individual `scale` property, so the swipe's own transform is never eased behind the finger. */
   transition: scale var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease;
@@ -40,7 +40,7 @@
 .cl-sx-pin svg, .cl-sx-viewers svg { width: 0.75rem; height: 0.75rem; }
 .cl-sx-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; color: var(--fg-3); font: var(--sx-small); letter-spacing: var(--ui-tracking); white-space: nowrap; transition: opacity var(--t-press) ease; }
 .cl-sx-meta-top { display: inline-flex; align-items: center; gap: 0.5rem; }
-.cl-sx-viewers { display: inline-flex; align-items: center; gap: 0.1875rem; }
+.cl-sx-viewers { display: inline-flex; align-items: center; gap: 0.25rem; }
 .cl-sx-meta .is-fail { color: var(--danger); }
 /* The field itself is the shared `.ui-inline-rename`; the row only gives it the name's width. */
 .cl-sx-name-input { width: 100%; margin: 0 -6px; }

@@ -225,7 +225,7 @@
 .ah-job .ah-meta { transition: color var(--t-pop) ease; }
 .ah-job[data-state="failed"] .ah-meta { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
 .ah-job[data-state="pending"] :is(.ah-name, .ah-os-mark) { color: var(--fg-3); }
-.ah-bar { position: absolute; right: 0.625rem; bottom: 0.1875rem; left: calc(0.625rem + var(--ah-icon) + 0.75rem); height: 2px; overflow: hidden; border-radius: 1px; background: var(--line); }
+.ah-bar { position: absolute; right: 0.625rem; bottom: 0.25rem; left: calc(0.625rem + var(--ah-icon) + 0.75rem); height: 2px; overflow: hidden; border-radius: 1px; background: var(--line); }
 .ah-bar > span { display: block; height: 100%; background: var(--fg-2); transform: scaleX(0); transform-origin: left; transition: transform 420ms var(--ease-out), background-color var(--t-pop) ease; }
 .ah-job[data-state="done"] .ah-bar > span { background: var(--ok); }
 .ah-job[data-state="failed"] .ah-bar > span { background: var(--danger); }
@@ -325,7 +325,7 @@
 .ah-overlay { position: absolute; z-index: 10; inset: 0; }
 .ah-overlay .ah-stage { padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); }
 @media (max-width: 600px) { .ah-overlay .ah-stage { padding: max(0.5rem, env(safe-area-inset-top)) 0.5rem max(0.5rem, env(safe-area-inset-bottom)); } }
-.ah-code { padding: 1px 0.3125rem; border-radius: var(--r-xs); background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
+.ah-code { padding: 1px 0.25rem; border-radius: var(--r-xs); background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
 .ah-note { display: flex; align-items: center; gap: 0.625rem; margin: 0.875rem 0.625rem 0; color: var(--fg-2); }
 .ah-note .ah-icon { flex: none; }
 .ah-load-error .ah-icon { color: var(--danger); }
@@ -357,7 +357,7 @@
 .ah-run[data-state="failed"] .ah-job-step { color: color-mix(in oklab, var(--danger) 75%, var(--fg-2)); }
 .ah-run[data-state="pending"] :is(.ah-name, .ah-os-mark) { color: var(--fg-3); }
 .ah-run[data-state="failed"] .ah-mark { display: none; }
-.ah-seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.1875rem; margin: 2px 0.625rem 0.5rem calc(0.625rem + var(--ah-icon) + 0.75rem); }
+.ah-seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.25rem; margin: 2px 0.625rem 0.5rem calc(0.625rem + var(--ah-icon) + 0.75rem); }
 .ah-seg > span { display: block; height: 2px; border-radius: 1px; background: var(--line); transition: background-color var(--t-panel) ease; }
 .ah-seg > span[data-state="running"] { background: var(--fg-2); }
 .ah-seg > span[data-state="done"] { background: var(--ok); }

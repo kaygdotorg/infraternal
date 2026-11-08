@@ -27,7 +27,7 @@
 /* Inline code, and a fenced block. A block copies on a click (a double tap on a phone): the pointer says so, and the text gives way
    to the shared "Copied" confirmation (copy-feedback.ts `confirmInPlace`) in the same spot. Its rules are here because the
    standalone page does not load the app's stylesheet; in the app the same `.ui-copied` classes apply, scoped to `.doc-code`. */
-.doc code { padding: 1px 0.3125rem; border-radius: 0.375rem; background: rgb(from var(--fg) r g b / 0.05); font: inherit; font-size: 0.93em; overflow-wrap: anywhere; }
+.doc code { padding: 1px 0.25rem; border-radius: 0.375rem; background: rgb(from var(--fg) r g b / 0.05); font: inherit; font-size: 0.93em; overflow-wrap: anywhere; }
 .doc .doc-code { position: relative; margin: 0 0 1rem; }
 .doc pre { margin: 0; overflow-x: auto; padding: 0.75rem 1rem; border-radius: 0.75rem; background: rgb(from var(--fg) r g b / 0.05); line-height: 1.6; cursor: pointer; -webkit-overflow-scrolling: touch; transition: background-color var(--t-press) ease; outline: none; }
 @media (hover: hover) { .doc pre:hover { background: rgb(from var(--fg) r g b / 0.08); } }
@@ -153,7 +153,7 @@
   .doc .toc-fold { display: none; }
   .doc .toc-side { display: block; }
   .doc .toc-title { margin: 0 0 0.5rem; color: var(--fg); font-weight: var(--fw-label); }
-  .doc .toc a { min-height: 0; padding: 0.1875rem 0; }
+  .doc .toc a { min-height: 0; padding: 0.25rem 0; }
   /* A track down the left of the rail, and a short bar on it at the section being read. Every entry has the same padding
      whether current or not, so nothing shifts when the highlight moves. */
   .doc .toc-side > ol { box-shadow: inset 1px 0 0 rgb(from var(--fg) r g b / 0.12); }

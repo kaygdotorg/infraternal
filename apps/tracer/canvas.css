@@ -59,7 +59,7 @@
 }
 .canvas-popover-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1rem 0.75rem; }
 .canvas-popover-logo { display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; color: var(--fg); }
-.canvas-popover-names { display: flex; flex-direction: column; gap: 0.1875rem; min-width: 0; }
+.canvas-popover-names { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
 .canvas-popover-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .canvas-popover-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .canvas-popover-tabs { display: flex; padding: 0 1rem 0.625rem; }

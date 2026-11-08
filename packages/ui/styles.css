@@ -219,7 +219,7 @@
    close in separate rows with an empty column between them at phone width. */
 .ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; column-gap: 0.625rem; row-gap: 0; }
 .ui-toast[data-stacked="true"] .ui-toast-marker, .ui-toast[data-stacked="true"] .ui-toast-glyph { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
-.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; padding-bottom: 0.3125rem; }
+.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.25rem; padding-bottom: 0.25rem; }
 .ui-toast[data-stacked="true"] .ui-toast-close { grid-column: 3; grid-row: 1; }
 .ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 2 / -1; grid-row: 2; justify-self: end; }
 .ui-toast-message { text-wrap: pretty; min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
@@ -238,7 +238,7 @@
 @media (max-width: 520px) {
   .ui-toast[data-choices="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 0.625rem; row-gap: 0; }
   .ui-toast[data-choices="true"] .ui-toast-glyph, .ui-toast[data-choices="true"] .ui-toast-marker { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
-  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.3125rem; }
+  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.25rem; }
   .ui-toast[data-choices="true"] .ui-toast-icons { grid-column: 1 / -1; grid-row: 2; justify-self: end; }
 }
 .ui-toast-icons { display: flex; flex: none; align-items: center; gap: 2px; }
@@ -548,7 +548,7 @@
      otherwise the body covers the 4 px of hit area below the pill and the pill is a 40 px target, not 44. */
   .ui-window-head { position: relative; z-index: 1; }
   .ui-window-pill::after { content: ""; position: absolute; inset: -0.375rem -0.1875rem; }
-  .ui-window-actions { gap: 0; padding: 0 0.1875rem; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
+  .ui-window-actions { gap: 0; padding: 0 0.25rem; position: relative; z-index: 1; } /* above the body, so the hit area below the pill is not covered by it */
   .ui-window-action { width: 1.875rem; height: 1.875rem; }
   .ui-window-action::after { content: ""; position: absolute; inset: -0.4375rem; } /* 44 px square around the 30 px button */
 }
@@ -580,7 +580,7 @@
   background: none; color: var(--fg-2); font: var(--ui-type-button); letter-spacing: var(--ui-tracking); white-space: nowrap; text-align: left; cursor: pointer;
 }
 .ui-window-menu-item svg { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.ui-window-menu-rule { height: 1px; margin: 0.1875rem 0.375rem; background: var(--line); }
+.ui-window-menu-rule { height: 1px; margin: 0.25rem 0.375rem; background: var(--line); }
 .ui-window-menu-item.is-danger { color: var(--danger); }
 /* A menu opened from the keyboard lands on its first row without a ring (rings are for Tab, TASTE 1); a quiet fill shows where it is. */
 .ui-window-menu-item:focus-visible { background: var(--hover); color: var(--fg); }
@@ -616,10 +616,10 @@
 .ui-row-ask[data-open] { opacity: 1; }
 .ui-row-ask:not([data-open]) { pointer-events: none; }
 .ui-row-ask[data-instant] { transition: none; }
-.ui-row-ask-q { flex: none; margin-right: 0.1875rem; color: var(--fg); font-weight: var(--fw-body, 500); } /* the label's own weight: same text, turned into a question */
+.ui-row-ask-q { flex: none; margin-right: 0.25rem; color: var(--fg); font-weight: var(--fw-body, 500); } /* the label's own weight: same text, turned into a question */
 .ui-row-ask-effect { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .ui-row-ask-dot { color: var(--fg-3); }
-.ui-row-ask button { position: relative; flex: none; height: calc(100% - 0.375rem); padding: 0 0.1875rem; border: 0; border-radius: var(--r-xs); background: none; color: var(--fg-2); font: inherit; font-weight: var(--fw-label, 500); letter-spacing: inherit; cursor: pointer; transition: background-color var(--t-press) ease, color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
+.ui-row-ask button { position: relative; flex: none; height: calc(100% - 0.375rem); padding: 0 0.25rem; border: 0; border-radius: var(--r-xs); background: none; color: var(--fg-2); font: inherit; font-weight: var(--fw-label, 500); letter-spacing: inherit; cursor: pointer; transition: background-color var(--t-press) ease, color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out); }
 .ui-row-ask button::after { content: ""; position: absolute; inset: -0.1875rem -0.25rem; } /* the hit area keeps to the row's own height */
 .ui-row-ask button:active { transform: scale(var(--ui-press-scale)); }
 .ui-row-ask .ui-row-ask-yes { color: var(--danger); }
@@ -637,9 +637,9 @@
 }
 
 /* Capsule tabs (capsule-tabs.ts): flat track, one gliding capsule. */
-.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 0.1875rem; border-radius: var(--r-pill); background: var(--hover); isolation: isolate; }
+.ui-tabs { position: relative; display: inline-flex; gap: 2px; padding: 0.25rem; border-radius: var(--r-pill); background: var(--hover); isolation: isolate; }
 .ui-tabs-capsule {
-  position: absolute; z-index: -1; top: 0.1875rem; bottom: 0.1875rem; left: 0; border-radius: var(--r-pill);
+  position: absolute; z-index: -1; top: 0.25rem; bottom: 0.25rem; left: 0; border-radius: var(--r-pill);
   background: var(--overlay-solid); box-shadow: 0 1px 2px rgb(0 0 0 / 0.14), 0 0 0 1px var(--overlay-line);
 }
 .ui-tab {
@@ -678,7 +678,7 @@
 /* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
    still lines up with the row's edges), cloned across wrapped lines. */
 .ui-kv-text {
-  display: inline; margin: 0 -0.375rem; padding: 0.1875rem 0.375rem; border-radius: var(--r-xs); overflow-wrap: anywhere;
+  display: inline; margin: 0 -0.375rem; padding: 0.25rem 0.375rem; border-radius: var(--r-xs); overflow-wrap: anywhere;
   -webkit-box-decoration-break: clone; box-decoration-break: clone;
 }
 /* A value that changes (kv-list `patch`) fades out, says its new thing while it is gone, and fades back in. */
@@ -690,7 +690,7 @@
 .ui-kv-cell { position: relative; }
 .ui-kv-cell[data-copied] > .ui-kv-text { opacity: 0; transition: background-color var(--t-press) ease, opacity var(--t-press) ease-out; }
 .ui-copied {
-  position: absolute; top: 0; display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.1875rem 0; white-space: nowrap; pointer-events: none;
+  position: absolute; top: 0; display: inline-flex; align-items: center; gap: 0.375rem; padding: 0.25rem 0; white-space: nowrap; pointer-events: none;
   color: var(--fg); opacity: 0; transition: opacity var(--t-press) ease-out;
 }
 .ui-kv-value > .ui-copied { right: 0; }
@@ -863,7 +863,7 @@
 @media (pointer: coarse) { .ui-sidebar-foot, .ui-sidebar-foot[data-variant="b"] { --pill-h: 2.75rem; } }
 .ui-sidebar-foot .ui-pill { cursor: pointer; font: var(--ui-type-label); letter-spacing: var(--ui-tracking); line-height: 1; white-space: nowrap; transition: transform var(--t-press) var(--ease-out, ease-out), background-color var(--t-press) ease, box-shadow var(--t-pop) ease; }
 @media (hover: hover) and (pointer: fine) { .ui-sidebar-foot .ui-pill:hover:not(:active) { box-shadow: var(--shadow), 0 2px 0.5rem -2px rgb(0 0 0 / 0.18); } }
-.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 0.5rem); justify-content: flex-start; gap: 0.625rem; padding: 0 0.875rem 0 0.3125rem; text-align: left; }
+.ui-sidebar-user { flex: 0 1 auto; min-width: 0; max-width: calc(100% - var(--pill-h) - 0.5rem); justify-content: flex-start; gap: 0.625rem; padding: 0 0.875rem 0 0.25rem; text-align: left; }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-user { padding-right: 0.75rem; }
 .ui-sidebar-avatar {
   display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 0.625rem); height: calc(var(--pill-h) - 0.625rem); border-radius: 50%; color: #fff;
@@ -872,7 +872,7 @@
 }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
 @media (pointer: coarse) { .ui-sidebar-avatar { font-size: 0.875rem; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
-.ui-sidebar-names { display: grid; min-width: 0; gap: 0.1875rem; }
+.ui-sidebar-names { display: grid; min-width: 0; gap: 0.25rem; }
 .ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
 .ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 0.6875rem; }
 @media (pointer: coarse) { .ui-sidebar-secondary { font-size: 0.75rem; } }
@@ -1044,7 +1044,7 @@
 .ui-ss-actions button { min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: var(--r-pill); background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
 @media (hover: hover) and (pointer: fine) { .ui-ss-actions button:hover, .ui-ss-main:not(:disabled):hover { background: var(--hover); } }
 .ui-ts-source { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.625rem; }
-.ui-ts-tag { padding: 0.1875rem 0.5625rem; border-radius: var(--r-pill); background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
+.ui-ts-tag { padding: 0.25rem 0.5625rem; border-radius: var(--r-pill); background: var(--hover); color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .ui-ts-tag[data-device="true"] { background: var(--accent-soft); color: var(--accent); }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
@@ -1082,7 +1082,7 @@
    ends at one x whether or not its row is selected. The name is one unbreakable line and is never truncated. When the
    list's widest row does not fit (decided per list in fitHints) the list is `data-stacked` and every description sits
    under its name as a left-aligned subtitle, balanced and allowed two lines. The tick stays centred on the row. */
-.ui-sp-text { display: flex; flex: 1; align-items: baseline; justify-content: space-between; column-gap: 0.625rem; min-width: 0; padding: 0.3125rem 0; }
+.ui-sp-text { display: flex; flex: 1; align-items: baseline; justify-content: space-between; column-gap: 0.625rem; min-width: 0; padding: 0.25rem 0; }
 .ui-sp-text .ui-sp-label { flex: none; white-space: nowrap; }
 .ui-sp-text .ui-sp-hint { flex: none; margin-left: auto; text-align: right; white-space: nowrap; color: var(--ui-text-secondary); }
 .ui-sp-text .ui-sp-hint:empty { display: none; }
@@ -1159,7 +1159,7 @@
 .bm-leaf[aria-current] .ui-state-dot[data-state="open"]::before { background: var(--accent); }
 .ui-mark { flex: none; width: 0.75rem; height: 0.75rem; }
 .ui-mark.is-new { animation: ui-mark-in 180ms var(--ease-out, ease-out); }
-.ui-mark[data-mark="output"] { width: 0.375rem; height: 0.375rem; margin: 0 0.1875rem; border-radius: 50%; background: var(--accent); }
+.ui-mark[data-mark="output"] { width: 0.375rem; height: 0.375rem; margin: 0 0.25rem; border-radius: 50%; background: var(--accent); }
 .ui-mark[data-mark="ok"], .ui-mark[data-mark="fail"] { background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; }
 .ui-mark[data-mark="ok"] { color: var(--ok); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E"); }
 /* Ended: the session is gone without an exit code to report. Quiet, not an error: a stopped square. */
@@ -1167,7 +1167,7 @@
 .ui-mark[data-mark="fail"] { color: var(--danger); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
 /* In a branched menu the mark sits on the right, against the note beside it. */
 .bm-leaf .ui-mark { margin-left: auto; }
-.bm-leaf .ui-mark[data-mark="output"] { margin-right: 0.1875rem; }
+.bm-leaf .ui-mark[data-mark="output"] { margin-right: 0.25rem; }
 .bm-leaf .ui-mark + .bm-meta { margin-left: 0.375rem; }
 @keyframes ui-mark-in { from { opacity: 0; transform: scale(0.5); } }
 @media (prefers-reduced-motion: reduce) { .ui-mark.is-new { animation: none; } }
