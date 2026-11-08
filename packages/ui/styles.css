@@ -407,6 +407,9 @@
   --ui-size-label: 0.8125rem;
   --ui-size-button: 0.84375rem;
   --ui-size-eyebrow: 0.75rem;
+  /* The one title size (D372) for every large title (sign-in, add host, access): 22 px at the default 110 % desktop root (1.25 rem x 17.6 px),
+     20 px on a phone, whose root is 16 px. Titles of a window or a section are the name role, not this. */
+  --ui-size-title: 1.25rem;
   /* The older names, kept as aliases of the sizes above so a reader never has two scales: body text in a row is a label,
      secondary and caption text are eyebrow size. --text-input is the one size that is not a role: iOS zooms into a focused field under 16 px. */
   --text-body: var(--ui-size-label);
