@@ -25,6 +25,7 @@
  * key watching and the morph live in window-alt.on-demand.ts, which the card loads the first time the pointer enters
  * the window or focus reaches its actions (D188): a window that nobody hovers carries none of that code.
  */
+import { markMotion } from "./input-source";
 import { createLockToggle, trackLockReveal, type LockSource, type LockToggle } from "./lock-toggle";
 import { createConnectionIndicator, type ConnectionIndicator, type ConnectionIndicatorState } from "./connection-indicator";
 import type { AltButton } from "./window-alt.on-demand";
@@ -212,6 +213,8 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   const stopReveal = lockable ? trackLockReveal(root, lock) : () => undefined;
   const setLocked = (next: boolean, instant = false): void => {
     if (next === lock.locked) return;
+    // A key (Ctrl+Shift+L, or Space or Enter on the lock) locks with no border fade and no lock-icon motion (#427).
+    instant = markMotion(root) || instant;
     root.toggleAttribute("data-locked", next);
     lock.setLocked(next, instant);
   };
@@ -262,6 +265,8 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
     get locked() { return lock.locked; },
     setLocked,
     setActive(active) {
+      // Stepping from window to window by key (Ctrl+Shift+arrows, next and previous) does not fade the border (#427, TASTE).
+      if (root.hasAttribute("data-active") !== active) markMotion(root);
       root.toggleAttribute("data-active", active);
       if (active) root.setAttribute("aria-current", "true");
       else root.removeAttribute("aria-current");
