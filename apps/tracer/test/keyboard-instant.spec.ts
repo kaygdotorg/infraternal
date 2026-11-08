@@ -158,8 +158,12 @@ for (const viewport of VIEWPORTS) {
 
     for (const key of ["Space", "Enter"]) test(`${key} on the focused capsule opens the palette with no animation`, async ({ page }) => {
       await page.locator("#capsule").focus();
-      // Space activates a button on keyup, so the click comes after the key went down: sample once the press has finished.
-      await page.keyboard.press(key);
+      // Space activates a button on keyup, so the click comes well after the key went down (a real press is held for tens of
+      // milliseconds): hold it for 100 ms, then sample once the key is up.
+      await page.keyboard.down(key);
+      // sleep: hold the key as a person does, longer than any short window after the keydown
+      await page.waitForTimeout(100);
+      await page.keyboard.up(key);
       const f = await page.evaluate(() => new Promise<{ hidden: boolean; opacity: string; running: number }>((resolve) => requestAnimationFrame(() => {
         const palette = document.querySelector<HTMLElement>("#palette")!;
         resolve({ hidden: getComputedStyle(palette).display === "none", opacity: getComputedStyle(palette).opacity, running: document.getAnimations().filter((a) => a instanceof CSSTransition && a.playState === "running" && (a.effect as KeyframeEffect).target === palette).length });
@@ -448,7 +452,15 @@ test.describe("window stepping and the lock do not animate from the keyboard", (
   }
 
   test("a pointer click on another window still fades its border", async ({ page }) => {
-    await page.locator(".ui-window").nth(1).locator(".ui-window-header, .terminal-host").first().click();
+    // Another window that is fully on screen, clicked at its centre.
+    const target = await page.evaluate(() => {
+      const rects = [...document.querySelectorAll<HTMLElement>(".ui-window")].map((w) => ({ w, r: w.getBoundingClientRect() }));
+      const active = rects.findIndex(({ w }) => w.hasAttribute("data-active"));
+      const i = rects.findIndex(({ r }, index) => index !== active && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && r.width > 80);
+      return i < 0 ? undefined : { x: rects[i]!.r.left + rects[i]!.r.width / 2, y: rects[i]!.r.top + rects[i]!.r.height / 2 };
+    });
+    expect(target, "a second window is fully on screen").toBeDefined();
+    await page.mouse.click(target!.x, target!.y);
     expect((await running(page)).some((n) => n.startsWith("border-color")), "pointer activation keeps its border fade").toBe(true);
   });
 });
