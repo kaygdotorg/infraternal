@@ -702,3 +702,24 @@ test("resync reopens a feature subscription with the same server ID", () => {
     expect(f.subscriptionIds.slice(before)).toEqual([subId, subId]);
   } finally { f.dispose(); }
 });
+
+// The readout is cleared when a terminal attaches and must be refilled by the probe sent at that moment, even when
+// an earlier probe (a focus or visibility return) was reported less than two seconds before. Without this the
+// readout stayed on its "unavailable" mark until the next key press (#430).
+test("an attach probe repopulates a cleared round-trip readout inside the report throttle", () => {
+  const f = fixture(300, 1);
+  try {
+    f.advance(5_000); // let the probe sent at welcome settle, and leave its report far in the past
+    const seen: Array<number | undefined> = [];
+    f.connection.onRoundTrip((ms) => seen.push(ms));
+    f.connection.sampleRoundTrip(); // the activation probe, answered and reported
+    f.advance(300);
+    expect(seen).toEqual([300]);
+    f.connection.sampleRoundTrip(true); // the attach probe: the readout was just cleared, so its answer must show
+    f.advance(300);
+    expect(seen).toEqual([300, 300]);
+    f.connection.sampleRoundTrip(); // an ordinary probe inside the window stays throttled
+    f.advance(300);
+    expect(seen).toEqual([300, 300]);
+  } finally { f.dispose(); }
+});
