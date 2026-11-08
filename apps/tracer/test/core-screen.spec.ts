@@ -71,6 +71,10 @@ test("curated overlay materials preserve foreground contrast in every theme", ()
   }
 });
 
+/**
+ * Opens the core screen in the paper and ink themes at one viewport size, checks each theme's floating-surface
+ * materials (pill, sidebar, palette) and saves a screenshot of each state. Returns the screenshot paths.
+ */
 async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, height: number): Promise<string[]> {
   const paths: string[] = [];
   await page.setViewportSize({ width, height });

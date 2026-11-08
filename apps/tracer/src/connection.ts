@@ -142,6 +142,11 @@ export const DESKTOP_VIDEO_CAP = DESKTOP_VIDEO;
 
 interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 
+/**
+ * The page's one connection to the server. Terminals open streams on it with `openStream`, calls go through
+ * `call`, and `onRoundTrip` reports the measured connection delay to whoever shows it. See the module comment
+ * for the handshake, resume, backoff and liveness rules it keeps.
+ */
 export class MuxConnection {
   private socket: WebSocket | undefined;
   private decoder: WebSocketFrameDecoder | undefined;
