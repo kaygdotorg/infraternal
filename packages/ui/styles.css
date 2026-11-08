@@ -72,7 +72,10 @@
    covers, the sidebar). Each rule keys off the element's own attribute, which stays until its next change, so no time window
    decides it and a pointer change on the same element (which writes "animate" first) keeps the full motion. A window card
    (border colour) and its lock icon follow the same attribute when the active window or the lock changes. */
-.ui-glass-bed[data-motion="instant"], .ui-key-instant[data-motion="instant"], .ui-window[data-motion="instant"], .ui-window[data-motion="instant"] .ui-window-lock { transition: none; }
+/* html:root raises the first rule above the pills' own transition rules (.top > .tabs > .tab-add and the like), which are as specific. The
+   window card's rules stay lower, so the card's height-shaping transition (more specific still) is left alone. */
+html:root .ui-glass-bed[data-motion="instant"], html:root .ui-key-instant[data-motion="instant"] { transition: none; }
+.ui-window[data-motion="instant"], .ui-window[data-motion="instant"] .ui-window-lock { transition: none; }
 .ui-glass-bed[hidden] { display: none; }
 .ui-glass-bed[data-open="true"] { opacity: 1; transform: none; }
 @media (prefers-reduced-motion: reduce) { .ui-glass-bed { transition: opacity 120ms ease; transform: none; } }

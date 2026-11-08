@@ -17,7 +17,7 @@
  * from `openHeight` to the whole panel, which is how that terminal expands into its slot.
  */
 import { Spring } from "./spring";
-import { triggeredByKeyboard } from "./input-source";
+import { markMotion } from "./input-source";
 
 export interface PillMorphOptions {
   /** The pill that morphs (the session capsule). */
@@ -122,7 +122,8 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
   const close = (instant = false): void => {
     if (!openState) return;
     openState = false;
-    if (instant || triggeredByKeyboard()) { spring.set(0, true); finishClose(); return; }
+    // The pill's own fade (its opacity transition) follows the same answer: a key brings it back at once.
+    if (markMotion(pill) || instant) { spring.set(0, true); finishClose(); return; }
     if (reduced.matches) {
       pill.style.opacity = "";
       panel.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: "ease-out", fill: "forwards" }).onfinish = () => { if (!openState) finishClose(); };
@@ -143,7 +144,7 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
     layout(options.width, undefined, options.openHeight);
     pill.setAttribute("aria-expanded", "true");
     pill.style.pointerEvents = "none";
-    if (triggeredByKeyboard()) { spring.set(1, true); return; }
+    if (markMotion(pill)) { spring.set(1, true); return; }
     if (reduced.matches) {
       pill.style.opacity = "0";
       panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });

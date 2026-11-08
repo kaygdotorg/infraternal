@@ -21,7 +21,7 @@
  * (shortcuts.ts): current area first, then global, one shortcut per action for this platform.
  */
 import { Spring } from "./spring";
-import { triggeredByKeyboard } from "./input-source";
+import { markMotion } from "./input-source";
 import { comboLabel, isOverridden, isTypingTarget, keyCaps, shortcutSections } from "./shortcuts";
 /** Re-exported for callers that already import the view: true for keystrokes that belong to a field or terminal. */
 export { isTypingTarget } from "./shortcuts";
@@ -154,7 +154,9 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     openState = false;
     controller?.abort();
     controller = undefined;
-    if (instant || !panel || triggeredByKeyboard()) { spring.set(0, true); finishClose(); return; }
+    // The pill's own opacity fade follows the same answer as the panel: a key brings the pill back at once.
+    const byKey = markMotion(pill);
+    if (instant || !panel || byKey) { spring.set(0, true); finishClose(); return; }
     if (reduced.matches) {
       const node = panel;
       pill.style.opacity = "";
@@ -196,13 +198,14 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
   const open = (): void => {
     if (openState) return;
     openState = true;
+    const byKey = markMotion(pill);
     listen();
     if (panel) {
       // The close is still playing: reverse it, on the panel that is there. A second panel would leave the first one
       // behind, half clipped and without content.
       for (const animation of panel.getAnimations()) animation.cancel();
       pill.style.pointerEvents = "none";
-      if (reduced.matches || triggeredByKeyboard()) { pill.style.opacity = "0"; panel.style.opacity = ""; spring.set(1, true); return; }
+      if (reduced.matches || byKey) { pill.style.opacity = "0"; panel.style.opacity = ""; spring.set(1, true); return; }
       spring.set(1);
       requestAnimationFrame(settle);
       return;
@@ -232,7 +235,7 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     pill.setAttribute("aria-expanded", "true");
     pill.style.pointerEvents = "none";
     panel.focus({ preventScroll: true });
-    if (triggeredByKeyboard()) { spring.set(1, true); return; }
+    if (byKey) { spring.set(1, true); return; }
     if (reduced.matches) {
       pill.style.opacity = "0";
       panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
