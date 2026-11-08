@@ -121,3 +121,33 @@ for (const size of SIZES) {
     });
   }
 }
+
+/** The mouse path is the renderer's own and must be untouched by the touch work: a drag over a row selects it, and no callout appears. */
+test("desktop: dragging with the mouse still selects text", async ({ browser }) => {
+  test.setTimeout(240_000);
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  try {
+    await context.request.post("/__mock/reset");
+    await context.request.post("/__mock/open-terminal");
+    await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
+    await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+    await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(id: string): void } }).__tracerClusters.flyView("console"));
+    await expect(page.locator(`${WINDOW} .terminal-host`)).toBeVisible({ timeout: 15_000 });
+    await page.evaluate((text) => window.__tracerTestDouble!.writeText(text), SCREEN);
+    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.screenText().includes("third"))).toBe(true);
+    await page.locator(`${WINDOW} .terminal-host`).click({ position: { x: 40, y: 300 } });
+    const from = await cellCentre(page, 0, 1);
+    const to = await cellCentre(page, 20, 1);
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move((from.x + to.x) / 2, to.y, { steps: 6 });
+    await page.mouse.move(to.x, to.y, { steps: 6 });
+    await page.mouse.up();
+    await expect.poll(() => selected(page), "a mouse drag selects the row's text").toBe("second line of output");
+    await expect(page.locator(CALLOUT)).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
