@@ -68,7 +68,7 @@ const STYLE = `
 .tip-pos.tip-measure { visibility: hidden; will-change: auto; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
-  border-radius: 0.875rem; opacity: 0; transform: scale(0.96); pointer-events: none;
+  border-radius: var(--r-md); opacity: 0; transform: scale(0.96); pointer-events: none;
   transition: opacity var(--t-press) ease-out, transform var(--t-pop) var(--ease-out); }
 .ui-confirm-tip[hidden] { display: none !important; }
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }

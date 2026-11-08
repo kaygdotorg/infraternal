@@ -64,7 +64,7 @@
   max-height: 100%;
   flex-direction: column;
   margin: auto;
-  border-radius: 1.375rem;
+  border-radius: var(--r-lg);
   --ui-overlay-shadow: var(--elevation);
   color: var(--fg);
   font: var(--fw-body) 0.875rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
@@ -105,7 +105,7 @@
 @media (hover: hover) and (pointer: fine) { .ah-close:hover { background: var(--hover); color: var(--fg); } }
 .ah-close:active { transform: scale(var(--ui-press-scale-small)); }
 @media (max-width: 600px) {
-  .ah-float { width: 100%; border-radius: 1.25rem; }
+  .ah-float { width: 100%; border-radius: var(--r-lg); }
   .ah-scroll { padding: 1.75rem 1.375rem 1.75rem; }
   .ah-float:has(.ah-foot:not([hidden])) .ah-scroll { padding-bottom: 1rem; }
 }
@@ -118,7 +118,7 @@
   height: 2.25rem;
   place-items: center;
   margin-bottom: 1.25rem;
-  border-radius: 0.625rem;
+  border-radius: var(--r-sm);
   background: rgb(from var(--fg) r g b / 0.06);
   color: var(--fg-2);
 }
@@ -167,7 +167,7 @@
   align-items: center;
   column-gap: 0.75rem;
   padding: var(--ah-row-pad) 0.625rem;
-  border-radius: 0.625rem;
+  border-radius: var(--r-sm);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
@@ -175,7 +175,7 @@
 .ah-row.is-added { cursor: default; }
 .ah-row.is-added :is(.ah-name, .ah-meta, .ah-os-mark) { color: var(--fg-3); }
 .ah-check { display: grid; width: var(--ah-check); height: var(--ah-check); place-items: center; }
-.ah-check .tick, .ah-consent .tick { width: var(--ah-check); height: var(--ah-check); border-radius: 0.3125rem; color: var(--bg); }
+.ah-check .tick, .ah-consent .tick { width: var(--ah-check); height: var(--ah-check); border-radius: var(--r-xs); color: var(--bg); }
 .ah-row.is-added .tick { opacity: 0.4; }
 .ah-os-mark { width: var(--ah-icon); height: var(--ah-icon); flex: none; fill: currentColor; color: var(--fg-2); }
 .ah-main { display: grid; min-width: 0; }
@@ -243,7 +243,7 @@
 .ah-details summary::-webkit-details-marker { display: none; }
 .ah-details summary .ah-icon { width: 0.875rem; height: 0.875rem; transition: transform var(--t-pop) var(--ease-out); }
 .ah-details[open] summary .ah-icon { transform: rotate(90deg); }
-.ah-details pre { margin: 0.5rem 0 0; padding: 0.75rem 0.875rem; border-radius: 0.625rem; background: var(--ah-field); color: var(--fg-2); font: var(--fw-body) 0.8125rem/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ah-details pre { margin: 0.5rem 0 0; padding: 0.75rem 0.875rem; border-radius: var(--r-sm); background: var(--ah-field); color: var(--fg-2); font: var(--fw-body) 0.8125rem/1.6 var(--font-mono, "Geist Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ── Actions (the sign-in card's pill and text buttons) ───────────────────── */
 /* Actions sit in the card's own footer, pinned below its scrolling body. */
@@ -325,7 +325,7 @@
 .ah-overlay { position: absolute; z-index: 10; inset: 0; }
 .ah-overlay .ah-stage { padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); }
 @media (max-width: 600px) { .ah-overlay .ah-stage { padding: max(0.5rem, env(safe-area-inset-top)) 0.5rem max(0.5rem, env(safe-area-inset-bottom)); } }
-.ah-code { padding: 1px 0.3125rem; border-radius: 0.3125rem; background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
+.ah-code { padding: 1px 0.3125rem; border-radius: var(--r-xs); background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }
 .ah-note { display: flex; align-items: center; gap: 0.625rem; margin: 0.875rem 0.625rem 0; color: var(--fg-2); }
 .ah-note .ah-icon { flex: none; }
 .ah-load-error .ah-icon { color: var(--danger); }
@@ -349,7 +349,7 @@
 
 /* One block per host: the head is always visible; the steps open under it. */
 .ah-run { position: relative; border-radius: var(--r-md); }
-.ah-run-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; column-gap: 0.75rem; padding: 0.25rem 0.625rem 0.25rem; border-radius: 0.625rem; }
+.ah-run-head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; column-gap: 0.75rem; padding: 0.25rem 0.625rem 0.25rem; border-radius: var(--r-sm); }
 .ah-run-toggle { display: grid; min-width: 0; grid-template-columns: var(--ah-icon) minmax(0, 1fr); align-items: center; column-gap: 0.75rem; margin: 0; padding: 0.25rem 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 @media (hover: hover) and (pointer: fine) { .ah-run-head:hover { background: var(--hover); } }
 /* The row's status is one line beside the host's name; the full reason is on the failure page (#394). */
