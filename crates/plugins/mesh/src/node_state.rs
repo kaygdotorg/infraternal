@@ -738,15 +738,6 @@ impl Store {
                 }
             }
         }
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
-                let mut bound = old;
-                bound.local_key = next.local_key;
-                if &bound != next {
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
-            }
-        }
         #[cfg(feature = "cutoff-measure")]
         let encode = state.config.as_ref().map(|config| {
             crate::cutoff_measure::Stage::new(config.node, config.version, "journal_encode")
@@ -1071,6 +1062,225 @@ pub(crate) mod tests {
             authority_reset_pending: false,
             config: Some(Config {
                 authority_epoch: None,
+                local_key: Some(local_key),
+                server: None,
+                node: crate::policy::model::NodeId(1),
+                #[cfg(feature = "mesh-dns-spike")]
+                name: None,
+                #[cfg(feature = "mesh-dns-spike")]
+                dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+                version: 7,
+                addresses: crate::policy::model::Addresses {
+                    ipv4: "10.254.0.1".parse().expect("IPv4"),
+                    ipv6: "fd01::1".parse().expect("IPv6"),
+                },
+                default_policy: crate::dataplane::DefaultPolicy::Deny,
+                exposure: None,
+                peers: std::collections::BTreeMap::new(),
+                #[cfg(feature = "mesh-dns-spike")]
+                peer_names: std::collections::BTreeMap::new(),
+            }),
+            #[cfg(target_os = "linux")]
+            backend: Some(crate::firewall::Backend::Nft),
+        }
+    }
+
+    /// A committed `GotaTun` journal authorizes persisting its candidate binding at the same revision.
+    #[test]
+    fn a_commit_journal_authorizes_the_same_version_gotatun_binding_advance() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+
+        store
+            .save(&binding_state(candidate_public))
+            .expect("journal-proven binding advance at the same config revision");
+
+        let (_, restored) = Store::open(&directory.0).expect("restore candidate binding");
+        assert_eq!(
+            restored.config.and_then(|config| config.local_key),
+            Some(candidate_public),
+            "the candidate binding is durable after snapshot replacement"
+        );
+    }
+
+    /// A completed journal still authorizes normalizing a snapshot that retained its old binding.
+    #[test]
+    fn a_completed_journal_authorizes_normalizing_a_stale_gotatun_binding() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: operation_id.to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("retire the predecessor before snapshot normalization");
+
+        store
+            .save(&binding_state(candidate_public))
+            .expect("normalize the stale binding after finish");
+    }
+
+    /// A completed marker cannot authorize replacing an unrelated predecessor binding.
+    #[test]
+    fn a_completed_journal_refuses_an_unrelated_predecessor_binding() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        let unrelated_public = crate::wireguard::Key::from_private(&unrelated)
+            .expect("unrelated key")
+            .1;
+        store
+            .save(&binding_state(unrelated_public))
+            .expect("save the unrelated old binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: operation_id.to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("finish the rotation");
+
+        assert_eq!(
+            store
+                .save(&binding_state(candidate_public))
+                .expect_err("an unrelated prior binding cannot advance after finish")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    /// A same-revision binding cannot move to a key that the commit journal does not select.
+    #[test]
+    fn an_unproven_same_version_gotatun_binding_advance_is_refused() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        let unrelated_public = crate::wireguard::Key::from_private(&unrelated)
+            .expect("unrelated key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+
+        assert_eq!(
+            store
+                .save(&binding_state(unrelated_public))
+                .expect_err("an unrelated key cannot replace the accepted binding")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
     #[test]
     fn explicit_off_survives_restart_and_snapshot_contains_only_public_fields() {
         let directory = Directory::new();

@@ -974,7 +974,6 @@ enum WorkerCommand {
         private_key: gotatun::x25519::StaticSecret,
         reply: sync::SyncSender<io::Result<()>>,
     },
-    },
     Counters(sync::SyncSender<CounterMap>),
     Stop(sync::SyncSender<io::Result<()>>),
 }
@@ -1237,8 +1236,6 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
             }
             WorkerCommand::SetPrivateKey { private_key, reply } => {
                 let result = state.set_private_key(private_key).await;
-                let _ = reply.send(result);
-            }
                 let _ = reply.send(result);
             }
             WorkerCommand::Counters(reply) => {
@@ -2403,10 +2400,10 @@ mod tests {
 
     use super::{
         BoundUdpFactory, Enrolment, Node, PUBLIC_STATE, RuntimeInfo, SavedState, UdpSocketFactory,
-        UdpTransportFactoryParams, Worker, WorkerCommand, mpsc, macos_snapshot_binding_is_authorized,
-        parse_utun_payload, peers_for_config, read_public_state, reconcile, rotation_crash_checkpoint,
-        route_addresses, stage_chunk, utun_family, valid_utun_name, validate_config,
-        validate_underlay_routes, write_public_state,
+        UdpTransportFactoryParams, Worker, WorkerCommand, macos_snapshot_binding_is_authorized,
+        mpsc, parse_utun_payload, peers_for_config, read_public_state, reconcile,
+        rotation_crash_checkpoint, route_addresses, stage_chunk, utun_family, valid_utun_name,
+        validate_config, validate_underlay_routes, write_public_state,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},

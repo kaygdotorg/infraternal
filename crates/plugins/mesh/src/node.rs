@@ -1909,7 +1909,11 @@ impl Node {
                     .map(|store| gotatun_owner_proof(store, snapshot_key))
                     .transpose();
                 match proof.and_then(|proof| match Device::active_link()? {
-                    Some(link) if proof.as_ref().is_some_and(|proof| proven_gotatun_link(&link, proof)) => {
+                    Some(link)
+                        if proof
+                            .as_ref()
+                            .is_some_and(|proof| proven_gotatun_link(&link, proof)) =>
+                    {
                         Device::delete_ifindex(link.ifindex)?;
                         Ok(())
                     }
