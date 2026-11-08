@@ -277,7 +277,10 @@ def check_build_recipe() -> None:
     """Verify signed inputs, offline dependencies, artifacts and feature selection."""
     with tempfile.TemporaryDirectory(prefix="build-vt-fixture-") as temporary:
         fixture = make_fixture(Path(temporary))
-        cases = (("shipping", {}),)
+        cases = (
+            ("shipping", {}),
+            ("mouse-probe", {"CARGO_FEATURE_VT_TEST_INPUT": "1"}),
+        )
         for label, features in cases:
             result, output = run_build(fixture, label, features)
             assert result.returncode == 0, f"{label} build failed: {result.stderr}{result.stdout}"
@@ -286,6 +289,13 @@ def check_build_recipe() -> None:
             native = native.resolve()
             assert (native / "lib/libghostty-vt.a").read_bytes() == b"fixture static archive"
             assert (native / "lib/libghostty-vt.so").read_bytes() == b"fixture shared library"
+            static_link = native / "static-link"
+            assert {path.name for path in static_link.iterdir()} == {"libghostty-vt.a"}, (
+                "Rust's native link path must contain only the static archive"
+            )
+            assert (static_link / "libghostty-vt.a").resolve() == (
+                native / "lib/libghostty-vt.a"
+            ).resolve()
             assert (native / "lib/pkgconfig/libghostty-vt.pc").is_file()
             assert (native / "include/ghostty/vt.h").is_file()
 
@@ -321,7 +331,15 @@ def check_build_recipe() -> None:
             for line in fixture["zig_log"].read_text().splitlines()
             if json.loads(line)["command"] == "build"
         ]
-        assert len(builds) == 1, "the release build must invoke the pinned compiler"
+        assert len(builds) == 2, "both build variants must invoke the pinned compiler"
+        feature_args = [
+            next(arg for arg in build["args"] if arg.startswith("-Dvt-features="))
+            for build in builds
+        ]
+        assert feature_args == [
+            "-Dvt-features=-all",
+            "-Dvt-features=-all,+input-encode",
+        ]
         for build in builds:
             args = build["args"]
             assert args[0] == "build"

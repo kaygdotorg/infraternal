@@ -83,6 +83,9 @@ optimize=ReleaseSafe
 [[ "${PROFILE:-debug}" != release ]] || optimize=ReleaseFast
 shared_host="${CARGO_FEATURE_PROCESS_PER_USER:-}"
 compact_history="${CARGO_FEATURE_COMPACT_HISTORY:-}"
+test_input="${CARGO_FEATURE_VT_TEST_INPUT:-}"
+vt_features=-all
+[[ -z "$test_input" ]] || vt_features=-all,+input-encode
 strip=false
 [[ "$optimize" != ReleaseFast ]] || strip=true
 
@@ -97,10 +100,10 @@ key="$( {
     if [[ -n "$compact_history" ]]; then
         sha256sum "$root/crates/infraternal-shim/native/history.zig"
     fi
-    printf '%s %s %s %s %s %s %s\n' \
+    printf '%s %s %s %s %s %s %s %s\n' \
         "$(awk -v file="$source_name" '$2 == file { print $1 }' "$root/scripts/libghostty-vt.sha256")" \
         "$(awk -v file="$deps_name" '$2 == file { print $1 }' "$root/scripts/libghostty-vt.sha256")" \
-        "$vt_target" "$optimize" "$strip" "$shared_host" "$compact_history"
+        "$vt_target" "$optimize" "$strip" "$vt_features" "$shared_host" "$compact_history"
 } | sha256sum | cut -d ' ' -f1)"
 cache_dir="$vt_tools/native-$key"
 mkdir -p "$cache_dir"
@@ -112,7 +115,21 @@ else
     # the short-lived Perl locker exits.
     perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or die "fd 9: $!"; flock($f, LOCK_EX) or die "flock: $!"'
 fi
+wire_static_link_dir() {
+    # Keep the pkg-config library directory intact while giving Cargo a path
+    # that cannot resolve libghostty-vt.dylib instead of our adapter archive.
+    local native_root="$1"
+    local link_dir="$native_root/static-link"
+    [[ -f "$native_root/lib/libghostty-vt.a" ]] || {
+        printf 'missing static libghostty-vt archive under %s\n' "$native_root" >&2
+        return 1
+    }
+    rm -rf -- "$link_dir"
+    mkdir -p "$link_dir"
+    ln -s ../lib/libghostty-vt.a "$link_dir/libghostty-vt.a"
+}
 if [[ -f "$cache_dir/native/lib/libghostty-vt.a" ]]; then
+    wire_static_link_dir "$cache_dir/native"
     rm -rf -- "$output/native"
     ln -s "$cache_dir/native" "$output/native"
     exit 0
@@ -169,6 +186,7 @@ build_args=(
     -Doptimize="$optimize"
     -Dcpu=baseline
     -Dtarget="$vt_target"
+    -Dvt-features="$vt_features"
     -Dstrip="$strip"
     --system "$deps_dir"
     --prefix "$cache_dir/native"
@@ -176,6 +194,7 @@ build_args=(
 )
 # Zig 0.17 reads the global cache location from the environment.
 ZIG_GLOBAL_CACHE_DIR="$global_cache" "$zig" "${build_args[@]}"
+wire_static_link_dir "$cache_dir/native"
 
 # The cache retains both release library forms; build.rs explicitly asks Cargo
 # to link the static archive used by the shim.
