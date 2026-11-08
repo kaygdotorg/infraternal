@@ -172,6 +172,8 @@ button { color: inherit; }
   overflow-y: hidden;
   padding: 0.875rem 1rem;
   touch-action: none;
+  /* A finger's long press selects text through our own gesture (terminal-touch.ts, #426); the system's callout must not open over it. */
+  -webkit-touch-callout: none;
   overscroll-behavior: none;
   scrollbar-width: none;
   /* The renderer measures its cells from the host's computed font settings, so UI

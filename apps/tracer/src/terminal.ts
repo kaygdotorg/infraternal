@@ -12,6 +12,7 @@ import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../pac
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
+import type { SelectableTerminal } from "./terminal-touch-select.on-demand";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
@@ -57,6 +58,7 @@ interface GhosttyActivityControls {
     remeasureFont(): void;
     resize(cols: number, rows: number): void;
     getMetrics(): { width: number; height: number; baseline: number };
+    getCanvas(): HTMLCanvasElement;
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
@@ -414,7 +416,15 @@ export class TerminalClient {
       write(data, callback);
     };
     // Phones wait for a real tap before opening the keyboard (D191).
-    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
+    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal(),
+      // A finger selects and copies text (#426); the code for it loads when the first finger touches the terminal.
+      () => onDemand(() => import("./terminal-touch-select.on-demand")).then(({ createTouchSelection }) => createTouchSelection({
+        terminal: terminal as unknown as SelectableTerminal,
+        host: config.host,
+        canvas: () => this.ghostty.renderer?.getCanvas(),
+        metrics: () => this.cellMetrics(),
+        wake: () => this.wakeTerminal(),
+      })));
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     this.prediction = config.predictiveEcho === true
