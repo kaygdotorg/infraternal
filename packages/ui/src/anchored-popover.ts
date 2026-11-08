@@ -54,6 +54,18 @@ export interface AnchoredPopoverOptions {
    * goes, and it falls below the point only when there is no room above.
    */
   atAlign?: "start" | "centre";
+  /**
+   * With `at`: the client box the popover must stay inside, instead of the whole screen (a callout over a window's text stays
+   * in that window's content area). Read on every placement. It is kept one inset inside this box on every side.
+   */
+  bounds?(): { left: number; top: number; right: number; bottom: number } | undefined;
+  /**
+   * With `at` and `side: "above"`: client boxes the popover must not cover (a window's title pill). When opening above the
+   * point would cover one, it opens below instead, at `atBelow`.
+   */
+  avoid?(): { left: number; top: number; right: number; bottom: number }[];
+  /** With `side: "above"` and `avoid`: the y where its top edge goes when it opens below the point instead. Default `at.y`. */
+  atBelow?: number;
   /** The y below which the popover must not reach (a key tray's top); read on every placement. */
   bottomLimit?(): number | undefined;
 }
@@ -82,17 +94,21 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   const placeAt = (at: { x: number; y: number }): void => {
     const screen = stage.getBoundingClientRect();
     const view = window.visualViewport;
-    const right = Math.min(screen.right, view ? view.offsetLeft + view.width : innerWidth) - INSET;
-    const bottom = Math.min(screen.bottom, view ? view.offsetTop + view.height : innerHeight) - INSET;
-    root.style.maxWidth = `${Math.round(Math.min(options.maxWidth ?? 400, right - screen.left - INSET))}px`;
+    const region = options.bounds?.();
+    const right = Math.min(screen.right, view ? view.offsetLeft + view.width : innerWidth, region?.right ?? Infinity) - INSET;
+    const bottom = Math.min(screen.bottom, view ? view.offsetTop + view.height : innerHeight, region?.bottom ?? Infinity) - INSET;
+    const leftEdge = Math.max(screen.left, region?.left ?? screen.left), topEdge = Math.max(screen.top, region?.top ?? screen.top);
+    root.style.maxWidth = `${Math.round(Math.min(options.maxWidth ?? 400, right - leftEdge - INSET))}px`;
     const width = root.offsetWidth, height = root.offsetHeight;
     const wanted = options.atAlign === "centre" ? at.x - width / 2 : at.x;
-    const left = Math.round(Math.max(screen.left + INSET, Math.min(wanted, right - width)));
+    const left = Math.round(Math.max(leftEdge + INSET, Math.min(wanted, right - width)));
     // Opens below the point and flips above it when the room below is smaller than the menu and the room above is larger;
-    // an `above` popover prefers the other way round.
-    const roomAbove = at.y - screen.top, roomBelow = bottom - at.y;
-    const flip = above ? roomAbove >= height || roomAbove >= roomBelow : height > roomBelow && roomAbove > roomBelow;
-    const top = Math.round(Math.max(screen.top + INSET, flip ? at.y - height : Math.min(at.y, bottom - height)));
+    // an `above` popover prefers the other way round, and gives up above when that would cover a box it must avoid.
+    const roomAbove = at.y - topEdge, roomBelow = bottom - at.y;
+    let flip = above ? roomAbove >= height || roomAbove >= roomBelow : height > roomBelow && roomAbove > roomBelow;
+    const covers = (y: number): boolean => (options.avoid?.() ?? []).some((box) => left < box.right && left + width > box.left && y < box.bottom && y + height > box.top);
+    if (above && flip && covers(at.y - height)) flip = false;
+    const top = Math.round(Math.max(topEdge + INSET, flip ? at.y - height : Math.min(above ? options.atBelow ?? at.y : at.y, bottom - height)));
     root.style.left = `${left - screen.left}px`;
     root.style.top = `${top - screen.top}px`;
     root.style.maxHeight = `${Math.max(0, Math.floor(bottom - top))}px`;

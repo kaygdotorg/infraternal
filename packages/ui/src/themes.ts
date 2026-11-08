@@ -1,6 +1,8 @@
 /** Curated UI and terminal palettes; one theme keeps both color systems coherent. */
 import { entityPaletteCss } from "./entity-palette";
 
+import { contrastRatio } from "./color";
+
 export type Ansi = [string, string, string, string, string, string, string, string];
 
 export interface Theme {
@@ -233,15 +235,43 @@ export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT
   style.setProperty("--mesh-4", active.ansi[6]);
 }
 
+/** A colour a fraction of the way from `from` to `to`, in sRGB, as six-digit hex. */
+function mixHex(from: string, to: string, amount: number): string {
+  const channel = (hex: string, index: number): number => parseInt(hex.slice(index, index + 2), 16);
+  return `#${[1, 3, 5].map((index) => Math.round(channel(from, index) + (channel(to, index) - channel(from, index)) * amount).toString(16).padStart(2, "0")).join("")}`;
+}
+
+/**
+ * The terminal's selection colours for a theme (#426, D365). The highlight is the accent mixed into the background. On a light
+ * theme it stays the soft third it always was, with the theme's text on it. On a dark theme a third of the accent is nearly
+ * invisible and the renderer's default selected text (dark) was unreadable on it, so the mix grows until the highlight stands
+ * out from the cell (3:1) while the selected text, the theme's own, still reads on it (4.5:1); if no mix does both, the one
+ * that comes closest is used.
+ */
+export function selectionColors(active: Theme): { background: string; foreground: string } {
+  const soft = mixHex(active.bg, active.accent, 0x55 / 255);
+  if (!active.dark) return { background: soft, foreground: active.fg };
+  let best = { background: soft, foreground: active.fg }, bestScore = -1;
+  for (let percent = 33; percent <= 95; percent++) {
+    const background = mixHex(active.bg, active.accent, percent / 100);
+    const score = Math.min(contrastRatio(background, active.bg) / 3, contrastRatio(active.fg, background) / 4.5);
+    if (score >= 1) return { background, foreground: active.fg };
+    if (score > bestScore) { bestScore = score; best = { background, foreground: active.fg }; }
+  }
+  return best;
+}
+
 /** Builds the Ghostty ANSI palette; translucent mode reveals the still backdrop. */
 export function terminalTheme(active: Theme, translucent: boolean) {
   const [black, red, green, yellow, blue, magenta, cyan, white] = active.ansi;
   const [brightBlack, brightRed, brightGreen, brightYellow, brightBlue, brightMagenta, brightCyan, brightWhite] = active.bright;
+  const selection = selectionColors(active);
   return {
     background: translucent ? "rgba(0,0,0,0)" : active.bg,
     foreground: active.fg,
     cursor: active.accent,
-    selectionBackground: `${active.accent}55`,
+    selectionBackground: selection.background,
+    selectionForeground: selection.foreground,
     black,
     red,
     green,
