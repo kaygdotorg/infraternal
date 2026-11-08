@@ -3,11 +3,16 @@
  * dry-runs it, then removes it inside the 15-minute admin window, with no passkey of its own (D339).
  * Pending cleanup keeps both the host row and the manual uninstall copy action available.
  */
-import { mountConfirmTip } from "../../../../packages/ui/src/tooltip";
+import { ICON_INFO } from "../../../../packages/ui/src/icons";
+import { confirmHostRemoval } from "./host-removal-confirm";
 import type { CoreScreen } from "../core-screen";
 import { isCanonicalUuid } from "../identifiers";
 interface RemovalStart { review: string; action: { host_id: string; host: string; uninstall: boolean } }
-/** `manual` carries the command that removes a leftover install, when the host could not uninstall itself. */
+/**
+ * `manual` carries the command that removes a leftover install. While `host_cleanup` is `pending` the
+ * server asks the host when it next connects and this is only the fallback (#409); otherwise the host
+ * could not uninstall itself.
+ */
 interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null }
 /** Send a bounded removal step with the browser session and same-origin checks. */
 async function post<T>(path: string, body: unknown): Promise<T> {
@@ -17,15 +22,16 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 /** Confirm a host removal and keep pending cleanup visible until server delivery. */
 export async function createHostRemoval(core: CoreScreen, removed: (id: string) => void) {
+  // The server's `label` is a sentence describing the action; rows and buttons use this short name instead.
   let label: string | undefined;
-  try { const action = await post<{ id: string; label: string }>("actions", {}); if (action.id === "remote.host.remove" && typeof action.label === "string") label = action.label; } catch { /* The optional remote component or owner authority is unavailable. */ }
+  try { const action = await post<{ id: string; label: string }>("actions", {}); if (action.id === "remote.host.remove" && typeof action.label === "string") label = "Remove host"; } catch { /* The optional remote component or owner authority is unavailable. */ }
   let busy = false;
   return {
     label: () => label,
     /** Review and persist denial; pending acceptance leaves the host in inventory. */
-    remove(id: string, name: string, anchor: HTMLElement): void {
+    remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void {
       if (!label || !isCanonicalUuid(id) || busy) return;
-      mountConfirmTip(anchor, { label: `${label}: ${name}`, title: `Remove ${name}?`, effect: "Revoke its access, forget its SSH key and uninstall the infraternal agent.", named: true, confirmLabel: label, cancelLabel: "Keep host", onConfirm: () => {
+      confirmHostRemoval(name, anchor, () => {
         busy = true;
         void (async () => {
           const start = await post<RemovalStart>("remove/start", { host_id: id, uninstall: true });
@@ -37,12 +43,20 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
           const manual = result.manual;
           if (typeof manual === "string" && manual) {
             // Pending delivery must keep the same local uninstall action as a
-            // completed removal with a leftover installation (#235).
+            // completed removal with a leftover installation (#235). A
+            // `pending` cleanup is not a failure: the server asks the host to
+            // uninstall itself when it next connects, and the command is only
+            // the fallback for a machine that never comes back (#409).
+            const asking = result.state === "pending" && result.host_cleanup === "pending";
             core.toast.show({
-              message: result.state === "pending"
-                ? `${name}: revoked, cleanup pending. infraternal is still installed on it. Copy the command and run it there.`
-                : `${name} was removed here, but infraternal is still installed on it. Copy the command and run it there.`,
-              tone: "error",
+              message: asking
+                ? `${name}: access revoked. It uninstalls infraternal as soon as it connects. If it never comes back, copy the command and run it there.`
+                : result.state === "pending"
+                  ? `${name}: revoked, cleanup pending. infraternal is still installed on it. Copy the command and run it there.`
+                  : `${name} was removed here, but infraternal is still installed on it. Copy the command and run it there.`,
+              // Waiting, not done: the shared info mark, never the success tick a
+              // toast shows by default (#409).
+              ...(asking ? { icon: ICON_INFO } : { tone: "error" as const }),
               dismissible: true,
               action: { label: "Copy command", onSelect: () => { void navigator.clipboard.writeText(manual).then(() => core.toast.show({ message: `Command copied. Run it on ${name}.`, duration: 5000 }), () => core.toast.show({ message: result.message, tone: "error", dismissible: true })); } },
             });
@@ -50,7 +64,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
             core.toast.show({ message: result.message, duration: 5000 });
           }
         })().catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "Host removal failed. Try again.", tone: "error", duration: 6000 })).finally(() => { busy = false; });
-      } });
+      }, returnFocus);
     },
   };
 }

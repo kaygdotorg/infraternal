@@ -38,6 +38,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     io::{BufRead, Write},
     net::SocketAddr,
+    os::unix::fs::DirBuilderExt,
     sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
@@ -78,12 +79,22 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Decode a 32-byte mesh public key from the fixture's 64-character hexadecimal input.
 fn key(text: &str) -> PublicKey {
     let mut out = [0; 32];
     for (index, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&text[2 * index..2 * index + 2], 16).expect("hex key");
     }
     PublicKey(out)
+}
+
+/// Select the peer identity whose host routes are active during an overlap.
+fn active_peer_key(peer: &Peer) -> PublicKey {
+    if peer.previous_active {
+        peer.previous_key.unwrap_or(peer.key)
+    } else {
+        peer.key
+    }
 }
 
 fn unix_time() -> SystemTime {
@@ -164,10 +175,20 @@ struct RelayConfig {
     name: String,
 }
 
+/// One peer and its host routes from the relay fixture's node input.
+///
+/// During a key overlap, `previous_key` stays installed while route ownership follows
+/// `previous_active`, so the fixture exercises the same active-key transition as a real node.
 #[derive(Deserialize)]
 struct PeerConfig {
     host: String,
     key: String,
+    /// Optional predecessor identity retained during the coordinator's overlap window.
+    #[serde(default)]
+    previous_key: Option<String>,
+    /// Keep host routes on `previous_key` until the local candidate is active.
+    #[serde(default)]
+    previous_active: bool,
     addresses: Addresses,
     endpoint: Option<SocketAddr>,
 }
@@ -178,6 +199,27 @@ struct PeerConfig {
 enum Command {
     /// Install coordinator peers and their host routes.
     Peers(Vec<PeerConfig>),
+    /// Prepare a local key rotation and report only its public candidate.
+    RotationPrepare {
+        /// The coordinator operation identifier used by the durable local journal.
+        operation_id: String,
+        /// The monotonically increasing coordinator sequence for this operation.
+        sequence: u64,
+    },
+    /// Commit a prepared rotation through the selected GotaTun engine.
+    RotationCommit {
+        /// The coordinator operation identifier used by the durable local journal.
+        operation_id: String,
+        /// The monotonically increasing coordinator sequence for this operation.
+        sequence: u64,
+    },
+    /// Erase the predecessor after the fixture retires its overlap peer.
+    RotationFinish {
+        /// The coordinator operation identifier used by the durable local journal.
+        operation_id: String,
+        /// The monotonically increasing coordinator sequence for this operation.
+        sequence: u64,
+    },
     /// Wait `grace_ms`; relay the peer if no direct handshake happened.
     DirectOrRelay {
         host: String,
@@ -202,7 +244,16 @@ enum Command {
 async fn node() {
     let mut input = lines();
     let config: NodeConfig = serde_json::from_str(&input.recv().await.unwrap()).unwrap();
-    let mut node = Node::default().with_engine(EngineKind::GotaTun);
+    let state = std::path::PathBuf::from(format!(
+        "/run/infraternal-mesh-relay-{}-{}",
+        config.host,
+        std::process::id()
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&state)
+        .unwrap();
+    let mut node = Node::restore_with_engine(&state, EngineKind::GotaTun).unwrap();
     let identity = node.up().unwrap();
     assert!(
         Device::owned_tun().unwrap(),
@@ -292,8 +343,8 @@ async fn node() {
                     .iter()
                     .map(|peer| Peer {
                         key: key(&peer.key),
-                        previous_key: None,
-                        previous_active: false,
+                        previous_key: peer.previous_key.as_deref().map(key),
+                        previous_active: peer.previous_active,
                         addresses: peer.addresses,
                         endpoint: peer.endpoint,
                     })
@@ -326,6 +377,32 @@ async fn node() {
                 }
                 say(json!({"event": "peers", "count": list.len()}));
             }
+            Command::RotationPrepare {
+                operation_id,
+                sequence,
+            } => {
+                let candidate = node
+                    .prepare_rotation_for_fixture(&operation_id, sequence)
+                    .unwrap();
+                say(json!({"event": "rotation_prepared", "public_key": hex(&candidate.0)}));
+            }
+            Command::RotationCommit {
+                operation_id,
+                sequence,
+            } => {
+                let candidate = node
+                    .commit_rotation_for_fixture(&operation_id, sequence)
+                    .unwrap();
+                say(json!({"event": "rotation_committed", "public_key": hex(&candidate.0)}));
+            }
+            Command::RotationFinish {
+                operation_id,
+                sequence,
+            } => {
+                node.finish_rotation_for_fixture(&operation_id, sequence)
+                    .unwrap();
+                say(json!({"event": "rotation_finished"}));
+            }
             Command::DirectOrRelay {
                 host: name,
                 grace_ms,
@@ -333,7 +410,7 @@ async fn node() {
                 let (kernel, since) = peers[&name].clone();
                 tokio::time::sleep(Duration::from_millis(grace_ms)).await;
                 let counters = node.counters().unwrap();
-                let peer_counters = counters.get(&kernel.key);
+                let peer_counters = counters.get(&active_peer_key(&kernel));
                 let direct_failed = relay_path::direct_failed(peer_counters, since);
                 if direct_failed {
                     let shim = paths
@@ -410,12 +487,15 @@ async fn node() {
             Command::Stats => {
                 let stats = paths.stats();
                 let counters = node.counters().unwrap();
+                let peer_keys: Vec<String> = counters.keys().map(|key| hex(&key.0)).collect();
                 let kernel: Vec<Value> = peers
                     .iter()
                     .map(|(name, (kernel, _))| {
-                        let counters = counters.get(&kernel.key).cloned().unwrap_or_default();
+                        let active = active_peer_key(kernel);
+                        let counters = counters.get(&active).cloned().unwrap_or_default();
                         json!({
                             "peer": name,
+                            "active_key": hex(&active.0),
                             "endpoint": counters.endpoint,
                             "handshake_secs": counters.handshake_secs,
                             "handshake_nanos": counters.handshake_nanos,
@@ -438,6 +518,7 @@ async fn node() {
                     "injection_errors": stats.injection_errors,
                     "receive_errors": stats.receive_errors,
                     "tap_delivered": observer.delivered(),
+                    "peer_keys": peer_keys,
                     "peers": kernel,
                 }));
             }
@@ -447,6 +528,7 @@ async fn node() {
     printer.abort();
     drop(observer);
     node.down().unwrap();
+    std::fs::remove_dir_all(state).unwrap();
     say(json!({"event": "off"}));
 }
 

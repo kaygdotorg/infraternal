@@ -12,15 +12,15 @@
     "test": "bun x playwright test"
   },
   "dependencies": {
-    "@scure/bip39": "2.2.0",
-    "geist": "1.7.2"
+    "@scure/bip39": "2.4.0",
+    "geist": "1.9.2"
   },
   "devDependencies": {
-    "@types/bun": "1.3.8",
-    "@types/node": "22.19.0",
-    "@types/ws": "8.5.10",
-    "playwright": "1.61.1",
-    "typescript": "5.9.3",
-    "ws": "8.18.3"
+    "@types/bun": "1.4.4",
+    "@types/node": "26.6.6",
+    "@types/ws": "8.18.2",
+    "playwright": "1.65.0",
+    "typescript": "7.0.2",
+    "ws": "8.22.1"
   }
 }

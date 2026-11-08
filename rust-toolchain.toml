@@ -1,6 +1,6 @@
 # Pin the workspace compiler and its static Linux target libraries.
 [toolchain]
-channel = "1.99.0"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
 profile = "minimal"

@@ -1275,6 +1275,10 @@ mod renewal;
 #[path = "remote_renewal_ack_tests.rs"]
 mod renewal_ack;
 
+/// Remove's uninstall request reaches the connected agent (#409).
+#[path = "remote_uninstall_delivery_tests.rs"]
+mod uninstall_delivery;
+
 #[path = "remote_renewal_cli_tests.rs"]
 mod renewal_cli;
 

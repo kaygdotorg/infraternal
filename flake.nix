@@ -55,7 +55,7 @@
               rust rustupShim
               pkgs.cargo-deny          # cargo-deny gate (deny.toml)
               pkgs.bun                 # TypeScript tests, tracer build
-              pkgs.nodejs              # JavaScript CLI shebangs in type checks
+              pkgs.nodejs_26           # JavaScript CLI shebangs in type checks
               pkgs.vim                 # Real-editor terminal repaint fixture
               pkgs.openssh             # Release-signature and SSH key fixtures
               pkgs.python3             # release and fixture scripts

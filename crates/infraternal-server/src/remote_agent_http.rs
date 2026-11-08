@@ -238,7 +238,8 @@ mod tests {
         x509::{X509Builder, X509NameBuilder},
     };
 
-    fn signing_certificate() -> (X509, PKey<Private>) {
+    /// A self-signed Ed25519 host certificate and its key, valid for a day.
+    pub(super) fn signing_certificate() -> (X509, PKey<Private>) {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
         name.append_entry_by_text("CN", "fixture").unwrap();
@@ -399,3 +400,8 @@ mod tests {
         let _ = server.await;
     }
 }
+
+/// The removal outbox delivers the uninstall after the receipt (#409).
+#[cfg(test)]
+#[path = "remote_removal_outbox_tests.rs"]
+mod removal_outbox_tests;

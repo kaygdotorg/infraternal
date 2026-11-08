@@ -1,5 +1,6 @@
-//! Exercises the real restart ingress fence before retained replacement aliases are reconciled [166,199], #173.
+//! Proves Linux node recovery across ingress fences and journaled key-rotation stops [166,199], #173, #367.
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
 use super::*;
 use crate::{
     dataplane::DefaultPolicy,
@@ -22,7 +23,8 @@ fn command(program: &str, args: &[&str]) {
             .success()
     );
 }
-/// Exercise the retained address, recovery fence, and packet observation together.
+
+/// Child-side recovery tests for the GotaTun rotation journal, added with #367.
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
     node.up().unwrap();
@@ -220,6 +222,98 @@ fn kernel_rotation_sends_the_candidate_to_our_index_and_moves_the_marker() {
     node.finish_rotation(operation, 1).unwrap();
     assert!(Node::plan_retirement(&state.0).unwrap().interface);
     node.down().unwrap();
+}
+
+/// The `GotaTun` node reports rotation support and changes its key, marker and private key file together.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_rotation_changes_the_live_identity_and_marker() {
+    let state = RotationState::new();
+    let operation = "00000000-0000-4000-8000-000000000041";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let previous = node.up().unwrap();
+    assert!(previous.key_rotation, "GotaTun offers durable rotation");
+    let link = Device::active_link().unwrap().unwrap();
+    assert_eq!(link.engine, EngineKind::GotaTun);
+    assert_eq!(link.owner, Some(previous.public_key));
+
+    let candidate = node.prepare_rotation(operation, 1).unwrap();
+    assert_ne!(candidate, previous.public_key);
+    assert_eq!(
+        Device::active_link().unwrap().unwrap().owner,
+        Some(previous.public_key),
+        "prepare leaves the live TUN identity unchanged"
+    );
+
+    let committed = node.commit_rotation(operation, 1).unwrap();
+    assert_eq!(committed.public_key, candidate);
+    assert_eq!(
+        Device::active_link().unwrap().unwrap().owner,
+        Some(candidate),
+        "the TUN marker follows the active device key"
+    );
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    assert_eq!(store.recorded_interface().unwrap(), Some(candidate));
+    let bytes = store.read_private_key().unwrap().unwrap();
+    assert_eq!(
+        crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
+        candidate
+    );
+    node.finish_rotation(operation, 1).unwrap();
+    assert!(store.rotation_secret().unwrap().unwrap().completed);
+    drop(store);
+    node.down().unwrap();
+}
+
+/// A higher coordinator sequence settles both prepared and committed `GotaTun` journals on the held key.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn gotatun_higher_sequence_settles_abandoned_rotations_on_the_held_key() {
+    let state = RotationState::new();
+    let first = "00000000-0000-4000-8000-000000000043";
+    let second = "00000000-0000-4000-8000-000000000044";
+    let third = "00000000-0000-4000-8000-000000000045";
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let original = node.up().unwrap().public_key;
+    let abandoned = node.prepare_rotation(first, 1).unwrap();
+    assert_eq!(
+        node.prepare_rotation(second, 1).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock,
+        "an equal sequence does not prove the server abandoned the first operation"
+    );
+
+    let committed = node.prepare_rotation(second, 3).unwrap();
+    assert_ne!(committed, abandoned);
+    assert_eq!(node.interface_key(), Some(original));
+    node.commit_rotation(second, 3).unwrap();
+    drop(node);
+
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    assert_eq!(restored.up().unwrap().public_key, committed);
+    let next = restored.prepare_rotation(third, 5).unwrap();
+    assert_ne!(next, committed);
+    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
+    let journal = store.rotation_secret().unwrap().unwrap();
+    assert_eq!(
+        (journal.operation_id.as_str(), journal.sequence),
+        (third, 5)
+    );
+    assert_eq!(Key::from_private(&journal.previous).unwrap().1, committed);
+    assert_eq!(store.recorded_interface().unwrap(), Some(committed));
+    let bytes = store.read_private_key().unwrap().unwrap();
+    assert_eq!(
+        crate::gotatun_node::secret_from_bytes(&bytes).unwrap().1,
+        committed
+    );
+    assert_eq!(
+        Device::active_link().unwrap().unwrap().owner,
+        Some(committed)
+    );
+    drop(journal);
+    drop(store);
+    restored.commit_rotation(third, 5).unwrap();
+    restored.finish_rotation(third, 5).unwrap();
+    restored.down().unwrap();
 }
 
 /// After a rotation, a restarted node still adopts its interface as its own.
@@ -501,39 +595,6 @@ fn a_failed_settle_save_leaves_the_presented_key_unchanged_and_is_retryable() {
     assert_eq!(node.interface_key(), Some(candidate));
     node.down().unwrap();
 }
-
-/// `GotaTun` cannot rotate yet: it says so, and every rotation step refuses without touching the
-/// device or the state (D166, D352; #285).
-#[test]
-#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-fn gotatun_reports_no_rotation_support_and_refuses_every_step() {
-    let state = RotationState::new();
-    let operation = "00000000-0000-4000-8000-000000000004";
-    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
-    let identity = node.up().unwrap();
-    assert!(
-        !identity.key_rotation,
-        "GotaTun must not offer key rotation"
-    );
-    for result in [
-        node.prepare_rotation(operation, 1).map(|_| ()),
-        node.commit_rotation(operation, 1).map(|_| ()),
-        node.finish_rotation(operation, 1),
-    ] {
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
-    }
-    let (store, _) = crate::node_state::Store::open(&state.0).unwrap();
-    assert!(
-        store.rotation_secret().unwrap().is_none(),
-        "no rotation journal is written"
-    );
-    assert_eq!(
-        store.recorded_interface().unwrap(),
-        Some(identity.public_key)
-    );
-    node.down().unwrap();
-}
-
 #[test]
 #[ignore = "Run in a disposable user/network namespace, #173."]
 fn nft_restart_fences_retained_replacement_address() {
