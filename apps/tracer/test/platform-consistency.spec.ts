@@ -48,13 +48,24 @@ const scrollState = (page: Page) => page.evaluate(() => {
 
 /**
  * The pixels of the list's scroll track: the strip inside the right edge, where a bar would be drawn. The
- * screenshot is decoded in the page, so the check is the same for every engine. A bar at rest would be a spread
- * of brightness across the strip; with no bar the strip is one flat colour.
+ * screenshot is decoded in the page, so the check is the same for every engine.
+ *
+ * The result is the largest brightness step between two neighbouring rows of the strip. A bar is a thumb with
+ * edges, so it shows as an abrupt step; with no bar the strip only drifts smoothly, because the glass lets the
+ * page's own gradient through. (The first version measured the spread from the darkest to the brightest row.
+ * That grows with the list's height and with the gradient behind it, so it failed on tall lists and on the paper theme.)
+ * The strip stops short of the palette's rounded bottom corner: the list ends at the palette's edge, and the corner
+ * and the page outside it would read as a step too (#430).
+ *
+ * The palette fades and scales in over 180 to 240 ms. Measuring while it moves puts the strip over the page outside the
+ * palette, so the palette's own animations finish first (waiting for them, not for a fixed time).
  */
 async function trackSpread(page: Page): Promise<number> {
+  await page.locator("#palette").evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))));
   const box = await page.locator("#palette-results").boundingBox();
   if (!box) throw new Error("palette list is not laid out");
-  const clip = { x: box.x + box.width - 8, y: box.y + 4, width: 6, height: box.height - 8 };
+  const radius = await page.locator("#palette").evaluate((element) => Number.parseFloat(getComputedStyle(element).borderBottomRightRadius) || 0);
+  const clip = { x: box.x + box.width - 8, y: box.y + 4, width: 6, height: box.height - 8 - Math.ceil(radius) };
   const png = (await page.screenshot({ clip })).toString("base64");
   return page.evaluate(async (data: string) => {
     const image = new Image();
@@ -66,14 +77,19 @@ async function trackSpread(page: Page): Promise<number> {
     const context = canvas.getContext("2d")!;
     context.drawImage(image, 0, 0);
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    let low = 255 * 3;
-    let high = 0;
-    for (let i = 0; i < pixels.length; i += 4) {
-      const luminance = pixels[i]! + pixels[i + 1]! + pixels[i + 2]!;
-      low = Math.min(low, luminance);
-      high = Math.max(high, luminance);
+    let step = 0;
+    let previous: number | undefined;
+    for (let y = 0; y < canvas.height; y++) {
+      let row = 0;
+      for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4;
+        row += pixels[i]! + pixels[i + 1]! + pixels[i + 2]!;
+      }
+      row /= canvas.width;
+      if (previous !== undefined) step = Math.max(step, Math.abs(row - previous));
+      previous = row;
     }
-    return high - low;
+    return step;
   }, png);
 }
 
@@ -104,13 +120,15 @@ test("Windows: the palette shows no scroll bar at rest, the scrolling state duri
   // A wheel scroll turns the thumb on at once.
   await page.locator("#palette-results").hover();
   await page.mouse.wheel(0, 240);
+  // The clock starts at the wheel, not after the pixel check below: capturing the strip takes a variable time that
+  // would otherwise be taken off the 800 ms the bar is meant to stay (#430).
+  const stoppedAt = Date.now();
   await expect.poll(async () => (await scrollState(page)).scrolling).toBe(true);
   const during = await scrollState(page);
   expect(during.top).toBeGreaterThan(0);
   expect(await trackSpread(page)).toBeGreaterThan(20);
 
   // The bar stays about 800 ms after the last scroll, then the attribute clears.
-  const stoppedAt = Date.now();
   await expect.poll(async () => (await scrollState(page)).scrolling, { timeout: 4000, intervals: [50] }).toBe(false);
   const hideAfter = Date.now() - stoppedAt;
   expect(hideAfter).toBeGreaterThan(300);
@@ -183,7 +201,8 @@ test("Windows: the shortcuts panel names every key in words, with no Apple glyph
 for (const [width, height, theme] of [[393, 852, "paper"], [375, 667, "ink"]] as const) {
   test(`captures: Windows palette at ${width}x${height}, ${theme}: no bar at rest, a thin bar while scrolling`, async ({ browser }) => {
     const context = await platformContext(browser, WINDOWS);
-    await context.request.post("/__mock/reset");
+    // Same one retry as `openTerminal`: a pooled keep-alive connection through the proxy can be among the sockets the reset closes.
+    await context.request.post("/__mock/reset").catch(() => context.request.post("/__mock/reset"));
     await context.request.post("/__mock/open-terminal");
     const page = await context.newPage();
     await page.setViewportSize({ width, height });
