@@ -676,9 +676,15 @@ mod tests {
         async fn wait_for_config_version(&self, version: u64, full_snapshot: bool) {
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
-                    if self.frames.lock().unwrap().iter().any(|(base, current, last)| {
-                        *current == version && *last && (!full_snapshot || base.is_none())
-                    }) {
+                    if self
+                        .frames
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(base, current, last)| {
+                            *current == version && *last && (!full_snapshot || base.is_none())
+                        })
+                    {
                         return;
                     }
                     self.applied.acquire().await.unwrap().forget();
@@ -1238,9 +1244,7 @@ mod tests {
             .expect("the worker attached the authenticated host");
         let before = store.config(node).await.unwrap();
         // Wait for the worker's current snapshot without re-attaching through the legacy API.
-        channel
-            .wait_for_config_version(before.version, false)
-            .await;
+        channel.wait_for_config_version(before.version, false).await;
         let baseline_frames = channel.frames.lock().unwrap().len();
         channel.refuse_delta.store(true, Ordering::Release);
         let next = if before.default_policy == crate::dataplane::DefaultPolicy::Allow {
@@ -1261,9 +1265,7 @@ mod tests {
             .await
             .unwrap();
         let after = store.config(node).await.unwrap();
-        channel
-            .wait_for_config_version(after.version, true)
-            .await;
+        channel.wait_for_config_version(after.version, true).await;
         let frames = channel.frames.lock().unwrap().clone();
         assert_eq!(frames.len(), baseline_frames + 2);
         assert_eq!(frames[baseline_frames].0, Some(before.version));
