@@ -1890,6 +1890,7 @@ async fn enrollment_process_exit_71_is_not_reported_as_directory_refusal() {
     assert!(!failure.message.contains("Move it aside"));
 }
 
+/// A staged transaction keeps its lease while separate installer commands run.
 #[tokio::test]
 async fn setup_transaction_holds_a_live_lock_between_shell_commands() {
     let fixture = Fixture::new();
