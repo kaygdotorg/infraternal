@@ -212,7 +212,6 @@ pub fn PagePool(comptime Item: type, comptime alignment: std.mem.Alignment) type
             pool.free_list = node;
             pool.free_count += 1;
         }
-
     };
 }
 

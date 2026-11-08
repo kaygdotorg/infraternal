@@ -73,7 +73,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     const defaults: vt.modes.ModeState = .{};
     const mode_info = @typeInfo(vt.modes.Mode).@"enum";
     inline for (mode_info.field_names, mode_info.field_values) |name, value| {
-        const mode: vt.modes.Mode = @enumFromInt(value);
+        const mode: vt.modes.Mode = @fromBackingInt(@intCast(value));
         const tag = vt.modes.ModeTag.fromMode(mode);
         const saved = @field(t.modes.saved, name);
         if (saved != @field(defaults.saved, name)) {
@@ -127,7 +127,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     // Modes with screen-switching or reset side effects are represented by
     // the screen construction above, rather than dispatched a second time.
     inline for (@typeInfo(vt.modes.Mode).@"enum".field_values) |value| {
-        const mode: vt.modes.Mode = @enumFromInt(value);
+        const mode: vt.modes.Mode = @fromBackingInt(@intCast(value));
         const tag = vt.modes.ModeTag.fromMode(mode);
         if (!(tag.value == 47 or tag.value == 1047 or tag.value == 1049 or tag.value == 1048 or tag.value == 6 or tag.value == 7 or tag.value == 69 or tag.value == 2026)) {
             try w.print("\x1b[{s}{d}{c}", .{ if (tag.ansi) "" else "?", tag.value, @as(u8, if (t.modes.get(mode)) 'h' else 'l') });
@@ -679,7 +679,7 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
     }
     if (a.screens.active_key != b.screens.active_key) return 3000003;
     inline for (@typeInfo(vt.modes.Mode).@"enum".field_values) |value| {
-        const mode: vt.modes.Mode = @enumFromInt(value);
+        const mode: vt.modes.Mode = @fromBackingInt(@intCast(value));
         const tag = vt.modes.ModeTag.fromMode(mode);
         if (!(tag.value == 47 or tag.value == 1047 or tag.value == 1049 or tag.value == 1048 or tag.value == 2026)) {
             if (a.modes.get(mode) != b.modes.get(mode)) return 4000000 + @as(usize, tag.value);
