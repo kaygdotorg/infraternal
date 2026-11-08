@@ -345,9 +345,8 @@ mod review_j375_padding_tests {
             panic!("data packet");
         };
         let encrypted_bytes = encrypted.into_bytes().len();
-        let encrypted_bytes = match u32::try_from(encrypted_bytes) {
-            Ok(length) => length,
-            Err(_) => panic!("encrypted packet length fits in a 32-bit MTU"),
+        let Ok(encrypted_bytes) = u32::try_from(encrypted_bytes) else {
+            panic!("encrypted packet length fits in a 32-bit MTU");
         };
         let outer_packet = encrypted_bytes.saturating_add(48);
         println!(
