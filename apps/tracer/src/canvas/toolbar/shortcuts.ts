@@ -99,7 +99,7 @@ export function installShortcuts(cx: Ctx): () => void {
     if (!id) return;
     e.preventDefault(); e.stopPropagation();
     cx.viewList.close(true);
-    cx.camera.keyFlight(() => cx.nav.flyView(id));
+    cx.nav.flyView(id);
   }, { signal, capture: true });
   return () => { removeRegistry(); removeBindings.forEach((r) => r()); offBindings(); };
 }

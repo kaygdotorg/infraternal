@@ -28,7 +28,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   const [, kind, value] = (detail?.action ?? "").split(":");
   // Focus can change while the chunk loads; a closed selection must never redirect to another window.
   const active = selected?.owner.wins.get(selected.model.id) === selected ? selected : undefined;
-  if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
+  if (kind === "view" && value) { cx.nav.flyView(value as ViewId); }
   else if (kind === "overview") cx.nav.showOverview();
   else if (kind === "settings") void openSettings(cx, value ?? "appearance", detail?.source);
   else if (kind === "windowdocs") { if (active) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, active); }); }
@@ -54,7 +54,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   else if (kind === "rename" && value) {
     // Goes to the Mesh view, where the host's card opens its name field as soon as the card is on screen.
     const host = decodeURIComponent(value);
-    if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView("mesh")); else cx.nav.flyView("mesh");
+    cx.nav.flyView("mesh");
     beginRename(cx, host);
   }
   else if (kind === "access" && value) {
