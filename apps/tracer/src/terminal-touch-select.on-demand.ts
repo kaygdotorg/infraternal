@@ -138,6 +138,9 @@ export function createTouchSelection(options: TouchSelectionOptions): TouchSelec
           ...(frame ? { bounds: () => windowBoxes()?.bounds, avoid: () => windowBoxes()?.avoid ?? [] } : {}),
         });
         menu = mine;
+        // Pressing Copy must not take focus from the terminal's input: the cursor would go hollow and, with the keyboard up, the
+        // keyboard and the key row would leave. A press on a button focuses it unless its mousedown is cancelled; the tap itself still clicks.
+        for (const type of ["pointerdown", "mousedown"]) mine.root.addEventListener(type, (event) => event.preventDefault());
         // The Copy icon is the shared swap (icon to tick), so the row can answer in place.
         mine.root.querySelector("button svg")?.replaceWith(Object.assign(document.createElement("template"), { innerHTML: swapIcon(CLIPBOARD) }).content);
         mine.place();
