@@ -213,6 +213,30 @@ test.describe("the Themes window", () => {
   });
 });
 
+test.describe("the Colour picker on a phone", () => {
+  test.use({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true });
+
+  test("each light and dark Colour circle has a 44 px touch target", async ({ page }) => {
+    await open(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const targets = await page.locator(`${WINDOW} .cl-colour-dot`).evaluateAll((dots) => dots.map((dot) => {
+      const rect = dot.getBoundingClientRect();
+      return { label: dot.getAttribute("aria-label"), width: rect.width, height: rect.height };
+    }));
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target.width, `${target.label} target width`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `${target.label} target height`).toBeGreaterThanOrEqual(44);
+    }
+    const centres = await page.locator(`${WINDOW} .cl-colour-row`).evaluateAll((rows) => rows.map((row) => {
+      const label = row.querySelector(".cl-colour-label")!.getBoundingClientRect();
+      const dot = row.querySelector(".cl-colour-dot")!.getBoundingClientRect();
+      return { label: (label.top + label.bottom) / 2, dot: (dot.top + dot.bottom) / 2 };
+    }));
+    for (const centre of centres) near(centre.label, centre.dot, "phone Colour labels and touch targets share a centre line");
+  });
+});
+
 // ---- in the product: the look is the account's, in the canvas document (D322, D178, D180) ----------------------------------------------------------------
 // Against the real layout store (`layout=server`) and the test double's server, which applies the same edits as the real one: a look chosen on one device is the
 // look of the account on every other; the browser keeps only a first-paint cache of the selected theme.
