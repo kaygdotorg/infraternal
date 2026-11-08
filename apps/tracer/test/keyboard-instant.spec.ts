@@ -330,11 +330,14 @@ test.describe("the pill-morph popovers open and close instantly from the keyboar
   test("the view list's Search everything row opens the palette like any pointer open, and the chord stays instant", async ({ page }) => {
     await page.locator("#capsule").click();
     await expect(page.locator(".cl-viewlist")).toBeVisible();
-    await arm(page);
     await page.locator(".cl-viewrow-search").click();
-    const pointerOpen = await frame(page);
-    expect(pointerOpen.paletteHidden, "the palette opened").toBe(false);
-    expect(Number(pointerOpen.paletteOpacity), "a click on Search everything fades the palette in").toBeLessThan(1);
+    // The first animation frame after the click has run: arm() would sample at the press, before the click's handler.
+    const pointerOpen = await page.evaluate(() => new Promise<{ hidden: boolean; opacity: number }>((resolve) => requestAnimationFrame(() => {
+      const palette = document.querySelector<HTMLElement>("#palette")!;
+      resolve({ hidden: getComputedStyle(palette).display === "none", opacity: Number(getComputedStyle(palette).opacity) });
+    })));
+    expect(pointerOpen.hidden, "the palette opened").toBe(false);
+    expect(pointerOpen.opacity, "a click on Search everything fades the palette in").toBeLessThan(1);
     await expect(page.locator("#palette")).toHaveCSS("opacity", "1");
     await page.keyboard.press("Escape");
     await expectPaletteOpenInstant(page);
