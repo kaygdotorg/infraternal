@@ -205,7 +205,9 @@ pub struct Chunk {
     pub access_updates: Vec<AccessUpdate>,
 }
 
-pub(crate) const DEFAULT_DNS_SUFFIX: &str = "internal";
+/// The mesh DNS suffix every node answers under (D165, D197): `<host>.internal`.
+/// Public so examples and fixtures build configs with the same value the product uses.
+pub const DEFAULT_DNS_SUFFIX: &str = "internal";
 
 #[cfg(feature = "mesh-dns")]
 fn default_dns_suffix() -> String {
