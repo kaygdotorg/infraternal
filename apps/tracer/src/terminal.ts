@@ -12,7 +12,7 @@ import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../pac
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
-import type { SelectableTerminal } from "./terminal-touch-select.on-demand";
+import { installWrapAwareSelection, type SelectableTerminal } from "./terminal-wrap-selection";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
@@ -408,6 +408,11 @@ export class TerminalClient {
     const rendererFocus = terminal.focus;
     terminal.focus = () => {};
     try { terminal.open(config.host); } finally { terminal.focus = rendererFocus; }
+    // Mouse selection copies a soft-wrapped word whole and puts no newline where the program printed none (#426).
+    installWrapAwareSelection(terminal as unknown as SelectableTerminal, config.host, {
+      canvas: () => this.ghostty.renderer?.getCanvas(),
+      metrics: () => this.cellMetrics(),
+    });
     // Keep Ghostty's scrollbar drag handler, but let the on-demand controller own link scanning and activation.
     (terminal as unknown as { linkDetector?: unknown }).linkDetector = undefined;
     const write = terminal.write.bind(terminal);
@@ -571,6 +576,7 @@ export class TerminalClient {
     }
   }
 
+  /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
       fontFamily: fontStack(font),
