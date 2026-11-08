@@ -4384,3 +4384,26 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      D339 does for root installs. `keys:write` revokes keys without a tap
      and requests new ones only through an approval link. Rejected: one
      `admin` scope on top of today's six.
+
+372. **UI consistency answers (owner grill, 2026-11-08, #345):** the
+     owner chose "Merge fixes, ask the 10": the 114 accidental fixes on
+     `ui-consistency-j195-deferred` merge after a fresh capture check, and
+     the audit's open questions were answered inline, all as recommended.
+     - One type system: every text reads the sign-in-derived roles, and
+       the phone size is set once (body 15 px, labels 13 px on phones).
+     - Radii: add an extra-small step (0.375 rem); nested corners stay
+       computed from their parent; other one-offs round to the nearest step.
+     - TASTE's grid becomes "4 px with 2 px half steps"; 3 and 5 px values
+       round.
+     - Controls and settings rows share one height token (32 px desktop);
+       list rows (28 px) and pills (38 px) stay.
+     - A 14 px small-icon token; hard-coded 16 px icons read the icon token,
+       so they grow on touch.
+     - Three durations: 120 ms press, 180 ms popover, 240 ms panel (keyboard
+       opens stay instant, #427).
+     - The docs pages follow the app's root size and roles.
+     - One title role at 22 px for every large title.
+     Engineering items the orchestrator decided as in-scope: a six-step
+     layer scale for z-index (content, chrome, sidebar, overlay, toast,
+     tooltip) with captures of every overlay pair, and one exported
+     `EASE_OUT` curve for Web Animations calls.
