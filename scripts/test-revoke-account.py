@@ -60,6 +60,12 @@ def job_plant(account, user, scenario, created):
     """Install one never-started system job; return its report label and root route."""
     privileged = scenario.startswith('root-job')
     target = Path(user.pw_dir) / 'scheduled-script'
+    if privileged and scenario != 'root-job-parent':
+        directory = Path('/run') / (account + '-job-input')
+        directory.mkdir(mode=0o755)
+        created.append(directory)
+        target = directory / 'scheduled-script'
+        created.append(target)
     target.write_text('#!/bin/sh\nexit 0\n')
     target.chmod(0o755)
     os.chown(target, user.pw_uid, user.pw_gid)
@@ -78,12 +84,23 @@ def job_plant(account, user, scenario, created):
     unit.chmod(0o644)
     if scenario == 'root-job-unit':
         os.chown(unit, user.pw_uid, user.pw_gid)
+        os.chown(target, 0, 0)
     if scenario == 'root-job-group':
         os.chown(target, 0, user.pw_gid)
         target.chmod(0o775)
     if scenario == 'root-job-parent':
         os.chown(target, 0, 0)
         target.chmod(0o755)
+    if scenario == 'root-job-acl':
+        os.chown(target, 0, 0)
+        import struct
+        acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in
+               [(1, 7, 0xffffffff), (2, 6, user.pw_uid), (4, 5, 0xffffffff),
+                (16, 7, 0xffffffff), (32, 5, 0xffffffff)])
+        os.setxattr(target, 'system.posix_acl_access', acl)
+    if privileged:
+        checked = target.parent if scenario == 'root-job-parent' else (unit if scenario == 'root-job-unit' else target)
+        assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(checked), check=False).returncode == 0
     if scenario == 'system-timer':
         timer = unit.with_suffix('.timer')
         with timer.open('x') as trigger:
@@ -139,7 +156,7 @@ def prove(binary, scenario="sessions"):
             prepare(client, 100, people[0], account)
             if scenario in ('system-cron', 'system-unit', 'system-uid', 'system-timer',
                             'root-job-owner', 'root-job-group', 'root-job-parent',
-                            'root-job-unit', 'root-job-cron'):
+                            'root-job-unit', 'root-job-cron', 'root-job-acl'):
                 label, privileged = job_plant(account, user, scenario, created_jobs)
                 reply = control(client, 102, 'terminal.login.revoke', dict(person=str(people[0])))
                 report = reply['access']['accounts'][0]
@@ -150,6 +167,8 @@ def prove(binary, scenario="sessions"):
                 else:
                     assert report['programs_may_remain'], report
                 assert any(label in job for job in report.get('jobs', [])), report
+                if scenario == 'system-timer':
+                    assert any(account + '-scheduled.timer' in job for job in report['jobs']), report
                 for path in created_jobs:
                     assert path.exists(), 'revoke deleted a system job'
                 print('SYSTEM_JOB_REAL_ROOT_PASS ' + scenario, flush=True)
@@ -290,8 +309,11 @@ def prove(binary, scenario="sessions"):
         finally:
             if client is not None:
                 client.kill()
-            for path in created_jobs:
-                path.unlink(missing_ok=True)
+            for path in reversed(created_jobs):
+                if path.is_dir() and not path.is_symlink():
+                    path.rmdir()
+                else:
+                    path.unlink(missing_ok=True)
             if created_jobs:
                 command('systemctl', 'daemon-reload')
             if system_started:

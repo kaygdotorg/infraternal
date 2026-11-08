@@ -286,17 +286,17 @@ async fn access_report(
                     jobs: Vec::new(),
                 }
             });
-            facts.privileged = !rootless
-                && lookup(uid).is_none_or(|user| crate::access_privilege::privileged(&user));
             if !rootless {
                 let snapshot = crate::account_processes::scan(&proc_root, uid);
                 facts.programs_may_remain |= !snapshot.empty();
                 facts.processes = snapshot.processes;
                 if let Some(user) = lookup(uid) {
                     let jobs = jobs_probe(&user);
+                    facts.privileged = crate::access_privilege::privileged(&user, &jobs);
                     facts.programs_may_remain |= !jobs.complete || !jobs.jobs.is_empty();
                     facts.jobs = jobs.jobs;
                 } else {
+                    facts.privileged = true;
                     facts.programs_may_remain = true;
                 }
             }
@@ -1537,7 +1537,10 @@ fn loginctl() -> tokio::process::Command {
 /// Callers fail closed when none exists; executing `/` also always fails.
 pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt as _;
-    if !matches!(name, "systemctl" | "loginctl" | "sudo" | "pkaction") {
+    if !matches!(
+        name,
+        "systemctl" | "loginctl" | "sudo" | "pkaction" | "sh" | "setpriv"
+    ) {
         return None;
     }
     for directory in [

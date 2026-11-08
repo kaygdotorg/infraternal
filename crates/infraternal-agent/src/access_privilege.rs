@@ -34,12 +34,16 @@ struct RootCheck {
     /// Plain name displayed in the access report.
     name: &'static str,
     /// True means root authority is present or could not be ruled out.
-    inspect: fn(&User) -> bool,
+    inspect: fn(&User, &crate::access_jobs::Observation) -> bool,
 }
 
 /// Known root routes, ordered to avoid subprocess work for obvious privilege.
 /// Adding a route here also updates report evidence and server requirements.
 const ROOT_CHECKS: &[RootCheck] = &[
+    RootCheck {
+        name: "root-run jobs",
+        inspect: job_route,
+    },
     RootCheck {
         name: "admin groups",
         inspect: root_group_or_unknown,
@@ -50,7 +54,7 @@ const ROOT_CHECKS: &[RootCheck] = &[
     },
     RootCheck {
         name: "polkit",
-        inspect: crate::access_polkit::privileged,
+        inspect: polkit_route,
     },
     RootCheck {
         name: "sudo",
@@ -72,17 +76,23 @@ pub(crate) fn check_names() -> Vec<String> {
 /// unknown. Host tools see only the system bus and a fixed C locale.
 pub(crate) fn host_output(name: &str, args: &[&str]) -> Option<String> {
     let program = crate::logins::account_tool(name)?;
+    let mut command = crate::sessions::isolated(&program);
+    command
+        .args(args)
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command_output(command)
+}
+
+/// Collect a prepared isolated child's small stdout without unbounded pipe or
+/// lifetime waits. A successful status and empty diagnostics are required.
+pub(crate) fn command_output(mut command: tokio::process::Command) -> Option<String> {
     let runtime = tokio::runtime::Handle::try_current().ok()?;
     runtime.block_on(async {
-        let mut command = crate::sessions::isolated(&program);
-        command
-            .args(args)
-            .env_clear()
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
         let mut child = command.spawn().ok()?;
         let mut stdout = child.stdout.take()?.take(1024 * 1024 + 1);
         let mut stderr = child.stderr.take()?.take(OUTPUT_BYTES + 1);
@@ -111,12 +121,12 @@ pub(crate) fn host_output(name: &str, args: &[&str]) -> Option<String> {
 }
 
 /// Inspect the host doas configuration from the registry's account callback.
-fn doas_route(_account: &User) -> bool {
+fn doas_route(_account: &User, _jobs: &crate::access_jobs::Observation) -> bool {
     doas_allows_or_unknown(Path::new("/etc/doas.conf"))
 }
 
 /// Run sudo's bounded asynchronous query from the scan's blocking worker.
-fn sudo_route(account: &User) -> bool {
+fn sudo_route(account: &User, _jobs: &crate::access_jobs::Observation) -> bool {
     tokio::runtime::Handle::try_current().map_or(true, |runtime| {
         runtime.block_on(sudo_allows_or_unknown(&account.name))
     })
@@ -224,11 +234,8 @@ fn doas_allows_or_unknown(path: &Path) -> bool {
 
 /// Ask NSS for all account groups, including its primary and supplementary
 /// memberships. Missing named groups are harmless; failed lookups are unknown.
-fn root_group_or_unknown(account: &User) -> bool {
-    let Ok(name) = CString::new(account.name.as_bytes()) else {
-        return true;
-    };
-    let Ok(groups) = nix::unistd::getgrouplist(&name, account.gid) else {
+fn root_group_or_unknown(account: &User, _jobs: &crate::access_jobs::Observation) -> bool {
+    let Some(groups) = account_groups(account) else {
         return true;
     };
     ROOT_GROUPS.iter().any(|name| match Group::from_name(name) {
@@ -238,14 +245,33 @@ fn root_group_or_unknown(account: &User) -> bool {
     })
 }
 
+/// Resolve the complete account group list once before a credential drop.
+/// Missing NSS membership is unknown, never an empty group list.
+pub(crate) fn account_groups(account: &User) -> Option<Vec<nix::unistd::Gid>> {
+    let name = CString::new(account.name.as_bytes()).ok()?;
+    nix::unistd::getgrouplist(&name, account.gid).ok()
+}
+
+/// Use the already completed job inventory, rather than scan host units twice.
+fn job_route(_account: &User, jobs: &crate::access_jobs::Observation) -> bool {
+    jobs.privileged || !jobs.complete
+}
+
+/// Inspect current policy through the registry's common context signature.
+fn polkit_route(account: &User, _jobs: &crate::access_jobs::Observation) -> bool {
+    crate::access_polkit::privileged(account)
+}
+
 /// Whether root authority is present or cannot be ruled out. Call only from
 /// the access scan's blocking worker with a Tokio runtime available. Rootless
 /// reports already have their own unverified outcome and never call this.
-pub(crate) fn privileged(account: &User) -> bool {
+pub(crate) fn privileged(account: &User, jobs: &crate::access_jobs::Observation) -> bool {
     if account.uid.is_root() || !Uid::effective().is_root() {
         return true;
     }
-    ROOT_CHECKS.iter().any(|check| (check.inspect)(account))
+    ROOT_CHECKS
+        .iter()
+        .any(|check| (check.inspect)(account, jobs))
 }
 
 #[cfg(test)]

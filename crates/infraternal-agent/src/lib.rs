@@ -18,6 +18,8 @@ mod access_jobs;
 mod access_polkit;
 /// Host policy checks for accounts that can exercise root authority.
 mod access_privilege;
+/// Kernel permission checks for bounded system-job targets.
+mod access_write;
 /// Kernel UID observations that verify session shutdown and report leftovers.
 mod account_processes;
 #[path = "daemon_portable.rs"]
