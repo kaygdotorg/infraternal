@@ -189,7 +189,7 @@ pub async fn run(
     let mut listener: ServerListener = None;
     let mut attach_retry: Option<std::time::Duration> = None;
     // Retry an ambiguous probe without weakening the identity request.
-    let mut identity_retry: Option<std::time::Duration> = None;
+    let mut identity_retry: Option<tokio::time::Instant> = None;
     let mut transport_port = None;
     let mut peer_route: Option<(
         std::net::SocketAddr,
@@ -205,7 +205,7 @@ pub async fn run(
                 authority_epoch_supported = probe.authority_epoch_supported;
                 identity_retry = authority_epoch_supported
                     .is_none()
-                    .then_some(UNKNOWN_SUPPORT_RETRY);
+                    .then(|| tokio::time::Instant::now() + UNKNOWN_SUPPORT_RETRY);
                 compact_access = identity.compact_access;
                 #[cfg(feature = "mesh-dns-spike")]
                 {
@@ -271,7 +271,7 @@ pub async fn run(
                 current_identity = None;
                 authority_epoch_supported = None;
                 attach_retry = None;
-                identity_retry = Some(UNKNOWN_SUPPORT_RETRY);
+                identity_retry = Some(tokio::time::Instant::now() + UNKNOWN_SUPPORT_RETRY);
             }
         }
         let local_identity = current_identity
@@ -506,7 +506,7 @@ pub async fn run(
                 attach_retry = None;
                 refresh_identity = true;
             }
-            () = sleep_optional(identity_retry) => {
+            () = sleep_until_optional(identity_retry) => {
                 identity_retry = None;
                 refresh_identity = true;
             }
@@ -518,6 +518,15 @@ pub async fn run(
 async fn sleep_optional(delay: Option<std::time::Duration>) {
     if let Some(delay) = delay {
         tokio::time::sleep(delay).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Wait for the original retry deadline, even when unrelated events wake the coordinator first.
+async fn sleep_until_optional(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
     } else {
         std::future::pending::<()>().await;
     }
@@ -1842,6 +1851,7 @@ mod tests {
     #[tokio::test]
     async fn timed_out_epoch_probe_never_sends_epochless_config_and_reprobes() {
         let service = service().await;
+        let presence_events = service.clone();
         let channel = Channel::new();
         channel.probe_answers.store(true, Ordering::Release);
         channel.identity_timeouts.store(2, Ordering::Release);
@@ -1876,8 +1886,21 @@ mod tests {
         let fallback: serde_json::Value = serde_json::from_slice(&initial_requests[2]).unwrap();
         assert!(fallback.get("authority_epoch").is_none());
 
+        let presence_noise = tokio::spawn(async move {
+            let mut live = crate::presence::Live::new();
+            loop {
+                if live.is_empty() {
+                    live.insert(NodeId(2), None);
+                } else {
+                    live.clear();
+                }
+                presence_events.set_presence(live.clone());
+                // sleep: repeatedly wake an unrelated select arm while the unknown-support retry is pending.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
         // sleep: bound the wait to the scheduled five-second identity reprobe.
-        tokio::time::timeout(
+        let reprobe = tokio::time::timeout(
             UNKNOWN_SUPPORT_RETRY + std::time::Duration::from_secs(2),
             async {
                 while channel.identity_calls.load(Ordering::Acquire) < 4 {
@@ -1885,8 +1908,9 @@ mod tests {
                 }
             },
         )
-        .await
-        .expect("the full identity probe was not retried");
+        .await;
+        presence_noise.abort();
+        reprobe.expect("the full identity probe was not retried");
         let requests = channel.identity_requests.lock().unwrap().clone();
         let retry: serde_json::Value = serde_json::from_slice(&requests[3]).unwrap();
         assert_eq!(
