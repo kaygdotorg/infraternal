@@ -4,7 +4,7 @@
  *
  * Every row carries a `canvas:` action; the core screen forwards them as `tracer:canvas-action` events, which
  * this module handles. A row's `source` is "keyboard" when it was picked without the pointer, and keyboard
- * flights are the short version (camera.keyFlight).
+ * flights jump with no animation (camera.keyFlight, #427).
  */
 import type { PaletteEntry } from "../../core-screen";
 import type { Ctx } from "../context";

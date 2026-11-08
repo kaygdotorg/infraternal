@@ -189,3 +189,37 @@ test("Shift pressed during a pointer open does not cut the fade short", async ({
   expect(fade.cancelled, "the fade was cancelled").toBe(false);
   expect(fade.end - fade.run, "the fade ran its whole length (about 240 ms)").toBeGreaterThan(200);
 });
+
+/**
+ * A camera flight started by a key (Control+Shift+digit, or a view picked in the palette by keyboard) jumps to its view in the
+ * same frame, with no spring (#427; owner: "actions originating from keyboard shortcuts = no animation"). The same flight
+ * started by a pointer click on the view list keeps flying, so its first frame is still short of where it ends.
+ */
+test("a camera flight from a key jumps at once, a pointer one still flies", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  const camera = (): Promise<{ cx: number; cy: number; z: number }> => page.evaluate(() => (window as unknown as { __tracerClusters: { camera(): { cx: number; cy: number; z: number } } }).__tracerClusters.camera());
+  /** The camera one animation frame after the trigger ran, then once it has certainly settled. */
+  const firstFrameThenFinal = async (trigger: () => Promise<void>): Promise<{ first: { cx: number; cy: number; z: number }; final: { cx: number; cy: number; z: number } }> => {
+    await trigger();
+    const first = await page.evaluate(() => new Promise<{ cx: number; cy: number; z: number }>((resolve) => requestAnimationFrame(() => resolve((window as unknown as { __tracerClusters: { camera(): { cx: number; cy: number; z: number } } }).__tracerClusters.camera()))));
+    // sleep: a flight is at most about 400 ms; wait it out so the end position is known
+    await page.waitForTimeout(1200);
+    return { first, final: await camera() };
+  };
+  // sleep: let the mockup's opening motion finish before the first measurement
+  await page.waitForTimeout(1200);
+  const moved = (a: { cx: number; cy: number; z: number }, b: { cx: number; cy: number; z: number }): boolean => Math.abs(a.cx - b.cx) * b.z > 1 || Math.abs(a.cy - b.cy) * b.z > 1 || Math.abs(a.z - b.z) > 0.001;
+  const start = await camera();
+  const key = await firstFrameThenFinal(() => page.keyboard.press("Control+Shift+Digit3"));
+  expect(moved(start, key.final), "the key flight went somewhere").toBe(true);
+  expect(moved(key.first, key.final), "key flight: the camera is already at its end one frame after the key").toBe(false);
+  // Pointer: the capsule opens the view list and a row is clicked.
+  await page.locator("#capsule").click();
+  // sleep: the pointer-opened palette grows in for 240 ms
+  await page.waitForTimeout(700);
+  const pointer = await firstFrameThenFinal(async () => { await page.locator(".cl-viewlist li, .cl-viewrow").nth(0).click(); });
+  expect(moved(key.final, pointer.final), "the pointer flight went somewhere").toBe(true);
+  expect(moved(pointer.first, pointer.final), "pointer flight: the camera is still on its way one frame after the click").toBe(true);
+});
