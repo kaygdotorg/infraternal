@@ -28,7 +28,7 @@ nix = { workspace = true, optional = true, features = ["event"] }
 tokio = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-screencapturekit = { version = "=11.0.0", default-features = false, features = ["macos_14_2"], optional = true }
+screencapturekit = { version = "=11.1.2", default-features = false, features = ["macos_14_2"], optional = true }
 
 [[bin]]
 name = "infraternal-desktop-helper"

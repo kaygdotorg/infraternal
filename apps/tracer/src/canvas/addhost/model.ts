@@ -151,7 +151,7 @@ export function stagesOf(view: TargetView): StageView[] {
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "none";
 
 /**
  * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
@@ -275,11 +275,13 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     // #394: a finished install for a host id this server doesn't know, or files at the setup location that
     // a staging step can't prove are its own. Nothing was changed; the server's sentence says which, and the
     // location is in Details. Retry is right once the other server has removed it.
+    // D359: in root mode the server offers to take a finished install of another server over. The page offers
+    // Take over, which opens a confirmation that names the old install; nothing changes until then.
     case "unrecognized_install": return {
       title: `${name} is set up elsewhere`,
       happened: failure.message,
       next: "",
-      fix: "retry", tone: "info",
+      fix: failure.takeover ? "take-over" : "retry", tone: "info",
     };
     // #394, J314 P2-1: a staging step met files it can't prove are infraternal's. Each check the host named has its
     // own title; none of them is "set up elsewhere", and trying again would only meet the same files, so there is no

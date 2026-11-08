@@ -487,13 +487,14 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
     let text = String::from_utf8_lossy(&stderr[..stderr.len().min(8192)]);
     let mut failure = if text.trim() == NETBIRD_NO_ACCOUNT {
         // The `NetBird` SSH server accepts the network sign-in, then ends the
-        // session with exactly this line and status 1 when the login name is
-        // no account on the host (#394: kayg on Proxmox hosts). Read as a
+        // session with exactly this line and status 1 when it can't find the
+        // login name's account: none there (#394: kayg on Proxmox hosts), or a
+        // directory lookup that failed (J342 P3-5). Read as a
         // command failure, it was reported as a generic setup failure.
         // Nothing else matches: only this whole stderr selects the kind.
         Failure::new(
             FailureKind::NoAccount,
-            "This host has no account with that user name.",
+            "This host couldn't find an account with that user name.",
         )
     } else if !ssh_failure {
         Failure::install("The remote bootstrap command failed.")
@@ -534,7 +535,7 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
             "Discovery confirms mesh reachability; SSH was refused or timed out."
         }
         FailureKind::Unreachable => "OpenSSH could not establish the connection.",
-        FailureKind::NoAccount => "The host's SSH server reported no such account.",
+        FailureKind::NoAccount => "The host's SSH server couldn't find that account.",
         _ => "Remote command returned a failure status; raw output was withheld.",
     });
     // Copy only canonical public error lines, never arbitrary remote bytes.

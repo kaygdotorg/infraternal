@@ -1183,12 +1183,17 @@ fi
         self.commit_with_timeout(None).await
     }
 
+    /// Commit this transaction on the host, within `timeout` when one is given:
+    /// its journal goes and what it replaced is deleted, after the new install
+    /// is durable (`COMMIT_RETIRE`).
+    /// # Errors
+    /// Reports a refused or failed commit; nothing is marked committed then.
     async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
-        let script = self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
+        let script = self.script(&format!(
+            r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
 stage="$base/.bootstrap-lock"
-retire_setup_lease
-rm -rf "$stage"
-retire_set_aside"#);
+{COMMIT_RETIRE}"#
+        ));
         let result = if let Some(timeout) = timeout {
             self.session
                 .run_with_timeout(&script, Input::Empty, timeout)
@@ -1234,9 +1239,7 @@ read -r approved || exit 1
 [ -z "$approved" ] || exit 1
 setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
-retire_setup_lease
-rm -rf "$stage"
-retire_set_aside"#
+{COMMIT_RETIRE}"#
             ),
         );
         let result = if let Some(timeout) = timeout {
@@ -1545,6 +1548,7 @@ validate_cache() {
 /// then opens this attempt's journal. Its 71s name their cause (`foreign`,
 /// `owner`) for the server (Refusal, #394).
 const STAGE_TRANSACTION: &str = r#"
+acquiring_written=no
 parent=$(dirname "$base")
 if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
 [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
@@ -1559,8 +1563,17 @@ if [ -e "$base" ] || [ -L "$base" ]; then
     [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] || { printf 'INFRATERNAL_REFUSED foreign\n' >&2; exit 71; }
     [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || { printf 'INFRATERNAL_REFUSED owner\n' >&2; exit 71; }
 else
-    mkdir -p "$base"
-    printf '%s\n' "$host" > "$base/.bootstrap-owner"
+    # A new setup location appears whole: owner record and acquisition journal
+    # are written under a temporary name, then renamed into place. A location
+    # holding only an owner record never exists, so nothing ever mistakes a
+    # half-made one for a finished install (J342 P1-1, D359).
+    fresh_base="$base.bootstrap-new-$transaction"
+    [ ! -e "$fresh_base" ] && [ ! -L "$fresh_base" ] || exit 72
+    mkdir -m 700 "$fresh_base"
+    printf '%s\n' "$host" > "$fresh_base/.bootstrap-owner"
+    printf '%s fresh\n' "$transaction" > "$fresh_base/.bootstrap-acquiring"
+    mv -T "$fresh_base" "$base"
+    acquiring_written=yes
 fi
 [ ! -L "$base/bin" ] && [ ! -L "$base/state" ] || exit 71
 stage="$base/.bootstrap-lock"
@@ -1571,7 +1584,7 @@ if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
 else
     kind=fresh
 fi
-printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
+[ "${acquiring_written:-no}" = yes ] || printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
 mkdir "$stage" || exit 72
 printf '%s\n' "$transaction" > "$stage/transaction"
 printf '%s\n' "$kind" > "$stage/kind"
@@ -1624,7 +1637,26 @@ fi
 // An acknowledged refusal is staging-only cleanup and must not restart it.
 // An incomplete upload is owned by this transaction. Reclaim it before
 // allocating the outside receipt, including when the home filesystem is full.
+/// The end of every commit (J349 P2-1, D359): make the new install durable,
+/// then delete its journal, then what it replaced. `settle_set_aside` syncs the
+/// filesystem first whenever a set-aside exists, so a power cut can never leave
+/// the old install deleted beside a new one whose data never reached the disk.
+/// Its sync comes before the journal goes too: a structurally finished base
+/// with an empty binary would otherwise let a later Check delete the set-aside.
+pub(crate) const COMMIT_RETIRE: &str = r#"settle_set_aside
+retire_setup_lease
+rm -rf "$stage"
+retire_set_aside"#;
+
+/// Roll back this transaction's setup on the host: an acquired or staged fresh
+/// install is removed through its receipt, an upgrade is put back from its
+/// rollback copies, and a new setup location it began but never renamed into
+/// place goes. Nothing another transaction owns is touched.
 pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
+# A new setup location this transaction began but never renamed into place
+# (STAGE_TRANSACTION): only its owner record and journal are in it.
+fresh_base="$base.bootstrap-new-$transaction"
+if [ -d "$fresh_base" ] && [ ! -L "$fresh_base" ] && [ -O "$fresh_base" ]; then rm -rf "$fresh_base"; fi
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
     validate_control_socket

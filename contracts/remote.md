@@ -481,12 +481,30 @@ token gets `400 {"error":"review_invalid"}`. Nothing runs in either case, and th
 refusal is audited as `denied`.
 
 A process-owned operation keeps the authorized mutation alive after a browser
-HTTP disconnect. SQLite's writer transaction serializes final authorization,
-a bounded five-second node uninstall handoff and public revocation. It deletes
-the visible bootstrap inventory and its application-owned SSH pin (unless another
-retained host uses that pin). External SSH trust is untouched. The existing
-revocation fence cuts the live QUIC/TLS channel before committing the tombstone.
-Public certificate denial tombstones remain so a removed certificate stays denied.
+HTTP disconnect. SQLite's writer transaction serializes final authorization and
+public revocation; no network call runs inside it (#409). For a person's host it
+records the removal intent: the login cleanup row, plus a removal row whose
+`host_cleanup` is `pending` when the agent is to be uninstalled (`retained` when
+not). It forgets the application-owned SSH pin (unless another retained host uses
+that pin) and keeps the bootstrap inventory until the host's receipt. External SSH
+trust is untouched. The existing revocation fence cuts the live QUIC/TLS channel
+when the tombstone commits. Public certificate denial tombstones remain so a
+removed certificate stays denied.
+
+The removal outbox delivers the rest on the host's cleanup-only reconnect: at once
+after the cut for a connected host, on its return for an offline one. In order:
+`terminal.login.revoke` and its durable receipt (D352); then, if the removal asked
+for it and the host has not accepted yet, `remote.host.uninstall`; then one
+transaction records the answer (`host_cleanup` `requested` or, when the host
+refused, `unreachable`; `retained`, the server-known kernel objects the host left
+in place), confirms the receipt, retires the host and deletes its bootstrap
+inventory. An answer that never arrives confirms nothing, and the next reconnect
+asks again. `requested` means the host accepted, not that its helper finished.
+When the host was connected at the click, the removal waits up to five seconds,
+after its commit, for that transaction and then answers `removed` with the host's
+`host_cleanup` and `left` objects; otherwise it answers `pending` with the
+ownership-checked manual command. Legacy non-person owners have no outbox and get
+one immediate attempt inside the removal instead.
 
 The internal `remote.host.uninstall` action is absent from the browser action
 catalogue. Only a checked managed remote installation registers its handler.
