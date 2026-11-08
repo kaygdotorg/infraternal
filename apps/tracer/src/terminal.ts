@@ -718,6 +718,11 @@ export class TerminalClient {
     return terminalBufferText(this.terminal, maxRows);
   }
 
+  /** The text the terminal currently has selected ("" when nothing is), for browser checks of touch and mouse selection. */
+  readSelectionText(): string {
+    return this.terminal.getSelection();
+  }
+
   /** Replays test-double output in a second Ghostty instance for differential checks. */
   async baselineScreenText(bytes: Uint8Array): Promise<string> {
     if (bytes.byteLength > 64 * 1024) throw new Error("differential replay exceeds its test bound");

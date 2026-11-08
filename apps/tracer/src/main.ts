@@ -31,6 +31,7 @@ declare global {
       dropConnection: () => void;
       screenText: () => string;
       graphemeText: () => string;
+      selectionText: () => string;
       injectInput: (data: string) => void;
       seedPrompt: () => Promise<void>;
       writeText: (text: string) => Promise<void>;
@@ -634,6 +635,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
         dropConnection: () => currentTerminal?.forceDrop(),
         screenText: () => currentTerminal?.readScreenText() ?? "",
         graphemeText: () => currentTerminal?.readGraphemeText() ?? "",
+        selectionText: () => currentTerminal?.readSelectionText() ?? "",
         injectInput: (data) => currentTerminal?.injectInput(data),
         seedPrompt: () => currentTerminal?.seedPromptForTest() ?? Promise.resolve(),
         writeText: (text) => currentTerminal?.writeTextForTest(text) ?? Promise.resolve(),
