@@ -144,19 +144,54 @@ while True:
     path
 }
 
-/// The example compiles the shipping runtime guard, without a duplicate probe.
+/// Returns the shipping runtime guard, building its example for focused test runs.
+/// Cargo builds examples for the workspace suite, but `--test install` alone
+/// does not. Prepare the missing example once before any synthetic host uses it,
+/// so an absent local fixture cannot masquerade as a remote upload failure.
+/// An explicit helper override remains entirely the caller's responsibility.
 #[allow(dead_code, clippy::unwrap_used)]
 pub fn runtime_helper() -> PathBuf {
-    std::env::var_os("INFRATERNAL_TEST_RUNTIME_HELPER").map_or_else(
-        || {
-            std::env::current_exe()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("examples/recovery-helper")
-        },
-        PathBuf::from,
-    )
+    static HELPER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    HELPER
+        .get_or_init(|| {
+            if let Some(path) = std::env::var_os("INFRATERNAL_TEST_RUNTIME_HELPER") {
+                return PathBuf::from(path);
+            }
+            let executable = std::env::current_exe().unwrap();
+            let profile_dir = executable.parent().unwrap().parent().unwrap();
+            let helper = profile_dir.join("examples/recovery-helper");
+            if !helper.is_file() {
+                // Match the invoking test's profile; Cargo calls both dev and
+                // test output directories `debug`. Its artifact lock also
+                // protects simultaneous integration-test processes building it.
+                let profile = profile_dir.file_name().unwrap().to_str().unwrap();
+                let profile = if profile == "debug" { "test" } else { profile };
+                let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .nth(3)
+                    .unwrap();
+                let output = std::process::Command::new(env!("CARGO"))
+                    .current_dir(workspace)
+                    .args([
+                        "build",
+                        "--locked",
+                        "--offline",
+                        "--profile",
+                        profile,
+                        "-p",
+                        "infraternal-plugin-ssh",
+                        "--example",
+                        "recovery-helper",
+                    ])
+                    .output()
+                    .expect("build the SSH runtime test helper");
+                assert!(
+                    output.status.success() && helper.is_file(),
+                    "SSH runtime test helper build failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            helper
+        })
+        .clone()
 }
