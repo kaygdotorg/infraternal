@@ -238,7 +238,12 @@ fn nft_new_server_rejection_retires_previous_peers() {
         .into_iter()
         .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
     let retained = node.config().cloned();
-    let installed_peers = Device::counters().unwrap().len();
+    // Fail-closed retirement may remove the kernel device; only ENODEV means zero peers.
+    let installed_peers = match Device::counters() {
+        Ok(peers) => peers.len(),
+        Err(error) if error.raw_os_error() == Some(nix::errno::Errno::ENODEV as i32) => 0,
+        Err(error) => panic!("could not inspect peers after authority refusal: {error}"),
+    };
     node.down().unwrap();
 
     assert!(
