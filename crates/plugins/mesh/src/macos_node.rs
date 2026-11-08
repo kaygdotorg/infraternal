@@ -4329,6 +4329,8 @@ mod tests {
     #[ignore = "Run on the macOS VM with system service privileges."]
     fn macos_authority_replacement_recovers_after_sigkill() {
         let directory = test_directory();
+        // Reuse the isolated key-file path so this crash proof never retires a host System keychain item.
+        write_key(&directory);
         let ready = directory.join("authority-replacement-ready");
         let mut child = Command::new(std::env::current_exe().expect("test binary"))
             .args([
