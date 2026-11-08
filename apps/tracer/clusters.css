@@ -136,7 +136,7 @@
 
 .cl-list { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 2px; padding: 0.375rem 0.5rem 0.75rem; overflow: auto; }
 .cl-row {
-  display: grid; grid-template-columns: 0.625rem auto minmax(0, 1fr) auto; align-items: center; gap: 0.625rem; flex: none; height: var(--ui-row-h, 2rem); padding: 0 0.625rem;
+  display: grid; grid-template-columns: 0.625rem auto minmax(0, 1fr) auto; align-items: center; gap: 0.625rem; flex: none; height: var(--ui-control-h, 2rem); padding: 0 0.625rem;
   border: 0; border-radius: var(--r-sm); background: none; color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer;
   transition: background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out);
 }
@@ -214,7 +214,7 @@
 .cl-summary[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
 .cl-summary-rows { display: grid; gap: 2px; }
 /* A window row in the card: the view list's row, taller when its detail wraps (values wrap, never truncate). */
-.cl-summary-pick { height: auto; min-height: var(--ui-row-h, 2rem); padding: 0.375rem 0.5rem; }
+.cl-summary-pick { height: auto; min-height: var(--ui-control-h, 2rem); padding: 0.375rem 0.5rem; }
 .cl-summary-pick .cl-viewrow-name { flex: 0 1 auto; max-width: 55%; overflow-wrap: anywhere; font-weight: 500; }
 .cl-summary-pick .cl-viewrow-meta { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; text-align: right; }
 .cl-summary-all { margin-top: 0.375rem; }
@@ -244,7 +244,7 @@
 .cl-viewlist { position: absolute; z-index: 9; display: flex; flex-direction: column; padding: 0.375rem; border-radius: var(--r-lg, 1.125rem); }
 .cl-viewlist-rows { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .cl-viewrow {
-  display: flex; align-items: center; gap: 0.625rem; width: 100%; height: var(--ui-row-h, 2rem); padding: 0 0.625rem; border: 0; border-radius: var(--r-sm); background: none;
+  display: flex; align-items: center; gap: 0.625rem; width: 100%; height: var(--ui-control-h, 2rem); padding: 0 0.625rem; border: 0; border-radius: var(--r-sm); background: none;
   color: var(--fg); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); text-align: left; cursor: pointer;
   transition: background-color var(--t-press) ease, transform var(--t-press) var(--ease-out, ease-out);
 }
@@ -327,7 +327,7 @@
 .cl-share-body { display: grid; gap: 0.375rem; padding: 0 0.875rem 0.25rem; }
 .cl-share-label { margin: 0.375rem 0 0; color: var(--ui-text-secondary); font: var(--ui-type-eyebrow); letter-spacing: 0.02em; text-transform: uppercase; }
 .cl-share-views { display: flex; flex-wrap: wrap; gap: 0.375rem; }
-.cl-share-publish { display: flex; align-items: center; justify-content: space-between; min-height: var(--ui-row-h, 2rem); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
+.cl-share-publish { display: flex; align-items: center; justify-content: space-between; min-height: var(--ui-control-h, 2rem); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .cl-share-note { margin: 0.25rem 0 0; color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 0.75rem); letter-spacing: var(--ui-tracking); }
 .cl-share-foot { display: flex; justify-content: flex-end; padding: 0.375rem 0.625rem 0.625rem; }
 .cl-share-send { --pill-h: var(--ui-control-h, 1.875rem); color: var(--accent); }
