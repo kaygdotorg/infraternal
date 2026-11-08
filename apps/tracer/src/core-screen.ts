@@ -4,6 +4,7 @@ import { branchedMenu, type BranchSection, type BranchedMenu, type BranchedOptio
 import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { Spring } from "../../../packages/ui/src/spring";
+import { markMotion } from "../../../packages/ui/src/input-source";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
@@ -705,6 +706,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
 
   const setSidebar = (open: boolean, instant = false): void => {
     pulseActivity("sidebar", 450);
+    // A key (Escape, a shortcut) opens and closes the sidebar with no motion, whatever the caller asked for.
+    instant = markMotion(sidebar, sidebarToggle) || instant;
     dockPanes(open, instant);
     // The toggle travels between the top bar and the sidebar header on a transform transition.
     sidebarToggle.classList.toggle("instant", instant);
@@ -724,6 +727,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // listed: the canvas's corner buttons (the sidebar toggle, the "+") and the capsule the palette grows from.
   const PALETTE_COVERABLE = [sidebarToggle, capsule, ...document.querySelectorAll<HTMLElement>(".top > .tabs > .tab-add")];
   const coverTopBar = (open: boolean): void => {
+    markMotion(...PALETTE_COVERABLE);
     if (!open) { for (const control of PALETTE_COVERABLE) delete control.dataset.paletteCovered; return; }
     const box = palette.getBoundingClientRect();
     for (const control of PALETTE_COVERABLE) {
@@ -734,9 +738,10 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   // Where focus was when the palette opened, so closing it (Escape most of all) puts focus back there instead of on the page.
   let paletteReturnFocus: HTMLElement | null = null;
-  // Whether it animates is not decided here: the last input (a key or a pointer press) does, through .ui-key-instant (#427).
+  // Whether it animates is not decided here: markMotion writes data-motion on the palette and scrim at the moment of the change, from the last input, and .ui-key-instant keys off it (#427).
   const setPalette = (open: boolean, only?: PaletteEntry[]): void => {
     if (open) {
+      markMotion(palette, scrim);
       if (palette.hidden) paletteReturnFocus = document.activeElement instanceof HTMLElement && !palette.contains(document.activeElement) && document.activeElement !== document.body ? document.activeElement : null;
       shortcuts.close(true);
       settings?.close("keyboard");
@@ -756,6 +761,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else {
       // Only a close that left focus in the palette restores it: a picked action that moved focus on (to a window, a field) keeps it.
       const focusInPalette = palette.contains(document.activeElement);
+      markMotion(palette, scrim);
       indexScoped(false);
       scopedEntries = undefined;
       palette.hidden = true;

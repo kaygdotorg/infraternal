@@ -22,17 +22,16 @@
  * the person acted, so the tracker ignores it: a pointer click that happens to dispatch a synthetic shortcut still reads as a
  * pointer.
  *
- * The source is written to the root as `data-input="keyboard" | "pointer"`, in the same task as the event. CSS therefore
- * sees it in the same style recalculation that applies the surface's new state, so a rule such as
- * `:root[data-input="keyboard"] .palette { transition: none }` removes the transition for both an open and a close. Script
- * reads {@link triggeredByKeyboard} the same way. Because each new event overwrites the last one, a pointer close of a
- * keyboard-opened surface may animate and a keyboard close of a pointer-opened one is instant, with no extra bookkeeping.
+ * The source stays what the last trusted key or pointer press made it, until the next one. That includes Space and Enter on a
+ * focused button: the button clicks on keyup (Space) or keydown (Enter), and the click still finds the source "keyboard", so
+ * the same button behaves the same way whichever key presses it. The source is only ever read at the moment something
+ * changes, so how long ago the key was does not matter.
  *
- * CSS that drops a surface's open and close transitions must not outlive the key that opened or closed it, or the surface would
- * lose its easing for good until the next pointer press. So a key also sets `data-input-fresh` on the root, and removes it two
- * animation frames later (the same pattern as `data-look-swap`: the second frame is the one after the style recalculation that
- * would have started the transitions). The rule in styles.css is keyed on `data-input-fresh`; script reads the persistent
- * {@link triggeredByKeyboard}.
+ * Surfaces do not read the source from CSS by time. Whatever opens, closes or changes state calls {@link markMotion} on its
+ * element at that moment, which writes the answer onto the element itself (`data-motion="instant"` or `"animate"`). It stays
+ * there until that element's next change, and the surface's CSS keys off its own attribute, so no other easing is touched and
+ * there is no window of frames after the key to get wrong. The root also carries `data-input="keyboard" | "pointer"`, for
+ * inspection and tests; no style depends on it.
  *
  * Before any input has happened, and for changes that no key caused (a timer, a network event), the source is `"pointer"`,
  * so those keep their animation.
@@ -65,6 +64,23 @@ export function triggeredByKeyboard(): boolean {
 }
 
 /**
+ * Says, on each of `elements`, whether the change about to happen to it is keyboard-triggered: writes `data-motion="instant"`
+ * when the last input was a key and `data-motion="animate"` otherwise. Call it right before the state flips (before `hidden`
+ * changes, a class or attribute toggles), in the same task, so the style recalculation that applies the new state also sees the
+ * attribute. The attribute stays until the element's next call. Returns true when the change is instant, so a caller that
+ * animates with script can skip its animation too.
+ * @example
+ * const instant = markMotion(palette, scrim);
+ * palette.hidden = false;
+ */
+export function markMotion(...elements: Array<Element | null | undefined>): boolean {
+  const instant = triggeredByKeyboard();
+  const value = instant ? "instant" : "animate";
+  for (const element of elements) if (element && element.getAttribute("data-motion") !== value) element.setAttribute("data-motion", value);
+  return instant;
+}
+
+/**
  * Installs the page-wide tracker once (a second call returns the first disposer) and returns its disposer. Marks the root
  * `data-input="pointer"` until the first key is pressed.
  */
@@ -75,18 +91,11 @@ export function installInputSource(root: HTMLElement = document.documentElement)
     // One attribute write per change of source, never per event.
     if (root.dataset.input !== source) root.dataset.input = source;
   };
-  /** Pending removal of `data-input-fresh`, so a quick second key restarts the two-frame window instead of being cut by the first. */
-  let freshWindow = 0;
-  const endFresh = (): void => { cancelAnimationFrame(freshWindow); freshWindow = 0; delete root.dataset.inputFresh; };
   const key = (event: Event): void => {
-    if (!event.isTrusted) return;
-    if (MODIFIER_KEYS.has((event as KeyboardEvent).key)) return;
+    if (!event.isTrusted || MODIFIER_KEYS.has((event as KeyboardEvent).key)) return;
     set("keyboard");
-    cancelAnimationFrame(freshWindow);
-    root.dataset.inputFresh = "";
-    freshWindow = requestAnimationFrame(() => { freshWindow = requestAnimationFrame(endFresh); });
   };
-  const pointer = (event: Event): void => { if (event.isTrusted) { set("pointer"); endFresh(); } };
+  const pointer = (event: Event): void => { if (event.isTrusted) set("pointer"); };
   set("pointer");
   window.addEventListener("wheel", pointer, { capture: true, passive: true });
   window.addEventListener("keydown", key, { capture: true, passive: true });
@@ -95,7 +104,6 @@ export function installInputSource(root: HTMLElement = document.documentElement)
     window.removeEventListener("keydown", key, { capture: true });
     window.removeEventListener("pointerdown", pointer, { capture: true });
     window.removeEventListener("wheel", pointer, { capture: true });
-    endFresh();
     delete root.dataset.input;
     current = "pointer";
     installed = undefined;

@@ -20,6 +20,8 @@
  * when the card is removed. It does nothing when the card has no backdrop blur (the Solid level, reduced transparency).
  */
 
+import { markMotion } from "./input-source";
+
 /**
  * How far past the card the bed reaches, in multiples of the blur radius. A CSS blur's radius is a standard deviation and
  * its kernel runs to about three of them, so a layer smaller than that has its own edge fade inside the blur and lets a
@@ -66,7 +68,7 @@ export function attachGlassBed(card: HTMLElement): GlassBed {
       bed.style.height = `${card.offsetHeight + reach * 2}px`;
       bed.style.transformOrigin = `${originX + reach}px ${originY + reach}px`;
     },
-    setOpen(open: boolean): void { bed.dataset.open = open ? "true" : "false"; },
+    setOpen(open: boolean): void { markMotion(bed); bed.dataset.open = open ? "true" : "false"; },
     dispose(): void { bed.remove(); },
   };
 }

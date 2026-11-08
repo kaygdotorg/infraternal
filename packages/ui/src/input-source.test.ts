@@ -1,15 +1,6 @@
 /** The last key or pointer press decides the input source, and the root attribute follows it in the same task. */
 import { expect, test } from "bun:test";
-import { inputSource, installInputSource, triggeredByKeyboard } from "./input-source";
-
-/** A stand-in animation-frame queue the test steps by hand, so it can check the two-frame window. */
-const queue = new Map<number, () => void>();
-/** The id the next queued frame callback gets. */
-let nextFrame = 1;
-(globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = (callback: () => void): number => { queue.set(nextFrame, callback); return nextFrame++; };
-(globalThis as { cancelAnimationFrame?: unknown }).cancelAnimationFrame = (id: number): void => { queue.delete(id); };
-/** Runs the callbacks queued so far (one frame); ones they queue wait for the next call. */
-const stepFrame = (): void => { const due = [...queue.values()]; queue.clear(); for (const callback of due) callback(); };
+import { inputSource, installInputSource, markMotion, triggeredByKeyboard } from "./input-source";
 
 /**
  * A stand-in for `window` that calls the listeners with plain objects. The browser marks an event the person made `isTrusted`
@@ -27,6 +18,15 @@ class FakeWindow {
     for (const listener of this.listeners.get(event.type) ?? []) listener({ isTrusted: true, ...event });
   }
 }
+/** An element stand-in: only the attribute calls `markMotion` makes. */
+class FakeElement {
+  readonly attrs: Record<string, string> = {};
+  /** Reads an attribute. */
+  getAttribute(name: string): string | null { return this.attrs[name] ?? null; }
+  /** Writes an attribute. */
+  setAttribute(name: string, value: string): void { this.attrs[name] = value; }
+}
+
 /** An event the person made (trusted), with optional fields such as `key`. */
 const person = (type: string, props: { key?: string } = {}): { type: string; isTrusted: boolean; key?: string } => ({ type, isTrusted: true, ...props });
 /** An event a script made: the same shape, marked untrusted. */
@@ -60,17 +60,23 @@ test("a key press is keyboard, a pointer press is pointer, the newest wins, and 
   target.dispatchEvent(person("keydown", { key: "k" }));
   expect(inputSource()).toBe("keyboard");
 
-  // The key's "fresh" mark (the CSS that drops open and close motion) lasts two frames, then goes; the source stays.
-  expect(root.dataset.inputFresh).toBe("");
-  stepFrame();
-  expect(root.dataset.inputFresh).toBe("");
-  stepFrame();
-  expect(root.dataset.inputFresh).toBeUndefined();
-  expect(inputSource()).toBe("keyboard");
-  target.dispatchEvent(person("keydown", { key: "j" }));
-  expect(root.dataset.inputFresh).toBe("");
+  // Space and Enter count: a button clicks on keyup, long after the keydown, and still finds the source "keyboard".
   target.dispatchEvent(person("pointerdown"));
-  expect(root.dataset.inputFresh).toBeUndefined();
+  target.dispatchEvent(person("keydown", { key: " " }));
+  expect(triggeredByKeyboard()).toBe(true);
+  target.dispatchEvent(person("pointerdown"));
+  target.dispatchEvent(person("keydown", { key: "Enter" }));
+  expect(triggeredByKeyboard()).toBe(true);
+
+  // markMotion writes the answer onto the elements at the moment of the call, and returns it.
+  const palette = new FakeElement(), scrim = new FakeElement();
+  expect(markMotion(palette as unknown as Element, scrim as unknown as Element, null, undefined)).toBe(true);
+  expect(palette.attrs["data-motion"]).toBe("instant");
+  expect(scrim.attrs["data-motion"]).toBe("instant");
+  target.dispatchEvent(person("pointerdown"));
+  expect(markMotion(palette as unknown as Element)).toBe(false);
+  expect(palette.attrs["data-motion"]).toBe("animate");
+  expect(scrim.attrs["data-motion"], "an element not named in the call is left as it was").toBe("instant");
 
   // A script's key or pointer event says nothing about the person: it is ignored whichever way it points.
   target.dispatchEvent(person("pointerdown"));
