@@ -73,11 +73,14 @@ def prove(binary, scenario="sessions"):
     uid = None
     sudoers = Path("/etc/sudoers.d") / account
     sudoers_created = False
-    polkit_dir = Path('/etc/polkit-1/rules.d')
+    polkit_dir = Path({'polkit-run': '/run/polkit-1/rules.d',
+                       'polkit-local': '/usr/local/share/polkit-1/rules.d',
+                       'polkit-policy': '/run/polkit-1/actions'}.get(scenario, '/etc/polkit-1/rules.d'))
     polkit_existed = polkit_dir.exists()
     polkit_parent_existed = polkit_dir.parent.exists()
-    polkit_rule = polkit_dir / f'50-{account}.rules'
+    polkit_rule = polkit_dir / (f'{account}.policy' if scenario == 'polkit-policy' else f'50-{account}.rules')
     polkit_created = False
+    polkit_triggers = []
     root_unit = f'{account}-polkit'
     system_unit = f'{account}-system-process'
     system_started = False
@@ -115,9 +118,12 @@ def prove(binary, scenario="sessions"):
                 assert any(row.startswith(f'{pid} ') for row in report['processes']), report
                 print('SYSTEM_PROCESS_REPORTED_NOT_KILLED_PASS', flush=True)
                 return
-            if scenario == 'polkit':
+            if scenario.startswith('polkit'):
                 def root_route():
                     """Exercise J357's actual polkit-to-systemd root route without prompting."""
+                    if scenario == 'polkit-policy':
+                        return command('runuser', '-u', account, '--', '/bin/sh', '-c',
+                                       f'pkcheck --action-id org.infraternal.{account} --process $$', check=False)
                     return command('runuser', '-u', account, '--', 'systemd-run',
                                    '--system', '--no-ask-password', '--wait', '--collect',
                                    '--unit=' + root_unit, '/bin/sh', '-c',
@@ -127,17 +133,40 @@ def prove(binary, scenario="sessions"):
                 polkit_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
                 with polkit_rule.open('x') as rule:
                     polkit_created = True
-                    rule.write('polkit.addRule(function(action, subject) {\n'
+                    if scenario == 'polkit-policy':
+                        rule.write(f'<?xml version="1.0"?><policyconfig><action id="org.infraternal.{account}">'
+                                   '<description>Disposable administrator action</description>'
+                                   '<message>Disposable administrator action</message><defaults>'
+                                   '<allow_any>yes</allow_any><allow_inactive>yes</allow_inactive>'
+                                   '<allow_active>yes</allow_active></defaults></action></policyconfig>')
+                    else:
+                        rule.write('polkit.addRule(function(action, subject) {\n'
                                f'    if (subject.user == "{account}") return polkit.Result.YES;\n'
                                '});\n')
                 polkit_rule.chmod(0o644)
+                if scenario != 'polkit':
+                    # A newly created load directory may have no daemon watch
+                    # yet. An owned harmless file in an existing watched tree
+                    # invalidates the cache without restarting the host daemon.
+                    trigger = Path('/etc/polkit-1/rules.d') / f'99-{account}-reload.rules'
+                    with trigger.open('x') as file:
+                        file.write('\n')
+                    polkit_triggers.append(trigger)
+                    if scenario == 'polkit-policy':
+                        trigger = Path('/usr/share/polkit-1/actions') / f'{account}-reload.policy'
+                        with trigger.open('x') as file:
+                            file.write('<?xml version="1.0"?><policyconfig/>')
+                        polkit_triggers.append(trigger)
                 wait_until(lambda: root_route().returncode == 0)
-                assert root_plant.read_text().strip() == '0'
-                assert root_plant.stat().st_uid == 0
-                print('POLKIT_ROOT_ROUTE_CONFIRMED uid=0', flush=True)
+                if scenario != 'polkit-policy':
+                    assert root_plant.read_text().strip() == '0'
+                    assert root_plant.stat().st_uid == 0
+                print('POLKIT_ACTION_DEFAULT_YES_CONFIRMED' if scenario == 'polkit-policy'
+                      else 'POLKIT_ROOT_ROUTE_CONFIRMED uid=0', flush=True)
                 reply = control(client, 102, 'terminal.login.revoke', dict(person=str(people[0])))
                 print(json.dumps(dict(scenario=scenario, reply=reply)), flush=True)
-                assert root_plant.exists(), 'the root plant must survive until fixture cleanup'
+                if scenario != 'polkit-policy':
+                    assert root_plant.exists(), 'the root plant must survive until fixture cleanup'
                 report = reply['access']['accounts'][0]
                 assert report['privileged'] is True, report
                 assert report['state'] == 'not_checked', report
@@ -209,9 +238,11 @@ def prove(binary, scenario="sessions"):
                 command('systemctl', 'reset-failed', system_unit + '.service', check=False)
             if sudoers_created:
                 sudoers.unlink(missing_ok=True)
+            for trigger in polkit_triggers:
+                trigger.unlink(missing_ok=True)
             if polkit_created:
                 polkit_rule.unlink(missing_ok=True)
-            if scenario == 'polkit':
+            if scenario.startswith('polkit'):
                 command('systemctl', 'stop', root_unit + '.service', check=False)
                 command('systemctl', 'reset-failed', root_unit + '.service', check=False)
                 root_plant.unlink(missing_ok=True)

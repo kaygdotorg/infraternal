@@ -1515,7 +1515,7 @@ fn loginctl() -> tokio::process::Command {
 /// Callers fail closed when none exists; executing `/` also always fails.
 pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt as _;
-    if !matches!(name, "systemctl" | "loginctl" | "sudo") {
+    if !matches!(name, "systemctl" | "loginctl" | "sudo" | "pkaction") {
         return None;
     }
     for directory in [

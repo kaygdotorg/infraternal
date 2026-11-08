@@ -67,6 +67,49 @@ pub(crate) fn check_names() -> Vec<String> {
         .collect()
 }
 
+/// Query a trusted host tool from the scan's blocking worker. Both pipes and
+/// child lifetime are bounded; callers treat missing or ambiguous output as
+/// unknown. Host tools see only the system bus and a fixed C locale.
+pub(crate) fn host_output(name: &str, args: &[&str]) -> Option<String> {
+    let program = crate::logins::account_tool(name)?;
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    runtime.block_on(async {
+        let mut command = crate::sessions::isolated(&program);
+        command
+            .args(args)
+            .env_clear()
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().ok()?;
+        let mut stdout = child.stdout.take()?.take(1024 * 1024 + 1);
+        let mut stderr = child.stderr.take()?.take(OUTPUT_BYTES + 1);
+        let query = async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let (a, b, status) = tokio::join!(
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+                child.wait()
+            );
+            match (a, b, status) {
+                (Ok(_), Ok(_), Ok(status))
+                    if status.success() && err.is_empty() && out.len() <= 1024 * 1024 =>
+                {
+                    String::from_utf8(out).ok()
+                }
+                _ => None,
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), query)
+            .await
+            .ok()
+            .flatten()
+    })
+}
+
 /// Inspect the host doas configuration from the registry's account callback.
 fn doas_route(_account: &User) -> bool {
     doas_allows_or_unknown(Path::new("/etc/doas.conf"))
