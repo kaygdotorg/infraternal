@@ -665,6 +665,7 @@ mod tests {
                 .unwrap()
                 .send_replace(());
         }
+        /// Wait until the fake worker acknowledges the next observed channel update.
         async fn wait(&self) {
             tokio::time::timeout(std::time::Duration::from_secs(5), self.applied.acquire())
                 .await
@@ -1226,6 +1227,7 @@ mod tests {
             .unwrap();
     }
 
+    /// A refused delta retries as a full snapshot and channel closure retires its worker.
     #[tokio::test]
     async fn refused_delta_recovers_immediately_and_closed_channel_retires_worker() {
         let service = service().await;
