@@ -1,6 +1,14 @@
 //! Ask the host whether an account could rewrite a root-owned access record.
-//! Only an explicit sudo denial and fully known local policy permit a negative
-//! answer. Queries run in the access scan's blocking worker, never the reactor.
+//! A negative answer covers only the checks listed in this module. Unknown
+//! results fail closed. Queries run in the access scan's blocking worker,
+//! never the reactor.
+//!
+//! Out of scope (J357 P3, owner 2026-11-08): `pam_cap` grants from
+//! `/etc/security/capability.conf`; root-run scripts owned by the account;
+//! and group-writable root paths. These require a capabilities audit or tracing
+//! root's executable inputs, file ownership, ACLs and writable path components
+//! across the host. This detector does neither, and a negative answer does not
+//! establish their absence. The report names the routes actually checked.
 use std::{ffi::CString, io::Read, path::Path, process::Stdio, time::Duration};
 
 use nix::unistd::{Group, Uid, User};

@@ -7,6 +7,14 @@
 //! to the system and are reported, never killed by revocation (D362, amended
 //! 2026-11-08). Any observed survivor forces `not_checked/programs_may_remain`
 //! with its PID and printable command, even if every watched file is unchanged.
+//!
+//! Subordinate-UID container processes are out of scope for this observation
+//! (J357 P3, owner 2026-11-08): their host UIDs can differ from the account's
+//! real, effective, saved and filesystem UIDs. The systemd stop still removes
+//! them while they remain in the account's sessions or user slice, regardless
+//! of UID. Outside that slice they can survive without appearing in this UID
+//! listing. This module does not infer account ownership from namespace UID
+//! maps or `/etc/subuid`, and never promises that such processes were checked.
 use std::{
     fs::File,
     io::{self, Read},
