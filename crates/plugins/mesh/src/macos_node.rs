@@ -3038,7 +3038,7 @@ mod tests {
                 match command {
                     WorkerCommand::Apply { config, reply } => {
                         if let Ok(mut configs) = applied.lock() {
-                            configs.push(config.clone());
+                            configs.push(config.as_ref().clone());
                         }
                         let _ = reply.send(Ok(RuntimeInfo {
                             interface: "utun-test".to_owned(),
