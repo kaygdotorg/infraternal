@@ -290,6 +290,13 @@ mod tests {
 mod review_j375_padding_tests {
     //! Checks direct IPv6 budgets against the pinned engine's shared-MTU padding rule (#381).
     use super::*;
+    use gotatun::{
+        noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
+        packet::{Packet, WgKind},
+        tun::MtuWatcher,
+        x25519,
+    };
+    use std::sync::Arc;
 
     /// A narrow direct IPv6 peer must fit its underlay even when another peer raises the TUN MTU.
     #[test]
@@ -297,13 +304,6 @@ mod review_j375_padding_tests {
         let narrow_underlay = 1450_u32;
         let narrow_inner = mtu_for_route(narrow_underlay);
         let shared_mtu = interface_mtu(&[narrow_inner, mtu_for_route(1500)]);
-        use gotatun::{
-            noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
-            packet::{Packet, WgKind},
-            tun::MtuWatcher,
-            x25519,
-        };
-        use std::sync::Arc;
         let a = x25519::StaticSecret::from([1_u8; 32]);
         let b = x25519::StaticSecret::from([2_u8; 32]);
         let a_pub = x25519::PublicKey::from(&a);
@@ -324,7 +324,9 @@ mod review_j375_padding_tests {
             IndexTable::from_os_rng(),
             Arc::new(RateLimiter::new(&b_pub, 100)),
         );
-        let init = sender.format_handshake_initiation(false).unwrap();
+        let Some(init) = sender.format_handshake_initiation(false) else {
+            panic!("expected a handshake initiation");
+        };
         let TunnResult::WriteToNetwork(response) =
             receiver.handle_incoming_packet(WgKind::HandshakeInit(init))
         else {
@@ -343,7 +345,11 @@ mod review_j375_padding_tests {
             panic!("data packet");
         };
         let encrypted_bytes = encrypted.into_bytes().len();
-        let outer_packet = u32::try_from(encrypted_bytes).unwrap() + 48;
+        let encrypted_bytes = match u32::try_from(encrypted_bytes) {
+            Ok(length) => length,
+            Err(_) => panic!("encrypted packet length fits in a 32-bit MTU"),
+        };
+        let outer_packet = encrypted_bytes.saturating_add(48);
         println!(
             "underlay={narrow_underlay} route_mtu={narrow_inner} shared_mtu={shared_mtu} actual_encrypted_bytes={encrypted_bytes} ipv6_outer={outer_packet}"
         );
