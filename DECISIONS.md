@@ -4199,3 +4199,109 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      adds no power. Rootless adds of another account's install still
      refuse. The rejected options were keeping D337 strict (a by-hand
      uninstall when the old server is gone) and never offering a button.
+
+360. **A revoke report names what it checked, never "unchanged" (owner,
+     2026-11-07, #355; refines D356):** J334's review showed that a report
+     could say "unchanged" when access was left behind: a folder with more
+     than 1,024 entries was skipped, and systemd and bash read places the
+     scan did not cover. No scan can prove nothing was left. The owner chose
+     "Say what was checked": when the scan finds nothing, the report says
+     what it watched and since when, for example "No changes found in the
+     214 places we watch (SSH keys, cron, user services, shell startup
+     files) since 3 Nov, 14:02". It never uses the word "unchanged". The
+     server decides that outcome itself, only when the scan was complete,
+     covered every category D356 names, ran in an account that could not
+     rewrite its record or the infraternal agent, and nothing of the person's
+     could write afterwards. Otherwise it says "Not checked" with the reason.
+     The rejected options were keeping "unchanged" for complete scans (it
+     still reads as a guarantee) and listing changes only (silence can't tell
+     "checked, nothing found" from "couldn't check").
+
+361. **The nightly fuzz run follows dev (owner, 2026-11-07, #353; changes
+     PROCESS §12):** the nightly fuzz runner on dev-02 was pinned to the
+     commit chosen at install, and only a reinstall moved it. It stayed on a
+     5 November commit, re-reported a parser bug already fixed on dev, and
+     never ran the newer runner checks. The owner chose "Follow latest dev":
+     before each night's run the runner fetches `dev` as the fuzz account and
+     fuzzes that head, and the night fails if the fetch fails. Its token
+     still only meets reviewed code, because only the orchestrator merges
+     into dev. The rejected option was keeping the pin and reinstalling after
+     merges, which drifts whenever a reinstall is forgotten.
+
+362. **A sole-holder revoke stops every process of the account (owner,
+     2026-11-07, #355; extends D353):** D353 stops the account's user
+     services and turns linger off when the revoked person is the account's
+     last holder. J343's review (#355 comment 84293) showed that a program
+     started some other way (a background job, or a session over the host's
+     local SSH socket) survives that, and can write a new SSH key after the
+     revoke. The owner chose "Stop all its processes": when no one else holds
+     the account, the revoke ends every remaining process running as that
+     account, then scans. A shared account's processes are left alone, and
+     its report says "Not checked: programs may still be running" with the
+     list. The rejected option was only reporting the surviving programs,
+     which leaves the access open until someone acts.
+
+363. **A revoke reports, never stops, processes the system started as the
+     account (owner, 2026-11-08, #355; amends D362):** D362 stops every
+     process of a sole-holder account. J357's review (#355 comment 85537)
+     showed a process that the system started as that account, outside its
+     login sessions and user services (a cron job, or a system service that
+     runs as that user), survives the session teardown. The owner chose
+     "Report system-started ones": the revoke stops everything in the
+     person's own sessions and user services, and lists any process the
+     system started as the account under "Not checked: programs may still
+     be running", never killing it, so a real service that shares the
+     account keeps running. The rejected option was stopping those too,
+     which can take down a service such as a database user's.
+
+364. **"No changes found" names the root checks it ran (owner, 2026-11-08,
+     #355; refines D360):** each review of the revoke report found another
+     route to root that the privilege check did not know (sudo, then docker,
+     then polkit). An unknown route would still read as clean. The owner
+     chose "Name the checks": the "No changes found" sentence also says
+     which root checks ran, for example "They had no root access through
+     sudo, doas, polkit or admin groups", built from the checks the code
+     actually performed. The rejected option was keeping the sentence short,
+     which implies unknown routes were covered.
+
+365. **Every text colour reaches 4.5:1 in every theme (owner, 2026-11-08,
+     #323; amends D80):** J364's review of the themes work found the
+     secondary text colour (placeholders, session labels, hints) at about
+     3.0:1 in Ink and Paper and under 4.5:1 in all 28 schemes, and accent
+     and ok text under 4.5:1 in some. D80's audit allowed that, while TASTE
+     section 2 asks 4.5:1 for text. The owner chose "4.5:1 for all text":
+     every colour used for text, including secondary, accent and
+     ok/warn/danger on their surfaces, reaches 4.5:1 in every scheme, ink
+     and paper, and the contrast gate enforces it; schemes are adjusted to
+     pass. The rejected options were 3:1 for secondary text and keeping D80
+     as written.
+366. **The interface font follows the account (owner, 2026-11-08, #400):**
+     theme, terminal font and transparency follow the account across
+     devices (D352). The owner chose "Follow the account" for the interface
+     font too, over keeping it per device.
+
+367. **The revoke report ships with a coverage caveat (owner, 2026-11-08,
+     #355; refines D360 and D364):** six review rounds each found another
+     route a revoked person could keep root or write later that the scan
+     did not see. The owner chose "Fix cheap gaps, ship with caveat": the
+     scan adds the remaining polkit rule folders and the system timers and
+     /etc/cron.d lines that run as the account; any root-run job whose
+     script or unit the account can modify makes the report "Not checked"
+     (fail closed); and the "No changes found" sentence ends with "Access
+     outside these checks isn't covered." After one more review the stack
+     merges, and the remaining routes are tracked in an issue. The rejected
+     options were reviewing until a round finds nothing (every round so far
+     found something) and shipping with the known gaps.
+
+368. **Take over closes the old install's open terminals after confirmation
+     (owner, 2026-11-08, refines D359):** minipc01 kept an install from an
+     earlier server with one idle root shell open since 17 Oct. That server
+     is gone, so nothing could close the terminal, and Take over was refused
+     as "busy" with no way forward. The owner chose "Offer to close them":
+     when the only things using a finished install are its own terminal
+     sessions, Take over is offered and its confirmation lists each open
+     terminal (account, program, opened since); confirming closes them and
+     then takes over. Nothing closes without that confirmation. Rejected:
+     closing idle terminals without asking, and keeping the refusal with
+     instructions for closing them by hand. minipc01 is kept as it is so the
+     fix is proven on the real machine.

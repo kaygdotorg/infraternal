@@ -929,7 +929,7 @@ if [ -e "$cache" ]; then
     mv -Tf "$prepared/payload" "$cache/payload"
 else
     mv -Tn "$prepared" "$cache"
-    [ ! -e "$prepared" ] || exit 71
+    [ ! -e "$prepared" ] || {{ printf 'INFRATERNAL_REFUSED prepared\n' >&2; exit 71; }}
 fi
 "#,
                 shell_quote(&digest),
@@ -1023,11 +1023,13 @@ fi
         } else {
             "700"
         };
+        // A base that is a link, not ours or not private was not made by setup:
+        // its refusal names the `foreign` cause for the server (Refusal, #394).
         // The shared routines read their control flags with defaults; a login
         // environment must never preset them (an inherited setup_check=yes would
         // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || exit 71\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) exit 71 ;; esac\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || {{ printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71; }}\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71 ;; esac\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -1181,12 +1183,17 @@ fi
         self.commit_with_timeout(None).await
     }
 
+    /// Commit this transaction on the host, within `timeout` when one is given:
+    /// its journal goes and what it replaced is deleted, after the new install
+    /// is durable (`COMMIT_RETIRE`).
+    /// # Errors
+    /// Reports a refused or failed commit; nothing is marked committed then.
     async fn commit_with_timeout(&self, timeout: Option<Duration>) -> Result<(), Failure> {
-        let script = self.script(r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
+        let script = self.script(&format!(
+            r#"[ -f "$base/.bootstrap-lock/activating" ] && [ "$(cat "$base/.bootstrap-lock/transaction")" = "$transaction" ] || exit 71
 stage="$base/.bootstrap-lock"
-retire_setup_lease
-rm -rf "$stage"
-retire_set_aside"#);
+{COMMIT_RETIRE}"#
+        ));
         let result = if let Some(timeout) = timeout {
             self.session
                 .run_with_timeout(&script, Input::Empty, timeout)
@@ -1232,9 +1239,7 @@ read -r approved || exit 1
 [ -z "$approved" ] || exit 1
 setup_guard
 [ -f "$stage/activating" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 71
-retire_setup_lease
-rm -rf "$stage"
-retire_set_aside"#
+{COMMIT_RETIRE}"#
             ),
         );
         let result = if let Some(timeout) = timeout {
@@ -1340,10 +1345,10 @@ stage="$base/.bootstrap-lock"
 if [ -e "$stage" ] || [ -L "$stage" ]; then
     [ -d "$stage" ] && [ ! -L "$stage" ] && [ -f "$stage/transaction" ] && [ ! -L "$stage/transaction" ] && [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 fi
-[ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] || exit 71
+[ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] || cache_refused
 digest=$(sha256sum < "$cache/payload")
 digest=${{digest%% *}}
-case "$digest" in {allowed}) :;; *) exit 71;; esac
+case "$digest" in {allowed}) :;; *) cache_refused;; esac
 exec 9<&-
 exec "$cache/payload" __ssh-session --state "$base/sessions" --session {id}
 "#
@@ -1507,19 +1512,24 @@ pub(crate) const RUNTIME_CLEANUP: &str = include_str!("runtime_cleanup.sh");
 
 // Cache records contain only public executable content. Every lookup repeats
 // ownership, link, private-parent and fixed-marker checks before any content read.
+// cache_refused names the refusal for the server (Refusal::Cache, #394).
+/// Shell routines for the private payload cache beside the setup location
+/// (`$base.bootstrap-cache`): `validate_cache` proves it is setup's own before
+/// any read, and `cache_refused` refuses (71) with the `cache` cause line.
 const PAYLOAD_CACHE: &str = r#"
 cache="$base.bootstrap-cache"
+cache_refused() { printf 'INFRATERNAL_REFUSED cache\n' >&2; exit 71; }
 validate_cache() {
     if [ -e "$cache" ] || [ -L "$cache" ]; then
         parent=$(dirname "$cache")
-        [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
+        [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || cache_refused
         mode=$(stat -c '%a' "$parent")
-        [ "$((0$mode & 022))" -eq 0 ] || exit 71
-        [ -d "$cache" ] && [ ! -L "$cache" ] && [ -O "$cache" ] && [ "$(stat -c '%a' "$cache")" = 700 ] || exit 71
-        [ -f "$cache/owner" ] && [ ! -L "$cache/owner" ] && [ -O "$cache/owner" ] && [ "$(stat -c '%a' "$cache/owner")" = 600 ] || exit 71
-        [ "$(stat -c '%s' "$cache/owner")" = 29 ] && [ "$(cat "$cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || exit 71
+        [ "$((0$mode & 022))" -eq 0 ] || cache_refused
+        [ -d "$cache" ] && [ ! -L "$cache" ] && [ -O "$cache" ] && [ "$(stat -c '%a' "$cache")" = 700 ] || cache_refused
+        [ -f "$cache/owner" ] && [ ! -L "$cache/owner" ] && [ -O "$cache/owner" ] && [ "$(stat -c '%a' "$cache/owner")" = 600 ] || cache_refused
+        [ "$(stat -c '%s' "$cache/owner")" = 29 ] && [ "$(cat "$cache/owner")" = INFRATERNAL_PAYLOAD_CACHE_V1 ] || cache_refused
         if [ -e "$cache/payload" ] || [ -L "$cache/payload" ]; then
-            [ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] && [ -O "$cache/payload" ] && [ "$(stat -c '%a' "$cache/payload")" = 700 ] || exit 71
+            [ -f "$cache/payload" ] && [ ! -L "$cache/payload" ] && [ -O "$cache/payload" ] && [ "$(stat -c '%a' "$cache/payload")" = 700 ] || cache_refused
         fi
     fi
 }
@@ -1533,7 +1543,12 @@ validate_cache() {
 // Admit no replacement until its receipt is removed after successful cleanup.
 // The private acquisition journal precedes mkdir. It proves this attempt's
 // empty lock if the command stops before the lock's ordinary receipts exist.
+/// The upload step's staging prologue: under the setup guard it admits only a
+/// missing setup location or one whose owner record names this attempt's host,
+/// then opens this attempt's journal. Its 71s name their cause (`foreign`,
+/// `owner`) for the server (Refusal, #394).
 const STAGE_TRANSACTION: &str = r#"
+acquiring_written=no
 parent=$(dirname "$base")
 if [ ! -e "$parent" ] && [ ! -L "$parent" ]; then mkdir -p "$parent"; fi
 [ -d "$parent" ] && [ ! -L "$parent" ] && [ -O "$parent" ] || exit 71
@@ -1544,10 +1559,21 @@ for receipt in "$base".bootstrap-rollback-*; do
     [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || exit 72
 done
 if [ -e "$base" ] || [ -L "$base" ]; then
-    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] && [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || exit 71
+    # The server names each refusal by its fixed stderr line (Refusal, #394).
+    [ ! -L "$base" ] && [ -f "$base/.bootstrap-owner" ] && [ ! -L "$base/.bootstrap-owner" ] || { printf 'INFRATERNAL_REFUSED foreign\n' >&2; exit 71; }
+    [ "$(cat "$base/.bootstrap-owner")" = "$host" ] || { printf 'INFRATERNAL_REFUSED owner\n' >&2; exit 71; }
 else
-    mkdir -p "$base"
-    printf '%s\n' "$host" > "$base/.bootstrap-owner"
+    # A new setup location appears whole: owner record and acquisition journal
+    # are written under a temporary name, then renamed into place. A location
+    # holding only an owner record never exists, so nothing ever mistakes a
+    # half-made one for a finished install (J342 P1-1, D359).
+    fresh_base="$base.bootstrap-new-$transaction"
+    [ ! -e "$fresh_base" ] && [ ! -L "$fresh_base" ] || exit 72
+    mkdir -m 700 "$fresh_base"
+    printf '%s\n' "$host" > "$fresh_base/.bootstrap-owner"
+    printf '%s fresh\n' "$transaction" > "$fresh_base/.bootstrap-acquiring"
+    mv -T "$fresh_base" "$base"
+    acquiring_written=yes
 fi
 [ ! -L "$base/bin" ] && [ ! -L "$base/state" ] || exit 71
 stage="$base/.bootstrap-lock"
@@ -1558,7 +1584,7 @@ if [ -e "$base/bin/current" ] || [ -L "$base/bin/current" ]; then
 else
     kind=fresh
 fi
-printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
+[ "${acquiring_written:-no}" = yes ] || printf '%s %s\n' "$transaction" "$kind" > "$base/.bootstrap-acquiring"
 mkdir "$stage" || exit 72
 printf '%s\n' "$transaction" > "$stage/transaction"
 printf '%s\n' "$kind" > "$stage/kind"
@@ -1611,7 +1637,26 @@ fi
 // An acknowledged refusal is staging-only cleanup and must not restart it.
 // An incomplete upload is owned by this transaction. Reclaim it before
 // allocating the outside receipt, including when the home filesystem is full.
+/// The end of every commit (J349 P2-1, D359): make the new install durable,
+/// then delete its journal, then what it replaced. `settle_set_aside` syncs the
+/// filesystem first whenever a set-aside exists, so a power cut can never leave
+/// the old install deleted beside a new one whose data never reached the disk.
+/// Its sync comes before the journal goes too: a structurally finished base
+/// with an empty binary would otherwise let a later Check delete the set-aside.
+pub(crate) const COMMIT_RETIRE: &str = r#"settle_set_aside
+retire_setup_lease
+rm -rf "$stage"
+retire_set_aside"#;
+
+/// Roll back this transaction's setup on the host: an acquired or staged fresh
+/// install is removed through its receipt, an upgrade is put back from its
+/// rollback copies, and a new setup location it began but never renamed into
+/// place goes. Nothing another transaction owns is touched.
 pub(crate) const ROLLBACK_TRANSACTION: &str = r#"
+# A new setup location this transaction began but never renamed into place
+# (STAGE_TRANSACTION): only its owner record and journal are in it.
+fresh_base="$base.bootstrap-new-$transaction"
+if [ -d "$fresh_base" ] && [ ! -L "$fresh_base" ] && [ -O "$fresh_base" ]; then rm -rf "$fresh_base"; fi
 if [ -e "$receipt" ] || [ -L "$receipt" ]; then
     validate_receipt
     validate_control_socket

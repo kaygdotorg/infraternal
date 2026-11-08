@@ -190,6 +190,20 @@ pub enum FailureKind {
     StalePreviousAttempt,
     #[serde(rename = "setup_running")]
     SetupRunning,
+    /// Setup found a finished infraternal install for another host id at its
+    /// location (#394): from another server, another person on this server, or
+    /// an earlier setup. Nothing was changed; the location goes in Details.
+    #[serde(rename = "unrecognized_install")]
+    UnrecognizedInstall,
+    /// A staging step met files at the setup location that it cannot prove are
+    /// infraternal's own (exit 71), and changed nothing. `refusal` says which
+    /// check refused, when the host named it (#394, J314 P2-1).
+    #[serde(rename = "unproven_files")]
+    UnprovenFiles,
+    /// The host has no account with the login name; no sign-in method can
+    /// help, so the person picks another account or root (#394).
+    #[serde(rename = "no_account")]
+    NoAccount,
 }
 
 /// Public, bounded findings from a host-local ownership check; paths belong in Details.
@@ -283,6 +297,55 @@ struct FailureIds {
     captured_setup_stderr: Option<CapturedSetupStderr>,
     /// Validated lease owner details for the setup-running and stuck-upgrade messages.
     setup_lock: Option<SetupLock>,
+    /// Which staging check refused with exit 71, as the host named it.
+    refusal: Option<Refusal>,
+    /// A finished install of another server that this attempt offers to take over (D359).
+    takeover: Option<TakeoverOffer>,
+}
+
+/// The staging check that refused with exit 71 (#394, J314 P2-1). The host
+/// names it with one fixed stderr line, `INFRATERNAL_REFUSED <cause>`, right
+/// before its exit; nothing else from stderr is used. A host could name the
+/// wrong one, which only selects another fixed sentence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Refusal {
+    /// The private payload cache beside the setup location is not one setup made.
+    Cache,
+    /// A prepared copy of the infraternal agent from an earlier setup is in the way.
+    Prepared,
+    /// The setup location holds files but no owner record of an infraternal setup.
+    Foreign,
+    /// The setup location's owner record names another host.
+    Owner,
+}
+
+impl Refusal {
+    /// The cause named by the last `INFRATERNAL_REFUSED <cause>` line of
+    /// `stderr`, if any.
+    #[must_use]
+    pub fn from_stderr(stderr: &str) -> Option<Self> {
+        stderr
+            .lines()
+            .rev()
+            .find_map(|line| match line.strip_prefix("INFRATERNAL_REFUSED ")? {
+                "cache" => Some(Self::Cache),
+                "prepared" => Some(Self::Prepared),
+                "foreign" => Some(Self::Foreign),
+                "owner" => Some(Self::Owner),
+                _ => None,
+            })
+    }
+}
+
+/// What a Take over confirmation must show (D359): the old install's id, which
+/// the person confirms, and whether its agent is running now (Take over stops it).
+/// Public: the id is the host id in its `.bootstrap-owner`, never a secret.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TakeoverOffer {
+    /// The old install's id, as 32 lowercase hex characters.
+    install: String,
+    live: bool,
 }
 
 /// Host-local lease metadata parsed from the fixed setup-check record.
@@ -326,12 +389,18 @@ impl Serialize for Failure {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Failure", 14)?;
+        let mut state = serializer.serialize_struct("Failure", 16)?;
         state.serialize_field("kind", &self.kind)?;
         state.serialize_field("message", &self.public_message())?;
         state.serialize_field("log_tail", &self.log_tail)?;
         if let Some(setup_lock) = self.ids.as_deref().and_then(|ids| ids.setup_lock.as_ref()) {
             state.serialize_field("setup_lock", setup_lock)?;
+        }
+        if let Some(refusal) = self.ids.as_deref().and_then(|ids| ids.refusal) {
+            state.serialize_field("refusal", &refusal)?;
+        }
+        if let Some(takeover) = self.ids.as_deref().and_then(|ids| ids.takeover.as_ref()) {
+            state.serialize_field("takeover", takeover)?;
         }
         if let Some(failed_step) = self.failed_step {
             state.serialize_field("failed_step", &failed_step)?;
@@ -424,6 +493,32 @@ impl Failure {
             in_use: false,
             set_aside: false,
             live: false,
+        });
+        self
+    }
+
+    /// Record which staging check refused (exit 71), as the host named it.
+    #[must_use]
+    pub fn with_refusal(mut self, refusal: Option<Refusal>) -> Self {
+        if refusal.is_some() {
+            self.ids.get_or_insert_with(Box::default).refusal = refusal;
+        }
+        self
+    }
+
+    /// The staging check that refused, if the host named it.
+    #[must_use]
+    pub fn refusal(&self) -> Option<Refusal> {
+        self.ids.as_deref().and_then(|ids| ids.refusal)
+    }
+
+    /// Offer to take over the finished install of another server whose id is
+    /// `install`, and say whether its agent runs (D359).
+    #[must_use]
+    pub(crate) fn with_takeover(mut self, install: uuid::Uuid, live: bool) -> Self {
+        self.ids.get_or_insert_with(Box::default).takeover = Some(TakeoverOffer {
+            install: install.simple().to_string(),
+            live,
         });
         self
     }
@@ -624,9 +719,19 @@ impl Failure {
             FailureKind::Auth => "auth",
             FailureKind::HostKey => "host-key",
             FailureKind::Unreachable | FailureKind::MeshPolicy => "transport",
-            _ if self.log_tail.contains(&"The SSH command channel failed.") => "channel",
-            _ if self.log_tail.contains(&"The SSH connection setup failed.") => "transport",
-            _ => "setup",
+            FailureKind::UnrecognizedInstall => "unrecognized-install",
+            FailureKind::UnprovenFiles => "unproven-files",
+            FailureKind::NoAccount => "no-account",
+            FailureKind::Unsupported => "unsupported",
+            FailureKind::StalePreviousAttempt => "leftovers",
+            FailureKind::SetupRunning => "setup-running",
+            FailureKind::Install if self.log_tail.contains(&"The SSH command channel failed.") => {
+                "channel"
+            }
+            FailureKind::Install if self.log_tail.contains(&"The SSH connection setup failed.") => {
+                "transport"
+            }
+            FailureKind::Install => "setup",
         }
     }
 
@@ -711,11 +816,24 @@ impl Failure {
         }
         match (self.exit_status, mode) {
             (Some(71..=77), _) if matches!(self.failed_step, Some(InstallStep::Join)) => {}
-            (Some(71), InstallMode::Rootless) => {
-                self.message = "Setup could not verify ownership or permissions of its files on this host. Check ~/.local/share/infraternal, its parent folders and the infraternal service files, then try again.";
-            }
-            (Some(71), InstallMode::Root) => {
-                self.message = "Setup could not verify ownership or permissions of its files on this host. Check /var/lib/infraternal, its parent folders and the infraternal service files with administrator access, then try again.";
+            (Some(71), mode) => {
+                // One plain finding, no chore and no second explanation: the
+                // step's own advice ("copying didn't finish") does not apply
+                // to a refusal, so the kind changes and the tracer shows only
+                // this text; the location goes in Details (#394, TASTE). Each
+                // check the host named gets its own sentence; only an owner
+                // record for another host is "set up elsewhere" (J314 P2-1).
+                (self.kind, self.message) = match self.refusal() {
+                    Some(Refusal::Owner) => (
+                        FailureKind::UnrecognizedInstall,
+                        crate::previous_attempt::INSTALLED_ELSEWHERE,
+                    ),
+                    Some(Refusal::Cache) => (FailureKind::UnprovenFiles, UNPROVEN_CACHE),
+                    Some(Refusal::Prepared) => (FailureKind::UnprovenFiles, UNPROVEN_PREPARED),
+                    Some(Refusal::Foreign) => (FailureKind::UnprovenFiles, UNPROVEN_FOREIGN),
+                    None => (FailureKind::UnprovenFiles, UNPROVEN_FILES),
+                };
+                self.log_tail.push(setup_location(mode));
             }
             (Some(72), _) => {
                 self.message = "An earlier setup on this host did not finish. Retry the host check to finish its cleanup before continuing.";
@@ -749,6 +867,25 @@ impl Failure {
         Self::new(FailureKind::Install, message)
     }
 }
+/// Exit 71 outside the read-only check: a staging step met files at the setup
+/// location that it cannot prove are this setup's own, and changed nothing.
+pub const UNPROVEN_FILES: &str = "Setup found infraternal files on this machine that it can't prove belong to this setup, so it changed nothing.";
+/// [`Refusal::Cache`]'s sentence.
+pub const UNPROVEN_CACHE: &str = "The infraternal agent's download cache on this machine wasn't made by setup, so setup changed nothing.";
+/// [`Refusal::Prepared`]'s sentence.
+pub const UNPROVEN_PREPARED: &str = "A copy of the infraternal agent left by an earlier setup is in the way, so setup changed nothing.";
+/// [`Refusal::Foreign`]'s sentence.
+pub const UNPROVEN_FOREIGN: &str = "The setup folder on this machine holds files that no infraternal setup made, so setup changed nothing.";
+
+/// The Details line naming where setup looked, by install mode (#394).
+#[must_use]
+pub fn setup_location(mode: InstallMode) -> &'static str {
+    match mode {
+        InstallMode::Rootless => "Setup location: ~/.local/share/infraternal",
+        InstallMode::Root => "Setup location: /var/lib/infraternal",
+    }
+}
+
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.failed_step {

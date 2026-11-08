@@ -240,6 +240,18 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, ()> {
         Box::pin(async { Ok(()) })
     }
+    /// Whether a finished install whose `.bootstrap-owner` names `host` may be
+    /// taken over (D359): `host` is no working host of this server, so the
+    /// install belongs to another server (or to one this server removed or
+    /// revoked). Asked before the offer and again right before the host acts.
+    /// Backends without host records never allow it.
+    fn takeover_allowed<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _host: uuid::Uuid,
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
     /// Whether the infraternal agent of an earlier setup's journal (`host`) is
     /// connected to this server now. Its leftovers are then in use, never offered
     /// for cleanup (#305, J257). Backends without host links have none.
@@ -917,12 +929,12 @@ impl Bootstrap {
                 }
                 let mut rolled_back = true;
                 if let Some(installation) = resources.installation {
-                    // A fresh install that committed before a later step failed
-                    // (its login check, completion) has no journal left to roll
-                    // back: remove it, or it keeps running for a host the server
-                    // revokes and blocks every retry (#305 F-B). A Replace or
-                    // Re-enroll keeps the enrolled host, so it is never removed.
-                    let cleanup = if installation.committed() && resources.set_aside.is_none() {
+                    // See uninstall_after_commit: a committed fresh install, Take
+                    // over or Re-enroll is removed; a Replace is rolled back.
+                    let cleanup = if uninstall_after_commit(
+                        installation.committed(),
+                        resources.set_aside.as_ref().map(|aside| aside.kind),
+                    ) {
                         tokio::time::timeout(
                             Duration::from_secs(30),
                             installation.uninstall_committed(),
@@ -961,7 +973,7 @@ impl Bootstrap {
                         aside.previous.restore_set_aside(
                             aside.session.as_ref(),
                             &target,
-                            aside.replaced,
+                            aside.kind,
                         ),
                     )
                     .await;
@@ -1273,7 +1285,7 @@ impl Bootstrap {
             if let Some(metadata) = lock(&batch.history).metadata.get_mut(&target.id) {
                 metadata.authentication = session.authentication();
             }
-            let (check, previous, absent) =
+            let (check, previous, remains) =
                 previous_attempt::parse_check_with_absence(&output.stdout)?;
             check.authorize_mode(target.mode)?;
             match restore_previous(batch, target, attempt, started, session.clone()).await {
@@ -1293,7 +1305,7 @@ impl Bootstrap {
             }
             let lookup = session.trust_lookup();
             let replacement_host = if let Some(previous) = previous {
-                if let Some(replaced) = previous.set_aside() {
+                if let Some(kind) = previous.set_aside() {
                     // An earlier Replace or Re-enroll set the stuck install aside
                     // and could not put it back. Offer that, never an install
                     // beside it (#305 P2-1).
@@ -1308,7 +1320,7 @@ impl Bootstrap {
                     )
                     .await?;
                     let restored = previous
-                        .restore_set_aside(session.as_ref(), target, replaced)
+                        .restore_set_aside(session.as_ref(), target, kind)
                         .await?;
                     return Err(Failure::install(if restored {
                         "The earlier infraternal agent was put back as it was found. Add the host again to continue."
@@ -1401,7 +1413,11 @@ impl Bootstrap {
                             resources.set_aside = Some(SetAside {
                                 session: session.clone(),
                                 previous: previous.clone(),
-                                replaced,
+                                kind: if replaced {
+                                    previous_attempt::AsideKind::Replaced
+                                } else {
+                                    previous_attempt::AsideKind::Superseded
+                                },
                             });
                             let acted = self
                                 .act_start_fresh(
@@ -1481,7 +1497,7 @@ impl Bootstrap {
                 // The check proved no install at all here (only the inspection
                 // script reports that; the cleanup-owning probe never does):
                 // same as after a Start fresh (D355).
-                if absent && !owns_cleanup {
+                if remains == previous_attempt::Remains::Absent && !owns_cleanup {
                     self.backend
                         .install_base_proven_empty(&batch.authority, target, &check, lookup.clone())
                         .await?;
@@ -1496,6 +1512,23 @@ impl Bootstrap {
                 self.backend
                     .preflight_existing_host(&batch.authority, target, lookup.clone())
                     .await?;
+            }
+            // A finished install this server did not recognize above. Staging
+            // carries a new host id and would refuse it (exit 71) on this and
+            // every retry; answer now, before anything is written (#394). In
+            // root mode it may be taken over instead (D359).
+            if let previous_attempt::Remains::Installed(installed) = &remains {
+                self.take_over(
+                    batch,
+                    target,
+                    attempt,
+                    started,
+                    &session,
+                    installed,
+                    server_origin.is_some(),
+                    resources,
+                )
+                .await?;
             }
             // Public HTTPS must be reachable and the host key prepared before the
             // backend creates the one-use invitation. The staged transaction remains
@@ -2016,31 +2049,65 @@ impl Bootstrap {
             );
         } else {
             let challenge = uuid::Uuid::new_v4();
+            self.await_confirmation(
+                batch,
+                target,
+                attempt,
+                started,
+                "This host has leftovers from an earlier setup",
+                if mode == FreshMode::PutBack {
+                    previous.set_aside_failure()
+                } else {
+                    previous.stuck_failure(mode == FreshMode::Reenroll)
+                },
+                match mode {
+                    FreshMode::Reenroll => previous.reenroll_findings(target.mode, challenge),
+                    FreshMode::PutBack => previous.set_aside_findings(target.mode, challenge),
+                    _ => previous.findings(target.mode, challenge),
+                },
+                resources,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Pause this attempt on `offer` and its `leftovers` until the person
+    /// confirms with the leftovers' challenge ([`Self::start_fresh`]). Changes
+    /// nothing on the host. The wait has its own limit, and hands back the
+    /// add-host slot meanwhile (#305 P2-1, P3-2).
+    async fn await_confirmation(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        message: &'static str,
+        offer: Failure,
+        leftovers: crate::model::Leftovers,
+        resources: &mut AttemptResources,
+    ) -> Result<(), Failure> {
+        {
             let (resume, resumed) = oneshot::channel();
             {
                 let mut states = lock(&batch.states);
                 let state = states
                     .get_mut(&target.id)
                     .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
-                state.start_fresh = Some(PendingFresh { challenge, resume });
+                state.start_fresh = Some(PendingFresh {
+                    challenge: leftovers.challenge,
+                    resume,
+                });
             }
             emit_with_leftovers(
                 batch,
                 target,
                 attempt,
                 Step::Check,
-                "This host has leftovers from an earlier setup",
+                message,
                 started,
-                Some(if mode == FreshMode::PutBack {
-                    previous.set_aside_failure()
-                } else {
-                    previous.stuck_failure(mode == FreshMode::Reenroll)
-                }),
-                Some(Box::new(match mode {
-                    FreshMode::Reenroll => previous.reenroll_findings(target.mode, challenge),
-                    FreshMode::PutBack => previous.set_aside_findings(target.mode, challenge),
-                    _ => previous.findings(target.mode, challenge),
-                })),
+                Some(offer),
+                Some(Box::new(leftovers)),
             );
             let held = resources.slot.take().is_some();
             tokio::time::timeout(CONFIRMATION_WAIT, async {
@@ -2061,6 +2128,108 @@ impl Bootstrap {
             .await
             .map_err(|_| Failure::install("Host confirmation exceeded its time limit."))??;
         }
+        Ok(())
+    }
+
+    /// D359: a root-mode add found a finished install of another server. Offer
+    /// Take over, whose confirmation names the old install's id, and once the
+    /// person confirms, set the install aside so the fresh install continues
+    /// in its place with a new host id. The old install is put back if this
+    /// attempt fails (`resources.set_aside`) and deleted by its commit.
+    ///
+    /// Refuses before any change when it is not offered: a rootless add (its
+    /// refusal stands, D359), an install the host could not prove ours or
+    /// found in use, an id this server knows ([`Backend::takeover_allowed`]),
+    /// or a server that cannot enroll (`enrolls`).
+    async fn take_over(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        session: &Arc<dyn SshSession>,
+        installed: &previous_attempt::FinishedInstall,
+        enrolls: bool,
+        resources: &mut AttemptResources,
+    ) -> Result<(), Failure> {
+        if target.mode != crate::model::InstallMode::Root
+            || installed.takeover != previous_attempt::Takeover::Ready
+            || !enrolls
+            || !self
+                .backend
+                .takeover_allowed(&batch.authority, installed.host)
+                .await?
+        {
+            return Err(installed.refusal(target.mode));
+        }
+        let challenge = uuid::Uuid::new_v4();
+        self.await_confirmation(
+            batch,
+            target,
+            attempt,
+            started,
+            "This machine has an infraternal agent from an earlier setup",
+            installed.takeover_failure(target.mode),
+            installed.takeover_findings(target.mode, challenge),
+            resources,
+        )
+        .await?;
+        // The person may have waited: this server could have enrolled that id
+        // meanwhile. Ask again right before the host stops anything.
+        if !self
+            .backend
+            .takeover_allowed(&batch.authority, installed.host)
+            .await?
+        {
+            return Err(Failure::install(CHANGED_WHILE_WAITING));
+        }
+        // One token names the set-aside and binds its restore. Recorded before
+        // the host acts: any later failure, even an attempt dropped while the
+        // script runs, puts the old install back, and a restore that finds
+        // nothing set aside keeps a late Take over from starting (#305 P2-1).
+        let token = uuid::Uuid::new_v4();
+        resources.set_aside = Some(SetAside {
+            session: session.clone(),
+            previous: installed.taken_over(token),
+            kind: previous_attempt::AsideKind::TakenOver,
+        });
+        self.backend
+            .record_start_fresh(target, installed.host, token, "started");
+        let acted = installed.take_over(session.as_ref(), target, token).await;
+        self.backend.record_start_fresh(
+            target,
+            installed.host,
+            token,
+            if acted.is_ok() {
+                "completed"
+            } else {
+                "refused"
+            },
+        );
+        if let Err(error) = &acted
+            && script_finished(error)
+        {
+            // The script ran to its end: its own trap already put the old
+            // install back, and nothing is set aside.
+            resources.set_aside = None;
+        }
+        acted.map_err(|mut error| {
+            // 75: the install changed since Check, for example its agent
+            // started while the person decided; Check shows it again.
+            if error.exit_status == Some(75) {
+                error.message = CHANGED_WHILE_WAITING;
+            }
+            error
+        })?;
+        emit(
+            batch,
+            target,
+            attempt,
+            Step::Check,
+            "The earlier infraternal agent is set aside. Installing the new one.",
+            started,
+            None,
+        );
         Ok(())
     }
 
@@ -2187,12 +2356,25 @@ enum FreshMode {
     PutBack,
 }
 
-/// A stuck install this attempt set aside, or may have: put back if the attempt fails.
+/// An install this attempt set aside, or may have: put back if the attempt fails.
 struct SetAside {
     session: Arc<dyn SshSession>,
     previous: PreviousAttempt,
-    /// A Replace moved only the journal; a Re-enroll moved the whole install (D335).
-    replaced: bool,
+    /// What set it aside: a Replace moved only the journal; a Re-enroll (D335)
+    /// or a Take over (D359) moved the whole install.
+    kind: previous_attempt::AsideKind,
+}
+
+/// Whether a failed attempt removes the install it already committed, rather
+/// than rolling back. A fresh install that committed before a later step failed
+/// (its login check, completion) has no journal left to roll back: removed, or it
+/// keeps running for a host the server revokes and blocks every retry (#305 F-B).
+/// A Take over (D359) and a Re-enroll (D335) commit a new host id the same way,
+/// and their old install was deleted at that commit, so they are removed too
+/// (J342 P2-1). Only a Replace keeps the enrolled host, so it is rolled back,
+/// never removed.
+fn uninstall_after_commit(committed: bool, set_aside: Option<previous_attempt::AsideKind>) -> bool {
+    committed && set_aside != Some(previous_attempt::AsideKind::Replaced)
 }
 
 /// Whether a failed host step is the script's own exit, so its trap has run.

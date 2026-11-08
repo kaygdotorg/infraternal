@@ -16,7 +16,7 @@ default = ["plugin-host-facts"]
 plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
 
 ee = ["infraternal-plugin-mesh?/ee"]
-mesh = ["dep:infraternal-plugin-mesh"]
+mesh = ["dep:infraternal-plugin-mesh", "infraternal-plugin-mesh/mesh-dns"]
 proxy = ["dep:infraternal-plugin-proxy", "dep:tracing"]
 
 [dependencies]

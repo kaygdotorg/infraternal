@@ -408,9 +408,15 @@ the default server supplies the verified source through the same SSH plugin.
 ## Classified attempt failures (#169)
 
 Failure adds optional `exit_status` from the authenticated command process (a
-signal or unavailable status omits it). Fixed installer code 71 retains
-`failed_step` and identifies the approved root/rootless directory with ownership,
-permission and setup-file guidance. An unfinished transaction (72) directs the
+signal or unavailable status omits it). Fixed installer code 71 outside the
+check and join retains `failed_step` and names the root/rootless setup location
+in `log_tail` only (#394). The refusing check may name itself with one fixed
+stderr line, `INFRATERNAL_REFUSED <cache|prepared|foreign|owner>`, right
+before its exit; nothing else of stderr is read. `owner` (an owner record for
+another host) becomes kind `unrecognized_install`; every other 71 becomes kind
+`unproven_files` (setup found files it cannot prove are its own and changed
+nothing), with `refusal: "cache" | "prepared" | "foreign"` when named. Neither
+is retried: a retry would meet the same files. An unfinished transaction (72) directs the
 person back to cleanup; a live setup (73) offers to wait. A retry with retained
 coordinates actually finishes the original cleanup before continuing. A returned
 script status is a setup failure, including status 255 after authentication;
@@ -617,3 +623,58 @@ as transfer progress. HTTP connect, TLS, response headers and storage completion
 each have a 30-second bound. A payload source without byte observations gets a
 30-second acquisition bound. Confirmation and authenticated readiness retain
 their own independent limits.
+
+## Finished installs and missing accounts (#394)
+
+A base with no journal is a finished install owned by the host id in its
+`.bootstrap-owner`. The read-only check reports it as
+`INFRATERNAL_SETUP_INSTALLED <32 hex host id> <dev:ino> <live|idle> <takeover>`,
+never `INFRATERNAL_SETUP_CLEAR`: every new attempt carries a new host id, and
+staging refuses (71) a base whose owner names another host. `<takeover>` is
+`ready` only for root's own `/var/lib/infraternal` whose every entry, launcher,
+unit header and `ExecStart` are proven infraternal's and that nothing uses but
+the agent's own unit; `busy` when it is proven but a terminal's shim or another
+process uses it; `unproven` otherwise, including every rootless install. After
+the existing already-added preflight, the server answers `unrecognized_install`
+at the `connect` step before any write, unless it offers Take over.
+Its sentence holds whoever enrolled it: another server, another person on this
+server, or an earlier setup this server retired.
+
+### Take over (D359)
+
+A root-mode add whose check reports `ready`, for a host id that is no working
+host of this server (unknown, removed or revoked), pauses on a `check` event
+whose failure is `unrecognized_install` with
+`takeover: {"install": "<32 hex host id>", "live": <bool>}` and `leftovers`
+(root mode). The browser shows Take over and a confirmation naming
+`takeover.install`; `start-fresh` with the leftovers' challenge confirms it.
+Rootless adds, `busy` (its own sentence) and `unproven` keep the plain
+`unrecognized_install` refusal. The server asks whether the id is still no
+working host again right before the host acts.
+
+The host then runs `take_over_finished_install '<the exact record>' <token>`
+under the setup guard. It refuses (71) any base but root's, (75) a changed
+record or an idle record whose agent has started, (73) a busy install, and (75)
+a token whose restore already ran. It builds
+`/var/lib/infraternal.bootstrap-taking-<token>` (0700: the old id, the service
+state found, a copy of the unit) and renames it to
+`/var/lib/infraternal.bootstrap-takeover-<token>` before anything is stopped.
+It then stops and disables the agent, requires that nothing else holds the
+install, renames the base into `<set-aside>/install`, and removes the unit and
+launcher. Any failure or signal before the end puts everything back. The
+attempt continues as a fresh install with a new host id. If it fails, the
+server runs `restore_taken_over_install <token>`, which is idempotent and puts
+back the install, unit, launcher and service state exactly (`restored`), or
+reports `untouched` and leaves the cancel token. The new install's commit
+deletes the set-aside (`retire_set_aside`). After a crash, Check reports it as
+`INFRATERNAL_SETUP_SET_ASIDE taken_over <host> <token> <machine> <enabled>
+<active>` (Put it back), or deletes it beside a committed new install.
+
+When the NetBird SSH server accepts a network sign-in and then ends a command
+session with exactly `User authentication failed` and status 1, the host could
+not find the login name's account. That is kind `no_account`, never a setup
+failure; no other sign-in method is tried. The same line with any other command
+status is the command's own failure. The master connection has no command
+status and matches on the line alone. The answer also covers a directory lookup
+that failed, so the wording says the host couldn't find the account, not that
+it has none.

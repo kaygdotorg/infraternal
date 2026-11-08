@@ -102,11 +102,14 @@ PACKAGES = {
              ('infraternal', 'crates/infraternal', '')),
 }
 
+# The mesh namespace matrix isolates shared fixtures from package defaults;
+# DNS gets enabled only for its dedicated target below.
+PACKAGE_NO_DEFAULT_FEATURES = {'infraternal-plugin-mesh'}
+
 # Targets that need a feature their package's shared set leaves off. The DNS
-# resolver is default-off (`mesh-dns-spike`), and turning it on for every mesh
-# test changes `Config`'s fields under fixtures that are not written for it.
+# resolver has feature-specific config fields that other fixtures do not set.
 TARGET_FEATURES = {
-    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns-spike',
+    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns',
 }
 
 # Root-only behaviour this row deliberately does not exercise, and why. Kept
@@ -326,7 +329,11 @@ def builds(selected):
     result = [(['--workspace'], None)]
     for area in sorted(selected):
         for package, _, features in PACKAGES[area]:
-            entry = (['-p', package, '--features', features, '--tests', '--examples'], package)
+            arguments = ['-p', package]
+            if package in PACKAGE_NO_DEFAULT_FEATURES:
+                arguments.append('--no-default-features')
+            arguments.extend(['--features', features, '--tests', '--examples'])
+            entry = (arguments, package)
             # --examples builds fixtures such as mesh's kernel_node that its
             # namespace tests execute.
             if features and entry not in result:
@@ -334,7 +341,11 @@ def builds(selected):
     packages = {package for area in selected for package, _, _ in PACKAGES[area]}
     for (package, target), features in sorted(TARGET_FEATURES.items()):
         if package in packages:
-            result.append((['-p', package, '--features', features, *cargo_selector(target)], (package, target)))
+            arguments = ['-p', package]
+            if package in PACKAGE_NO_DEFAULT_FEATURES:
+                arguments.append('--no-default-features')
+            arguments.extend(['--features', features, *cargo_selector(target)])
+            result.append((arguments, (package, target)))
     return result
 
 
@@ -407,8 +418,11 @@ def sandboxed(command, environment, cwd, scratch, target):
 
     `environment` is passed explicitly (`env -i`), so nothing else from the
     caller's environment leaks in. CARGO_TARGET_DIR points at the tmpfs view.
+    The namespace marker lets tests compare against the parent net namespace;
+    `/proc/1` inside the inner PID namespace names its own init process.
     """
-    environment = dict(environment, CARGO_TARGET_DIR='/tmp/ut', TMPDIR='/tmp')
+    environment = dict(environment, CARGO_TARGET_DIR='/tmp/ut', TMPDIR='/tmp',
+                       INFRATERNAL_VERIFY_OUTER_NETNS=os.readlink('/proc/self/ns/net'))
     pairs = [f'{key}={value}' for key, value in sorted(environment.items())
              if '\n' not in value and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)]
     return ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--fork', '--kill-child',
@@ -609,7 +623,11 @@ def run(root, selected, target):
 
 
 def main():
-    """Pick areas from the diff against the merge base, then build and run their namespace tests."""
+    """Report the comparison base, select affected areas, and run their namespace tests.
+
+    Merge qualification must compare against pre-merge dev, not an already
+    updated origin/dev; printing the range makes an empty selection visible.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--base', default=os.environ.get('VERIFY_QUICK_BASE', 'origin/dev'))
     parser.add_argument('--self-check', action='store_true', help='only prove the sandbox contains planted escapes')
@@ -628,7 +646,10 @@ def main():
     base = subprocess.check_output(['git', 'merge-base', 'HEAD', args.base], cwd=root, text=True).strip()
     paths = subprocess.check_output(['git', 'diff', '--name-only', '-z', base], cwd=root).decode().split('\0')
     paths += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard', '-z'], cwd=root).decode().split('\0')
-    selected = areas([path for path in paths if path], dependency_directories(root, workspace_graph(root)))
+    paths = [path for path in paths if path]
+    print(f'privileged integration: comparison base={args.base} merge-base={base}; '
+          f'{len(paths)} changed paths', flush=True)
+    selected = areas(paths, dependency_directories(root, workspace_graph(root)))
     if not selected:
         print('privileged integration: SKIP (no change to install, proxy, mesh or shim code, or a crate they depend on)')
         # 77 is the gate's "skipped" code, so the summary reads SKIP, not PASS.
@@ -637,6 +658,20 @@ def main():
     if needs_tun_proof(paths):
         print('privileged integration: REAL-ROOT PROOF REQUIRED: TUN code changed; run '
               '`scripts/tun-real-root-proof <commit>` from code and record it on the issue', flush=True)
+    # The compatibility backend uses these absolute paths in product code and
+    # fixtures. nft alone cannot provide it, and PATH changes cannot repair it.
+    # Do not claim this row passed when the host cannot exercise the backend.
+    if 'mesh' in selected:
+        tools = [f'/usr/sbin/{family}{suffix}'
+                 for family in ('iptables-nft', 'ip6tables-nft')
+                 for suffix in ('', '-restore')]
+        missing = [tool for tool in tools if not os.access(tool, os.X_OK)]
+        if missing:
+            print('privileged integration: SKIP (host lacks nf_tables frontend: '
+                  + ', '.join(missing) + '; install the host iptables package)', flush=True)
+            raise SystemExit(SKIP_EXIT)
+        print('privileged integration: nf_tables frontends executable: '
+              + ', '.join(tools), flush=True)
     for area in sorted(selected & set(NOT_COVERED)):
         print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
     areas_packages = {package for area in selected for package, _, _ in PACKAGES[area]}

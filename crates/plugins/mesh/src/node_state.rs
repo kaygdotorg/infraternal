@@ -1,8 +1,9 @@
-//! Persists accepted public node intent and write-ahead peer-route ownership [166,198]. Under
-//! kernel `WireGuard` the private key lives only in kernel memory; the `GotaTun` engine keeps it in
-//! one private 0600 file, which down and retirement remove (#260). That key never leaves its
-//! node (D163), so backups (D147: database, CA key, configuration) must never include this
-//! directory's `mesh-private-key`.
+//! Persists accepted public node intent, engine identity records and journaled key rotation
+//! [166,198]. Kernel `WireGuard` keeps its key in kernel memory; Linux and Mac `GotaTun` keep it in
+//! a private 0600 file. That key never leaves its node (D163), so backups (D147: database, CA key,
+//! configuration) must never include this directory's private Mesh key. A clean `down` or host
+//! uninstall retires the key, interface record and rotation journal, so a later `up` starts with a
+//! fresh identity (#260, #367).
 use crate::dataplane::Config;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,12 +16,14 @@ use std::{
     sync::Mutex,
 };
 use zeroize::{Zeroize, Zeroizing};
+/// The accepted public mesh snapshot saved for restart, with a firewall choice on Linux.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
     pub enabled: bool,
     pub config: Option<Config>,
     #[serde(default)]
+    #[cfg(target_os = "linux")]
     pub backend: Option<crate::firewall::Backend>,
 }
 impl Default for State {
@@ -28,11 +31,12 @@ impl Default for State {
         Self {
             enabled: true,
             config: None,
+            #[cfg(target_os = "linux")]
             backend: None,
         }
     }
 }
-/// This node's durable local state: the public snapshot, routes, interface key, engine, private key and rotation journal.
+/// One node's durable local state: public snapshot, routes, identity record, private key and rotation journal.
 pub struct Store {
     path: PathBuf,
     route_path: PathBuf,
@@ -43,6 +47,7 @@ pub struct Store {
     // Pending local rotation keys are separate from the public snapshot and are
     // readable only by this installation's effective UID.
     rotation_path: PathBuf,
+    #[cfg(target_os = "linux")]
     engine_path: PathBuf,
     key_path: PathBuf,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
@@ -50,15 +55,19 @@ pub struct Store {
     route_body: Mutex<Vec<u8>>,
 }
 
-/// A locally retained old/candidate pair makes an interrupted key switch retryable.
-/// The fixed-size binary record never enters diagnostics or the public snapshot.
+/// A fixed-size local record makes an interrupted key switch retryable.
+/// While open it stores predecessor and candidate private keys; completion clears the predecessor
+/// private bytes and keeps only its public key for binding checks. The record never enters logs or
+/// the public snapshot.
 pub(crate) struct RotationSecret {
     pub(crate) operation_id: String,
     pub(crate) sequence: u64,
+    /// The predecessor private key while the journal is open; its public key after completion.
     pub(crate) previous: [u8; 32],
+    /// The candidate private key selected by commit intent and retained for retry.
     pub(crate) candidate: [u8; 32],
     pub(crate) commit_requested: bool,
-    /// The candidate is now the retained interface key and the predecessor is erased.
+    /// The candidate is the retained interface key; `previous` no longer contains private bytes.
     pub(crate) completed: bool,
 }
 impl Drop for RotationSecret {
@@ -67,10 +76,25 @@ impl Drop for RotationSecret {
         self.candidate.zeroize();
     }
 }
+impl RotationSecret {
+    /// Whether a completed marker authorizes this saved predecessor or candidate binding.
+    ///
+    /// New markers retain the predecessor's public bytes. Older markers contain zero here and
+    /// can therefore authorize only the candidate they already select.
+    pub(crate) fn completed_binding_matches(
+        &self,
+        bound: crate::policy::model::PublicKey,
+        candidate: crate::policy::model::PublicKey,
+    ) -> bool {
+        self.completed
+            && (bound == candidate || (self.previous != [0; 32] && bound.0 == self.previous))
+    }
+}
 
 /// Marks the private rotation-secret file format, version 1.
 const ROTATION_MAGIC: &[u8; 8] = b"IMKEYV1\0";
-/// Exact size of that file: magic, phase, sequence, operation ID, previous and candidate private keys.
+/// Exact size of that file: magic, phase, sequence, operation ID, predecessor identity and
+/// candidate private key.
 const ROTATION_FIXED_BYTES: usize = 8 + 1 + 8 + 36 + 32 + 32;
 
 /// A canonical hyphenated UUID text, the only operation ID the secret file accepts.
@@ -100,9 +124,11 @@ impl Store {
         let route_path = parent.join("mesh-routes.json");
         let interface_path = parent.join("mesh-interface.json");
         let rotation_path = parent.join("mesh-key-rotation.bin");
+        #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
         let key_path = parent.join("mesh-private-key");
         sweep_private_temporaries(&key_path)?;
+        sweep_rotation_temporaries(&rotation_path)?;
         let state = read_public(&path)?.unwrap_or_default();
         let routes: BTreeSet<IpAddr> = read_public(&route_path)?.unwrap_or_default();
         let route_body = serde_json::to_vec(&routes).map_err(io::Error::other)?;
@@ -112,12 +138,44 @@ impl Store {
                 route_path,
                 interface_path,
                 rotation_path,
+                #[cfg(target_os = "linux")]
                 engine_path,
                 key_path,
                 route_body: Mutex::new(route_body),
             },
             state,
         ))
+    }
+
+    /// Open the shared journal beside the Mac public snapshot without decoding that platform's state.
+    ///
+    /// Mac and Linux use the same durable rotation files, while their public snapshots have
+    /// different schemas. The Mac constructor binds the shared store to `mesh-wireguard.key`.
+    /// # Errors
+    /// Refuses an unsafe state directory or key-file temporary.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn open_for_macos(parent: &Path) -> io::Result<Self> {
+        let metadata = fs::symlink_metadata(parent)?;
+        if !metadata.is_dir()
+            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            || metadata.mode() & 0o777 != 0o700
+        {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        let key_path = parent.join(crate::macos_key::KEY_FILE);
+        let rotation_path = parent.join("mesh-key-rotation.bin");
+        sweep_private_temporaries(&key_path)?;
+        sweep_rotation_temporaries(&rotation_path)?;
+        let route_body =
+            serde_json::to_vec(&BTreeSet::<IpAddr>::new()).map_err(io::Error::other)?;
+        Ok(Self {
+            path: parent.join("mesh-public.json"),
+            route_path: parent.join("mesh-routes.json"),
+            interface_path: parent.join("mesh-interface.json"),
+            rotation_path,
+            key_path,
+            route_body: Mutex::new(route_body),
+        })
     }
     /// Read only the public host addresses recorded before kernel mutation.
     /// # Errors
@@ -148,6 +206,73 @@ impl Store {
     pub fn recorded_interface(&self) -> io::Result<Option<crate::policy::model::PublicKey>> {
         read_public(&self.interface_path)
     }
+
+    /// Persist a candidate key and interface identity as one journal-authorized store operation.
+    ///
+    /// The interface record is written first. During either half of the update, the open journal
+    /// proves both possible identities and startup completes the operation before opening a link.
+    /// # Errors
+    /// Refuses a stale operation or a candidate that is not the journaled private key.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn record_rotation_identity(
+        &self,
+        operation_id: &str,
+        sequence: u64,
+        private_key: &[u8],
+        public_key: &crate::policy::model::PublicKey,
+    ) -> io::Result<()> {
+        let rotation = self.rotation_secret()?.ok_or(io::ErrorKind::NotFound)?;
+        let candidate_private = Zeroizing::new(rotation.candidate);
+        let candidate_secret = gotatun::x25519::StaticSecret::from(*candidate_private);
+        let candidate_public = crate::policy::model::PublicKey(
+            *gotatun::x25519::PublicKey::from(&candidate_secret).as_bytes(),
+        );
+        if rotation.operation_id != operation_id
+            || rotation.sequence != sequence
+            || !rotation.commit_requested
+            || rotation.completed
+            || private_key != &candidate_private[..]
+            || candidate_public != *public_key
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        self.record_interface(public_key)?;
+        #[cfg(all(test, target_os = "macos"))]
+        crate::macos_node::rotation_crash_checkpoint("rotation_interface_recorded");
+        self.replace_private_key(private_key)?;
+        #[cfg(all(test, target_os = "macos"))]
+        crate::macos_node::rotation_crash_checkpoint("rotation_private_key_saved");
+        Ok(())
+    }
+
+    /// Remove the saved interface identity and rotation journal when this node forgets or retires its mesh identity.
+    ///
+    /// Call after the engine has stopped; `remove_private_key` separately retires its key file.
+    /// # Errors
+    /// Refuses unsafe records and reports failed removals or directory syncs.
+    pub(crate) fn discard_rotation_state(&self) -> io::Result<()> {
+        let mut removed = false;
+        for path in [&self.rotation_path, &self.interface_path] {
+            match fs::symlink_metadata(path) {
+                Ok(metadata)
+                    if metadata.is_file()
+                        && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+                        && metadata.mode() & 0o777 == 0o600 =>
+                {
+                    fs::remove_file(path)?;
+                    removed = true;
+                }
+                Ok(_) => return Err(io::ErrorKind::PermissionDenied.into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if removed {
+            FileSync::parent(&self.rotation_path)?;
+        }
+        Ok(())
+    }
+
     /// Read a pending key pair or completed-operation marker from a private, no-follow file.
     /// # Errors
     /// Refuses unsafe ownership, modes, lengths, operation IDs or key-state encodings.
@@ -193,9 +318,6 @@ impl Store {
         let candidate = bytes[85..117]
             .try_into()
             .map_err(|_| io::ErrorKind::InvalidData)?;
-        if phase == 2 && previous != [0; 32] {
-            return Err(io::ErrorKind::InvalidData.into());
-        }
         Ok(Some(RotationSecret {
             operation_id,
             sequence,
@@ -205,14 +327,14 @@ impl Store {
             completed: phase == 2,
         }))
     }
-    /// Durably replace the pending key pair before a server can publish its candidate.
+    /// Durably replace pending keys or a finished marker before the server publishes a candidate.
     /// # Errors
     /// Refuses malformed state, unsafe paths or failed fsync/rename.
     pub(crate) fn save_rotation_secret(&self, state: &RotationSecret) -> io::Result<()> {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         if state.sequence == 0
             || !valid_operation_id(&state.operation_id)
-            || (state.completed && (!state.commit_requested || state.previous != [0; 32]))
+            || (state.completed && !state.commit_requested)
         {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -244,6 +366,19 @@ impl Store {
             nonce,
             ROTATION_MAGIC[6]
         ));
+        // Keep the directory lock through cleanup and replacement so a concurrent writer never
+        // sweeps another process's live journal temporary.
+        let parent = self
+            .rotation_path
+            .parent()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(parent)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        sweep_rotation_temporaries_locked(&self.rotation_path)?;
         let result = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -265,7 +400,7 @@ impl Store {
         }
         result
     }
-    /// Retire the predecessor and keep a small retry marker after server acknowledgement.
+    /// Retire the predecessor private bytes and keep its public key in the retry marker.
     /// # Errors
     /// Refuses a stale operation or a failed atomic durable replacement.
     pub(crate) fn complete_rotation_secret(
@@ -283,41 +418,29 @@ impl Store {
         if !state.commit_requested {
             return Err(io::ErrorKind::InvalidData.into());
         }
+        let predecessor_public = rotation_public_key(&state.previous)?;
         state.previous.zeroize();
+        state.previous.copy_from_slice(&predecessor_public.0);
         state.completed = true;
         self.save_rotation_secret(&state)
     }
-    /// Remove the rotation journal, its keys included, when the engine that rotated is retired.
-    /// # Errors
-    /// Refuses an unsafe journal file and reports durable directory failures.
-    pub(crate) fn discard_rotation_secret(&self) -> io::Result<()> {
-        if self.rotation_secret()?.is_none() {
-            return Ok(());
-        }
-        fs::remove_file(&self.rotation_path)?;
-        FileSync::parent(&self.rotation_path)
-    }
     /// Persist the selected engine separately from the legacy accepted snapshot.
     ///
-    /// Only kernel `WireGuard` rotates (D166, D352), so recording any other engine also retires the rotation
-    /// journal: whether or not a live link was switched, a later return to kernel must start from the key the
-    /// node now uses, never from a journal key (#285, J252 P3-2). The engine is written first; a stop between the
-    /// two leaves a journal that the kernel ownership proof already ignores, and the next recording removes it.
+    /// Both supported Linux engines use the same journal, so an engine switch must keep it with
+    /// the key it describes. `switch_engine` carries the live key before changing this record.
     /// # Errors
     /// Refuses unsafe state files and reports durable-write failures.
+    #[cfg(target_os = "linux")]
     pub(crate) fn record_engine(&self, engine: crate::gotatun_node::EngineKind) -> io::Result<()> {
         write_public(
             &self.engine_path,
             &serde_json::to_vec(&engine).map_err(io::Error::other)?,
-        )?;
-        if engine == crate::gotatun_node::EngineKind::Kernel {
-            return Ok(());
-        }
-        self.discard_rotation_secret()
+        )
     }
     /// Read the selected engine, if this node has recorded one.
     /// # Errors
     /// Refuses unsafe metadata and malformed engine values.
+    #[cfg(target_os = "linux")]
     pub(crate) fn recorded_engine(&self) -> io::Result<Option<crate::gotatun_node::EngineKind>> {
         read_public(&self.engine_path)
     }
@@ -339,6 +462,50 @@ impl Store {
             return Err(io::ErrorKind::AlreadyExists.into());
         }
         write_private(&self.key_path, key)
+    }
+    /// Atomically replace the private key after the rotation journal authorizes the candidate.
+    ///
+    /// The directory lock keeps temporary-file cleanup and another local writer from racing this
+    /// replacement. The file and parent directory are synced before success is returned.
+    /// # Errors
+    /// Refuses malformed keys, unsafe existing files and failed durable replacements.
+    pub(crate) fn replace_private_key(&self, key: &[u8]) -> io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if key.len() != 32 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let parent = self.key_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(parent)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        if self
+            .read_private_key()?
+            .is_some_and(|current| current.as_slice() == key)
+        {
+            return Ok(());
+        }
+        let temporary = self
+            .key_path
+            .with_extension(format!("{}.new", std::process::id()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&temporary)?;
+            file.write_all(key)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &self.key_path)?;
+            FileSync::parent(&self.key_path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
     }
     /// Read the private key through a checked no-follow descriptor.
     /// # Errors
@@ -391,11 +558,54 @@ impl Store {
         }
         Ok(())
     }
+    /// Prove a same-version binding advance from an accepted `GotaTun` predecessor to its candidate.
+    ///
+    /// Restart may finish applying an already committed identity while replaying the same public
+    /// revision. The journal must select the candidate, and both the private key file and recorded
+    /// interface identity must already name it. An open journal proves the snapshot's predecessor
+    /// from its private key; a completed marker checks the retained predecessor public key, when
+    /// present, and accepts no other snapshot binding.
+    fn rotation_binding_advance_is_proven(
+        &self,
+        previous: crate::policy::model::PublicKey,
+        candidate: crate::policy::model::PublicKey,
+    ) -> io::Result<bool> {
+        let Some(rotation) = self.rotation_secret()? else {
+            return Ok(false);
+        };
+        if !rotation.commit_requested {
+            return Ok(false);
+        }
+        let journal_candidate = rotation_public_key(&rotation.candidate)?;
+        if candidate != journal_candidate {
+            return Ok(false);
+        }
+        if !rotation.completed {
+            let journal_previous = rotation_public_key(&rotation.previous)?;
+            if previous != journal_previous {
+                return Ok(false);
+            }
+        } else if !rotation.completed_binding_matches(previous, journal_candidate) {
+            return Ok(false);
+        }
+        #[cfg(target_os = "linux")]
+        if self.recorded_engine()? != Some(crate::gotatun_node::EngineKind::GotaTun) {
+            return Ok(false);
+        }
+        if self.recorded_interface()? != Some(journal_candidate) {
+            return Ok(false);
+        }
+        let Some(private_key) = self.read_private_key()? else {
+            return Ok(false);
+        };
+        let private_public = rotation_public_key(&private_key)?;
+        Ok(private_public == journal_candidate)
+    }
     /// Atomically publish public intent and fsync the replacement and directory.
     /// # Errors
     /// Refuses stale/conflicting revisions or incomplete persistence; no existing
-    /// temporary file is overwritten. Identical replay and exact legacy-key
-    /// metadata upgrades retain their established semantics.
+    /// temporary file is overwritten. Identical replay, legacy binding upgrades and journal-proven
+    /// `GotaTun` binding advances retain their established semantics.
     pub fn save(&self, state: &State) -> io::Result<()> {
         // The directory inode is stable across atomic snapshot replacement.
         // Lock it, not the replaced file, so independent Store instances cannot
@@ -416,12 +626,20 @@ impl Store {
                 return Err(io::ErrorKind::InvalidData.into());
             }
             if next.version == old.version && next != &old {
-                // An existing exact legacy-key upgrade changes metadata only;
-                // Node's authenticated binding check still authorizes that key.
-                let mut bound = old;
-                if bound.local_key.is_some() || next.local_key.is_none() {
+                // Legacy snapshots may gain their first binding. An existing binding may advance
+                // only when the local GotaTun commit journal and identity files prove that exact
+                // candidate; equal revision alone never authorizes new policy.
+                let binding_advance = match (old.local_key, next.local_key) {
+                    (Some(previous), Some(candidate)) if previous != candidate => {
+                        self.rotation_binding_advance_is_proven(previous, candidate)?
+                    }
+                    _ => false,
+                };
+                let legacy_binding = old.local_key.is_none() && next.local_key.is_some();
+                if !binding_advance && !legacy_binding {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
+                let mut bound = old;
                 bound.local_key = next.local_key;
                 if &bound != next {
                     return Err(io::ErrorKind::InvalidData.into());
@@ -441,6 +659,22 @@ impl Store {
         });
         write_public(&self.path, &body)
     }
+}
+
+/// Derive a `GotaTun` public identity from a private key in the journal or key file.
+///
+/// This shared proof runs on Linux and macOS, where the kernel `WireGuard` adapter is not available
+/// on both targets. `GotaTun` uses the same X25519 bytes on each platform.
+/// # Errors
+/// Returns `InvalidData` when the journal or private-key file does not contain exactly 32 bytes.
+fn rotation_public_key(private_key: &[u8]) -> io::Result<crate::policy::model::PublicKey> {
+    let private_bytes: [u8; 32] = private_key
+        .try_into()
+        .map_err(|_| io::ErrorKind::InvalidData)?;
+    let private_bytes = Zeroizing::new(private_bytes);
+    let secret = gotatun::x25519::StaticSecret::from(*private_bytes);
+    let public = gotatun::x25519::PublicKey::from(&secret);
+    Ok(crate::policy::model::PublicKey(*public.as_bytes()))
 }
 
 // Both public files must pass the same ownership, mode and no-follow boundary.
@@ -554,6 +788,62 @@ fn sweep_private_temporaries(key_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Remove journal replacement files left by a stop before rename while holding the state-directory lock.
+///
+/// Only the numeric `<pid>.<nonce>.<version>.new` form is ours. A symlink or directory with that
+/// name is left alone, and syncing the parent makes successful removals durable.
+fn sweep_rotation_temporaries(rotation_path: &Path) -> io::Result<()> {
+    let parent = rotation_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(parent)?;
+    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    sweep_rotation_temporaries_locked(rotation_path)
+}
+
+/// Remove regular journal temporaries; the caller holds the exclusive parent-directory lock.
+fn sweep_rotation_temporaries_locked(rotation_path: &Path) -> io::Result<()> {
+    let parent = rotation_path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let stem = rotation_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let prefix = format!("{stem}.");
+    let mut removed = false;
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let is_temporary = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .is_some_and(|rest| {
+                let mut fields = rest.split('.');
+                let pid = fields.next().unwrap_or_default();
+                let nonce = fields.next().unwrap_or_default();
+                let version = fields.next().unwrap_or_default();
+                !pid.is_empty()
+                    && !nonce.is_empty()
+                    && !version.is_empty()
+                    && [pid, nonce, version]
+                        .iter()
+                        .all(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+                    && fields.next() == Some("new")
+                    && fields.next().is_none()
+            });
+        // `file_type` does not follow symlinks; only interrupted regular-file writes belong here.
+        if is_temporary && entry.file_type()?.is_file() {
+            fs::remove_file(entry.path())?;
+            removed = true;
+        }
+    }
+    if removed {
+        FileSync::parent(rotation_path)?;
+    }
+    Ok(())
+}
+
 struct FileSync;
 impl FileSync {
     fn parent(path: &Path) -> io::Result<()> {
@@ -561,7 +851,7 @@ impl FileSync {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) mod tests {
     //! Provides isolated filesystem state for node persistence tests.
     #![allow(clippy::expect_used)]
@@ -596,6 +886,230 @@ pub(crate) mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    /// Build a minimal accepted mesh view with one local identity binding.
+    fn binding_state(local_key: crate::policy::model::PublicKey) -> State {
+        State {
+            enabled: true,
+            config: Some(Config {
+                local_key: Some(local_key),
+                server: None,
+                node: crate::policy::model::NodeId(1),
+                #[cfg(feature = "mesh-dns")]
+                name: None,
+                #[cfg(feature = "mesh-dns")]
+                dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+                version: 7,
+                addresses: crate::policy::model::Addresses {
+                    ipv4: "10.254.0.1".parse().expect("IPv4"),
+                    ipv6: "fd01::1".parse().expect("IPv6"),
+                },
+                default_policy: crate::dataplane::DefaultPolicy::Deny,
+                exposure: None,
+                peers: std::collections::BTreeMap::new(),
+                #[cfg(feature = "mesh-dns")]
+                peer_names: std::collections::BTreeMap::new(),
+            }),
+            #[cfg(target_os = "linux")]
+            backend: Some(crate::firewall::Backend::Nft),
+        }
+    }
+
+    /// A committed `GotaTun` journal authorizes persisting its candidate binding at the same revision.
+    #[test]
+    fn a_commit_journal_authorizes_the_same_version_gotatun_binding_advance() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+
+        store
+            .save(&binding_state(candidate_public))
+            .expect("journal-proven binding advance at the same config revision");
+
+        let (_, restored) = Store::open(&directory.0).expect("restore candidate binding");
+        assert_eq!(
+            restored.config.and_then(|config| config.local_key),
+            Some(candidate_public),
+            "the candidate binding is durable after snapshot replacement"
+        );
+    }
+
+    /// A completed journal still authorizes normalizing a snapshot that retained its old binding.
+    #[test]
+    fn a_completed_journal_authorizes_normalizing_a_stale_gotatun_binding() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: operation_id.to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("retire the predecessor before snapshot normalization");
+
+        store
+            .save(&binding_state(candidate_public))
+            .expect("normalize the stale binding after finish");
+    }
+
+    /// A completed marker cannot authorize replacing an unrelated predecessor binding.
+    #[test]
+    fn a_completed_journal_refuses_an_unrelated_predecessor_binding() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        let unrelated_public = crate::wireguard::Key::from_private(&unrelated)
+            .expect("unrelated key")
+            .1;
+        store
+            .save(&binding_state(unrelated_public))
+            .expect("save the unrelated old binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: operation_id.to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+        store
+            .complete_rotation_secret(operation_id, 1)
+            .expect("finish the rotation");
+
+        assert_eq!(
+            store
+                .save(&binding_state(candidate_public))
+                .expect_err("an unrelated prior binding cannot advance after finish")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    /// A same-revision binding cannot move to a key that the commit journal does not select.
+    #[test]
+    fn an_unproven_same_version_gotatun_binding_advance_is_refused() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x11; 32];
+        let candidate = [0x22; 32];
+        let unrelated = [0x33; 32];
+        let previous_public = crate::wireguard::Key::from_private(&previous)
+            .expect("previous key")
+            .1;
+        let candidate_public = crate::wireguard::Key::from_private(&candidate)
+            .expect("candidate key")
+            .1;
+        let unrelated_public = crate::wireguard::Key::from_private(&unrelated)
+            .expect("unrelated key")
+            .1;
+        store
+            .save(&binding_state(previous_public))
+            .expect("save the accepted predecessor binding");
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous,
+                candidate,
+                commit_requested: true,
+                completed: false,
+            })
+            .expect("durable commit intent");
+        #[cfg(target_os = "linux")]
+        store
+            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
+            .expect("record the userspace engine");
+        store
+            .record_interface(&candidate_public)
+            .expect("record the candidate interface identity");
+        store
+            .write_private_key(&candidate)
+            .expect("save the candidate private key");
+
+        assert_eq!(
+            store
+                .save(&binding_state(unrelated_public))
+                .expect_err("an unrelated key cannot replace the accepted binding")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
     #[test]
     fn explicit_off_survives_restart_and_snapshot_contains_only_public_fields() {
         let directory = Directory::new();
@@ -625,11 +1139,14 @@ pub(crate) mod tests {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
         let operation_id = "00000000-0000-4000-8000-000000000001";
+        let previous = [0x11; 32];
+        let previous_public =
+            rotation_public_key(&previous).expect("derive predecessor public key");
         store
             .save_rotation_secret(&RotationSecret {
                 operation_id: operation_id.to_owned(),
                 sequence: 1,
-                previous: [0x11; 32],
+                previous,
                 candidate: [0x22; 32],
                 commit_requested: true,
                 completed: false,
@@ -647,10 +1164,11 @@ pub(crate) mod tests {
             .expect("read completed marker")
             .expect("completion marker retained");
         assert!(completed.completed);
-        assert_eq!(completed.previous, [0; 32]);
+        assert_eq!(completed.previous, previous_public.0);
         assert_eq!(completed.candidate, [0x22; 32]);
         let bytes = fs::read(&store.rotation_path).expect("private rotation record");
-        assert!(!bytes.windows(32).any(|window| window == [0x11; 32]));
+        assert!(!bytes.windows(32).any(|window| window == previous));
+        assert!(bytes.windows(32).any(|window| window == previous_public.0));
         assert_eq!(
             fs::metadata(&store.rotation_path)
                 .expect("private record mode")
@@ -660,22 +1178,22 @@ pub(crate) mod tests {
         );
     }
 
-    /// Recording an engine other than kernel retires the rotation journal, even with no live link to switch, so a
-    /// later return to kernel cannot revive an old key of ours from it (#285, J252 P3-2). Recording kernel keeps it.
+    /// Both supported engines carry the open rotation journal when the node switches its data plane (#367).
     #[test]
-    fn leaving_kernel_retires_the_rotation_journal() {
+    fn switching_engines_keeps_the_rotation_journal() {
         let directory = Directory::new();
         let (store, _) = Store::open(&directory.0).expect("initial state");
+        let operation_id = "00000000-0000-4000-8000-000000000367";
         store
             .save_rotation_secret(&RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+                operation_id: operation_id.to_owned(),
                 sequence: 1,
-                previous: [0; 32],
+                previous: [0x11; 32],
                 candidate: [0x22; 32],
-                commit_requested: true,
-                completed: true,
+                commit_requested: false,
+                completed: false,
             })
-            .expect("completed journal");
+            .expect("prepared journal");
         store
             .record_engine(crate::gotatun_node::EngineKind::Kernel)
             .expect("record kernel");
@@ -686,11 +1204,23 @@ pub(crate) mod tests {
         store
             .record_engine(crate::gotatun_node::EngineKind::GotaTun)
             .expect("record GotaTun");
-        assert!(store.rotation_secret().expect("read journal").is_none());
-        assert!(!store.rotation_path.exists());
+        let carried = store
+            .rotation_secret()
+            .expect("read journal after switching to GotaTun")
+            .expect("GotaTun keeps the pending operation");
+        assert_eq!(carried.operation_id, operation_id);
+        assert!(!carried.commit_requested);
+        drop(carried);
         store
-            .record_engine(crate::gotatun_node::EngineKind::GotaTun)
-            .expect("recording again is harmless");
+            .record_engine(crate::gotatun_node::EngineKind::Kernel)
+            .expect("switching back to kernel");
+        assert!(
+            store
+                .rotation_secret()
+                .expect("read carried journal")
+                .is_some(),
+            "the same operation remains recoverable on either engine"
+        );
     }
 
     /// A stop inside `write_private` leaves `mesh-private-key.<pid>.new` holding the key. Opening
@@ -731,6 +1261,86 @@ pub(crate) mod tests {
         );
     }
 
+    /// A killed journal replacement may leave both private keys in a temporary that startup must sweep.
+    #[test]
+    fn j356_open_sweeps_rotation_journal_temporaries() {
+        let directory = Directory::new();
+        drop(Store::open(&directory.0).expect("initial state"));
+        let temporary = directory
+            .0
+            .join("mesh-key-rotation.4242.1762500000000000000.49.new");
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .expect("temporary");
+            file.write_all(&[0x5a; 117])
+                .expect("write journal-shaped bytes");
+        }
+        let unrelated = directory
+            .0
+            .join("mesh-key-rotation.4242.not-a-nonce.49.new");
+        fs::write(&unrelated, b"keep").expect("unrelated file");
+        let temporary_link = directory
+            .0
+            .join("mesh-key-rotation.99.1762500000000000001.49.new");
+        symlink(&temporary, &temporary_link).expect("temporary symlink");
+
+        drop(Store::open(&directory.0).expect("reopen after interrupted write"));
+
+        assert!(
+            !temporary.exists(),
+            "journal temporary with both keys survives restart"
+        );
+        assert!(
+            unrelated.exists(),
+            "a nonnumeric nonce is not a journal temporary"
+        );
+        assert!(
+            fs::symlink_metadata(&temporary_link).is_ok(),
+            "a symlink matching the temporary name is never followed or removed"
+        );
+    }
+
+    /// Every journal replacement sweeps an older crash-left temporary before it writes a new record.
+    #[test]
+    fn save_rotation_secret_sweeps_old_journal_temporaries() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let temporary = directory
+            .0
+            .join("mesh-key-rotation.4242.1762500000000000000.49.new");
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .expect("temporary");
+            file.write_all(&[0x5a; 117])
+                .expect("write journal-shaped bytes");
+        }
+
+        store
+            .save_rotation_secret(&RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 1,
+                previous: [0x11; 32],
+                candidate: [0x22; 32],
+                commit_requested: false,
+                completed: false,
+            })
+            .expect("write prepared journal");
+
+        assert!(
+            !temporary.exists(),
+            "a journal write leaves no older temporary"
+        );
+    }
+
+    /// A `GotaTun` identity can be restored from its private file without weakening its mode.
     #[test]
     fn gotatun_private_key_round_trips_only_as_a_private_file() {
         let directory = Directory::new();
@@ -752,6 +1362,53 @@ pub(crate) mod tests {
         );
         store.remove_private_key().expect("remove private key");
         assert!(store.read_private_key().expect("key removed").is_none());
+    }
+
+    /// Rotation replaces the old key atomically while keeping its restrictive file mode.
+    #[test]
+    fn replacing_a_private_key_is_durable_private_and_idempotent() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        let previous = [0x31; 32];
+        let candidate = [0x42; 32];
+        store.write_private_key(&previous).expect("initial key");
+        let abandoned = store.key_path.with_extension("4242.new");
+        fs::write(&abandoned, [0x77; 32]).expect("simulate a stop before the replacement rename");
+        drop(store);
+        let (store, _) =
+            Store::open(&directory.0).expect("reopen after the interrupted replacement");
+        assert!(
+            !abandoned.exists(),
+            "restart removes the private temporary left by a stopped replacement"
+        );
+        store
+            .replace_private_key(&candidate)
+            .expect("replace with the journaled key");
+        let bytes = store
+            .read_private_key()
+            .expect("read replacement")
+            .expect("replacement exists");
+        assert_eq!(bytes.as_slice(), &candidate);
+        assert_eq!(
+            fs::metadata(&store.key_path)
+                .expect("replacement metadata")
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store
+            .replace_private_key(&candidate)
+            .expect("replaying the same replacement is harmless");
+        assert!(
+            fs::read_dir(&directory.0)
+                .expect("list private state")
+                .all(|entry| !entry
+                    .expect("state entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".new")),
+            "no private temporary remains after a completed replacement"
+        );
     }
 
     #[test]
@@ -781,6 +1438,7 @@ pub(crate) mod tests {
                 .any(|window| window == b"gotatun")
         );
     }
+    /// Records owned routes separately while preserving the legacy accepted-state bytes.
     #[test]
     fn route_recording_preserves_the_legacy_accepted_state_format() {
         let directory = Directory::new();
@@ -789,9 +1447,9 @@ pub(crate) mod tests {
             local_key: None,
             server: None,
             node: crate::policy::model::NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 7,
             addresses: crate::policy::model::Addresses {
@@ -801,7 +1459,7 @@ pub(crate) mod tests {
             default_policy: crate::dataplane::DefaultPolicy::Deny,
             exposure: None,
             peers: std::collections::BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         };
         store
@@ -892,10 +1550,10 @@ pub(crate) mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "node_state_order_tests.rs"]
 mod order_tests;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "node_state_restore_tests.rs"]
 mod restore_tests;
