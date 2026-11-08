@@ -751,7 +751,7 @@ impl Store {
         });
         write_public(&self.path, &body)
     }
-    /// Persist peer-free intent after an authority has already been fenced at runtime.
+    /// Persist peer-free intent before fencing an authority at runtime.
     ///
     /// Atomic replacement is preferred. If that fails, the existing private snapshot is rewritten
     /// in place so a failed temporary-file write cannot make the retired peer copy restartable.

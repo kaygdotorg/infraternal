@@ -1776,9 +1776,8 @@ impl Node {
     }
     /// Irreversibly retire one authenticated server authority before accepting its replacement.
     ///
-    /// The peer-free deny snapshot replaces the rollback config before runtime work begins. The
-    /// runtime is fenced directly, then the epoch marker is persisted; ordinary `apply` never sees
-    /// a retired peer as a rollback target.
+    /// The peer-free deny snapshot is persisted before the runtime is fenced. Ordinary `apply`
+    /// never sees a retired peer as a rollback target.
     /// # Errors
     /// Returns runtime or persistence failures after keeping the previous peers fenced out.
     fn retire_authority(&mut self, authority_epoch: Option<String>) -> io::Result<()> {
@@ -1792,14 +1791,17 @@ impl Node {
         #[cfg(feature = "mesh-dns-spike")]
         deny.peer_names.clear();
         self.pending = None;
+        let persistence_error = self.persist_retired_snapshot(&deny).err();
         self.config = Some(deny.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
 
+        #[cfg(test)]
+        rotation_tests::j363_retirement_crash_checkpoint();
         let mut runtime_error = self.fence_retired_runtime(&deny).err();
         if let Some(error) = runtime_error.as_ref() {
             tracing::warn!(
                 error_kind = ?error.kind(),
-                "mesh authority peer fence failed; stopping its runtime before persistence"
+                "mesh authority peer fence failed; stopping its runtime after durable retirement"
             );
             if let Err(stop_error) = self.stop_retired_runtime() {
                 tracing::error!(
@@ -1810,10 +1812,22 @@ impl Node {
                 runtime_error = Some(stop_error);
             }
         }
-
-        #[cfg(test)]
-        rotation_tests::j363_retirement_crash_checkpoint();
-        let persistence_error = self.persist_retired_snapshot(&deny).err();
+        if persistence_error.is_some() {
+            // Do not leave an in-memory denied state backed by the previous live runtime when
+            // persistence failed. Stop it and retry the durable deny state after cleanup.
+            if runtime_error.is_none() {
+                self.enabled = false;
+                if let Err(error) = self.stop_retired_runtime() {
+                    runtime_error = Some(error);
+                }
+            }
+            if let Err(error) = self.persist_retired_snapshot(&deny) {
+                tracing::error!(
+                    error_kind = ?error.kind(),
+                    "could not persist disabled peer-free mesh state after retirement write failed"
+                );
+            }
+        }
         if let Some(error) = runtime_error {
             return Err(error);
         }
@@ -1853,7 +1867,7 @@ impl Node {
         self.pending = None;
         Ok(())
     }
-    /// Persist the peer-free epoch snapshot after the runtime fence, with an in-place fail-closed fallback.
+    /// Persist the peer-free epoch snapshot before the runtime fence, with an in-place fail-closed fallback.
     /// # Errors
     /// Reports route or snapshot persistence failures without restoring the previous peers.
     fn persist_retired_snapshot(&mut self, deny: &Config) -> io::Result<()> {

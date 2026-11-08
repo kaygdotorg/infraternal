@@ -913,10 +913,10 @@ const J363_EPOCH_A: &str = "00000000-0000-4000-8000-000000000001";
 /// The replacement authority used by the independent SIGKILL retirement reproducer.
 const J363_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
 
-/// Pause a test child after the retirement fence so the parent can kill it at the crash boundary.
+/// Pause a test child after durable retirement intent and before the runtime fence.
 pub(super) fn j363_retirement_crash_checkpoint() {
     if let Some(ready) = std::env::var_os("J363_RETIREMENT_READY") {
-        std::fs::write(ready, b"runtime fenced; retirement checkpoint reached").unwrap();
+        std::fs::write(ready, b"retirement persisted; runtime fence not entered").unwrap();
         loop {
             std::thread::park();
         }
@@ -964,7 +964,7 @@ fn j363_config(key: crate::policy::model::PublicKey) -> Config {
     }
 }
 
-/// A child installs authority A, then blocks after fencing it while applying authority B.
+/// A child installs authority A, then blocks after persisting B's deny state while applying B.
 #[test]
 #[ignore = "child process of the independent retirement crash proof"]
 fn j363_retirement_crash_child() {
@@ -985,10 +985,10 @@ fn j363_retirement_crash_child() {
     panic!("retirement checkpoint was not reached");
 }
 
-/// SIGKILL after the runtime fence must not restore peers from the retired authority.
+/// SIGKILL between durable retirement and the runtime fence must not restore retired peers.
 #[test]
 #[ignore = "Run as root inside a dedicated network namespace"]
-fn j363_kill_between_fence_and_persist() {
+fn j363_kill_between_persist_and_fence() {
     use std::time::Instant;
 
     command("ip", &["link", "set", "lo", "up"]);
@@ -1013,16 +1013,16 @@ fn j363_kill_between_fence_and_persist() {
         // sleep: wait for the child to publish the exact retirement boundary.
         std::thread::sleep(Duration::from_millis(10));
     }
-    let fenced = Device::counters().unwrap().len();
-    child.kill().unwrap();
-    child.wait().unwrap();
+    let runtime_peers_before_fence = Device::counters().unwrap().len();
     let durable: serde_json::Value =
         serde_json::from_slice(&std::fs::read(state.0.join("mesh-public.json")).unwrap()).unwrap();
     println!(
-        "J363_FENCED_PEERS={fenced} DURABLE_EPOCH={} DURABLE_PEERS={}",
+        "J363_RUNTIME_PEERS_BEFORE_FENCE={runtime_peers_before_fence} DURABLE_EPOCH={} DURABLE_PEERS={}",
         durable["config"]["authority_epoch"],
         durable["config"]["peers"].as_object().unwrap().len()
     );
+    child.kill().unwrap();
+    child.wait().unwrap();
     let mut restored = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
     let peers = Device::counters().unwrap().len();
     println!(
@@ -1032,7 +1032,12 @@ fn j363_kill_between_fence_and_persist() {
             .and_then(|config| config.authority_epoch.as_deref())
     );
     restored.down().unwrap();
-    assert_eq!(fenced, 0, "the checkpoint follows the runtime fence");
+    assert_eq!(
+        runtime_peers_before_fence, 1,
+        "the checkpoint precedes the runtime fence"
+    );
+    assert_eq!(durable["config"]["authority_epoch"], J363_EPOCH_B);
+    assert_eq!(durable["config"]["peers"].as_object().unwrap().len(), 0);
     assert_eq!(
         peers, 0,
         "retired authority peers resurrected after SIGKILL"

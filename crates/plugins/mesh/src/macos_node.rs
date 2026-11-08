@@ -627,7 +627,7 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
     result
 }
 
-/// Overwrite an existing private Mac snapshot after runtime peers have already been fenced.
+/// Overwrite an existing private Mac snapshot when atomic replacement cannot complete.
 ///
 /// This is the last safe write when a directory rename fails. A torn write leaves malformed state
 /// that restore refuses instead of replaying the old peer set; atomic replacement stays the normal
@@ -2238,8 +2238,8 @@ impl Node {
 
     /// Irreversibly retire the old Mac peer set before accepting another authority epoch.
     ///
-    /// The empty peer set reaches a dedicated worker command before persistence. This command has
-    /// no rollback target; on error the worker stops and cannot restore peers from the old epoch.
+    /// The peer-free state is persisted before the empty peer set reaches the dedicated worker
+    /// command. On error the worker stops and cannot restore peers from the old epoch.
     /// # Errors
     /// Returns worker or persistence errors after the previous peers have been fenced or the worker stopped.
     fn retire_authority(&mut self, authority_epoch: Option<String>) -> io::Result<()> {
@@ -2253,6 +2253,7 @@ impl Node {
         #[cfg(feature = "mesh-dns-spike")]
         deny.peer_names.clear();
         self.pending = None;
+        let persistence_error = self.persist_retired_snapshot(&deny).err();
         self.config = Some(deny.clone());
         self.authority_reset_pending = true;
         let applied = match self.worker.as_ref() {
@@ -2266,6 +2267,9 @@ impl Node {
         self.routes = info.routes;
         self.interface = Some(info.interface);
         self.port = info.port;
+        if let Some(error) = persistence_error {
+            return self.stop_after_retirement_failure(error, &deny);
+        }
         if let Err(error) = self.persist(
             true,
             Some(&deny),
@@ -2275,6 +2279,36 @@ impl Node {
             return self.stop_after_retirement_failure(error, &deny);
         }
         Ok(())
+    }
+
+    /// Persist peer-free authority state before the Mac worker removes old peers.
+    /// # Errors
+    /// Reports when neither atomic replacement nor the in-place fail-closed write succeeds.
+    fn persist_retired_snapshot(&self, denied: &Config) -> io::Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let state = SavedState {
+            enabled: self.enabled,
+            config: Some(denied.clone()),
+            authority_reset_pending: true,
+            routes: self.routes.clone(),
+            interface: self.interface.clone(),
+            port: self.port,
+            backend: None,
+            binding: self.binding.clone(),
+        };
+        match write_public_state(path, &state) {
+            Ok(()) => Ok(()),
+            Err(atomic_error) => write_public_state_in_place(path, &state).map_err(|error| {
+                tracing::error!(
+                    atomic_error_kind = ?atomic_error.kind(),
+                    fallback_error_kind = ?error.kind(),
+                    "atomic and in-place peer-free Mac state writes both failed before retirement"
+                );
+                error
+            }),
+        }
     }
 
     /// Stop the node without restoring peers when a retirement step cannot be completed.
@@ -2572,6 +2606,14 @@ mod tests {
 
     /// Provide a worker that records complete configs without opening a Mac utun.
     fn recording_worker(applied: Arc<Mutex<Vec<Config>>>) -> Worker {
+        recording_worker_with_retire_hook(applied, |_| {})
+    }
+
+    /// Provide a recording worker that observes durable state when retirement is requested.
+    fn recording_worker_with_retire_hook(
+        applied: Arc<Mutex<Vec<Config>>>,
+        on_retire: impl Fn(&Config) + Send + 'static,
+    ) -> Worker {
         let (commands, mut receiver) = mpsc::unbounded_channel();
         let join = thread::spawn(move || {
             while let Some(command) = receiver.blocking_recv() {
@@ -2588,8 +2630,9 @@ mod tests {
                     }
                     WorkerCommand::Retire { config, reply } => {
                         if let Ok(mut configs) = applied.lock() {
-                            configs.push(config);
+                            configs.push(config.clone());
                         }
+                        on_retire(&config);
                         let _ = reply.send(Ok(RuntimeInfo {
                             interface: "utun-test".to_owned(),
                             port: 51820,
@@ -2928,6 +2971,82 @@ mod tests {
                     .is_none_or(|config| config.peers.is_empty()),
             "a restart could restore the retired peer: {saved:?}"
         );
+    }
+
+    /// The peer-free authority state is durable before the worker fences old peers.
+    #[test]
+    fn mac_retirement_persists_deny_state_before_worker_fence() {
+        let current = config();
+        let directory = std::env::temp_dir().join(format!(
+            "infraternal-j363-mac-retirement-order-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("state directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("private state directory");
+        let state_path = directory.join(PUBLIC_STATE);
+        write_public_state(
+            &state_path,
+            &SavedState {
+                enabled: true,
+                config: Some(current.clone()),
+                routes: route_addresses(&current),
+                interface: Some("utun-test".to_owned()),
+                port: 51820,
+                ..SavedState::default()
+            },
+        )
+        .expect("persist original peer-bearing snapshot");
+        let identity = Identity {
+            public_key: current.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: true,
+        };
+        let at_fence = Arc::new(Mutex::new(None));
+        let observed = Arc::clone(&at_fence);
+        let hook_path = state_path.clone();
+        let mut node = Node {
+            enabled: true,
+            worker: Some(recording_worker_with_retire_hook(
+                Arc::new(Mutex::new(Vec::new())),
+                move |_| {
+                    let saved = read_public_state(&hook_path)
+                        .expect("read state when worker retirement begins")
+                        .expect("state exists when worker retirement begins");
+                    *observed.lock().expect("retirement state lock") = Some(saved);
+                },
+            )),
+            identity: Some(identity),
+            store: None,
+            config: Some(current.clone()),
+            authority_reset_pending: false,
+            pending: None,
+            routes: route_addresses(&current),
+            interface: Some("utun-test".to_owned()),
+            port: 51820,
+            path: Some(state_path),
+            binding: None,
+        };
+
+        node.retire_authority(Some(AUTHORITY_EPOCH_B.to_owned()))
+            .expect("retire old authority");
+        let saved_at_fence = at_fence
+            .lock()
+            .expect("retirement state lock")
+            .clone()
+            .expect("worker observed a saved state");
+        node.down().expect("stop test worker");
+        fs::remove_dir_all(directory).expect("remove state directory");
+
+        let denied = saved_at_fence.config.expect("retained denied snapshot");
+        assert_eq!(denied.authority_epoch.as_deref(), Some(AUTHORITY_EPOCH_B));
+        assert!(denied.peers.is_empty(), "retired peers were persisted");
+        assert_eq!(denied.default_policy, DefaultPolicy::Deny);
+        assert!(saved_at_fence.authority_reset_pending);
     }
 
     #[test]
