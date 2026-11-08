@@ -7,83 +7,44 @@
  * canvas's own selection listens to the mouse only. The contract these cases pin:
  * - a long press selects the word under the finger, and dragging then extends the selection by cell;
  * - a double tap selects the word too (a pairing code is one word);
- * - a Copy callout appears by the selection, and tapping it puts exactly the selected text on the clipboard;
+ * - a Copy callout appears by the selection, inside the window and never over its title pill, sized to its content;
+ * - tapping Copy puts exactly the selected text on the clipboard and answers on the row itself ("Copied");
  * - a plain swipe still scrolls the scrollback and never selects;
- * - a tap elsewhere clears the selection and the callout.
+ * - a tap elsewhere clears the selection and the callout;
+ * - a second finger landing after the hold keeps the selection and its callout;
+ * - a long press in the host's padding, outside the canvas, selects nothing.
+ * Wrapped words and the mouse path are in `terminal-selection-wrap.spec.ts`.
  *
- * Touches go through the DevTools protocol (`Input.dispatchTouchEvent`) because Playwright has no long press. Captures go to the
- * external evidence directory. Playwright WebKit is not iOS Safari: the real-device check is on the issue.
+ * Captures go to the external evidence directory. Playwright WebKit is not iOS Safari: the real-device check is on the issue.
  */
 import { mkdirSync } from "node:fs";
-import { expect, test, type CDPSession, type Page } from "playwright/test";
+import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
+import { boxOf, CALLOUT, cellCentre, hold, longPress, openTerminal, selected, show, SIZES, THEMES, touch, WINDOW } from "./terminal-select-fixture";
 
 /** Where this spec writes its captures (the external evidence directory). */
 const OUT = tracerEvidencePath("terminal-touch-select");
-/** The window whose terminal every case drives. */
-const WINDOW = '.ui-window[data-window-id="w-build-01"]';
-/** The Copy callout: the shared window menu, named for what it acts on. */
-const CALLOUT = '.ui-window-menu[aria-label="Selected text"]';
-/** The two phone sizes the contract holds at. */
-const SIZES = [{ name: "393x852", width: 393, height: 852 }, { name: "375x667", width: 375, height: 667 }] as const;
-/** Ink is the dark theme and paper the light one. */
-const THEMES = ["ink", "paper"] as const;
 /** The pairing-code-shaped word the owner could not select. */
 const CODE = "ABCD-EFGH-1234";
 /** The screen the cases select from: row 0 holds the pairing code, row 1 the sentence the drag covers. */
 const SCREEN = "\u001b[2J\u001b[H" + [`pair: ${CODE} now`, "second line of output", "third"].join("\r\n");
-
-/** A point in client pixels. */
-type Point = { x: number; y: number };
-/** Sends one touch event through the DevTools protocol: a finger down, moved, or lifted. */
-const touch = (cdp: CDPSession, type: "touchStart" | "touchMove" | "touchEnd", at?: Point): Promise<unknown> =>
-  cdp.send("Input.dispatchTouchEvent", { type, touchPoints: at && type !== "touchEnd" ? [{ x: at.x, y: at.y }] : [] });
-/** Keeps the finger down past the app's long-press time. */
-const hold = (page: Page, ms = 650): Promise<void> =>
-  // sleep: a long press is defined by the finger staying down; the app times it, so the test must really wait.
-  page.waitForTimeout(ms);
-/** The text the terminal has selected right now. */
-const selected = (page: Page): Promise<string> => page.evaluate(() => window.__tracerTestDouble?.selectionText() ?? "");
-
-/** The centre of the cell at (col, row) on the visible canvas, in client pixels. */
-async function cellCentre(page: Page, col: number, row: number): Promise<Point> {
-  return page.evaluate(([c, r]) => {
-    const m = window.__tracerTestDouble!.rendererMetrics()!;
-    const rect = document.querySelector<HTMLCanvasElement>(".terminal-host canvas")!.getBoundingClientRect();
-    return { x: rect.left + (c! + 0.5) * m.cellWidth, y: rect.top + (r! + 0.5) * m.cellHeight };
-  }, [col, row] as const);
-}
+/** Where a tap lands on empty terminal, below the text. */
+const EMPTY = { x: 40, y: 300 };
 
 for (const size of SIZES) {
   for (const theme of THEMES) {
     test(`touch selection and copy, ${size.name} ${theme}`, async ({ browser }) => {
       test.setTimeout(240_000);
       mkdirSync(OUT, { recursive: true });
-      const context = await browser.newContext({
-        viewport: { width: size.width, height: size.height }, deviceScaleFactor: 3, hasTouch: true, isMobile: true,
-        colorScheme: theme === "ink" ? "dark" : "light", permissions: ["clipboard-read", "clipboard-write"],
-      });
-      const page = await context.newPage();
-      const cdp = await context.newCDPSession(page);
+      const { context, page, cdp } = await openTerminal(browser, theme, size);
       try {
-        await context.request.post("/__mock/reset");
-        await context.request.post("/__mock/open-terminal");
-        await page.goto(`/?mock=1&proto=clusters&scene=1&theme=${theme}&bg=none`);
-        await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-        await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
-        await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(id: string): void } }).__tracerClusters.flyView("console"));
-        const host = page.locator(`${WINDOW} .terminal-host`);
-        await expect(host).toBeVisible({ timeout: 15_000 });
-        await page.evaluate((text) => window.__tracerTestDouble!.writeText(text), SCREEN);
-        await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.screenText().includes("third"))).toBe(true);
+        await show(page, SCREEN, "third");
         await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 200 } });
         await expect(page.locator(WINDOW)).toHaveAttribute("data-active", "");
 
         // 1. Long press on the pairing code selects exactly that word.
         const onCode = await cellCentre(page, 10, 0);
-        await touch(cdp, "touchStart", onCode);
-        await hold(page);
-        await touch(cdp, "touchEnd");
+        await longPress(page, cdp!, onCode);
         await expect.poll(() => selected(page), "long press selects the word").toBe(CODE);
         await expect(page.locator(CALLOUT)).toBeVisible();
         await page.screenshot({ path: `${OUT}/${size.name}-${theme}-word-callout.png` });
@@ -91,40 +52,98 @@ for (const size of SIZES) {
         // 2. Copy puts exactly the selection on the clipboard.
         await page.locator(`${CALLOUT} button`, { hasText: "Copy" }).tap();
         await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), "Copy fills the clipboard").toBe(CODE);
+
         // 3. A tap elsewhere clears the selection and the callout.
-        await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 300 } });
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: EMPTY });
         await expect.poll(() => selected(page)).toBe("");
         await expect(page.locator(CALLOUT)).toHaveCount(0);
 
         // 4. Long press, then drag over the second row: the selection extends by cell and spans the word onwards.
         const start = await cellCentre(page, 2, 1);
-        const end = await cellCentre(page, 20, 1);
-        await touch(cdp, "touchStart", start);
-        await hold(page);
-        await touch(cdp, "touchMove", await cellCentre(page, 9, 1));
-        await touch(cdp, "touchMove", end);
-        await touch(cdp, "touchEnd");
+        await longPress(page, cdp!, start, await cellCentre(page, 9, 1), await cellCentre(page, 20, 1));
         await expect.poll(() => selected(page), "long press then drag extends").toBe("second line of output");
         await expect(page.locator(CALLOUT)).toBeVisible();
         await page.screenshot({ path: `${OUT}/${size.name}-${theme}-drag-callout.png` });
-        await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 300 } });
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: EMPTY });
         await expect.poll(() => selected(page)).toBe("");
+
         // 5. A double tap selects the word.
         await page.touchscreen.tap(onCode.x, onCode.y);
         await page.touchscreen.tap(onCode.x, onCode.y);
         await expect.poll(() => selected(page), "double tap selects the word").toBe(CODE);
-        await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 300 } });
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: EMPTY });
         await expect.poll(() => selected(page)).toBe("");
+
         // 6. A plain swipe still scrolls the scrollback and selects nothing.
         const lines = Array.from({ length: 120 }, (_, i) => `scroll line ${i}`).join("\r\n") + "\r\n";
         await page.evaluate((text) => window.__tracerTestDouble!.writeText(text), lines);
         await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.rendererMetrics()?.scrollbackRows ?? 0)).toBeGreaterThan(50);
         const from = await cellCentre(page, 6, 4);
-        await touch(cdp, "touchStart", from);
-        for (let i = 1; i <= 10; i++) await touch(cdp, "touchMove", { x: from.x, y: from.y + i * 18 });
-        await touch(cdp, "touchEnd");
+        await touch(cdp!, "touchStart", from);
+        for (let i = 1; i <= 10; i++) await touch(cdp!, "touchMove", { x: from.x, y: from.y + i * 18 });
+        await touch(cdp!, "touchEnd");
         await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.rendererMetrics()?.viewportY ?? 0), "swipe scrolls").toBeGreaterThan(0);
         expect(await selected(page)).toBe("");
+        await expect(page.locator(CALLOUT)).toHaveCount(0);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test(`callout placement, Copy answer, second finger and padding, ${size.name} ${theme}`, async ({ browser }) => {
+      test.setTimeout(240_000);
+      mkdirSync(OUT, { recursive: true });
+      const { context, page, cdp } = await openTerminal(browser, theme, size);
+      try {
+        await show(page, SCREEN, "third");
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: { x: 40, y: 200 } });
+        await expect(page.locator(WINDOW)).toHaveAttribute("data-active", "");
+
+        // The callout on the top row, at the left edge, is the worst case: it must stay in the window and off the title pill.
+        await longPress(page, cdp!, await cellCentre(page, 1, 0));
+        await expect.poll(() => selected(page)).toBe("pair");
+        await expect(page.locator(CALLOUT)).toBeVisible();
+        await page.screenshot({ path: `${OUT}/${size.name}-${theme}-edge-callout.png` });
+        const callout = (await boxOf(page, CALLOUT))!;
+        const body = (await boxOf(page, `${WINDOW} .ui-window-body`))!;
+        const pill = (await boxOf(page, `${WINDOW} .ui-window-pill`))!;
+        expect.soft(callout.left, "inside the window's content area, left").toBeGreaterThanOrEqual(body.left);
+        expect.soft(callout.top, "inside the window's content area, top").toBeGreaterThanOrEqual(body.top);
+        expect.soft(callout.right, "inside the window's content area, right").toBeLessThanOrEqual(body.right);
+        expect.soft(callout.bottom, "inside the window's content area, bottom").toBeLessThanOrEqual(body.bottom);
+        const overlap = callout.left < pill.right && callout.right > pill.left && callout.top < pill.bottom && callout.bottom > pill.top;
+        expect.soft(overlap, "never covers the title pill").toBe(false);
+        expect.soft(callout.right - callout.left, "sized to its content, not the shared menu's minimum").toBeLessThan(130);
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: EMPTY });
+        await expect.poll(() => selected(page)).toBe("");
+
+        // Copy answers on the row itself, then the callout and the selection go.
+        await longPress(page, cdp!, await cellCentre(page, 10, 0));
+        await expect.poll(() => selected(page)).toBe(CODE);
+        await page.locator(`${CALLOUT} button`).tap();
+        await expect(page.locator(`${CALLOUT} button`), "the row says Copied").toContainText("Copied");
+        await page.screenshot({ path: `${OUT}/${size.name}-${theme}-copied.png` });
+        await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(CODE);
+        await expect(page.locator(CALLOUT)).toHaveCount(0, { timeout: 5000 });
+        expect(await selected(page)).toBe("");
+
+        // A second finger after the hold keeps the selection and its callout.
+        const finger = await cellCentre(page, 10, 0);
+        const other = await cellCentre(page, 12, 3);
+        await touch(cdp!, "touchStart", finger);
+        await hold(page);
+        await cdp!.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: finger.x, y: finger.y, id: 0 }, { x: other.x, y: other.y, id: 1 }] });
+        await cdp!.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await expect(page.locator(CALLOUT), "the callout survives a second finger").toBeVisible();
+        expect(await selected(page)).toBe(CODE);
+        await page.locator(`${WINDOW} .terminal-host`).tap({ position: EMPTY });
+        await expect.poll(() => selected(page)).toBe("");
+
+        // A long press in the host's padding, outside the canvas, selects nothing.
+        const canvas = (await boxOf(page, ".terminal-host canvas"))!;
+        const row = await cellCentre(page, 1, 1);
+        await longPress(page, cdp!, { x: canvas.left - 6, y: row.y });
+        expect(await selected(page), "padding selects nothing").toBe("");
         await expect(page.locator(CALLOUT)).toHaveCount(0);
       } finally {
         await context.close();
@@ -136,18 +155,9 @@ for (const size of SIZES) {
 /** The mouse path is the renderer's own and must be untouched by the touch work: a drag over a row selects it, and no callout appears. */
 test("desktop: dragging with the mouse still selects text", async ({ browser }) => {
   test.setTimeout(240_000);
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
-  const page = await context.newPage();
+  const { context, page } = await openTerminal(browser, "ink");
   try {
-    await context.request.post("/__mock/reset");
-    await context.request.post("/__mock/open-terminal");
-    await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
-    await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
-    await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(id: string): void } }).__tracerClusters.flyView("console"));
-    await expect(page.locator(`${WINDOW} .terminal-host`)).toBeVisible({ timeout: 15_000 });
-    await page.evaluate((text) => window.__tracerTestDouble!.writeText(text), SCREEN);
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble!.screenText().includes("third"))).toBe(true);
+    await show(page, SCREEN, "third");
     await page.locator(`${WINDOW} .terminal-host`).click({ position: { x: 40, y: 300 } });
     const from = await cellCentre(page, 0, 1);
     const to = await cellCentre(page, 20, 1);
