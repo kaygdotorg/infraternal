@@ -36,9 +36,10 @@ fn all_decimal_lines_survive_compression_and_full_replay() {
     assert_numbered_replay(&("0123456789".repeat(6) + "01234"));
 }
 
+/// Verifies compressed numbered history restores the same rows and screen state.
 fn assert_numbered_replay(body: &str) {
     let mut terminal = filled_with_body(body);
-    assert!(terminal.engine.history_rows() >= 9977);
+    assert!(terminal.engine.history_rows().unwrap() >= 9977);
     assert!(
         terminal.engine.encoded_bytes() > 0,
         "fixture must compress cold pages"
@@ -101,7 +102,7 @@ fn assert_numbered_replay(body: &str) {
     terminal.resize(40, 24).unwrap();
     terminal.resize(80, 24).unwrap();
     assert_eq!(terminal.research_state_difference(&replayed), 0);
-    assert!(replayed.engine.history_rows() >= 9977);
+    assert!(replayed.engine.history_rows().unwrap() >= 9977);
 }
 
 #[test]
@@ -116,6 +117,7 @@ fn decimal_history_resident_increment() {
     measured_history_increment(&("0123456789".repeat(6) + "01234"), "decimal");
 }
 
+/// Measures memory growth as decimal history fills 50 terminal instances.
 #[test]
 #[ignore = "perf VM only: distinguish fixed code residency from history slope at scale"]
 fn decimal_history_resident_slope() {
@@ -144,7 +146,7 @@ fn decimal_history_resident_slope() {
             }
             terminal.engine.compact(true);
             // The unchanged seed row precedes the 10,000 numbered rows.
-            assert_eq!(terminal.retained_history_rows(), 9978);
+            assert_eq!(terminal.retained_history_rows().unwrap(), 9978);
             assert!(!terminal.memory().2);
         }
         let resident = pss();
@@ -169,6 +171,7 @@ fn decimal_history_resident_slope() {
     }
 }
 
+/// Compares RSS and native page ownership before and after filling one history.
 fn measured_history_increment(body: &str, label: &str) {
     assert_eq!(
         std::fs::read_to_string("/proc/sys/kernel/hostname")
@@ -207,7 +210,7 @@ fn measured_history_increment(body: &str, label: &str) {
         f64::from(u32::try_from(full.saturating_sub(empty)).unwrap()) / 407.0
     );
     assert!(!terminal.memory().2);
-    assert!(terminal.engine.history_rows() >= 9977);
+    assert!(terminal.engine.history_rows().unwrap() >= 9977);
 }
 
 /// An external observer can classify resident mappings without allocating a
@@ -277,10 +280,11 @@ fn memory_kib(key: &str) -> usize {
         .unwrap()
 }
 
+/// Confirms row-count metadata reads do not restore pages or change ownership.
 #[test]
 fn retained_row_receipt_neither_restores_pages_nor_changes_encoding() {
     let terminal = filled();
     let before = terminal.ownership().unwrap();
-    assert_eq!(terminal.retained_history_rows(), 9977);
+    assert_eq!(terminal.retained_history_rows().unwrap(), 9977);
     assert_eq!(terminal.ownership().unwrap(), before);
 }

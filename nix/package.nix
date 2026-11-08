@@ -1,6 +1,6 @@
 # The release bundle, built with the shipping scripts and their pinned toolchains.
 { lib, stdenv, rust-bin, rustPlatform, writeShellScriptBin, fetchurl, runCommand,
-  bun, cacert, coreutils, curl, git, python3, perl, gnumake, xz, pkg-config, ripgrep,
+  bun, cacert, coreutils, curl, git, minisign, python3, perl, gnumake, xz, pkg-config, ripgrep,
   util-linux, binutils, source, revision, epoch, releaseVersion ? null }:
 let
   # The daemon does not inherit the client's nice level. Lower only this
@@ -15,7 +15,7 @@ let
     else releaseVersion;
   # Same tarball and checksum table as scripts/auth-toolchain (D213, D328).
   zigArchive = (import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; }).archive;
-  zig = runCommand "infraternal-zig-0.15.2" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
+  zig = runCommand "infraternal-zig-0.17.0" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
     ${lowerBuildPriority}
     mkdir -p "$out"
     tar -xJf ${zigArchive} --strip-components=1 -C "$out"
@@ -46,36 +46,36 @@ let
     path.write_text(source.replace(before, after))
     PY
   '';
-  vtRevision = "a887df42c56f6de86c0fe6da9c4eeca37931e083";
-  vtArchive = fetchurl {
-    name = "infraternal-vt-${vtRevision}.tar.gz";
-    url = "https://codeload.github.com/ghostty-org/ghostty/tar.gz/${vtRevision}";
-    sha256 = "fb4b2f9ffa0af125983041fdbe4ef94d3fa79fb9f2d22b9c213c0e3847a866b6";
+  vtVersion = "1.0.0";
+  vtFiles = builtins.listToAttrs (map
+    (line: let fields = lib.splitString "  " line; in {
+      name = builtins.elemAt fields 1;
+      value = builtins.elemAt fields 0;
+    })
+    (lib.filter
+      (line: line != "" && !(lib.hasPrefix "#" line))
+      (lib.splitString "\n" (builtins.readFile ../scripts/libghostty-vt.sha256))));
+  vtSourceName = "libghostty-vt-${vtVersion}.tar.gz";
+  vtDepsName = "libghostty-vt-${vtVersion}-deps.tar.gz";
+  vtSource = fetchurl {
+    name = vtSourceName;
+    url = "https://release.files.ghostty.org/libghostty-vt/${vtVersion}/${vtSourceName}";
+    sha256 = vtFiles.${vtSourceName};
   };
-  # Only fetched package sources enter the output, never native build caches.
-  vtDeps = stdenv.mkDerivation {
-    name = "infraternal-vt-deps-${vtRevision}";
-    src = vtArchive;
-    nativeBuildInputs = [ cacert util-linux ];
-    preUnpack = lowerBuildPriority;
-    dontConfigure = true;
-    buildPhase = ''
-      export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
-      # Fetch-only mode skips lazy dependencies requested while configuring
-      # the shipping build graph. Exercise that graph, then discard all objects.
-      ${zig}/zig build -j2 -Demit-lib-vt=true -Doptimize=ReleaseFast \
-        -Dcpu=baseline -Dtarget=x86_64-linux-musl -Demit-xcframework=false -Dapp-runtime=none \
-        --prefix "$TMPDIR/native"
-      test -s "$TMPDIR/native/lib/libghostty-vt.a"
-    '';
-    installPhase = ''
-      mkdir -p "$out"
-      cp -R "$ZIG_GLOBAL_CACHE_DIR/p" "$out/p"
-    '';
-    outputHashMode = "recursive";
-    outputHashAlgo = "sha256";
-    outputHash = "sha256-BfU58ccEGY7L08XD3VPCr05VWHyDxQ+kb+LDQiCC2l0=";
-    dontFixup = true;
+  vtSourceSignature = fetchurl {
+    name = "${vtSourceName}.minisig";
+    url = "https://release.files.ghostty.org/libghostty-vt/${vtVersion}/${vtSourceName}.minisig";
+    sha256 = vtFiles."${vtSourceName}.minisig";
+  };
+  vtDeps = fetchurl {
+    name = vtDepsName;
+    url = "https://release.files.ghostty.org/libghostty-vt/${vtVersion}/${vtDepsName}";
+    sha256 = vtFiles.${vtDepsName};
+  };
+  vtDepsSignature = fetchurl {
+    name = "${vtDepsName}.minisig";
+    url = "https://release.files.ghostty.org/libghostty-vt/${vtVersion}/${vtDepsName}.minisig";
+    sha256 = vtFiles."${vtDepsName}.minisig";
   };
   cargoDeps = rustPlatform.importCargoLock {
     lockFile = ../Cargo.lock;
@@ -119,7 +119,7 @@ let
     pname = "infraternal-static";
     inherit version;
     src = source;
-    nativeBuildInputs = [ rust rustupShim python3 perl gnumake curl git xz pkg-config ripgrep util-linux binutils ];
+    nativeBuildInputs = [ rust rustupShim python3 perl gnumake curl git minisign xz pkg-config ripgrep util-linux binutils ];
     preUnpack = lowerBuildPriority;
     dontConfigure = true;
     # The sandbox has no /usr/bin/env. Only build-time script interpreters are
@@ -147,11 +147,12 @@ let
         ${cargoDeps}/.cargo/config.toml > "$CARGO_HOME/config.toml"
       # Keep the release scripts' one-Zig invariant without invoking a downloader.
       for target in "$CARGO_TARGET_DIR" "$CARGO_TARGET_DIR/bootstrap" "$CARGO_TARGET_DIR/session"; do
-        mkdir -p "$target/auth-tools" "$target/vt-tools/zig-cache"
+        mkdir -p "$target/auth-tools" "$target/vt-tools"
         ln -s ${zig} "$target/auth-tools/zig"
-        ln -s ${vtArchive} "$target/vt-tools/${vtRevision}.tar.gz"
-        cp -R ${vtDeps}/p "$target/vt-tools/zig-cache/p"
-        chmod -R u+w "$target/vt-tools/zig-cache/p"
+        ln -s ${vtSource} "$target/vt-tools/${vtSourceName}"
+        ln -s ${vtSourceSignature} "$target/vt-tools/${vtSourceName}.minisig"
+        ln -s ${vtDeps} "$target/vt-tools/${vtDepsName}"
+        ln -s ${vtDepsSignature} "$target/vt-tools/${vtDepsName}.minisig"
       done
       ${lib.optionalString (releaseVersion != null) ''
         export INFRATERNAL_RELEASE_BUILD=1

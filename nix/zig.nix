@@ -8,7 +8,7 @@
 # sandbox patches on top of `archive`.
 { lib, stdenv, fetchurl, runCommand, xz }:
 let
-  version = "0.15.2";
+  version = "0.17.0";
   # Zig names hosts <cpu>-<os> with "macos", not nix's "darwin".
   host = {
     x86_64-linux = "x86_64-linux";

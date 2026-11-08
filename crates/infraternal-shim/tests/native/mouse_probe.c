@@ -1,4 +1,4 @@
-/** Independent public mouse-encoder Snapshot continuation probe for #26 [13][40]. */
+/** Independent stable C API mouse-encoder continuation probe for #26 [13][40]. */
 #include <ghostty/vt.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -6,8 +6,6 @@
 #include <string.h>
 extern size_t infraternal_vt_snapshot(GhosttyTerminal, unsigned char *, size_t, size_t);
 extern size_t infraternal_vt_compare(GhosttyTerminal, GhosttyTerminal, bool);
-_Static_assert(sizeof(GhosttyTerminalOptions) == 16, "options ABI size");
-_Static_assert(offsetof(GhosttyTerminalOptions,max_scrollback) == 8, "options ABI offset");
 static size_t encode(GhosttyTerminal t, char *out, bool motion) {
  GhosttyMouseEncoder encoder; GhosttyMouseEvent event;
  if(ghostty_mouse_encoder_new(NULL,&encoder) || ghostty_mouse_event_new(NULL,&event)) exit(3);
@@ -25,8 +23,10 @@ int main(void) {
  const char *inputs[]={"\033c\033[?1000hX","\033c\033[?1003h\033[?1006hX","\033c\033[?1003h\033[?1000hX"};
  unsigned char *paint=malloc(1024*1024);int failures=0;
  for(size_t i=0;i<3;i++){
-  GhosttyTerminal a,b;GhosttyTerminalOptions opts={.cols=80,.rows=24,.max_scrollback=17*1024*1024};
-  if(ghostty_terminal_new(NULL,&a,opts)||ghostty_terminal_new(NULL,&b,opts))return 2;
+  GhosttyTerminal a,b;size_t max_scrollback=17*1024*1024;
+  if(ghostty_terminal_new(NULL,&a,80,24)!=GHOSTTY_SUCCESS||ghostty_terminal_new(NULL,&b,80,24)!=GHOSTTY_SUCCESS)return 2;
+  if(ghostty_terminal_set(a,GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,&max_scrollback)!=GHOSTTY_SUCCESS||
+     ghostty_terminal_set(b,GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,&max_scrollback)!=GHOSTTY_SUCCESS)return 2;
   ghostty_terminal_vt_write(a,(const unsigned char *)inputs[i],strlen(inputs[i]));
   size_t n=infraternal_vt_snapshot(a,paint,1024*1024,256);
   if(!n||n==SIZE_MAX)return 5;
