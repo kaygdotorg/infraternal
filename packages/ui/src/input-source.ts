@@ -14,7 +14,9 @@
  *   one down starts no action and must not cut short a pointer-opened surface's motion (Shift pressed 60 ms into a pointer
  *   open would otherwise end its fade). The last key of a chord is not a modifier, so it still sets the source before the
  *   shortcut's handler runs;
- * - `pointerdown` (which covers mouse, pen and touch) sets it to `"pointer"`.
+ * - `pointerdown` (which covers mouse, pen and touch) and `wheel` (a mouse wheel or a trackpad swipe, which press nothing) set it
+ *   to `"pointer"`. Code reads the source to decide whether a camera flight springs, so a trackpad swipe through the windows
+ *   must not be taken for a key press just because the person typed a moment before.
  *
  * The source is written to the root as `data-input="keyboard" | "pointer"`, in the same task as the event. CSS therefore
  * sees it in the same style recalculation that applies the surface's new state, so a rule such as
@@ -66,11 +68,13 @@ export function installInputSource(root: HTMLElement = document.documentElement)
   const key = (event: Event): void => { if (!MODIFIER_KEYS.has((event as KeyboardEvent).key)) set("keyboard"); };
   const pointer = (): void => set("pointer");
   set("pointer");
+  window.addEventListener("wheel", pointer, { capture: true, passive: true });
   window.addEventListener("keydown", key, { capture: true, passive: true });
   window.addEventListener("pointerdown", pointer, { capture: true, passive: true });
   installed = () => {
     window.removeEventListener("keydown", key, { capture: true });
     window.removeEventListener("pointerdown", pointer, { capture: true });
+    window.removeEventListener("wheel", pointer, { capture: true });
     delete root.dataset.input;
     current = "pointer";
     installed = undefined;

@@ -30,6 +30,10 @@ test("a key press is keyboard, a pointer press is pointer, the newest wins, and 
   target.dispatchEvent(Object.assign(new Event("keydown"), { key: "k" }));
   expect(inputSource()).toBe("keyboard");
 
+  // A wheel or trackpad swipe is a pointer input even though it presses nothing.
+  target.dispatchEvent(new Event("wheel"));
+  expect(inputSource()).toBe("pointer");
+
   dispose();
   expect(root.dataset.input).toBeUndefined();
   expect(inputSource()).toBe("pointer");
