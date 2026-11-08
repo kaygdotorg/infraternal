@@ -311,7 +311,7 @@ test.describe("editing arrows", () => {
     await expect.poll(() => called(page, "mesh.grant.move")).toEqual([{ name: "nix-cache to studio-mac", side: "to", endpoint: { Node: 2 } }]);
     await expect.poll(() => called(page, "mesh.grant.rename")).toEqual([{ name: "nix-cache to studio-mac", new_name: "nix-cache to edge-arm" }]);
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach edge-arm");
-    await expect(page.locator(".ui-toast, .toast").first()).toContainText("nix-cache can now reach edge-arm");
+    await expect(page.locator(".ui-toast, .toast").last()).toContainText("nix-cache can now reach edge-arm");
   });
 
   test("a tail move sends the new source; removing sends a delete; allowing from a card sends a create", async ({ page }) => {
@@ -365,14 +365,14 @@ test.describe("editing arrows", () => {
     await server(page, (s) => s.failNext("mesh.grant.move", "refuse"));
     await dragEnd(page, "g3", "head", "edge-arm");
     await page.locator(".ui-confirm-yes").click();
-    await expect(page.locator(".ui-toast, .toast").first()).toContainText("Could not change who nix-cache can reach. You may not be allowed to");
+    await expect(page.locator(".ui-toast, .toast").last()).toContainText("Could not change who nix-cache can reach. You may not be allowed to");
     await expect.poll(async () => (await grant("g3"))?.to).toBe("studio-mac");
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
     await page.waitForTimeout(3600);
     await server(page, (s) => s.failNext("mesh.grant.delete", "network"));
     await dragEnd(page, "g3", "head", undefined);
     await page.locator(".ui-confirm-yes").click();
-    await expect(page.locator(".ui-toast, .toast").first()).toContainText("Could not stop nix-cache reaching studio-mac");
+    await expect(page.locator(".ui-toast, .toast").last()).toContainText("Could not stop nix-cache reaching studio-mac");
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(1); // the grant came back
   });
 });
@@ -542,7 +542,7 @@ for (const [label, size] of [["1440x900", DESKTOP], ["393x852", PHONE]] as const
     expect(noHosts(await stop.innerText())).not.toMatch(TECHNICAL);
     await capture(page, `confirm-stop-ink-${label}`, testInfo);
     await page.locator(".ui-confirm-yes").click();
-    const toast = page.locator(".ui-toast, .toast").first();
+    const toast = page.locator(".ui-toast, .toast").last();
     await expect(toast).toContainText("nix-cache can no longer reach studio-mac");
     expect(noHosts(await toast.innerText())).not.toMatch(TECHNICAL);
     await server(page, (s) => { s.failNext("mesh.grant.delete", "refuse"); });

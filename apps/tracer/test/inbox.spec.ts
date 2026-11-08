@@ -85,7 +85,7 @@ for (const [name, viewport, scale] of [["desktop", { width: 1440, height: 900 },
     await card(page).getByRole("button", { name: "Unlock", exact: true }).click();
     await expect(card(page)).toHaveCount(0);
     await expect(toggle(page)).not.toHaveAttribute("data-pending", "");
-    await expect(toast(page)).toContainText("Host connections unlocked");
+    await expect(toast(page).last()).toContainText("Host connections unlocked");
     // The outcome keeps the success look.
     await expect(toast(page).locator(".ui-toast-marker")).toBeVisible();
     await expect(toast(page).locator(".ui-toast-glyph")).toBeHidden();
@@ -107,7 +107,7 @@ test("the toast's own action unlocks and leaves nothing behind", async ({ page }
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page, "ca=locked");
   await toast(page).getByRole("button", { name: "Unlock" }).click({ timeout: 8000 });
-  await expect(toast(page)).toContainText("Host connections unlocked");
+  await expect(toast(page).last()).toContainText("Host connections unlocked");
   await expect(card(page)).toHaveCount(0);
   await expect(toggle(page)).not.toHaveAttribute("data-pending", "");
 });
