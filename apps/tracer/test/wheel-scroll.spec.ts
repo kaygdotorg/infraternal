@@ -95,7 +95,9 @@ for (const size of SIZES) {
 
       // ---- a sideways gesture over the same page is the canvas's: it moves to the neighbouring window ----------------------------
       await page.waitForTimeout(400);
-      await page.mouse.wheel(300, 0);
+      // The Keys page is the last stop of the Docs view, so a sideways gesture can only go back; go whichever way there is room.
+      const { stops } = (await api(page, "canvasLock")) as { stops: number };
+      await page.mouse.wheel(index >= stops - 1 ? -300 : 300, 0);
       await expect.poll(() => stopIndex(page)).not.toBe(index);
       await page.waitForTimeout(600);
       // The router's cost per wheel event over page content (logged for the record, not asserted: speed is measured in the
