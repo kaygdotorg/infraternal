@@ -628,13 +628,47 @@ their own independent limits.
 
 A base with no journal is a finished install owned by the host id in its
 `.bootstrap-owner`. The read-only check reports it as
-`INFRATERNAL_SETUP_INSTALLED <32 hex host id>`, never `INFRATERNAL_SETUP_CLEAR`:
-every new attempt carries a new host id, and staging refuses (71) a base whose
-owner names another host. After the existing already-added preflight, the
-server answers `unrecognized_install` at the `connect` step before any write.
+`INFRATERNAL_SETUP_INSTALLED <32 hex host id> <dev:ino> <live|idle> <takeover>`,
+never `INFRATERNAL_SETUP_CLEAR`: every new attempt carries a new host id, and
+staging refuses (71) a base whose owner names another host. `<takeover>` is
+`ready` only for root's own `/var/lib/infraternal` whose every entry, launcher,
+unit header and `ExecStart` are proven infraternal's and that nothing uses but
+the agent's own unit; `busy` when it is proven but a terminal's shim or another
+process uses it; `unproven` otherwise, including every rootless install. After
+the existing already-added preflight, the server answers `unrecognized_install`
+at the `connect` step before any write, unless it offers Take over.
 Its sentence holds whoever enrolled it: another server, another person on this
-server, or an earlier setup this server retired. Taking such an install over is
-D359's Take over, a separate slice on `addhost-takeover-d359`.
+server, or an earlier setup this server retired.
+
+### Take over (D359)
+
+A root-mode add whose check reports `ready`, for a host id that is no working
+host of this server (unknown, removed or revoked), pauses on a `check` event
+whose failure is `unrecognized_install` with
+`takeover: {"install": "<32 hex host id>", "live": <bool>}` and `leftovers`
+(root mode). The browser shows Take over and a confirmation naming
+`takeover.install`; `start-fresh` with the leftovers' challenge confirms it.
+Rootless adds, `busy` (its own sentence) and `unproven` keep the plain
+`unrecognized_install` refusal. The server asks whether the id is still no
+working host again right before the host acts.
+
+The host then runs `take_over_finished_install '<the exact record>' <token>`
+under the setup guard. It refuses (71) any base but root's, (75) a changed
+record or an idle record whose agent has started, (73) a busy install, and (75)
+a token whose restore already ran. It builds
+`/var/lib/infraternal.bootstrap-taking-<token>` (0700: the old id, the service
+state found, a copy of the unit) and renames it to
+`/var/lib/infraternal.bootstrap-takeover-<token>` before anything is stopped.
+It then stops and disables the agent, requires that nothing else holds the
+install, renames the base into `<set-aside>/install`, and removes the unit and
+launcher. Any failure or signal before the end puts everything back. The
+attempt continues as a fresh install with a new host id. If it fails, the
+server runs `restore_taken_over_install <token>`, which is idempotent and puts
+back the install, unit, launcher and service state exactly (`restored`), or
+reports `untouched` and leaves the cancel token. The new install's commit
+deletes the set-aside (`retire_set_aside`). After a crash, Check reports it as
+`INFRATERNAL_SETUP_SET_ASIDE taken_over <host> <token> <machine> <enabled>
+<active>` (Put it back), or deletes it beside a committed new install.
 
 When the NetBird SSH server accepts a network sign-in and then ends a command
 session with exactly `User authentication failed` and status 1, the host could

@@ -44,6 +44,36 @@ def userns_available():
 class PrivilegedAreas(unittest.TestCase):
     """Trigger the namespace tests only for relevant code paths."""
 
+    def test_missing_host_frontend_skips_the_row_without_claiming_coverage(self):
+        """An absent absolute-path backend is an environment gap, not a mesh failure."""
+        with mock.patch.object(sys, 'argv', ['verify-privileged']), \
+             mock.patch.object(p.subprocess, 'check_output', side_effect=[b'base', b'crates/plugins/mesh/src/iptables.rs\0', b'']), \
+             mock.patch.object(p, 'workspace_graph', return_value={}), \
+             mock.patch.object(p, 'dependency_directories', return_value={}), \
+             mock.patch.object(p, 'areas', return_value={'mesh'}), \
+             mock.patch.object(p.os, 'access', return_value=False), \
+             mock.patch.object(p, 'run', return_value=[]) as run:
+            with self.assertRaises(SystemExit) as result:
+                p.main()
+            self.assertEqual(result.exception.code, p.SKIP_EXIT)
+            run.assert_not_called()
+
+    def test_present_host_frontends_and_nonmesh_changes_still_run(self):
+        """Preflight must not hide product failures or require mesh tools for other areas."""
+        for selected, available in (({'mesh'}, True), ({'shim'}, False)):
+            with self.subTest(selected=selected), \
+                 mock.patch.object(sys, 'argv', ['verify-privileged']), \
+                 mock.patch.object(p.subprocess, 'check_output', side_effect=[b'base', b'changed\0', b'']), \
+                 mock.patch.object(p, 'workspace_graph', return_value={}), \
+                 mock.patch.object(p, 'dependency_directories', return_value={}), \
+                 mock.patch.object(p, 'areas', return_value=selected), \
+                 mock.patch.object(p.os, 'access', return_value=available), \
+                 mock.patch.object(p, 'run', return_value=['fixture failure']) as run:
+                with self.assertRaises(SystemExit) as result:
+                    p.main()
+                self.assertIn('fixture failure', str(result.exception.code))
+                run.assert_called_once()
+
     def test_scopes(self):
         """Cover production files, fixtures, shared manifests and harmless docs."""
         for path, expected in (

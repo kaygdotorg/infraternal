@@ -637,6 +637,18 @@ def main():
     if needs_tun_proof(paths):
         print('privileged integration: REAL-ROOT PROOF REQUIRED: TUN code changed; run '
               '`scripts/tun-real-root-proof <commit>` from code and record it on the issue', flush=True)
+    # The compatibility backend uses these absolute paths in product code and
+    # fixtures. nft alone cannot provide it, and PATH changes cannot repair it.
+    # Do not claim this row passed when the host cannot exercise the backend.
+    if 'mesh' in selected:
+        tools = [f'/usr/sbin/{family}{suffix}'
+                 for family in ('iptables-nft', 'ip6tables-nft')
+                 for suffix in ('', '-restore')]
+        missing = [tool for tool in tools if not os.access(tool, os.X_OK)]
+        if missing:
+            print('privileged integration: SKIP (host lacks nf_tables frontend: '
+                  + ', '.join(missing) + '; install the host iptables package)', flush=True)
+            raise SystemExit(SKIP_EXIT)
     for area in sorted(selected & set(NOT_COVERED)):
         print(f'privileged integration: not covered ({area}): {NOT_COVERED[area]}', flush=True)
     areas_packages = {package for area in selected for package, _, _ in PACKAGES[area]}
