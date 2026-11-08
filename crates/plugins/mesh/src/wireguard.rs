@@ -243,19 +243,27 @@ impl Device {
         }
         Ok(ifindex)
     }
-    /// Move this link's owner marker from `from` to `to` after a kernel key rotation (#285). The
-    /// old marker is re-verified on the link at `ifindex` first, and the change is addressed by that
-    /// index alone, so a link substituted under the shared name is never re-marked. The new
-    /// marker is verified before this returns.
+    /// Move this link's owner marker after either engine accepts a rotation key. The old marker is
+    /// re-verified on the link at `ifindex` first, and the change is addressed by that index alone,
+    /// so a link substituted under the shared name is never re-marked. The new marker is verified
+    /// before this returns.
     /// # Errors
     /// Refuses a link whose marker does not name `from`, and reports kernel errors.
     pub(crate) fn remark(ifindex: u32, from: PublicKey, to: PublicKey) -> io::Result<()> {
-        verify_owner(ifindex, from)?;
+        let engine = Self::active_link()?
+            .filter(|link| link.ifindex == ifindex)
+            .map(|link| link.engine)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        verify_engine_owner(ifindex, engine, from)?;
+        let prefix = match engine {
+            crate::gotatun_node::EngineKind::Kernel => KERNEL_OWNER_PREFIX,
+            crate::gotatun_node::EngineKind::GotaTun => GOTATUN_OWNER_PREFIX,
+        };
         let mut claim = vec![0; 16];
         claim[4..8].copy_from_slice(&ifindex.to_ne_bytes());
-        attribute(&mut claim, 20, &owner_alias(KERNEL_OWNER_PREFIX, to))?;
+        attribute(&mut claim, 20, &owner_alias(prefix, to))?;
         Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4, &claim)?;
-        verify_owner(ifindex, to)
+        verify_engine_owner(ifindex, engine, to)
     }
     /// Create a `WireGuard` link under a fresh temporary name with an index we chose, retrying a
     /// few times when that name or index is already taken. Returns the name and the index.
@@ -1219,6 +1227,19 @@ fn identity_from(mut payload: Vec<u8>) -> io::Result<(PublicKey, u16)> {
 
 /// Refuse unless the link at `ifindex` is a `WireGuard` link carrying `owner`'s marker.
 fn verify_owner(ifindex: u32, owner: PublicKey) -> io::Result<()> {
+    verify_engine_owner(ifindex, crate::gotatun_node::EngineKind::Kernel, owner)
+}
+
+/// Refuse unless the link at `ifindex` has the selected engine marker for `owner`.
+fn verify_engine_owner(
+    ifindex: u32,
+    engine: crate::gotatun_node::EngineKind,
+    owner: PublicKey,
+) -> io::Result<()> {
+    let (expected_kind, prefix) = match engine {
+        crate::gotatun_node::EngineKind::Kernel => (b"wireguard\0".as_slice(), KERNEL_OWNER_PREFIX),
+        crate::gotatun_node::EngineKind::GotaTun => (b"tun\0".as_slice(), GOTATUN_OWNER_PREFIX),
+    };
     let mut payload = vec![0; 16];
     payload[4..8].copy_from_slice(&ifindex.to_ne_bytes());
     let replies = match Socket::open(SockProtocol::NetlinkRoute)?.request(18, 4, &payload) {
@@ -1248,8 +1269,8 @@ fn verify_owner(ifindex: u32, owner: PublicKey) -> io::Result<()> {
         }
     }
     if netlink::u32_at(&reply, 4)? == ifindex
-        && kind.as_deref() == Some(b"wireguard\0")
-        && alias.as_deref() == Some(owner_alias(KERNEL_OWNER_PREFIX, owner).as_slice())
+        && kind.as_deref() == Some(expected_kind)
+        && alias.as_deref() == Some(owner_alias(prefix, owner).as_slice())
     {
         Ok(())
     } else {

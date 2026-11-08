@@ -129,7 +129,7 @@ pub(crate) struct RuntimeInfo {
     offloads_enabled: bool,
 }
 
-/// Commands sent to the Linux `GotaTun` worker, each with a synchronous result channel.
+/// Requests serialized by the Linux `GotaTun` worker, each with a synchronous result channel.
 enum WorkerCommand {
     Apply {
         config: Config,
@@ -137,6 +137,10 @@ enum WorkerCommand {
     },
     SetMtu {
         mtu: u16,
+        reply: sync::SyncSender<io::Result<()>>,
+    },
+    SetPrivateKey {
+        private_key: StaticSecret,
         reply: sync::SyncSender<io::Result<()>>,
     },
     Counters(sync::SyncSender<io::Result<CounterMap>>),
@@ -340,6 +344,17 @@ impl Engine {
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
 
+    /// Switch the userspace device and its rebuild key to one journaled rotation identity.
+    /// # Errors
+    /// Reports a stopped worker or a failed device reconfiguration.
+    pub(crate) fn set_private_key(&self, private_key: StaticSecret) -> io::Result<()> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::SetPrivateKey { private_key, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
     /// Read the current `GotaTun` peer counters.
     /// # Errors
     /// Reports a stopped worker or device read error.
@@ -426,8 +441,9 @@ struct Started {
     info: RuntimeInfo,
 }
 
-/// Open, mark and activate the TUN, bind the engine socket, and build the device when the startup
-/// config already has peers. Runs on the engine's runtime, which also runs the TUN writer.
+/// Open and activate the TUN, bind the engine socket, and build the device when the startup
+/// config already has peers. New TUNs get a marker here; adopted TUNs were re-proven by index.
+/// Runs on the engine's runtime, which also runs the TUN writer.
 async fn initialize(
     private_key: StaticSecret,
     local_public_key: PublicKey,
@@ -478,7 +494,9 @@ async fn initialize(
             "Linux TUN checksum and TCP segmentation offloads are unavailable.",
         ));
     }
-    crate::wireguard::Device::mark_tun(local_public_key)?;
+    if adopt.is_none() {
+        crate::wireguard::Device::mark_tun(local_public_key)?;
+    }
     crate::wireguard::Device::activate_tun(tun.owned_ifindex()?, mtu)?;
     // Raised on a new and on a reattached TUN alike. A refusal does not stop the engine: the
     // length it really has goes to `mesh status`.
@@ -593,7 +611,7 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// Serve control commands while the worker owns runtime state and supervises packet tasks.
+/// Serialize device changes, relay work, fatal-error recovery, and shutdown on the runtime thread.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     loop {
         tokio::select! {
@@ -603,6 +621,9 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
                 }
                 Some(WorkerCommand::SetMtu { mtu, reply }) => {
                     let _ = reply.send(state.update_mtu(mtu));
+                }
+                Some(WorkerCommand::SetPrivateKey { private_key, reply }) => {
+                    let _ = reply.send(state.set_private_key(private_key).await);
                 }
                 Some(WorkerCommand::Counters(reply)) => {
                     let _ = reply.send(state.counters().await);
@@ -640,23 +661,57 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
 }
 
 impl RuntimeState {
+    /// Change the live device key and retain that key for a later device rebuild.
+    ///
+    /// The pending key changes only after the device accepts the new key, so a failed update
+    /// cannot make a later rebuild silently use an identity the live device never accepted.
+    /// # Errors
+    /// Reports an absent runtime or a failed userspace device reconfiguration.
+    async fn set_private_key(&mut self, private_key: StaticSecret) -> io::Result<()> {
+        if self.pending.is_none() {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        if let Some(device) = self.device.as_ref() {
+            device
+                .set_private_key(private_key.clone())
+                .await
+                .map_err(|_| io::Error::other("GotaTun private key could not be updated."))?;
+        }
+        self.pending
+            .as_mut()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .private_key = private_key;
+        Ok(())
+    }
+
+    /// Install a relay endpoint on the peer whose key currently owns its host routes.
     #[cfg(feature = "relay")]
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         let policy = self
             .config
             .as_ref()
-            .and_then(|config| config.peers.values().find(|peer| peer.peer.key == key))
+            .and_then(|config| {
+                config
+                    .peers
+                    .values()
+                    .find(|policy| active_peer_key(&policy.peer) == key)
+            })
             .ok_or(io::ErrorKind::NotFound)?;
-        let mut peer = peer_for_policy(policy)?;
-        peer.endpoint = Some(endpoint);
+        let mut peers = peer_for_policy(policy)?;
+        let active = peers
+            .iter_mut()
+            .find(|peer| peer.public_key.as_bytes() == &key.0)
+            .ok_or(io::ErrorKind::NotFound)?;
+        active.endpoint = Some(endpoint);
         self.device
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
-            .write(async |device| device.add_or_update_peers([peer]).await)
+            .write(async |device| device.add_or_update_peers(peers).await)
             .await
             .map_err(|_| io::Error::other("GotaTun relay endpoint could not be installed."))
     }
 
+    /// Prepare a peer for relayed traffic while preserving any session it already established.
     #[cfg(feature = "relay")]
     async fn prepare_handshake(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
         // GotaTun records a handshake as soon as either side derives a session, including a
@@ -669,23 +724,29 @@ impl RuntimeState {
         if has_session {
             return self.set_endpoint(key, endpoint).await;
         }
-        let policy = self
-            .config
-            .as_ref()
-            .and_then(|config| config.peers.values().find(|peer| peer.peer.key == key))
-            .ok_or(io::ErrorKind::NotFound)?;
-        let mut peer = peer_for_policy(policy)?;
+        let policy =
+            self.config
+                .as_ref()
+                .and_then(|config| {
+                    config.peers.values().find(|policy| {
+                        policy.peer.key == key || policy.peer.previous_key == Some(key)
+                    })
+                })
+                .ok_or(io::ErrorKind::NotFound)?;
+        let mut peers = peer_for_policy(policy)?;
         // Drop the direct-path attempt still in flight: GotaTun's forced handshake would wait
         // for it rather than send a fresh initiation. An endpoint-less responder learns the
         // relay shim's address from the authenticated initiation, so only one side initiates.
-        peer.endpoint = None;
+        if let Some(active) = peers.iter_mut().find(|peer| !peer.allowed_ips.is_empty()) {
+            active.endpoint = None;
+        }
         let public_key = X25519PublicKey::from(key.0);
         self.device
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
             .write(async |device| {
                 device.remove_peer(&public_key).await;
-                device.add_or_update_peers([peer]).await;
+                device.add_or_update_peers(peers).await;
             })
             .await
             .map_err(|_| io::Error::other("GotaTun relay peer could not be reset."))
@@ -758,7 +819,7 @@ impl RuntimeState {
         }
     }
 
-    /// Apply a peer snapshot while keeping the shared link above IPv6's minimum.
+    /// Apply a coordinator snapshot while keeping the shared link above IPv6's minimum.
     ///
     /// The caller installs the new per-peer route MTUs before lowering the shared interface.
     /// # Errors
@@ -780,13 +841,9 @@ impl RuntimeState {
             self.config = Some(config);
             return Ok(self.info.clone());
         }
-        let desired: BTreeSet<_> = config
-            .peers
-            .values()
-            .map(|policy| policy.peer.key)
-            .collect();
+        let desired: BTreeSet<_> = config.peers.values().flat_map(policy_keys).collect();
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let changed = config
+        let changed_policies = config
             .peers
             .iter()
             .filter(|(id, policy)| {
@@ -797,12 +854,16 @@ impl RuntimeState {
             })
             .map(|(_, policy)| peer_for_policy(policy))
             .collect::<io::Result<Vec<_>>>()?;
-        let retired: Vec<_> = self
+        let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
+        let previous_keys: BTreeSet<_> = self
             .config
             .iter()
             .flat_map(|old| old.peers.values())
-            .map(|policy| policy.peer.key)
-            .filter(|key| !desired.contains(key))
+            .flat_map(policy_keys)
+            .collect();
+        let retired: Vec<_> = previous_keys
+            .difference(&desired)
+            .copied()
             .map(|key| X25519PublicKey::from(key.0))
             .collect();
         // Keep the larger link limit until the caller has replaced the peer route metrics.
@@ -990,23 +1051,77 @@ impl IpRecv for LinuxPacketIo {
     }
 }
 
+/// Build the device's complete peer list, retaining both keys during a rotation overlap.
+/// # Errors
+/// Rejects invalid host routes before changing the live device.
 fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
-    config.peers.values().map(peer_for_policy).collect()
+    let peers = config
+        .peers
+        .values()
+        .map(peer_for_policy)
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(peers.into_iter().flatten().collect())
 }
 
-fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<WireGuardPeer> {
+/// Convert each configured peer to one live identity or its journaled overlap pair.
+///
+/// Only the active identity owns allowed IPs and the endpoint, so the second identity can accept
+/// a handshake during overlap without stealing routes or initiating a competing path.
+/// # Errors
+/// Rejects invalid host routes before they reach the userspace device.
+fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
-    let addresses = [
+    let addresses = vec![
         IpNetwork::new(IpAddr::V4(peer.addresses.ipv4), 32)
             .map_err(|_| io::ErrorKind::InvalidData)?,
         IpNetwork::new(IpAddr::V6(peer.addresses.ipv6), 128)
             .map_err(|_| io::ErrorKind::InvalidData)?,
     ];
-    let mut wireguard_peer =
-        WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
-    wireguard_peer.endpoint = peer.endpoint;
-    wireguard_peer.keepalive = Some(25);
-    Ok(wireguard_peer)
+    let Some(previous) = peer.previous_key.filter(|key| *key != peer.key) else {
+        let mut current =
+            WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
+        current.endpoint = peer.endpoint;
+        current.keepalive = Some(25);
+        return Ok(vec![current]);
+    };
+    let previous_active = peer.previous_active;
+    let mut previous_peer = WireGuardPeer::new(X25519PublicKey::from(previous.0)).with_allowed_ips(
+        if previous_active {
+            addresses.clone()
+        } else {
+            Vec::new()
+        },
+    );
+    let mut current_peer = WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(
+        if previous_active {
+            Vec::new()
+        } else {
+            addresses
+        },
+    );
+    let active = if previous_active {
+        &mut previous_peer
+    } else {
+        &mut current_peer
+    };
+    active.endpoint = peer.endpoint;
+    active.keepalive = Some(25);
+    Ok(vec![previous_peer, current_peer])
+}
+
+/// Select the identity that currently owns this peer's host routes.
+#[cfg(feature = "relay")]
+fn active_peer_key(peer: &crate::dataplane::Peer) -> PublicKey {
+    if peer.previous_active {
+        peer.previous_key.unwrap_or(peer.key)
+    } else {
+        peer.key
+    }
+}
+
+/// Include every configured identity so cleanup removes only keys no longer in overlap.
+fn policy_keys(policy: &crate::dataplane::PeerPolicy) -> impl Iterator<Item = PublicKey> {
+    std::iter::once(policy.peer.key).chain(policy.peer.previous_key)
 }
 
 pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, PublicKey)> {
@@ -1233,5 +1348,35 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["10.254.0.1/32", "fd01::1/128"]
         );
+    }
+
+    /// Keep both rotation keys installed while routing only through the currently active one.
+    #[test]
+    fn peer_conversion_keeps_the_inactive_rotation_key_without_routes_or_endpoint() {
+        let endpoint: SocketAddr = "192.0.2.4:51831".parse().expect("endpoint");
+        let mut config = one_peer_config(Some(endpoint));
+        let policy = config.peers.get_mut(&NodeId(1)).expect("configured peer");
+        policy.peer.previous_key = Some(PublicKey([4; 32]));
+        policy.peer.previous_active = true;
+        let peers = peers_for_config(&config).expect("convert both rotation keys");
+
+        assert_eq!(peers.len(), 2, "the peer accepts both overlap identities");
+        let candidate = peers
+            .iter()
+            .find(|peer| peer.public_key.as_bytes() == &[3; 32])
+            .expect("candidate identity");
+        let previous = peers
+            .iter()
+            .find(|peer| peer.public_key.as_bytes() == &[4; 32])
+            .expect("previous identity");
+        assert_eq!(candidate.allowed_ips.as_slice(), &[]);
+        assert_eq!(candidate.endpoint, None);
+        assert!(
+            previous
+                .allowed_ips
+                .iter()
+                .any(|ip| ip.to_string() == "10.254.0.1/32")
+        );
+        assert_eq!(previous.endpoint, Some(endpoint));
     }
 }
