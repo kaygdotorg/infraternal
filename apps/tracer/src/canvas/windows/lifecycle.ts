@@ -17,6 +17,7 @@
  */
 import { randomUuid } from "../../identifiers";
 import { Spring } from "../../../../../packages/ui/src/spring";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
@@ -325,7 +326,9 @@ export function createWindows(cx: Ctx): WindowsModule {
     return rec;
   };
 
+  /** The small "this is the window" swell. A key never plays it (#427): the person asked for the window and is looking at it. */
   const pulse = (rec: WinRec): void => {
+    if (triggeredByKeyboard()) return;
     rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 360, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
   };
 

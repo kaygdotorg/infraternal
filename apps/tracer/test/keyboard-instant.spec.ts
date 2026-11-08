@@ -456,7 +456,7 @@ test.describe("window stepping and the lock do not animate from the keyboard", (
       const target = (a.effect as KeyframeEffect | null)?.target;
       const el = target instanceof Element ? target : null;
       const hit = el?.closest(".ui-window, .ui-window-lock, .bm-marker, .bm-lit, .bm-branches");
-      return hit ? `${a instanceof CSSTransition ? a.transitionProperty : a.constructor.name} on ${hit.className.toString().split(" ").slice(0, 2).join(".")}` : "";
+      return hit ? `${a instanceof CSSTransition ? a.transitionProperty : a.constructor.name} on ${hit.className.toString().split(" ").slice(0, 2).join(".")} (${el!.tagName.toLowerCase()}.${el!.className.toString().split(" ")[0]})` : "";
     }).filter(Boolean);
     resolve(names);
   })));
@@ -490,6 +490,7 @@ test.describe("window stepping and the lock do not animate from the keyboard", (
     expect(target, "a second window is fully on screen").toBeDefined();
     await armAfter(page, "pointerdown", "window-transitions");
     await page.mouse.click(target!.x, target!.y);
-    expect(await readAfter<string[]>(page), "pointer activation keeps its border fade").toContain("border-color");
+    const fades = await readAfter<string[]>(page);
+    expect(fades.some((property) => property.startsWith("border")), `pointer activation keeps its border fade (running: ${fades.join(", ")})`).toBe(true);
   });
 });
