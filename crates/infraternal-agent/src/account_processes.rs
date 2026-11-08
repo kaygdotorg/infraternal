@@ -14,7 +14,8 @@
 //! them while they remain in the account's sessions or user slice, regardless
 //! of UID. Outside that slice they can survive without appearing in this UID
 //! listing. This module does not infer account ownership from namespace UID
-//! maps or `/etc/subuid`, and never promises that such processes were checked.
+//! maps or `/etc/subuid`, including ranges containing host uid 0, and never
+//! promises that such processes were checked (D367, follow-up #429).
 use std::{
     fs::File,
     io::{self, Read},

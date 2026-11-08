@@ -218,6 +218,7 @@ fn no_changes_found(
         sentence.push_str(" or ");
     }
     sentence.push_str(last);
+    sentence.push_str(". Access outside these checks isn't covered");
     sentence
 }
 
@@ -757,6 +758,16 @@ mod tests {
         assert!(message.contains(root_sentence), "{message}");
         let body = super::report_body(&value).unwrap();
         assert!(body.contains(root_sentence), "{body}");
+    }
+
+    /// The shared sentence builder always ends with D367's coverage boundary.
+    #[test]
+    fn clean_sentence_ends_with_coverage_caveat() {
+        let sentence = super::no_changes_found(30, &[], None, &["sudo".to_owned()]);
+        assert!(
+            sentence.ends_with("Access outside these checks isn't covered"),
+            "{sentence}"
+        );
     }
 
     /// A historical result with no root-check evidence cannot gain the new
