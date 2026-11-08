@@ -74,7 +74,7 @@ test("the palette row runs the ceremony and the lock clears", async ({ page }) =
   await paletteLabels(page, "unlock host");
   await page.keyboard.press("Enter");
   await expect(page.locator("#palette")).toBeHidden();
-  await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked");
+  await expect(page.locator(".ui-toast").last()).toContainText("Host connections unlocked");
   expect(await paletteLabels(page, "unlock host")).not.toContain(LABEL);
   await page.keyboard.press("Escape");
   await openSettingsHosts(page);
@@ -147,7 +147,7 @@ for (const [warning, expected] of [
     await expect(row).toBeVisible();
     await expect.poll(() => page.evaluate(() => (window as unknown as {
       __tracerClusters?: { activeWindow(): string | undefined };
-    }).__tracerClusters?.activeWindow())).toBe("s-hosts");
+    }).__tracerClusters?.activeWindow())).toBe("s-terminal-hosts");
     await expect(row).toBeInViewport({ ratio: 0.5 });
     await expect(row).toContainText(expected);
     const settingsAlignment = await page.evaluate(() => {
@@ -221,5 +221,5 @@ test("the inbox line is collapsed, expands to Unlock, and unlocking clears the c
   await expect(unlock).toBeVisible();
   await unlock.click();
   await expect(card).toHaveCount(0);
-  await expect(page.locator(".ui-toast")).toContainText("Host connections unlocked");
+  await expect(page.locator(".ui-toast").last()).toContainText("Host connections unlocked");
 });
