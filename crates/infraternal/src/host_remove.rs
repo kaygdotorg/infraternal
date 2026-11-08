@@ -208,6 +208,36 @@ mod tests {
         assert_eq!(result.data, serde_json::json!({}));
     }
 
+    /// A connected host's answer comes back in the removal result (#409): people
+    /// read which kernel objects it left in place, scripts get them as `left`.
+    #[test]
+    fn removed_result_names_what_the_host_left() {
+        use crate::cli::output::{RenderOptions, render_pretty};
+        let line = "Left infraternal0 because infraternal didn't create it here.";
+        let value = serde_json::json!({"state":"removed", "host_cleanup":"requested",
+            "message":format!("worker was removed. Its infraternal agent is uninstalling itself. {line}"),
+            "manual":null, "left":["infraternal0"]});
+        let human = super::command_result(value.clone(), true, false);
+        let output = render_pretty(
+            &human,
+            RenderOptions {
+                terminal: false,
+                color: false,
+                width: 120,
+            },
+        )
+        .unwrap();
+        // The renderer wraps long sentences; compare the words, not the breaks.
+        let words = output.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains(line),
+            "left object missing from human output: {output}"
+        );
+        assert_eq!(human.state, crate::cli::output::CommandState::Ready);
+        let machine = super::command_result(value, true, true);
+        assert_eq!(machine.data["left"], serde_json::json!(["infraternal0"]));
+    }
+
     /// Found on the test server (#303, J94f): `remove-host` refused every step, its dry run
     /// included, while the same session's browser dry run succeeded. With `SSL_CERT_FILE` set to
     /// the system bundle the same binary removed the host. A vendored OpenSSL's default paths

@@ -97,3 +97,40 @@ fn accepted_uninstall_names_the_objects_it_leaves() {
     );
     assert!(manual.is_none());
 }
+
+/// A person's removal is delivered by the outbox when the host next connects
+/// (#409). The toast says so, and still hands over the manual command for a
+/// machine that never comes back; the command ends the text verbatim.
+#[test]
+fn pending_uninstall_says_when_and_keeps_the_manual_command() {
+    let (message, manual) = outcome("pending", "rootless", "host.example", &[], Some(HOST), true);
+    let command = format!("~/.local/bin/infraternal --bootstrap-uninstall {HOST}");
+    assert_eq!(
+        message,
+        format!(
+            "host.example: revoked, cleanup pending; its infraternal agent uninstalls itself as soon as it connects. If it never does, remove it there as the account it was added with by running: {command}"
+        )
+    );
+    assert_eq!(manual.as_deref(), Some(command.as_str()));
+}
+
+/// A rootless leftover names its account once: "as the account it was added
+/// with by running", never "added with with" (#409).
+#[test]
+fn rootless_manual_wording_reads_once() {
+    for pending in [true, false] {
+        let (message, _) = outcome(
+            "unreachable",
+            "rootless",
+            "host.example",
+            &[],
+            Some(HOST),
+            pending,
+        );
+        assert!(
+            message.contains("as the account it was added with by running: ~/.local/bin/"),
+            "{message}"
+        );
+        assert!(!message.contains("with with"), "{message}");
+    }
+}

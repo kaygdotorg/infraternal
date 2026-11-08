@@ -59,9 +59,11 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
         .finish_host(&f.session, host, review, NOW)
         .await
         .unwrap();
-    assert_eq!(result["host_cleanup"], "unreachable");
-    // #235: an uninstall that did not happen is said plainly, by name, with the
-    // commands that remove the leftover rootful install on the machine itself.
+    // #409: the removal outbox asks the host when it next connects; the
+    // removal itself makes no network call.
+    assert_eq!(result["host_cleanup"], "pending");
+    // #235: the toast still hands over the commands that remove the rootful
+    // install on the machine itself, for a host that never comes back.
     let message = result["message"].as_str().unwrap();
     assert_eq!(result["state"], "pending");
     assert!(message.contains("revoked, cleanup pending"));

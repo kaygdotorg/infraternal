@@ -755,19 +755,17 @@ impl RemoteLink {
         }
         // A retired host's reconnect is a delivery capability for one cleanup,
         // never a terminal/plugin/native-stream capability, even if misrouted.
-        if authority.cleanup_person().is_some()
-            && !(stream == 0
-                && matches!(
-                    frame,
-                    Frame::Hello { .. }
-                        | Frame::Ping { .. }
-                        | Frame::Pong { .. }
-                        | Frame::Call {
-                            action_id: "terminal.login.revoke",
-                            ..
-                        }
-                ))
-        {
+        // That cleanup is the login revocation and, for a removal, the
+        // uninstall request that follows its receipt (#409).
+        let cleanup_frame = match frame {
+            Frame::Hello { .. } | Frame::Ping { .. } | Frame::Pong { .. } => true,
+            Frame::Call { action_id, .. } => {
+                *action_id == "terminal.login.revoke"
+                    || *action_id == infraternal_plugin_remote::UNINSTALL.id
+            }
+            _ => false,
+        };
+        if authority.cleanup_person().is_some() && !(stream == 0 && cleanup_frame) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let _permit = authority.write_permit().await?;
