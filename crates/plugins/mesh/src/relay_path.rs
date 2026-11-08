@@ -536,11 +536,7 @@ fn live(shared: &Shared, index: usize) -> Option<Arc<Live>> {
 }
 
 /// Advance the generation when relay state and the published data path select `expected`.
-fn route_generation_for_live(
-    shared: &Shared,
-    peer: &Peer,
-    expected: &Arc<Live>,
-) -> Option<u64> {
+fn route_generation_for_live(shared: &Shared, peer: &Peer, expected: &Arc<Live>) -> Option<u64> {
     let state = lock(&peer.state);
     let (index, link_id) = state.active?;
     if index != expected.index
@@ -810,11 +806,7 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
 }
 
 /// Install one peer's newly derived direct or relayed route budget on a blocking netlink worker.
-async fn update_peer_route_mtu(
-    peer: &Arc<Peer>,
-    generation: u64,
-    mtu: Option<u16>,
-) -> bool {
+async fn update_peer_route_mtu(peer: &Arc<Peer>, generation: u64, mtu: Option<u16>) -> bool {
     let updater = peer.route_mtu_updater.clone();
     let peer = peer.clone();
     tokio::task::spawn_blocking(move || {
@@ -825,8 +817,8 @@ async fn update_peer_route_mtu(
         // Keep the generation stable until the route write completes.
         updater(mtu)
     })
-        .await
-        .is_ok_and(|result| result.is_ok())
+    .await
+    .is_ok_and(|result| result.is_ok())
 }
 
 /// Poll a live connection for path-MTU changes and refresh every peer using that connection.
