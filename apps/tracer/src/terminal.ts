@@ -12,6 +12,7 @@ import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../pac
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
+import { selectionColors, THEMES } from "../../../packages/ui/src/themes";
 import { installWrapAwareSelection, type SelectableTerminal } from "./terminal-wrap-selection";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
@@ -38,6 +39,8 @@ const TERMINAL_FONT_SIZE_MAX = 24;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
+/** The selection colours of the default (ink) terminal theme, used until the screen hands the terminal its theme. */
+const INK_SELECTION = selectionColors(THEMES.ink!);
 const ANSI_THEME_KEYS = [
   "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
   "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
@@ -589,7 +592,8 @@ export class TerminalClient {
         foreground: "#e6e7e9",
         cursor: "#c8ceff",
         cursorAccent: "#101113",
-        selectionBackground: "#44485c",
+        selectionBackground: INK_SELECTION.background,
+        selectionForeground: INK_SELECTION.foreground,
       },
     });
   }

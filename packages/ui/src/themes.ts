@@ -246,17 +246,21 @@ function mixHex(from: string, to: string, amount: number): string {
  * theme it stays the soft third it always was, with the theme's text on it. On a dark theme a third of the accent is nearly
  * invisible and the renderer's default selected text (dark) was unreadable on it, so the mix grows until the highlight stands
  * out from the cell (3:1) while the selected text, the theme's own, still reads on it (4.5:1); if no mix does both, the one
- * that comes closest is used.
+ * that comes closest is used. Where the theme's own text cannot do it, the text is white, or the theme's background on a lighter highlight.
  */
 export function selectionColors(active: Theme): { background: string; foreground: string } {
   const soft = mixHex(active.bg, active.accent, 0x55 / 255);
   if (!active.dark) return { background: soft, foreground: active.fg };
   let best = { background: soft, foreground: active.fg }, bestScore = -1;
-  for (let percent = 33; percent <= 95; percent++) {
-    const background = mixHex(active.bg, active.accent, percent / 100);
-    const score = Math.min(contrastRatio(background, active.bg) / 3, contrastRatio(active.fg, background) / 4.5);
-    if (score >= 1) return { background, foreground: active.fg };
-    if (score > bestScore) { bestScore = score; best = { background, foreground: active.fg }; }
+  // The theme's own text first; then plain white, then the theme's background colour as dark text on a lighter highlight,
+  // where no mix gives the theme's own text enough room (a dark theme whose accent is light or dim).
+  for (const foreground of [active.fg, "#ffffff", active.bg]) {
+    for (let step = 66; step <= 190; step++) {
+      const background = mixHex(active.bg, active.accent, step / 200);
+      const score = Math.min(contrastRatio(background, active.bg) / 3, contrastRatio(foreground, background) / 4.5);
+      if (score >= 1) return { background, foreground };
+      if (score > bestScore) { bestScore = score; best = { background, foreground }; }
+    }
   }
   return best;
 }
