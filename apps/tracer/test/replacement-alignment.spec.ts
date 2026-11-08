@@ -93,7 +93,8 @@ for (const [size, viewport, scale, touch] of [["desktop 1440×900 at DPR 2", { w
       await menuOf(page, touch, "Rename");
       const field = await page.evaluate(() => { const i = document.querySelector(".ui-inline-rename") as HTMLInputElement; const r = i.getBoundingClientRect(), cs = getComputedStyle(i); return { textLeft: r.left + parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth), size: parseFloat(cs.fontSize) }; });
       expect(Math.abs(field.textLeft - before.left), "rename text against the label").toBeLessThanOrEqual(0.5);
-      expect(field.size).toBe(before.size);
+      // A touch field stays 16 px (iOS zooms into smaller ones, --text-input), above the 13 px label it replaces: only desktop must match the label.
+      expect(field.size).toBe(touch ? Math.max(before.size, 16) : before.size);
       await page.keyboard.press("Escape");
     });
   });

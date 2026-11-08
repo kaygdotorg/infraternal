@@ -1,14 +1,14 @@
 /** Shared presentation for @infraternal/ui browser primitives. */
 
-/* One type scale per platform (TASTE.md section 2). Desktop follows the macOS sizes, touch the iOS
-   sizes. Every product surface (top bar, sidebar, palette, tooltip, toast, windows) uses these
-   tokens rather than its own pixel values. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input stays 16 px on touch so iOS never zooms. */
-:root { --ui-base: 1.1; font-size: calc(16px * var(--ui-base) * var(--ui-scale, 1)); --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --text-body: 0.8125rem; --text-secondary: 0.75rem; --text-caption: 0.6875rem; --text-input: 0.8125rem; --row: 1.75rem; }
+/* One type system (D372, TASTE section 2): the sizes of the sign-in-derived roles (--ui-size-*, further down), the same on every
+   platform except body, which is set once for phones. --row is the list row height (macOS sidebar 28 px, iOS 44 px). --text-input is the one
+   size that is not a role: it stays 16 px on touch so iOS never zooms. */
+:root { --ui-base: 1.1; font-size: calc(16px * var(--ui-base) * var(--ui-scale, 1)); --ui-press-scale: 0.97; --ui-press-scale-small: 0.94; --ui-press-scale-soft: 0.98; --row: 1.75rem; }
 /* The UI's base size (owner, 2026-11-01: "110% should be the new 100%"): a desktop's UI is drawn at 1.1 times the 16 px root and
    the UI size slider (--ui-scale, 50-150 %) is relative to it. A touch screen keeps 1: it already has its own larger sizes below
    (16 px text, 44 px rows) and its width is the screen's. Phones taking the 1.1 as well is this one number. */
 @media (pointer: coarse) { :root { --ui-base: 1; } }
-@media (pointer: coarse) { :root { --text-body: 1rem; --text-secondary: 0.9375rem; --text-caption: 0.8125rem; --text-input: 1rem; --row: 2.75rem; } }
+@media (pointer: coarse) { :root { --row: 2.75rem; } }
 
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
@@ -20,7 +20,7 @@
 :root { --focus-ring-room: 0.375rem; }
 [data-focus-ring="on"] :focus-visible { outline: 2px solid var(--focus-ring, var(--accent, #7a9cff)); outline-offset: 2px; }
 .countup { font-variant-numeric: tabular-nums; }
-.busy-count { font: var(--fw-label, 500) 0.8125rem/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
+.busy-count { font: var(--fw-label, 500) var(--ui-size-label)/1 var(--font-face, "Maple Mono NF", ui-monospace, monospace); color: rgb(0 0 0 / 0.6); }
 /* Icons (icons.ts) follow the product's icon scale: 16 px on desktop, 18 px on touch, 1.5 stroke. */
 .ui-icon { width: var(--ui-icon); height: var(--ui-icon); flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .terminal-text-overlay { position: absolute; z-index: 2; pointer-events: none; }
@@ -399,15 +399,29 @@
      eyebrow 500 12px/1     +0.02em  (auth-eyebrow)
    --------------------------------------------------------------------------------------- */
 :root {
-  --ui-type-name: 600 0.875rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-body: 450 0.875rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-label: 450 0.8125rem/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  /* Text sizes (D372): the sizes of the sign-in-derived roles, written once. Every font size reads one of these, directly or
+     through a role below; a rem literal in a font rule is a bug. Body is the one size that differs between desktop and a phone
+     (0.875 rem, 0.9375 rem on touch), set here and nowhere else; labels, buttons and eyebrows are the same everywhere (D174:
+     touch gets bigger targets, not bigger text). */
+  --ui-size-body: 0.875rem;
+  --ui-size-label: 0.8125rem;
+  --ui-size-button: 0.84375rem;
+  --ui-size-eyebrow: 0.75rem;
+  /* The older names, kept as aliases of the sizes above so a reader never has two scales: body text in a row is a label,
+     secondary and caption text are eyebrow size. --text-input is the one size that is not a role: iOS zooms into a focused field under 16 px. */
+  --text-body: var(--ui-size-label);
+  --text-secondary: var(--ui-size-eyebrow);
+  --text-caption: var(--ui-size-eyebrow);
+  --text-input: var(--ui-size-label);
+  --ui-type-name: 600 var(--ui-size-body)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-body: 450 var(--ui-size-body)/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-label: 450 var(--ui-size-label)/1.55 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   /* Line height `normal`, never a number: next to an icon, a label's line box must be the font's own height. With a smaller
      line height (it was 1) Blink rounds the half-leading asymmetrically and the glyphs sit up to 0.75 px above the centre the
      icon is centred on (TASTE "Icon and text share one centre line", #282; icon-text-centre.spec.ts measures it). Every control
      that uses this token has a fixed height or min-height and centres its content, so only the text's offset changes. */
-  --ui-type-button: 500 0.84375rem/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
-  --ui-type-eyebrow: 500 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-button: 500 var(--ui-size-button)/normal var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-type-eyebrow: 500 var(--ui-size-eyebrow)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   /* Every section heading (the small uppercase titles above a group of rows) is padded with this one value:
      6 px above, --ui-heading-gap between it and the group's first row. A new heading style uses it, never its own numbers. */
   --ui-heading-gap: 0.5rem;
@@ -442,7 +456,7 @@
   --t-panel: 240ms;
 }
 @media (pointer: coarse) {
-  :root { --ui-control-h: 2.75rem; --ui-icon: 1.125rem; }
+  :root { --ui-control-h: 2.75rem; --ui-icon: 1.125rem; --ui-size-body: 0.9375rem; --text-input: 1rem; /* ui-literal: D372, iOS never zooms at 16 px */ }
 }
 
 /* Window card (window-card.ts): the pane card's surface plus a quiet header. */
@@ -672,7 +686,7 @@
 }
 .ui-kv-key { justify-self: start; color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-key { display: grid; justify-items: start; }
-.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: 0.6875rem; letter-spacing: var(--ui-tracking); white-space: nowrap; }
+.ui-kv-hint { color: var(--fg-3); font: var(--ui-type-label); font-size: var(--ui-size-eyebrow); letter-spacing: var(--ui-tracking); white-space: nowrap; }
 .ui-kv-value { justify-self: end; color: var(--fg); font: var(--ui-type-body); letter-spacing: var(--ui-tracking); text-align: right; }
 .ui-kv-cell:active { transform: scale(var(--ui-press-scale-soft)); }
 /* The highlighted run: 6 px of even padding either side (cancelled by a -6 px margin so the text
@@ -772,7 +786,7 @@
   border-radius: var(--r-pill);
   background: rgb(from var(--fg) r g b / 0.08);
   color: var(--fg);
-  font: var(--fw-label) 0.8125rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  font: var(--fw-label) var(--ui-size-label)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   letter-spacing: var(--ui-tracking);
   transform-origin: left center;
   transition: background-color var(--t-press) ease;
@@ -783,7 +797,7 @@
 .ui-chip-remove { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--fg-3); cursor: pointer; }
 .ui-chip-remove svg { width: 0.75rem; height: 0.75rem; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .ui-chip-remove:hover { background: rgb(from var(--fg) r g b / 0.1); color: var(--fg); } }
-@media (pointer: coarse) { .ui-chip { height: 2.125rem; font-size: 0.9375rem; } .ui-chip-remove { width: 1.75rem; height: 1.75rem; } }
+@media (pointer: coarse) { .ui-chip { height: 2.125rem; font-size: var(--ui-size-body); } .ui-chip-remove { width: 1.75rem; height: 1.75rem; } }
 /* Pill: the one container for floating capsule controls (the top-bar capsule, icon buttons, the
    sidebar toggle, session tabs). Instances set only their size and content layout; the material,
    hairline, shadow, radius and press feedback live here so they can never drift apart. */
@@ -868,14 +882,14 @@
 .ui-sidebar-avatar {
   display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 0.625rem); height: calc(var(--pill-h) - 0.625rem); border-radius: 50%; color: #fff;
   background: linear-gradient(145deg, oklch(from var(--accent) calc(l + 0.06) c calc(h + var(--ui-avatar-hue, 0))), oklch(from var(--accent) calc(l - 0.12) c calc(h + var(--ui-avatar-hue, 0) + 28)));
-  font: 600 0.75rem/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
+  font: 600 var(--ui-size-eyebrow)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
 }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
-@media (pointer: coarse) { .ui-sidebar-avatar { font-size: 0.875rem; } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
+@media (pointer: coarse) { .ui-sidebar-avatar { font-size: var(--ui-size-body); } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }
 .ui-sidebar-names { display: grid; min-width: 0; gap: 0.25rem; }
 .ui-sidebar-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: var(--fw-label); }
-.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: 0.6875rem; }
-@media (pointer: coarse) { .ui-sidebar-secondary { font-size: 0.75rem; } }
+.ui-sidebar-secondary { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ui-text-secondary); font-size: var(--ui-size-eyebrow); }
+@media (pointer: coarse) { .ui-sidebar-secondary { font-size: var(--ui-size-eyebrow); } }
 .ui-sidebar-settings svg { stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 /* Window lock (lock-toggle.ts, window-card.ts): the padlock glyph itself, no chip. It is centred on
@@ -1038,7 +1052,7 @@
 @media (prefers-reduced-motion: reduce) { .ui-ss-row[data-reset-all] > .ui-ss-main > * { transition: none; } }
 .ui-ss-main { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .ui-ss-keys[data-capturing] { color: var(--accent); }
-.ui-ss-keys kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: var(--r-xs); background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption, 0.6875rem)/1 var(--font-ui); text-align: center; }
+.ui-ss-keys kbd { min-width: 1.375rem; padding: 0.25rem 0.375rem; border-radius: var(--r-xs); background: var(--hover); color: var(--fg-2); font: var(--fw-label, 500) var(--text-caption)/1 var(--font-ui); text-align: center; }
 .ui-ss-warn { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.25rem 0 0.5rem; color: var(--warn, var(--fg-2)); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
 .ui-ss-actions { display: inline-flex; gap: 0.375rem; }
 .ui-ss-actions button { min-height: var(--ui-control-h, 1.875rem); padding: 0 0.75rem; border: 1px solid var(--overlay-line); border-radius: var(--r-pill); background: none; color: var(--fg); font: var(--ui-type-button); cursor: pointer; }
@@ -1138,8 +1152,8 @@
 .ui-sp-name-row { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; }
 .ui-sp-name { min-width: 0; max-width: 100%; padding: 0 2px; margin: 0 -2px; border: 0; border-radius: var(--r-xs); background: none; outline: none; color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); }
 .ui-sp-name:focus { background: var(--hover); }
-.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 0.75rem); white-space: nowrap; }
-.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary, 0.75rem); letter-spacing: var(--ui-tracking); }
+.ui-sp-here { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary); white-space: nowrap; }
+.ui-sp-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); font-size: var(--text-secondary); letter-spacing: var(--ui-tracking); }
 .ui-sp-actions { display: flex; flex: none; gap: 2px; }
 .ui-ts-tag, .ui-ts-source .ui-ts-reset, .ui-ss-actions button { white-space: nowrap; }
 .keyedit-list::before { white-space: nowrap; }
@@ -1293,7 +1307,7 @@
 
 /* A value run (kv-decorate.ts `parts`): small items that wrap only between them; each is one unit, tinted, with its note one
    step quieter than the name but still readable (--fg-2 clears 4.5:1 on the tint). */
-.ui-kv-part { display: inline-flex; max-width: 100%; margin: 1px 0; padding: 0 0.4375rem; border-radius: var(--r-pill); background: color-mix(in oklab, var(--fg) 9%, transparent); font-size: var(--text-secondary, 0.75rem); line-height: 1.25rem; vertical-align: top; }
+.ui-kv-part { display: inline-flex; max-width: 100%; margin: 1px 0; padding: 0 0.4375rem; border-radius: var(--r-pill); background: color-mix(in oklab, var(--fg) 9%, transparent); font-size: var(--text-secondary); line-height: 1.25rem; vertical-align: top; }
 .ui-kv-part-name { min-width: 4ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-kv-part-note { flex: none; margin-left: 0.4em; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 /* A pressable value with a chevron (kv-decorate.ts `chevron`): the room for the chevron is the value's own padding. */
@@ -1325,10 +1339,10 @@
 .ui-setting + .ui-setting { border-top: 1px solid var(--line); }
 .ui-setting-names { display: contents; }
 .ui-setting-title { grid-row: 1; display: flex; align-items: center; min-width: 0; min-height: var(--ui-control-h, 1.875rem); color: var(--fg); font: var(--ui-type-label); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: normal; }
-.ui-setting-explain { grid-row: 2; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-setting-explain { grid-row: 2; color: var(--ui-text-secondary); font-size: var(--text-secondary); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
 .ui-setting-control { grid-row: 3; display: flex; align-items: center; gap: 0.25rem; margin: 0.375rem 0 0.25rem; height: var(--ui-control-h, 1.875rem); }
-.ui-setting-caption { grid-row: 4; color: var(--fg-3); font-size: var(--text-caption, 0.6875rem); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); }
-.ui-setting-input { width: 7rem; min-width: 0; height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0 0.625rem; border: 0; border-radius: var(--r-sm); background: var(--hover); color: var(--fg); font: var(--ui-type-label); font-size: var(--text-input, 0.8125rem); line-height: normal; letter-spacing: var(--ui-tracking); text-align: left; transition: background-color var(--t-press) ease, color var(--t-press) ease; }
+.ui-setting-caption { grid-row: 4; color: var(--fg-3); font-size: var(--text-caption); font-weight: var(--fw-secondary, 400); line-height: 1.4; letter-spacing: var(--ui-tracking); }
+.ui-setting-input { width: 7rem; min-width: 0; height: calc(var(--ui-control-h, 1.875rem) - 0.25rem); padding: 0 0.625rem; border: 0; border-radius: var(--r-sm); background: var(--hover); color: var(--fg); font: var(--ui-type-label); font-size: var(--text-input, var(--ui-size-label)); line-height: normal; letter-spacing: var(--ui-tracking); text-align: left; transition: background-color var(--t-press) ease, color var(--t-press) ease; }
 .ui-setting-input:focus { outline: none; }
 [data-focus-ring="on"] .ui-setting-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ui-setting[data-invalid] .ui-setting-input { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
@@ -1341,7 +1355,7 @@
 /* The refusal slides open under the row (height and opacity) and says what is allowed and what is still in use. */
 .ui-setting-refusal { display: grid; grid-column: 1 / -1; grid-row: 5; justify-self: stretch; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--t-pop) var(--ease-out, ease-out), opacity var(--t-pop) ease; }
 .ui-setting-refusal > div { min-height: 0; overflow: hidden; }
-.ui-setting-refusal p { margin: 0; padding-top: 0.375rem; color: var(--danger); font-size: var(--text-secondary, 0.75rem); line-height: 1.4; letter-spacing: var(--ui-tracking); }
+.ui-setting-refusal p { margin: 0; padding-top: 0.375rem; color: var(--danger); font-size: var(--text-secondary); line-height: 1.4; letter-spacing: var(--ui-tracking); }
 .ui-setting[data-invalid] .ui-setting-refusal { grid-template-rows: 1fr; opacity: 1; }
 /* ⌘K jumped here: a faint fill that fades, never an outline (TASTE: selection is quiet). */
 .ui-setting[data-found] { border-radius: var(--r-sm); animation: ui-setting-found 1800ms ease-out; }
@@ -1359,15 +1373,15 @@
 .ui-dp-pop { padding: 0; width: max-content; }
 .ui-dp { display: grid; gap: 0.375rem; padding: 0.625rem 0.75rem 0.75rem; min-width: 12rem; }
 .ui-dp-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: calc(var(--ui-control-h, 1.875rem) - 0.375rem); }
-.ui-dp-title { min-width: 0; margin: 0; color: var(--fg); font: var(--ui-type-label); font-size: var(--text-body, 0.8125rem); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: 1.3; overflow-wrap: anywhere; }
+.ui-dp-title { min-width: 0; margin: 0; color: var(--fg); font: var(--ui-type-label); font-size: var(--text-body); font-weight: var(--fw-label, 500); letter-spacing: var(--ui-tracking); line-height: 1.3; overflow-wrap: anywhere; }
 .ui-dp-expand { flex: none; margin-right: -0.25rem; }
-.ui-dp-lead { margin: 0; color: var(--fg); font-size: var(--text-body, 0.8125rem); font-weight: var(--fw-secondary, 400); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-dp-lead { margin: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-secondary, 400); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
 .ui-dp-bullets { display: grid; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
-.ui-dp-bullet { position: relative; padding-left: 1rem; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
+.ui-dp-bullet { position: relative; padding-left: 1rem; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.45; letter-spacing: var(--ui-tracking); text-wrap: pretty; }
 .ui-dp-bullet::before { content: ""; position: absolute; left: 0.125rem; top: 0.5em; width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--fg-3); }
-.ui-dp-empty { margin: 0; color: var(--ui-text-secondary); font-size: var(--text-secondary, 0.75rem); line-height: 1.45; }
+.ui-dp-empty { margin: 0; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.45; }
 .ui-dp-table-wrap { margin-top: 0.125rem; overflow-x: auto; }
-.ui-dp-table { width: 100%; border-collapse: collapse; font-size: var(--text-caption, 0.6875rem); line-height: 1.35; }
+.ui-dp-table { width: 100%; border-collapse: collapse; font-size: var(--text-caption); line-height: 1.35; }
 .ui-dp-table th { padding: 0 0.5rem 0.25rem 0; color: var(--fg-3); font-weight: var(--fw-label, 500); text-align: left; text-transform: uppercase; letter-spacing: 0.02em; }
 .ui-dp-table td { padding: 0.25rem 0.5rem 0.25rem 0; border-top: 1px solid var(--line); color: var(--ui-text-secondary); vertical-align: top; }
 .ui-dp-table td:first-child { color: var(--fg); }

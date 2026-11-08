@@ -59,7 +59,7 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 const STYLE = `
 .tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
 .tip, .tip-sizer { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: var(--r-sm); width: max-content; max-width: min(17.5rem, calc(100vw - 2 * ${MARGIN}px)); overflow: hidden;
-  font: var(--fw-label, 500) var(--text-secondary, 0.75rem)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
+  font: var(--fw-label, 500) var(--text-secondary)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label.is-leaving { position: absolute; left: 0.625rem; top: 0.375rem; white-space: nowrap; }
 .tip-arrow { position: absolute; left: 0; width: 0.5rem; height: 0.5rem; margin-left: -0.25rem; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
@@ -77,8 +77,8 @@ const STYLE = `
 .ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -0.3125rem; border-right: 0; border-bottom: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
 .ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -0.3125rem; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
 .ui-confirm-tip-text { display: grid; gap: 0.1875rem; }
-.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 0.8125rem)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 0.75rem)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button { display: inline-grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent;
   color: var(--fg-2); cursor: pointer;
@@ -105,7 +105,7 @@ const STYLE = `
   .ui-confirm-tip[data-stack][data-named] button { width: 100%; }
 }
 /* Named actions: the buttons carry their words. */
-.ui-confirm-tip[data-named] button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: 100%; overflow: hidden; padding: 0 0.75rem; font: 500 var(--text-secondary, 0.75rem)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+.ui-confirm-tip[data-named] button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: 100%; overflow: hidden; padding: 0 0.75rem; font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 /* A label that still does not fit (a long host name) is cut with an ellipsis inside its button, never run past the card's edge. */
 .ui-confirm-tip[data-named] button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Two named actions sit side by side and share the row; the dismissal is a real button with a quiet flat fill, not loose text. */
