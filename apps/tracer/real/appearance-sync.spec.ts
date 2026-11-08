@@ -413,6 +413,44 @@ test("theme and font changes reach the same account live and after reload withou
   }
 });
 
+/** A remote account look updates the page without dismissing a palette query this device is using. */
+test("a remote look change keeps the local palette open with its query", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
+  const evidence = tracerEvidencePath("appearance-sync");
+  await mkdir(evidence, { recursive: true });
+  const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  try {
+    const a = watchLayout(await first.newPage());
+    await enrol(a, server);
+    await settled(a);
+    await second.addCookies(await first.cookies());
+    const b = watchLayout(await second.newPage());
+    await b.goto(server.origin + "/");
+    await expect(windows(b)).toHaveCount(1);
+    await settled(b);
+
+    await b.keyboard.press(await b.evaluate(isMacPlatform) ? "Meta+K" : "Control+Shift+K");
+    const palette = b.locator("#palette");
+    const input = b.locator("#palette-input");
+    await expect(palette).toBeVisible();
+    await input.fill("Ter");
+    await expect(input).toHaveValue("Ter");
+
+    await choosePaletteValue(a, "Theme: Solid");
+    await expect(a.locator("#palette")).toBeHidden();
+    await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 30_000 }).toBe("solid");
+    await expect(b.locator("html")).toHaveAttribute("data-look", "solid");
+    await expect(palette).toBeVisible();
+    await expect(input).toHaveValue("Ter");
+    await b.screenshot({ path: `${evidence}/remote-look-keeps-palette-query.png` });
+  } finally {
+    await second.close();
+    await first.close();
+    await server.dispose();
+  }
+});
+
 /** Replays J359's close-together edits against the real canvas server; the newer local edit must be the next document revision. */
 test("a newer local appearance edit survives an older remote look while its announce is pending", async ({ browser }) => {
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });

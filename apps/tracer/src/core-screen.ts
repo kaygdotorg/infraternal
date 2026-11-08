@@ -478,14 +478,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // at 1440x900 DPR 2: a view-transition crossfade froze rendering for 80-220 ms while it
   // captured two full-screen snapshots, and the old per-element fades repainted every
   // blurred surface per frame; the instant swap costs one repaint (p95 16.7-33 ms headless).
-  // The palette closes in the same step so it never fades over a repainting page.
+  // Remote document updates keep this device's overlays open; local palette actions close through the action handler.
   const swapLook = (): void => {
-    // Every token changes in this step, so no element may start a transition from its old value (a window card's border
-    // colour, the palette's own close): transitions are off while the first frame with the new styles is made, and on again
+    // Every token changes in this step, so no element may start a transition from its old value (for example a window card's
+    // border or the palette when a local action closes it): transitions are off while the first frame with the new styles is made, and on again
     // after it. The attribute is set before anything changes, and removed after two frames, so the style recalculation that
     // would start the transitions always sees it. It costs one attribute and no forced layout (TASTE "No lag while animating").
     ROOT.setAttribute("data-look-swap", "");
-    setPalette(false, "keyboard");
     void applyLook(true);
     requestAnimationFrame(() => requestAnimationFrame(() => ROOT.removeAttribute("data-look-swap")));
   };
@@ -1464,7 +1463,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       currentThemeId = value!;
       if (!options.accountId) writeLocal("tracer.theme", currentThemeId);
       swapLook();
-      return true;
+      return false;
     } else if (kind === "font" && fontById(value)) {
       committedFont = fontById(value)!;
       if (!options.accountId) rememberFont(committedFont);
@@ -1475,17 +1474,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       cardLevel = Number(value);
       if (!options.accountId) writeLocal("tracer.card", value!);
       swapLook();
-      return true;
+      return false;
     } else if (kind === "windows" && validLevel(Number(value))) {
       windowLevel = Number(value);
       if (!options.accountId) writeLocal("tracer.windows", value!);
       swapLook();
-      return true;
+      return false;
     } else if (kind === "bg" && validBackground(value ?? null)) {
       background = value!;
       if (!options.accountId) writeLocal("tracer.background", value!);
       swapLook();
-      return true;
+      return false;
     } else if (kind === "themes") {
       // A row of the Themes group (`canvas/themes/controller.ts` offers the rows and listens): the palette closes, the controller switches the theme.
       setPalette(false, source);
