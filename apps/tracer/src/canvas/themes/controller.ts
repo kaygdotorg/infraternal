@@ -5,7 +5,8 @@
  * on this device. The account-keyed browser cache is only for first paint while the existing canvas subscription is loading.
  *
  * A new or older account document may lack a look or the newer appearance fields. In that case the newest account cache or one-time browser values seed the
- * missing state. Once the complete look is confirmed by the canvas store, this module refreshes its derived cache and removes the old global keys.
+ * missing state. An existing account look wins over legacy device values; those values seed only a look the account has not saved yet. Once the complete look is
+ * confirmed by the canvas store, this module refreshes its derived cache and removes the old global keys.
  */
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { parseLook, type DocLook, type DocWindowSizes } from "../model/schema";

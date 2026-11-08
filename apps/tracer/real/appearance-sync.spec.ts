@@ -463,6 +463,52 @@ test("a newer local appearance edit survives an older remote look while its anno
   }
 });
 
+/** Uses light and dark clients on one real account to ensure OS defaults cannot rewrite account basics or Reset. */
+test("account basics and Reset stay the same on clients with different OS schemes", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
+  const light = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, colorScheme: "light" });
+  const dark = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true, colorScheme: "dark" });
+  try {
+    const a = watchLayout(await light.newPage());
+    await enrol(a, server);
+    await settled(a);
+    await choosePaletteValue(a, "Theme: Frosted");
+    await expect.poll(async () => {
+      const look = (await cache(a)).canonical.look;
+      return look?.selected === "frosted" && look.themes.find((theme) => theme.id === "frosted")?.colors === "latte";
+    }).toBe(true);
+    await settled(a);
+    const accountBasicsBefore = (await cache(a)).canonical.look?.basics;
+    expect(accountBasicsBefore).toEqual({ colors: "latte", font: "maple-mono-nf", uiSize: 100 });
+    expect((await cache(a)).canonical.look?.selected).toBe("frosted");
+
+    await dark.addCookies(await light.cookies());
+    const b = watchLayout(await dark.newPage());
+    await b.goto(server.origin + "/");
+    await expect(windows(b)).toHaveCount(1);
+    await settled(b);
+    expect(await b.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)).toBe(true);
+    const deviceCacheBasics = await b.evaluate(() => {
+      const key = Object.keys(localStorage).find((candidate) => candidate.startsWith("tracer.look.account."));
+      return key ? JSON.parse(localStorage.getItem(key) ?? "null").basics : undefined;
+    });
+
+    // The dark client picks a built-in theme based on the account list. This must not copy its OS default into account basics.
+    await choosePaletteValue(b, "Theme: Tinted");
+    await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 15_000 }).toBe("tinted");
+    await settled(a);
+    await settled(b);
+    const accountBasicsAfter = (await cache(a)).canonical.look?.basics;
+    console.log(`APPEARANCE_ACCOUNT_BASICS ${JSON.stringify({ accountBasicsBefore, deviceCacheBasics, accountBasicsAfter })}`);
+    expect(accountBasicsAfter).toEqual(accountBasicsBefore);
+    expect(deviceCacheBasics).toEqual(accountBasicsBefore);
+  } finally {
+    await dark.close();
+    await light.close();
+    await server.dispose();
+  }
+});
+
 test("legacy appearance values migrate once into the new account document", async ({ browser }) => {
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
   const evidence = tracerEvidencePath("appearance-sync");

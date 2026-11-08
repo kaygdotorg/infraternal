@@ -173,6 +173,23 @@ test("a saved list comes back as it was, and Reset still goes to the starting po
   expect(again.themes().find((t) => t.id === "tinted")!.colors).toBe("mocha");
 });
 
+/** A remote account look supplies both the theme list and the built-in Reset baseline on every device. */
+test("loading an account look replaces device basics and uses them for Reset", () => {
+  const accountBasics = { colors: "latte", font: "maple-mono-nf", uiSize: 100 };
+  const deviceBasics = { colors: "mocha", font: "geist-mono", uiSize: 125 };
+  const saved = createThemeStore(accountBasics).snapshot();
+  const store = createThemeStore(deviceBasics);
+
+  expect(store.load(saved)).toBe(true);
+  expect(store.snapshot().basics).toEqual(accountBasics);
+  expect(store.changed("tinted")).toBe(false);
+  store.select("tinted");
+  store.edit({ tint: 60 });
+  store.reset("tinted");
+  expect(store.selected()).toMatchObject(accountBasics);
+  expect(store.changed("tinted")).toBe(false);
+});
+
 test("a damaged saved list is mended, never trusted: numbers are clamped, unknown things fall back, built-in themes come back", () => {
   expect(restore(null)).toBeUndefined();
   expect(restore({ v: 2, basics, themes: [] })).toBeUndefined();

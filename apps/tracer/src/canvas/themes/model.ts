@@ -7,6 +7,7 @@
  * - There are three built-in themes: Solid (100% tint, 0% blur), Tinted (75%, 25%) and Frosted (50%, 50%). The person may change
  *   any of them; **Reset** puts a built-in theme's numbers back and exists only while it differs from them.
  * - **Colour** is a version of a scheme: dark shows dark cards, light shows light ones (D322 round 2, D338).
+ * - `basics` is the account's starting point for built-in themes and Reset. Loading a saved account look replaces the device's startup values, so Reset is the same on every device.
  * - **Add** makes a new theme as a copy of the selected one (D341). Its name can change; the built-in names cannot.
  * - A theme also holds its **background**: Solid (the scheme's own colour, or another solid), one of the scheme's gradients, or the
  *   person's own (`gradients.ts`).
@@ -107,7 +108,7 @@ export interface ThemeStore {
   remove(id: string): void;
   /** Everything that is saved, as plain data (see {@link SavedThemes}). */
   snapshot(): SavedThemes;
-  /** Replaces the list with a saved one (checked by {@link restore}); false when it is unusable and nothing changed. */
+  /** Replaces themes and the account-wide Reset baseline with a saved look (checked by {@link restore}); false when unusable. */
   load(saved: unknown): boolean;
   onChange(listener: () => void): () => void;
 }
@@ -172,12 +173,12 @@ function nextSerial(list: readonly AppearanceTheme[]): number {
   return max + 1;
 }
 
-/** Makes the store. `basics` is what the built-in themes start from; `saved` (if usable, see {@link restore}) is the list the person had. */
+/** Makes the store. `basics` seeds a new look; a usable saved account look replaces it, including the built-in Reset baseline. */
 export function createThemeStore(basics: Basics, saved?: unknown, start: string = DEFAULT_THEME): ThemeStore {
   const restored = saved === undefined ? undefined : restore(saved);
   // The saved starting point wins over today's: a built-in theme's "changed" is measured against what it started as, not against whatever the product shows now.
-  const base: Basics = restored ? restored.basics : basics;
-  const defaults = new Map(BUILT_IN_IDS.map((id) => [id, builtIn(id, base)] as const));
+  let base: Basics = restored ? restored.basics : basics;
+  let defaults = new Map(BUILT_IN_IDS.map((id) => [id, builtIn(id, base)] as const));
   let list: AppearanceTheme[] = restored ? restored.themes : [...defaults.values()].map(copyTheme);
   let current = list.some((t) => t.id === (restored?.selected ?? start)) ? (restored?.selected ?? start) : DEFAULT_THEME;
   const listeners = new Set<() => void>();
@@ -232,6 +233,8 @@ export function createThemeStore(basics: Basics, saved?: unknown, start: string 
     load(next) {
       const r = restore(next);
       if (!r) return false;
+      base = { ...r.basics };
+      defaults = new Map(BUILT_IN_IDS.map((id) => [id, builtIn(id, base)] as const));
       list = r.themes;
       current = r.selected;
       emit();
