@@ -11,6 +11,7 @@ use std::{
     collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command,
 };
 
+/// Creates a started kernel node and its private state directory for route inventory proofs.
 fn fixture() -> (PathBuf, Node) {
     let target = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let directory = target.join(format!("review-inventory-{}", std::process::id()));
@@ -23,9 +24,9 @@ fn fixture() -> (PathBuf, Node) {
         local_key: None,
         server: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         from_version: None,
         version: 1,
@@ -40,9 +41,9 @@ fn fixture() -> (PathBuf, Node) {
         upserted: BTreeMap::new(),
         merged: BTreeMap::new(),
         removed: Vec::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         removed_peer_names: Vec::new(),
     })
     .unwrap();
