@@ -20,6 +20,8 @@ pub(crate) const FALLBACK_MESH_MTU: u16 = 1200;
 pub(crate) const IPV6_MINIMUM_MTU: u16 = 1280;
 /// The largest `WireGuard` UDP overhead for an outer IPv6 packet.
 const OUTER_OVERHEAD: u32 = 80;
+/// `WireGuard` pads each encrypted data payload to this block size.
+const WIREGUARD_PADDING: u32 = 16;
 #[cfg(any(all(feature = "relay", target_os = "linux"), test))]
 /// The encrypted `WireGuard` transport header and tag in one data packet.
 const WIREGUARD_PACKET_OVERHEAD: u32 = 32;
@@ -64,7 +66,7 @@ pub(crate) fn for_relay_datagram(max_datagram_size: Option<usize>) -> u16 {
         let inner_budget = size
             .saturating_sub(WIREGUARD_PACKET_OVERHEAD + RELAY_LINK_ID_OVERHEAD)
             .min(u32::from(u16::MAX));
-        mtu_for_inner_budget(inner_budget & !15)
+        mtu_for_inner_budget(inner_budget)
     })
 }
 
@@ -85,13 +87,14 @@ pub(crate) fn watcher(mtu: u16) -> (watch::Sender<u16>, MtuWatcher) {
     (sender, receiver.into())
 }
 
-/// Return the safe inner MTU for one route after reserving worst-case encapsulation overhead.
+/// Return the safe inner MTU after reserving IPv6 encapsulation and encryption padding.
 fn mtu_for_route(route_mtu: u32) -> u16 {
     mtu_for_inner_budget(route_mtu.saturating_sub(OUTER_OVERHEAD))
 }
 
-/// Bound a converted inner packet budget to a useful 16-bit mesh route MTU.
+/// Round a packet budget down to the cipher padding boundary and a useful 16-bit mesh MTU.
 fn mtu_for_inner_budget(inner: u32) -> u16 {
+    let inner = inner - inner % WIREGUARD_PADDING;
     if inner < u32::from(MIN_MESH_MTU) {
         return MIN_MESH_MTU;
     }
@@ -194,10 +197,10 @@ mod tests {
         assert_eq!(mtu_for_route(1280), 1200);
     }
 
-    /// A normal 1500-byte route keeps the standard 1420-byte inner packet size.
+    /// A normal 1500-byte route rounds down so encryption padding still fits its IPv6 packets.
     #[test]
     fn keeps_the_largest_safe_mtu_on_a_normal_route() {
-        assert_eq!(mtu_for_route(1500), 1420);
+        assert_eq!(mtu_for_route(1500), 1408);
     }
 
     /// Relay budgets include `WireGuard`'s 16-byte packet padding as well as its framing.
@@ -227,7 +230,7 @@ mod tests {
     /// The shared interface follows the largest peer budget and the IPv6 link floor.
     #[test]
     fn the_largest_peer_budget_sets_the_interface_mtu() {
-        assert_eq!(interface_mtu(&[1200, 1420]), 1420);
+        assert_eq!(interface_mtu(&[1200, 1408]), 1408);
     }
 
     /// An interface keeps the IPv6 minimum while every peer route uses a smaller packet budget.
@@ -280,5 +283,73 @@ mod tests {
         let route = "route to: 10.69.69.218\ndestination: 10.69.69.218\ninterface: en0\nflags: <UP,HOST>\n recvpipe sendpipe ssthresh rtt,msec rttvar hopcount mtu expire\n 0 0 1 152 11 0 9000 0\n";
         let interface = "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1280\n";
         assert_eq!(parse_macos_route_mtu(route, interface).unwrap(), 1280);
+    }
+}
+
+#[cfg(test)]
+mod review_j375_padding_tests {
+    //! Checks direct IPv6 budgets against the pinned engine's shared-MTU padding rule (#381).
+    use super::*;
+
+    /// A narrow direct IPv6 peer must fit its underlay even when another peer raises the TUN MTU.
+    #[test]
+    fn mixed_path_direct_ipv6_budget_accounts_for_wireguard_padding() {
+        let narrow_underlay = 1450_u32;
+        let narrow_inner = mtu_for_route(narrow_underlay);
+        let shared_mtu = interface_mtu(&[narrow_inner, mtu_for_route(1500)]);
+        use gotatun::{
+            noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
+            packet::{Packet, WgKind},
+            tun::MtuWatcher,
+            x25519,
+        };
+        use std::sync::Arc;
+        let a = x25519::StaticSecret::from([1_u8; 32]);
+        let b = x25519::StaticSecret::from([2_u8; 32]);
+        let a_pub = x25519::PublicKey::from(&a);
+        let b_pub = x25519::PublicKey::from(&b);
+        let mut sender = Tunn::new(
+            a,
+            b_pub,
+            None,
+            None,
+            IndexTable::from_os_rng(),
+            Arc::new(RateLimiter::new(&a_pub, 100)),
+        );
+        let mut receiver = Tunn::new(
+            b,
+            a_pub,
+            None,
+            None,
+            IndexTable::from_os_rng(),
+            Arc::new(RateLimiter::new(&b_pub, 100)),
+        );
+        let init = sender.format_handshake_initiation(false).unwrap();
+        let TunnResult::WriteToNetwork(response) =
+            receiver.handle_incoming_packet(WgKind::HandshakeInit(init))
+        else {
+            panic!("handshake response");
+        };
+        let TunnResult::WriteToNetwork(_) = sender.handle_incoming_packet(response) else {
+            panic!("handshake finish");
+        };
+        let mut watcher = MtuWatcher::new(shared_mtu);
+        let packet = Packet::from_bytes(bytes::BytesMut::from(
+            vec![0_u8; usize::from(narrow_inner)].as_slice(),
+        ));
+        let Some(WgKind::Data(encrypted)) =
+            sender.handle_outgoing_packet(packet, Some(&mut watcher))
+        else {
+            panic!("data packet");
+        };
+        let encrypted_bytes = encrypted.into_bytes().len();
+        let outer_packet = u32::try_from(encrypted_bytes).unwrap() + 48;
+        println!(
+            "underlay={narrow_underlay} route_mtu={narrow_inner} shared_mtu={shared_mtu} actual_encrypted_bytes={encrypted_bytes} ipv6_outer={outer_packet}"
+        );
+        assert!(
+            outer_packet <= narrow_underlay,
+            "direct IPv6 budget forces outer fragmentation after padding"
+        );
     }
 }
