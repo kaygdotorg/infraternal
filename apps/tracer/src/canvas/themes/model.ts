@@ -134,7 +134,7 @@ export function restore(saved: unknown): SavedThemes | undefined {
   if (raw.v !== 1 || typeof raw.basics !== "object" || raw.basics === null || !Array.isArray(raw.themes)) return undefined;
   const b = raw.basics as Partial<Basics>;
   const basics: Basics = {
-    colors: typeof b.colors === "string" && b.colors in THEMES ? b.colors : "mocha",
+    colors: typeof b.colors === "string" && Object.hasOwn(THEMES, b.colors) ? b.colors : "mocha",
     font: fontById(typeof b.font === "string" ? b.font : null) ? (b.font as string) : "maple-mono-nf",
     uiSize: clamp(b.uiSize, UI_SIZE_RANGE.min, UI_SIZE_RANGE.max, 100),
   };
@@ -152,7 +152,7 @@ export function restore(saved: unknown): SavedThemes | undefined {
       blur: clamp(item.blur, 0, 100, base.blur),
       grain: clamp(item.grain, 0, 100, base.grain),
       font: typeof item.font === "string" && fontById(item.font) ? item.font : base.font,
-      colors: typeof item.colors === "string" && item.colors in THEMES ? item.colors : base.colors,
+      colors: typeof item.colors === "string" && Object.hasOwn(THEMES, item.colors) ? item.colors : base.colors,
       uiSize: clamp(item.uiSize, UI_SIZE_RANGE.min, UI_SIZE_RANGE.max, base.uiSize),
       background: isBackground(item.background) ? item.background : base.background,
       customSolid: isHex(item.customSolid) ? item.customSolid : base.customSolid,

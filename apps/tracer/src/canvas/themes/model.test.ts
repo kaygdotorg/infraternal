@@ -211,6 +211,17 @@ test("a damaged saved list is mended, never trusted: numbers are clamped, unknow
   expect(r.themes.find((t) => t.id === "custom-7")).toMatchObject({ name: "Theme", tint: 20 });
 });
 
+test("prototype-named Colours are treated as unknown saved ids", () => {
+  for (const id of ["toString", "__proto__", "constructor"]) {
+    const saved = createThemeStore(basics).snapshot();
+    saved.basics.colors = id;
+    saved.themes.find((theme) => theme.id === "tinted")!.colors = id;
+    const restored = restore(saved)!;
+    expect(restored.basics.colors, `basics ${id}`).toBe("mocha");
+    expect(restored.themes.find((theme) => theme.id === "tinted")!.colors, `theme ${id}`).toBe("mocha");
+  }
+});
+
 test("removing a theme the person made keeps the built-in ones and falls back to Tinted when it was selected", () => {
   const store = createThemeStore(basics);
   const made = store.add();

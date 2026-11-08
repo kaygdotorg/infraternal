@@ -11,6 +11,7 @@
 import { mkdirSync } from "node:fs";
 import { expect, test, type Browser, type Page } from "playwright/test";
 import { paletteOpen } from "./settings-palette";
+import { createThemeStore } from "../src/canvas/themes/model";
 
 /** Optional directory for the review screenshots written by the capture cases. */
 const SHOTS = process.env.THEMES_SHOTS;
@@ -47,6 +48,16 @@ test.describe("the Themes window", () => {
     await expect(page.locator(`${WINDOW} .ui-theme-add`)).toBeVisible();
     await expect(page.locator(`${WINDOW} .ui-theme[data-id="tinted"] .ui-theme-pick`)).toHaveAttribute("aria-checked", "true");
     expect(await look(page)).toMatchObject({ id: "tinted", tint: "0.75", blur: "6px", scheme: "dark", theme: "mocha", grain: false });
+  });
+
+  test("a prototype-named saved Colour leaves the Themes window usable", async ({ page }) => {
+    const saved = createThemeStore({ colors: "mocha", font: "maple-mono-nf", uiSize: 100 }).snapshot();
+    saved.themes.find((theme) => theme.id === "tinted")!.colors = "__proto__";
+    await page.addInitScript((look) => localStorage.setItem("tracer.look", JSON.stringify(look)), saved);
+    await open(page);
+    await expect(page.locator(`${WINDOW} .ui-theme-strip`)).toBeVisible();
+    await expect(page.locator(`${WINDOW} .cl-colour-row[data-id="catppuccin"]`)).toBeVisible();
+    expect(await look(page)).toMatchObject({ theme: "mocha", id: "tinted" });
   });
 
   test("the plus card makes a copy of the selected theme, selects it and lets its name change", async ({ page }) => {
