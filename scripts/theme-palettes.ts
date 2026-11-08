@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The published palettes of the colour schemes added by D329 (#323), and the D80 repair of each.
+ * The published palettes of the colour schemes added by D329 (#323), repaired for D80 and the stricter text contrast in D365.
  *
  * Run `bun scripts/theme-palettes.ts` from the repository root. For every scheme it prints (1) the compact `scheme(...)` lines to paste into
- * `packages/ui/src/themes.ts`, with every colour repaired by `repair` (OKLab lightness only: D80), and (2) a log of each colour that
- * changed, as published -> repaired with both ratios. The log is the record D80 asks for; it is kept in docs/design/THEME-AUDIT.md.
+ * `packages/ui/src/themes.ts`, with every text colour repaired by OKLab lightness only, and (2) a log of each colour that
+ * changed, as published -> repaired with the weakest surface ratios. The log records the D365 palette repair.
  *
  * Each entry holds the colours the upstream project publishes for the scheme (the source and licence are in THIRD_PARTY_NOTICES.md).
  * `bright` hues are the upstream's bright slot where it has one, else the hue moved 0.06 in OKLab lightness away from the background.
- * Black and white of the ANSI tables are not hues (see `theme-audit.ts`); they take the scheme's surface and softest text.
+ * ANSI black and white are repaired too because they can be foreground text; all eight normal and bright slots meet D365's line.
  */
 import { auditTheme, cardSurface, contrast, repair } from "../packages/ui/src/theme-audit";
 import { hexToOklab, oklabToHex } from "../packages/ui/src/color";
 import type { Ansi, Theme } from "../packages/ui/src/themes";
 import { gradientColours } from "../apps/tracer/src/canvas/themes/gradients";
 
-/** Published palette values and provenance used as input to the D80 contrast repair. */
+/** Published palette values and provenance used as input to the D365 contrast repair. */
 interface Published {
   id: string; name: string; dark: boolean; source: string;
   bg: string; fg: string; fg2: string; fg3: string; accent: string;
@@ -88,38 +88,78 @@ const SCHEMES: Published[] = [
 /** Moves a colour's OKLab lightness by `delta`, keeping hue and chroma. */
 const shifted = (hex: string, delta: number): string => { const [l, a, b] = hexToOklab(hex); return oklabToHex([Math.max(0, Math.min(1, l + delta)), a, b]); };
 
-/** Contrast changes recorded for the D80 repair report. */
+/** Contrast changes recorded for the D365 repair report. */
 const log: string[] = [];
 /** Generated scheme declarations printed for review and copying into themes.ts. */
 const out: string[] = [];
 for (const s of SCHEMES) {
-  const note = (role: string, from: string, to: string): void => { if (from !== to) log.push(`| ${s.name} | ${role} | ${from} (${contrast(from, s.bg).toFixed(2)}:1) | ${to} (${contrast(to, s.bg).toFixed(2)}:1) |`); };
-  const fix = (role: string, colour: string, need: number): string => { const r = repair(colour, s.bg, need); note(role, colour, r); return r; };
+  const side = s.dark ? "lighter" : "darker";
+  /** Records an adjustment with its original and resulting ratio against the weakest supplied surface. */
+  const note = (role: string, from: string, to: string, reportingSurfaces: readonly string[]): void => {
+    if (from !== to) {
+      const beforeSurface = reportingSurfaces.reduce((worst, candidate) => contrast(from, candidate) < contrast(from, worst) ? candidate : worst, reportingSurfaces[0]!);
+      const afterSurface = reportingSurfaces.reduce((worst, candidate) => contrast(to, candidate) < contrast(to, worst) ? candidate : worst, reportingSurfaces[0]!);
+      log.push(`| ${s.name} | ${role} | ${from} (${contrast(from, beforeSurface).toFixed(2)}:1 on ${beforeSurface}) | ${to} (${contrast(to, afterSurface).toFixed(2)}:1 on ${afterSurface}) |`);
+    }
+  };
+  /** Moves a foreground colour toward the readable side of a scheme while preserving its OKLab hue and chroma. */
+  const move = (colour: string, surface: string, need: number): string => {
+    if (contrast(colour, surface) >= need) return colour;
+    const [, a, b] = hexToOklab(colour);
+    let lightness = hexToOklab(colour)[0];
+    const direction = side === "lighter" ? 1 : -1;
+    for (let step = 0; step < 400; step++) {
+      lightness += direction * 0.0025;
+      const next = oklabToHex([Math.max(0, Math.min(1, lightness)), a, b]);
+      if (contrast(next, surface) >= need + 0.02) return next;
+      if (lightness <= 0 || lightness >= 1) return next;
+    }
+    return colour;
+  };
+  /** Repairs one foreground against every surface it can appear on and fails loudly if the colour cannot meet the line. */
+  const fix = (role: string, colour: string, need: number, surfaces: readonly string[] = [s.bg]): string => {
+    let result = colour;
+    for (let pass = 0; pass < 8; pass++) for (const surface of surfaces) result = move(result, surface, need);
+    const failed = surfaces.find((surface) => contrast(result, surface) < need);
+    if (failed) throw new Error(`${s.id} ${role} cannot reach ${need}:1 on ${failed}`);
+    note(role, colour, result, surfaces);
+    return result;
+  };
   const names = ["red", "green", "yellow", "blue", "magenta", "cyan"];
+  let fg = fix("fg", s.fg, 7), fg2 = fix("fg2", s.fg2, 4.5), fg3 = fix("fg3", s.fg3, 4.5), accent = fix("accent", s.accent, 4.5);
   const hues = s.hues.map((h, i) => fix(`ansi ${names[i]}`, h, 4.5));
   const brights = s.hues.map((h, i) => fix(`bright ${names[i]}`, s.bright?.[i] ?? shifted(h, s.dark ? 0.06 : -0.06), 4.5));
-  const fg = fix("fg", s.fg, 7), fg2 = fix("fg2", s.fg2, 4.5), fg3 = fix("fg3", s.fg3, 3), accent = fix("accent", s.accent, 3);
-  // ok is the scheme's green; danger (ansi 1) and warn (ansi 3) are held to 3:1 and the hues are already held to 4.5:1.
-  const ok = hues[1]!;
-  const black = s.black ?? s.bg, white = s.white ?? s.fg2;
+  const black = fix("ansi black", s.black ?? s.bg, 4.5), white = fix("ansi white", s.white ?? s.fg2, 4.5);
+  let ok = hues[1]!;
   const ansi = [black, ...hues, white] as Ansi;
-  const bright = [s.dark ? fg3 : fg2, ...brights, fg] as Ansi;
+  let bright = [s.dark ? fg3 : fg2, ...brights, fg] as Ansi;
   let theme: Theme = { name: s.name, dark: s.dark, bg: s.bg, fg, fg2, fg3, accent, ok, ansi, bright };
-  // Text on the floating cards: the card surface is the background lifted toward white, so a dark scheme's text needs a little more.
+  // Every interface text role must pass on both the canvas and the floating card surface.
   const surface = cardSurface(theme);
-  const onCards = (role: string, colour: string, need: number): string => { const r = repair(colour, surface, need); if (r !== colour) log.push(`| ${s.name} | ${role} (on cards) | ${colour} (${contrast(colour, surface).toFixed(2)}:1 on the card) | ${r} (${contrast(r, surface).toFixed(2)}:1 on the card) |`); return r; };
+  const surfaces = [s.bg, surface];
+  fg = fix("fg", fg, 7, surfaces);
+  fg2 = fix("fg2", fg2, 4.5, surfaces);
+  fg3 = fix("fg3", fg3, 4.5, surfaces);
+  accent = fix("accent", accent, 4.5, surfaces);
+  ok = fix("ok", ok, 4.5, surfaces);
+  hues[0] = fix("ansi red", hues[0]!, 4.5, surfaces);
+  hues[1] = fix("ansi green", hues[1]!, 4.5, surfaces);
+  hues[2] = fix("ansi yellow", hues[2]!, 4.5, surfaces);
+  theme = { ...theme, fg, fg2, fg3, accent, ok, ansi: [black, ...hues, white] as Ansi,
+    bright: [s.dark ? fg3 : fg2, ...brights, fg] as Ansi };
   // Text over the backgrounds a theme can paint (every gradient and solid colour of the scheme): primary text keeps 4.5:1 over the strongest of them.
   let fgBack = fg;
   for (const colour of gradientColours(theme)) { const r = repair(fgBack, colour, 4.5); if (r !== fgBack) { log.push(`| ${s.name} | fg (over the background ${colour}) | ${fgBack} (${contrast(fgBack, colour).toFixed(2)}:1) | ${r} (${contrast(r, colour).toFixed(2)}:1) |`); fgBack = r; } }
-  const fgCards = onCards("fg", fgBack, 7), fg2Cards = onCards("fg2", fg2, 4.5);
-  theme = { ...theme, fg: fgCards, fg2: fg2Cards, bright: [bright[0]!, ...bright.slice(1, 7), fgCards] as Ansi };
+  fg = fix("fg", fgBack, 7, surfaces);
+  bright = [s.dark ? fg3 : fg2, ...brights, fg] as Ansi;
+  theme = { ...theme, fg, bright };
   const failures = auditTheme(theme);
   if (failures.length) throw new Error(`${s.id} still fails: ${failures.map((f) => `${f.role} ${f.ratio.toFixed(2)}`).join(", ")}`);
   const q = (v: string): string => JSON.stringify(v);
   const h = (list: string[]): string => list.map((c) => c.slice(1)).join(" ");
-  out.push(`  // ${s.source}\n  ${s.id.includes("-") ? q(s.id) : s.id}: scheme(${q(s.name)}, ${s.dark}, ${q(h([s.bg, theme.fg, theme.fg2, fg3, accent, ok]))},\n    ${q(h(ansi))},\n    ${q(h(theme.bright))}),`);
+  out.push(`  // ${s.source}\n  ${s.id.includes("-") ? q(s.id) : s.id}: scheme(${q(s.name)}, ${s.dark}, ${q(h([s.bg, theme.fg, theme.fg2, fg3, accent, ok]))},\n    ${q(h([...theme.ansi]))},\n    ${q(h(theme.bright))}),`);
 }
 console.log(out.join("\n"));
-console.log("\n--- D80 log: published -> repaired (OKLab lightness only) ---");
-console.log("| Scheme | Colour | Published (ratio on bg) | Repaired (ratio on bg) |\n|---|---|---|---|");
+console.log("\n--- D365 log: published -> repaired (OKLab lightness only) ---");
+console.log("| Scheme | Colour | Before (weakest surface) | After (weakest surface) |\n|---|---|---|---|");
 console.log(log.join("\n"));

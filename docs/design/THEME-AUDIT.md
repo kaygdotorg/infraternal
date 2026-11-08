@@ -1,30 +1,29 @@
-<!-- Role: the D80 contrast audit of the colour schemes added by D329 (#323): the rules, and every colour the audit changed. -->
-# Colour scheme audit (D80)
+<!-- Role: the D80 and D365 contrast audits of the colour schemes added by D329 (#323): the rules and recorded palette repairs. -->
+# Colour scheme audit (D80, D365)
 
-D80: each scheme passes the contrast audit; a failing colour is fixed by changing only its OKLab lightness, and each change is logged. The
-rules and the repair are code (`packages/ui/src/theme-audit.ts`), run on every scheme by `theme-audit.test.ts`. The published palettes and the
-generator are `scripts/theme-palettes.ts` (`bun scripts/theme-palettes.ts` prints the table of `themes.ts` and this log).
+D80 established the original contrast gate. D365 amends it so every text colour reaches 4.5:1, while primary `fg` keeps 7:1. The current
+rules and repair are code (`packages/ui/src/theme-audit.ts`), and `theme-audit.test.ts` runs them across every scheme. The published palettes
+and generator are `scripts/theme-palettes.ts` (`bun scripts/theme-palettes.ts` prints the compact scheme declarations and repair log).
 
 | Colour | Needs, on the scheme's background |
 |---|---|
 | fg (primary text) | 7:1 |
 | fg2 (secondary text) | 4.5:1 |
-| fg3 (tertiary text) | 3:1 |
-| accent, ok, danger (ANSI red), warn (ANSI yellow) | 3:1 |
-| ANSI red, green, yellow, blue, magenta, cyan, normal and bright | 4.5:1 |
-| fg and fg2 on the floating-card surface | 7:1 and 4.5:1 |
+| fg2, fg3, accent, ok, danger (ANSI red), warn (ANSI yellow) | 4.5:1 |
+| Every ANSI foreground slot, black and white included, normal and bright | 4.5:1 |
+| Every interface text role on the floating-card surface | 4.5:1; primary `fg` remains 7:1 |
 | fg over every background a theme can paint (each gradient and solid colour of the scheme) | 4.5:1 |
 
-ANSI black and white are not hues (black is meant to be dark and white pale), so they are not held to a ratio. Touch targets (44 x 44 pt, the other
-half of D80) are unchanged by a colour scheme.
+ANSI black and white are separate slots from the six hues, but they are also foreground text choices and meet the same line when used as text.
+Touch targets (44 x 44 pt, the other half of D80) are unchanged by a colour scheme.
 
 Light and dark versions of a scheme are one row of the Colour list with two circles. Catppuccin Frappe and Macchiato are dark only, so each has
 a row of its own beside Catppuccin (Latte and Mocha).
 
-## What the audit changed
+## Original D80 repair log
 
-Published value to repaired value, with the contrast ratio of each against the scheme's background (or against the card surface, where said).
-Colours not listed already passed.
+This historical table records the original D80 repair of the D329 palettes. D365 applies the stricter rules above to the complete scheme set;
+its current values are in `packages/ui/src/themes.ts`, and the gate checks every role and surface.
 
 | Scheme | Colour | Published (ratio on bg) | Repaired (ratio on bg) |
 |---|---|---|---|
@@ -135,3 +134,21 @@ Colours not listed already passed.
 | Light Owl | bright yellow | #c69700 (2.59:1) | #996b00 (4.55:1) |
 | Light Owl | bright cyan | #008489 (4.35:1) | #008186 (4.53:1) |
 | Light Owl | fg3 | #989fb1 (2.56:1) | #8a91a3 (3.05:1) |
+
+## D365 repairs
+
+D365 strengthens the text line from 3:1 to 4.5:1 for secondary text, accent, status text and every ANSI foreground slot. Interface roles
+are checked on both the scheme background and the floating-card surface. ANSI black and white stay distinct from the six hues, but are no
+longer exempt when used as foreground text. The palette changes move only OKLab lightness: light themes move toward darker text and dark
+themes toward lighter text, keeping each scheme's hue and chroma.
+
+Ink and Paper show the main difference clearly. Other unchanged roles are retained as authored.
+
+| Scheme | Text role | Before | After |
+|---|---|---|---|
+| Paper | fg3 | `#8d8d92` | `#707075` |
+| Paper | ok | `#1f9d55` | `#00823c` |
+| Paper | ANSI white text | `#8d8d93` | `#707076` |
+| Ink | fg3 | `#5f5f65` | `#818187` |
+| Ink | ANSI black text | `#1b1c1f` | `#797b7e` |
+| Ink | bright ANSI black text | `#5c5c62` | `#7a7a80` |

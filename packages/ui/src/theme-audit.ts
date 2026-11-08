@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The contrast audit of D80, as code: every colour scheme must pass it before it may be offered.
+ * The contrast audit of D365, as code: every colour scheme must pass it before it may be offered.
  *
- * The rules (D80): primary text `fg` at least 7:1 against the scheme's background, secondary text `fg2` at least 4.5:1, tertiary
- * text `fg3` at least 3:1, the accent and the status colours (ok, danger, warn) at least 3:1, and the terminal's hue colours (red,
- * green, yellow, blue, magenta, cyan, in their normal and their bright form) at least 4.5:1, and `fg` and `fg2` keep their 7:1 and 4.5:1 on the
- * floating-card surface too (the card tint is the background lifted toward white, so dark text on it is the harder case for a dark scheme). Black and white of the ANSI table are not
- * hues: black is meant to be dark and white is meant to be pale, so they are not held to a ratio against the background.
+ * Primary text `fg` keeps its stricter 7:1 line from D80. Every other text colour reaches at least 4.5:1 against the scheme background;
+ * all interface roles (`fg`, `fg2`, `fg3`, accent and status colours) also pass on the floating-card surface. ANSI black and white are
+ * included because both slots can be foreground terminal text, just like the six hue slots.
  *
  * A colour that fails is repaired by {@link repair}, which changes only its OKLab lightness (its hue and chroma stay), moving it by the
  * least amount that reaches the ratio. The scheme tables in `themes.ts` hold the repaired values; `scripts/theme-palettes.ts` shows each
@@ -37,29 +35,27 @@ export const cardSurface = (theme: Theme): string => overlayMaterial(theme).surf
 /** One colour of a scheme that is below its line: what it is, the colour, the ratio it has and the one it needs. */
 export interface AuditFailure { role: string; colour: string; ratio: number; need: number }
 
-/** The ANSI hue slots held to 4.5:1: red, green, yellow, blue, magenta, cyan (indices 1 to 6 of the eight-colour tables). */
-const HUES = [1, 2, 3, 4, 5, 6] as const;
-/** Readable labels corresponding to the ANSI hue slots in {@link HUES}. */
-const HUE_NAMES = ["red", "green", "yellow", "blue", "magenta", "cyan"] as const;
+/** Names of the eight ANSI slots, all of which can carry terminal foreground text. */
+const ANSI_NAMES = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"] as const;
 
-/** Every colour of a scheme with the ratio D80 asks of it, in the order they are reported. */
+/** Every text colour of a scheme with the ratio D365 asks of it, in the order they are reported. */
 export function rolesOf(theme: Theme): Array<{ role: string; colour: string; need: number }> {
   return [
     { role: "fg", colour: theme.fg, need: 7 },
     { role: "fg2", colour: theme.fg2, need: 4.5 },
-    { role: "fg3", colour: theme.fg3, need: 3 },
-    { role: "accent", colour: theme.accent, need: 3 },
-    { role: "ok", colour: theme.ok, need: 3 },
-    { role: "danger", colour: theme.ansi[1], need: 3 },
-    { role: "warn", colour: theme.ansi[3], need: 3 },
-    ...HUES.flatMap((i) => [
-      { role: `ansi ${HUE_NAMES[i - 1]}`, colour: theme.ansi[i]!, need: 4.5 },
-      { role: `bright ${HUE_NAMES[i - 1]}`, colour: theme.bright[i]!, need: 4.5 },
+    { role: "fg3", colour: theme.fg3, need: 4.5 },
+    { role: "accent", colour: theme.accent, need: 4.5 },
+    { role: "ok", colour: theme.ok, need: 4.5 },
+    { role: "danger", colour: theme.ansi[1], need: 4.5 },
+    { role: "warn", colour: theme.ansi[3], need: 4.5 },
+    ...ANSI_NAMES.flatMap((name, i) => [
+      { role: `ansi ${name}`, colour: theme.ansi[i]!, need: 4.5 },
+      { role: `bright ${name}`, colour: theme.bright[i]!, need: 4.5 },
     ]),
   ];
 }
 
-/** The colours of `theme` that are below D80's lines. Empty means the scheme passes. */
+/** The colours of `theme` that are below D365's lines. Empty means the scheme passes. */
 export function auditTheme(theme: Theme): AuditFailure[] {
   const out: AuditFailure[] = [];
   for (const { role, colour, need } of rolesOf(theme)) {
@@ -67,7 +63,11 @@ export function auditTheme(theme: Theme): AuditFailure[] {
     if (ratio < need) out.push({ role, colour, ratio, need });
   }
   const surface = cardSurface(theme);
-  for (const [role, colour, need] of [["fg on cards", theme.fg, 7], ["fg2 on cards", theme.fg2, 4.5]] as const) {
+  for (const [role, colour, need] of [
+    ["fg on cards", theme.fg, 7], ["fg2 on cards", theme.fg2, 4.5], ["fg3 on cards", theme.fg3, 4.5],
+    ["accent on cards", theme.accent, 4.5], ["ok on cards", theme.ok, 4.5],
+    ["danger on cards", theme.ansi[1], 4.5], ["warn on cards", theme.ansi[3], 4.5],
+  ] as const) {
     const ratio = contrast(colour, surface);
     if (ratio < need) out.push({ role, colour, ratio, need });
   }
