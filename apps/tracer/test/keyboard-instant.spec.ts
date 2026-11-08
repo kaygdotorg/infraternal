@@ -156,6 +156,34 @@ for (const viewport of VIEWPORTS) {
       await expect(page.locator("#palette")).toBeHidden();
     });
 
+    for (const key of ["Space", "Enter"]) test(`${key} on the focused capsule opens the palette with no animation`, async ({ page }) => {
+      await page.locator("#capsule").focus();
+      // Space activates a button on keyup, so the click comes after the key went down: sample once the press has finished.
+      await page.keyboard.press(key);
+      const f = await page.evaluate(() => new Promise<{ hidden: boolean; opacity: string; running: number }>((resolve) => requestAnimationFrame(() => {
+        const palette = document.querySelector<HTMLElement>("#palette")!;
+        resolve({ hidden: getComputedStyle(palette).display === "none", opacity: getComputedStyle(palette).opacity, running: document.getAnimations().filter((a) => a instanceof CSSTransition && a.playState === "running" && (a.effect as KeyframeEffect).target === palette).length });
+      })));
+      expect(f.hidden, `${key} opened the palette`).toBe(false);
+      expect(f.opacity, `palette opacity right after ${key}`).toBe("1");
+      expect(f.running, "transitions running on the palette").toBe(0);
+    });
+
+    test("a surface that opens long after a key still opens without animation", async ({ page }) => {
+      // The last input was a key; the palette opens 100 ms later from a script click (nothing pressed in between). The
+      // decision is taken when the surface changes, not within some window after the key.
+      await page.keyboard.press("a");
+      // sleep: well past any short window after the key, as a late opener (code loaded on demand) would be
+      await page.waitForTimeout(100);
+      await page.evaluate(() => document.querySelector<HTMLElement>("#capsule")!.click());
+      const f = await page.evaluate(() => new Promise<{ hidden: boolean; opacity: string }>((resolve) => requestAnimationFrame(() => {
+        const palette = document.querySelector<HTMLElement>("#palette")!;
+        resolve({ hidden: getComputedStyle(palette).display === "none", opacity: getComputedStyle(palette).opacity });
+      })));
+      expect(f.hidden).toBe(false);
+      expect(f.opacity, "palette opacity in the first frame of a late open after a key").toBe("1");
+    });
+
     test("the first keystroke after the palette chord lands", async ({ page }) => {
       await page.keyboard.press(PALETTE_KEY);
       await page.keyboard.type("thm", { delay: 0 });
@@ -381,5 +409,46 @@ test.describe("round 3 polish", () => {
     const f = await frame(page);
     expect(f.paletteOpacity, "no fade under reduced motion").toBe("1");
     expect(f.running).toEqual([]);
+  });
+});
+
+/**
+ * Window stepping and the input lock (TASTE: rapid window stepping does not animate). A key that moves the active window or
+ * toggles the lock must not start the card's border-colour fade, the lock icon's fade, the tree marker's glide or its draw-on
+ * animation; the pointer equivalents keep theirs (J389 review of #427).
+ */
+test.describe("window stepping and the lock do not animate from the keyboard", () => {
+  /** Counts the animations and transitions still running on the window cards, their lock icons and the tree's marker and branch. */
+  const running = (page: Page): Promise<string[]> => page.evaluate(() => new Promise<string[]>((resolve) => requestAnimationFrame(() => {
+    const names = document.getAnimations().filter((a) => a.playState === "running").map((a) => {
+      const target = (a.effect as KeyframeEffect | null)?.target;
+      const el = target instanceof Element ? target : null;
+      const hit = el?.closest(".ui-window, .ui-window-lock, .bm-marker, .bm-lit, .bm-branches");
+      return hit ? `${a instanceof CSSTransition ? a.transitionProperty : a.constructor.name} on ${hit.className.toString().split(" ").slice(0, 2).join(".")}` : "";
+    }).filter(Boolean);
+    resolve(names);
+  })));
+
+  test.beforeEach(async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openCanvas(page);
+    // The pointer picks the first window; the keys then step from it.
+    await page.locator(".ui-window").first().locator(".ui-window-header, .terminal-host").first().click();
+    // sleep: let the pointer's own border fade end before the keys are sampled
+    await page.waitForTimeout(400);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  });
+
+  for (const [name, key] of [["Ctrl+Shift+Right", "Control+Shift+ArrowRight"], ["Ctrl+Shift+Left", "Control+Shift+ArrowLeft"], ["Ctrl+Shift+L (lock)", "Control+Shift+L"]] as const) {
+    test(`${name} runs no transition or animation`, async ({ page }) => {
+      await page.keyboard.press(key);
+      expect(await running(page), `${name}: animations running one frame after the key`).toEqual([]);
+      if (key.endsWith("L")) { await page.keyboard.press(key); expect(await running(page), "unlocking by key").toEqual([]); }
+    });
+  }
+
+  test("a pointer click on another window still fades its border", async ({ page }) => {
+    await page.locator(".ui-window").nth(1).locator(".ui-window-header, .terminal-host").first().click();
+    expect((await running(page)).some((n) => n.startsWith("border-color")), "pointer activation keeps its border fade").toBe(true);
   });
 });
