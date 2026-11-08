@@ -865,5 +865,21 @@ class RealSandbox(unittest.TestCase):
                 process.kill()
 
 
+class GateFixtureOutput(unittest.TestCase):
+    """Keep simulated gate verdicts from masquerading as the real privileged row."""
+
+    def test_successful_missing_frontend_fixture_does_not_print_a_real_skip(self):
+        """Run the actual test entrypoint: a passing mocked SKIP must stay out of stdout."""
+        result = subprocess.run(
+            [sys.executable, __file__,
+             'PrivilegedAreas.test_missing_host_frontend_skips_the_row_without_claiming_coverage'],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK', result.stderr)
+        self.assertNotIn('privileged integration:', result.stdout)
+
+
 if __name__ == '__main__':
-    unittest.main()
+    # Passing mocks exercise SKIP/FAIL paths; only failures should expose their
+    # captured output beside the real runner's verdict in verify fast.
+    unittest.main(buffer=True)
