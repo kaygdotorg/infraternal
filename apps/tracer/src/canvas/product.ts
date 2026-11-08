@@ -199,7 +199,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     welcomedOnce = true;
   });
   let readyRemoval: import("./context").Adapters["hostRemoval"];
-  const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), remove: (id, name, anchor) => readyRemoval?.remove(id, name, anchor) };
+  const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), remove: (id, name, anchor, returnFocus) => readyRemoval?.remove(id, name, anchor, returnFocus) };
   // Registry metadata is optional chrome: load it without delaying the first terminal.
   void onDemand(() => import("./host-removal.on-demand")).then((module) => module.createHostRemoval(core, (id) => {
     setupPendingHostIds.delete(id);

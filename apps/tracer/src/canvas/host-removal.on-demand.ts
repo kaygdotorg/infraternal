@@ -4,7 +4,7 @@
  * Pending cleanup keeps both the host row and the manual uninstall copy action available.
  */
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
-import { mountConfirmTip } from "../../../../packages/ui/src/tooltip";
+import { confirmHostRemoval } from "./host-removal-confirm";
 import type { CoreScreen } from "../core-screen";
 import { isCanonicalUuid } from "../identifiers";
 interface RemovalStart { review: string; action: { host_id: string; host: string; uninstall: boolean } }
@@ -22,15 +22,16 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 /** Confirm a host removal and keep pending cleanup visible until server delivery. */
 export async function createHostRemoval(core: CoreScreen, removed: (id: string) => void) {
+  // The server's `label` is a sentence describing the action; rows and buttons use this short name instead.
   let label: string | undefined;
-  try { const action = await post<{ id: string; label: string }>("actions", {}); if (action.id === "remote.host.remove" && typeof action.label === "string") label = action.label; } catch { /* The optional remote component or owner authority is unavailable. */ }
+  try { const action = await post<{ id: string; label: string }>("actions", {}); if (action.id === "remote.host.remove" && typeof action.label === "string") label = "Remove host"; } catch { /* The optional remote component or owner authority is unavailable. */ }
   let busy = false;
   return {
     label: () => label,
     /** Review and persist denial; pending acceptance leaves the host in inventory. */
-    remove(id: string, name: string, anchor: HTMLElement): void {
+    remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void {
       if (!label || !isCanonicalUuid(id) || busy) return;
-      mountConfirmTip(anchor, { label: `${label}: ${name}`, title: `Remove ${name}?`, effect: "Revoke its access, forget its SSH key and uninstall the infraternal agent.", named: true, confirmLabel: label, cancelLabel: "Keep host", onConfirm: () => {
+      confirmHostRemoval(name, anchor, () => {
         busy = true;
         void (async () => {
           const start = await post<RemovalStart>("remove/start", { host_id: id, uninstall: true });
@@ -63,7 +64,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
             core.toast.show({ message: result.message, duration: 5000 });
           }
         })().catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "Host removal failed. Try again.", tone: "error", duration: 6000 })).finally(() => { busy = false; });
-      } });
+      }, returnFocus);
     },
   };
 }
