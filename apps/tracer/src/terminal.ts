@@ -4,6 +4,8 @@ import { mountToast, type ToastController } from "../../../packages/ui/src/toast
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
+import { Osc52Scanner } from "./osc52";
+import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
@@ -351,6 +353,10 @@ export class TerminalClient {
   private suppressTerminalResponses = false;
   // Allocate only when output is scanned; a reset before the first write has no query state.
   private terminalQueries: TerminalQueries | undefined;
+  /** Reads clipboard writes (OSC 52) out of live output; replayed output goes through it without acting (#440). */
+  private readonly clipboardWrites = new Osc52Scanner();
+  /** The notice that confirms a remote copy, or offers it when the browser refused to write without a gesture. */
+  private remoteCopyNotice: ToastController | undefined;
   private parserReplies: string[] | undefined;
   private parserReplyLength = 0;
   private renderIdleTimer = 0;
@@ -977,6 +983,8 @@ export class TerminalClient {
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputResendNotice?.dispose();
+    this.remoteCopyNotice?.dispose();
+    this.clipboardWrites.reset();
     this.inputQueue.clear();
     this.retainedInput?.fill(0);
     this.retainedInput = undefined;
@@ -1375,6 +1383,7 @@ export class TerminalClient {
     this.pendingWriteSynchronizedBatch = false;
     this.prediction?.resetForSnapshot();
     this.terminalQueries?.reset();
+    this.clipboardWrites.reset();
     this.synchronizedOutput.reset();
     this.synchronizedOutputBatchPending = false;
     this.terminal.reset();
@@ -1525,6 +1534,33 @@ export class TerminalClient {
       secondaryAction: { label: "Discard", onSelect: () => this.discardRetainedInput() },
     });
     this.inputResendNoticeVisible = true;
+  }
+
+  /**
+   * A program in the terminal asked to copy `text` (OSC 52). Writes it to the clipboard and says so. A browser may
+   * refuse a write that no gesture or permission backs (always, in Safari); then the text waits behind a "Copy"
+   * action, and the tap on that action is the gesture the browser wants.
+   */
+  private remoteCopy(text: string): void {
+    if (this.closed) return;
+    this.remoteCopyNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    const notice = this.remoteCopyNotice;
+    const key = "remote-copy";
+    void writeClipboard(text).then((ok) => {
+      if (this.closed) return;
+      if (ok) { notice.show({ key, message: "Copied from the terminal", duration: 1800 }); return; }
+      notice.show({
+        key,
+        message: "The terminal has text to copy",
+        icon: CLIPBOARD,
+        duration: 15000,
+        dismissible: true,
+        action: {
+          label: "Copy",
+          onSelect: () => { void writeClipboard(text).then((done) => notice.show(done ? { key, message: "Copied from the terminal", duration: 1800 } : { key, message: "Couldn't copy. Select the text instead.", tone: "error" })); },
+        },
+      });
+    });
   }
 
   private encoderIntoScratch(data: string): Uint8Array | undefined {
@@ -1796,6 +1832,7 @@ export class TerminalClient {
    * Keyboard callbacks run in later tasks and always use the unchanged typing path.
    */
   private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback?: () => void): void {
+    this.clipboardWrites.scan(bytes, (text) => this.remoteCopy(text));
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     this.linkRowsArmed = true;
     this.terminal.writeSlices(bytes, (writeSlice) => {
@@ -1826,6 +1863,8 @@ export class TerminalClient {
   private writeSuppressingTerminalResponses(bytes: Uint8Array, callback?: () => void, queryOffset?: bigint): void {
     const previous = this.suppressTerminalResponses;
     this.suppressTerminalResponses = true;
+    // Replayed bytes are old output: a copy in them must not rewrite what the person copied since.
+    this.clipboardWrites.scan(bytes, undefined);
     if (queryOffset !== undefined) (this.terminalQueries ??= new TerminalQueries()).scan(bytes, queryOffset, () => undefined);
     try {
       this.terminal.write(bytes, callback);
