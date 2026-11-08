@@ -3155,6 +3155,22 @@ mod tests {
     fn restored_snapshot_replaces_stale_peers() {
         let mut current = config();
         current.version = 11;
+        let directory = test_directory();
+        let state_path = directory.join(PUBLIC_STATE);
+        let store = crate::node_state::Store::open_for_macos(&directory.0)
+            .expect("open persisted replacement store");
+        write_public_state(
+            &state_path,
+            &SavedState {
+                enabled: true,
+                config: Some(current.clone()),
+                routes: route_addresses(&current),
+                interface: Some("utun-test".to_owned()),
+                port: 51820,
+                ..SavedState::default()
+            },
+        )
+        .expect("persist the exact base for the lower-revision transaction");
         let mut restored = current.clone();
         restored.version = 2;
         restored.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
@@ -3172,7 +3188,7 @@ mod tests {
         let mut node = Node {
             enabled: true,
             worker: Some(recording_worker(Arc::clone(&applied_configs))),
-            store: None,
+            store: Some(store),
             identity: Some(identity),
             config: Some(current.clone()),
             authority_reset_pending: false,
@@ -3180,7 +3196,7 @@ mod tests {
             routes: route_addresses(&current),
             interface: Some("utun-test".to_owned()),
             port: 51820,
-            path: None,
+            path: Some(state_path),
             binding: None,
         };
         for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
