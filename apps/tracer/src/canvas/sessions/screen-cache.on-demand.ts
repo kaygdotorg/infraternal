@@ -55,7 +55,7 @@ export function createScreenCache(): ScreenCache {
       canvas.height = bitmap.height;
       // Drawn at the pixel size it was taken at, from the corner the terminal's own canvas starts at.
       const dpr = window.devicePixelRatio || 1;
-      canvas.style.cssText = `position:absolute;left:0;top:0;width:${bitmap.width / dpr}px;height:${bitmap.height / dpr}px;pointer-events:none;z-index:1`;
+      canvas.style.cssText = `position:absolute;left:0;top:0;width:${bitmap.width / dpr}px;height:${bitmap.height / dpr}px;pointer-events:none;z-index:var(--z-content)`;
       canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
       host.append(canvas);
       return () => canvas.remove();

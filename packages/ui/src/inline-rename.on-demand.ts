@@ -186,7 +186,7 @@ export function placeOverName(name: HTMLElement, container: HTMLElement, input: 
   }
   // One pixel more than the name, so the caret at the end of a name that fills the box does not scroll the text.
   const width = (right - at.left) / scale + 2 * FIELD_PAD_PX + 1;
-  input.style.cssText = `${fontCss}position:absolute;z-index:2;left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${width}px;padding:0 ${FIELD_PAD_PX}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
+  input.style.cssText = `${fontCss}position:absolute;z-index:calc(var(--z-content) + 1);left:${left}px;top:${(at.top - box.top + at.height / 2) / scale}px;transform:translateY(-50%);width:${width}px;padding:0 ${FIELD_PAD_PX}px;max-width:calc(100% - ${Math.max(left, 0)}px)`;
   const hidden = name.style.visibility;
   name.style.visibility = "hidden";
   return () => {

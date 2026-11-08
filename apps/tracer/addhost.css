@@ -44,7 +44,7 @@
 .ah { position: relative; --ah-fg2: color-mix(in oklab, var(--fg-2) 80%, var(--fg)); }
 .ah-stage {
   position: absolute;
-  z-index: 1;
+  z-index: var(--z-content);
   inset: 0;
   display: grid;
   /* A definite row, so the card's max-height: 100% holds and its footer stays on screen. */
@@ -85,7 +85,7 @@
 .ah-page { min-width: 0; }
 .ah-close {
   position: absolute;
-  z-index: 2;
+  z-index: calc(var(--z-content) + 1);
   top: 0.875rem;
   right: 0.875rem;
   display: grid;
@@ -136,7 +136,7 @@
 /* The hint keeps its line when hidden (opacity, not display), so the list below never jumps as it appears. */
 .ah-hint { min-height: 1.25rem; margin: 0.375rem 0.25rem 0; color: var(--fg-2); font-size: var(--ui-size-label); line-height: 1.25rem; opacity: 0; transition: opacity var(--t-pop) ease; }
 .ah-hint[data-show="true"] { opacity: 1; }
-.ah-field-icon { position: absolute; z-index: 1; top: 1rem; left: 0.875rem; color: var(--fg-3); pointer-events: none; }
+.ah-field-icon { position: absolute; z-index: var(--z-content); top: 1rem; left: 0.875rem; color: var(--fg-3); pointer-events: none; }
 .ah-secret {
   display: block;
   width: 100%;
@@ -321,7 +321,7 @@
 /* ═══ The product wizard (canvas/addhost): the same card, over the canvas stage ═══════════════════════
    New class names (`ah-run`, `ah-seg`, `ah-stages`, `ah-keyblock`, …) so the mock-only window prototype
    above keeps its own rules. */
-.ah-overlay { position: absolute; z-index: 10; inset: 0; }
+.ah-overlay { position: absolute; z-index: calc(var(--z-overlay) + 4); inset: 0; }
 .ah-overlay .ah-stage { padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); }
 @media (max-width: 600px) { .ah-overlay .ah-stage { padding: max(0.5rem, env(safe-area-inset-top)) 0.5rem max(0.5rem, env(safe-area-inset-bottom)); } }
 .ah-code { padding: 1px 0.25rem; border-radius: var(--r-xs); background: rgb(from var(--fg) r g b / 0.06); color: var(--fg); font-weight: var(--fw-label); overflow-wrap: anywhere; }

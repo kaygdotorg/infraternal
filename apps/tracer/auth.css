@@ -49,7 +49,7 @@
 .auth-screen {
   --ease: cubic-bezier(0.23, 1, 0.32, 1);
   position: fixed;
-  z-index: 1;
+  z-index: var(--z-content);
   inset: 0;
   display: grid;
   place-items: safe center;

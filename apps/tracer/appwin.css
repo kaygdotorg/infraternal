@@ -25,7 +25,7 @@
 :root[data-scheme="light"] .aw-stage { --aw-dim-opacity: 0.72; --aw-dim-saturate: 0.35; }
 
 /* The state card is the "No access" card's twin: same position, same type, same rhythm (message, 24 px, action). */
-.aw-card { z-index: 1; transition: opacity var(--t-pop) var(--ease-out, ease-out); }
+.aw-card { z-index: var(--z-content); transition: opacity var(--t-pop) var(--ease-out, ease-out); }
 .aw-card[data-shown="false"] { opacity: 0; pointer-events: none; }
 .aw-card .cl-noaccess-hint { max-width: 38ch; }
 .aw-mark { display: grid; place-items: center; width: 22px; height: 22px; margin-bottom: 4px; color: var(--fg-3); }
@@ -35,7 +35,7 @@
 /* The pill's small mark (window-body.ts `paintPillMark`): control, view only or paused, 14 px like the connection dot beside
    it. Nothing about control or state is drawn over the picture. Its colour follows the quiet scale: the one thing the
    person is doing (controlling) is the full text colour, everything else is secondary. */
-.aw-pillmark { position: relative; z-index: 1; display: inline-grid; flex: none; place-items: center; width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
+.aw-pillmark { position: relative; z-index: var(--z-content); display: inline-grid; flex: none; place-items: center; width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
 .aw-pillmark[data-kind="controlled"] { color: var(--fg); }
 .aw-pillmark svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 @keyframes aw-in { from { opacity: 0; } }

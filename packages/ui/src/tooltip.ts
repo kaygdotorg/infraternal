@@ -57,7 +57,7 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 /** The tooltip and confirmation styles, installed once by `buildStyleOnly`. */
 const STYLE = `
-.tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
+.tip-pos { position: fixed; left: 0; top: 0; z-index: calc(var(--z-tooltip) + 2); pointer-events: none; will-change: transform; }
 .tip, .tip-sizer { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: var(--r-sm); width: max-content; max-width: min(17.5rem, calc(100vw - 2 * ${MARGIN}px)); overflow: hidden;
   font: var(--fw-label, 500) var(--text-secondary)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label.is-leaving { position: absolute; left: 0.625rem; top: 0.375rem; white-space: nowrap; }
@@ -67,7 +67,7 @@ const STYLE = `
    and cap are never restated as pixel constants that drift when a token changes. Its own class keeps the .tip element unique in the page. */
 .tip-pos.tip-measure { visibility: hidden; will-change: auto; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
-.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
+.ui-confirm-tip { position: fixed; z-index: calc(var(--z-tooltip) + 1); display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
   border-radius: var(--r-md); opacity: 0; transform: scale(0.96); pointer-events: none;
   transition: opacity var(--t-press) ease-out, transform var(--t-pop) var(--ease-out); }
 .ui-confirm-tip[hidden] { display: none !important; }
