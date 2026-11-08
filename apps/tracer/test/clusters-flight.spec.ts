@@ -50,6 +50,8 @@ test("view flights settle quickly: pointer about 350 ms, key at once", async ({ 
   console.log(`FLIGHT ${JSON.stringify(results)}`);
   expect(results.pointer!).toBeLessThan(550);
   expect(results.pointerBack!).toBeLessThan(550);
-  expect(results.key!).toBeLessThan(300);
-  expect(results.key2!).toBeLessThan(300);
+  // A key flight has no spring (#427): it ends in the first frame or two. 34 ms is two frames at 60 Hz, which leaves a late sample
+  // on a busy machine its slack, and a 190 ms spring (the old key flight) fails it by far.
+  expect(results.key!).toBeLessThanOrEqual(34);
+  expect(results.key2!).toBeLessThanOrEqual(34);
 });

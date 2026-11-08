@@ -223,3 +223,125 @@ test("a camera flight from a key jumps at once, a pointer one still flies", asyn
   expect(moved(key.final, pointer.final), "the pointer flight went somewhere").toBe(true);
   expect(moved(pointer.first, pointer.final), "pointer flight: the camera is still on its way one frame after the click").toBe(true);
 });
+
+// ---- round 3 (J378 review of #427): the rule is central, so no key-triggered motion is left behind ----------------------------
+
+/** A camera position as the clusters mockup reports it. */
+type Cam = { cx: number; cy: number; z: number };
+
+/** Loads the clusters mockup (the view list, the camera and the palette's view picks) and waits for it to settle. */
+async function openClusters(page: Page): Promise<void> {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft");
+  await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  // sleep: let the mockup's opening motion finish before the first measurement
+  await page.waitForTimeout(1500);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
+const cameraOf = (page: Page): Promise<Cam> => page.evaluate(() => (window as unknown as { __tracerClusters: { camera(): Cam } }).__tracerClusters.camera());
+const moved = (a: Cam, b: Cam): boolean => Math.abs(a.cx - b.cx) * b.z > 1 || Math.abs(a.cy - b.cy) * b.z > 1 || Math.abs(a.z - b.z) > 0.001;
+
+/**
+ * Runs `trigger` (a key press) and returns the camera one animation frame later, the camera before it, and the camera once
+ * any flight has certainly ended.
+ */
+async function flight(page: Page, trigger: () => Promise<void>): Promise<{ before: Cam; first: Cam; final: Cam }> {
+  const before = await cameraOf(page);
+  await trigger();
+  const first = await page.evaluate(() => new Promise<Cam>((resolve) => requestAnimationFrame(() => resolve((window as unknown as { __tracerClusters: { camera(): Cam } }).__tracerClusters.camera()))));
+  // sleep: the slowest flight measured is about 600 ms; wait it out so the end position is known
+  await page.waitForTimeout(1500);
+  return { before, first, final: await cameraOf(page) };
+}
+
+test.describe("every camera flight a key starts jumps (the rule is in Camera.flyTo)", () => {
+  test.beforeEach(async ({ page }) => {
+    await openClusters(page);
+    await page.keyboard.press("Control+Shift+Digit3");
+    // sleep: park the camera inside a view first, so Escape has somewhere to fly out from
+    await page.waitForTimeout(600);
+  });
+
+  /** Picks a palette row by keyboard: the chord, the query, Enter. */
+  const palettePick = (page: Page, query: string) => async (): Promise<void> => {
+    await page.keyboard.press("Control+Shift+K");
+    await page.keyboard.type(query, { delay: 0 });
+    await expect(page.locator("#palette-results .result").first()).toBeVisible();
+    await page.keyboard.press("Enter");
+  };
+
+  const cases: Array<[string, (page: Page) => () => Promise<void>]> = [
+    ["Escape to the overview", (page) => () => page.keyboard.press("Escape")],
+    ["Control+Shift+G (canvas lock)", (page) => () => page.keyboard.press("Control+Shift+G")],
+    ["the palette's All views + Enter", (page) => palettePick(page, "all views")],
+    ["a window picked in the palette + Enter", (page) => palettePick(page, "nix-cache")],
+  ];
+  for (const [name, make] of cases) test(name, async ({ page }) => {
+    const f = await flight(page, make(page));
+    expect(moved(f.before, f.final), `${name} went somewhere`).toBe(true);
+    expect(moved(f.first, f.final), `${name}: the camera is already at its end one frame after the key`).toBe(false);
+  });
+});
+
+test.describe("the pill-morph popovers open and close instantly from the keyboard", () => {
+  test.beforeEach(async ({ page }) => { await openClusters(page); });
+
+  test("Enter on the focused capsule opens the view list whole, Escape removes it", async ({ page }) => {
+    await page.locator("#capsule").focus();
+    await arm(page);
+    await page.keyboard.press("Enter");
+    const open = await page.evaluate(() => new Promise<{ present: boolean; clip: string; pill: string }>((resolve) => requestAnimationFrame(() => {
+      const panel = document.querySelector<HTMLElement>(".cl-viewlist");
+      resolve({ present: panel !== null, clip: panel ? getComputedStyle(panel).clipPath : "", pill: getComputedStyle(document.querySelector("#capsule")!).opacity });
+    })));
+    expect(open.present).toBe(true);
+    expect(open.clip, "view list is unclipped in the first frame after Enter").toBe("none");
+    expect(open.pill, "the pill under it is already hidden").toBe("0");
+    await page.keyboard.press("Escape");
+    const closed = await page.evaluate(() => new Promise<{ present: boolean; pill: string }>((resolve) => requestAnimationFrame(() => resolve({ present: document.querySelector(".cl-viewlist") !== null, pill: getComputedStyle(document.querySelector("#capsule")!).opacity }))));
+    expect(closed.present, "view list is gone in the first frame after Escape").toBe(false);
+    expect(closed.pill).toBe("1");
+  });
+
+  test("a pointer open of the view list still morphs out of the pill", async ({ page }) => {
+    await page.locator("#capsule").click();
+    const first = await page.evaluate(() => new Promise<string>((resolve) => requestAnimationFrame(() => resolve(getComputedStyle(document.querySelector(".cl-viewlist")!).clipPath))));
+    expect(first, "pointer open is still clipped part way in the first frame").toMatch(/^inset\(/);
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".cl-viewlist")!).clipPath)).toBe("none");
+  });
+});
+
+test.describe("round 3 polish", () => {
+  test("a key removes the open and close motion only around the key, not until the next pointer press", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openCanvas(page);
+    const capsuleTransition = (): Promise<string> => page.evaluate(() => getComputedStyle(document.querySelector("#capsule")!).transitionDuration);
+    await page.locator("#capsule").click();
+    await page.keyboard.press("Escape");
+    // sleep: a few frames after the key, so only a rule that lasts beyond the key can still be on
+    await page.waitForTimeout(150);
+    expect(await capsuleTransition(), "the capsule's cover fade is back a moment after a key").not.toBe("0s");
+  });
+
+  test("Escape out of the palette returns focus to where it was", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openCanvas(page);
+    await page.locator("#sidebar-toggle").focus();
+    await page.keyboard.press(PALETTE_KEY);
+    await expect(page.locator("#palette-input")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#sidebar-toggle")).toBeFocused();
+  });
+
+  test("the pointer-open palette respects reduced motion", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openCanvas(page);
+    await arm(page);
+    await page.locator("#capsule").click();
+    const f = await frame(page);
+    expect(f.paletteOpacity, "no fade under reduced motion").toBe("1");
+    expect(f.running).toEqual([]);
+  });
+});
