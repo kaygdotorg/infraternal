@@ -229,6 +229,9 @@ test("a camera flight from a key jumps at once, a pointer one still flies", asyn
 /** A camera position as the clusters mockup reports it. */
 type Cam = { cx: number; cy: number; z: number };
 
+/** True for a `clip-path` that hides nothing: none, or an inset of 0 on every side (a morph at rest may leave the second form). */
+const clipIsWhole = (clip: string): boolean => clip === "none" || [...clip.replace(/round.*$/, "").matchAll(/-?[\d.]+/g)].every((n) => Math.abs(Number(n[0])) < 0.5);
+
 /** Loads the clusters mockup (the view list, the camera and the palette's view picks) and waits for it to settle. */
 async function openClusters(page: Page): Promise<void> {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -243,16 +246,26 @@ const cameraOf = (page: Page): Promise<Cam> => page.evaluate(() => (window as un
 const moved = (a: Cam, b: Cam): boolean => Math.abs(a.cx - b.cx) * b.z > 1 || Math.abs(a.cy - b.cy) * b.z > 1 || Math.abs(a.z - b.z) > 0.001;
 
 /**
- * Runs `trigger` (a key press) and returns the camera one animation frame later, the camera before it, and the camera once
- * any flight has certainly ended.
+ * Runs `trigger` (a key press) while sampling the camera on every animation frame, and returns the camera before it, once the
+ * flight has certainly ended, and how many sampled frames showed a position strictly between the two. A jump has none. (The
+ * palette loads the code for its actions on first use, so a jump can land a few frames after the key; what matters is that
+ * the camera never shows a position on the way.)
  */
-async function flight(page: Page, trigger: () => Promise<void>): Promise<{ before: Cam; first: Cam; final: Cam }> {
+async function flight(page: Page, trigger: () => Promise<void>): Promise<{ before: Cam; final: Cam; inBetween: number }> {
   const before = await cameraOf(page);
+  await page.evaluate(() => {
+    const w = window as unknown as { __cams: Cam[]; __tracerClusters: { camera(): Cam } };
+    w.__cams = [];
+    const t0 = performance.now();
+    const tick = (): void => { w.__cams.push({ ...w.__tracerClusters.camera() }); if (performance.now() - t0 < 2200) requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
   await trigger();
-  const first = await page.evaluate(() => new Promise<Cam>((resolve) => requestAnimationFrame(() => resolve((window as unknown as { __tracerClusters: { camera(): Cam } }).__tracerClusters.camera()))));
-  // sleep: the slowest flight measured is about 600 ms; wait it out so the end position is known
-  await page.waitForTimeout(1500);
-  return { before, first, final: await cameraOf(page) };
+  // sleep: the slowest flight measured is about 600 ms; the sampler runs 2.2 s, so wait it out
+  await page.waitForTimeout(2400);
+  const cams = await page.evaluate(() => (window as unknown as { __cams: Cam[] }).__cams);
+  const final = cams[cams.length - 1]!;
+  return { before, final, inBetween: cams.filter((c) => moved(c, before) && moved(c, final)).length };
 }
 
 test.describe("every camera flight a key starts jumps (the rule is in Camera.flyTo)", () => {
@@ -288,7 +301,7 @@ test.describe("every camera flight a key starts jumps (the rule is in Camera.fly
     }
     const f = await flight(page, make(page));
     expect(moved(f.before, f.final), `${name} went somewhere`).toBe(true);
-    expect(moved(f.first, f.final), `${name}: the camera is already at its end one frame after the key`).toBe(false);
+    expect(f.inBetween, `${name}: frames that showed the camera on its way`).toBe(0);
   });
 });
 
@@ -304,7 +317,7 @@ test.describe("the pill-morph popovers open and close instantly from the keyboar
       resolve({ present: panel !== null, clip: panel ? getComputedStyle(panel).clipPath : "", pill: getComputedStyle(document.querySelector("#capsule")!).opacity });
     })));
     expect(open.present).toBe(true);
-    expect(open.clip, "view list is unclipped in the first frame after Enter").toBe("none");
+    expect(clipIsWhole(open.clip), `view list is whole in the first frame after Enter (clip-path: ${open.clip})`).toBe(true);
     expect(open.pill, "the pill under it is already hidden").toBe("0");
     await page.keyboard.press("Escape");
     const closed = await page.evaluate(() => new Promise<{ present: boolean; pill: string }>((resolve) => requestAnimationFrame(() => resolve({ present: document.querySelector(".cl-viewlist") !== null, pill: getComputedStyle(document.querySelector("#capsule")!).opacity }))));
@@ -315,7 +328,7 @@ test.describe("the pill-morph popovers open and close instantly from the keyboar
   test("a pointer open of the view list still morphs out of the pill", async ({ page }) => {
     await page.locator("#capsule").click();
     const first = await page.evaluate(() => new Promise<string>((resolve) => requestAnimationFrame(() => resolve(getComputedStyle(document.querySelector(".cl-viewlist")!).clipPath))));
-    expect(first, "pointer open is still clipped part way in the first frame").toMatch(/^inset\(/);
+    expect(clipIsWhole(first), `pointer open is still clipped part way in the first frame (clip-path: ${first})`).toBe(false);
   });
 });
 
