@@ -4240,3 +4240,26 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      its report says "Not checked: programs may still be running" with the
      list. The rejected option was only reporting the surviving programs,
      which leaves the access open until someone acts.
+
+363. **A revoke reports, never stops, processes the system started as the
+     account (owner, 2026-11-08, #355; amends D362):** D362 stops every
+     process of a sole-holder account. J357's review (#355 comment 85537)
+     showed a process that the system started as that account, outside its
+     login sessions and user services (a cron job, or a system service that
+     runs as that user), survives the session teardown. The owner chose
+     "Report system-started ones": the revoke stops everything in the
+     person's own sessions and user services, and lists any process the
+     system started as the account under "Not checked: programs may still
+     be running", never killing it, so a real service that shares the
+     account keeps running. The rejected option was stopping those too,
+     which can take down a service such as a database user's.
+
+364. **"No changes found" names the root checks it ran (owner, 2026-11-08,
+     #355; refines D360):** each review of the revoke report found another
+     route to root that the privilege check did not know (sudo, then docker,
+     then polkit). An unknown route would still read as clean. The owner
+     chose "Name the checks": the "No changes found" sentence also says
+     which root checks ran, for example "They had no root access through
+     sudo, doas, polkit or admin groups", built from the checks the code
+     actually performed. The rejected option was keeping the sentence short,
+     which implies unknown routes were covered.

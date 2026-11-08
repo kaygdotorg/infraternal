@@ -33,7 +33,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
             | sh -s -- --yes --no-modify-path --profile minimal
           export PATH="$HOME/.cargo/bin:$PATH"
-          rustup toolchain install 1.99.0 \
+          rustup toolchain install 1.99.1 \
             --profile minimal \
             --component rustfmt \
             --component clippy \
