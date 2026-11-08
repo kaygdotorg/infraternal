@@ -42,7 +42,10 @@ test("a look out of the server's bounds makes the document unreadable, field by 
   expect(bad((l) => { l.windowSizes!.phone = "tablet" as NonNullable<DocLook["windowSizes"]>["phone"]; })).toBeUndefined();
   expect(bad((l) => { l.windowSizes!.desktop = "compact" as NonNullable<DocLook["windowSizes"]>["desktop"]; })).toBeUndefined();
   expect(bad((l) => { l.extendedInfo = "yes" as unknown as boolean; })).toBeUndefined();
-  expect(parseLook({ ...look(), uiFont: "sans" })).toBeUndefined();
+  const sansUiFont: DocLook = { ...look(), uiFont: "sans" };
+  expect(parseLook(sansUiFont)).toEqual(sansUiFont);
+  expect(parseLook({ ...look(), uiFont: "mono" })).toEqual({ ...look(), uiFont: "mono" });
+  expect(parseLook({ ...look(), uiFont: "serif" })).toBeUndefined();
   expect(bad((l) => { while (l.themes.length <= MAX_THEMES) l.themes.push({ ...structuredClone(l.themes[0]!), id: `n${l.themes.length}` }); })).toBeUndefined();
   expect(parseLook(null)).toBeUndefined();
   const earlier = look(); delete earlier.windowSizes; delete earlier.extendedInfo;

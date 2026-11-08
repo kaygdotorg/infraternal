@@ -315,6 +315,10 @@ test("theme and font changes reach the same account live and after reload withou
     const fontActionMeasures = await b.evaluate((startedAt) => performance.getEntriesByType("measure")
       .filter((entry) => entry.name.startsWith("appearance:") && entry.startTime >= startedAt)
       .map((entry) => ({ name: entry.name, durationMs: entry.duration, startTimeMs: entry.startTime })), fontWindowStartedAt);
+
+    await a.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:ui-font", { detail: { font: "sans" } })));
+    await expect.poll(async () => (await cache(b)).canonical.look?.uiFont, { timeout: 5_000 }).toBe("sans");
+    await expect(b.locator("html")).toHaveAttribute("data-ui-font", "sans");
     const themeFrames = measureAppearanceFrames(themeTrace, "data-look", "solid");
     const fontFrames = measureAppearanceFrames(fontTrace, "data-font", "fira-code");
     const frameTraces = [themeTrace, fontTrace];
@@ -359,6 +363,7 @@ test("theme and font changes reach the same account live and after reload withou
     expect(afterReload).toEqual(beforeReload);
     await expect(b.locator("html")).toHaveAttribute("data-look", "solid");
     await expect(b.locator("html")).toHaveAttribute("data-font", "fira-code");
+    await expect(b.locator("html")).toHaveAttribute("data-ui-font", "sans");
     expect(await cameraTransform(a)).toBe(aCamera);
     expect(await cameraTransform(b)).toBe(bCamera);
 
@@ -395,6 +400,7 @@ test("theme and font changes reach the same account live and after reload withou
       cameraAStayedLocal: true,
       cameraBStayedLocal: true,
       themeAndFontSurvivedReload: true,
+      uiFontSurvivedReload: true,
     };
     await b.screenshot({ path: `${evidence}/client-b-synced-look.png` });
     await writeFile(`${evidence}/live-sync.json`, JSON.stringify(measurement, null, 2));
@@ -571,6 +577,7 @@ test("legacy appearance values migrate once into the new account document", asyn
     const document = (await cache(page)).canonical;
     const look = document.look as unknown as {
       selected: string;
+      uiFont?: "mono" | "sans";
       themes: Array<{ id: string; font: string; colors: string; uiSize: number; tint: number; blur: number; background: string }>;
       windowSizes?: { phone: string; desktop: string };
       extendedInfo?: boolean;
@@ -583,11 +590,11 @@ test("legacy appearance values migrate once into the new account document", asyn
     expect(selected.font).toBe("geist-mono");
     expect(selected.uiSize).toBe(125);
     expect(selected).toMatchObject({ tint: 75, blur: 25, background: "aurora" });
-    expect(look).not.toHaveProperty("uiFont");
+    expect(look.uiFont).toBe("sans");
     expect(look.windowSizes).toEqual({ phone: "full", desktop: "wide" });
     expect(look.extendedInfo).toBe(true);
-    expect(remaining).toEqual(["tracer.ui-font"]);
-    expect(uiFontPreference).toBe("sans");
+    expect(remaining).toEqual([]);
+    expect(uiFontPreference).toBeNull();
     await writeFile(`${evidence}/legacy-migration.json`, JSON.stringify({ accountId, look, remainingLegacyKeys: remaining, uiFontPreference }, null, 2));
     console.log(`APPEARANCE_MIGRATION ${JSON.stringify({ accountId, selected: look.selected, font: selected.font, uiSize: selected.uiSize, windowSizes: look.windowSizes, extendedInfo: look.extendedInfo, remainingLegacyKeys: remaining, uiFontPreference })}`);
   } finally { await context.close(); await server.dispose(); }

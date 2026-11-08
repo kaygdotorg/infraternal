@@ -226,6 +226,7 @@ pub(crate) fn look(value: &Value) -> bool {
         &[
             "v",
             "selected",
+            "uiFont",
             "basics",
             "themes",
             "windowSizes",
@@ -233,6 +234,7 @@ pub(crate) fn look(value: &Value) -> bool {
         ],
     ) && value.get("v").and_then(Value::as_u64) == Some(1)
         && string(value, "selected").is_some()
+        && value.get("uiFont").is_none_or(|font| matches!(font.as_str(), Some("mono" | "sans")))
         && value.get("basics").is_some_and(|basics| {
             shape(basics, &["colors", "font", "uiSize"])
                 && known_id(basics.get("colors"), SCHEME_IDS)
@@ -442,6 +444,7 @@ mod tests {
         let valid = json!({
             "v": 1,
             "selected": "solid",
+            "uiFont": "sans",
             "basics": {"colors": "ink", "font": "geist-mono", "uiSize": 100},
             "themes": [{
                 "id": "solid", "name": "Solid", "tint": 100, "blur": 0, "grain": 0,
@@ -454,8 +457,14 @@ mod tests {
         document.0["look"] = valid.clone();
         assert!(document.valid());
 
+        let mut older = valid.clone();
+        older.as_object_mut().unwrap().remove("uiFont");
+        document.0["look"] = older;
+        assert!(document.valid(), "rejected an older look without uiFont");
+
         for pointer in [
             "/selected",
+            "/uiFont",
             "/basics/colors",
             "/basics/font",
             "/themes/0/font",

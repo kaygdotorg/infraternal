@@ -47,6 +47,8 @@ export interface DocWindowSizes { phone: "full" | "edge" | "comfortable"; deskto
 export interface DocLook {
   v: 1;
   selected: string;
+  /** The page font family; absent in older v1 looks and defaults to mono during migration. */
+  uiFont?: "mono" | "sans";
   basics: { colors: string; font: string; uiSize: number };
   themes: DocTheme[];
   /** Defaults for windows that still follow their device-size setting; absent in older documents. */
@@ -96,7 +98,8 @@ const hex = (v: unknown): v is string => typeof v === "string" && /^#[0-9a-fA-F]
 
 /** Checks an untrusted look with the server's bounds (text up to 200 characters, percentages 0 to 100, size 50 to 150, hex colours, at most 16 distinct themes). */
 export function parseLook(input: unknown): DocLook | undefined {
-  if (!isObject(input) || !shape(input, ["v", "selected", "basics", "themes", "windowSizes", "extendedInfo"]) || input.v !== 1 || !text(input.selected) || !isObject(input.basics) || !shape(input.basics, ["colors", "font", "uiSize"]) || !Array.isArray(input.themes) || input.themes.length > MAX_THEMES) return undefined;
+  if (!isObject(input) || !shape(input, ["v", "selected", "uiFont", "basics", "themes", "windowSizes", "extendedInfo"]) || input.v !== 1 || !text(input.selected) || !isObject(input.basics) || !shape(input.basics, ["colors", "font", "uiSize"]) || !Array.isArray(input.themes) || input.themes.length > MAX_THEMES) return undefined;
+  if (input.uiFont !== undefined && input.uiFont !== "mono" && input.uiFont !== "sans") return undefined;
   if (input.extendedInfo !== undefined && typeof input.extendedInfo !== "boolean") return undefined;
   let windowSizes: DocWindowSizes | undefined;
   if (input.windowSizes !== undefined) {
@@ -113,7 +116,7 @@ export function parseLook(input: unknown): DocLook | undefined {
     themes.push({ id: t.id, name: t.name, tint: t.tint, blur: t.blur, grain: t.grain, font: t.font, colors: t.colors, uiSize: t.uiSize, background: t.background, customSolid: t.customSolid, custom: { stops: [...c.stops as string[]], angle: c.angle } });
   }
   return {
-    v: 1, selected: input.selected, basics: { colors: b.colors, font: b.font, uiSize: b.uiSize }, themes,
+    v: 1, selected: input.selected, ...(input.uiFont === undefined ? {} : { uiFont: input.uiFont }), basics: { colors: b.colors, font: b.font, uiSize: b.uiSize }, themes,
     ...(windowSizes ? { windowSizes } : {}),
     ...(input.extendedInfo === undefined ? {} : { extendedInfo: input.extendedInfo }),
   };

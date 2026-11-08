@@ -6,8 +6,8 @@
  *
  * A new or older account document may lack a look or the newer appearance fields. In that case the newest account cache or one-time browser values seed the
  * missing state. An existing account look wins over legacy device values; those values seed only a look the account has not saved yet. Once the complete look is
- * confirmed by the canvas store, this module refreshes its derived cache and removes old appearance keys. The separate
- * `tracer.ui-font` preference stays local; clearing it here would erase an unrelated saved UI choice.
+ * confirmed by the canvas store, this module refreshes its derived cache and removes old appearance keys. `uiFont` follows that same account-first migration
+ * rule, so the first account value wins over any later device-local copy.
  */
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { parseLook, type DocLook, type DocWindowSizes } from "../model/schema";
@@ -24,6 +24,7 @@ import {
   readCache,
   readCachedLook,
   readLegacyAppearance,
+  readLegacyUiFont,
   readLegacyUiSize,
   writeCache,
   type LegacyAppearance,
@@ -142,9 +143,9 @@ function legacyThemePatch(store: ThemeStore, legacy: LegacyAppearance | undefine
   if (Object.keys(patch).length) store.edit(patch);
 }
 
-/** Returns true once both newer defaults are present so the old global keys can be retired safely. */
-function completeLook(look: DocLook | undefined): look is DocLook & { windowSizes: DocWindowSizes; extendedInfo: boolean } {
-  return Boolean(look?.windowSizes && typeof look.extendedInfo === "boolean");
+/** Returns true once the account look contains every field needed to retire old browser values safely. */
+function completeLook(look: DocLook | undefined): look is DocLook & { windowSizes: DocWindowSizes; extendedInfo: boolean; uiFont: "mono" | "sans" } {
+  return Boolean(look?.windowSizes && typeof look.extendedInfo === "boolean" && (look.uiFont === "mono" || look.uiFont === "sans"));
 }
 
 /** Compares valid looks after the document schema normalizes their nested object field order. */
@@ -161,6 +162,13 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   const legacy = accountId ? readLegacyAppearance(accountId) : undefined;
   const cache = readCache(accountId);
   const cachedLook = accountId ? readCachedLook(accountId) : parseLook(cache);
+  const query = new URLSearchParams(location.search);
+  const prototype = query.get("proto");
+  const requestedUiFont = query.get("ui");
+  const previewUiFont = prototype === "windows" || prototype === "addhost" || prototype === "clusters"
+    ? "mono"
+    : requestedUiFont === "mono" || requestedUiFont === "sans" ? requestedUiFont : undefined;
+  let uiFont = cachedLook?.uiFont ?? readLegacyUiFont(accountId, cachedLook?.uiFont) ?? "mono";
   const selected = selectedTheme(cachedLook);
   const uiSize = (accountId ? readLegacyUiSize(legacy) : undefined) ?? selected?.uiSize ?? (accountId ? 100 : readUiSize());
   const now = core.appearance();
@@ -184,9 +192,15 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   // A local look stays authoritative until the canvas document confirms that exact snapshot.
   let localLookPending = false;
   let appliedUiSize = store.selected().uiSize;
+  /** Applies the page preview or the account's font to the document root. */
+  const applyUiFont = (): void => {
+    const next = previewUiFont ?? uiFont;
+    if (document.documentElement.dataset.uiFont !== next) document.documentElement.dataset.uiFont = next;
+  };
   const render = (): void => {
     applyingLook = true;
     try {
+      applyUiFont();
       applyLook(core, store.selected());
       applyStoredUiSize();
       const nextUiSize = store.selected().uiSize;
@@ -203,7 +217,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
 
   const listeners = new Set<() => void>();
   let cacheTimer = 0, announceTimer = 0;
-  const snapshot = (): DocLook => ({ ...store.snapshot(), windowSizes: { ...defaults.windowSizes }, extendedInfo: defaults.extendedInfo });
+  const snapshot = (): DocLook => ({ ...store.snapshot(), uiFont, windowSizes: { ...defaults.windowSizes }, extendedInfo: defaults.extendedInfo });
   const flushCache = (): void => { cacheTimer = 0; if (!previewing) writeCache(accountId, snapshot()); };
   const announce = (): void => { announceTimer = 0; for (const listener of [...listeners]) listener(); };
   const scheduleChange = (): void => {
@@ -240,11 +254,12 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
         },
         extendedInfo: canonical.extendedInfo ?? defaults.extendedInfo,
       };
-      const needsCompletion = canonical.windowSizes === undefined || canonical.extendedInfo === undefined;
+      const nextUiFont = canonical.uiFont ?? uiFont;
+      const needsCompletion = canonical.windowSizes === undefined || canonical.extendedInfo === undefined || canonical.uiFont === undefined;
       const changedWindowSizes = nextDefaults.windowSizes.phone !== defaults.windowSizes.phone
         || nextDefaults.windowSizes.desktop !== defaults.windowSizes.desktop;
       const changedExtendedInfo = nextDefaults.extendedInfo !== defaults.extendedInfo;
-      const next: DocLook = { ...restored, ...nextDefaults };
+      const next: DocLook = { ...restored, uiFont: nextUiFont, ...nextDefaults };
       if (localLookPending && !sameLook(next, snapshot())) {
         // Preserve the unsent local look until DocumentSync captures it. Its operation then uses the canvas journal's
         // current base revision and op id, so the server's ordinary document order decides the winner.
@@ -255,10 +270,12 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
       applyingDocument = true;
       defaults.windowSizes = { ...nextDefaults.windowSizes };
       defaults.extendedInfo = nextDefaults.extendedInfo;
+      uiFont = nextUiFont;
       try {
         // Loading emits synchronously, so the store listener already renders this remote look once.
         store.load(restored);
       } finally { applyingDocument = false; }
+      applyUiFont();
       if (changedWindowSizes) window.dispatchEvent(new CustomEvent(SIZE_EVENT));
       if (changedExtendedInfo) window.dispatchEvent(new CustomEvent(EXTENDED_INFO_EVENT));
       writeCache(accountId, snapshot());
@@ -296,6 +313,17 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   };
   window.addEventListener("tracer:appearance", onAppearance);
 
+  /** Saves a chosen page font through the existing account-look operation. */
+  const onUiFont = (event: Event): void => {
+    if (applyingDocument || previewUiFont !== undefined) return;
+    const next = (event as CustomEvent<{ font?: unknown }>).detail?.font;
+    if ((next !== "mono" && next !== "sans") || next === uiFont) return;
+    uiFont = next;
+    applyUiFont();
+    scheduleChange();
+  };
+  window.addEventListener("tracer:ui-font", onUiFont);
+
   const removeProvider = core.addPaletteProvider((): PaletteEntry[] => store.themes().map((theme) => ({
     group: "Theme", glyph: "◫", label: `Theme: ${theme.name}`, hint: `${theme.tint}% tint · ${theme.blur}% blur`, action: `themes:${theme.id}`,
   })));
@@ -308,6 +336,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
     removeProvider();
     window.removeEventListener("tracer:themes-action", onAction);
     window.removeEventListener("tracer:appearance", onAppearance);
+    window.removeEventListener("tracer:ui-font", onUiFont);
     window.removeEventListener("pagehide", onHide);
     if (cacheTimer) { window.clearTimeout(cacheTimer); flushCache(); }
     if (announceTimer) { window.clearTimeout(announceTimer); announce(); }

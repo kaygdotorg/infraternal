@@ -9,10 +9,10 @@ import { clampUiSize, migrateLegacy, UI_SIZE } from "../../../../../packages/ui/
 import { lastAccountKey } from "../../account-storage";
 import { parseLook, type DocLook } from "../model/schema";
 
-/** Keys moved into the account look and removed after server confirmation; the separate UI-font preference stays local. */
+/** Keys moved into the account look and removed only after the server confirms the migrated values. */
 export const LEGACY_KEYS = [
   "tracer.look", "tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size",
-  "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info", "tracer.card", "tracer.windows", "tracer.background",
+  "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info", "tracer.card", "tracer.windows", "tracer.background", "tracer.ui-font",
 ] as const;
 /** The old theme cache key, kept only to read previous releases and isolated mock pages. */
 export const CACHE_KEY = "tracer.look";
@@ -83,6 +83,13 @@ export function readCache(accountId?: string): unknown {
 
 /** Validates the cache before first-paint callers use its selected theme. */
 export function readCachedLook(accountId?: string): DocLook | undefined { return parseLook(readCache(accountId)); }
+
+/** Reads the old UI-font choice only when this account's look has no value; a saved account value always wins. */
+export function readLegacyUiFont(accountId: string | undefined, accountFont: DocLook["uiFont"]): DocLook["uiFont"] | undefined {
+  if (!accountId || accountFont !== undefined || !ownsLegacyValues(accountId)) return undefined;
+  const value = readLocal("tracer.ui-font");
+  return value === "mono" || value === "sans" ? value : undefined;
+}
 
 /** The newest usable old UI-size choice, converted without rewriting or clearing its source before server confirmation. */
 export function readLegacyUiSize(legacy: LegacyAppearance | undefined): number | undefined {

@@ -451,7 +451,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   coreScreen = undefined;
   performanceProbe = undefined;
   const query = new URLSearchParams(location.search);
-  const uiFont = uiFontPreference();
+  const uiFont = uiFontPreference(activeUserId);
   const mockMode = query.get("mock") === "1";
   // One combined preview (D160): `?proto=windows` is the canvas, and the add-host flow opens
   // on it. `?proto=addhost` is an alias that opens the same preview with the wizard open.
@@ -471,16 +471,14 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   let screen: import("./core-screen").CoreScreen | undefined;
   try {
     const { mountCoreScreen } = await import("./core-screen");
-    // The screen mounts only after its selected face is ready, preventing a one-frame
-    // fallback and keeping the mobile layout stable while the font loads. The pre-auth
-    // bootstrap may have applied a different face, so apply the account face it just loaded.
-    if (uiFont === "mono") {
-      const font = initialFont(activeUserId);
-      await loadFont(font);
-      applyFontVars(font, document.documentElement);
-    } else await document.fonts.load('450 14px "Geist Sans"');
+    // The screen mounts after both its terminal face and its page face are ready. They are separate account choices: a sans page must
+    // still load the selected terminal font, and a mono page must not make the terminal inherit a page-only font preview.
+    const font = initialFont(activeUserId);
+    await loadFont(font);
+    applyFontVars(font, document.documentElement);
+    if (uiFont === "sans") await document.fonts.load('450 14px "Geist Sans"');
     if (generation !== sessionGeneration) return;
-    // Geist Mono is the product face (TASTE §2); `?ui=` is a page-only preview and is never stored.
+    // The controller stores the account face in the canvas look; `?ui=` overrides this page only and never enters that look.
     document.documentElement.dataset.uiFont = uiFont;
     screen = mountCoreScreen(app, { hostName, mockMode, probeMode,
       ...(activeUserId ? { accountId: activeUserId } : {}),
@@ -698,13 +696,22 @@ async function showRecovery(): Promise<void> {
   scheduleBackdrop();
 }
 
-/** The product face stays monospace; `?ui=` can preview another face on this page only. */
-function uiFontPreference(): UiFont {
+/** Reads the page-only preview first, then the existing account cache so the signed-in canvas can paint immediately. */
+function uiFontPreference(accountId?: string): UiFont {
   // The canvas mockup is monospace throughout (owner rule, docs/design/TASTE.md §2).
   const proto = new URLSearchParams(location.search).get("proto");
   if (proto === "windows" || proto === "addhost" || proto === "clusters") return "mono";
   const requested = new URLSearchParams(location.search).get("ui");
   if (requested === "sans" || requested === "mono") return requested;
+  if (accountId) {
+    try {
+      const raw = localStorage.getItem(`tracer.look.account.${encodeURIComponent(accountId)}`);
+      if (raw !== null) {
+        const cached = JSON.parse(raw) as { uiFont?: unknown };
+        if (cached.uiFont === "sans" || cached.uiFont === "mono") return cached.uiFont;
+      }
+    } catch { /* Storage can be unavailable before the canvas has mounted. */ }
+  }
   return "mono";
 }
 
