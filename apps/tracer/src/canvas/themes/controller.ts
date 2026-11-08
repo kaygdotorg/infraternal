@@ -6,7 +6,8 @@
  *
  * A new or older account document may lack a look or the newer appearance fields. In that case the newest account cache or one-time browser values seed the
  * missing state. An existing account look wins over legacy device values; those values seed only a look the account has not saved yet. Once the complete look is
- * confirmed by the canvas store, this module refreshes its derived cache and removes the old global keys.
+ * confirmed by the canvas store, this module refreshes its derived cache and removes old appearance keys. The separate
+ * `tracer.ui-font` preference stays local; clearing it here would erase an unrelated saved UI choice.
  */
 import type { CoreScreen, PaletteEntry } from "../../core-screen";
 import { parseLook, type DocLook, type DocWindowSizes } from "../model/schema";

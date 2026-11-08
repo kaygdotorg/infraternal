@@ -9,9 +9,9 @@ import { clampUiSize, migrateLegacy, UI_SIZE } from "../../../../../packages/ui/
 import { lastAccountKey } from "../../account-storage";
 import { parseLook, type DocLook } from "../model/schema";
 
-/** The unscoped keys written by earlier releases; they are removed after the server confirms a full account look. */
+/** Keys moved into the account look and removed after server confirmation; the separate UI-font preference stays local. */
 export const LEGACY_KEYS = [
-  "tracer.look", "tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size", "tracer.ui-font",
+  "tracer.look", "tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size",
   "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info", "tracer.card", "tracer.windows", "tracer.background",
 ] as const;
 /** The old theme cache key, kept only to read previous releases and isolated mock pages. */

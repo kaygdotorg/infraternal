@@ -542,6 +542,7 @@ test("legacy appearance values migrate once into the new account document", asyn
     const selected = look.themes.find((theme) => theme.id === look.selected)!;
     const legacyKeys = ["tracer.look", "tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size", "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info", "tracer.card", "tracer.windows", "tracer.background", "tracer.ui-font"];
     const remaining = await page.evaluate((keys) => keys.filter((key) => localStorage.getItem(key) !== null), legacyKeys);
+    const uiFontPreference = await page.evaluate(() => localStorage.getItem("tracer.ui-font"));
     expect(selected.colors).toBe("latte");
     expect(selected.font).toBe("geist-mono");
     expect(selected.uiSize).toBe(125);
@@ -549,9 +550,10 @@ test("legacy appearance values migrate once into the new account document", asyn
     expect(look).not.toHaveProperty("uiFont");
     expect(look.windowSizes).toEqual({ phone: "full", desktop: "wide" });
     expect(look.extendedInfo).toBe(true);
-    expect(remaining).toEqual([]);
-    await writeFile(`${evidence}/legacy-migration.json`, JSON.stringify({ accountId, look, remainingLegacyKeys: remaining }, null, 2));
-    console.log(`APPEARANCE_MIGRATION ${JSON.stringify({ accountId, selected: look.selected, font: selected.font, uiSize: selected.uiSize, windowSizes: look.windowSizes, extendedInfo: look.extendedInfo, remainingLegacyKeys: remaining })}`);
+    expect(remaining).toEqual(["tracer.ui-font"]);
+    expect(uiFontPreference).toBe("sans");
+    await writeFile(`${evidence}/legacy-migration.json`, JSON.stringify({ accountId, look, remainingLegacyKeys: remaining, uiFontPreference }, null, 2));
+    console.log(`APPEARANCE_MIGRATION ${JSON.stringify({ accountId, selected: look.selected, font: selected.font, uiSize: selected.uiSize, windowSizes: look.windowSizes, extendedInfo: look.extendedInfo, remainingLegacyKeys: remaining, uiFontPreference })}`);
   } finally { await context.close(); await server.dispose(); }
 });
 
