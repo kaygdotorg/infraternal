@@ -139,7 +139,7 @@ fn endpoint_route_metric_is_bounded_by_egress_link_mtu() {
     };
     Device::routes(&[peer], false).unwrap();
     let underlay = ip(&["route", "get", "198.51.100.2"]);
-    let mesh = ip(&["route", "get", "10.254.0.2"]);
+    let mesh = ip(&["route", "show", "exact", "10.254.0.2/32"]);
     node.down().unwrap();
     println!("underlay_link_mtu=1280 underlay={underlay}mesh={mesh}");
     assert!(
@@ -184,15 +184,15 @@ fn full_peer_update_refreshes_existing_peer_route_mtu() {
         "upserted": {"2": peer(first, 2)}, "removed": []});
     node.chunk(serde_json::from_value::<Chunk>(chunk.clone()).unwrap())
         .unwrap();
-    let before = ip(&["route", "get", "10.254.0.2"]);
+    let before = ip(&["route", "show", "exact", "10.254.0.2/32"]);
     ip(&["link", "set", "underlay0", "mtu", "1280"]);
     chunk["from_version"] = json!(1);
     chunk["version"] = json!(2);
     chunk["upserted"] = json!({"3": peer(second, 3)});
     node.chunk(serde_json::from_value::<Chunk>(chunk).unwrap())
         .unwrap();
-    let after = ip(&["route", "get", "10.254.0.2"]);
-    let added = ip(&["route", "get", "10.254.0.3"]);
+    let after = ip(&["route", "show", "exact", "10.254.0.2/32"]);
+    let added = ip(&["route", "show", "exact", "10.254.0.3/32"]);
     node.down().unwrap();
     println!("before={before}after={after}new_peer={added}");
     assert!(before.contains("mtu 1420"), "{before}");
