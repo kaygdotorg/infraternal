@@ -4253,3 +4253,13 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      be running", never killing it, so a real service that shares the
      account keeps running. The rejected option was stopping those too,
      which can take down a service such as a database user's.
+
+364. **"No changes found" names the root checks it ran (owner, 2026-11-08,
+     #355; refines D360):** each review of the revoke report found another
+     route to root that the privilege check did not know (sudo, then docker,
+     then polkit). An unknown route would still read as clean. The owner
+     chose "Name the checks": the "No changes found" sentence also says
+     which root checks ran, for example "They had no root access through
+     sudo, doas, polkit or admin groups", built from the checks the code
+     actually performed. The rejected option was keeping the sentence short,
+     which implies unknown routes were covered.
