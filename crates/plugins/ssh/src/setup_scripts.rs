@@ -22,8 +22,39 @@ fi
     )
 }
 
+/// The shell lines that write the agent's systemd unit into `$stage/unit`.
+///
+/// A macro, not a `const`, so [`ACTIVATE`] can splice the same literal in with
+/// `concat!` and the tests can run exactly the lines that ship. It reads the
+/// prelude's `$host`, `$base`, `$manager` and `$wanted`, plus `$stage`.
+///
+/// A root unit relabels its binary `bin_t` before every start (#401). ACTIVATE
+/// labels the payload once, but a later `restorecon` or full relabel puts the
+/// file back to `/var/lib`'s `var_lib_t`, which systemd then refuses with
+/// `203/EXEC`; the agent can't heal itself because it never gets to run. `+`
+/// runs the step as root outside the unit's sandboxing, `-` means it can never
+/// fail the unit, and the selinuxfs check makes it a no-op where `SELinux` is
+/// absent or disabled. `chcon` follows `bin/current` to `bin/live`. No `$` and
+/// no `;` appear in it, because systemd expands the one and splits on the
+/// other in `Exec` lines. A rootless unit has no step: its binary under
+/// `~/.local/share` is already executable for the account's service manager.
+/// The mode comes from `$manager`, which the prelude sets from the install mode.
+macro_rules! service_unit {
+    () => {
+        r#"{
+    printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\nStartLimitIntervalSec=0\n[Service]\n' "$host"
+    if [ "$manager" = systemctl ]; then
+        printf 'ExecStartPre=-+/bin/sh -c "[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t %s/bin/current"\n' "$base"
+    fi
+    printf 'ExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=always\nRestartSec=2\nKillMode=process\nDelegate=yes\n[Install]\nWantedBy=%s\n' "$base" "$base" "$base" "$wanted"
+} > "$stage/unit"
+"#
+    };
+}
+
 /// Publish the staged image, canonical launcher and optional short CLI symlink.
-pub(super) const ACTIVATE: &str = r##"
+pub(super) const ACTIVATE: &str = concat!(
+    r##"
 stage="$base/.bootstrap-lock"
 [ "$(cat "$stage/transaction")" = "$transaction" ] || exit 72
 if [ -e "$launcher" ] || [ -L "$launcher" ]; then
@@ -93,10 +124,12 @@ if [ ! -e "$alias" ] && [ ! -L "$alias" ]; then
 elif [ ! -L "$alias" ] || [ "$(stat -c '%u' "$alias")" != "$(id -u)" ] || [ "$(readlink "$alias")" != infraternal ]; then
     printf 'ALIAS skipped\n'
 fi
-printf '# infraternal bootstrap %s\n[Unit]\nDescription=infraternal host daemon\nStartLimitIntervalSec=0\n[Service]\nExecStart="%s/bin/current" agent --data "%s/state" --state "%s/sessions" run\nRestart=always\nRestartSec=2\nKillMode=process\nDelegate=yes\n[Install]\nWantedBy=%s\n' "$host" "$base" "$base" "$base" "$wanted" > "$stage/unit"
-: > "$stage/replacing-unit"
+"##,
+    service_unit!(),
+    r#": > "$stage/replacing-unit"
 mv -f "$stage/unit" "$unit"
-"##;
+"#
+);
 
 pub(super) const START: &str = r#"
 stage="$base/.bootstrap-lock"
@@ -131,3 +164,72 @@ case "$state" in
     *) printf 'no\n';;
 esac
 "#;
+
+#[cfg(test)]
+mod tests {
+    //! The unit that ACTIVATE writes, rendered by running its real shell lines.
+
+    /// The relabel step a root unit must carry (#401): before every start, as
+    /// root (`+`), give the binary `bin_t` again, so a `restorecon` or a full
+    /// relabel can't leave systemd refusing it with `203/EXEC`. `-` keeps any
+    /// failure from failing the unit, and the selinuxfs check makes it a no-op
+    /// where `SELinux` is absent or disabled.
+    const ROOT_RELABEL: &str = r#"ExecStartPre=-+/bin/sh -c "[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t /var/lib/infraternal/bin/current""#;
+
+    /// Run `service_unit!()` with the prelude values of one install mode and
+    /// return the unit it wrote.
+    fn render(base: &str, manager: &str, wanted: &str) -> String {
+        let stage = std::env::temp_dir().join(format!(
+            "infraternal-unit-test-{}-{}",
+            std::process::id(),
+            wanted
+        ));
+        std::fs::create_dir_all(&stage).unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-euc")
+            .arg(service_unit!())
+            .env("host", "0123456789abcdef0123456789abcdef")
+            .env("base", base)
+            .env("manager", manager)
+            .env("wanted", wanted)
+            .env("stage", &stage)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let unit = std::fs::read_to_string(stage.join("unit")).unwrap();
+        std::fs::remove_dir_all(&stage).unwrap();
+        unit
+    }
+
+    /// #401: the root unit relabels its binary before every start, ahead of
+    /// `ExecStart`, and keeps every line the install and removal checks match.
+    #[test]
+    fn root_unit_relabels_its_binary_before_every_start() {
+        let unit = render("/var/lib/infraternal", "systemctl", "multi-user.target");
+        let lines: Vec<&str> = unit.lines().collect();
+        let relabel = lines.iter().position(|line| *line == ROOT_RELABEL);
+        let start = lines.iter().position(|line| line.starts_with("ExecStart="));
+        assert!(relabel.is_some(), "{unit}");
+        assert!(relabel < start, "{unit}");
+        assert!(lines.contains(
+            &r#"ExecStart="/var/lib/infraternal/bin/current" agent --data "/var/lib/infraternal/state" --state "/var/lib/infraternal/sessions" run"#
+        ));
+        assert!(lines.contains(&"KillMode=process"));
+        assert!(lines.contains(&"WantedBy=multi-user.target"));
+        // systemd expands `$` and splits commands on a lone `;` in Exec lines.
+        assert!(!ROOT_RELABEL.contains('$') && !ROOT_RELABEL.contains(';'));
+    }
+
+    /// A rootless unit is left as it was: its binary under `~/.local/share` is
+    /// already executable for the account's own service manager.
+    #[test]
+    fn rootless_unit_has_no_relabel_step() {
+        let unit = render(
+            "/home/someone/.local/share/infraternal",
+            "systemctl --user",
+            "default.target",
+        );
+        assert!(!unit.contains("ExecStartPre"), "{unit}");
+        assert!(unit.lines().any(|line| line == "WantedBy=default.target"));
+    }
+}
