@@ -7,45 +7,29 @@
  * `terminal-touch.ts` recognises the gestures (a long press, a double tap, a drag after either) and calls the hooks built
  * here, which do the part that needs the terminal's cells:
  *
- * - `start(x, y)` selects the word under the finger, or the single cell when the finger is on blank space;
+ * - `start(x, y)` selects the word under the finger (a word that wraps over rows is selected whole), or the single cell when
+ *   the finger is on blank space, and nothing when the finger is outside the canvas, in the host's padding;
  * - `extend(x, y)` grows the selection to the cell under the finger, by whole cells. The word that was first selected
  *   stays inside it, so dragging backwards past the word's start keeps the word, as the system's own text does;
- * - `end()` offers a Copy callout, centred above the selection (the shared window menu, one row), when there is text;
+ * - `end()` offers a Copy callout (the shared window menu, one row) above the selection, or below it when above would leave
+ *   the window or cover its title pill, always inside the window's content area;
  * - `clear()` drops the selection and the callout, and is what any other touch of the terminal does first.
  *
- * Coordinates are always the viewport's: a gesture is short enough that the viewport does not move under it, and the
- * selection is stored in the renderer's absolute rows, so it stays on the same text if the screen scrolls afterwards. Copying goes through the shared `writeClipboard`,
- * called inside the tap on Copy so iOS still counts it as the person's gesture.
+ * Copy answers on its own row, the way every copy does (TASTE "Every tap answers"): the clipboard icon turns into a tick and
+ * the label says "Copied" for a moment, then the callout and the selection go. The write starts inside the tap on Copy, so iOS
+ * still counts it as the person's gesture.
  *
- * Loaded when the first finger touches the terminal (D188): a desktop session never carries it.
+ * Coordinates are the viewport's: a gesture is short enough that the viewport does not move under it, and the selection is
+ * stored in the renderer's absolute rows (terminal-wrap-selection.ts), so it stays on the same text if the screen scrolls
+ * afterwards. Loaded when the first finger touches the terminal (D188): a desktop session never carries it.
  */
-import { CLIPBOARD, writeClipboard } from "../../../packages/ui/src/copy-feedback";
+import { CLIPBOARD, confirmAction, swapIcon, writeClipboard } from "../../../packages/ui/src/copy-feedback";
+import { applySelection, cellAtPoint, selectedText, wordRange, type Cell, type CellGeometry, type SelectableTerminal } from "./terminal-wrap-selection";
 
-/**
- * The renderer's selection manager, as far as this module touches it. Its members are private in the renderer's types but
- * present at runtime, and the vendored build is pinned (vendor/ghostty-web/SHA256SUMS), so this is checked on every upgrade.
- * Why not the public `Terminal.select(column, row, length)`: it anchors rows at the viewport's scroll offset instead of the
- * scrollback length, so it selects the wrong lines as soon as there is scrollback. `viewportRowToAbsolute` is the renderer's
- * own conversion, the one its mouse selection uses.
- */
-export interface SelectionManagerRuntime {
-  selectionStart: { col: number; absoluteRow: number } | null;
-  selectionEnd: { col: number; absoluteRow: number } | null;
-  selectionChangedEmitter: { fire(): void };
-  getWordAtCell(column: number, row: number): { startCol: number; endCol: number } | null;
-  viewportRowToAbsolute(row: number): number;
-  markCurrentSelectionDirty(): void;
-  requestRender(): void;
-}
-
-/** The part of the terminal this module drives; the real `Terminal` from the renderer satisfies it. */
-export interface SelectableTerminal {
-  readonly cols: number;
-  readonly rows: number;
-  clearSelection(): void;
-  getSelection(): string;
-  readonly selectionManager?: SelectionManagerRuntime;
-}
+/** How long the row says "Copied" before the callout and the selection go (the shared copy feedback's hold). */
+const ANSWER_MS = 900;
+/** The gap between the callout and the selected text. */
+const GAP = 8;
 
 /** What `terminal-touch.ts` calls. */
 export interface TouchSelectHooks {
@@ -58,20 +42,13 @@ export interface TouchSelectHooks {
 }
 
 /** What the selection hooks need from the terminal screen they serve. */
-export interface TouchSelectionOptions {
+export interface TouchSelectionOptions extends CellGeometry {
   terminal: SelectableTerminal;
   /** The terminal's host element: the callout's anchor, and what the finger is on. */
   host: HTMLElement;
-  /** The canvas the cells are drawn on; its box is where cell (0, 0) starts. */
-  canvas(): HTMLCanvasElement | undefined;
-  /** One cell's size in CSS pixels. */
-  metrics(): { width: number; height: number };
   /** Wakes the renderer so the new selection is painted while it is otherwise idle. */
   wake(): void;
 }
-
-/** One cell of the grid, by column and viewport row. */
-interface Cell { col: number; row: number }
 
 /** Builds the hooks for one terminal. */
 export function createTouchSelection(options: TouchSelectionOptions): TouchSelectHooks {
@@ -82,51 +59,42 @@ export function createTouchSelection(options: TouchSelectionOptions): TouchSelec
   let range: { from: Cell; to: Cell } | undefined;
   let menu: { close(how: "keyboard" | "pointer"): void } | undefined;
   let showing = false;
+  let answer = 0;
 
   const index = (cell: Cell): number => cell.row * terminal.cols + cell.col;
-
-  /** The cell under a client point, clamped to the grid; undefined while the canvas is not laid out. */
-  const cellAt = (x: number, y: number): Cell | undefined => {
-    const canvas = options.canvas();
-    const { width, height } = options.metrics();
-    if (!canvas || width <= 0 || height <= 0) return undefined;
-    const box = canvas.getBoundingClientRect();
-    return {
-      col: Math.max(0, Math.min(terminal.cols - 1, Math.floor((x - box.left) / width))),
-      row: Math.max(0, Math.min(terminal.rows - 1, Math.floor((y - box.top) / height))),
-    };
-  };
 
   /** Selects the cells from `a` to `b` inclusive, in either order. */
   const paint = (a: Cell, b: Cell): void => {
     const [from, to] = index(a) <= index(b) ? [a, b] : [b, a];
-    const manager = terminal.selectionManager;
-    if (!manager) return;
     range = { from, to };
     options.wake();
-    // The rows the old selection covered must repaint too, or its highlight stays behind when the selection shrinks.
-    manager.markCurrentSelectionDirty();
-    manager.selectionStart = { col: from.col, absoluteRow: manager.viewportRowToAbsolute(from.row) };
-    manager.selectionEnd = { col: to.col, absoluteRow: manager.viewportRowToAbsolute(to.row) };
-    manager.requestRender();
-    manager.selectionChangedEmitter.fire();
+    applySelection(terminal, from, to);
   };
 
-  const closeMenu = (): void => { menu?.close("pointer"); menu = undefined; };
+  const closeMenu = (): void => { window.clearTimeout(answer); menu?.close("pointer"); menu = undefined; };
+
+  /** The window's content area: where the callout must stay, and the header controls it must not cover. */
+  const windowBoxes = (): { bounds: DOMRect; avoid: DOMRect[] } | undefined => {
+    const frame = host.closest<HTMLElement>(".ui-window");
+    const body = frame?.querySelector<HTMLElement>(".ui-window-body");
+    if (!frame || !body) return undefined;
+    const controls = [...frame.querySelectorAll<HTMLElement>(".ui-window-pill, .ui-window-actions")].map((el) => el.getBoundingClientRect());
+    return { bounds: body.getBoundingClientRect(), avoid: controls };
+  };
 
   const hooks: TouchSelectHooks = {
     start(x, y) {
       closeMenu();
-      const cell = cellAt(x, y);
+      const cell = cellAtPoint(options, terminal, x, y, false);
       if (!cell) return;
-      const word = terminal.selectionManager?.getWordAtCell(cell.col, cell.row);
-      first = word ? { from: { col: word.startCol, row: cell.row }, to: { col: word.endCol, row: cell.row } } : { from: cell, to: cell };
+      const word = wordRange(terminal, cell.col, cell.row);
+      first = word ?? { from: cell, to: cell };
       showing = true;
       paint(first.from, first.to);
     },
 
     extend(x, y) {
-      const cell = cellAt(x, y);
+      const cell = cellAtPoint(options, terminal, x, y, true);
       if (!cell || !first) return;
       closeMenu();
       // Before the first cells the selection runs from the finger to the end of them; after, from their start to the finger.
@@ -136,26 +104,43 @@ export function createTouchSelection(options: TouchSelectionOptions): TouchSelec
     },
 
     end() {
-      const text = terminal.getSelection();
+      const text = selectedText(terminal);
       if (!text) { hooks.clear(); return; }
       const canvas = options.canvas();
       const { width, height } = options.metrics();
       if (!canvas || !range) return;
       const box = canvas.getBoundingClientRect();
-      // Centred over the first selected row's selected span (to the last column when the selection goes on to the next row).
-      const last = range.to.row > range.from.row ? terminal.cols - 1 : range.to.col;
-      const point = { x: box.left + (range.from.col + last + 1) / 2 * width, y: box.top + range.from.row * height - 8 };
+      // Centred over the first visible selected row's span (to the last column when the selection goes on to the next row).
+      const top = Math.max(0, range.from.row), bottom = Math.min(terminal.rows - 1, range.to.row);
+      const [firstCol, lastCol] = range.to.row > range.from.row ? [range.from.row < 0 ? 0 : range.from.col, terminal.cols - 1] : [range.from.col, range.to.col];
+      const point = { x: box.left + (firstCol + lastCol + 1) / 2 * width, y: box.top + top * height - GAP };
+      const below = box.top + (bottom + 1) * height + GAP;
       const stage = host.closest<HTMLElement>(".cl-mockup, .terminal-screen") ?? document.body;
+      const frame = windowBoxes();
       void import("../../../packages/ui/src/window-menu.on-demand").then(({ openWindowMenu }) => {
         if (!showing) return;
         closeMenu();
         const mine = openWindowMenu(stage, host, [{
-          id: "copy", label: "Copy", icon: CLIPBOARD,
-          run: () => { void writeClipboard(terminal.getSelection()); hooks.clear(); },
+          id: "copy", label: "Copy", icon: CLIPBOARD, keepOpen: true,
+          run: (event) => {
+            const row = event.currentTarget as HTMLElement;
+            const label = row.lastElementChild!; // the icon is first, the label last
+            void writeClipboard(selectedText(terminal)).then((ok) => {
+              if (!showing) return; // something else ended the selection while the write was pending
+              label.textContent = ok ? "Copied" : "Couldn't copy";
+              if (ok) confirmAction(row, "Copied", event.detail === 0);
+              mine.place();
+              answer = window.setTimeout(() => hooks.clear(), ANSWER_MS);
+            });
+          },
         }], "pointer", () => { if (menu === mine) menu = undefined; }, {
-          label: "Selected text", side: "above", at: point, atAlign: "centre", hug: true, maxWidth: 160,
+          label: "Selected text", className: "ui-select-callout", side: "above", at: point, atAlign: "centre", atBelow: below, hug: true, maxWidth: 160,
+          ...(frame ? { bounds: () => windowBoxes()?.bounds, avoid: () => windowBoxes()?.avoid ?? [] } : {}),
         });
         menu = mine;
+        // The Copy icon is the shared swap (icon to tick), so the row can answer in place.
+        mine.root.querySelector("button svg")?.replaceWith(Object.assign(document.createElement("template"), { innerHTML: swapIcon(CLIPBOARD) }).content);
+        mine.place();
       });
     },
 
