@@ -32,6 +32,8 @@ impl NodeChannel for PeerChannel {
             if action == "mesh.identity" {
                 return Ok(serde_json::to_vec(&Some(Identity {
                     compact_access: false,
+                    // This fixture leaves resolver support unnegotiated because it tests revocation.
+                    dns_names: false,
                     public_key: PublicKey([2; 32]),
                     port: 51820,
                     key_rotation: false,

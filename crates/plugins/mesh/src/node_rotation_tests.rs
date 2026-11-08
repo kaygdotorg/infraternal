@@ -23,7 +23,6 @@ fn command(program: &str, args: &[&str]) {
             .success()
     );
 }
-
 /// Stop a child test at one rotation durability boundary so its parent can send SIGKILL.
 pub(super) fn crash_checkpoint(name: &str) {
     if std::env::var("INFRATERNAL_ROTATION_CRASH_POINT").as_deref() != Ok(name) {
@@ -216,9 +215,9 @@ fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() 
         local_key: Some(previous),
         server: None,
         node: node_id,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
         version: 1,
         addresses: Addresses {
@@ -228,7 +227,7 @@ fn gotatun_restart_recovers_commit_intent_with_a_predecessor_snapshot_binding() 
         default_policy: DefaultPolicy::Deny,
         exposure: None,
         peers: BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: BTreeMap::new(),
     };
     let (store, mut saved) = crate::node_state::Store::open(&state.0).unwrap();
@@ -325,7 +324,7 @@ fn gotatun_owner_proof_rejects_a_candidate_before_commit_intent() {
     );
 }
 
-// Keep the retained address, recovery fence and packet observation in one scenario.
+/// Checks address replacement, recovery fencing, and packet delivery in one backend scenario.
 fn check(backend: Backend) {
     let mut node = Node::with_firewall(Firewall::for_backend(backend));
     node.up().unwrap();
@@ -338,9 +337,9 @@ fn check(backend: Backend) {
         local_key: None,
         server: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
         version: 1,
         addresses: Addresses {
@@ -350,7 +349,7 @@ fn check(backend: Backend) {
         default_policy: DefaultPolicy::Deny,
         exposure: None,
         peers: BTreeMap::new(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
     };
     // Restore invokes this same boundary with no in-memory accepted config.
