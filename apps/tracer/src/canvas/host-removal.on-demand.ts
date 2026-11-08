@@ -2,9 +2,10 @@
  * Registry-labelled host removal for both machine details and the palette [D16, D168]. The server
  * dry-runs it, then removes it inside the 15-minute admin window, with no passkey of its own (D339).
  * Pending cleanup keeps both the host row and the manual uninstall copy action available.
+ * D369 Forget cancels an unreachable retirement here, in that same window, without touching the machine.
  */
 import { ICON_INFO } from "../../../../packages/ui/src/icons";
-import { confirmHostRemoval } from "./host-removal-confirm";
+import { confirmHostForget, confirmHostRemoval } from "./host-removal-confirm";
 import type { CoreScreen } from "../core-screen";
 import { isCanonicalUuid } from "../identifiers";
 interface RemovalStart { review: string; action: { host_id: string; host: string; uninstall: boolean } }
@@ -14,10 +15,10 @@ interface RemovalStart { review: string; action: { host_id: string; host: string
  * could not uninstall itself.
  */
 interface Result { state: string; host_id: string; host_cleanup: string; message: string; manual?: string | null }
-/** Send a bounded removal step with the browser session and same-origin checks. */
-async function post<T>(path: string, body: unknown): Promise<T> {
+/** Send a bounded host-management step with the browser session and same-origin checks. */
+async function post<T>(path: string, body: unknown, failure = "The host could not be removed. Sign in again, then try again."): Promise<T> {
   const response = await fetch(`/remote/hosts/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error("The host could not be removed. Sign in again, then try again.");
+  if (!response.ok) throw new Error(failure);
   return await response.json() as T;
 }
 /** Confirm a host removal and keep pending cleanup visible until server delivery. */
@@ -28,6 +29,18 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
   let busy = false;
   return {
     label: () => label,
+    /** Forget an unreachable retirement here without sending anything to the machine. */
+    forget(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void {
+      if (!label || !isCanonicalUuid(id) || busy) return;
+      confirmHostForget(name, anchor, () => {
+        busy = true;
+        void post<{ host_id: string; state: string; message: string }>("forget", { host_id: id }, "The host could not be forgotten. Refresh the list or sign in again, then try again.").then((result) => {
+          if (result.host_id !== id || result.state !== "forgotten") throw new Error("Host forgetting could not be confirmed.");
+          removed(id);
+          core.toast.show({ message: result.message, duration: 5000 });
+        }).catch((error: unknown) => core.toast.show({ message: error instanceof Error ? error.message : "The host could not be forgotten. Try again.", tone: "error", duration: 6000 })).finally(() => { busy = false; });
+      }, returnFocus);
+    },
     /** Review and persist denial; pending acceptance leaves the host in inventory. */
     remove(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void {
       if (!label || !isCanonicalUuid(id) || busy) return;

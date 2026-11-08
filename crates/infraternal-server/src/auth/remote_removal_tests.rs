@@ -548,3 +548,181 @@ async fn pending_removal_describes_one_host_without_claiming_completion() {
         }
     }
 }
+
+/// A removed host with its original removal record and a 14-minute-old admin approval.
+async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
+    let host = owned_host(f).await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("UPDATE sessions SET fresh=?,expires=? WHERE token_hash=?")
+        .bind(now - infraternal_plugin_api::ADMIN_WINDOW_SECONDS + 60)
+        .bind(now + 3600)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,zeroblob(32),zeroblob(32),?,?)")
+        .bind(host.as_bytes().repeat(2)).bind(host.as_bytes().as_slice()).bind(now - 604_800 + i64::from(valid) * 3600).bind(now + i64::from(valid) * 3600).execute(&f.auth.pool).await.unwrap();
+    sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,1,1,'pending')")
+        .bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
+    sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,?)")
+        .bind(host.as_bytes().as_slice())
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    host
+}
+
+/// Exercise the bounded same-origin browser route, including its session authority.
+async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
+    use tower::ServiceExt;
+    crate::remote_removal_http::router(f.auth.clone(), removal(f))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/remote/hosts/forget")
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(json!({"host_id":host}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Forget removes pending delivery and inventory visibility while preserving denial and audit.
+#[tokio::test]
+async fn forget_retired_host_keeps_audit_and_denial() {
+    let f = fixture().await;
+    let host = forget_fixture(&f, false).await;
+    sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES(?,'remote.host.remove',?,0,1,'{}')")
+        .bind(&f.user).bind(host.to_string()).execute(&f.auth.pool).await.unwrap();
+    assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
+    assert!(!live(&f, host).await);
+    let inventory = crate::remote_inventory::Source {
+        pool: f.auth.pool.clone(),
+        hosts: crate::remote_runtime::RemoteHosts::default(),
+        #[cfg(feature = "mesh")]
+        mesh: None,
+    };
+    let listed = infraternal_plugin_remote::inventory::Inventory::list(&inventory, &f.user, None)
+        .await
+        .unwrap();
+    assert_eq!(listed["hosts"], json!([]));
+    let certificates: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_certificates WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(certificates, 1, "the certificate denial ledger stays");
+    let prior_audit: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mesh_audit WHERE action='remote.host.remove' AND resource=?",
+    )
+    .bind(host.to_string())
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    assert_eq!(prior_audit, 1, "earlier audit records stay unchanged");
+    for table in [
+        "remote_host_removals",
+        "remote_login_cleanup",
+        "remote_host_bootstrap",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE host_id=?"))
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(&f.auth.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{table}");
+    }
+    let detail: String = sqlx::query_scalar(
+        "SELECT detail_json FROM mesh_audit WHERE action='remote.host.forget' AND resource=?",
+    )
+    .bind(host.to_string())
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    let detail: Value = serde_json::from_str(&detail).unwrap();
+    assert_eq!(detail["host_cleanup"], "pending");
+    assert_eq!(detail["requested_at"], 1);
+    assert_eq!(
+        forget_request(&f, host).await,
+        axum::http::StatusCode::FORBIDDEN
+    );
+}
+
+/// A live certificate, another owner, or an expired admin window cannot be forgotten.
+#[tokio::test]
+async fn forget_retired_host_rechecks_state_owner_and_admin_window() {
+    for rule in [
+        "pending",
+        "other-owner",
+        "non-owner",
+        "expired",
+        "no-cleanup",
+        "confirmed",
+    ] {
+        let f = fixture().await;
+        let host = forget_fixture(&f, rule == "pending").await;
+        match rule {
+            "other-owner" => {
+                sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('other','other',0,'unused')").execute(&f.auth.pool).await.unwrap();
+                sqlx::query("UPDATE remote_hosts SET owner_id='other' WHERE id=?")
+                    .bind(host.as_bytes().as_slice())
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "non-owner" => {
+                sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+                    .bind(&f.user)
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "expired" => {
+                sqlx::query("UPDATE sessions SET fresh=1")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "no-cleanup" => {
+                sqlx::query("DELETE FROM remote_login_cleanup")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "confirmed" => {
+                sqlx::query("UPDATE remote_login_cleanup SET confirmed=1")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        assert_eq!(
+            forget_request(&f, host).await,
+            axum::http::StatusCode::FORBIDDEN,
+            "{rule}"
+        );
+        assert!(live(&f, host).await, "{rule}");
+    }
+}
+
+/// Inventory derives retirement from the outbox and certificate expiry, not a removal row.
+#[tokio::test]
+async fn forget_retired_host_without_removal_record_matches_inventory() {
+    let f = fixture().await;
+    let host = forget_fixture(&f, false).await;
+    sqlx::query("DELETE FROM remote_host_removals WHERE host_id=?")
+        .bind(host.as_bytes().as_slice())
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
+    assert!(!live(&f, host).await);
+}

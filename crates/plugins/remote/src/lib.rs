@@ -42,7 +42,7 @@ pub mod remote_tls;
 #[cfg(feature = "native-streams")]
 pub mod wire_datagrams;
 
-/// Remove one enrolled host: in the browser with its own passkey assertion, or with a
+/// Remove one enrolled host: inside the browser's admin window (D339), or with a
 /// `hosts:write` API key inside its scope and no further tap (D333). Always dry-run first.
 pub const REMOVE: ActionDef = ActionDef {
     id: "remote.host.remove",
@@ -63,6 +63,20 @@ pub const REMOVE: ActionDef = ActionDef {
     opens: None,
     api_scope: Some("hosts:write"),
     fresh_passkey: false,
+};
+/// Forget only an owner's retired-unreachable host, keeping audit and machine state (D369).
+/// Like removal, hosts:write calls require a dry run and no additional passkey tap.
+pub const FORGET: ActionDef = ActionDef {
+    id: "remote.host.forget",
+    summary: "Forget a retired-unreachable host without changing the machine.",
+    instructions: &[
+        "Select an owned retired-unreachable host using its ID from the server inventory.",
+        "Run with dry_run first, then confirm with the review token to forget the host.",
+        "Forget removes the list entry and pending cleanup, keeps the audit record, and does not touch the machine or uninstall infraternal from it.",
+    ],
+    input: SchemaRef("remote.host.forget"),
+    output: SchemaRef("remote.host.forgotten"),
+    ..REMOVE
 };
 /// Internal node handoff; only an authenticated server can request its exact installation.
 pub const UNINSTALL: ActionDef = ActionDef {
@@ -216,6 +230,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         BOOTSTRAP_CA,
         CA_ADMINISTRATORS,
         REMOVE,
+        FORGET,
     ],
     // Settings retain the source declarations; these adapters have no socket dispatcher.
     settings: Some(SchemaRef(
