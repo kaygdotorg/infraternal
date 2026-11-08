@@ -43,6 +43,10 @@ test("curated overlay materials preserve foreground contrast in every theme", ()
   }
 });
 
+/**
+ * Opens the core screen in the paper and ink themes at one viewport size, checks each theme's floating-surface
+ * materials (pill, sidebar, palette) and saves a screenshot of each state. Returns the screenshot paths.
+ */
 async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, height: number): Promise<string[]> {
   const paths: string[] = [];
   await page.setViewportSize({ width, height });
@@ -110,7 +114,19 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
       const style = getComputedStyle(element);
       return { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow };
     });
-    expect(cssChannels(paletteMaterial.background)).toEqual(cssChannels(material.root));
+    // D219: the palette's fill is the card tint mixed 58% over the page colour, so it is never thinner than the shared
+    // material and no text reads through it. The browser works out the expected colour from the same two inputs, inside
+    // the palette so that the page colour resolves where the palette reads it.
+    const paletteFill = await page.locator("#palette").evaluate((element, tint) => {
+      const probe = document.createElement("div");
+      probe.style.background = `color-mix(in oklab, ${tint} 58%, var(--bg))`;
+      element.append(probe);
+      const fill = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return fill;
+    }, material.root);
+    expect(cssChannels(paletteMaterial.background)).toEqual(cssChannels(paletteFill));
+    expect(cssChannels(paletteMaterial.background)[3]).toBeGreaterThanOrEqual(cssChannels(material.root)[3]);
     expect(cssChannels(paletteMaterial.line)).toEqual(cssChannels(material.rootLine));
     expect(paletteMaterial.shadow).toBe(sidebarMaterial.shadow);
     expect(paletteMaterial.shadow).not.toBe(material.layers[0]!.shadow);

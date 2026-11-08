@@ -3,6 +3,12 @@
 Settled in the design grill of 2026-10-05. Each decision has a number. To change
 a decision, the owner (kayg) must approve it. Record the change here with a date.
 
+Words: D252 (2026-10-12) retired "grant" and "policy" for access in
+the product, docs and code. Decisions written before it (for example
+D154, D164, D187, D211 and D235) keep the old words as written; read
+them with D252's three kinds of access: roles, network access and login
+access (#341 B19).
+
 ## Product
 
 1. **What it is.** infraternal is an all-in-one, self-hosted infrastructure
@@ -103,6 +109,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     (mandatory) and can add one more passkey (optional). No passwords.
 25. **Recovery key.** 24 words. Recovery waits 24 h. Signed-in devices can
     cancel it.
+    *Pointer (2026-11-08, #341 B3):* D113 settles the delay: recovery is
+    immediate from a device that already holds a live session, and waits 24
+    hours only from a device without one.
 26. **First run.** The server prints a one-time setup token to its logs. You
     use it to create the owner.
 27. **CLI and MCP.** API keys for each device. A signed-in browser approves the
@@ -121,6 +130,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     multiple users (invites, roles UI, group mapping, SCIM) is in `ee/` under a
     commercial license with an offline license key. The data model stays in
     the core. Contributors sign a short CLA.
+    *Pointer (2026-11-08, #341 B23):* D277 moved the commercial code to the
+    separate repository `kayg/infraternal-enterprise`, so this repository has no
+    `ee/` directory. D334 confirms that invites and multi-user management live
+    there.
 32. **Tiers.** Community: free, one user, all features, unlimited hosts.
     Homelab: one-time payment, about 10 users. Team: per user per month.
     Enterprise: contact sales. Apps: a subscription for iOS and macOS, with
@@ -140,9 +153,14 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     - S5: Proxmox LXC.
     - S6: VMs.
     - S7: Kubernetes.
+    *Pointer (2026-11-08, #341 B13):* The order changed. See D92 (VNC and RDP
+    right after S1), D261 (logs, metrics and alerting before containers and
+    Kubernetes), and D200 and D207 (remote desktops and app windows).
 35. **Metrics plugin.** Live data plus a short history: 24 h at 10 s
     resolution, then 30 days downsampled. The server has a Prometheus
     `/metrics` export. Alerting stays in Grafana.
+    *Pointer (2026-11-08, #341 B12):* D260 amends this: alerting is ours, not
+    left to Grafana.
 
 ## UI
 
@@ -151,6 +169,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     actions. The terminal area has tabs and splits. The style is dense,
     neutral and enterprise-like. It uses calternal's tokens, but not its
     consumer feel.
+    *Pointer (2026-11-08, #341 B1, B15):* D62 and D65 govern how infraternal
+    looks where this text differs: it must look different from calternal and has
+    no reference products. D212 sets the layout words: there are no tabs, only
+    windows.
 37. **Mobile terminal input.** An accessory key bar (esc, tab, ctrl, alt,
     arrows, symbols, customizable), sticky modifiers, swipe for arrows,
     two-finger swipe for scrollback, pinch for font size, and snippets for each
@@ -203,6 +225,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 47. **Shared UI with calternal.** The goal is an `@kayg/ui` package on the
     Forgejo npm registry. Until it exists, the calternal `packages/ui` tokens
     and components are vendored, with a sync script.
+    *Pointer (2026-11-08, #341 B1):* D62 and D65 govern how infraternal looks
+    where this text differs: it must look different from calternal and has no
+    reference products.
 
 ## Open
 
@@ -216,6 +241,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 48. **Dogfood instance.** The owner's own server runs at
     `infraternal.kayg.org` on monitor01, as the user `kayg`. Only the owner
     uses it. It is redeployed from `dev`.
+    *Pointer (2026-11-08, #341 B16):* D170 and D229: the owner's server runs as
+    root, with data in /var/lib/infraternal. "As the user kayg" here is history.
 49. **Self-installing binary.** `infraternal server install` and
     `infraternal agent install` write and enable their own service (systemd
     system or user unit, other init systems per contracts/bootstrap.md). No
@@ -227,6 +254,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 52. **S1 terminal scope.** Tabs, splits, scrollback search, copy and paste,
     clickable links, the mobile key bar and resume. File transfer and
     broadcast input come in S1.5.
+    *Pointer (2026-11-08, #341 B15):* D212: there are no tabs. Read "Tabs" here
+    as windows.
 53. **No insecure dev mode.** The first deploy already has real auth: the
     setup token, the owner's passkey and the recovery key.
 54. **Friendly first.** The product must be very user friendly: setup
@@ -234,6 +263,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     network → hosts → agents → done.
 55. **Shell exit.** A clean exit (0) closes the tab. A non-zero exit or a
     signal keeps the tab, with its scrollback and a restart prompt.
+    *Pointer (2026-11-08, #341 B15):* D212: there are no tabs. Read "tab" here
+    as window.
 56. **Session reaping.** A session that no one has viewed for 7 days (you
     can change this for each user) gets a warning and is then reaped.
     Attached sessions are never reaped.
@@ -268,6 +299,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     (standalone) or as plain HTTP on a local address behind a reverse proxy.
     Dogfood instance: Traefik 443 → `172.18.0.1:7011`, and agents connect to
     `10.69.69.50:7443`.
+    *Pointer (2026-11-08, #341 B7):* D291 amends this: a new host joins through
+    the add-host SSH connection, so the server's agent port (7443) is no longer
+    required for anything.
 
 ## Visual direction (grill of 2026-10-06, issue #14 to come)
 
@@ -286,6 +320,11 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     you can interrupt) and live data that changes softly in place. All UI
     motion stays under about 250 ms. Motion is used only when it explains
     something.
+    *Pointer (2026-11-08, #341 B18):* Exceptions are set in their own decisions:
+    the droplet split takes about 500 ms (D190) and the welcome text settles
+    after 1.6 s (D101). Bounce: D99's amendment removes it from the shared tick,
+    with the droplet split as the one deliberate exception; D140 ("springy,
+    bouncy") was written before it.
 71. **Color and guidance.** A near-neutral base with one vivid accent, used
     only for focus and "look here". State colors only on small marks. Less
     information, more guidance: friendly components that lead the user.
@@ -295,6 +334,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
 73. **Type.** Geist Mono for the terminal and for code. One sans for the UI,
     chosen by eye from mockups (licensed under OFL or similar, so it is
     compatible with AGPL).
+    *Pointer (2026-11-08, #341 B2):* D175 made Maple Mono NF the default font
+    for the UI and the terminal. Geist Mono is no longer the default.
 74. **Shared sessions size like tmux.** When several devices attach to one
     session, the size of the device that typed last wins (tmux's default
     `window-size latest`). The other devices show the same screen, scaled to
@@ -353,6 +394,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
     palette with a live preview: Geist Mono (default), JetBrains Mono, Commit
     Mono, Maple Mono, Monaspace Neon, IBM Plex Mono, Cascadia Code, Fira Code
     and Source Code Pro. They are self-hosted and loaded on first use.
+    *Pointer (2026-11-08, #341 B2):* D175 made Maple Mono NF the default font
+    for the UI and the terminal, in place of the Geist Mono named as the default
+    here.
 88. **Codec on both sides, one byte format.** The browser (TypeScript) and
     the server and agent (Rust) each have a native codec for the wire format.
     Shared golden vectors and differential tests keep them identical. No
@@ -884,6 +928,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        pre-upgrade backup; tested against real old databases.
      - **Browsers (U5):** a toast says infraternal updated, and the page
        reloads when idle with no unsent input; sessions resume.
+     *Pointer (2026-11-08, #341 B6):* D186 supersedes "no public edge channel"
+     and "no central update server" (the builds host is the project's own). D295
+     narrows the rollback: the previous binary plus one copy of the database
+     taken right before the switch.
 156. **Discovery and facts (round D):**
      - **Extended information (D1, D3):** cheap facts are on by default
        (opt-out); expensive or sensitive facts and the noisier discovery
@@ -1059,6 +1107,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        on hover or tap only, and a quiet marker when a rule has not reached
        a peer yet.
      - Subnet routes and exit nodes come later; stage 1 stays simple.
+     *Pointer (2026-11-08, #341 B4):* D216 settles the default per edition:
+     allow by default in Community, deny by default in Enterprise. D242 and D252
+     refine removal of access and the access words; D302 restates D216.
 165. **Mesh addressing and names:**
      - **IPv4:** a fixed range per deployment, **10.254.0.0/16** by default.
        Setup checks it against routes in use and offers another range on
@@ -1090,6 +1141,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      the expected peer count, idle cost, join time, rule-propagation time
      and rotation impact. A round that regresses a number needs a
      benchmark that justifies it (priority 1).
+     *Pointer (2026-11-08, #341 B4):* "Deny by default" here follows D164. D216
+     sets it per edition: allow by default in Community, deny by default in
+     Enterprise.
 168. **Internal CA: Ed25519, locked until an administrator unlocks it**
      (#78):
      - The CA signing key is **Ed25519** (measured equal to P-256 in speed
@@ -1162,6 +1216,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      so it was rejected. The size baseline is raised for this growth only,
      with the per-crate breakdown recorded; the allowance for future growth
      stays 256 KiB.
+     *Pointer (2026-11-08, #341 B10):* D243's amendment (2026-11-01) removed the
+     binary size caps and the 16/64 KiB approval bands. The cap and ratchet
+     wording here is history; sizes are now measured and reported, not capped.
 174. **Type scale: one text size, bigger touch targets (owner, 2026-10-08):**
      text sizes follow the sign-in card on every platform (no larger phone
      text scale); touch devices get 44 px targets through padding and row
@@ -1333,6 +1390,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Terminal size** follows the device that last sent keys or a paste,
        with about 500 ms of hysteresis; focus, scroll and viewing don't
        count.
+     *Pointer (2026-11-08, #341 B5):* D214 replaces the "one connection" rule
+     above: the number of WebSockets per page is a measured choice.
 184. **Update source and signing (owner, 2026-10-08, backend grill round 3):**
      server and agent releases come from **builds.infraternal.com** (the
      URL stays configurable). Every release is signed, and the server refuses
@@ -1446,6 +1505,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Focus on open:** a terminal never looks ready for typing (a blinking
        cursor) unless the keyboard can actually appear; on iOS the keyboard
        needs a tap, so the first tap on the terminal opens it.
+     *Pointer (2026-11-08, #341 B14):* D322 round 2 renames Plain to Solid,
+     removes Soft, renames Mesh to Gradient, and makes the background part of a
+     preset.
 192. **The direct path uses str0m (owner, 2026-10-09):** the browser-to-host
      WebRTC direct path (D185, #103) is built on str0m 0.24.x (sans-IO, driven
      by our own transport event loop; OpenSSL, already in the binary). Chosen
@@ -1701,6 +1763,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **UI authority (P4):** the orchestrator decides reversible UI details
        on its recommendation and the owner vetoes afterwards; foundational
        and security choices still wait for an explicit answer.
+     *Pointer (2026-11-08, #341 B11):* D222 amends this decision and replaces
+     D212's key table. Read the shortcuts in D222, not here.
 207. **Stream what people already use first (owner, 2026-10-09):** streaming
      apps that are already open and signed in on the owner's machines comes
      before the server-held browser window, because it needs no onboarding.
@@ -1794,6 +1858,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      into rows without needing a window that spans columns. Rejected: one
      column per component. *(Corrected 2026-11-03: an earlier wording said
      "no scrolling inside a window", which the owner did not say.)*
+     *Pointer (2026-11-08, #341 B11):* D222 replaces this decision's key table:
+     the shortcuts in its "Keys" bullet are superseded by D222.
 213. **Zig is the C toolchain for static builds (owner, 2026-10-10):** the
      C dependencies of the static musl binaries (OpenSSL, SQLite, and
      libghostty-vt, which is written in Zig per D94) are compiled with `zig
@@ -1828,6 +1894,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      last fallback. Owner: "that's good ux - it also removes the need to have
      ports open." It is built as part of the mesh data plane (#129), not as
      a separate feature.
+     *Pointer (2026-11-08, #341 B7):* D291 amends this: the agent port 7443 is
+     no longer required for anything, including the first join.
 216. **Mesh default policy depends on the edition (owner, 2026-10-10;
      amends D164):** the open-source edition is **allow by default**: a new
      mesh lets its members reach each other until rules narrow it. The
@@ -2208,6 +2276,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        days needs a passkey re-approval when it returns.
      - **Approval (Q17f).** Enterprise policy: each new machine waits in the
        administrators' inbox (D234) until approved.
+     *Pointer (2026-11-08, #341 B21):* For many machines at once, D337, D342 and
+     D343 add keys with a join permission that need no approval. They are API
+     keys, not a separate type.
 238. **Native apps (owner grill, 2026-10-11):**
      - **All native on Apple, iOS first** (Q27): SwiftUI for the chrome
        (sidebar, pills, palette, settings, inbox, sheets, approvals) and
@@ -2298,6 +2369,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      says so: "zellij start skipped: infraternal keeps this session for you ·
      [Use zellij here]"; the button turns the skip off for that host. After
      that, nothing. A global switch exists as well.
+     *Pointer (2026-11-08, #341 B9):* D315 replaces the transparent skip:
+     infraternal never changes a shell's startup, and offers a guard line
+     instead.
 242. **Removing access cuts open connections at once (owner, 2026-10-12, #173;
      amends D164 and D216):** when a grant is removed, a peer is revoked, or
      the default policy tightens, connections that the new policy no longer
@@ -2491,6 +2565,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Built by us:** boot-request answering, TFTP and HTTP serving in Rust
        inside the plugin; iPXE shipped as separate boot files (licence
        checked per build); measured against dnsmasq before shipping.
+     *Pointer (2026-11-08, #341 B21):* D337, D342 and D343 later added keys with
+     a join permission (one-time by default, 24 h expiry) for joining machines
+     without approval. They are API keys, not a separate type.
 254. **App windows run at the display's refresh rate (owner, 2026-10-12;
      amends D232):** an app window updates at 60 fps, and at 120 fps on a
      120 Hz screen, whenever the source changes that fast, and does no work
@@ -2555,6 +2632,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      The goal is that reconnecting feels instant, while the second number keeps
      the claim honest. Full-screen prediction, a latest-screen view lane and a
      UDP transport for mesh SSH are decided only after measurement.
+     *Pointer (2026-11-08, #341 B8):* D265 and D267 refine the second budget for
+     a browser reconnect after a network change: four round trips + 50 ms
+     (D267). One round trip + 50 ms stays for links that can be reused or
+     resumed.
 260. **Logs, metrics and alerting are our own, built lean (owner,
      2026-10-12, #193):** the guiding line: "we keep it lean, we keep it
      small. we are non-intrusive, extremely reliable and ridiculously fast."
@@ -2649,6 +2730,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Logs nodes are planned next (no build yet):** a machine can be
        marked a "logs" node that stores all logs synced from other
        machines. To be grilled before anything is built.
+     *Pointer (2026-11-08, #341 B10):* D243's amendment (2026-11-01) removed the
+     binary size caps and the 16/64 KiB approval bands. The cap and ratchet
+     wording here is history; sizes are now measured and reported, not capped.
 264. **S1 decided without an AVX-512 measurement; revisit later (owner,
      2026-10-13, #175; amends D257 S1):** the static build drops OpenSSL's
      AVX-512 AES-GCM code (about 659 KB) now. None of our machines can run
@@ -2682,6 +2766,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        code cost) and decided after measurement. Rejected for now: a
        second warm connection per open tab (an idle socket per tab works
        against D260's lean principle).
+     *Pointer (2026-11-08, #341 B8):* D267 replaces the "three round trips + 50
+     ms" above with four, because of the first-message resume token.
 266. **App windows are captured at the source's full rate (owner,
      2026-10-13, #146; extends D232, D254):** "the window that is being
      captured must be captured at the max frame rate." Capture never caps
@@ -2959,6 +3045,8 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **The pill (Q6):** unchanged (picture, name, username), plus one amber
        mark when something needs attention, such as an unchecked recovery
        key or a passkey on only one device.
+284. **Not used.** The number was skipped between D283 and D285; no decision
+     carries it (#341 B20).
 285. **NAT traversal details (owner, 2026-10-15, #220; extends D196,
      D131, D166):**
      - **Server down:** machines already in the mesh, with valid
@@ -3035,6 +3123,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        SFTP. The caps rise once by the measured delta when the SSH slice
        lands, and only by that; jobs offset it with cuts elsewhere where
        they can, and the ratchet continues downward from there.
+     *Pointer (2026-11-08, #341 B10):* D243's amendment (2026-11-01) removed the
+     binary size caps and the 16/64 KiB approval bands. The cap and ratchet
+     wording here is history; sizes are now measured and reported, not capped.
 290. **App windows never fight a window manager (owner, 2026-10-16, #146;
      extends D208):** on a desktop where a window manager places and sizes
      windows (tiling managers on macOS such as OmniWM, yabai and AeroSpace,
@@ -3189,6 +3280,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      up. The trim is still owed: a follow-up measures where the bytes go
      and removes what is free to cut, and the caps ratchet down with it.
      This is not a new allowance for other changes.
+     *Pointer (2026-11-08, #341 B10):* D243's amendment (2026-11-01) removed the
+     binary size caps and the 16/64 KiB approval bands. The cap and ratchet
+     wording here is history; sizes are now measured and reported, not capped.
 299. **CLI overhaul, first answers (owner, 2026-10-17, #239; extends D202
      and D239):**
      - **One word: "machines" (C1):** the CLI says machine everywhere,
@@ -3231,6 +3325,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      connection-close logging (#227, about +37 KB) and edge auto-update
      (#211, about +636 KB x86_64 / ~800 KB aarch64) ship at their measured
      sizes; each keeps a trim follow-up and the caps ratchet down with it.
+     *Pointer (2026-11-08, #341 B10):* D243's amendment (2026-11-01) removed the
+     binary size caps and the 16/64 KiB approval bands. The cap and ratchet
+     wording here is history; sizes are now measured and reported, not capped.
 302. **Remote control rules, completing D297 (owner, 2026-10-17, #170):**
      1. Plain SSH is not covered by the per-machine switch; the switch says
         "SSH is separate" (SSH keeps D235/D289 login rules).
@@ -3273,6 +3370,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        allowed, 4 not found, 5 off or unreachable, 6 partly done, 130
        interrupted; `status` exits 5 when something that should run is down.
        The JSON envelope only ever gains fields; a removal bumps its version.
+     *Pointer (2026-11-08, #341 B17):* D314 settles the verbs: `ssh <machine>`
+     opens a shell; `open <machine>` opens or focuses that machine's screen in
+     the web app canvas, and falls back to a one-off shell with an explanation
+     only when no desktop is available.
 304. **Session automation and canvas commands, as shown to the owner
      (owner, 2026-10-17, #239; extends D303):** "i love it". `infraternal
      sessions [machine]`, `sessions read <machine>:<session> --last N`,
@@ -3297,6 +3398,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      because its earlier figure was taken against an older, larger base. It
      ships now at the measured size, like real logins (D298); the trim job
      (#236) continues and the caps ratchet down with it.
+     *Pointer (2026-11-08, #341 B10):* D243's amendment (2026-11-01) removed the
+     binary size caps and the 16/64 KiB approval bands. The cap and ratchet
+     wording here is history; sizes are now measured and reported, not capped.
 307. **One answer per terminal query, marked on the wire (owner, 2026-10-19,
      #160, #206):** "a is fine". Every attached browser answers terminal
      queries (cursor position, device attributes, colours), so with three
@@ -3313,6 +3417,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      above the 64 KB band of D243. It ships at the measured size once its
      reviews and the phone pass are clean; trimming continues and the caps
      ratchet down with it. Rejected: holding the feature for a deeper trim.
+     *Pointer (2026-11-08, #341 B10):* D243's amendment (2026-11-01) removed the
+     binary size caps and the 16/64 KiB approval bands. The cap and ratchet
+     wording here is history; sizes are now measured and reported, not capped.
 309. **Owner answers 2026-10-19 (#242, #146, #94, D300, #205, #243):**
      - **Row menu and swipes (#242):** "1a agreed", "1b agreed", "1c yes,
        one shared component!". Right-click on a row opens our own menu:
@@ -3415,6 +3522,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
        follows separately. Rejected: permanent keys, client-authoritative
        expiry, and a database write for every request. CLI commands do not
        yet consume the stored keys; that integration is tracked in #303.
+     *Pointer (2026-11-08, #341 B16):* The lume VM `macos-02-std` named in the
+     app windows bullet no longer exists. macOS builds and app-window tests run
+     on `macos-01-std`.
 312. **Layout edits live per tab; the server is the only saved copy
      (owner, 2026-10-30, #250; replaces the multi-tab layout journal):**
      - Each tab keeps its unconfirmed canvas layout edits in memory and
@@ -3646,6 +3756,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      background: **Solid** or **Gradient**, with many gradients that match
      each colour scheme by default and the person's own gradient. The strip
      fades at its left and right edges ("please add fade").
+     *Pointer (2026-11-08, #341 B14):* D338 changes the built-in values to Solid
+     100% tint / 0% blur, Tinted 75% / 25% and Frosted 50% / 50%. Round 2 above
+     already replaces Plain, Soft and Mesh with Solid and Gradient.
 323. **Settings in rows of windows approved (owner, 2026-11-03, #304):**
      "304 is aproved". The breadcrumb follows the row in view ("yes"). A
      resize drag changes "only its own window", never its whole column.
@@ -3676,6 +3789,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      lookups the peer is not allowed to do. no denial." A name a peer may
      not reach does not exist for that peer; nothing says it was refused,
      and there is no unnamed-<id> projection.
+     *Pointer (2026-11-08, #341 B22):* D339's `<os>-<first 6 characters of the
+     id>` fallback is a different scheme from the `unnamed-<id>` projection
+     ruled out here.
 328. **Small infrastructure answers (owner, 2026-11-03):**
      - The flake fetches the same pinned Zig tarball, with the same SHA-256,
        as a nix fixed-output derivation (#264; amends D213): "sure".
@@ -3708,6 +3824,10 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - The `unnamed-<id>` naming scheme goes away everywhere: "just lose
        this naming scheme. we already have default dns decided" (D327: a
        peer sees a name only if it may reach that machine).
+     *Pointer (2026-11-08, #341 B22):* D339 later defines a different fallback
+     name, `<os>-<first 6 characters of the id>`, used only when the reported
+     hostname is empty or `localhost`. It is not the removed `unnamed-<id>`
+     scheme.
 330. **Rootless proxy may still publish publicly (owner, 2026-11-03,
      #281):** "can't userspace daemons bind to public IPs for ports >1024?
      I think we can still do --public but just alert the user that the
@@ -3901,6 +4021,9 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      - **Creating** such a key needs a passkey tap bound to its exact
        settings. **Revoking** it stops new joins; machines that joined stay,
        with a separate action to remove them ("agreed").
+     *Pointer (2026-11-08, #341 B21 term):* "Setup key" (D337's quote, and the
+     `--setup-key` flag of D343) and "join key" (D343) both mean an API key that
+     carries the join permission. They are not a separate key type.
 343. **App-window controls, keys on the command line, key lists (owner,
      2026-11-04, #146; extends D342):**
      - **Clipboard is automatic both ways:** "pasteing my clipboard to the
@@ -4292,3 +4415,118 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      merges, and the remaining routes are tracked in an issue. The rejected
      options were reviewing until a round finds nothing (every round so far
      found something) and shipping with the known gaps.
+
+368. **Take over closes the old install's open terminals after confirmation
+     (owner, 2026-11-08, refines D359):** minipc01 kept an install from an
+     earlier server with one idle root shell open since 17 Oct. That server
+     is gone, so nothing could close the terminal, and Take over was refused
+     as "busy" with no way forward. The owner chose "Offer to close them":
+     when the only things using a finished install are its own terminal
+     sessions, Take over is offered and its confirmation lists each open
+     terminal (account, program, opened since); confirming closes them and
+     then takes over. Nothing closes without that confirmation. Rejected:
+     closing idle terminals without asking, and keeping the refusal with
+     instructions for closing them by hand. minipc01 is kept as it is so the
+     fix is proven on the real machine.
+
+369. **Forget a host stuck as "retired, unreachable" (owner, 2026-11-08,
+     J249 P3-3):** a host removed while offline whose certificate expires
+     before it reconnects can never receive its cleanup, so it stayed listed
+     forever. The owner chose "\"Forget\" action": an owner-only Forget on
+     the row removes it from the list, and its audit record stays. Rejected:
+     hiding it automatically once its certificate expires, and listing it
+     forever.
+
+370. **Scoped join keys, the #340 design questions (owner grill,
+     2026-11-08; refines D342, D343, D311, D337):** answered inline, all as
+     recommended unless marked.
+     - Scope `hosts:join`. A join key may also hold read scopes, never
+       write. The owner first asked: "so in this case if a machine joins with
+       join only, how do they get perms to reach other hosts?" (answer: a
+       key's scopes are API permissions; a joined machine reaches what the
+       tags the key assigns are granted).
+     - Owner of a key-joined machine: the creator in community, any person
+       in EE, or "Shared (nobody)" with at least one tag; the owner field
+       still records who added it.
+     - Use limit: one-time, at most N machines, or unlimited.
+     - Install mode is a per-key choice of system, user or both; both on
+       by default.
+     - A tag deleted before a join refuses the join and names the tag.
+     - Ephemeral machines are removed after 1 h offline by default
+       (choices 10 min, 1 h, 24 h, 7 d); a server restart gives every
+       machine a full window again.
+     - The secret is never returned to an AI agent: over MCP it shows only
+       on the approval page after the tap; the local CLI writes it to a
+       0600 file and returns the path.
+     - "Never expires" keys get a separate inactivity setting (owner's
+       choice; the recommendation was no inactivity end plus a 90-day
+       reminder).
+     - New keys use an `ifk_` prefix with a checksum; existing keys keep
+       working.
+     - A key file readable by others warns; a world-writable one is
+       refused.
+     - A one-time key is spent when its receipt is issued; a retry with the
+       same machine key gets the same receipt, and an expired unredeemed
+       receipt gives the use back.
+     - A key join takes over another server's broken install automatically,
+       following D337 (owner's choice; the recommendation was only with
+       `--take-over`).
+     - Rate limits: per key a burst of 10, then 1 every 6 s; per network 4x
+       the approval caps (20 per address or /64, 128 per /24 or /48, per
+       minute).
+     - The server stores each key's networks (IPv4 /24, IPv6 /48) with
+       first and last seen for 30 days. The owner asked first: "this needs
+       a bit more refining? what would knowing the network do here and how
+       would the warning look?" Joins are reported as one Inbox item per key
+       every 10 minutes, highlighted when the key is used from a network it
+       has not used before, naming that network and the key's usual ones.
+     - The keys list has fixed groups (Join keys, Sign-in keys, Ended
+       collapsed) and one filter field that turns words into chips.
+     - Removing every machine a key joined runs in the 15-minute admin
+       window, with the exact list in the confirmation.
+     - Keys never change after creation for now: create a new one and
+       revoke the old.
+     - Key-joined machines reach by default only what their tags are
+       granted; a per-key "Can reach: everything / only what its tags
+       allow" can widen it.
+     - No per-key source-network limit now; an "Only from" list may come as
+       a later slice.
+
+371. **Scopes for every area, an admin scope, and approval links over MCP
+     (owner, 2026-11-08; extends D333, D339):** the owner asked: "can't i
+     give my agent an admin key and have it manage everything in
+     infraternal for me without passkey taps? i am genuinely asking. yes we
+     should block imopratnt actions behind it but over mcp, we should
+     provide a way for the agent to get approval links from the server and
+     send them to me (the user)." Keys had only hosts, sessions, status and
+     terminal scopes. Decided: read and write scopes for every area
+     (settings, people, access rules, tags, mesh, keys) plus `admin`,
+     meaning all of them. Inside its scopes a key acts with no tap (D333).
+     Every action on D333's tap-each-time list, requested over MCP, answers
+     "approval needed" with a link the AI agent passes to the person, as
+     D339 does for root installs. `keys:write` revokes keys without a tap
+     and requests new ones only through an approval link. Rejected: one
+     `admin` scope on top of today's six.
+
+372. **UI consistency answers (owner grill, 2026-11-08, #345):** the
+     owner chose "Merge fixes, ask the 10": the 114 accidental fixes on
+     `ui-consistency-j195-deferred` merge after a fresh capture check, and
+     the audit's open questions were answered inline, all as recommended.
+     - One type system: every text reads the sign-in-derived roles, and
+       the phone size is set once (body 15 px, labels 13 px on phones).
+     - Radii: add an extra-small step (0.375 rem); nested corners stay
+       computed from their parent; other one-offs round to the nearest step.
+     - TASTE's grid becomes "4 px with 2 px half steps"; 3 and 5 px values
+       round.
+     - Controls and settings rows share one height token (32 px desktop);
+       list rows (28 px) and pills (38 px) stay.
+     - A 14 px small-icon token; hard-coded 16 px icons read the icon token,
+       so they grow on touch.
+     - Three durations: 120 ms press, 180 ms popover, 240 ms panel (keyboard
+       opens stay instant, #427).
+     - The docs pages follow the app's root size and roles.
+     - One title role at 22 px for every large title.
+     Engineering items the orchestrator decided as in-scope: a six-step
+     layer scale for z-index (content, chrome, sidebar, overlay, toast,
+     tooltip) with captures of every overlay pair, and one exported
+     `EASE_OUT` curve for Web Animations calls.
