@@ -1232,12 +1232,30 @@ impl Node {
         self.rotation_link()
     }
 
-    /// Return this node's live `GotaTun` link after validating its durable owner proof.
+    /// Return this node's live `GotaTun` link after validating its owner proof.
+    ///
+    /// Restored nodes prove the marker with durable state. A fresh in-memory node
+    /// proves it against the key and engine handle it created in this process.
     /// # Errors
     /// Refuses non-`GotaTun` engines, inactive links, and links whose owner proof changed.
     fn owned_gotatun_link(&self) -> io::Result<crate::wireguard::ActiveLink> {
         if self.engine_kind != EngineKind::GotaTun {
             return Err(io::ErrorKind::Unsupported.into());
+        }
+        if self.store.is_none() {
+            if !self.owned || self.gotatun.is_none() {
+                return Err(io::ErrorKind::NotConnected.into());
+            }
+            let link = Device::active_link()?.ok_or(io::ErrorKind::NotConnected)?;
+            let owner = self
+                .identity
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .public_key;
+            if link.engine != EngineKind::GotaTun || link.owner != Some(owner) {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            return Ok(link);
         }
         self.rotation_link()
     }
