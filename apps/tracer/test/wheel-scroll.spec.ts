@@ -17,7 +17,7 @@ const SIZES = [
   { name: "desktop", width: 1440, height: 900, scale: 2, touch: false },
   { name: "phone", width: 393, height: 852, scale: 3, touch: true },
 ] as const;
-const PAGE = '.ui-window[data-window-id="d-keys"]';
+const PAGE = '.ui-window[data-window-id="d-reference/keys"]';
 
 type Api = Record<string, (...args: unknown[]) => unknown>;
 const api = (page: Page, fn: string, ...args: unknown[]): Promise<unknown> =>
