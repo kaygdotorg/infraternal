@@ -945,6 +945,12 @@ fi
         })
     }
 
+    /// Wraps an installer command body so it runs under the shared setup guard.
+    ///
+    /// Every command this installation sends to the host goes through here: the
+    /// guard serializes it against any other setup of the same install root,
+    /// and the setup lease helpers become available to the body. The result is
+    /// then bound to this installation's mode, host and transaction.
     #[cold]
     #[inline(never)]
     fn script(&self, body: &str) -> String {
