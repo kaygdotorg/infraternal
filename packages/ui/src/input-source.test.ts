@@ -18,7 +18,9 @@ const stepFrame = (): void => { const due = [...queue.values()]; queue.clear(); 
  */
 class FakeWindow {
   private readonly listeners = new Map<string, Array<(event: unknown) => void>>();
+  /** Registers a listener for `type`, as `window.addEventListener` does. */
   addEventListener(type: string, listener: (event: unknown) => void): void { this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]); }
+  /** Removes a listener registered with {@link FakeWindow.addEventListener}. */
   removeEventListener(type: string, listener: (event: unknown) => void): void { this.listeners.set(type, (this.listeners.get(type) ?? []).filter((l) => l !== listener)); }
   /** Delivers an event of `type` to the listeners; `isTrusted` defaults to true, as for the person's own events. */
   dispatchEvent(event: { type: string; isTrusted?: boolean; key?: string }): void {

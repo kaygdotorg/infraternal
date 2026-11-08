@@ -12,6 +12,7 @@ import { el } from "../dom";
 import { viewIcon } from "../views/icons";
 import { viewKeys, type ViewList } from "./viewlist";
 
+/** Builds the view list: the views with their keys, morphed out of the top pill; its last row opens the whole palette directly. */
 export function createViewListPanel(cx: Ctx): ViewList {
   const { stage, state, views } = cx;
   let morph: PillMorph | undefined;

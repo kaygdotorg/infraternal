@@ -76,6 +76,7 @@ export interface ToolbarRow {
   dispose(): void;
 }
 
+/** What the mounted core screen offers the canvas: its stage and palette hooks (see each member). */
 export interface CoreScreen {
   stage: HTMLElement;
   /** The pane area under the top bar; the window canvas mounts here (src/canvas.ts). */
