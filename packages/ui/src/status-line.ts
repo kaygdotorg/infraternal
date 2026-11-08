@@ -21,6 +21,7 @@
  * The element keeps `data-state` (idle | ok | error) for colour; callers style the rest.
  */
 import { icon, ICON_ALERT, ICON_CIRCLE_CHECK, ICON_INFO } from "./icons";
+import { EASE_OUT } from "./motion";
 
 export type StatusState = "idle" | "ok" | "error";
 export interface StatusLine { set(state: StatusState, text: string): void }
@@ -91,7 +92,7 @@ export function statusLine(root: HTMLElement): StatusLine {
       const out = leaving.animate([{ opacity: 1, filter: "blur(0)" }, { opacity: 0, filter: "blur(3px)" }], { duration: 120, easing: "ease-out", fill: "forwards" });
       out.onfinish = () => leaving.remove();
       num.textContent = nextNum; rest.textContent = nextRest; value = Number(nextNum || 0);
-      for (const part of [num, rest]) part.animate([{ opacity: 0, filter: "blur(3px)" }, { opacity: 1, filter: "blur(0)" }], { duration: MOVE, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+      for (const part of [num, rest]) part.animate([{ opacity: 0, filter: "blur(3px)" }, { opacity: 1, filter: "blur(0)" }], { duration: MOVE, easing: EASE_OUT });
     },
   };
 }

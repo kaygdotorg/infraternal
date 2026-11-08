@@ -32,11 +32,11 @@
  * updates an open tooltip through `refreshTip`.
  */
 import { attachGlassBed } from "./glass-bed";
+import { EASE_OUT } from "./motion";
 
 const DELAY = 400, WARM = 300, GRACE = 80, LONG_PRESS = 500, SLOP = 10;
 const POP = 160, SWAP = 140, SHIFT = 10, TRAVEL = 200, OUT = 100;
 const GAP = 8, MARGIN = 8;
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 
 type Side = "top" | "bottom";
 /** Optional layout for one point-anchored tooltip: a clamped two-line preview (a long link). Every other tooltip shows its whole label. */
@@ -437,7 +437,7 @@ function place(el: HTMLElement, animateMove: boolean): number {
   const x = Math.max(MARGIN, Math.min(cx - w / 2, innerWidth - MARGIN - w));
   const y = Math.max(MARGIN, Math.min(side === "top" ? r.top - GAP - h : r.bottom + GAP, innerHeight - MARGIN - h));
   const prev = new DOMMatrix(getComputedStyle(pos).transform).m41;
-  pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE}` : "none";
+  pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE_OUT}` : "none";
   pos.style.transform = `translate(${x}px, ${y}px)`;
   surface.style.width = `${w}px`;
   // The arrow follows the anchor, but never leaves the surface when a shift moved the surface off-centre.
@@ -456,12 +456,12 @@ function setLabel(text: string, dir: number) {
   if (dir === 0 || reduced() || !shown) { old.textContent = text; return; }
   // Slide: the old label leaves against the travel, the new one arrives with it.
   old.classList.add("is-leaving");
-  old.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateX(${-dir * SHIFT}px)` }], { duration: SWAP, easing: EASE, fill: "forwards" }).onfinish = () => old.remove();
+  old.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateX(${-dir * SHIFT}px)` }], { duration: SWAP, easing: EASE_OUT, fill: "forwards" }).onfinish = () => old.remove();
   const next = document.createElement("span");
   next.className = "tip-label";
   next.textContent = text;
   surface.appendChild(next);
-  next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE });
+  next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE_OUT });
 }
 
 function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
@@ -478,8 +478,8 @@ function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   if (!shown && how === "pop") {
     const from = reduced() ? { opacity: 0 } : { opacity: 0, transform: "scale(0.94)" };
     const to = reduced() ? { opacity: 1 } : { opacity: 1, transform: "scale(1)" };
-    surface.animate([from, to], { duration: POP, easing: EASE });
-    arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE });
+    surface.animate([from, to], { duration: POP, easing: EASE_OUT });
+    arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE_OUT });
   }
   shown = true;
   watch();
@@ -497,7 +497,7 @@ function hide(instant = false) {
   current = null;
   warmUntil = performance.now() + WARM;
   if (instant) { pos.style.visibility = "hidden"; return; }
-  pos.animate([{ opacity: 1 }, { opacity: 0 }], { duration: OUT, easing: EASE }).onfinish = () => { if (!shown) pos.style.visibility = "hidden"; };
+  pos.animate([{ opacity: 1 }, { opacity: 0 }], { duration: OUT, easing: EASE_OUT }).onfinish = () => { if (!shown) pos.style.visibility = "hidden"; };
 }
 
 const warm = () => shown || performance.now() < warmUntil;
@@ -528,7 +528,7 @@ export function refreshTip(el: HTMLElement, animate = false) {
   if (!(shown && current === el)) return;
   if (!animate || reduced()) { place(el, false); setLabel(labelOf(el), 0); return; }
   const dir = place(el, true);
-  surface.style.transition = `width ${TRAVEL}ms ${EASE}`;
+  surface.style.transition = `width ${TRAVEL}ms ${EASE_OUT}`;
   window.setTimeout(() => { surface.style.transition = ""; }, TRAVEL + 40);
   setLabel(labelOf(el), dir);
 }

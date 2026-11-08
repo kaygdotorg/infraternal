@@ -1,3 +1,4 @@
+import { EASE_OUT } from "./motion";
 /**
  * Capsule tabs: a small segmented tab list whose selected capsule glides to the chosen
  * tab (docs/design/segmented-selection.md). One component for every icon/label tab set.
@@ -24,7 +25,6 @@ export interface CapsuleTabs {
   dispose(): void;
 }
 
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 
 /** Builds a tab list; `onChange` runs after the selection moves. */
 export function createCapsuleTabs(
@@ -68,7 +68,7 @@ export function createCapsuleTabs(
     const x = Math.round(button.offsetLeft * dpr) / dpr;
     const width = Math.round(button.offsetWidth * dpr) / dpr;
     const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    capsule.style.transition = instant || reduced ? "none" : `transform 200ms ${EASE}, width 200ms ${EASE}`;
+    capsule.style.transition = instant || reduced ? "none" : `transform 200ms ${EASE_OUT}, width 200ms ${EASE_OUT}`;
     glideUntil = instant || reduced ? 0 : performance.now() + 260;
     capsule.style.width = `${width}px`;
     capsule.style.transform = `translateX(${x}px)`;

@@ -58,11 +58,11 @@ import {
   type StartTarget,
   type TargetView,
 } from "./provisioning-client";
+import { EASE_OUT } from "../../../packages/ui/src/motion";
 
 /** Where the mock server serves the discovery data. */
 const FIXTURES_URL = "/__mock/proto/addhost";
 /** The strong ease-out curve used for the wizard's motion. */
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** The name shown for each discovery source. */
 const SOURCE_LABELS: Record<HostSource, string> = {
   netbird: "NetBird",
@@ -295,7 +295,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         button.dataset.button = button.classList.contains("ah-primary") ? "primary" : "secondary";
       }
       this.foot.hidden = markup === "";
-      if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE });
+      if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE_OUT });
     }
 
     private hero(icon: string, tone = ""): string {
@@ -439,7 +439,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         const wasHidden = row.hidden;
         row.hidden = !match && !isSelected;
         if (match && !isSelected) visible++;
-        if (wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE });
+        if (wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT });
       }
       const candidate = page.querySelector<HTMLElement>(".ah-candidate")!;
       const offer = !!target && !exact && visible === 0;
@@ -646,7 +646,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.win.becomeHost(canvasHostOf(first, this.asRoot));
         card.root.classList.remove("ah");
         if (!this.asRoot && first.rootAvailable) addRootPill(card, first);
-        if (!reduce) for (const child of card.pill.children) child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: EASE });
+        if (!reduce) for (const child of card.pill.children) child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: EASE_OUT });
         // The rest of the batch gets windows right after this one, in order, in the same tick as
         // this window's header change, so the sidebar tree gets all its new rows in one rebuild.
         // The canvas lays them out and pans to the first with its own pan animation.
@@ -661,9 +661,9 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       if (reduce) { swapHeader(); done2(); }
       else {
         const scrim = this.stageEl.querySelector<HTMLElement>(".ah-scrim")!;
-        this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px) scale(0.98)" }], { duration: 200, easing: EASE, fill: "forwards" });
-        scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, easing: EASE, fill: "forwards" }).onfinish = done2;
-        fades = [...card.pill.children].map((child) => child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE, fill: "forwards" }));
+        this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px) scale(0.98)" }], { duration: 200, easing: EASE_OUT, fill: "forwards" });
+        scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, easing: EASE_OUT, fill: "forwards" }).onfinish = done2;
+        fades = [...card.pill.children].map((child) => child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE_OUT, fill: "forwards" }));
         void (fades[0]?.finished ?? Promise.resolve()).then(swapHeader);
       }
       // A batch with failures keeps its connection: Review retries on it, and closing it
@@ -707,8 +707,8 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.resize.disconnect();
       const remove = (): void => { this.win.remove(); };
       if (reducedMotion()) { remove(); return; }
-      this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.98)" }], { duration: 160, easing: EASE, fill: "forwards" });
-      this.card.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, delay: 60, easing: EASE, fill: "forwards" }).onfinish = remove;
+      this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.98)" }], { duration: 160, easing: EASE_OUT, fill: "forwards" });
+      this.card.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, delay: 60, easing: EASE_OUT, fill: "forwards" }).onfinish = remove;
     }
 
     focus(): void {

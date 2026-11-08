@@ -22,9 +22,9 @@ import type { HostEntry } from "../sessions/adapter";
 import { ICON } from "../views/icons";
 import { entryTitle, matches, type Entry } from "./inventory";
 import { canStream, type Machines } from "./machines";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 
 /** The ease-out curve for rows that glide to a new place. */
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** Icon paths (a display) for screen rows. */
 const SCREEN_ICON = '<rect x="3" y="4.5" width="18" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 17v3.5"/>';
 /** The padlock drawn beside a missing-permission note. */
@@ -220,7 +220,7 @@ export class Picker {
         const was = before.get(id);
         if (was === undefined) continue;
         const dy = was - node.getBoundingClientRect().top;
-        if (Math.abs(dy) > 1) node.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 240, easing: EASE });
+        if (Math.abs(dy) > 1) node.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 240, easing: EASE_OUT });
       }
     }
     const ids = this.visibleIds();
