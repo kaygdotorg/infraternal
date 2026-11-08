@@ -4263,3 +4263,19 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      sudo, doas, polkit or admin groups", built from the checks the code
      actually performed. The rejected option was keeping the sentence short,
      which implies unknown routes were covered.
+
+365. **Every text colour reaches 4.5:1 in every theme (owner, 2026-11-08,
+     #323; amends D80):** J364's review of the themes work found the
+     secondary text colour (placeholders, session labels, hints) at about
+     3.0:1 in Ink and Paper and under 4.5:1 in all 28 schemes, and accent
+     and ok text under 4.5:1 in some. D80's audit allowed that, while TASTE
+     section 2 asks 4.5:1 for text. The owner chose "4.5:1 for all text":
+     every colour used for text, including secondary, accent and
+     ok/warn/danger on their surfaces, reaches 4.5:1 in every scheme, ink
+     and paper, and the contrast gate enforces it; schemes are adjusted to
+     pass. The rejected options were 3:1 for secondary text and keeping D80
+     as written.
+366. **The interface font follows the account (owner, 2026-11-08, #400):**
+     theme, terminal font and transparency follow the account across
+     devices (D352). The owner chose "Follow the account" for the interface
+     font too, over keeping it per device.
