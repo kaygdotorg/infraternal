@@ -605,3 +605,128 @@ fn nft_restart_fences_retained_replacement_address() {
 fn nf_tables_restart_fences_retained_replacement_address() {
     check(Backend::NfTables);
 }
+
+/// The original authority used by the independent SIGKILL retirement reproducer.
+const J363_EPOCH_A: &str = "00000000-0000-4000-8000-000000000001";
+/// The replacement authority used by the independent SIGKILL retirement reproducer.
+const J363_EPOCH_B: &str = "00000000-0000-4000-8000-000000000002";
+
+/// Pause a test child after the retirement fence so the parent can kill it at the crash boundary.
+pub(super) fn j363_retirement_crash_checkpoint() {
+    if let Some(ready) = std::env::var_os("J363_RETIREMENT_READY") {
+        std::fs::write(ready, b"runtime fenced; retirement checkpoint reached").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+}
+
+/// Construct an authenticated peer-bearing snapshot for the J363 authority transition tests.
+fn j363_config(key: crate::policy::model::PublicKey) -> Config {
+    Config {
+        authority_epoch: Some(J363_EPOCH_A.to_owned()),
+        local_key: Some(key),
+        server: None,
+        node: NodeId(1),
+        #[cfg(feature = "mesh-dns-spike")]
+        name: None,
+        #[cfg(feature = "mesh-dns-spike")]
+        dns_suffix: "internal".to_owned(),
+        version: 10,
+        addresses: Addresses {
+            ipv4: "10.254.0.1".parse().unwrap(),
+            ipv6: "fd01::1".parse().unwrap(),
+        },
+        default_policy: DefaultPolicy::Deny,
+        exposure: None,
+        peers: BTreeMap::from([(NodeId(2), crate::dataplane::PeerPolicy {
+            peer: crate::dataplane::Peer {
+                key: Key::generate().unwrap().1,
+                previous_key: None,
+                previous_active: false,
+                addresses: Addresses {
+                    ipv4: "10.254.0.2".parse().unwrap(),
+                    ipv6: "fd01::2".parse().unwrap(),
+                },
+                endpoint: None,
+            },
+            inbound: crate::policy::rules::TrafficPolicy::All,
+            outbound: crate::policy::rules::TrafficPolicy::All,
+            access_ssh: None,
+        })]),
+        #[cfg(feature = "mesh-dns-spike")]
+        peer_names: BTreeMap::new(),
+    }
+}
+
+/// A child installs authority A, then blocks after fencing it while applying authority B.
+#[test]
+#[ignore = "child process of the independent retirement crash proof"]
+fn j363_retirement_crash_child() {
+    let path = std::path::PathBuf::from(std::env::var_os("J363_STATE").unwrap());
+    let mut node = Node::restore_with_engine(&path, EngineKind::Kernel).unwrap();
+    let identity = node.up().unwrap();
+    let old = j363_config(identity.public_key);
+    for chunk in crate::configuration::chunks(None, &old).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    assert_eq!(Device::counters().unwrap().len(), 1);
+    let mut replacement = old.clone();
+    replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
+    replacement.peers.clear();
+    for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+        node.chunk(chunk).unwrap();
+    }
+    panic!("retirement checkpoint was not reached");
+}
+
+/// SIGKILL after the runtime fence must not restore peers from the retired authority.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j363_kill_between_fence_and_persist() {
+    use std::time::Instant;
+
+    command("ip", &["link", "set", "lo", "up"]);
+    let state = RotationState::new();
+    let ready = state.0.join("j363-ready");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "j363_retirement_crash_child", "--nocapture"])
+        .env("J363_STATE", &state.0)
+        .env("J363_RETIREMENT_READY", &ready)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("child exited before retirement checkpoint: {status}");
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("retirement checkpoint timed out");
+        }
+        // sleep: wait for the child to publish the exact retirement boundary.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let fenced = Device::counters().unwrap().len();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let durable: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state.0.join("mesh-public.json")).unwrap(),
+    )
+    .unwrap();
+    println!(
+        "J363_FENCED_PEERS={fenced} DURABLE_EPOCH={} DURABLE_PEERS={}",
+        durable["config"]["authority_epoch"],
+        durable["config"]["peers"].as_object().unwrap().len()
+    );
+    let mut restored = Node::restore_with_engine(&state.0, EngineKind::Kernel).unwrap();
+    let peers = Device::counters().unwrap().len();
+    println!(
+        "J363_RESTORED_PEERS={peers} RESTORED_EPOCH={:?}",
+        restored.config().and_then(|config| config.authority_epoch.as_deref())
+    );
+    restored.down().unwrap();
+    assert_eq!(fenced, 0, "the checkpoint follows the runtime fence");
+    assert_eq!(peers, 0, "retired authority peers resurrected after SIGKILL");
+}

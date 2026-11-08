@@ -1811,6 +1811,8 @@ impl Node {
             }
         }
 
+        #[cfg(test)]
+        rotation_tests::j363_retirement_crash_checkpoint();
         let persistence_error = self.persist_retired_snapshot(&deny).err();
         if let Some(error) = runtime_error {
             return Err(error);
