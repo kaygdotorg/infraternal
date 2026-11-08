@@ -4279,3 +4279,29 @@ a decision, the owner (kayg) must approve it. Record the change here with a date
      theme, terminal font and transparency follow the account across
      devices (D352). The owner chose "Follow the account" for the interface
      font too, over keeping it per device.
+
+367. **The revoke report ships with a coverage caveat (owner, 2026-11-08,
+     #355; refines D360 and D364):** six review rounds each found another
+     route a revoked person could keep root or write later that the scan
+     did not see. The owner chose "Fix cheap gaps, ship with caveat": the
+     scan adds the remaining polkit rule folders and the system timers and
+     /etc/cron.d lines that run as the account; any root-run job whose
+     script or unit the account can modify makes the report "Not checked"
+     (fail closed); and the "No changes found" sentence ends with "Access
+     outside these checks isn't covered." After one more review the stack
+     merges, and the remaining routes are tracked in an issue. The rejected
+     options were reviewing until a round finds nothing (every round so far
+     found something) and shipping with the known gaps.
+
+368. **Take over closes the old install's open terminals after confirmation
+     (owner, 2026-11-08, refines D359):** minipc01 kept an install from an
+     earlier server with one idle root shell open since 17 Oct. That server
+     is gone, so nothing could close the terminal, and Take over was refused
+     as "busy" with no way forward. The owner chose "Offer to close them":
+     when the only things using a finished install are its own terminal
+     sessions, Take over is offered and its confirmation lists each open
+     terminal (account, program, opened since); confirming closes them and
+     then takes over. Nothing closes without that confirmation. Rejected:
+     closing idle terminals without asking, and keeping the refusal with
+     instructions for closing them by hand. minipc01 is kept as it is so the
+     fix is proven on the real machine.
