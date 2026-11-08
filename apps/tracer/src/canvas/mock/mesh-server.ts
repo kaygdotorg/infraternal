@@ -20,6 +20,7 @@ import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { ACTION, TOPIC, ActionRefused, type MeshTransport } from "../mesh/protocol";
 
 export type FakeMeshState = "ready" | "loading" | "error" | "denied";
+/** A mock mesh membership row, including whether the node can fence peers after a restore. */
 export interface FakeNode { id: number; name: string; live: boolean; behind: boolean; rttUs: number | undefined; os: HostPlatform; address: string; path: "direct" | "relay"; via: string | undefined; /** Whether the mock node can retire peers after a server restore. */ restoreSafe: boolean }
 export interface FakeGrant { name: string; arrowId: number; from: string; to: string; both: boolean; via: string | undefined }
 export interface FakeMeshSeed { nodes: FakeNode[]; tags: Record<string, number[]>; grants: FakeGrant[] }
@@ -77,6 +78,7 @@ export function generateMesh(hosts: number, extraGrants = 0): FakeMeshSeed {
   return { nodes, tags, grants };
 }
 
+/** Test-only Mesh transport that returns seeded membership and emits controllable updates. */
 export class FakeMeshServer implements MeshTransport {
   state: FakeMeshState = "ready";
   access = { view: true, manageGrants: true };

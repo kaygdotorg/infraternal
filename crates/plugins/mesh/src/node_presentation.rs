@@ -18,6 +18,7 @@ fn plural(count: u64, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+/// Turn public mesh status JSON into a short message and suggested next command.
 fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     let state = value["state"].as_str().ok_or(PluginError::Rejected)?;
     let count = value["peer_count"].as_u64().ok_or(PluginError::Rejected)?;
@@ -356,6 +357,7 @@ fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginEr
 }
 
 #[cfg(test)]
+/// Tests the user-facing CLI presentation of Mesh status and peer rows.
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;

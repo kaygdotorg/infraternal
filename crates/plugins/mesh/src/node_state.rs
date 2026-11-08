@@ -1317,6 +1317,7 @@ pub(crate) mod tests {
         );
     }
 
+    /// Explicitly disabled state survives restart without persisting private keys.
     #[test]
     fn explicit_off_survives_restart_and_snapshot_contains_only_public_fields() {
         let directory = Directory::new();

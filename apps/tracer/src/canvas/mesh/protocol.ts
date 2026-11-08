@@ -38,6 +38,7 @@ import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 export type NodeState = "online" | "behind" | "offline";
 export type NodePath = "direct" | "relay";
 
+/** One validated Mesh node row with omitted server capabilities left unknown. */
 export interface WireNode {
   /** The server's stable node id (the canvas shows and keys by `name`). */
   id: number;
@@ -121,6 +122,7 @@ function parseAccess(v: unknown): WireAccess | undefined {
   return { view: v.view, manageGrants: v.view && v.manage_grants };
 }
 
+/** Parse one node row, rejecting malformed identity while preserving only recognized optional fields. */
 function parseNode(v: unknown): WireNode | undefined {
   if (!isObject(v)) return undefined;
   const core = isObject(v.node) ? v.node : v; // `{ node: { id, host, tags }, live, ... }`

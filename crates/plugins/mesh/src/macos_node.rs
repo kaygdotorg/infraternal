@@ -1894,6 +1894,7 @@ impl Node {
         self.enabled
     }
 
+    /// Whether the enabled node has its authenticated identity and runtime worker available.
     #[must_use]
     pub fn active(&self) -> bool {
         self.enabled && self.identity.is_some() && self.worker.is_some()

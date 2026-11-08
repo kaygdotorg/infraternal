@@ -17,6 +17,7 @@ import { layoutMesh, type Cluster } from "./layout";
 import type { WireNode } from "./protocol";
 import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./source";
 
+/** Return the node subtitle, including its restore-safety warning when epoch support is unproved. */
 const subOf = (n: WireNode): string => {
   if (n.state === "offline") return n.restoreSafe === false ? "offline · unsafe after restore" : "offline";
   if (n.state === "behind") return n.restoreSafe === false ? "not up to date · unsafe after restore" : "not up to date";
@@ -26,6 +27,7 @@ const subOf = (n: WireNode): string => {
   return n.restoreSafe === false ? `${online} · unsafe after restore` : online;
 };
 
+/** Build a cached, positioned Mesh layout while preserving card identity and stored pin coordinates. */
 export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: () => Readonly<Record<string, { x: number; y: number }>> | undefined): (m: Metrics) => MeshLayout {
   const objects = new Map<string, NodeModel>();
   let cache: { key: string; layout: MeshLayout; pins: unknown } | undefined;
