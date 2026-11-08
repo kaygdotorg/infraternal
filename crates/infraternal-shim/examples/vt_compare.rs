@@ -18,6 +18,7 @@ impl Dimensions for Size {
         200
     }
 }
+/// Compare terminal oracles with one byte stream and a fixed-size snapshot round trip.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let candidate = std::env::args().nth(1).unwrap_or_default();
     let fixture = std::env::args().nth(2);
@@ -122,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             term.grid().history_size()
         );
     } else {
-        let mut parser = vt100::Parser::new(60, 200, 10_000);
+        let mut parser = vt100::Parser::new(60_u16.try_into()?, 200_u16.try_into()?, 10_000);
         if has_fixture {
             parser.process(b"PRIMARY-SCREEN-CANARY\r\n");
         }
@@ -136,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rss()?
         );
         let start = Instant::now();
-        let mut snapshot = Vec::new();
+        let mut snapshot = String::new();
         for _ in 0..1000 {
             snapshot = parser.screen().state_formatted();
             std::hint::black_box(&snapshot);
@@ -146,8 +147,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             start.elapsed().as_secs_f64() * 1e6 / 1000.0,
             snapshot.len()
         );
-        let mut restored = vt100::Parser::new(60, 200, 10_000);
-        restored.process(&snapshot);
+        let mut restored = vt100::Parser::new(60_u16.try_into()?, 200_u16.try_into()?, 10_000);
+        restored.process(snapshot.as_bytes());
         println!(
             "repaint_equal={} cursor_equal={}",
             restored.screen().contents() == parser.screen().contents(),
