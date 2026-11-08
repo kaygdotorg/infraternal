@@ -2365,10 +2365,7 @@ impl Node {
                 && old.authority_epoch == config.authority_epoch
                 && config.version < old.version
         });
-        if lower_revision_replacement
-            && !completes_authority_reset
-            && self.store.is_none()
-        {
+        if lower_revision_replacement && !completes_authority_reset && self.store.is_none() {
             tracing::warn!(
                 old_version = ?self.config.as_ref().map(|old| old.version),
                 new_version = config.version,

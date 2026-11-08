@@ -2467,12 +2467,7 @@ impl Node {
         let mut cleanup_routes = self.routes.clone();
         cleanup_routes.extend(desired_routes.iter().copied());
         let persistence = if let Some(base) = lower_revision_base.as_ref() {
-            self.persist_full_snapshot(
-                &config,
-                cleanup_routes,
-                self.interface.clone(),
-                base,
-            )
+            self.persist_full_snapshot(&config, cleanup_routes, self.interface.clone(), base)
         } else {
             self.persist(true, Some(&config), cleanup_routes, self.interface.clone())
         };
@@ -3723,8 +3718,7 @@ mod tests {
             Some(&accepted),
             &identity,
             false,
-            chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_A)
-                .remove(0),
+            chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_A).remove(0),
         )
         .expect_err("an in-memory snapshot cannot authorize a revision rewind");
         assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
@@ -3735,8 +3729,7 @@ mod tests {
                 Some(&accepted),
                 &identity,
                 true,
-                chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_A)
-                    .remove(0),
+                chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_A).remove(0),
             )
             .expect("stage the Store-backed transaction"),
             Some(replacement)
@@ -3746,10 +3739,8 @@ mod tests {
     /// The persisted rollback transaction must compare the exact accepted base before writing.
     #[test]
     fn lower_revision_public_snapshot_requires_exact_stored_base() {
-        let directory = std::env::temp_dir().join(format!(
-            "j287-mac-lower-revision-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("j287-mac-lower-revision-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir(&directory).expect("create state directory");
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))

@@ -1974,8 +1974,7 @@ fn decode_host(
     // viewer's scope has no row, so no name is projected for it and no placeholder stands in (D327, D329).
     let key: Vec<u8> = row.try_get("public_key").ok()?;
     let key_rotation_supported: bool = row.try_get("key_rotation_supported").ok()?;
-    let authority_epoch_supported: Option<bool> =
-        row.try_get("authority_epoch_supported").ok()?;
+    let authority_epoch_supported: Option<bool> = row.try_get("authority_epoch_supported").ok()?;
     let last_seen: Option<i64> = row.try_get("last_seen").ok()?;
     let last_rtt: Option<i64> = row.try_get("last_rtt_us").ok()?;
     Some(MeshNode {

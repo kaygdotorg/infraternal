@@ -772,10 +772,9 @@ mod tests {
         };
 
         let mut plugin = MeshNodePlugin::default();
-        let identity: Identity = serde_json::from_slice(
-            &plugin.call("mesh.up", b"{}").expect("mesh up"),
-        )
-        .expect("public identity");
+        let identity: Identity =
+            serde_json::from_slice(&plugin.call("mesh.up", b"{}").expect("mesh up"))
+                .expect("public identity");
         let accepted = Chunk {
             access_updates: Vec::new(),
             authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
@@ -823,10 +822,9 @@ mod tests {
             "an epoch-bound node must refuse an epoch-less snapshot"
         );
 
-        let status: serde_json::Value = serde_json::from_slice(
-            &plugin.call("mesh.status", b"{}").expect("mesh status"),
-        )
-        .expect("status JSON");
+        let status: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
+                .expect("status JSON");
         assert_eq!(status["state"], "Waiting");
         assert_eq!(status["peer_count"], 0);
         plugin.call("mesh.down", b"{}").expect("mesh down");
