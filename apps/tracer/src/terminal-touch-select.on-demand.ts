@@ -57,6 +57,7 @@ export interface TouchSelectHooks {
   active(): boolean;
 }
 
+/** What the selection hooks need from the terminal screen they serve. */
 export interface TouchSelectionOptions {
   terminal: SelectableTerminal;
   /** The terminal's host element: the callout's anchor, and what the finger is on. */
@@ -69,6 +70,7 @@ export interface TouchSelectionOptions {
   wake(): void;
 }
 
+/** One cell of the grid, by column and viewport row. */
 interface Cell { col: number; row: number }
 
 /** Builds the hooks for one terminal. */

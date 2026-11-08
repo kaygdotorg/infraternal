@@ -1,9 +1,14 @@
+/**
+ * Touch gestures on the terminal: scroll, pinch to zoom the font, long press and double tap to select text (#426).
+ * The gesture rules live here; what a selection does with the terminal's cells is in `terminal-touch-select.on-demand.ts`.
+ */
 import type { TouchSelectHooks } from "./terminal-touch-select.on-demand";
 
 /** How long a finger must rest on the terminal before it starts a selection (the system's long press is about the same). */
 const HOLD_MS = 450;
 /** Two taps within this time and distance are a double tap, which selects the word under them. */
 const DOUBLE_TAP_MS = 350;
+/** See {@link DOUBLE_TAP_MS}: the most the second tap may land from the first. */
 const DOUBLE_TAP_PX = 30;
 /** A touch that ends sooner than this without moving is a tap. */
 const TAP_MS = 300;
