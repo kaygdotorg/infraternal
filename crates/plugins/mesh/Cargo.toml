@@ -65,6 +65,7 @@ security-framework = { version = "3.7.0", optional = true }
 [dev-dependencies]
 # Namespace tests run each node on a thread that entered its own network namespace (D332).
 nix = { workspace = true, features = ["net", "sched"] }
+socket2 = { version = "0.6", features = ["all"] }
 
 [lints]
 workspace = true

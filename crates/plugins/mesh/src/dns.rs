@@ -32,9 +32,15 @@ const NEGATIVE_TTL: u32 = 5;
 const MAX_PACKET: usize = 4096;
 /// Maximum number of TCP DNS clients held by the resolver at once.
 const TCP_CONNECTION_LIMIT: usize = 64;
+/// Maximum number of TCP DNS clients held for one source address.
+const TCP_SOURCE_CONNECTION_LIMIT: usize = 8;
 /// Maximum time a TCP DNS client may remain idle between reads or writes.
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Maximum number of queued TCP accepts serviced before returning to UDP queries.
+/// Maximum time from accept (or the previous complete answer) to read one whole DNS frame.
+const TCP_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Malformed DNS messages are counted for the lifetime of a connection.
+const TCP_MALFORMED_FRAME_LIMIT: usize = 16;
+/// Maximum number of queued TCP accepts serviced before polling clients again.
 const TCP_ACCEPT_BUDGET: usize = 64;
 
 /// The addresses one name resolves to.
@@ -174,11 +180,14 @@ struct TcpClient {
     output: Vec<u8>,
     output_offset: usize,
     last_activity: Instant,
+    frame_deadline: Option<Instant>,
+    malformed_frames: usize,
 }
 
 impl TcpClient {
     /// Reserves at most one capped DNS request frame for a newly accepted stream.
     fn new(stream: TcpStream, source: SocketAddr) -> Self {
+        let now = Instant::now();
         Self {
             stream,
             source,
@@ -186,7 +195,9 @@ impl TcpClient {
             expected_message_length: None,
             output: Vec::new(),
             output_offset: 0,
-            last_activity: Instant::now(),
+            last_activity: now,
+            frame_deadline: Some(now + TCP_MESSAGE_TIMEOUT),
+            malformed_frames: 0,
         }
     }
 
@@ -195,13 +206,26 @@ impl TcpClient {
         self.input.clear();
         self.expected_message_length = None;
     }
+
+    /// Returns the earlier of the idle timeout and the whole-frame deadline.
+    fn deadline(&self) -> Instant {
+        let idle_deadline = self.last_activity + TCP_IDLE_TIMEOUT;
+        self.frame_deadline
+            .map_or(idle_deadline, |frame_deadline| frame_deadline.min(idle_deadline))
+    }
+
+    /// Reports whether this connection has exhausted either bounded wait.
+    fn expired_at(&self, now: Instant) -> bool {
+        self.deadline() <= now
+    }
 }
 
-/// Selects the next TCP idle deadline, blocking indefinitely when no TCP clients are connected.
+/// Selects the next TCP deadline, blocking indefinitely when no clients are connected.
 fn tcp_poll_timeout(clients: &[TcpClient]) -> PollTimeout {
+    let now = Instant::now();
     clients
         .iter()
-        .map(|client| TCP_IDLE_TIMEOUT.saturating_sub(client.last_activity.elapsed()))
+        .map(|client| client.deadline().saturating_duration_since(now))
         .min()
         .map_or(PollTimeout::NONE, |remaining| {
             PollTimeout::try_from(remaining).unwrap_or(PollTimeout::MAX)
@@ -213,7 +237,14 @@ fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) 
     for _ in 0..TCP_ACCEPT_BUDGET {
         match listener.accept() {
             Ok((stream, source)) => {
-                if clients.len() >= TCP_CONNECTION_LIMIT || stream.set_nonblocking(true).is_err() {
+                let source_connections = clients
+                    .iter()
+                    .filter(|client| client.source.ip() == source.ip())
+                    .count();
+                if clients.len() >= TCP_CONNECTION_LIMIT
+                    || source_connections >= TCP_SOURCE_CONNECTION_LIMIT
+                    || stream.set_nonblocking(true).is_err()
+                {
                     continue;
                 }
                 clients.push(TcpClient::new(stream, source));
@@ -227,24 +258,42 @@ fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) 
     Ok(())
 }
 
-/// Reads one capped, length-prefixed query and queues the same source-filtered answer as UDP.
+/// Reads at most one capped, length-prefixed query fragment and queues its UDP-equivalent answer.
 fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> bool {
     let mut buffer = [0_u8; MAX_PACKET + 2];
-    loop {
-        let frame_length = client.expected_message_length.unwrap_or(2);
-        let target_length = if client.expected_message_length.is_some() {
-            frame_length + 2
-        } else {
-            2
-        };
-        let remaining = target_length.saturating_sub(client.input.len());
-        if remaining == 0 {
+    let target_length = client
+        .expected_message_length
+        .map_or(2, |message_length| message_length + 2);
+    let remaining = target_length - client.input.len();
+    let read_length = remaining.min(buffer.len());
+    match client.stream.read(&mut buffer[..read_length]) {
+        Ok(0) => false,
+        Ok(length) => {
+            client.last_activity = Instant::now();
+            client.input.extend_from_slice(&buffer[..length]);
+            if client.expected_message_length.is_none() && client.input.len() == 2 {
+                let message_length =
+                    usize::from(u16::from_be_bytes([client.input[0], client.input[1]]));
+                if !(12..=MAX_PACKET).contains(&message_length) {
+                    return false;
+                }
+                client.expected_message_length = Some(message_length);
+            }
+
+            let Some(message_length) = client.expected_message_length else {
+                return true;
+            };
+            if client.input.len() < message_length + 2 {
+                return true;
+            }
+
             let response = {
                 let snapshot = records
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 response_for_source(&client.input[2..], &snapshot, client.source.ip())
             };
+            client.clear_request();
             match response {
                 Ok(Some(response)) if response.len() <= MAX_PACKET => {
                     let Ok(response_length) = u16::try_from(response.len()) else {
@@ -256,35 +305,27 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
                         .extend_from_slice(&response_length.to_be_bytes());
                     client.output.extend_from_slice(&response);
                     client.output_offset = 0;
-                    client.clear_request();
-                    return true;
+                    client.frame_deadline = None;
+                    true
                 }
-                _ => {
-                    client.clear_request();
-                    continue;
+                Ok(Some(_)) => false,
+                Ok(None) => {
+                    client.frame_deadline = Some(Instant::now() + TCP_MESSAGE_TIMEOUT);
+                    true
                 }
-            }
-        }
-
-        let read_length = remaining.min(buffer.len());
-        match client.stream.read(&mut buffer[..read_length]) {
-            Ok(0) => return false,
-            Ok(length) => {
-                client.last_activity = Instant::now();
-                client.input.extend_from_slice(&buffer[..length]);
-                if client.expected_message_length.is_none() && client.input.len() == 2 {
-                    let message_length =
-                        usize::from(u16::from_be_bytes([client.input[0], client.input[1]]));
-                    if !(12..=MAX_PACKET).contains(&message_length) {
+                Err(_) => {
+                    client.malformed_frames += 1;
+                    if client.malformed_frames >= TCP_MALFORMED_FRAME_LIMIT {
                         return false;
                     }
-                    client.expected_message_length = Some(message_length);
+                    client.frame_deadline = Some(Instant::now() + TCP_MESSAGE_TIMEOUT);
+                    true
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return true,
-            Err(_) => return false,
         }
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => true,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
+        Err(_) => false,
     }
 }
 
@@ -304,6 +345,7 @@ fn write_tcp_response(client: &mut TcpClient) -> bool {
     }
     client.output.clear();
     client.output_offset = 0;
+    client.frame_deadline = Some(Instant::now() + TCP_MESSAGE_TIMEOUT);
     true
 }
 
@@ -495,20 +537,148 @@ fn negative_soa(suffix: &str) -> io::Result<Record> {
     ))
 }
 
+/// Serves UDP on its own worker so TCP framing and clients cannot delay datagrams.
+fn run_udp_worker(
+    sockets: Vec<UdpSocket>,
+    shutdown_reader: UnixStream,
+    records: Arc<RwLock<Records>>,
+) {
+    let mut query = [0_u8; MAX_PACKET + 1];
+    'worker: loop {
+        let shutdown_index = sockets.len();
+        let mut descriptors = Vec::with_capacity(shutdown_index + 1);
+        descriptors.extend(
+            sockets
+                .iter()
+                .map(|socket| PollFd::new(socket.as_fd(), PollFlags::POLLIN)),
+        );
+        descriptors.push(PollFd::new(shutdown_reader.as_fd(), PollFlags::POLLIN));
+        match poll(&mut descriptors, PollTimeout::NONE) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+        let ready = descriptors
+            .iter()
+            .map(|descriptor| descriptor.revents().unwrap_or_else(PollFlags::empty))
+            .collect::<Vec<_>>();
+        drop(descriptors);
+        if ready[shutdown_index]
+            .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
+        {
+            break;
+        }
+        for (index, socket) in sockets.iter().enumerate() {
+            if !ready[index].contains(PollFlags::POLLIN) {
+                continue;
+            }
+            let (length, source) = match socket.recv_from(&mut query) {
+                Ok(result) => result,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break 'worker,
+            };
+            if length > MAX_PACKET {
+                continue;
+            }
+            let response = {
+                let snapshot = records
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                response_for_source(&query[..length], &snapshot, source.ip())
+            };
+            if let Ok(Some(reply)) = response {
+                let _ = socket.send_to(&reply, source);
+            }
+        }
+    }
+}
+
+/// Serves TCP independently, with bounded accepts, reads and per-connection state.
+fn run_tcp_worker(
+    listeners: Vec<TcpListener>,
+    shutdown_reader: UnixStream,
+    records: Arc<RwLock<Records>>,
+) {
+    let mut clients = Vec::<TcpClient>::new();
+    'worker: loop {
+        let now = Instant::now();
+        clients.retain(|client| !client.expired_at(now));
+        let clients_start = listeners.len();
+        let polled_client_count = clients.len();
+        let shutdown_index = clients_start + polled_client_count;
+        let mut descriptors = Vec::with_capacity(shutdown_index + 1);
+        descriptors.extend(
+            listeners
+                .iter()
+                .map(|listener| PollFd::new(listener.as_fd(), PollFlags::POLLIN)),
+        );
+        descriptors.extend(clients.iter().map(|client| {
+            let flags = if client.output.is_empty() {
+                PollFlags::POLLIN
+            } else {
+                PollFlags::POLLOUT
+            };
+            PollFd::new(client.stream.as_fd(), flags)
+        }));
+        descriptors.push(PollFd::new(shutdown_reader.as_fd(), PollFlags::POLLIN));
+        match poll(&mut descriptors, tcp_poll_timeout(&clients)) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => break 'worker,
+        }
+        let ready = descriptors
+            .iter()
+            .map(|descriptor| descriptor.revents().unwrap_or_else(PollFlags::empty))
+            .collect::<Vec<_>>();
+        drop(descriptors);
+        if ready[shutdown_index]
+            .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
+        {
+            break;
+        }
+        // One read per ready client per poll turn bounds parser work and lets other clients run.
+        for index in (0..polled_client_count).rev() {
+            if !service_tcp_client(
+                &mut clients[index],
+                ready[clients_start + index],
+                &records,
+            ) {
+                clients.swap_remove(index);
+            }
+        }
+        for (index, listener) in listeners.iter().enumerate() {
+            if ready[index].contains(PollFlags::POLLIN)
+                && accept_tcp_connections(listener, &mut clients).is_err()
+            {
+                break 'worker;
+            }
+        }
+    }
+}
+
 /// The mesh DNS server of one node.
 ///
-/// It listens on UDP and TCP port [`DNS_PORT`] of the node's mesh IPv4 address only, with one
-/// background thread named `mesh-dns`. TCP clients have bounded connection state and share the
-/// UDP source-privacy rules. Queries from another source receive the same NXDOMAIN as an absent
-/// name (see [`response`]). Names can be replaced while it runs; each query sees a whole snapshot,
-/// never a half-updated one. Dropping the resolver stops the worker and waits for it.
+/// It listens on UDP and TCP port [`DNS_PORT`] of the node's mesh IPv4 address only, with separate
+/// `mesh-dns-udp` and `mesh-dns-tcp` workers. TCP clients have bounded connection state and share
+/// the UDP source-privacy rules. Queries from another source receive the same NXDOMAIN as an
+/// absent name (see [`response`]). Names can be replaced while it runs; each query sees a whole
+/// snapshot, never a half-updated one. Dropping the resolver stops both workers and waits for them.
 pub struct Resolver {
     address: Ipv4Addr,
     #[cfg(target_os = "linux")]
     system_port: bool,
     records: Arc<RwLock<Records>>,
-    shutdown: UnixStream,
-    worker: Option<JoinHandle<()>>,
+    udp_shutdown: UnixStream,
+    tcp_shutdown: UnixStream,
+    udp_worker: Option<JoinHandle<()>>,
+    tcp_worker: Option<JoinHandle<()>>,
 }
 
 impl Resolver {
@@ -558,12 +728,12 @@ impl Resolver {
         self.system_port
     }
 
-    /// Binds the UDP and TCP sockets and starts the shared poll worker.
+    /// Binds the UDP and TCP sockets and starts independent protocol workers.
     ///
-    /// The worker waits on DNS sockets and on a shutdown pipe at once, so it needs no idle timer
-    /// when there are no TCP clients. TCP state is capped by connection count, frame size and idle
-    /// time. Packets over the size limit, unparseable queries and queries outside the zone get no
-    /// reply; UDP send errors are ignored because datagrams have no delivery guarantee.
+    /// UDP gets its own poll loop. TCP state is capped by global and per-source connection count,
+    /// frame size, whole-message time and idle time; each ready client gets one bounded read per
+    /// poll turn. Packets over the size limit and queries outside the zone get no reply; malformed
+    /// TCP messages are counted and eventually close that connection.
     fn bind_records(
         address: Ipv4Addr,
         initial: Records,
@@ -601,105 +771,34 @@ impl Resolver {
             worker_sockets.push(system_socket);
             worker_listeners.push(system_listener);
         }
-        let (shutdown, shutdown_reader) = UnixStream::pair()?;
+        let (mut udp_shutdown, udp_shutdown_reader) = UnixStream::pair()?;
+        let (tcp_shutdown, tcp_shutdown_reader) = UnixStream::pair()?;
         let records = Arc::new(RwLock::new(initial));
-        let worker_records = Arc::clone(&records);
-        let worker = thread::Builder::new()
-            .name("mesh-dns".to_owned())
-            .spawn(move || {
-                // The sentinel byte exposes recv_from truncation at the protocol size limit.
-                let mut query = [0_u8; MAX_PACKET + 1];
-                let mut clients = Vec::<TcpClient>::new();
-                'worker: loop {
-                    clients.retain(|client| client.last_activity.elapsed() < TCP_IDLE_TIMEOUT);
-                    let listener_start = worker_sockets.len();
-                    let clients_start = listener_start + worker_listeners.len();
-                    let polled_client_count = clients.len();
-                    let shutdown_index = clients_start + polled_client_count;
-                    let mut descriptors = Vec::with_capacity(shutdown_index + 1);
-                    descriptors.extend(
-                        worker_sockets
-                            .iter()
-                            .map(|socket| PollFd::new(socket.as_fd(), PollFlags::POLLIN)),
-                    );
-                    descriptors.extend(
-                        worker_listeners
-                            .iter()
-                            .map(|listener| PollFd::new(listener.as_fd(), PollFlags::POLLIN)),
-                    );
-                    descriptors.extend(clients.iter().map(|client| {
-                        let flags = if client.output.is_empty() {
-                            PollFlags::POLLIN
-                        } else {
-                            PollFlags::POLLOUT
-                        };
-                        PollFd::new(client.stream.as_fd(), flags)
-                    }));
-                    descriptors.push(PollFd::new(shutdown_reader.as_fd(), PollFlags::POLLIN));
-                    let timeout = tcp_poll_timeout(&clients);
-                    match poll(&mut descriptors, timeout) {
-                        Ok(_) => {}
-                        Err(nix::errno::Errno::EINTR) => continue,
-                        Err(_) => break 'worker,
-                    }
-                    let ready = descriptors
-                        .iter()
-                        .map(|descriptor| descriptor.revents().unwrap_or_else(PollFlags::empty))
-                        .collect::<Vec<_>>();
-                    drop(descriptors);
-                    let shutdown_ready = ready[shutdown_index];
-                    if shutdown_ready
-                        .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
-                    {
-                        break;
-                    }
-                    for (index, worker_socket) in worker_sockets.iter().enumerate() {
-                        let socket_ready = ready[index];
-                        if !socket_ready.contains(PollFlags::POLLIN) {
-                            continue;
-                        }
-                        let (length, source) = match worker_socket.recv_from(&mut query) {
-                            Ok(result) => result,
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                            Err(_) => break 'worker,
-                        };
-                        if length > MAX_PACKET {
-                            continue;
-                        }
-                        let records = worker_records
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if let Ok(Some(reply)) =
-                            response_for_source(&query[..length], &records, source.ip())
-                        {
-                            let _ = worker_socket.send_to(&reply, source);
-                        }
-                    }
-                    for index in (0..polled_client_count).rev() {
-                        if !service_tcp_client(
-                            &mut clients[index],
-                            ready[clients_start + index],
-                            &worker_records,
-                        ) {
-                            clients.swap_remove(index);
-                        }
-                    }
-                    for (index, listener) in worker_listeners.iter().enumerate() {
-                        if ready[listener_start + index].contains(PollFlags::POLLIN)
-                            && accept_tcp_connections(listener, &mut clients).is_err()
-                        {
-                            break 'worker;
-                        }
-                    }
-                }
-            })?;
+        let udp_records = Arc::clone(&records);
+        let udp_worker = thread::Builder::new()
+            .name("mesh-dns-udp".to_owned())
+            .spawn(move || run_udp_worker(worker_sockets, udp_shutdown_reader, udp_records))?;
+        let tcp_records = Arc::clone(&records);
+        let tcp_worker = match thread::Builder::new()
+            .name("mesh-dns-tcp".to_owned())
+            .spawn(move || run_tcp_worker(worker_listeners, tcp_shutdown_reader, tcp_records))
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = udp_shutdown.write(&[0]);
+                let _ = udp_worker.join();
+                return Err(error);
+            }
+        };
         Ok(Self {
             address,
             #[cfg(target_os = "linux")]
             system_port,
             records,
-            shutdown,
-            worker: Some(worker),
+            udp_shutdown,
+            tcp_shutdown,
+            udp_worker: Some(udp_worker),
+            tcp_worker: Some(tcp_worker),
         })
     }
 
@@ -742,9 +841,13 @@ fn system_port_for_node() -> bool {
 
 impl Drop for Resolver {
     fn drop(&mut self) {
-        // The pipe wakes poll independently of the mesh address, without an idle timer.
-        let _ = self.shutdown.write(&[0]);
-        if let Some(worker) = self.worker.take() {
+        // The independent pipes wake both poll loops without touching DNS sockets.
+        let _ = self.udp_shutdown.write(&[0]);
+        let _ = self.tcp_shutdown.write(&[0]);
+        if let Some(worker) = self.udp_worker.take() {
+            let _ = worker.join();
+        }
+        if let Some(worker) = self.tcp_worker.take() {
             let _ = worker.join();
         }
     }
