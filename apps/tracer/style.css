@@ -650,7 +650,7 @@ button { color: inherit; }
   .sidebar[hidden] { transform: none; }
   .sidebar.instant, .sidebar-toggle { transition: none; }
   .top > .capsule, .top > .tabs > .tab-add { transition: none; }
-  .palette { transition-duration: 0ms; }
+  .palette, .palette:not([hidden]), .palette-scrim { transition: none; }
   .keybar.is-away { transform: none; }
   .backdrop { transition: opacity 240ms ease; }
   .keybar button:active,
