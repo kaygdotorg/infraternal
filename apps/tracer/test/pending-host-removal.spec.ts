@@ -1,7 +1,17 @@
 /** Production-build proof that denied hosts retain status without offering shell access. */
-import { expect, test } from "playwright/test";
+import { expect, test, type Page } from "playwright/test";
 import { decodeMuxedFrame, encodeMuxedFrame } from "../../../packages/protocol/src/codec";
 import { tracerEvidencePath } from "./evidence-path";
+
+/**
+ * Waits until the palette has finished opening. The palette fades and scales in (180 ms from the keyboard, 240 ms from a
+ * pointer), and a scaled row reports a smaller, shifted box: measuring during the open reads the animation as a layout
+ * difference (a row 22 px wide measured 21.7 px, its label 1-3 px off). The wait is on the palette's own transitions, so it
+ * needs no fixed sleep and ends the moment they do.
+ */
+async function paletteSettled(page: Page): Promise<void> {
+  await page.locator(".palette").evaluate((palette) => Promise.all(palette.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => undefined))));
+}
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
   for (const theme of ["ink", "paper"]) {
@@ -41,6 +51,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await expect(row).toContainText("removal pending");
         await expect(row.locator(".result-hint")).toBeVisible();
         await expect(row).toHaveAttribute("data-action", "");
+        await paletteSettled(page);
         const label = await row.locator(".result-label").boundingBox();
         const icon = await row.locator(".result-icon").boundingBox();
         expect(label).not.toBeNull(); expect(icon).not.toBeNull();
@@ -48,6 +59,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await page.screenshot({ path: tracerEvidencePath("pending-host", `${viewport.width}-${theme}-pending.png`) });
         state = "retired-unreachable"; push?.();
         await expect(row).toContainText("retired-unreachable");
+        await paletteSettled(page);
         const expiredLabel = await row.locator(".result-label").boundingBox();
         expect(Math.abs(expiredLabel!.x - label!.x)).toBeLessThanOrEqual(0.5);
         await page.screenshot({ path: tracerEvidencePath("pending-host", `${viewport.width}-${theme}-unreachable.png`) });
