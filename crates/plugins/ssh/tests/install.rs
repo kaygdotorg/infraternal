@@ -1890,6 +1890,7 @@ async fn enrollment_process_exit_71_is_not_reported_as_directory_refusal() {
     assert!(!failure.message.contains("Move it aside"));
 }
 
+/// A staged transaction keeps its lease while separate installer commands run.
 #[tokio::test]
 async fn setup_transaction_holds_a_live_lock_between_shell_commands() {
     let fixture = Fixture::new();
@@ -1914,6 +1915,110 @@ async fn setup_transaction_holds_a_live_lock_between_shell_commands() {
     );
     transaction.rollback().await.unwrap();
     assert!(!fixture.base().exists());
+}
+
+/// A scope belonging to one fixture must protect its files without blocking another.
+/// Only cgroup membership is substituted; the hidden process, socket files,
+/// journals and concurrent ownership checks all use the real filesystem.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn concurrent_fixtures_attribute_hidden_session_scopes_to_their_own_install() {
+    use std::os::unix::fs::DirBuilderExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let a = first.transaction();
+    let b = second.transaction();
+    let (staged_a, staged_b) = tokio::join!(a.stage(&first.binary), b.stage(&second.binary));
+    staged_a.unwrap();
+    staged_b.unwrap();
+    // Preserve each cleanup receipt, then retire the owned lease before inspection.
+    for (fixture, transaction) in [(&first, &a), (&second, &b)] {
+        let keep = fixture.base().join("keep");
+        std::fs::write(&keep, b"retain the recovery receipt").unwrap();
+        assert!(transaction.rollback().await.is_err());
+        std::fs::remove_file(keep).unwrap();
+    }
+    let scope = uuid::Uuid::new_v4().simple().to_string();
+    let sessions = first.base().join("sessions/sessions");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&sessions)
+        .unwrap();
+    let socket = sessions.join(format!("{scope}.sock"));
+    // Bind from the owned directory to keep the kernel's path below sun_path.
+    assert!(
+        Command::new("python3")
+            .args([
+                "-c",
+                "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])"
+            ])
+            .arg(socket.file_name().unwrap())
+            .current_dir(&sessions)
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut hidden = Command::new("python3")
+        .args([
+            "-u",
+            "-c",
+            "import ctypes,sys; assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; print('ready',flush=True); sys.stdin.read()",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    tokio::time::timeout(
+        INSTALL_HANG,
+        BufReader::new(hidden.stdout.take().unwrap()).read_line(&mut ready),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(ready, "ready\n");
+    let pid = hidden.id().unwrap();
+    assert!(std::fs::read_link(format!("/proc/{pid}/exe")).is_err());
+    let cgroups = first.root.join("proc");
+    let process = cgroups.join(pid.to_string());
+    std::fs::create_dir_all(&process).unwrap();
+    std::fs::write(
+        process.join("cgroup"),
+        format!("0::/user.slice/app.slice/infraternal-session-{scope}.scope/child\n"),
+    )
+    .unwrap();
+    let check = infraternal_plugin_ssh::previous_attempt::check_script(first.target.mode).replace(
+        "\"$1/cgroup\"",
+        &format!("\"{}/${{1##*/}}/cgroup\"", cgroups.display()),
+    );
+    let local_a = Local {
+        root: first.root.clone(),
+    };
+    let local_b = Local {
+        root: second.root.clone(),
+    };
+    let (checked_a, checked_b) = tokio::join!(
+        local_a.run(&check, Input::Empty),
+        local_b.run(&check, Input::Empty),
+    );
+    // Reap the exact fixture process and finish both cleanups even on a red run.
+    drop(hidden.stdin.take());
+    assert!(hidden.wait().await.unwrap().success());
+    std::fs::remove_file(socket).unwrap();
+    a.rollback().await.unwrap();
+    b.rollback().await.unwrap();
+    assert_eq!(checked_a.err().unwrap().exit_status, Some(73));
+    assert!(
+        checked_b.is_ok(),
+        "another install's hidden scope blocked this fixture: {:?}",
+        checked_b.err(),
+    );
 }
 
 #[tokio::test]
