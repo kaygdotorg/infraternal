@@ -25,6 +25,8 @@ export interface WindowMenuOptions {
   maxWidth?: number;
   /** Opens at a pointer position (a right-click) instead of under the anchor; see anchored-popover.ts. */
   at?: { x: number; y: number };
+  /** With `at`: centre the menu on the point's x instead of starting at it (a callout over a selection). */
+  atAlign?: "start" | "centre";
 }
 
 /** Opens a menu of actions next to `anchor`, one row per action (icon and label). */
@@ -34,6 +36,7 @@ export function openWindowMenu(stage: HTMLElement, anchor: HTMLElement, items: W
     align: options.align ?? "end", maxWidth: options.maxWidth ?? 240,
     ...(options.side ? { side: options.side } : {}), ...(options.hug ? { hug: true } : {}),
     ...(options.at ? { at: options.at } : {}),
+    ...(options.atAlign ? { atAlign: options.atAlign } : {}),
   }, source, onClosed);
   menu.root.setAttribute("role", "menu");
   const rows: HTMLButtonElement[] = [];

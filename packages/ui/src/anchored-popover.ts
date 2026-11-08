@@ -47,6 +47,12 @@ export interface AnchoredPopoverOptions {
   maxWidth?: number;
   /** Opens at this point (client coordinates) instead of under the anchor; see the module doc. */
   at?: { x: number; y: number };
+  /**
+   * With `at`: how the popover lines up with the point's x. `start` (default) puts its left edge there, as a right-click menu does;
+   * `centre` centres it on the point, for a callout over a text selection. With `side: "above"` the point is where its bottom edge
+   * goes, and it falls below the point only when there is no room above.
+   */
+  atAlign?: "start" | "centre";
   /** The y below which the popover must not reach (a key tray's top); read on every placement. */
   bottomLimit?(): number | undefined;
 }
@@ -79,9 +85,12 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     const bottom = Math.min(screen.bottom, view ? view.offsetTop + view.height : innerHeight) - INSET;
     root.style.maxWidth = `${Math.round(Math.min(options.maxWidth ?? 400, right - screen.left - INSET))}px`;
     const width = root.offsetWidth, height = root.offsetHeight;
-    const left = Math.round(Math.max(screen.left + INSET, Math.min(at.x, right - width)));
-    // Flips above the point when the room below is smaller than the menu and the room above is larger.
-    const flip = at.y + height > bottom && at.y - screen.top > bottom - at.y;
+    const wanted = options.atAlign === "centre" ? at.x - width / 2 : at.x;
+    const left = Math.round(Math.max(screen.left + INSET, Math.min(wanted, right - width)));
+    // Opens below the point and flips above it when the room below is smaller than the menu and the room above is larger;
+    // an `above` popover prefers the other way round.
+    const roomAbove = at.y - screen.top, roomBelow = bottom - at.y;
+    const flip = above ? roomAbove >= height || roomAbove >= roomBelow : height > roomBelow && roomAbove > roomBelow;
     const top = Math.round(Math.max(screen.top + INSET, flip ? at.y - height : Math.min(at.y, bottom - height)));
     root.style.left = `${left - screen.left}px`;
     root.style.top = `${top - screen.top}px`;
