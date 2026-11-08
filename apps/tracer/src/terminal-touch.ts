@@ -73,19 +73,29 @@ export function terminalTouch(host: HTMLElement, terminal: {
   host.addEventListener("touchstart", (event) => {
     stop();
     clearTimeout(holdTimer);
+    const wasSelecting = selecting;
     selecting = false;
-    press++;
     lastTouchAt = event.timeStamp;
-    // Loaded now, so the code is there by the time the finger has rested long enough; any new touch ends a selection.
-    if (event.touches.length === 1) withSelect((hooks) => { if (hooks.active()) hooks.clear(); });
+    if (event.touches.length === 1) {
+      // A new touch is a new press: it ends any selection. The code is loaded now, so it is there by the time the finger
+      // has rested long enough.
+      press++;
+      withSelect((hooks) => { if (hooks.active()) hooks.clear(); });
+    }
     dragging = event.touches.length === 1;
     axis = undefined;
     carry = 0;
     if (event.touches.length === 2) {
       pinching = true;
       suppressClick = true;
-      distance = separation(event.touches);
-      baseFont = terminal.options.fontSize;
+      if (wasSelecting) {
+        // A second finger after the hold finishes the selection (its Copy callout shows) and is not a pinch.
+        distance = 0;
+        withSelect((hooks) => hooks.end());
+      } else {
+        distance = separation(event.touches);
+        baseFont = terminal.options.fontSize;
+      }
     } else if (dragging && !pinching) {
       suppressClick = false;
       x = startX = event.touches[0]!.clientX;
