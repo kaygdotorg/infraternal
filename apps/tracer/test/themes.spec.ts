@@ -76,6 +76,22 @@ test.describe("the Themes window", () => {
     await expect(page.locator(`${WINDOW} .cl-theme-name`)).not.toHaveAttribute("data-open", "");
   });
 
+  test("the selected theme tick does not cover preview text", async ({ page }) => {
+    await open(page);
+    const covered = await page.locator(`${WINDOW} .ui-theme[data-selected]`).evaluate((card) => {
+      const tick = card.querySelector(".ui-theme-tick")!.getBoundingClientRect();
+      const samples = [...card.querySelectorAll(".ui-theme-term > span, .ui-theme-aa, .ui-theme-prompt")];
+      return samples.flatMap((sample) => {
+        const range = document.createRange();
+        range.selectNodeContents(sample);
+        return [...range.getClientRects()].filter((rect) =>
+          tick.left < rect.right && tick.right > rect.left && tick.top < rect.bottom && tick.bottom > rect.top,
+        ).map(() => sample.textContent);
+      });
+    });
+    expect(covered, "the selection marker stays clear of the preview's rendered text").toEqual([]);
+  });
+
   test("the light and dark circles of a Colour choose the version, and a press does not move the circle", async ({ page }) => {
     await open(page);
     const row = page.locator(`${WINDOW} .cl-colour-row[data-id="catppuccin"]`);
