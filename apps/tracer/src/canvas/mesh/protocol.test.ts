@@ -50,6 +50,12 @@ test("restore safety is preserved for an explicitly unsafe node", () => {
   expect(snapshot.nodes[0]).toMatchObject({ restoreSafe: false });
 });
 
+test("a server without restore-safety support leaves the field absent", () => {
+  const node = parseSnapshot(today)!.nodes[0]!;
+  expect(node.restoreSafe).toBeUndefined();
+  expect(Object.hasOwn(node, "restoreSafe")).toBe(false);
+});
+
 // The server since #236: liveness from its own device (no stored observation, so `last_seen` is null), the path
 // while a session is up, and each machine under its own name. Owner report 2026-10-17: minipc01 passing traffic.
 const presence = {

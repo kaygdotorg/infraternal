@@ -134,7 +134,18 @@ function parseNode(v: unknown): WireNode | undefined {
   const os = typeof v.os === "string" && PLATFORMS.includes(v.os) ? (v.os as HostPlatform) : undefined;
   const path = v.path === "direct" || v.path === "relay" ? v.path : undefined;
   const restoreSafe = typeof v.restore_safe === "boolean" ? v.restore_safe : undefined;
-  return { id: core.id, name: core.host, tags, state, rttMs, os, address: optText(v.address), path, via: optText(v.via), restoreSafe };
+  return {
+    id: core.id,
+    name: core.host,
+    tags,
+    state,
+    rttMs,
+    os,
+    address: optText(v.address),
+    path,
+    via: optText(v.via),
+    ...(restoreSafe === undefined ? {} : { restoreSafe }),
+  };
 }
 
 function parseEndpoint(v: unknown, nameOf: ReadonlyMap<number, string>): string | undefined {
