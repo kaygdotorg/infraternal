@@ -202,3 +202,43 @@ fn full_peer_update_refreshes_existing_peer_route_mtu() {
         "unchanged peer kept an unsafe route budget: {after}"
     );
 }
+/// Access-only snapshots must also refresh the path budget after the underlay narrows.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "Run as root inside a disposable network namespace."]
+fn access_only_update_refreshes_existing_peer_route_mtu() {
+    ip(&["link", "set", "lo", "up"]);
+    ip(&["link", "add", "underlay0", "type", "dummy"]);
+    ip(&["link", "set", "underlay0", "mtu", "1500", "up"]);
+    ip(&["addr", "add", "192.0.2.1/24", "dev", "underlay0"]);
+    let mut node = Node::default().with_engine(EngineKind::Kernel);
+    node.up().unwrap();
+    let (_, first) = Key::generate().unwrap();
+    let peer = |key, id: u8| {
+        json!({
+            "peer": {"key": key, "addresses": {"ipv4": format!("10.254.0.{id}"), "ipv6": format!("fd01::{id}")}, "endpoint": format!("192.0.2.{id}:51820")},
+            "inbound": "All", "outbound": "All"
+        })
+    };
+    let mut chunk: Value = json!({"node": 1, "from_version": null, "version": 1, "index": 0, "last": true,
+        "addresses": {"ipv4": "10.254.0.1", "ipv6": "fd01::1"}, "default_policy": "Allow",
+        "upserted": {"2": peer(first, 2)}, "removed": []});
+    node.chunk(serde_json::from_value::<Chunk>(chunk.clone()).unwrap())
+        .unwrap();
+    let before = ip(&["route", "show", "exact", "10.254.0.2/32"]);
+    ip(&["link", "set", "underlay0", "mtu", "1280"]);
+    chunk["from_version"] = json!(1);
+    chunk["version"] = json!(2);
+    chunk["upserted"] = json!({"2": peer(first, 2)});
+    chunk["upserted"]["2"]["inbound"] = json!("None");
+    node.chunk(serde_json::from_value::<Chunk>(chunk).unwrap())
+        .unwrap();
+    let after = ip(&["route", "show", "exact", "10.254.0.2/32"]);
+    node.down().unwrap();
+    println!("before={before}after_access_only_update={after}");
+    assert!(before.contains("mtu 1420"), "{before}");
+    assert!(
+        after.contains("mtu 1200"),
+        "unchanged peer kept an unsafe route budget: {after}"
+    );
+}

@@ -2279,6 +2279,7 @@ impl Node {
         drop(inventory);
         if changed.is_empty()
             && retired_keys.is_empty()
+            && route_overrides_to_clear.is_empty()
             && self.config.as_ref().is_some_and(|old| {
                 old.node == config.node
                     && old.addresses == config.addresses
@@ -2286,14 +2287,25 @@ impl Node {
             })
         {
             // Route validation and the actual key inventory above still run.
-            // Only access changes remain: one final firewall transaction is
-            // sufficient, without an intermediate table or peer/route writes.
+            // Only access changes remain. Keep the small firewall transaction, but
+            // still rederive peer route budgets because their underlay can change
+            // independently of the accepted peer snapshot.
             #[cfg(feature = "cutoff-measure")]
             let firewall =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
             self.firewall.install_pending(&config)?;
+            let configured_peers: Vec<_> = config
+                .peers
+                .values()
+                .map(|policy| policy.peer.clone())
+                .collect();
+            if let Err(error) = self.install_peer_routes(&configured_peers, false) {
+                self.firewall
+                    .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
+                return Err(error);
+            }
             #[cfg(feature = "cutoff-measure")]
             {
                 self.refusing_at_ns = crate::cutoff_measure::monotonic_ns();
