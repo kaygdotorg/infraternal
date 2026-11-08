@@ -509,9 +509,22 @@ test("a plain tooltip keeps its wrapped layout after a link tooltip", async ({ b
       };
     });
 
+    // The tooltip eases to its size, so a read taken right after it appears is a few pixels short (a busy host reads it
+    // mid-ease: 302 px wide against 308). Read it again until two reads 100 ms or more apart agree.
+    const measureSettled = async () => {
+      let previous = "";
+      await expect.poll(async () => {
+        const now = JSON.stringify(await measurePlainTooltip());
+        const settled = now === previous;
+        previous = now;
+        return settled;
+      }).toBe(true);
+      return JSON.parse(previous) as Awaited<ReturnType<typeof measurePlainTooltip>>;
+    };
+
     await trigger.hover();
     await expect(page.locator(".tip")).toBeVisible();
-    const beforeLink = await measurePlainTooltip();
+    const beforeLink = await measureSettled();
     await page.mouse.move(0, 0);
 
     const target = "https://login.example.test/sign-in";
@@ -525,10 +538,7 @@ test("a plain tooltip keeps its wrapped layout after a link tooltip", async ({ b
     await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText(target);
     await trigger.hover();
     await expect(page.locator(".tip-label:not(.is-leaving)")).toHaveText(`https://plain.example.test/${"x".repeat(420)}`);
-    // The tooltip eases to its size, so a read taken mid-ease is a few hundredths of a pixel short (a busy host reads it
-    // there). Wait for the layout to arrive at the earlier one: this still fails if the link preview's clamp leaked.
-    await expect.poll(async () => JSON.stringify(await measurePlainTooltip())).toBe(JSON.stringify(beforeLink));
-    const afterLink = await measurePlainTooltip();
+    const afterLink = await measureSettled();
 
     // The link preview's two-line clamp must not leak: a plain label is laid out the same as before it, and (#310, TASTE "A tooltip
     // is as wide as its text") it wraps at the cap and shows all of its text instead of ending in an ellipsis.
