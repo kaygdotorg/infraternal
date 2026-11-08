@@ -10,7 +10,10 @@
  * How it works. One pair of passive listeners on `window`, in the capture phase, so they run before any shortcut or click
  * handler of the same event:
  *
- * - `keydown` sets the source to `"keyboard"`;
+ * - `keydown` sets the source to `"keyboard"`, except a modifier key on its own (Shift, Control, Alt, Meta and the like): holding
+ *   one down starts no action and must not cut short a pointer-opened surface's motion (Shift pressed 60 ms into a pointer
+ *   open would otherwise end its fade). The last key of a chord is not a modifier, so it still sets the source before the
+ *   shortcut's handler runs;
  * - `pointerdown` (which covers mouse, pen and touch) sets it to `"pointer"`.
  *
  * The source is written to the root as `data-input="keyboard" | "pointer"`, in the same task as the event. CSS therefore
@@ -25,6 +28,9 @@
 
 /** The two kinds of input that can open or close a surface. */
 export type InputSource = "keyboard" | "pointer";
+
+/** `KeyboardEvent.key` values of keys that only modify other keys; pressing one is not a shortcut by itself. */
+const MODIFIER_KEYS: ReadonlySet<string> = new Set(["Shift", "Control", "Alt", "AltGraph", "Meta", "OS", "Super", "Hyper", "Fn", "FnLock", "CapsLock", "NumLock", "ScrollLock"]);
 
 /** The source of the most recent key or pointer press. */
 let current: InputSource = "pointer";
@@ -57,7 +63,7 @@ export function installInputSource(root: HTMLElement = document.documentElement)
     // One attribute write per change of source, never per event.
     if (root.dataset.input !== source) root.dataset.input = source;
   };
-  const key = (): void => set("keyboard");
+  const key = (event: Event): void => { if (!MODIFIER_KEYS.has((event as KeyboardEvent).key)) set("keyboard"); };
   const pointer = (): void => set("pointer");
   set("pointer");
   window.addEventListener("keydown", key, { capture: true, passive: true });

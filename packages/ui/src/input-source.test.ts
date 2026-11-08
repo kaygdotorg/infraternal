@@ -23,6 +23,13 @@ test("a key press is keyboard, a pointer press is pointer, the newest wins, and 
   target.dispatchEvent(new Event("keydown"));
   expect(triggeredByKeyboard()).toBe(true);
 
+  // A modifier on its own is not a shortcut: it leaves a pointer source alone, and the chord's last key sets the source.
+  target.dispatchEvent(new Event("pointerdown"));
+  for (const key of ["Shift", "Control", "Alt", "Meta"]) target.dispatchEvent(Object.assign(new Event("keydown"), { key }));
+  expect(inputSource()).toBe("pointer");
+  target.dispatchEvent(Object.assign(new Event("keydown"), { key: "k" }));
+  expect(inputSource()).toBe("keyboard");
+
   dispose();
   expect(root.dataset.input).toBeUndefined();
   expect(inputSource()).toBe("pointer");

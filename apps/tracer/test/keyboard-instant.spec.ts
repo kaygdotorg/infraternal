@@ -158,3 +158,29 @@ for (const viewport of VIEWPORTS) {
     });
   });
 }
+
+/**
+ * A modifier key on its own is not a shortcut: pressing Shift 60 ms into a pointer-opened palette must not cut its fade short
+ * (J373 review of #427). The palette's opacity transition has to run its whole length, and never be cancelled.
+ */
+test("Shift pressed during a pointer open does not cut the fade short", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCanvas(page);
+  await page.evaluate(() => {
+    const palette = document.querySelector("#palette")!;
+    const log: { run?: number; end?: number; cancelled: boolean } = { cancelled: false };
+    (window as unknown as { __fade: typeof log }).__fade = log;
+    palette.addEventListener("transitionrun", (e) => { if ((e as TransitionEvent).propertyName === "opacity" && log.run === undefined) log.run = performance.now(); });
+    palette.addEventListener("transitionend", (e) => { if ((e as TransitionEvent).propertyName === "opacity") log.end = performance.now(); });
+    palette.addEventListener("transitioncancel", (e) => { if ((e as TransitionEvent).propertyName === "opacity") log.cancelled = true; });
+  });
+  await page.locator("#capsule").click();
+  // sleep: let the pointer-opened fade get 60 ms in, as the reviewer did, before the modifier arrives
+  await page.waitForTimeout(60);
+  await page.keyboard.down("Shift");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __fade: { end?: number } }).__fade.end !== undefined)).toBe(true);
+  await page.keyboard.up("Shift");
+  const fade = await page.evaluate(() => (window as unknown as { __fade: { run: number; end: number; cancelled: boolean } }).__fade);
+  expect(fade.cancelled, "the fade was cancelled").toBe(false);
+  expect(fade.end - fade.run, "the fade ran its whole length (about 240 ms)").toBeGreaterThan(200);
+});
