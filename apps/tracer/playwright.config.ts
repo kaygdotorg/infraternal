@@ -52,6 +52,10 @@ export default defineConfig({
   // helper waits and one runs three scenes of 8-12 s each, so the 30 s default made a loaded build host fail them for being slow.
   timeout: 90_000,
   reporter: "list",
+  // Pixel baselines are exact (`maxDiffPixels: 0`), and the browser's software rasteriser blurs shadows and anti-aliases text
+  // differently on x86-64 and arm64. So a baseline belongs to one platform and one CPU architecture, and each build host
+  // records its own (`--update-snapshots` writes the one for the architecture it runs on).
+  snapshotPathTemplate: `{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}{-projectName}-{platform}-${process.arch}{ext}`,
   outputDir: tracerEvidencePath("playwright"),
   use: {
     ...devices["Desktop Chrome"],
