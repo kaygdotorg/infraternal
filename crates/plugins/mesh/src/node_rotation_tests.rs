@@ -1043,3 +1043,46 @@ fn j363_kill_between_persist_and_fence() {
         "retired authority peers resurrected after SIGKILL"
     );
 }
+
+/// An authority change removes its abandoned rotation journal before the new server rotates again.
+#[test]
+#[ignore = "Run as root inside a dedicated network namespace"]
+fn j363_epoch_change_retires_old_rotation_journal() {
+    command("ip", &["link", "set", "lo", "up"]);
+    let mut failures = Vec::new();
+    for engine in [EngineKind::Kernel, EngineKind::GotaTun] {
+        let state = RotationState::new();
+        let mut node = Node::restore_with_engine(&state.0, engine).unwrap();
+        let identity = node.up().unwrap();
+        let old = j363_config(identity.public_key);
+        for chunk in crate::configuration::chunks(None, &old).unwrap() {
+            node.chunk(chunk).unwrap();
+        }
+        node.prepare_rotation("00000000-0000-4000-8000-000000000011", 11)
+            .unwrap();
+
+        let mut replacement = old.clone();
+        replacement.authority_epoch = Some(J363_EPOCH_B.to_owned());
+        replacement.peers.clear();
+        for chunk in crate::configuration::chunks(None, &replacement).unwrap() {
+            node.chunk(chunk).unwrap();
+        }
+
+        let journal = node.store.as_ref().unwrap().rotation_secret().unwrap();
+        println!(
+            "J363_ENGINE={engine:?} RETAINED_OLD_JOURNAL={}",
+            journal.is_some()
+        );
+        drop(journal);
+        let result = node.prepare_rotation("00000000-0000-4000-8000-000000000001", 1);
+        println!("J363_ENGINE={engine:?} NEW_AUTHORITY_PREPARE={result:?}");
+        if result.is_err() {
+            failures.push(engine);
+        }
+        node.down().unwrap();
+    }
+    assert!(
+        failures.is_empty(),
+        "retired authority journal blocks its replacement: {failures:?}"
+    );
+}

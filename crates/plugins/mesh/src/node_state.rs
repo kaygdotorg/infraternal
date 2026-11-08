@@ -271,6 +271,42 @@ impl Store {
         Ok(())
     }
 
+    /// Remove only the rotation journal after its live key has been settled.
+    ///
+    /// An authority replacement abandons the previous server's sequence space but must keep the
+    /// interface ownership marker and selected private key. The directory lock prevents removal
+    /// from racing a journal writer, and the parent sync makes retirement durable.
+    /// # Errors
+    /// Refuses unsafe journal files and reports failed removal or directory syncs.
+    pub(crate) fn discard_rotation_journal(&self) -> io::Result<()> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let parent = self
+            .rotation_path
+            .parent()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+            .open(parent)?;
+        let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, error)| error)?;
+        sweep_rotation_temporaries_locked(&self.rotation_path)?;
+        match fs::symlink_metadata(&self.rotation_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+                    && metadata.mode() & 0o777 == 0o600 =>
+            {
+                fs::remove_file(&self.rotation_path)?;
+                FileSync::parent(&self.rotation_path)
+            }
+            Ok(_) => Err(io::ErrorKind::PermissionDenied.into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Remove the saved interface identity and rotation journal when this node forgets or retires its mesh identity.
     ///
     /// Call after the engine has stopped; `remove_private_key` separately retires its key file.

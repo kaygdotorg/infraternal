@@ -1764,6 +1764,17 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
+        if self.authority_reset == AuthorityResetState::AwaitingFullSnapshot
+            && chunk.index == 0
+            && chunk.from_version.is_none()
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
+        {
+            self.validate_binding(&chunk)?;
+            self.retire_settled_authority_rotation()?;
+        }
         let result = self.stage(chunk);
         if let Err(error) = &result {
             self.pending = None;
@@ -1791,9 +1802,22 @@ impl Node {
         #[cfg(feature = "mesh-dns-spike")]
         deny.peer_names.clear();
         self.pending = None;
-        let persistence_error = self.persist_retired_snapshot(&deny).err();
+        let rotation_error = self.settle_authority_rotation().err();
+        if let Some(identity) = &self.identity {
+            deny.local_key = Some(identity.public_key);
+        }
         self.config = Some(deny.clone());
         self.authority_reset = AuthorityResetState::AwaitingFullSnapshot;
+        let persistence_error = self.persist_retired_snapshot(&deny).err();
+        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
+            self.store
+                .as_ref()
+                .map(crate::node_state::Store::discard_rotation_journal)
+                .transpose()
+                .err()
+        } else {
+            None
+        };
 
         #[cfg(test)]
         rotation_tests::j363_retirement_crash_checkpoint();
@@ -1838,8 +1862,70 @@ impl Node {
             );
             return Err(error);
         }
+        if let Some(error) = rotation_error.or(journal_error) {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "mesh authority is fenced but its previous rotation journal could not be retired"
+            );
+            return Err(error);
+        }
         Ok(())
     }
+
+    /// Settle an open key rotation on the live identity before retiring its authority journal.
+    ///
+    /// The journal belongs to the previous server's sequence space, but its active key remains
+    /// this node's identity. Completing it first lets the subsequent durable authority snapshot
+    /// bind to that key before the journal file is removed.
+    /// # Errors
+    /// Refuses an unproven active key or any failed rotation-state update.
+    fn settle_authority_rotation(&mut self) -> io::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let Some(rotation) = store.rotation_secret()? else {
+            return Ok(());
+        };
+        let link = self.rotation_link()?;
+        if rotation.completed {
+            let candidate = Key::from_private(&rotation.candidate)?.1;
+            if self.rotation_public_key(&link)? != candidate
+                || self.identity.as_ref().map(|identity| identity.public_key) != Some(candidate)
+                || link.owner != Some(candidate)
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        } else {
+            self.settle_superseded_rotation(&link, &rotation)?;
+        }
+        if let (Some(config), Some(identity)) = (&mut self.config, &self.identity) {
+            config.local_key = Some(identity.public_key);
+        }
+        Ok(())
+    }
+
+    /// Retry retirement cleanup before accepting a full snapshot after an interrupted reset.
+    ///
+    /// A durable peer-free state records the pending reset. If its journal removal failed, settle
+    /// and save the active key binding again before unlinking that previous authority's journal.
+    /// # Errors
+    /// Refuses an unproven rotation or a failed state or journal write.
+    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        if store.rotation_secret()?.is_none() {
+            return Ok(());
+        }
+        self.settle_authority_rotation()?;
+        let config = self.config.clone().ok_or(io::ErrorKind::InvalidData)?;
+        self.save(Some(&config), self.enabled)?;
+        self.store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .discard_rotation_journal()
+    }
+
     /// Drop the old peer set before any replacement snapshot can be installed.
     ///
     /// This path does not call `apply`, so it cannot create a normal transaction that rolls back

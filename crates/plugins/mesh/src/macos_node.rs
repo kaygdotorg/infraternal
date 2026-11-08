@@ -2078,7 +2078,7 @@ impl Node {
     /// # Errors
     /// Refuses wrong identity bindings, incomplete chunks, unsafe routes, or failed engine updates.
     pub fn chunk(&mut self, chunk: crate::dataplane::Chunk) -> io::Result<bool> {
-        let Some(identity) = self.identity.clone() else {
+        let Some(mut identity) = self.identity.clone() else {
             self.pending = None;
             tracing::warn!("Mac mesh configuration chunk refused while the node is not up");
             return Err(io::ErrorKind::NotConnected.into());
@@ -2152,6 +2152,17 @@ impl Node {
                 "Mac mesh configuration chunk refused: an authority reset needs a full snapshot"
             );
             return Err(io::ErrorKind::InvalidData.into());
+        }
+        if self.authority_reset_pending
+            && chunk.index == 0
+            && chunk.from_version.is_none()
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|config| config.authority_epoch == chunk.authority_epoch)
+        {
+            self.retire_settled_authority_rotation()?;
+            identity = self.identity.clone().ok_or(io::ErrorKind::NotConnected)?;
         }
         let result = stage_chunk(&mut self.pending, self.config.as_ref(), &identity, chunk);
         if let Err(error) = &result {
@@ -2253,9 +2264,22 @@ impl Node {
         #[cfg(feature = "mesh-dns-spike")]
         deny.peer_names.clear();
         self.pending = None;
-        let persistence_error = self.persist_retired_snapshot(&deny).err();
+        let rotation_error = self.settle_authority_rotation().err();
+        if let Some(identity) = &self.identity {
+            deny.local_key = Some(identity.public_key);
+        }
         self.config = Some(deny.clone());
         self.authority_reset_pending = true;
+        let persistence_error = self.persist_retired_snapshot(&deny).err();
+        let journal_error = if persistence_error.is_none() && rotation_error.is_none() {
+            self.store
+                .as_ref()
+                .map(crate::node_state::Store::discard_rotation_journal)
+                .transpose()
+                .err()
+        } else {
+            None
+        };
         let applied = match self.worker.as_ref() {
             Some(worker) => worker.retire(deny.clone()),
             None => Err(io::ErrorKind::NotConnected.into()),
@@ -2270,6 +2294,13 @@ impl Node {
         if let Some(error) = persistence_error {
             return self.stop_after_retirement_failure(error, &deny);
         }
+        if let Some(error) = rotation_error.or(journal_error) {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "Mac mesh authority is fenced but its previous rotation journal could not be retired"
+            );
+            return Err(error);
+        }
         if let Err(error) = self.persist(
             true,
             Some(&deny),
@@ -2279,6 +2310,57 @@ impl Node {
             return self.stop_after_retirement_failure(error, &deny);
         }
         Ok(())
+    }
+
+    /// Settle an open rotation on the active Mac key before retiring the old authority journal.
+    ///
+    /// The journal sequence belongs to the previous server. The current worker key and private key
+    /// file remain the enrolled machine identity, so they stay selected while the journal is erased.
+    /// # Errors
+    /// Refuses an unproven key transition or a failed durable update.
+    fn settle_authority_rotation(&mut self) -> io::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let Some(rotation) = store.rotation_secret()? else {
+            return Ok(());
+        };
+        let current = self.rotation_identity()?.public_key;
+        validate_macos_rotation_proof(store, &rotation, current)?;
+        if !rotation.completed {
+            self.settle_superseded_rotation(&rotation)?;
+        }
+        if let (Some(config), Some(identity)) = (&mut self.config, &self.identity) {
+            config.local_key = Some(identity.public_key);
+        }
+        Ok(())
+    }
+
+    /// Retry journal retirement before accepting a full snapshot after a reset was interrupted.
+    ///
+    /// The peer-free reset record makes startup safe. This retry saves the settled live key binding
+    /// before removing the previous authority's rotation journal.
+    /// # Errors
+    /// Refuses a journal that does not prove the active key or a failed state write.
+    fn retire_settled_authority_rotation(&mut self) -> io::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        if store.rotation_secret()?.is_none() {
+            return Ok(());
+        }
+        self.settle_authority_rotation()?;
+        let config = self.config.clone().ok_or(io::ErrorKind::InvalidData)?;
+        self.persist(
+            self.enabled,
+            Some(&config),
+            self.routes.clone(),
+            self.interface.clone(),
+        )?;
+        self.store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .discard_rotation_journal()
     }
 
     /// Persist peer-free authority state before the Mac worker removes old peers.
@@ -3047,6 +3129,92 @@ mod tests {
         assert!(denied.peers.is_empty(), "retired peers were persisted");
         assert_eq!(denied.default_policy, DefaultPolicy::Deny);
         assert!(saved_at_fence.authority_reset_pending);
+    }
+
+    /// A changed authority retires its old rotation journal but keeps the active interface marker.
+    #[test]
+    fn authority_change_discards_old_rotation_journal() {
+        let private_key = [9; 32];
+        let active_key = mac_private_public(&private_key);
+        let mut current = config();
+        current.local_key = Some(active_key);
+        let directory = std::env::temp_dir().join(format!(
+            "infraternal-j363-mac-rotation-retirement-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("state directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("private state directory");
+        let state_path = directory.join(PUBLIC_STATE);
+        let store = crate::node_state::Store::open_for_macos(&directory).expect("open node store");
+        store
+            .record_interface(&active_key)
+            .expect("record active key");
+        store
+            .replace_private_key(&private_key)
+            .expect("save active key");
+        store
+            .save_rotation_secret(&crate::node_state::RotationSecret {
+                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
+                sequence: 11,
+                previous: [3; 32],
+                candidate: private_key,
+                commit_requested: true,
+                completed: true,
+            })
+            .expect("save old authority journal");
+        let identity = Identity {
+            public_key: active_key,
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns-spike")]
+            dns_names: false,
+            key_rotation: true,
+            authority_epoch: true,
+        };
+        let store = Some(store);
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let mut node = Node {
+            enabled: true,
+            worker: Some(recording_worker(Arc::clone(&applied))),
+            identity: Some(identity),
+            store,
+            config: Some(current.clone()),
+            authority_reset_pending: false,
+            pending: None,
+            routes: route_addresses(&current),
+            interface: Some("utun-test".to_owned()),
+            port: 51820,
+            path: Some(state_path),
+            binding: None,
+        };
+
+        node.retire_authority(Some(AUTHORITY_EPOCH_B.to_owned()))
+            .expect("retire old authority");
+        let journal = node
+            .store
+            .as_ref()
+            .expect("node store")
+            .rotation_secret()
+            .expect("read journal");
+        let retained_key = node
+            .store
+            .as_ref()
+            .expect("node store")
+            .recorded_interface()
+            .expect("read interface marker");
+        let retained_private_key = node
+            .store
+            .as_ref()
+            .expect("node store")
+            .read_private_key()
+            .expect("read active key");
+        node.down().expect("stop test worker");
+        fs::remove_dir_all(directory).expect("remove state directory");
+
+        assert!(journal.is_none(), "retired rotation journal remained");
+        assert_eq!(retained_key, Some(active_key));
+        assert_eq!(retained_private_key.as_deref(), Some(&private_key[..]));
     }
 
     #[test]
