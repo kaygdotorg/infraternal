@@ -640,6 +640,39 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
     result
 }
 
+/// Compare and replace one lower-revision full snapshot under the public-state directory lock.
+///
+/// This transaction is for a same-authority rollback only. Authority changes continue through
+/// the peer-free checkpoint path, which carries its own durable reset marker.
+/// # Errors
+/// Refuses a stale base, changed authority, reset state, or a failed atomic write.
+fn write_public_state_full_snapshot(
+    path: &Path,
+    state: &SavedState,
+    expected: &Config,
+) -> io::Result<()> {
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_DIRECTORY)
+        .open(parent)?;
+    let _guard = nix::fcntl::Flock::lock(directory, nix::fcntl::FlockArg::LockExclusive)
+        .map_err(|(_, error)| error)?;
+    let previous = read_public_state(path)?.ok_or(io::ErrorKind::InvalidData)?;
+    let old = previous.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+    let next = state.config.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+    if !previous.enabled
+        || previous.authority_reset_pending
+        || state.authority_reset_pending
+        || old != expected
+        || old.authority_epoch != next.authority_epoch
+        || next.version >= old.version
+    {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    write_public_state(path, state)
+}
+
 /// Overwrite an existing private Mac snapshot when atomic replacement cannot complete.
 ///
 /// This is the last safe write when a directory rename fails. A torn write leaves malformed state
@@ -788,12 +821,14 @@ struct Pending {
 }
 
 /// Stage a contiguous Mac snapshot, allowing a changed authority only in a fresh full snapshot.
+/// A lower same-authority revision needs the persisted replacement transaction.
 /// # Errors
 /// Refuses incomplete, stale, unbound, or inconsistent chunks.
 fn stage_chunk(
     pending: &mut Option<Pending>,
     current: Option<&Config>,
     identity: &crate::dataplane::Identity,
+    allow_lower_revision_replacement: bool,
     chunk: crate::dataplane::Chunk,
 ) -> io::Result<Option<Config>> {
     if chunk
@@ -828,6 +863,15 @@ fn stage_chunk(
     }
     if chunk.index == 0 {
         let current_version = current.map(|config| config.version);
+        if !allow_lower_revision_replacement
+            && current.is_some_and(|old| {
+                chunk.from_version.is_none()
+                    && old.authority_epoch == chunk.authority_epoch
+                    && chunk.version < old.version
+            })
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         if chunk.from_version.is_some() && chunk.from_version != current_version
             || current_version
                 .is_some_and(|version| chunk.from_version.is_some() && chunk.version <= version)
@@ -2350,7 +2394,13 @@ impl Node {
             self.retire_settled_authority_rotation()?;
             identity = self.identity.clone().ok_or(io::ErrorKind::NotConnected)?;
         }
-        let result = stage_chunk(&mut self.pending, self.config.as_ref(), &identity, chunk);
+        let result = stage_chunk(
+            &mut self.pending,
+            self.config.as_ref(),
+            &identity,
+            self.store.is_some() || self.authority_reset_pending,
+            chunk,
+        );
         if let Err(error) = &result {
             self.pending = None;
             tracing::warn!(
@@ -2397,11 +2447,30 @@ impl Node {
         if completes_authority_reset {
             self.authority_reset_pending = false;
         }
+        let lower_revision_base = (!completes_authority_reset)
+            .then(|| {
+                self.config
+                    .as_ref()
+                    .filter(|old| {
+                        old.authority_epoch == config.authority_epoch
+                            && config.version < old.version
+                    })
+                    .cloned()
+            })
+            .flatten();
         let mut cleanup_routes = self.routes.clone();
         cleanup_routes.extend(desired_routes.iter().copied());
-        if let Err(error) =
+        let persistence = if let Some(base) = lower_revision_base.as_ref() {
+            self.persist_full_snapshot(
+                &config,
+                cleanup_routes,
+                self.interface.clone(),
+                base,
+            )
+        } else {
             self.persist(true, Some(&config), cleanup_routes, self.interface.clone())
-        {
+        };
+        if let Err(error) = persistence {
             if let Some(denied) = reset_config.as_ref() {
                 self.authority_reset_pending = true;
                 return self.stop_after_retirement_failure(error, denied);
@@ -2718,6 +2787,36 @@ impl Node {
         }
         Ok(())
     }
+
+    /// Save a lower-revision full snapshot only against the exact accepted durable base.
+    ///
+    /// This Store-backed compare-and-set is the explicit same-authority replacement transaction;
+    /// an in-memory config alone cannot authorize lowering the revision fence.
+    /// # Errors
+    /// Refuses an absent or changed base and reports failed durable writes.
+    fn persist_full_snapshot(
+        &self,
+        config: &Config,
+        routes: BTreeSet<IpAddr>,
+        interface: Option<String>,
+        expected: &Config,
+    ) -> io::Result<()> {
+        let path = self.path.as_ref().ok_or(io::ErrorKind::InvalidData)?;
+        write_public_state_full_snapshot(
+            path,
+            &SavedState {
+                enabled: true,
+                config: Some(config.clone()),
+                authority_reset_pending: self.authority_reset_pending,
+                routes,
+                interface,
+                port: self.port,
+                backend: None,
+                binding: self.binding.clone(),
+            },
+            expected,
+        )
+    }
 }
 
 fn validate_config(config: &Config, identity: crate::policy::model::PublicKey) -> io::Result<()> {
@@ -2754,6 +2853,7 @@ mod tests {
         mpsc, parse_utun_payload, peers_for_config, read_public_state, reconcile,
         rotation_crash_checkpoint, route_addresses, stage_chunk, utun_family, valid_utun_name,
         validate_config, validate_underlay_routes, write_public_state,
+        write_public_state_full_snapshot,
     };
     use crate::{
         dataplane::{Config, DefaultPolicy, Identity, Peer, PeerPolicy},
@@ -3038,7 +3138,8 @@ mod tests {
         let mut pending = None;
         let mut applied = None;
         for chunk in crate::configuration::chunks(Some(&old), &revoked).expect("delta") {
-            applied = stage_chunk(&mut pending, Some(&old), &identity, chunk).expect("stage delta");
+            applied = stage_chunk(&mut pending, Some(&old), &identity, false, chunk)
+                .expect("stage delta");
         }
         let applied = applied.expect("complete revision");
 
@@ -3582,14 +3683,113 @@ mod tests {
 
         let mut pending = None;
         assert!(
-            stage_chunk(&mut pending, None, &identity, first)
+            stage_chunk(&mut pending, None, &identity, false, first)
                 .expect("stage first part")
                 .is_none()
         );
         assert_eq!(
-            stage_chunk(&mut pending, None, &identity, last).expect("finish snapshot"),
+            stage_chunk(&mut pending, None, &identity, false, last).expect("finish snapshot"),
             Some(config)
         );
+    }
+
+    /// A lower same-authority revision needs a persisted exact-base replacement transaction.
+    #[test]
+    fn lower_same_epoch_snapshot_requires_persisted_replacement_path() {
+        let mut accepted = config();
+        accepted.version = 11;
+        let mut replacement = accepted.clone();
+        replacement.version = 2;
+        replacement.peers.clear();
+        let identity = Identity {
+            public_key: accepted.local_key.expect("bound key"),
+            port: 51820,
+            compact_access: true,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: true,
+        };
+
+        let mut pending = None;
+        let refused = stage_chunk(
+            &mut pending,
+            Some(&accepted),
+            &identity,
+            false,
+            chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_A)
+                .remove(0),
+        )
+        .expect_err("an in-memory snapshot cannot authorize a revision rewind");
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+
+        assert_eq!(
+            stage_chunk(
+                &mut pending,
+                Some(&accepted),
+                &identity,
+                true,
+                chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_A)
+                    .remove(0),
+            )
+            .expect("stage the Store-backed transaction"),
+            Some(replacement)
+        );
+    }
+
+    /// The persisted rollback transaction must compare the exact accepted base before writing.
+    #[test]
+    fn lower_revision_public_snapshot_requires_exact_stored_base() {
+        let directory = std::env::temp_dir().join(format!(
+            "j287-mac-lower-revision-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).expect("create state directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("protect state directory");
+        let path = directory.join(PUBLIC_STATE);
+        let mut accepted = config();
+        accepted.version = 11;
+        let initial = SavedState {
+            config: Some(accepted.clone()),
+            routes: route_addresses(&accepted),
+            ..SavedState::default()
+        };
+        write_public_state(&path, &initial).expect("save accepted base");
+
+        let mut replacement = accepted.clone();
+        replacement.version = 2;
+        replacement.peers.clear();
+        let next = SavedState {
+            config: Some(replacement.clone()),
+            routes: route_addresses(&replacement),
+            ..SavedState::default()
+        };
+        let mut stale_base = accepted.clone();
+        stale_base.version = 10;
+        assert_eq!(
+            write_public_state_full_snapshot(&path, &next, &stale_base)
+                .expect_err("a stale base must not authorize replacement")
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_public_state(&path)
+                .expect("read unchanged base")
+                .and_then(|state| state.config),
+            Some(accepted.clone())
+        );
+
+        write_public_state_full_snapshot(&path, &next, &accepted)
+            .expect("replace the exact durable base");
+        assert_eq!(
+            read_public_state(&path)
+                .expect("read replacement")
+                .and_then(|state| state.config),
+            Some(replacement)
+        );
+        fs::remove_dir_all(directory).expect("remove state directory");
     }
 
     #[test]

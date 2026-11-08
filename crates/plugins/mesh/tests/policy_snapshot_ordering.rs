@@ -307,6 +307,37 @@ fn j330_persisted_rollback_accepts_replacement() {
     assert_eq!(installed_peers, 0, "the replaced peer remained installed");
 }
 
+/// A lower same-authority full snapshot needs the durable exact-base transaction used by J330.
+#[test]
+#[ignore = "Run in a disposable user/network namespace; #382 review."]
+fn same_epoch_lower_snapshot_without_persisted_base_is_refused() {
+    let (mut node, mut accepted) = install(false);
+    let identity = node.up().unwrap();
+    accepted.local_key = Some(identity.public_key);
+    accepted.server = Some(NodeId(1));
+    accepted.authority_epoch = Some(AUTHORITY_EPOCH_A.to_owned());
+    accepted.version = 11;
+    for chunk in chunks_with_epoch(None, &accepted, AUTHORITY_EPOCH_A) {
+        node.chunk(chunk).unwrap();
+    }
+
+    let mut stale = accepted.clone();
+    stale.version = 2;
+    stale.peers.clear();
+    let result = node.chunk(chunks_with_epoch(None, &stale, AUTHORITY_EPOCH_A).remove(0));
+    let retained = node.config().cloned();
+    let installed_peers = Device::counters().unwrap().len();
+    node.down().unwrap();
+
+    assert_eq!(
+        result.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::InvalidData),
+        "a non-persistent node must not accept a lower same-epoch revision: {result:?}"
+    );
+    assert_eq!(retained, Some(accepted));
+    assert_eq!(installed_peers, 1, "refusal must keep the accepted peer");
+}
+
 /// A failed retirement write must not leave the old peer installed.
 #[test]
 #[ignore = "Run in an isolated user/network namespace; J330 review."]
