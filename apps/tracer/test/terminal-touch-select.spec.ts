@@ -18,20 +18,31 @@ import { mkdirSync } from "node:fs";
 import { expect, test, type CDPSession, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** Where this spec writes its captures (the external evidence directory). */
 const OUT = tracerEvidencePath("terminal-touch-select");
+/** The window whose terminal every case drives. */
 const WINDOW = '.ui-window[data-window-id="w-build-01"]';
+/** The Copy callout: the shared window menu, named for what it acts on. */
 const CALLOUT = '.ui-window-menu[aria-label="Selected text"]';
+/** The two phone sizes the contract holds at. */
 const SIZES = [{ name: "393x852", width: 393, height: 852 }, { name: "375x667", width: 375, height: 667 }] as const;
+/** Ink is the dark theme and paper the light one. */
 const THEMES = ["ink", "paper"] as const;
+/** The pairing-code-shaped word the owner could not select. */
 const CODE = "ABCD-EFGH-1234";
 /** The screen the cases select from: row 0 holds the pairing code, row 1 the sentence the drag covers. */
 const SCREEN = "\u001b[2J\u001b[H" + [`pair: ${CODE} now`, "second line of output", "third"].join("\r\n");
 
+/** A point in client pixels. */
 type Point = { x: number; y: number };
+/** Sends one touch event through the DevTools protocol: a finger down, moved, or lifted. */
 const touch = (cdp: CDPSession, type: "touchStart" | "touchMove" | "touchEnd", at?: Point): Promise<unknown> =>
   cdp.send("Input.dispatchTouchEvent", { type, touchPoints: at && type !== "touchEnd" ? [{ x: at.x, y: at.y }] : [] });
-// sleep: a long press is defined by the finger staying down; the app times it, so the test must really wait.
-const hold = (page: Page, ms = 650): Promise<void> => page.waitForTimeout(ms);
+/** Keeps the finger down past the app's long-press time. */
+const hold = (page: Page, ms = 650): Promise<void> =>
+  // sleep: a long press is defined by the finger staying down; the app times it, so the test must really wait.
+  page.waitForTimeout(ms);
+/** The text the terminal has selected right now. */
 const selected = (page: Page): Promise<string> => page.evaluate(() => window.__tracerTestDouble?.selectionText() ?? "");
 
 /** The centre of the cell at (col, row) on the visible canvas, in client pixels. */

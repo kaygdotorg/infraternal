@@ -24,6 +24,7 @@
 import { currentUiScale } from "./ui-scale";
 export type PopoverSource = "pointer" | "keyboard";
 
+/** What an anchored popover needs: where it floats, what it is anchored to, its name, and how it lines up. */
 export interface AnchoredPopoverOptions {
   /** The positioned ancestor the popover is appended to (the screen). */
   stage: HTMLElement;

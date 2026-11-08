@@ -15,6 +15,7 @@ export interface WindowMenuItem {
   danger?: boolean;
 }
 
+/** How a window menu is named, sized and placed. */
 export interface WindowMenuOptions {
   /** The dialog's accessible name. Default "Window actions". */
   label?: string;
