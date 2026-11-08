@@ -9,13 +9,15 @@
  * width, height and corner radius move together and nothing reflows. The pill fades out over the
  * first third, the content fades in after the shape has settled, and closing reverses the same
  * spring from wherever it is (interruptible). At rest no clip, transform or opacity is left
- * on anything. Reduced motion: a crossfade.
+ * on anything. Reduced motion: a crossfade. Opened or closed from the keyboard (Enter on the focused pill, Escape), the
+ * morph has no motion at all (#427, input-source.ts): the panel is whole in the first frame and gone in the first frame.
  *
  * `openHeight` makes the open state show only the top part of a taller panel (a floating
  * terminal that is a clipped view of a full window). `setReveal(e)` then grows the visible part
  * from `openHeight` to the whole panel, which is how that terminal expands into its slot.
  */
 import { Spring } from "./spring";
+import { triggeredByKeyboard } from "./input-source";
 
 export interface PillMorphOptions {
   /** The pill that morphs (the session capsule). */
@@ -119,7 +121,7 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
   const close = (instant = false): void => {
     if (!openState) return;
     openState = false;
-    if (instant) { spring.set(0, true); finishClose(); return; }
+    if (instant || triggeredByKeyboard()) { spring.set(0, true); finishClose(); return; }
     if (reduced.matches) {
       pill.style.opacity = "";
       panel.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: "ease-out", fill: "forwards" }).onfinish = () => { if (!openState) finishClose(); };
@@ -140,6 +142,7 @@ export function createPillMorph(options: PillMorphOptions): PillMorph {
     layout(options.width, undefined, options.openHeight);
     pill.setAttribute("aria-expanded", "true");
     pill.style.pointerEvents = "none";
+    if (triggeredByKeyboard()) { spring.set(1, true); return; }
     if (reduced.matches) {
       pill.style.opacity = "0";
       panel.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
