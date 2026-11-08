@@ -18,6 +18,10 @@ RUNTIME_CLEANUP = (ROOT / 'src/runtime_cleanup.sh').read_text()
 SOURCE = (ROOT / 'src/install.rs').read_text()
 CONSTANTS = dict(re.findall(r'(?:pub\(crate\) )?const (\w+): &str = r#"(.*?)"#;', SOURCE, re.S))
 HOST, TRANSACTION = '1' * 32, '2' * 32
+# A Take over's own token: names its set-aside and its cancel (D359).
+TAKEOVER = '7' * 32
+# The fresh install that follows a Take over: its own host id and transaction.
+NEW_HOST, NEW_TRANSACTION = '6' * 32, '8' * 32
 
 class EarlierSetup(unittest.TestCase):
     def setUp(self):
@@ -192,6 +196,14 @@ transaction={TRANSACTION}
             return []
         return [call for call in self.manager_log.read_text().splitlines()
                 if call.split(' ')[0] not in ('is-active', 'is-enabled', 'show')]
+
+    def installed(self, host=HOST, takeover='unproven'):
+        """The check's record for a finished install (#394, D359): its host
+        id, the root's identity, whether its agent runs, and whether Take
+        over may act on it."""
+        stat = self.base.stat()
+        live = 'live' if self.manager_active.exists() else 'idle'
+        return f'INFRATERNAL_SETUP_INSTALLED {host} {stat.st_dev}:{stat.st_ino} {live} {takeover}\n'.encode()
 
     def service_state(self):
         """(enabled, active) as the mock service manager holds it."""
@@ -1464,15 +1476,25 @@ supersede_stuck_install "{expected}"
         self.assertEqual(commit.returncode, 0, commit.stderr.decode())
         self.assertFalse(aside.exists())
 
+    def test_check_keeps_a_superseded_install_beside_a_base_that_is_not_finished(self):
+        # J342 P1-1 for Re-enroll (D335): a base holding only an owner
+        # record is not a committed new host; the old install stays.
+        self.make_upgrade_fixture()
+        self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
+        aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
+        self.new_host_in_place()
+        self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertTrue((aside / 'state/identity.json').exists(), 'nothing committed: the old install stays')
+
     def test_check_deletes_an_old_install_a_crash_left_beside_a_new_host(self):
         # D337: a crash between the commit and its delete leaves the old
         # install beside the new one; the next Check deletes it.
         self.make_upgrade_fixture()
         self.assertEqual(self.confirm('supersede_stuck_install').returncode, 0)
         aside = Path(f'{self.base}.bootstrap-superseded-{TRANSACTION}')
-        self.new_host_in_place()
+        self.committed_install_in_place(aside)
         # Nothing to offer: the new host's finished install is named (#394).
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, f'INFRATERNAL_SETUP_INSTALLED {"5" * 32}\n'.encode())
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed('5' * 32))
         self.assertFalse(aside.exists(), 'the old install and its key are gone')
 
     def test_several_set_aside_installs_are_refused_by_name(self):
@@ -1582,7 +1604,7 @@ supersede_stuck_install "{expected}"
         result = self.confirm('finish_stuck_upgrade')
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertFalse(replaced.exists(), 'Finish is a commit and retires the replaced journal')
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, f'INFRATERNAL_SETUP_INSTALLED {HOST}\n'.encode())
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed())
 
     def test_a_replaced_journal_beside_an_active_agent_is_never_offered_or_put_back(self):
         # #305 P2-3: something newer is serving (a commit that predates
@@ -1596,7 +1618,7 @@ supersede_stuck_install "{expected}"
         self.assertEqual(restore.returncode, 72, restore.stderr.decode())
         self.assertTrue(replaced.exists())
         self.assertFalse(stage.exists(), 'the stale journal is not planted into the live install')
-        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, f'INFRATERNAL_SETUP_INSTALLED {HOST}\n'.encode())
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed())
         self.assertFalse(replaced.exists(), 'and Check deletes it: no set-aside copy is kept (D337)')
 
     def test_failed_upgrade_rollback_replaces_activating_with_failed_before_stop(self):
@@ -1777,7 +1799,7 @@ mock_manager() {{
         self.make_committed_fixture()
         check = self.run_shell('\nsetup_check=yes\ninspect_previous')
         self.assertEqual(check.returncode, 0, check.stderr)
-        self.assertEqual(check.stdout, f'INFRATERNAL_SETUP_INSTALLED {HOST}\n'.encode())
+        self.assertEqual(check.stdout, self.installed())
         self.assertEqual(self.mutating_calls(), [], 'the check changes nothing')
 
     def test_staging_refuses_a_finished_install_for_another_host_id(self):
@@ -1786,6 +1808,539 @@ mock_manager() {{
         self.assertEqual(self.stage_as('6' * 32).returncode, 71)
         self.assertEqual((self.base / '.bootstrap-owner').read_text(), HOST + '\n')
 
+
+    # ── D359: Take over a finished install another server enrolled ──────────
+
+    def make_takeover_fixture(self):
+        """#394's owner shape on root's own base (D359): a finished install,
+        enabled and running, whose owner names a host this server does not
+        know. The oracle runs unprivileged, so the fixture's base stands in for
+        root's /var/lib/infraternal. Returns the record Check reports."""
+        self.make_committed_fixture()
+        self.up_root_base = str(self.base)
+        self.manager_log.unlink(missing_ok=True)
+        return self.run_shell('\nsetup_check=yes\ninspect_previous').stdout.decode().strip()
+
+    def install_snapshot(self, root):
+        """Every entry under `root`, with its mode and its content or target."""
+        import stat as kinds
+        entries = {}
+        for directory, names, files in os.walk(root):
+            for path in [Path(directory)] + [Path(directory) / name for name in files]:
+                info = path.lstat()
+                if path.is_symlink():
+                    what = ('link', os.readlink(path))
+                elif kinds.S_ISDIR(info.st_mode):
+                    what = ('dir',)
+                elif kinds.S_ISSOCK(info.st_mode):
+                    what = ('socket',)
+                else:
+                    what = ('file', path.read_bytes())
+                entries[str(path.relative_to(root))] = (oct(info.st_mode), *what)
+            for name in names:
+                path = Path(directory) / name
+                if path.is_symlink():
+                    entries[str(path.relative_to(root))] = (oct(path.lstat().st_mode), 'link', os.readlink(path))
+        return entries
+
+    def found_install(self):
+        """The old install as Take over must leave it or put it back: its
+        files, the same directory (moved, never copied), its unit, its
+        launcher and its service state."""
+        return (
+            self.install_snapshot(self.base),
+            self.base.stat().st_ino,
+            self.unit.read_text(),
+            oct(self.unit.stat().st_mode),
+            os.readlink(self.launcher),
+            self.service_state(),
+        )
+
+    def takeover_aside(self, token=TAKEOVER):
+        return Path(f'{self.base}.bootstrap-takeover-{token}')
+
+    def take_over(self, expected, token=TAKEOVER, prefix=''):
+        return self.run_shell(f'{prefix}\ntake_over_finished_install "{expected}" {token}\n')
+
+    def killing(self, at, writes=False):
+        """Shell lines that SIGKILL the script right after its `at`-th change:
+        every directory, move, copy, delete, link and service-manager call,
+        and with `writes` every printf too (each file the script writes).
+        SIGKILL runs no trap, as with a power loss."""
+        printf = 'printf() { command printf "$@"; kill_step; }' if writes else ''
+        return f'''
+kill_steps=0
+kill_step() {{ kill_steps=$((kill_steps + 1)); [ "$kill_steps" != {at} ] || kill -KILL $$; }}
+{printf}
+mkdir() {{ command mkdir "$@"; kill_step; }}
+mv() {{ command mv "$@"; kill_step; }}
+cp() {{ command cp "$@"; kill_step; }}
+rm() {{ command rm "$@"; kill_step; }}
+ln() {{ command ln "$@"; kill_step; }}
+kill_manager() {{ mock_manager "$@"; case "$1" in is-active|is-enabled|show) ;; *) kill_step;; esac; }}
+manager=kill_manager
+'''
+
+    def test_check_offers_take_over_for_roots_own_proven_install(self):
+        record = self.make_takeover_fixture()
+        self.assertEqual((record + '\n').encode(), self.installed(takeover='ready'))
+        self.assertEqual(self.mutating_calls(), [], 'the check changes nothing')
+        self.manager_active.unlink()
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+
+    def test_a_rootless_install_is_never_taken_over(self):
+        # D359: rootless adds still refuse. Even a forged "ready" record
+        # changes nothing outside root's own base.
+        self.make_committed_fixture()
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed())
+        result = self.take_over(self.installed(takeover='ready').decode().strip())
+        self.assertEqual(result.returncode, 71, result.stderr.decode())
+        self.assertTrue((self.base / 'state/identity.json').exists())
+        self.assertTrue(self.unit.exists())
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertFalse(self.takeover_aside().exists())
+
+    def test_anything_not_proven_infraternals_is_never_offered(self):
+        def foreign_header():
+            self.unit.write_text(self.unit.read_text().replace(f'# infraternal bootstrap {HOST}', '# someone else'))
+        def extra_file():
+            extra = self.base / 'notes.txt'
+            extra.write_text('mine\n')
+            extra.chmod(0o600)
+        def launcher_elsewhere():
+            self.launcher.unlink()
+            self.launcher.symlink_to('/bin/true')
+        def changed_command():
+            self.unit.write_text(self.unit.read_text().replace(' run\n', ' run --other\n'))
+        for change in (foreign_header, extra_file, launcher_elsewhere, changed_command):
+            with self.subTest(change=change.__name__):
+                record = self.make_takeover_fixture()
+                change()
+                self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+                result = self.take_over(record)
+                self.assertEqual(result.returncode, 75, result.stderr.decode())
+                self.assertEqual(self.mutating_calls(), [], 'nothing is stopped')
+                self.assertTrue(self.base.exists())
+
+    def hold_a_file(self):
+        """Start a process outside the agent's unit that keeps a file of the install open."""
+        holder = subprocess.Popen(['/bin/sh', '-c', f'exec 3< "{self.identity_path}"; exec sleep 30'])
+        self.children.append(holder)
+        for _ in range(500):
+            if Path(f'/proc/{holder.pid}/fd/3').exists():
+                break
+            time.sleep(0.01)
+        return holder
+
+    def test_a_real_finished_root_install_is_ready(self):
+        # J315, real root on compute01: a finished install's bin/live is the
+        # payload cache's own inode (setup reuses the verified payload), and
+        # the root agent keeps its mesh state in sessions/. Both are ours.
+        self.make_takeover_fixture()
+        live = self.base / 'bin/live'
+        cache = Path(f'{self.base}.bootstrap-cache/payload')
+        live.unlink()
+        os.link(cache, live)
+        for name in ('mesh-public.json', 'mesh-routes.json', 'mesh-interface.json', 'mesh-key-rotation.bin', 'mesh-engine.json', 'mesh-private-key'):
+            state = self.base / 'sessions' / name
+            state.write_text('{}\n')
+            state.chmod(0o600)
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        def other_link():
+            live.unlink()
+            shutil.copyfile(cache, live)
+            live.chmod(0o700)
+            os.link(live, Path(self.temp).resolve() / 'elsewhere')
+        def stray_state():
+            stray = self.base / 'sessions/mesh-private-key.4242.new'
+            stray.write_text('x')
+            stray.chmod(0o600)
+        for change in (other_link, stray_state):
+            with self.subTest(change=change.__name__):
+                change()
+                self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+                self.make_takeover_fixture()
+                live.unlink()
+                os.link(cache, live)
+
+    def test_a_container_running_its_own_install_does_not_make_it_busy(self):
+        # J315, real root on compute01: a container's own infraternal names
+        # the same path, in its own mount namespace. Not a holder of this
+        # install; a process holding this install's file still is.
+        self.make_takeover_fixture()
+        ready = subprocess.run(['unshare', '-Urm', 'true'], capture_output=True)
+        if ready.returncode != 0:
+            self.skipTest('no unprivileged mount namespaces here')
+        marker = Path(self.temp).resolve() / 'container-ready'
+        container = subprocess.Popen(['unshare', '-Urm', 'sh', '-c',
+            f'mount -t tmpfs none "{self.base}" && mkdir -p "{self.base}/state" && : > "{self.identity_path}" '
+            f'&& exec 3< "{self.identity_path}" && : > "{marker}" && exec sleep 30'])
+        self.children.append(container)
+        for _ in range(500):
+            if marker.exists():
+                break
+            time.sleep(0.01)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        self.hold_a_file()
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='busy'))
+
+    def check_in_mount_namespace(self, mount):
+        """Check, run in a private mount namespace after the shell line `mount`."""
+        script = self.shell_script('\nsetup_check=yes\ninspect_previous')
+        return subprocess.run(['unshare', '-Urm', 'sh', '-c', f'{mount} && exec /bin/sh -c "$1"', '_', script],
+                              capture_output=True, env=dict(os.environ, HOME=str(self.home)))
+
+    def test_a_unit_with_a_drop_in_is_never_offered(self):
+        # J342 P3-3: a drop-in can change ExecStart while the unit file still
+        # passes; Take over would stop that unit and carry the drop-in over.
+        self.make_takeover_fixture()
+        beside = Path(f'{self.unit}.d')
+        beside.mkdir(mode=0o700)
+        (beside / 'override.conf').write_text('[Service]\nExecStart=\nExecStart=/bin/true\n')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+        shutil.rmtree(beside)
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        reported = '''
+dropin_manager() {
+ case "$*" in
+  "show -p DropInPaths --value infraternal-agent.service") printf '%s\\n' /run/systemd/system/infraternal-agent.service.d/zz.conf;;
+  *) mock_manager "$@";;
+ esac
+}
+manager=dropin_manager'''
+        self.assertEqual(self.run_shell(reported + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+        everyone = reported.replace('/run/systemd/system/infraternal-agent.service.d/zz.conf', '/usr/lib/systemd/system/service.d/10-timeout-abort.conf')
+        self.assertEqual(self.run_shell(everyone + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
+        # J349 P3-3: systemd also applies the prefix form infraternal-.service.d.
+        prefixed = reported.replace('/run/systemd/system/infraternal-agent.service.d/zz.conf', '/etc/systemd/system/infraternal-.service.d/zz.conf')
+        self.assertEqual(self.run_shell(prefixed + '\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+        prefix_beside = self.unit.parent / 'infraternal-.service.d'
+        prefix_beside.mkdir(mode=0o700)
+        (prefix_beside / 'override.conf').write_text('[Service]\nExecStart=\nExecStart=/bin/false\n')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='unproven'))
+
+    def test_an_install_with_a_mount_inside_is_never_offered(self):
+        # J342 P3-1: Take over's commit deletes the whole set-aside tree; a
+        # bind mount inside it would have its contents deleted.
+        if subprocess.run(['unshare', '-Urm', 'true'], capture_output=True).returncode != 0:
+            self.skipTest('no unprivileged mount namespaces here')
+        self.make_takeover_fixture()
+        victim = Path(self.temp).resolve() / 'victim'
+        victim.mkdir(mode=0o700)
+        mounted = self.base / 'state/mounted'
+        mounted.mkdir(mode=0o700)
+        plain = self.check_in_mount_namespace('true')
+        self.assertTrue(plain.stdout.endswith(b' ready\n'), plain.stdout + plain.stderr)
+        bound = self.check_in_mount_namespace(f'mount --bind "{victim}" "{mounted}"')
+        self.assertTrue(bound.stdout.endswith(b' unproven\n'), bound.stdout + bound.stderr)
+
+    def test_an_install_another_process_uses_is_busy_and_never_stopped(self):
+        record = self.make_takeover_fixture()
+        self.hold_a_file()
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='busy'))
+        result = self.take_over(record)
+        self.assertEqual(result.returncode, 73, result.stderr.decode())
+        self.assertEqual(self.mutating_calls(), [], 'nothing is stopped')
+        self.assertTrue((self.base / 'state/identity.json').exists())
+        self.assertFalse(self.takeover_aside().exists())
+
+    def test_take_over_sets_the_install_aside_whole_where_only_root_can_reach_it(self):
+        record = self.make_takeover_fixture()
+        found = self.found_install()
+        result = self.take_over(record)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        aside = self.takeover_aside()
+        self.assertFalse(self.base.exists(), 'the setup directory is free for the new install')
+        self.assertFalse(self.unit.exists())
+        self.assertFalse(self.launcher.is_symlink())
+        self.assertEqual(aside.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.install_snapshot(aside / 'install'), found[0], 'nothing is deleted')
+        self.assertEqual((aside / 'install').stat().st_ino, found[1], 'moved, never copied')
+        self.assertEqual((aside / 'owner').read_text(), HOST + '\n', 'it names the old install')
+        self.assertEqual((aside / 'service').read_text(), 'yes yes\n')
+        self.assertEqual((aside / 'unit').read_text(), found[2])
+        self.assertEqual(self.mutating_calls(), [
+            'stop infraternal-agent.service',
+            'disable infraternal-agent.service',
+            'daemon-reload',
+        ])
+        self.assertEqual(self.service_state(), (False, False))
+        self.assertFalse(Path(f'{self.base}.bootstrap-taking-{TAKEOVER}').exists())
+
+    def test_a_failed_new_install_gets_the_old_one_back_exactly(self):
+        record = self.make_takeover_fixture()
+        found = self.found_install()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        restore = self.run_shell(f'\nrestore_taken_over_install {TAKEOVER}\n')
+        self.assertEqual(restore.returncode, 0, restore.stderr.decode())
+        self.assertEqual(restore.stdout, b'restored\n')
+        self.assertEqual(self.found_install(), found)
+        self.assertFalse(self.takeover_aside().exists())
+
+    def test_a_stopped_disabled_install_is_put_back_stopped_and_disabled(self):
+        self.make_takeover_fixture()
+        self.manager_active.unlink()
+        (self.unit.parent / 'default.target.wants/infraternal-agent.service').unlink()
+        record = self.run_shell('\nsetup_check=yes\ninspect_previous').stdout.decode().strip()
+        found = self.found_install()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.assertEqual((self.takeover_aside() / 'service').read_text(), 'no no\n')
+        self.assertEqual(self.run_shell(f'\nrestore_taken_over_install {TAKEOVER}\n').returncode, 0)
+        self.assertEqual(self.found_install(), found)
+
+    def test_check_offers_put_back_for_an_install_taken_over_and_never_restored(self):
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        result = self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(
+            result.stdout.decode(),
+            f'INFRATERNAL_SETUP_SET_ASIDE taken_over {HOST} {TAKEOVER} {socket.gethostname()} yes yes\n',
+        )
+
+    def test_a_commit_deletes_the_install_taken_over(self):
+        # D359: deleted only after the new install has committed.
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.new_host_in_place()
+        commit = self.run_shell('\nretire_set_aside\n')
+        self.assertEqual(commit.returncode, 0, commit.stderr.decode())
+        self.assertFalse(self.takeover_aside().exists())
+
+    def committed_install_in_place(self, source, owner='5' * 32):
+        """A new install committed in $base for `owner`, built from the files of
+        `source`, with its own unit, wants link and launcher."""
+        shutil.copytree(source, self.base, symlinks=True,
+                        ignore=shutil.ignore_patterns('.bootstrap-lock', '.superseded-service', '.superseded-unit'))
+        (self.base / '.bootstrap-owner').write_text(owner + '\n')
+        binary_dir = self.base / 'bin'
+        self.unit.write_text(
+            f'# infraternal bootstrap {owner}\n[Unit]\n[Service]\n'
+            f'ExecStart="{binary_dir / "current"}" agent --data "{self.base / "state"}" '
+            f'--state "{self.base / "sessions"}" run\n[Install]\nWantedBy=default.target\n'
+        )
+        self.unit.chmod(0o600)
+        wants = self.unit.parent / 'default.target.wants/infraternal-agent.service'
+        wants.unlink(missing_ok=True)
+        wants.symlink_to(self.unit)
+        self.launcher.unlink(missing_ok=True)
+        self.launcher.symlink_to(binary_dir / 'current')
+
+    def commit_new_install(self, prelude):
+        """Run the end of the new install's commit (COMMIT_RETIRE), after `prelude`."""
+        (self.base / '.bootstrap-lock').mkdir(mode=0o700, exist_ok=True)
+        return self.run_shell(prelude + '\nstage="$base/.bootstrap-lock"\n' + CONSTANTS['COMMIT_RETIRE'])
+
+    def test_a_commit_makes_the_new_install_durable_before_it_deletes_anything(self):
+        # J349 P2-1, modelled as real root on an ext4 loop image
+        # (compute01:/root/j349/ev/powercut.txt): renames and deletes reach the
+        # disk through the journal within seconds, file data can wait ~30 s, so
+        # a power cut right after the commit left the old install deleted and
+        # the new binary empty. The commit now syncs the filesystem before it
+        # deletes the journal or the set-aside; a failed sync deletes nothing.
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.committed_install_in_place(self.takeover_aside() / 'install')
+        trace = Path(self.temp).resolve() / 'commit.trace'
+        tracing = f'''
+sync() {{ printf 'sync %s\\n' "$*" >> "{trace}"; command sync "$@"; }}
+rm() {{ printf 'rm %s\\n' "$*" >> "{trace}"; command rm "$@"; }}'''
+        failing = self.commit_new_install('\nsync() { return 1; }')
+        self.assertNotEqual(failing.returncode, 0)
+        self.assertTrue((self.takeover_aside() / 'install/state/identity.json').exists(), 'a failed sync deletes nothing')
+        self.assertTrue((self.base / '.bootstrap-lock').exists(), 'not even the journal')
+        result = self.commit_new_install(tracing)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        steps = trace.read_text().splitlines()
+        # Durable before each delete: the journal's, then the set-aside's.
+        self.assertEqual(steps[0], f'sync -f {self.base}', steps)
+        journal = steps.index(f'rm -rf {self.base}/.bootstrap-lock')
+        aside = steps.index(f'rm -rf {self.takeover_aside()}')
+        self.assertIn(f'sync -f {self.base}', steps[journal + 1:aside], steps)
+        self.assertFalse(self.takeover_aside().exists())
+        self.assertFalse((self.base / '.bootstrap-lock').exists())
+        trace.unlink()
+        plain = self.commit_new_install(tracing)
+        self.assertEqual(plain.returncode, 0, plain.stderr.decode())
+        self.assertNotIn('sync', trace.read_text() if trace.exists() else '', 'a commit with nothing set aside pays no sync')
+
+    def test_check_keeps_a_taken_over_install_beside_a_base_that_is_not_finished(self):
+        # J342 P1-1's shape: a base holding only an owner record, beside the
+        # install Take over set aside. Nothing committed: the old install stays.
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.new_host_in_place()
+        self.run_shell('\nsetup_check=yes\ninspect_previous')
+        self.assertTrue((self.takeover_aside() / 'install/state/identity.json').exists(), 'nothing committed: the old install stays')
+
+    def test_check_deletes_a_taken_over_install_a_crash_left_beside_the_new_host(self):
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.committed_install_in_place(self.takeover_aside() / 'install')
+        self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed('5' * 32, takeover='ready'))
+        self.assertFalse(self.takeover_aside().exists(), 'the new install committed; no copy is kept')
+
+    def test_restore_refuses_while_the_new_install_is_in_place(self):
+        record = self.make_takeover_fixture()
+        self.assertEqual(self.take_over(record).returncode, 0)
+        self.base.mkdir(mode=0o700)
+        restore = self.run_shell(f'\nrestore_taken_over_install {TAKEOVER}\n')
+        self.assertEqual(restore.returncode, 72, restore.stderr.decode())
+        self.assertTrue((self.takeover_aside() / 'install/state/identity.json').exists())
+
+    def test_an_install_that_changed_since_the_confirmation_is_refused(self):
+        self.make_takeover_fixture()
+        self.manager_active.unlink()
+        idle = self.run_shell('\nsetup_check=yes\ninspect_previous').stdout.decode().strip()
+        host, identity = idle.split(' ')[1:3]
+        for name, record, prepare in (
+            ('started since', idle, self.manager_active.touch),
+            ('another root', idle.replace(identity, '1:1'), lambda: None),
+            ('another owner', idle.replace(host, '6' * 32), lambda: None),
+        ):
+            with self.subTest(name=name):
+                self.manager_active.unlink(missing_ok=True)
+                prepare()
+                self.manager_log.unlink(missing_ok=True)
+                result = self.take_over(record)
+                self.assertEqual(result.returncode, 75, result.stderr.decode())
+                self.assertEqual(self.mutating_calls(), [])
+                self.assertTrue(self.base.exists())
+
+    def test_a_restore_that_runs_first_keeps_the_take_over_from_starting(self):
+        # A cancelled attempt's restore and its take over are exclusive,
+        # whichever reaches the host first (#305, J202 P2).
+        record = self.make_takeover_fixture()
+        restore = self.run_shell(f'\nrestore_taken_over_install {TAKEOVER}\n')
+        self.assertEqual(restore.stdout, b'untouched\n', restore.stderr.decode())
+        result = self.take_over(record)
+        self.assertEqual(result.returncode, 75, result.stderr.decode())
+        self.assertEqual(self.mutating_calls(), [])
+        self.assertTrue(self.base.exists())
+
+    def test_a_holder_that_appears_during_the_stop_is_refused_and_put_back(self):
+        record = self.make_takeover_fixture()
+        found = self.found_install()
+        pid_file = Path(self.temp).resolve() / 'holder.pid'
+        result = self.take_over(record, prefix=f'''
+holding_manager() {{
+ mock_manager "$@"
+ if [ "$1" = stop ]; then
+  (exec 3< "{self.identity_path}"; exec sleep 30) >/dev/null 2>&1 &
+  printf '%s\\n' "$!" > "{pid_file}"
+  sleep 0.2
+ fi
+}}
+manager=holding_manager''')
+        try:
+            self.assertEqual(result.returncode, 73, result.stderr.decode())
+            self.assertEqual(self.found_install(), found, 'put back, enabled and running, as found')
+            self.assertFalse(self.takeover_aside().exists())
+        finally:
+            os.kill(int(pid_file.read_text()), 15)
+
+    def test_a_termination_after_the_stop_still_puts_it_back(self):
+        record = self.make_takeover_fixture()
+        found = self.found_install()
+        result = self.take_over(record, prefix='''
+terminating_manager() {
+ mock_manager "$@"
+ [ "$1" != disable ] || kill -TERM $$
+}
+manager=terminating_manager''')
+        self.assertEqual(result.returncode, 143, result.stderr.decode())
+        self.assertEqual(self.found_install(), found)
+        self.assertFalse(self.takeover_aside().exists())
+
+    def test_a_take_over_killed_at_any_step_keeps_the_old_install_and_puts_it_back(self):
+        # D359: a crash at any step leaves the old install or the new one,
+        # never neither. Kill after each change in turn: the old install is
+        # whole in exactly one place, Check names it, and the restore puts
+        # it back exactly as it was found.
+        step = 0
+        while True:
+            step += 1
+            token = f'{step:032x}'
+            record = self.make_takeover_fixture()
+            found = self.found_install()
+            result = self.take_over(record, token=token, prefix=self.killing(step))
+            if result.returncode == 0:
+                break
+            self.assertEqual(result.returncode, -9, (step, result.stderr.decode()))
+            aside = self.takeover_aside(token)
+            in_place = self.base.exists() and self.install_snapshot(self.base) == found[0]
+            moved = (aside / 'install').exists() and self.install_snapshot(aside / 'install') == found[0]
+            self.assertTrue(in_place != moved, f'step {step}: the old install is whole in exactly one place')
+            check = self.run_shell('\nsetup_check=yes\ninspect_previous')
+            self.assertEqual(check.returncode, 0, (step, check.stderr.decode()))
+            self.assertRegex(check.stdout, rb'^INFRATERNAL_SETUP_(INSTALLED|SET_ASIDE taken_over) ', step)
+            restore = self.run_shell(f'\nrestore_taken_over_install {token}\n')
+            self.assertEqual(restore.returncode, 0, (step, restore.stderr.decode()))
+            self.assertIn(restore.stdout, (b'restored\n', b'untouched\n'), step)
+            self.assertEqual(self.found_install(), found, f'step {step}: put back exactly')
+            self.assertFalse(aside.exists(), step)
+            self.assertFalse(Path(f'{self.base}.bootstrap-taking-{token}').exists(), step)
+        self.assertGreater(step, 8, 'every change of the take over was interrupted once')
+
+    def stage_new_attempt(self, prefix=''):
+        """The upload step's staging as the fresh install that follows a Take
+        over: a new host id and a new transaction (STAGE_TRANSACTION)."""
+        return self.run_shell(f'{prefix}\nhost={NEW_HOST}\ntransaction={NEW_TRANSACTION}\n' + CONSTANTS['STAGE_TRANSACTION'])
+
+    def roll_back_new_attempt(self):
+        """The server's rollback of that attempt (Installation::rollback)."""
+        return self.run_shell(f'\nhost={NEW_HOST}\ntransaction={NEW_TRANSACTION}\n' + CONSTANTS['FRESH_CLEANUP'] + '\npreserve_session=no\n' + CONSTANTS['ROLLBACK_TRANSACTION'])
+
+    def test_staging_cut_at_any_step_after_a_take_over_never_loses_the_old_install(self):
+        # J342 P1-1, reproduced as real root: staging cut right after it wrote
+        # the new owner record left a base with nothing else in it; the next
+        # Check read that as a finished install and deleted the set-aside, so
+        # neither install was left. Cut the staging after every change and
+        # every write: Check never deletes the old install, and the server's
+        # rollback then restore put it back exactly.
+        step = 0
+        while True:
+            step += 1
+            record = self.make_takeover_fixture()
+            found = self.found_install()
+            self.assertEqual(self.take_over(record).returncode, 0)
+            aside = self.takeover_aside()
+            result = self.stage_new_attempt(self.killing(step, writes=True))
+            finished = result.returncode == 0
+            if not finished:
+                self.assertEqual(result.returncode, -9, (step, result.stderr.decode()))
+            check = self.run_shell('\nsetup_check=yes\ninspect_previous')
+            self.assertTrue((aside / 'install').is_dir(), f'step {step}: Check {check.stdout!r} deleted the old install')
+            rollback = self.roll_back_new_attempt()
+            self.assertEqual(rollback.returncode, 0, (step, rollback.stderr.decode()))
+            restore = self.run_shell(f'\nrestore_taken_over_install {TAKEOVER}\n')
+            self.assertEqual(restore.returncode, 0, (step, restore.stderr.decode()))
+            self.assertEqual(restore.stdout, b'restored\n', step)
+            self.assertEqual(self.found_install(), found, f'step {step}: put back exactly')
+            self.assertFalse(Path(f'{self.base}.bootstrap-new-{NEW_TRANSACTION}').exists(), step)
+            self.assertFalse(Path(f'{self.base}.bootstrap-rollback-{NEW_TRANSACTION}').exists(), step)
+            if finished:
+                break
+        self.assertGreater(step, 4, 'every change and write of the staging was cut once')
+
+    def test_a_restore_killed_at_any_step_finishes_when_run_again(self):
+        step = 0
+        while True:
+            step += 1
+            token = f'{step:032x}'
+            record = self.make_takeover_fixture()
+            found = self.found_install()
+            self.assertEqual(self.take_over(record, token=token).returncode, 0)
+            result = self.run_shell(self.killing(step) + f'\nrestore_taken_over_install {token}\n')
+            if result.returncode == 0:
+                break
+            self.assertEqual(result.returncode, -9, (step, result.stderr.decode()))
+            again = self.run_shell(f'\nrestore_taken_over_install {token}\n')
+            self.assertEqual(again.returncode, 0, (step, again.stderr.decode()))
+            self.assertEqual(self.found_install(), found, f'step {step}: put back exactly')
+            self.assertFalse(self.takeover_aside(token).exists(), step)
+        self.assertGreater(step, 4)
 
 class LeaseBirthFields(unittest.TestCase):
     def decode(self, records):

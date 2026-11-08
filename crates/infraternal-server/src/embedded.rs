@@ -2036,7 +2036,16 @@ async fn process_command(
             if reply.is_closed() {
                 return true;
             }
+            // Every action the server sends on the control stream is listed here,
+            // with the link capability it needs; anything else is refused before
+            // it reaches the wire. Removal's uninstall needs only a remote link:
+            // every infraternal agent build answers a control-stream plugin call,
+            // by running its uninstall handler or by refusing (#409, #235). It was
+            // missing after #285 made this list, so Remove never asked the host.
             let supported = match action {
+                uninstall if uninstall == infraternal_plugin_remote::UNINSTALL.id => {
+                    matches!(&connection.peer, Peer::Remote(_))
+                }
                 "transport.csr" | "transport.certificate" => {
                     matches!(&connection.peer, Peer::Remote(link) if link.supports_renewal())
                 }

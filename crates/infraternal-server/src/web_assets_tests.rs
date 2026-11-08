@@ -25,6 +25,7 @@ fn fixture() -> (PathBuf, Router) {
     (root, app)
 }
 
+/// Verify negotiated encodings, case-insensitive Vary tokens and exact response lengths.
 #[tokio::test]
 async fn encodings_and_identity_have_correct_headers_and_sizes() {
     let (root, app) = fixture();
@@ -55,7 +56,12 @@ async fn encodings_and_identity_have_correct_headers_and_sizes() {
                 .map(|v| v.to_str().unwrap()),
             encoding
         );
-        assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
+        assert!(
+            response.headers()[header::VARY]
+                .to_str()
+                .unwrap()
+                .eq_ignore_ascii_case("Accept-Encoding")
+        );
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
             "public, max-age=31536000, immutable"

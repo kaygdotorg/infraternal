@@ -176,6 +176,12 @@ validate_upgrade_sessions() {
    # The proxy plugin's owner-only credential store (crates/plugins/proxy,
    # custody.rs): 0700 directories and 0600 files, all this user's (#281).
    proxy-secrets) private_tree "$setup_runtime_entry";;
+   # A finished root install's mesh state (crates/plugins/mesh, node_state.rs):
+   # private files the agent wrote; Take over moves them, never reads them.
+   mesh-public.json|mesh-routes.json|mesh-interface.json|mesh-key-rotation.bin|mesh-engine.json|mesh-private-key)
+    [ "${validating_finished:-no}" = yes ] || exit 71
+    [ -f "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a:%h' "$setup_runtime_entry")" = 600:1 ] || exit 71
+    [ "$(stat -c '%s' "$setup_runtime_entry")" -le 65536 ] || exit 71;;
    *)
     [ -S "$setup_runtime_entry" ] && [ ! -L "$setup_runtime_entry" ] && [ -O "$setup_runtime_entry" ] && [ "$(stat -c '%a' "$setup_runtime_entry")" = 600 ] || exit 71
     setup_runtime_name=${setup_runtime_entry##*/}
@@ -261,7 +267,12 @@ validate_upgrade_root() {
  hex_id "$previous_host"
  identity=$(stat -c '%d:%i' "$base")
  [ -d "$base/bin" ] && [ ! -L "$base/bin" ] && [ -O "$base/bin" ] && [ "$(stat -c '%a' "$base/bin")" = 700 ] || exit 71
- [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] && [ -O "$base/bin/live" ] && [ "$(stat -c '%a:%h' "$base/bin/live")" = 700:1 ] || exit 71
+ [ -f "$base/bin/live" ] && [ ! -L "$base/bin/live" ] && [ -O "$base/bin/live" ] || exit 71
+ case "$(stat -c '%a:%h' "$base/bin/live")" in
+  700:1) :;;
+  700:2) finished_cache_link || exit 71;;
+  *) exit 71;;
+ esac
  [ -L "$base/bin/current" ] && [ "$(readlink "$base/bin/current")" = "$base/bin/live" ] || exit 71
  for entry in "$base"/* "$base"/.[!.]* "$base"/..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
@@ -275,6 +286,14 @@ validate_upgrade_root() {
  done
  private_tree "$base/state"
  if [ -e "$base/sessions" ] || [ -L "$base/sessions" ]; then validate_upgrade_sessions "$base/sessions"; fi
+ # Nothing at or under it is a mount point: Take over and Re-enroll move the
+ # whole tree and later delete it, and that delete must never reach into a
+ # mounted filesystem (J342 P3-1). A same-filesystem bind mount keeps the
+ # device number, so mountinfo is read rather than comparing devices.
+ setup_real=$(CDPATH= cd -P "$base" && pwd -P) || exit 71
+ [ -r /proc/self/mountinfo ] || exit 71
+ setup_mounted=$(awk -v under="$setup_real/" 'index($5 "/", under) == 1 { print $5; exit }' /proc/self/mountinfo) || exit 71
+ [ -z "$setup_mounted" ] || exit 71
  for entry in "$base/bin"/* "$base/bin"/.[!.]* "$base/bin"/..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   case "${entry##*/}" in live) :;; current) [ -L "$entry" ] && [ "$(readlink "$entry")" = "$base/bin/live" ] || exit 71;; *) exit 71;; esac
@@ -284,6 +303,16 @@ validate_upgrade_root() {
  [ "$(stat -c '%s' "$unit")" -le 4096 ] || refuse size
  grep -Fxq "# infraternal bootstrap $previous_host" "$unit" || exit 71
  grep -Fxq "ExecStart=\"$base/bin/current\" agent --data \"$base/state\" --state \"$base/sessions\" run" "$unit" || exit 71
+ # Drop-ins change what systemd runs without touching the unit file (J342
+ # P3-3): none for this unit, beside it or anywhere systemd reports one. That
+ # includes the prefix form systemd also applies to it, infraternal-.service.d
+ # (J349 P3-3). Drop-ins for every service (a distribution's service.d) are not
+ # ours to judge.
+ for setup_dropin_dir in "$unit.d" "${unit%/*}/infraternal-.service.d"; do
+  [ ! -e "$setup_dropin_dir" ] && [ ! -L "$setup_dropin_dir" ] || exit 71
+ done
+ setup_dropins=$($manager show -p DropInPaths --value infraternal-agent.service 2>/dev/null || :)
+ case "$setup_dropins" in *infraternal-agent.service.d/*|*/infraternal-.service.d/*) exit 71;; esac
  setup_wanted=$(sed -n 's/^WantedBy=//p' "$unit")
  case "$setup_wanted" in default.target|multi-user.target) :;; *) refuse unit;; esac
  setup_wants_dir="$(dirname "$unit")/$setup_wanted.wants"
@@ -297,6 +326,23 @@ validate_upgrade_root() {
   [ -L "$setup_wants" ] || exit 71
   case "$(readlink "$setup_wants")" in "$unit"|../infraternal-agent.service) :;; *) exit 71;; esac
  fi
+}
+# A finished install's binary is linked to the private payload cache setup
+# verified it from (bin/live and the cache payload are one inode). Only that
+# second link is accepted, and only when proving a finished install (D359).
+finished_cache_link() {
+ [ "${validating_finished:-no}" = yes ] || return 1
+ finished_cache="$base.bootstrap-cache"
+ [ -d "$finished_cache" ] && [ ! -L "$finished_cache" ] && [ -O "$finished_cache" ] && [ "$(stat -c '%a' "$finished_cache")" = 700 ] || return 1
+ [ -f "$finished_cache/payload" ] && [ ! -L "$finished_cache/payload" ] && [ -O "$finished_cache/payload" ] || return 1
+ [ "$base/bin/live" -ef "$finished_cache/payload" ]
+}
+# validate_upgrade_root for a finished install (D359): the same proof, plus
+# what a finished root install also holds (finished_cache_link, mesh state).
+validate_finished_install() {
+ validating_finished=yes
+ validate_upgrade_root
+ validating_finished=no
 }
 inspect_upgrade() {
  validate_upgrade_root
@@ -386,18 +432,7 @@ live_session_sockets() {
 # more. Without one, this does nothing.
 stop_activated_agent() {
  [ "${not_live_scan:-all}" = unit ] || return 0
- # Read the unit's cgroup while it runs; systemd may forget it once stopped.
- agent_cgroup=$($manager show -p ControlGroup --value infraternal-agent.service 2>/dev/null || :)
- $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
- # KillMode=process leaves anything else the agent started running. A shim
- # that started after the checks above, or never bound a socket, is still in
- # the unit's cgroup: refuse while it lists any process (#305 J272).
- case "$agent_cgroup" in
-  /*) agent_procs="${agent_cgroup_root:-/sys/fs/cgroup}$agent_cgroup/cgroup.procs"
-      if [ -e "$agent_procs" ]; then
-       [ -z "$(cat "$agent_procs" 2>/dev/null || echo unreadable)" ] || exit 73
-      fi;;
- esac
+ stop_agent_unit
  live_session_sockets
  scan_holders all
  for marker in "$base/sessions/sessions"/*.readiness; do
@@ -405,6 +440,21 @@ stop_activated_agent() {
   rm -- "$marker"
  done
  not_live_scan=all
+}
+# Stop the infraternal agent's unit, then refuse (73) while anything else it
+# started is still running. KillMode=process leaves it: a shim that started
+# after the earlier checks, or never bound a socket, is still in the unit's
+# cgroup (#305 J272).
+stop_agent_unit() {
+ # Read the unit's cgroup while it runs; systemd may forget it once stopped.
+ agent_cgroup=$($manager show -p ControlGroup --value infraternal-agent.service 2>/dev/null || :)
+ $manager stop infraternal-agent.service >/dev/null 2>&1 || exit 73
+ case "$agent_cgroup" in
+  /*) agent_procs="${agent_cgroup_root:-/sys/fs/cgroup}$agent_cgroup/cgroup.procs"
+      if [ -e "$agent_procs" ]; then
+       [ -z "$(cat "$agent_procs" 2>/dev/null || echo unreadable)" ] || exit 73
+      fi;;
+ esac
 }
 # Whether this fresh journal was interrupted during activation and carries the
 # rollback marker $1 for what activation created (see not_live).
@@ -432,7 +482,9 @@ agent_unit_process() {
 # Refuse (73) while a process of this user runs from or holds a file under
 # $base. "service" skips the enrolled unit's own processes and the journaled
 # payload's shims, which a replacement is about to stop itself (#305). "unit"
-# skips only the unit's own processes (see not_live).
+# skips only the unit's main process (see not_live). "agent" skips every
+# process in the agent's unit and nothing else, not even a terminal's shim: a
+# Take over stops only the old agent (D359).
 scan_holders() {
  scan_skip=$1
  if [ -e "$base" ] || [ -L "$base" ]; then
@@ -450,6 +502,8 @@ scan_holders() {
    ! agent_unit_process "$process" || continue
   elif [ "$scan_skip" = unit ] && [ "${process##*/}" = "${agent_main_pid:-0}" ]; then
    agent_unit_process "$process" && continue
+  elif [ "$scan_skip" = agent ]; then
+   ! agent_unit_process "$process" || continue
   fi
   # A non-dumpable process (every infraternal agent and shim, and OpenSSH's own
   # session process) hides its exe and fds even from its owner. Never read that
@@ -467,7 +521,7 @@ scan_holders() {
  # process that has exited meanwhile is moot; a permission error about one that
  # turned non-dumpable meanwhile (an ssh or a shim starting) is decided as
  # above; any other error is unknown and refuses.
- live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print -quit 2>&1 >&4 | sed 's/^/unreadable: /'; } 4>&1 )
+ live=$( { LC_ALL=C find "$@" -maxdepth 1 \( -lname "$base/*" -o -lname "$base_real/*" \) -print 2>&1 >&4 | sed 's/^/unreadable: /'; } 4>&1 )
  # One line per entry; no here-document (compaction, see install.rs) and no
  # pipeline, whose subshell would swallow exit 73.
  scan_nl=$(printf '\n_'); scan_nl=${scan_nl%_}
@@ -486,10 +540,21 @@ scan_holders() {
      *": Permission denied") ! hidden_holder "/proc/$scan_pid" || exit 73;;
      *) exit 73;;
     esac;;
-   *) exit 73;;
+   *) scan_ours "$scan_line" || continue; exit 73;;
   esac
  done
  set +f; IFS=$scan_ifs
+}
+# Whether /proc link $1, whose text names a path under $base, is that very
+# file here. A process in another mount namespace, such as a container that
+# runs its own infraternal, names its own /var/lib/infraternal, which is not
+# this install: refusing on it made every add on such a host "busy" (#394,
+# J315 on compute01). A link that vanished holds nothing; a deleted file
+# cannot be compared, so it still counts.
+scan_ours() {
+ scan_target=$(readlink "$1" 2>/dev/null) || return 1
+ case "$scan_target" in *" (deleted)") return 0;; esac
+ [ "$1" -ef "$scan_target" ]
 }
 # Whether /proc entry $1, whose exe or fds are hidden (non-dumpable), may hold
 # this install. A process that has exited (or is a zombie) holds nothing.
@@ -511,7 +576,13 @@ install_process() {
  agent_unit_process "$1" && return 0
  session_scope_process "$1" && return 0
  install_argv0=$({ tr '\0' '\n' < "$1/cmdline" | sed -n 1p; } 2>/dev/null || :)
- case "$install_argv0" in "$base"/*|"$base_real"/*) return 0;; esac
+ case "$install_argv0" in
+  "$base"/*|"$base_real"/*)
+   # Started from that path in its own root: when that file is visibly
+   # another one (a container's own install), it is not this install's.
+   if [ -e "$1/root$install_argv0" ] && [ -e "$install_argv0" ] && ! [ "$1/root$install_argv0" -ef "$install_argv0" ]; then return 1; fi
+   return 0;;
+ esac
  return 1
 }
 # Whether /proc entry $1 runs in an infraternal terminal session scope.
@@ -541,10 +612,24 @@ no_redirect() {
 # a stopped agent is a Replace whose restore never ran; it is kept, for Put it
 # back (report_set_aside).
 discard_committed_set_aside() {
- for set_aside in "$base".bootstrap-superseded-* "$base".bootstrap-replaced-*; do
+ for set_aside in "$base".bootstrap-superseded-* "$base".bootstrap-replaced-* "$base".bootstrap-takeover-*; do
   [ -d "$set_aside" ] && [ ! -L "$set_aside" ] && [ -O "$set_aside" ] || continue
   case "$set_aside" in
    "$base".bootstrap-replaced-*) $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || continue;;
+   # A Re-enroll's whole old install goes only beside a base that is provably
+   # a finished install, as for Take over below (J342 P1-1, D335).
+   "$base".bootstrap-superseded-*)
+    probe validate_finished_install
+    [ "$probed" = 0 ] || continue;;
+   # A Take over killed before it moved the old install: $base is still
+   # that install, so the set-aside holds its service state; Put it back.
+   # Otherwise the set-aside goes only beside a base that is provably a
+   # finished install: a base with no journal is not proof enough (J342
+   # P1-1: a bare owner record once deleted the only remaining install).
+   "$base".bootstrap-takeover-*)
+    [ -d "$set_aside/install" ] && [ ! -L "$set_aside/install" ] || continue
+    probe validate_finished_install
+    [ "$probed" = 0 ] || continue;;
   esac
   rm -rf "$set_aside"
  done
@@ -557,10 +642,14 @@ discard_committed_set_aside() {
 # replaced journal while the unit is active: a newer install is serving, and
 # putting the stale journal into it would make a healthy host stuck again
 # (#305 P2-3).
+# A Take over's set-aside (D359) is reported while the old install is in it
+# and nothing is in its place, or while it never left its place (a Take over
+# killed between its stop and its move). Beside a new install it is the
+# new install's rollback that comes first, or the commit's delete.
 # Fails (1) when there is nothing to report.
 report_set_aside() {
  set_aside=
- for candidate in "$base".bootstrap-superseded-* "$base".bootstrap-replaced-*; do
+ for candidate in "$base".bootstrap-superseded-* "$base".bootstrap-replaced-* "$base".bootstrap-takeover-*; do
   [ -e "$candidate" ] || [ -L "$candidate" ] || continue
   case "$candidate" in
    "$base".bootstrap-superseded-*)
@@ -569,13 +658,21 @@ report_set_aside() {
     set_aside_transaction=${candidate#"$base.bootstrap-superseded-"}
     set_aside_owner="$candidate/.bootstrap-owner"
     set_aside_service="$candidate/.superseded-service";;
-   *)
+   "$base".bootstrap-replaced-*)
     [ -d "$base" ] && [ ! -L "$base" ] || continue
     ! $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || continue
     set_aside_kind=replaced
     set_aside_transaction=${candidate#"$base.bootstrap-replaced-"}
     set_aside_owner="$base/.bootstrap-owner"
     set_aside_service="$candidate/found-service";;
+   "$base".bootstrap-takeover-*)
+    if [ -e "$candidate/install" ] || [ -L "$candidate/install" ]; then
+     [ ! -e "$base" ] && [ ! -L "$base" ] || continue
+    fi
+    set_aside_kind=taken_over
+    set_aside_transaction=${candidate#"$base.bootstrap-takeover-"}
+    set_aside_owner="$candidate/owner"
+    set_aside_service="$candidate/service";;
   esac
   [ -z "$set_aside" ] || refuse aside
   set_aside=$candidate
@@ -594,6 +691,44 @@ report_set_aside() {
  case "$setup_locked_machine" in ''|[-.]*|*[!a-zA-Z0-9._-]*) setup_locked_machine=unknown;; esac
  [ "${#setup_locked_machine}" -le 253 ] || setup_locked_machine=unknown
  printf 'INFRATERNAL_SETUP_SET_ASIDE %s %s %s %s %s %s\n' "$set_aside_kind" "$set_aside_host" "$set_aside_transaction" "$setup_locked_machine" "$set_aside_enabled" "$set_aside_active"
+}
+# Run "$@" in a subshell with errexit in force and refusals fatal and quiet,
+# and leave its exit status in $probed. Inside an if or an || list the shell
+# ignores errexit, so a check that relies on it would read as passing.
+probe() {
+ set +e
+ (set -e; setup_check=no; "$@") >/dev/null 2>&1
+ probed=$?
+ set -e
+}
+# Refuse (73) while a terminal's shim serves a session of this install, or
+# any process outside the agent's own unit uses it (scan_holders agent).
+holders_beside_agent() {
+ live_session_sockets
+ scan_holders agent
+}
+# A finished install (#394), with what Take over needs (D359):
+# `INFRATERNAL_SETUP_INSTALLED <host> <dev:ino> <live|idle> <takeover>`.
+# The takeover field is "ready" only for root's own base whose every entry,
+# launcher and unit are proven infraternal's (validate_upgrade_root) and that
+# nothing but the agent's own unit uses; "busy" when proven but in use (an
+# open terminal, another process); "unproven" otherwise, including every
+# rootless install. Only "ready" is ever offered. A runtime helper that needs
+# a refresh (76) ends the check, which then asks for one.
+report_installed() {
+ installed_takeover=unproven
+ if [ "$base" = "$up_root_base" ]; then
+  probe validate_finished_install
+  if [ "$probed" = 0 ]; then
+   probe holders_beside_agent
+   case "$probed" in
+    0) installed_takeover=ready;;
+    73) installed_takeover=busy;;
+    76) exit 76;;
+   esac
+  fi
+ fi
+ printf 'INFRATERNAL_SETUP_INSTALLED %s %s %s %s\n' "$(cat "$base/.bootstrap-owner")" "$(stat -c '%d:%i' "$base")" "$(upgrade_liveness)" "$installed_takeover"
 }
 inspect_previous() {
  no_redirect
@@ -632,7 +767,7 @@ inspect_previous() {
   # every Add host and retry into that refusal, and nothing was ever offered
   # (#394). Name the install instead, so the server answers before staging.
   if [ -e "$base" ] || [ -L "$base" ]; then
-   printf 'INFRATERNAL_SETUP_INSTALLED %s\n' "$(cat "$base/.bootstrap-owner")"
+   report_installed
    return
   fi
   # D355: proven absence lets the server finish this person's stale entries.
@@ -824,14 +959,7 @@ retire_stuck_service() {
  # This attempt's restore took the guard first and found nothing moved: the
  # attempt was cancelled, so its set-aside never starts. The token is the
  # attempt's own, so no other attempt is held back (#305, J202 P2).
- if [ "$replace_cancel" != - ]; then
-  hex_id "$replace_cancel"
-  replace_cancelled="$base.bootstrap-cancel-$replace_cancel"
-  if [ -e "$replace_cancelled" ] || [ -L "$replace_cancelled" ]; then
-   rm -f -- "$replace_cancelled"
-   exit 75
-  fi
- fi
+ refuse_cancelled "$replace_cancel"
  replace_observed=$(inspect_previous)
  [ "${replace_observed% *}" = "${replace_expected% *}" ] || exit 75
  # The agent started since the person confirmed an idle install (upgrade_liveness).
@@ -905,6 +1033,18 @@ not_live_beside_sessions() {
   exec 8<&-
  fi
  scan_holders service
+}
+# Refuse (75) a set-aside whose attempt's restore already ran: the restore
+# found nothing moved and left the token $1 (cancel_set_aside). The token
+# is used up. `-` (no token) never refuses.
+refuse_cancelled() {
+ [ "$1" != - ] || return 0
+ hex_id "$1"
+ replace_cancelled="$base.bootstrap-cancel-$1"
+ if [ -e "$replace_cancelled" ] || [ -L "$replace_cancelled" ]; then
+  rm -f -- "$replace_cancelled"
+  exit 75
+ fi
 }
 replace_untrap() {
  trap - EXIT
@@ -1061,7 +1201,145 @@ finish_stuck_upgrade() {
  # that has stopped since keeps everything, and the next add-host sees it
  # again (#305, J202 P2).
  $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1 || exit 75
+ # As every commit does (COMMIT_RETIRE in install.rs): durable first (J349 P2-1).
+ settle_set_aside
  retire_setup_lease
  rm -rf "$stage"
  retire_set_aside
+}
+# D359: take over a finished install another server enrolled (#394), after
+# the person confirmed the exact record Check reported (report_installed),
+# which names the old install's id. $2 is this attempt's token: it names the
+# set-aside, and a restore that ran first refuses it (refuse_cancelled).
+#
+# Root only: $base must be root's /var/lib/infraternal. The prelude fixes
+# up_root_base, and no rootless base can be equal to it.
+#
+# A crash at any step leaves the old install whole, either in its place or
+# in the set-aside $base.bootstrap-takeover-<token>, a 0700 sibling that only
+# root can enter. The set-aside is built under a temporary name with the old
+# install's id, the service state found and a copy of its unit, and renamed
+# into place complete before anything is stopped. Then the agent is stopped
+# and disabled (validate_upgrade_root proved the unit is ours), nothing else
+# may still use the install, the install is renamed into the set-aside, and
+# the unit and launcher are removed. Any failure or signal before the end
+# puts it back (put_back_taken_over). After the end, the server puts it back
+# if the new install fails (restore_taken_over_install), a later Check offers
+# it after a crash (report_set_aside), and the new install's commit deletes
+# it (retire_set_aside).
+take_over_finished_install() {
+ takeover_expected=$1
+ takeover_token=$2
+ hex_id "$takeover_token"
+ [ "$base" = "$up_root_base" ] || exit 71
+ setup_guard
+ refuse_cancelled "$takeover_token"
+ takeover_observed=$(inspect_previous)
+ set -- $takeover_expected
+ [ "$#" = 5 ] && [ "$1" = INFRATERNAL_SETUP_INSTALLED ] && [ "$5" = ready ] || exit 75
+ takeover_host=$2
+ # The same install (owner and root identity) and still ready to take over.
+ [ "${takeover_observed% * *}" = "${takeover_expected% * *}" ] || exit 75
+ case "${takeover_observed##* }" in ready) :;; busy) exit 73;; *) exit 75;; esac
+ # Its agent started since the person confirmed an idle install: ask again.
+ takeover_liveness=${takeover_observed% *}
+ [ "$4" != idle ] || [ "${takeover_liveness##* }" != live ] || exit 75
+ validate_finished_install
+ aside="$base.bootstrap-takeover-$takeover_token"
+ takeover_part="$base.bootstrap-taking-$takeover_token"
+ for takeover_path in "$aside" "$takeover_part"; do
+  [ ! -e "$takeover_path" ] && [ ! -L "$takeover_path" ] || exit 72
+ done
+ takeover_enabled=no
+ takeover_active=no
+ if $manager is-enabled --quiet infraternal-agent.service >/dev/null 2>&1; then takeover_enabled=yes; fi
+ if $manager is-active --quiet infraternal-agent.service >/dev/null 2>&1; then takeover_active=yes; fi
+ mkdir -m 700 "$takeover_part"
+ printf '%s\n' "$takeover_host" > "$takeover_part/owner"
+ printf '%s %s\n' "$takeover_enabled" "$takeover_active" > "$takeover_part/service"
+ cp "$unit" "$takeover_part/unit"
+ [ "$(cat "$takeover_part/unit")" = "$(cat "$unit")" ] || exit 71
+ mv -T "$takeover_part" "$aside"
+ # From here every way out puts the old install back, until the end.
+ trap 'takeover_status=$?; replace_untrap; put_back_taken_over; exit "$takeover_status"' EXIT
+ trap 'replace_untrap; put_back_taken_over; exit 129' HUP
+ trap 'replace_untrap; put_back_taken_over; exit 130' INT
+ trap 'replace_untrap; put_back_taken_over; exit 143' TERM
+ trap 'replace_untrap; put_back_taken_over; exit 141' PIPE
+ stop_agent_unit
+ $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
+ # Only the old agent was allowed to use it, and it has stopped.
+ live_session_sockets
+ scan_holders all
+ mv -T "$base" "$aside/install"
+ rm -f "$unit"
+ rm -f "$launcher"
+ $manager daemon-reload >/dev/null 2>&1 || exit 73
+ replace_done
+}
+# Put back what take_over_finished_install set aside in $aside, whatever step
+# it reached: the install, its unit and its launcher go back where they were,
+# its service is enabled and started again as it was found, and the set-aside
+# is removed. Each step checks first, so running it again after any
+# interruption, its own included, finishes the same way. Refuses (72) while a
+# new install, or a unit or launcher that is not the old one's, is in place.
+put_back_taken_over() {
+ [ -d "$aside" ] && [ ! -L "$aside" ] && [ -O "$aside" ] && [ "$(stat -c '%a' "$aside")" = 700 ] || exit 71
+ private_file "$aside/owner"
+ hex_id "$(cat "$aside/owner")"
+ private_file "$aside/service"
+ # Its own IFS: a trap can run it after scan_holders left IFS at a newline.
+ IFS=' ' read -r takeover_enabled takeover_active takeover_extra < "$aside/service"
+ [ -z "$takeover_extra" ] || exit 71
+ case "$takeover_enabled:$takeover_active" in yes:yes|yes:no|no:yes|no:no) :;; *) exit 71;; esac
+ takeover_unit="$aside/unit"
+ [ -f "$takeover_unit" ] && [ ! -L "$takeover_unit" ] && [ -O "$takeover_unit" ] && [ "$(stat -c '%a:%h' "$takeover_unit")" = 600:1 ] || exit 71
+ [ "$(stat -c '%s' "$takeover_unit")" -le 4096 ] || exit 71
+ if [ -e "$aside/install" ] || [ -L "$aside/install" ]; then
+  [ -d "$aside/install" ] && [ ! -L "$aside/install" ] && [ -O "$aside/install" ] || exit 71
+  [ ! -e "$base" ] && [ ! -L "$base" ] || exit 72
+ else
+  # Never moved: the old install is still in its place.
+  [ -d "$base" ] && [ ! -L "$base" ] && [ -O "$base" ] || exit 71
+ fi
+ if [ -e "$unit" ] || [ -L "$unit" ]; then
+  [ -f "$unit" ] && [ ! -L "$unit" ] && [ "$(cat "$unit")" = "$(cat "$takeover_unit")" ] || exit 72
+ fi
+ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+  [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$base/bin/current" ] || exit 72
+ fi
+ if [ -e "$aside/install" ]; then mv -T "$aside/install" "$base"; fi
+ if [ ! -e "$unit" ]; then
+  # Copied beside the unit, then renamed: the unit appears whole or not at all.
+  takeover_restoring="${unit%/*}/.infraternal-agent.service.restore"
+  rm -f "$takeover_restoring"
+  cp "$takeover_unit" "$takeover_restoring"
+  mv -T "$takeover_restoring" "$unit"
+ fi
+ [ -L "$launcher" ] || ln -s "$base/bin/current" "$launcher"
+ $manager daemon-reload >/dev/null 2>&1 || :
+ [ "$takeover_enabled" != yes ] || $manager enable infraternal-agent.service >/dev/null 2>&1 || :
+ [ "$takeover_active" != yes ] || $manager start infraternal-agent.service >/dev/null 2>&1 || :
+ rm -rf "$aside"
+}
+# Put back the install Take over token $1 set aside, after the new install
+# failed and its own rollback removed it (D359). Prints "restored", or
+# "untouched" when that token set nothing aside; the token then stays, so a
+# Take over still on its way refuses (cancel_set_aside). A set-aside left
+# half-built, before anything was stopped, is removed. Waits for a Take over
+# still running (setup_guard_wait), as the other restores do.
+restore_taken_over_install() {
+ hex_id "$1"
+ setup_guard_wait=25
+ setup_guard
+ takeover_part="$base.bootstrap-taking-$1"
+ if [ -d "$takeover_part" ] && [ ! -L "$takeover_part" ] && [ -O "$takeover_part" ]; then rm -rf "$takeover_part"; fi
+ aside="$base.bootstrap-takeover-$1"
+ if [ ! -e "$aside" ] && [ ! -L "$aside" ]; then
+  cancel_set_aside "$1"
+  printf 'untouched\n'
+  return
+ fi
+ put_back_taken_over
+ printf 'restored\n'
 }

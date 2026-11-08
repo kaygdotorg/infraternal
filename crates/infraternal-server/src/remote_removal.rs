@@ -14,6 +14,13 @@ use uuid::Uuid;
 /// How long a browser dry run's review stays usable, as for a key's review token.
 const REVIEW_SECONDS: i64 = 120;
 
+/// How long a removal waits, after its commit, for a connected host's answer to
+/// arrive through the outbox (#409). A connected host reconnects and answers
+/// within about a second of the cut; the root and rootless end-to-end runs
+/// measured whole uninstalls of 0.4–3.7 s. Past this the person gets the
+/// pending answer, which stays true: the cleanup still completes.
+const REMOVAL_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 struct Pending {
     hash: String,
     user: String,
@@ -282,10 +289,22 @@ impl Removal {
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
             .bind(entry.host.as_bytes().as_slice()).bind(&entry.user).bind(live).bind(entry.uninstall).execute(&mut *tx).await?;
-        let (cleanup, left) = if entry.uninstall {
-            request_uninstall(&self.hosts, entry.host).await
-        } else {
-            ("retained", Vec::new())
+        // One delivery path (#409): for a person's host the removal outbox asks
+        // for the uninstall on the agent's cleanup-only reconnect, right after
+        // its login revocation receipt, and records the answer with that
+        // receipt. That reconnect follows this commit's link cut at once for an
+        // online host, and the host's return for an offline one. So nothing
+        // here waits on the network under the writer lock, and the uninstall
+        // can no longer stop the agent before its receipt is in. Legacy owners
+        // have no outbox and keep a single immediate attempt.
+        let outbox = Uuid::parse_str(&entry.user).is_ok();
+        // Read before the commit cuts the link: only a host connected right now
+        // can answer within the short wait below.
+        let connected = outbox && entry.uninstall && self.hosts.actor(entry.host).await.is_some();
+        let (cleanup, left) = match (entry.uninstall, outbox) {
+            (false, _) => ("retained", Vec::new()),
+            (true, true) => ("pending", Vec::new()),
+            (true, false) => request_uninstall(&self.hosts, entry.host).await,
         };
         sqlx::query(
             "UPDATE remote_host_removals SET host_cleanup=?,completed_at=? WHERE host_id=?",
@@ -340,6 +359,32 @@ impl Removal {
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         let installation = installed_by_setup.then(|| entry.host.simple().to_string());
+        // A connected host answers through the outbox within about a second of
+        // the cut (#409). Wait for that, after the commit and so outside the
+        // writer lock, so the result can say what happened and which kernel
+        // objects stayed, as the live call did (#235). A host that is slower,
+        // or offline, gets the pending answer: its cleanup still completes.
+        if pending && connected {
+            let answered = self
+                .store
+                .wait_removal_outcome(entry.host, REMOVAL_ANSWER_WAIT)
+                .await
+                .map_err(|_| crate::auth::Error::Denied)?;
+            if let Some((cleanup, retained)) = answered {
+                let left = known_left(retained.iter().map(String::as_str));
+                let (message, manual) = outcome(
+                    &cleanup,
+                    &mode,
+                    display_name(&name),
+                    &left,
+                    installation.as_deref(),
+                    false,
+                );
+                return Ok(
+                    json!({"host_id":entry.host,"state":"removed","host_cleanup":cleanup,"message":message,"manual":manual,"left":left}),
+                );
+            }
+        }
         let (message, manual) = outcome(
             cleanup,
             &mode,
@@ -349,7 +394,7 @@ impl Removal {
             pending,
         );
         Ok(
-            json!({"host_id":entry.host,"state":if pending { "pending" } else { "removed" },"host_cleanup":cleanup,"message":message,"manual":manual}),
+            json!({"host_id":entry.host,"state":if pending { "pending" } else { "removed" },"host_cleanup":cleanup,"message":message,"manual":manual,"left":left}),
         )
     }
 }
@@ -380,6 +425,13 @@ fn outcome(
                 (detail, None)
             }
             "retained" => ("its infraternal agent stays installed on it".to_owned(), None),
+            // The outbox asks the host when it next connects (#409). Hand over
+            // the manual command too, for a machine that never comes back.
+            "pending" if installation.is_some() => {
+                let commands = manual_uninstall(mode, installation.unwrap_or_default());
+                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                (format!("its infraternal agent uninstalls itself as soon as it connects. If it never does, remove it there {account} by running: {commands}"), Some(commands))
+            }
             _ if installation.is_none() => (
                 "infraternal setup didn't install its infraternal agent, so remove it there the way it was installed".to_owned(),
                 None,
@@ -387,7 +439,7 @@ fn outcome(
             _ => {
                 let commands = manual_uninstall(mode, installation.unwrap_or_default());
                 let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
-                (format!("infraternal is still installed on it, so remove it there {account} with: {commands}"), Some(commands))
+                (format!("infraternal is still installed on it, so remove it there {account} by running: {commands}"), Some(commands))
             }
         };
         let punctuation = if manual.is_some() { "" } else { "." };
@@ -429,54 +481,99 @@ fn outcome(
             };
             (
                 format!(
-                    "{name} was removed here, but infraternal is still installed on it. Remove it there {account} with: {commands}"
+                    "{name} was removed here, but infraternal is still installed on it. Remove it there {account} by running: {commands}"
                 ),
                 Some(commands),
             )
         }
     }
 }
-/// Ask a connected host's infraternal agent to uninstall itself (D273).
+/// How a host's infraternal agent answered one uninstall request.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UninstallReply {
+    /// It accepted, and its helper is removing the installation. These are the
+    /// kernel objects it leaves because its installation did not create them.
+    Accepted(Vec<&'static str>),
+    /// It answered, but will not uninstall (for example an installation that
+    /// infraternal setup did not make). Asking again gets the same answer.
+    Refused,
+    /// No answer: the link was gone, ended mid-call, or timed out. The
+    /// request may be repeated on the next connection.
+    Lost,
+}
+
+/// The kernel objects a host may report leaving in place because its
+/// installation did not create them (#235). These are the only names a
+/// removal message ever shows.
+const KNOWN_LEFT: [&str; 3] = [
+    "infraternal0",
+    "infraternal_mesh",
+    "the IFM_* iptables chains",
+];
+
+/// Keep only the names in `names` this server knows, in the server's own order
+/// and spelling. A host never puts its own text into the owner's message: this
+/// applies to its live reply and to the copy the removal outbox stores (#409).
+pub(crate) fn known_left<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<&'static str> {
+    let names: Vec<&str> = names.into_iter().collect();
+    KNOWN_LEFT
+        .into_iter()
+        .filter(|known| names.contains(known))
+        .collect()
+}
+
+/// Ask the infraternal agent behind `actor` to uninstall itself (D273, #235).
+///
+/// The removal outbox calls this on the host's cleanup-only reconnect, after
+/// its login revocation receipt (#409); legacy owners and the real-binary
+/// removal check reach it through [`request_uninstall`]. Only names this
+/// server knows are kept from the reply: a host never puts its own text into
+/// the owner's message.
+pub(crate) async fn ask_uninstall(
+    actor: &crate::embedded::EmbeddedAgent,
+    host: Uuid,
+) -> UninstallReply {
+    let Ok(input) = serde_json::to_vec(&json!({"host":host.simple().to_string(),"dry_run":false}))
+    else {
+        return UninstallReply::Lost;
+    };
+    let reply = match actor
+        .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
+        .await
+    {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+        // A `Result` frame with `ok:false` is the host's own refusal.
+        Err(crate::embedded::AgentError::Rejected) => None,
+        Err(_) => return UninstallReply::Lost,
+    };
+    match reply {
+        Some(reply) if reply["state"] == "accepted" => UninstallReply::Accepted(known_left(
+            reply["left"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str),
+        )),
+        _ => UninstallReply::Refused,
+    }
+}
+
+/// Ask a connected host's infraternal agent to uninstall itself, once, now.
 ///
 /// `requested` only when the host accepted the exact action; any refusal, error
 /// or absent connection is `unreachable`, which the caller reports as a leftover
-/// installation. The real-binary removal check calls this same path (#235).
-///
-/// With `requested` come the kernel objects the host will leave because its
-/// installation did not create them. Only names this server knows are kept:
-/// a host never puts its own text into the owner's message.
+/// installation. Only removals with no outbox use it (legacy owners), plus the
+/// real-binary removal check (#235).
 pub(crate) async fn request_uninstall(
     hosts: &RemoteHosts,
     host: Uuid,
 ) -> (&'static str, Vec<&'static str>) {
-    const KNOWN: [&str; 3] = [
-        "infraternal0",
-        "infraternal_mesh",
-        "the IFM_* iptables chains",
-    ];
     let Some(actor) = hosts.actor(host).await else {
         return ("unreachable", Vec::new());
     };
-    let Ok(input) = serde_json::to_vec(&json!({"host":host.simple().to_string(),"dry_run":false}))
-    else {
-        return ("unreachable", Vec::new());
-    };
-    let reply = actor
-        .control_call(infraternal_plugin_remote::UNINSTALL.id, input)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    match reply {
-        Some(reply) if reply["state"] == "accepted" => {
-            let left = reply["left"].as_array().map_or_else(Vec::new, |left| {
-                KNOWN
-                    .into_iter()
-                    .filter(|known| left.iter().any(|name| name == known))
-                    .collect()
-            });
-            ("requested", left)
-        }
-        _ => ("unreachable", Vec::new()),
+    match ask_uninstall(&actor, host).await {
+        UninstallReply::Accepted(left) => ("requested", left),
+        UninstallReply::Refused | UninstallReply::Lost => ("unreachable", Vec::new()),
     }
 }
 /// The machine part of a stored `account@machine` address, as people name the host.
