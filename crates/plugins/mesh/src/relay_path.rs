@@ -195,6 +195,7 @@ struct Counters {
     receive_errors: AtomicU64,
 }
 
+/// Holds a connected relay session and the peer links that use it.
 struct Live {
     /// Relay slot that owns this connection.
     index: usize,
