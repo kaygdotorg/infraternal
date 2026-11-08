@@ -179,6 +179,8 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   let applyingLook = false;
   // Once the canvas has supplied a valid account look, the OS scheme is no longer an appearance authority.
   let accountLookApplied = false;
+  // A local look stays authoritative until the canvas document confirms that exact snapshot.
+  let localLookPending = false;
   let appliedUiSize = store.selected().uiSize;
   const render = (): void => {
     applyingLook = true;
@@ -204,6 +206,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
   const announce = (): void => { announceTimer = 0; for (const listener of [...listeners]) listener(); };
   const scheduleChange = (): void => {
     if (previewing) return;
+    localLookPending = Boolean(accountId);
     window.clearTimeout(cacheTimer);
     cacheTimer = window.setTimeout(flushCache, CACHE_DELAY_MS);
     window.clearTimeout(announceTimer);
@@ -240,6 +243,11 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
         || nextDefaults.windowSizes.desktop !== defaults.windowSizes.desktop;
       const changedExtendedInfo = nextDefaults.extendedInfo !== defaults.extendedInfo;
       const next: DocLook = { ...restored, ...nextDefaults };
+      if (localLookPending && !sameLook(next, snapshot())) {
+        // Preserve the unsent local look until DocumentSync captures it. Its operation then uses the canvas journal's
+        // current base revision and op id, so the server's ordinary document order decides the winner.
+        return;
+      }
       if (sameLook(next, snapshot()) && !needsCompletion) return;
 
       applyingDocument = true;
@@ -258,6 +266,7 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
       if (!accountId || previewing || !completeLook(parseLook(look))) return;
       const canonical = parseLook(look)!;
       if (!sameLook(canonical, snapshot())) return;
+      localLookPending = false;
       writeCache(accountId, canonical);
       clearLegacyAppearance(accountId);
     },

@@ -415,6 +415,54 @@ test("theme and font changes reach the same account live and after reload withou
   }
 });
 
+/** Replays J359's close-together edits against the real canvas server; the newer local edit must be the next document revision. */
+test("a newer local appearance edit survives an older remote look while its announce is pending", async ({ browser }) => {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
+  const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  try {
+    const a = watchLayout(await first.newPage());
+    await enrol(a, server);
+    await settled(a);
+    await second.addCookies(await first.cookies());
+    const b = watchLayout(await second.newPage());
+    await b.goto(server.origin + "/");
+    await expect(windows(b)).toHaveCount(1);
+    await settled(b);
+
+    const rounds: Array<{ base: string; older: string; newer: string; gapMs: number }> = [];
+    const cap = (value: string): string => value[0]!.toUpperCase() + value.slice(1);
+    for (const [base, older, newer] of [
+      ["solid", "tinted", "frosted"],
+      ["tinted", "frosted", "solid"],
+      ["frosted", "solid", "tinted"],
+    ] as const) {
+      await choosePaletteValue(a, `Theme: ${cap(base)}`);
+      await expect.poll(async () => (await cache(b)).canonical.look?.selected).toBe(base);
+      await settled(a);
+      await settled(b);
+
+      await choosePaletteValue(a, `Theme: ${cap(older)}`);
+      const olderPickedAt = Date.now();
+      await choosePaletteValue(b, `Theme: ${cap(newer)}`);
+      const newerPickedAt = Date.now();
+      const round = { base, older, newer, gapMs: newerPickedAt - olderPickedAt };
+      console.log(`APPEARANCE_UNSENT_ATTEMPT ${JSON.stringify(round)}`);
+      await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 15_000 }).toBe(newer);
+      await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 15_000 }).toBe(newer);
+      await expect(b.locator("html")).toHaveAttribute("data-look", newer);
+      await settled(a);
+      await settled(b);
+      rounds.push(round);
+    }
+    console.log(`APPEARANCE_UNSENT_CONFLICT ${JSON.stringify({ rounds, expectedNewestWins: true })}`);
+  } finally {
+    await second.close();
+    await first.close();
+    await server.dispose();
+  }
+});
+
 test("legacy appearance values migrate once into the new account document", async ({ browser }) => {
   const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
   const evidence = tracerEvidencePath("appearance-sync");
