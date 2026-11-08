@@ -34,7 +34,7 @@ test("a failure after the prompt is explained in the pill, and Try again finishe
   await expect(page.locator(".ui-toast").filter({ hasText: /ready|added/i })).toHaveCount(0);
 
   await pillOf(page, "instant-fail.lab").click();
-  const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
+  const tip = page.getByRole("dialog", { name: "instant-fail.lab couldn't join this server" });
   await expect(tip).toBeVisible();
   await expect(tip).toContainText("couldn't join this server");
   await expect(tip).toContainText("Your other sessions keep working.");
@@ -75,7 +75,7 @@ test("reduced motion: the failure and the retry still show, with no flight", asy
   await expect(page.locator('.ui-window .ui-setup-fill[data-state="failed"]')).toHaveCount(1, { timeout: 30_000 });
   expect(await page.locator(".ui-setup-fly").count()).toBe(0);
   await pillOf(page, "instant-fail.lab").click();
-  await page.getByRole("dialog", { name: "Setup of instant-fail.lab" }).getByRole("button", { name: "Try again" }).click();
+  await page.getByRole("dialog", { name: "instant-fail.lab couldn't join this server" }).getByRole("button", { name: "Try again" }).click();
   await page.waitForSelector(".ui-window .ui-setup-ring", { state: "detached", timeout: 20_000 });
 });
 
@@ -101,7 +101,7 @@ for (const [width, height] of [[1440, 900], [393, 852], [375, 667]] as const) {
       await addHost(page, "instant-fail.lab", theme);
       await expect(page.locator('.ui-window .ui-setup-fill[data-state="failed"]')).toHaveCount(1, { timeout: 30_000 });
       await pillOf(page, "instant-fail.lab").click();
-      const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
+      const tip = page.getByRole("dialog", { name: "instant-fail.lab couldn't join this server" });
       await expect(tip).toBeVisible();
       await expect(tip.getByRole("button", { name: "Try again", disabled: false })).toHaveCount(0);
       await expect(tip).toContainText("retry limit");
