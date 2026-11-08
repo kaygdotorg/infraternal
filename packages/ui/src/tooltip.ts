@@ -450,6 +450,7 @@ function place(el: HTMLElement, animateMove: boolean): number {
   return x >= prev ? 1 : -1;
 }
 
+/** Swaps the tooltip's text for `text`, sliding in the direction `dir` (0 for no slide, and no slide under reduced motion). */
 function setLabel(text: string, dir: number) {
   const old = surface.querySelector<HTMLElement>(".tip-label:not(.is-leaving)")!;
   if (old.textContent === text) return;
@@ -464,6 +465,7 @@ function setLabel(text: string, dir: number) {
   next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE_OUT });
 }
 
+/** Shows the tooltip for `el`, popping in or appearing instantly; `pointCall` marks a label tied to a point, not to the element. */
 function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   if (!pos) build();
   clearTimeout(closeTimer); clearTimeout(openTimer);
@@ -485,6 +487,7 @@ function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   watch();
 }
 
+/** Hides the tooltip, skipping the exit animation when `instant` is true. */
 function hide(instant = false) {
   clearTimeout(openTimer); clearTimeout(closeTimer);
   if (!shown) {

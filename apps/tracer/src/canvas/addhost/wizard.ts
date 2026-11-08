@@ -266,6 +266,7 @@ export class Wizard {
     else if (!this.float.contains(document.activeElement)) { page.tabIndex = -1; page.focus({ preventScroll: true }); }
   }
 
+  /** Replaces the footer's buttons with `markup`, hiding the footer when it is empty and fading new content in. */
   private setFoot(markup: string): void {
     this.foot.innerHTML = markup;
     this.foot.hidden = markup === "";
@@ -1068,6 +1069,7 @@ export class Wizard {
     this.setFoot(`<span class="ah-count">Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.</span><button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="keep">Keep installing</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="cancel-install">Stop installing</button>`);
   }
 
+  /** Closes the wizard once (a second call does nothing): cancels running installs, removes its listeners, animates out, then calls `after`. */
   private dismiss(after?: () => void): void {
     if (this.closing) return;
     this.closing = true;

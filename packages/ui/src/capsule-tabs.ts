@@ -1,4 +1,3 @@
-import { EASE_OUT } from "./motion";
 /**
  * Capsule tabs: a small segmented tab list whose selected capsule glides to the chosen
  * tab (docs/design/segmented-selection.md). One component for every icon/label tab set.
@@ -11,6 +10,7 @@ import { EASE_OUT } from "./motion";
  * - Compact lists (narrow popovers) show the label only on the selected tab; the others
  *   are icon-only and get the shared tooltip from their aria-label.
  */
+import { EASE_OUT } from "./motion";
 
 export interface CapsuleTab {
   id: string;

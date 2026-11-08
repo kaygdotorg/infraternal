@@ -43,6 +43,7 @@ const STYLE = `
 const MOVE = 160;
 let styled = false;
 
+/** Turns `root` into a status line and returns its `set(state, text)` control; the stylesheet is injected on first use. */
 export function statusLine(root: HTMLElement): StatusLine {
   if (!styled) { styled = true; const style = document.createElement("style"); style.textContent = STYLE; document.head.append(style); }
   root.classList.add("ui-status-line");

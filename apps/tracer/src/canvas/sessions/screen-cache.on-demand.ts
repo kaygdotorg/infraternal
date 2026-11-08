@@ -21,6 +21,7 @@ export interface ScreenCache {
 
 const MAX_PIXELS = 12_000_000;
 
+/** Creates the cache of session pictures, which keeps at most two on a touch screen and four elsewhere. */
 export function createScreenCache(): ScreenCache {
   const pictures = new Map<string, ImageBitmap>();
   const limit = (): number => (coarse.matches ? 2 : 4);

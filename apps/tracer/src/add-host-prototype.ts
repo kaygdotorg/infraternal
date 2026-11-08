@@ -287,6 +287,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       if (next === "discovery") this.focusField();
     }
 
+    /** Replaces the footer's buttons with `markup` and gives the new buttons the production button geometry. */
     private setFoot(markup: string): void {
       this.foot.innerHTML = markup;
       // Fixture buttons use the same primitive and instance geometry as production.
@@ -632,6 +633,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     }
 
     // ── The result: this window becomes the first host's terminal window ─────
+    /** Ends the run: this window becomes the first added host's terminal window, and `failed` lists the hosts that did not make it. */
     private finish(done: AddHostFixture[], failed: Failure[]): void {
       const [first, ...rest] = done;
       if (!first) return;
@@ -697,6 +699,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.card.removeEventListener("keydown", this.onKeyDown);
     }
 
+    /** Closes the wizard: marks it no longer alive, then clears its timers and closes its run. */
     close(): void {
       this.alive = false;
       this.clearTimers();
