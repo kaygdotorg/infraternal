@@ -78,7 +78,8 @@ fn tcp_stream_from(source: Ipv4Addr, destination: Ipv4Addr) -> TcpStream {
         .unwrap();
     socket
         .connect(&socket2::SockAddr::from(SocketAddr::from((
-            destination, DNS_PORT,
+            destination,
+            DNS_PORT,
         ))))
         .unwrap();
     socket.into()
@@ -293,11 +294,9 @@ fn review_j254_tcp_rejects_connections_over_the_bound() {
             client
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
-            let response = Message::from_vec(&exchange_tcp(
-                &mut client,
-                &question("secret.internal", 1),
-            ))
-            .unwrap();
+            let response =
+                Message::from_vec(&exchange_tcp(&mut client, &question("secret.internal", 1)))
+                    .unwrap();
             if source == Ipv4Addr::LOCALHOST {
                 assert_eq!(response.answers.len(), 1);
             } else {

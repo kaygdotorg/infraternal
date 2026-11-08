@@ -210,8 +210,9 @@ impl TcpClient {
     /// Returns the earlier of the idle timeout and the whole-frame deadline.
     fn deadline(&self) -> Instant {
         let idle_deadline = self.last_activity + TCP_IDLE_TIMEOUT;
-        self.frame_deadline
-            .map_or(idle_deadline, |frame_deadline| frame_deadline.min(idle_deadline))
+        self.frame_deadline.map_or(idle_deadline, |frame_deadline| {
+            frame_deadline.min(idle_deadline)
+        })
     }
 
     /// Reports whether this connection has exhausted either bounded wait.
@@ -539,9 +540,9 @@ fn negative_soa(suffix: &str) -> io::Result<Record> {
 
 /// Serves UDP on its own worker so TCP framing and clients cannot delay datagrams.
 fn run_udp_worker(
-    sockets: Vec<UdpSocket>,
-    shutdown_reader: UnixStream,
-    records: Arc<RwLock<Records>>,
+    sockets: &[UdpSocket],
+    shutdown_reader: &UnixStream,
+    records: &Arc<RwLock<Records>>,
 ) {
     let mut query = [0_u8; MAX_PACKET + 1];
     'worker: loop {
@@ -602,9 +603,9 @@ fn run_udp_worker(
 
 /// Serves TCP independently, with bounded accepts, reads and per-connection state.
 fn run_tcp_worker(
-    listeners: Vec<TcpListener>,
-    shutdown_reader: UnixStream,
-    records: Arc<RwLock<Records>>,
+    listeners: &[TcpListener],
+    shutdown_reader: &UnixStream,
+    records: &Arc<RwLock<Records>>,
 ) {
     let mut clients = Vec::<TcpClient>::new();
     'worker: loop {
@@ -645,11 +646,7 @@ fn run_tcp_worker(
         }
         // One read per ready client per poll turn bounds parser work and lets other clients run.
         for index in (0..polled_client_count).rev() {
-            if !service_tcp_client(
-                &mut clients[index],
-                ready[clients_start + index],
-                &records,
-            ) {
+            if !service_tcp_client(&mut clients[index], ready[clients_start + index], records) {
                 clients.swap_remove(index);
             }
         }
@@ -660,6 +657,8 @@ fn run_tcp_worker(
                 break 'worker;
             }
         }
+        // The poll can return immediately while hostile TCP clients stay ready.
+        thread::yield_now();
     }
 }
 
@@ -777,11 +776,11 @@ impl Resolver {
         let udp_records = Arc::clone(&records);
         let udp_worker = thread::Builder::new()
             .name("mesh-dns-udp".to_owned())
-            .spawn(move || run_udp_worker(worker_sockets, udp_shutdown_reader, udp_records))?;
+            .spawn(move || run_udp_worker(&worker_sockets, &udp_shutdown_reader, &udp_records))?;
         let tcp_records = Arc::clone(&records);
         let tcp_worker = match thread::Builder::new()
             .name("mesh-dns-tcp".to_owned())
-            .spawn(move || run_tcp_worker(worker_listeners, tcp_shutdown_reader, tcp_records))
+            .spawn(move || run_tcp_worker(&worker_listeners, &tcp_shutdown_reader, &tcp_records))
         {
             Ok(worker) => worker,
             Err(error) => {
