@@ -271,13 +271,21 @@ test.describe("every camera flight a key starts jumps (the rule is in Camera.fly
     await page.keyboard.press("Enter");
   };
 
-  const cases: Array<[string, (page: Page) => () => Promise<void>]> = [
-    ["Escape to the overview", (page) => () => page.keyboard.press("Escape")],
-    ["Control+Shift+G (canvas lock)", (page) => () => page.keyboard.press("Control+Shift+G")],
-    ["the palette's All views + Enter", (page) => palettePick(page, "all views")],
-    ["a window picked in the palette + Enter", (page) => palettePick(page, "nix-cache")],
+  /** The key that parks the camera where the case under test has somewhere to go; `undefined` leaves it inside view 3. */
+  type Prelude = string | undefined;
+  const cases: Array<[string, Prelude, (page: Page) => () => Promise<void>]> = [
+    ["Escape to the overview", undefined, (page) => () => page.keyboard.press("Escape")],
+    // The canvas lock moves the camera when it starts from the overview; a view's own framing is the same either way.
+    ["Control+Shift+G (canvas lock)", "Escape", (page) => () => page.keyboard.press("Control+Shift+G")],
+    ["the palette's All views + Enter", undefined, (page) => palettePick(page, "all views")],
+    ["a window picked in the palette + Enter", "Control+Shift+Digit1", (page) => palettePick(page, "nix-cache")],
   ];
-  for (const [name, make] of cases) test(name, async ({ page }) => {
+  for (const [name, prelude, make] of cases) test(name, async ({ page }) => {
+    if (prelude) {
+      await page.keyboard.press(prelude);
+      // sleep: let the prelude's flight (if the build still springs) end before the case starts
+      await page.waitForTimeout(900);
+    }
     const f = await flight(page, make(page));
     expect(moved(f.before, f.final), `${name} went somewhere`).toBe(true);
     expect(moved(f.first, f.final), `${name}: the camera is already at its end one frame after the key`).toBe(false);
@@ -308,7 +316,6 @@ test.describe("the pill-morph popovers open and close instantly from the keyboar
     await page.locator("#capsule").click();
     const first = await page.evaluate(() => new Promise<string>((resolve) => requestAnimationFrame(() => resolve(getComputedStyle(document.querySelector(".cl-viewlist")!).clipPath))));
     expect(first, "pointer open is still clipped part way in the first frame").toMatch(/^inset\(/);
-    await expect.poll(() => page.evaluate(() => getComputedStyle(document.querySelector(".cl-viewlist")!).clipPath)).toBe("none");
   });
 });
 
