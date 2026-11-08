@@ -44,6 +44,9 @@ pub struct MeshNode {
     pub node: Node,
     /// Whether the last attached infraternal agent can safely rotate its mesh key.
     pub key_rotation_supported: bool,
+    /// Whether the attached node can retire stale peers after a server authority restore.
+    /// Unknown or unsupported epoch capability is reported as unsafe.
+    pub restore_safe: bool,
     /// True when the last heartbeat is within the fixed live window.
     pub live: bool,
     /// Unix seconds of the last successful observation.
@@ -1844,7 +1847,7 @@ async fn read_snapshot(
     invalid_hosts: &crate::diagnostics::InvalidHosts,
 ) -> Result<MeshSnapshot, MeshApiError> {
     let node_rows = sqlx::query(
-        "SELECT id,name,name_source,public_key,key_rotation_supported,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id",
+        "SELECT id,name,name_source,public_key,key_rotation_supported,authority_epoch_supported,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id",
     )
     .fetch_all(&mut **tx)
     .await
@@ -1971,6 +1974,8 @@ fn decode_host(
     // viewer's scope has no row, so no name is projected for it and no placeholder stands in (D327, D329).
     let key: Vec<u8> = row.try_get("public_key").ok()?;
     let key_rotation_supported: bool = row.try_get("key_rotation_supported").ok()?;
+    let authority_epoch_supported: Option<bool> =
+        row.try_get("authority_epoch_supported").ok()?;
     let last_seen: Option<i64> = row.try_get("last_seen").ok()?;
     let last_rtt: Option<i64> = row.try_get("last_rtt_us").ok()?;
     Some(MeshNode {
@@ -1986,6 +1991,7 @@ fn decode_host(
             tags: tags.into_iter().collect(),
         },
         key_rotation_supported,
+        restore_safe: authority_epoch_supported == Some(true),
         live: last_seen
             .is_some_and(|seen| seen <= now && seen >= now.saturating_sub(NODE_LIVE_SECONDS)),
         last_seen,

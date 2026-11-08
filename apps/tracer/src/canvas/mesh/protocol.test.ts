@@ -36,10 +36,18 @@ test("without `access` (today's server) the person may view and may not edit", (
 
 test("fields the server does not send are absent, never invented", () => {
   const n = parseSnapshot(today)!.nodes[0]!;
-  expect([n.os, n.address, n.path, n.via]).toEqual([undefined, undefined, undefined, undefined]);
+  expect([n.os, n.address, n.path, n.via, n.restoreSafe]).toEqual([undefined, undefined, undefined, undefined, undefined]);
   const extra = parseSnapshot({ ...today, nodes: [{ ...today.nodes[0], os: "debian", address: "10.254.0.4", path: "relay", via: "fra", behind: true }, today.nodes[1]] })!.nodes[0]!;
   expect([extra.os, extra.address, extra.path, extra.via, extra.state]).toEqual(["debian", "10.254.0.4", "relay", "fra", "behind"]);
   expect(parseSnapshot({ ...today, nodes: [{ ...today.nodes[0], os: "plan9" }, today.nodes[1]] })!.nodes[0]!.os).toBeUndefined();
+});
+
+test("restore safety is preserved for an explicitly unsafe node", () => {
+  const snapshot = parseSnapshot({
+    ...today,
+    nodes: [{ ...today.nodes[0], restore_safe: false }, today.nodes[1]],
+  })!;
+  expect(snapshot.nodes[0]).toMatchObject({ restoreSafe: false });
 });
 
 // The server since #236: liveness from its own device (no stored observation, so `last_seen` is null), the path

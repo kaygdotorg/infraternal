@@ -244,13 +244,14 @@ pub async fn run(
                         return;
                     };
                     store
-                        .attach_named_with_probed_capability(
+                        .attach_named_with_probed_capabilities(
                             channel.id(),
                             identity.public_key,
                             endpoint,
                             channel.is_server(),
                             reported.as_deref(),
                             key_rotation,
+                            authority_epoch_supported,
                         )
                         .await
                 };

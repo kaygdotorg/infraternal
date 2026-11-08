@@ -1446,13 +1446,14 @@ impl Store {
         reported: Option<&str>,
         key_rotation_supported: bool,
     ) -> Result<(NodeId, bool), &'static str> {
-        self.attach_named_with_probed_capability(
+        self.attach_named_with_probed_capabilities(
             host,
             key,
             endpoint,
             server,
             reported,
             Some(key_rotation_supported),
+            None,
         )
         .await
     }
@@ -1473,6 +1474,34 @@ impl Store {
         reported: Option<&str>,
         key_rotation: Option<bool>,
     ) -> Result<(NodeId, bool), &'static str> {
+        self.attach_named_with_probed_capabilities(
+            host,
+            key,
+            endpoint,
+            server,
+            reported,
+            key_rotation,
+            None,
+        )
+        .await
+    }
+
+    /// Attach with the independently probed rotation and authority-epoch capabilities.
+    ///
+    /// A `None` epoch result stays unknown in storage. The inventory maps both unknown and
+    /// unsupported to restore-unsafe, while a later successful identity probe can prove support.
+    /// # Errors
+    /// Returns fixed public errors, not database input or authentication data.
+    pub async fn attach_named_with_probed_capabilities(
+        &self,
+        host: &str,
+        key: PublicKey,
+        endpoint: Option<SocketAddr>,
+        server: bool,
+        reported: Option<&str>,
+        key_rotation: Option<bool>,
+        authority_epoch: Option<bool>,
+    ) -> Result<(NodeId, bool), &'static str> {
         let key_rotation_supported = key_rotation.unwrap_or(false);
         if server != (host == "server") {
             return Err("Mesh host identity invalid.");
@@ -1485,7 +1514,7 @@ impl Store {
         // The authenticated host is the sole selector; uniqueness refuses any
         // conflicting key without changing another node's grants [164,166,235].
         let existing = sqlx::query(
-            "SELECT n.id,n.name,n.name_source,n.public_key,n.endpoint,n.dataplane_host,n.key_rotation_supported,\
+            "SELECT n.id,n.name,n.name_source,n.public_key,n.endpoint,n.dataplane_host,n.key_rotation_supported,n.authority_epoch_supported,\
                     r.rotation_phase,r.candidate_public_key,r.previous_public_key \
              FROM mesh_nodes AS n LEFT JOIN mesh_node_key_rotation AS r ON r.node_id=n.id \
              WHERE n.dataplane_host=?",
@@ -1548,6 +1577,7 @@ impl Store {
                 && row.get::<Vec<u8>, _>("public_key") == public_key
                 && row.get::<Option<String>, _>("endpoint").as_deref() == endpoint.as_deref()
                 && row.get::<bool, _>("key_rotation_supported") == key_rotation_supported
+                && row.get::<Option<bool>, _>("authority_epoch_supported") == authority_epoch
             {
                 return Ok((
                     NodeId(u64::try_from(id).map_err(|_| "Mesh identity invalid.")?),
@@ -1555,12 +1585,13 @@ impl Store {
                 ));
             }
             sqlx::query(
-                "UPDATE mesh_nodes SET public_key=?,endpoint=?,dataplane_host=?,key_rotation_supported=? WHERE id=?",
+                "UPDATE mesh_nodes SET public_key=?,endpoint=?,dataplane_host=?,key_rotation_supported=?,authority_epoch_supported=? WHERE id=?",
             )
             .bind(public_key)
             .bind(&endpoint)
             .bind(host)
             .bind(key_rotation_supported)
+            .bind(authority_epoch)
             .bind(id)
             .execute(&mut *tx)
             .await
@@ -1573,7 +1604,7 @@ impl Store {
                 .ok_or("Mesh identity invalid.")?;
             renamed = naming.moved;
             rename(&mut tx, &renamed).await?;
-            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint,key_rotation_supported) VALUES(?,?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).bind(key_rotation_supported).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
+            sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint,key_rotation_supported,authority_epoch_supported) VALUES(?,?,?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).bind(key_rotation_supported).bind(authority_epoch).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
             high
         };
         let revision = sqlx::query_scalar::<_,i64>("UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision").fetch_one(&mut *tx).await.map_err(|_|"Mesh storage unavailable.")?;
