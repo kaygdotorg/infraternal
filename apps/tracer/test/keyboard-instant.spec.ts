@@ -85,6 +85,32 @@ async function frame(page: Page): Promise<Frame> {
   return page.evaluate(() => (window as unknown as { __frame: Frame }).__frame);
 }
 
+/** What {@link armAfter} can record at the first animation frame after the event. */
+type AfterKind = "palette-opacity" | "viewlist-clip" | "window-transitions";
+
+/**
+ * Records one value at the first animation frame after the next `type` event (capture phase, before any handler), so the sample
+ * is taken after the handler ran however busy the machine is; read it with {@link readAfter}. Unlike a sample taken after the
+ * test's own round trip to the page, a slow machine cannot make a fade look finished.
+ */
+async function armAfter(page: Page, type: "click" | "pointerdown", kind: AfterKind): Promise<void> {
+  await page.evaluate(([eventType, what]) => {
+    const w = window as unknown as { __after?: unknown };
+    w.__after = undefined;
+    window.addEventListener(eventType, () => requestAnimationFrame(() => {
+      if (what === "palette-opacity") w.__after = Number(getComputedStyle(document.querySelector("#palette")!).opacity);
+      else if (what === "viewlist-clip") w.__after = getComputedStyle(document.querySelector(".cl-viewlist")!).clipPath;
+      else w.__after = document.getAnimations().filter((a) => a instanceof CSSTransition && a.playState === "running" && (a.effect as KeyframeEffect).target instanceof Element && ((a.effect as KeyframeEffect).target as Element).closest(".ui-window, .ui-window-lock")).map((a) => (a as CSSTransition).transitionProperty);
+    }), { capture: true, once: true });
+  }, [type, kind] as const);
+}
+
+/** The value {@link armAfter} recorded, once it has. */
+async function readAfter<T>(page: Page): Promise<T> {
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __after?: unknown }).__after !== undefined)).toBe(true);
+  return page.evaluate(() => (window as unknown as { __after: T }).__after);
+}
+
 /** Opens the palette from the keyboard and checks the first frame is final, with nothing running. */
 async function expectPaletteOpenInstant(page: Page): Promise<void> {
   await arm(page);
@@ -362,36 +388,37 @@ test.describe("the pill-morph popovers open and close instantly from the keyboar
   test("the view list's Search everything row opens the palette like any pointer open, and the chord stays instant", async ({ page }) => {
     await page.locator("#capsule").click();
     await expect(page.locator(".cl-viewlist")).toBeVisible();
+    await armAfter(page, "click", "palette-opacity");
     await page.locator(".cl-viewrow-search").click();
-    // The first animation frame after the click has run: arm() would sample at the press, before the click's handler.
-    const pointerOpen = await page.evaluate(() => new Promise<{ hidden: boolean; opacity: number }>((resolve) => requestAnimationFrame(() => {
-      const palette = document.querySelector<HTMLElement>("#palette")!;
-      resolve({ hidden: getComputedStyle(palette).display === "none", opacity: Number(getComputedStyle(palette).opacity) });
-    })));
-    expect(pointerOpen.hidden, "the palette opened").toBe(false);
-    expect(pointerOpen.opacity, "a click on Search everything fades the palette in").toBeLessThan(1);
+    expect(await readAfter<number>(page), "a click on Search everything fades the palette in (opacity in the first frame after the click)").toBeLessThan(1);
+    await expect(page.locator("#palette")).toBeVisible();
     await expect(page.locator("#palette")).toHaveCSS("opacity", "1");
     await page.keyboard.press("Escape");
     await expectPaletteOpenInstant(page);
   });
 
   test("a pointer open of the view list still morphs out of the pill", async ({ page }) => {
+    await armAfter(page, "click", "viewlist-clip");
     await page.locator("#capsule").click();
-    const first = await page.evaluate(() => new Promise<string>((resolve) => requestAnimationFrame(() => resolve(getComputedStyle(document.querySelector(".cl-viewlist")!).clipPath))));
+    const first = await readAfter<string>(page);
     expect(clipIsWhole(first), `pointer open is still clipped part way in the first frame (clip-path: ${first})`).toBe(false);
   });
 });
 
 test.describe("round 3 polish", () => {
-  test("a key removes the open and close motion only around the key, not until the next pointer press", async ({ page }) => {
+  test("a pointer change after a key animates the same elements again", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await openCanvas(page);
-    const capsuleTransition = (): Promise<string> => page.evaluate(() => getComputedStyle(document.querySelector("#capsule")!).transitionDuration);
-    await page.locator("#capsule").click();
+    // A key opens and closes the palette instantly: the palette, scrim and covered pills are marked data-motion="instant".
+    await page.keyboard.press(PALETTE_KEY);
     await page.keyboard.press("Escape");
-    // sleep: a few frames after the key, so only a rule that lasts beyond the key can still be on
-    await page.waitForTimeout(150);
-    expect(await capsuleTransition(), "the capsule's cover fade is back a moment after a key").not.toBe("0s");
+    expect(await page.locator("#palette").getAttribute("data-motion")).toBe("instant");
+    // The next change is a pointer click: each element is marked again at that moment, and the fade is back.
+    await armAfter(page, "click", "palette-opacity");
+    await page.locator("#capsule").click();
+    expect(await readAfter<number>(page), "pointer open after a key fades in").toBeLessThan(1);
+    expect(await page.locator("#palette").getAttribute("data-motion")).toBe("animate");
+    expect(await page.locator("#capsule").getAttribute("data-motion")).toBe("animate");
   });
 
   test("Escape out of the palette returns focus to where it was", async ({ page }) => {
@@ -424,7 +451,8 @@ test.describe("round 3 polish", () => {
 test.describe("window stepping and the lock do not animate from the keyboard", () => {
   /** Counts the animations and transitions still running on the window cards, their lock icons and the tree's marker and branch. */
   const running = (page: Page): Promise<string[]> => page.evaluate(() => new Promise<string[]>((resolve) => requestAnimationFrame(() => {
-    const names = document.getAnimations().filter((a) => a.playState === "running").map((a) => {
+    // CSSAnimation (a cursor's endless blink, say) is not a response to the key; transitions and script animations are.
+    const names = document.getAnimations().filter((a) => a.playState === "running" && !(a instanceof CSSAnimation)).map((a) => {
       const target = (a.effect as KeyframeEffect | null)?.target;
       const el = target instanceof Element ? target : null;
       const hit = el?.closest(".ui-window, .ui-window-lock, .bm-marker, .bm-lit, .bm-branches");
@@ -460,7 +488,8 @@ test.describe("window stepping and the lock do not animate from the keyboard", (
       return i < 0 ? undefined : { x: rects[i]!.r.left + rects[i]!.r.width / 2, y: rects[i]!.r.top + rects[i]!.r.height / 2 };
     });
     expect(target, "a second window is fully on screen").toBeDefined();
+    await armAfter(page, "pointerdown", "window-transitions");
     await page.mouse.click(target!.x, target!.y);
-    expect((await running(page)).some((n) => n.startsWith("border-color")), "pointer activation keeps its border fade").toBe(true);
+    expect(await readAfter<string[]>(page), "pointer activation keeps its border fade").toContain("border-color");
   });
 });
