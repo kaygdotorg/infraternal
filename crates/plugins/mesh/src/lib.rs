@@ -72,8 +72,20 @@ mod gotatun_tun;
 /// Derives per-peer mesh route MTUs and a shared IPv6-safe interface MTU.
 mod mesh_mtu;
 
-#[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+#[cfg(all(
+    feature = "agent",
+    feature = "mesh-dns",
+    any(target_os = "linux", target_os = "macos")
+))]
 pub mod dns;
+
+#[cfg(all(
+    feature = "agent",
+    feature = "mesh-dns",
+    any(target_os = "linux", target_os = "macos")
+))]
+/// Routes mesh DNS suffixes through the host's per-link resolver configuration.
+mod dns_integration;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_actions;

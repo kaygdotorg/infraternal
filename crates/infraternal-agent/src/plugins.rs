@@ -479,6 +479,7 @@ mod proxy_mesh_context_tests {
         }
     }
 
+    /// Accepted exposure policy publishes only inbound-authorized TCP sources.
     #[test]
     fn accepted_config_exports_only_inbound_tcp_sources_for_the_published_port() {
         let tcp_3000 = Port {
@@ -493,6 +494,10 @@ mod proxy_mesh_context_tests {
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
+            #[cfg(feature = "mesh")]
+            name: None,
+            #[cfg(feature = "mesh")]
+            dns_suffix: "internal".to_owned(),
             version: 9,
             addresses: Addresses {
                 ipv4: "10.254.0.2".parse().expect("local mesh address"),
@@ -532,6 +537,8 @@ mod proxy_mesh_context_tests {
                     ),
                 ),
             ]),
+            #[cfg(feature = "mesh")]
+            peer_names: BTreeMap::new(),
         };
         let context = proxy_mesh_context(&config).expect("trusted exposure identity");
 

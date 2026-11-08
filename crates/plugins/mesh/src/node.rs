@@ -440,9 +440,11 @@ pub struct Node {
     connection_cleanup_pending: bool,
     client: Option<Client>,
     gotatun: Option<Engine>,
-    #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+    #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
     // Only a newly accepted full snapshot replaces DNS names; coordinator loss keeps D166 state.
     dns_resolver: Option<crate::dns::Resolver>,
+    #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+    dns_integration: crate::dns_integration::DnsIntegration,
     #[cfg(feature = "cutoff-measure")]
     refusing_at_ns: Option<u64>,
 }
@@ -465,8 +467,10 @@ impl Default for Node {
             connection_cleanup_pending: false,
             client: None,
             gotatun: None,
-            #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+            #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             dns_resolver: None,
+            #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+            dns_integration: crate::dns_integration::DnsIntegration::default(),
             #[cfg(feature = "cutoff-measure")]
             refusing_at_ns: None,
         }
@@ -613,7 +617,7 @@ impl Node {
                 public_key,
                 port,
                 compact_access: true,
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 dns_names: cfg!(target_os = "linux"),
                 // Kernel `WireGuard` rotates its key in place (#285, D166).
                 key_rotation: true,
@@ -1143,7 +1147,7 @@ impl Node {
                             public_key,
                             port,
                             compact_access: true,
-                            #[cfg(feature = "mesh-dns-spike")]
+                            #[cfg(feature = "mesh-dns")]
                             dns_names: cfg!(target_os = "linux"),
                             key_rotation: true,
                         };
@@ -1186,7 +1190,7 @@ impl Node {
                     public_key,
                     port,
                     compact_access: true,
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     dns_names: cfg!(target_os = "linux"),
                     // Linux GotaTun uses the durable journal and live reconfigure command (#367).
                     key_rotation: true,
@@ -1696,8 +1700,9 @@ impl Node {
         // between the independent kernel transactions must reconcile as Off.
         self.save(None, false)?;
         self.enabled = false;
-        #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         {
+            self.dns_integration.remove()?;
             self.dns_resolver = None;
         }
         let mut foreign_live_link = false;
@@ -1837,7 +1842,8 @@ impl Node {
         }
         Ok(())
     }
-    // Keep version/binding checks and complete staging visible before installation.
+    /// Validates and stages a coordinator chunk without applying a partial snapshot.
+    /// Version and identity binding checks run before any network state is installed.
     fn stage(&mut self, chunk: Chunk) -> io::Result<bool> {
         if !chunk.access_updates.is_empty()
             && (chunk.from_version.is_none()
@@ -1872,20 +1878,20 @@ impl Node {
                     local_key: chunk.local_key,
                     server: chunk.server,
                     node: chunk.node,
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     name: chunk.name.clone(),
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     dns_suffix: chunk.dns_suffix.clone(),
                     version: chunk.version,
                     addresses: chunk.addresses,
                     default_policy: chunk.default_policy,
                     exposure: chunk.exposure.clone(),
                     peers: BTreeMap::new(),
-                    #[cfg(feature = "mesh-dns-spike")]
+                    #[cfg(feature = "mesh-dns")]
                     peer_names: BTreeMap::new(),
                 }
             };
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             let config = {
                 let mut config = config;
                 config.name.clone_from(&chunk.name);
@@ -1902,13 +1908,13 @@ impl Node {
             });
         }
         let pending = self.pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         let name_changed = pending.config.name != chunk.name;
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         let dns_suffix_changed = pending.config.dns_suffix != chunk.dns_suffix;
-        #[cfg(not(feature = "mesh-dns-spike"))]
+        #[cfg(not(feature = "mesh-dns"))]
         let name_changed = false;
-        #[cfg(not(feature = "mesh-dns-spike"))]
+        #[cfg(not(feature = "mesh-dns"))]
         let dns_suffix_changed = false;
         if pending.server != chunk.server
             || pending.next != chunk.index
@@ -1934,11 +1940,11 @@ impl Node {
         crate::access_updates::apply(&mut pending.config, &chunk.access_updates)?;
         for node in chunk.removed {
             pending.config.peers.remove(&node);
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             pending.config.peer_names.remove(&node);
         }
         pending.config.peers.extend(chunk.upserted);
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         for id in chunk.removed_peer_names {
             if !pending.config.peers.contains_key(&id)
                 || pending.config.peer_names.remove(&id).is_none()
@@ -1963,7 +1969,7 @@ impl Node {
             peer.inbound.union(&partial.inbound);
             peer.outbound.union(&partial.outbound);
         }
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         for (id, name) in chunk.peer_names {
             if !pending.config.peers.contains_key(&id)
                 || name.is_empty()
@@ -2046,9 +2052,10 @@ impl Node {
             .apply_with_aliases(fence, &aliases, connections)?;
         Ok(())
     }
-    /// Keep the apply/fence/rollback transaction and its failure ordering visible together.
+    /// Applies a complete configuration through the route and firewall transaction.
+    /// The fence and rollback ordering keep the previously accepted state usable on failure.
     fn apply(&mut self, config: Config) -> io::Result<()> {
-        #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_records = crate::dns::Records::from_config(&config)?;
         #[cfg(feature = "cutoff-measure")]
         let validation = crate::cutoff_measure::Stage::new(config.node, config.version, "validate");
@@ -2091,7 +2098,7 @@ impl Node {
                 return Err(io::ErrorKind::InvalidData.into());
             }
         }
-        #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         if self.config.is_some() {
             self.ensure_dns_resolver(config.addresses.ipv4)?;
         }
@@ -2219,7 +2226,7 @@ impl Node {
                     return Err(error);
                 }
                 self.config = Some(config);
-                #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+                #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
                 self.publish_dns(dns_records)?;
                 return Ok(());
             }
@@ -2284,7 +2291,7 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let firewall =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "firewall");
-            #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+            #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
             self.firewall.install_pending(&config)?;
             #[cfg(feature = "cutoff-measure")]
@@ -2306,7 +2313,7 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let _retire = crate::cutoff_measure::Stage::new(config.node, config.version, "retire");
             self.config = Some(config);
-            #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+            #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.publish_dns(dns_records)?;
             self.connection_cleanup_pending = true;
             return self.finish_connection_cleanup();
@@ -2349,7 +2356,7 @@ impl Node {
             crate::mesh_mtu::for_config(Some(&config)),
         );
         self.apply_fence(&fence, &config)?;
-        #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         let dns_was_running = self.dns_resolver.is_some();
         let mut previous_route_overrides = None;
         let result = (|| {
@@ -2360,7 +2367,7 @@ impl Node {
             {
                 Device::addresses(config.addresses)?;
             }
-            #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+            #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
             let (ifindex, previous_mtu, requested_mtu) = mesh_mtu;
             // Keep the larger interface until per-peer route metrics are installed. The shared
@@ -2403,7 +2410,7 @@ impl Node {
             if let Some(previous) = previous_route_overrides {
                 self.restore_peer_route_mtu_overrides(previous);
             }
-            #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+            #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             if !dns_was_running && self.config.is_none() {
                 self.dns_resolver = None;
             }
@@ -2476,13 +2483,14 @@ impl Node {
             return Err(error);
         }
         self.config = Some(config);
-        #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
         self.publish_dns(dns_records)?;
         self.connection_cleanup_pending = true;
         self.finish_connection_cleanup()
     }
 
-    #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
+    #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+    /// Binds the DNS sockets after the mesh address exists and before names are published.
     fn ensure_dns_resolver(&mut self, address: std::net::Ipv4Addr) -> io::Result<()> {
         match &self.dns_resolver {
             Some(resolver) if resolver.address() == address => Ok(()),
@@ -2492,9 +2500,9 @@ impl Node {
             )),
             None => {
                 let resolver = if let Some(config) = &self.config {
-                    crate::dns::Resolver::bind(config)?
+                    crate::dns::Resolver::bind_for_node(config)?
                 } else {
-                    crate::dns::Resolver::bind_empty(address)?
+                    crate::dns::Resolver::bind_empty_for_node(address)?
                 };
                 if resolver.address() != address {
                     return Err(io::Error::new(
@@ -2508,12 +2516,21 @@ impl Node {
         }
     }
 
-    #[cfg(all(feature = "mesh-dns-spike", target_os = "linux"))]
-    fn publish_dns(&self, records: crate::dns::Records) -> io::Result<()> {
+    #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+    /// Routes the accepted suffixes through the host resolver, then swaps in their names.
+    fn publish_dns(&mut self, records: crate::dns::Records) -> io::Result<()> {
         let resolver = self
             .dns_resolver
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?;
+        if let Err(error) = self.dns_integration.configure(
+            crate::wireguard::INTERFACE,
+            &records,
+            nix::unistd::Uid::effective().as_raw(),
+            resolver.has_system_port(),
+        ) {
+            tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
+        }
         resolver.publish(records);
         Ok(())
     }
@@ -2730,7 +2747,7 @@ mod tests {
         let mut node = Node {
             identity: Some(Identity {
                 compact_access: true,
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 dns_names: cfg!(target_os = "linux"),
                 key_rotation: true,
                 public_key: PublicKey([1; 32]),
@@ -2742,9 +2759,9 @@ mod tests {
             server: Some(NodeId(1)),
             local_key: None,
             node: NodeId(2),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 1,
             addresses: Addresses {
@@ -2754,7 +2771,7 @@ mod tests {
             default_policy: crate::dataplane::DefaultPolicy::default(),
             exposure: None,
             peers: BTreeMap::new(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         };
         let mut chunk = crate::configuration::chunks(None, &config)
@@ -2812,9 +2829,9 @@ mod tests {
             local_key: None,
             server: None,
             node: NodeId(1),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 1,
             addresses: addresses(1),
@@ -2840,7 +2857,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         };
         let chunks = crate::configuration::chunks(None, &config).expect("bounded chunks");

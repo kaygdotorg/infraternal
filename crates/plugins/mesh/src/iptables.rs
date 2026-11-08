@@ -641,9 +641,9 @@ mod tests {
             local_key: None,
             server: None,
             node: NodeId(0),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 1,
             addresses: address(1),
@@ -669,7 +669,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: std::collections::BTreeMap::new(),
         }
     }

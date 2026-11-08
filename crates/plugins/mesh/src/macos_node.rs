@@ -780,6 +780,7 @@ struct Pending {
     config: Config,
 }
 
+/// Accumulates a versioned coordinator snapshot and returns it only after a valid final chunk.
 fn stage_chunk(
     pending: &mut Option<Pending>,
     current: Option<&Config>,
@@ -825,20 +826,20 @@ fn stage_chunk(
                 local_key: chunk.local_key,
                 server: chunk.server,
                 node: chunk.node,
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 name: chunk.name.clone(),
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 dns_suffix: chunk.dns_suffix.clone(),
                 version: chunk.version,
                 addresses: chunk.addresses,
                 default_policy: chunk.default_policy,
                 exposure: chunk.exposure.clone(),
                 peers: std::collections::BTreeMap::new(),
-                #[cfg(feature = "mesh-dns-spike")]
+                #[cfg(feature = "mesh-dns")]
                 peer_names: std::collections::BTreeMap::new(),
             }
         };
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         let config = {
             let mut config = config;
             config.name.clone_from(&chunk.name);
@@ -855,13 +856,13 @@ fn stage_chunk(
         });
     }
     let staged = pending.as_mut().ok_or(io::ErrorKind::InvalidData)?;
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let names_changed = staged.config.name != chunk.name;
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     let dns_suffix_changed = staged.config.dns_suffix != chunk.dns_suffix;
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     let names_changed = false;
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     let dns_suffix_changed = false;
     if staged.server != chunk.server
         || staged.next != chunk.index
@@ -888,7 +889,7 @@ fn stage_chunk(
     crate::access_updates::apply(&mut staged.config, &chunk.access_updates)?;
     for node in chunk.removed {
         staged.config.peers.remove(&node);
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         staged.config.peer_names.remove(&node);
     }
     staged.config.peers.extend(chunk.upserted);
@@ -907,7 +908,7 @@ fn stage_chunk(
         peer.inbound.union(&partial.inbound);
         peer.outbound.union(&partial.outbound);
     }
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     {
         for node in chunk.removed_peer_names {
             if !staged.config.peers.contains_key(&node)
@@ -947,11 +948,12 @@ struct RuntimeInfo {
     routes: BTreeSet<IpAddr>,
 }
 
-/// A serialized request for the Mac `GotaTun` worker. Each request has a reply channel so callers
-/// can wait for the device update before changing durable identity state.
+/// Commands serialized by the Mac `GotaTun` worker. Each reply lets callers
+/// wait for the device update before changing durable identity state.
 enum WorkerCommand {
     Apply {
-        config: Config,
+        /// Keeps the larger snapshot out of the enum's inline command payload.
+        config: Box<Config>,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
     SetPrivateKey {
@@ -976,9 +978,9 @@ struct PendingWorker {
 }
 
 impl PendingWorker {
-    /// Start the worker and return when its allocated utun details are ready for approval.
+    /// Start the worker behind a gate and return its utun details for approval.
     /// # Errors
-    /// Reports utun allocation, worker startup, or initial route setup failures.
+    /// Reports utun allocation, worker startup, route setup, or DNS setup failures.
     fn begin(
         open: OpenUtun,
         private_key: gotatun::x25519::StaticSecret,
@@ -1043,6 +1045,26 @@ impl PendingWorker {
                         .unwrap_or(crate::mesh_mtu::IPV6_MINIMUM_MTU);
                     configure_interface(&info.interface, config.as_ref(), mtu)?;
                     utun.set_mtu(mtu);
+                    #[cfg(feature = "mesh-dns")]
+                    let mut dns_integration = crate::dns_integration::DnsIntegration::default();
+                    #[cfg(feature = "mesh-dns")]
+                    let mut dns_resolver = None;
+                    #[cfg(feature = "mesh-dns")]
+                    if let Some(config) = config.as_ref() {
+                        let records = crate::dns::Records::from_config(config)?;
+                        let resolver = crate::dns::Resolver::bind(config)?;
+                        if let Err(error) = dns_integration.configure(
+                            &info.interface,
+                            &records,
+                            nix::unistd::Uid::effective().as_raw(),
+                            false,
+                        ) {
+                            tracing::warn!(
+                                "mesh DNS host resolver integration could not be updated: {error}"
+                            );
+                        }
+                        dns_resolver = Some(resolver);
+                    }
                     let peers = config
                         .as_ref()
                         .map(peers_for_config)
@@ -1070,7 +1092,14 @@ impl PendingWorker {
                         }
                         installed.insert(*address);
                     }
-                    Ok(device)
+                    #[cfg(feature = "mesh-dns")]
+                    {
+                        Ok((device, dns_resolver, dns_integration))
+                    }
+                    #[cfg(not(feature = "mesh-dns"))]
+                    {
+                        Ok(device)
+                    }
                 });
                 let device = match device {
                     Ok(device) => device,
@@ -1079,6 +1108,8 @@ impl PendingWorker {
                         return;
                     }
                 };
+                #[cfg(feature = "mesh-dns")]
+                let (device, dns_resolver, dns_integration) = device;
                 if ready_tx.send(Ok(())).is_err() {
                     let _ = runtime.block_on(device.stop());
                     return;
@@ -1090,6 +1121,10 @@ impl PendingWorker {
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
                     port: info.port,
+                    #[cfg(feature = "mesh-dns")]
+                    dns_resolver,
+                    #[cfg(feature = "mesh-dns")]
+                    dns_integration,
                 };
                 runtime.block_on(run_worker(receiver, state));
             })?;
@@ -1149,10 +1184,14 @@ impl Drop for PendingWorker {
 }
 
 impl Worker {
+    /// Sends a new mesh configuration to the worker and waits for its result.
     fn apply(&self, config: Config) -> io::Result<RuntimeInfo> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
-            .send(WorkerCommand::Apply { config, reply })
+            .send(WorkerCommand::Apply {
+                config: Box::new(config),
+                reply,
+            })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
@@ -1200,8 +1239,8 @@ impl Drop for Worker {
     }
 }
 
-/// Owns the live utun, GotaTun device, and route state used for transactional updates.
-/// `route_mtus` mirrors the installed peer metrics so a failed update can restore them.
+/// Owns the live utun, peer-route MTUs, accepted snapshot and DNS resolver integration.
+/// `route_mtus` mirrors installed metrics so a failed update can restore them.
 struct RuntimeState {
     utun: Option<MacUtun>,
     device: Option<GotaDevice>,
@@ -1209,14 +1248,18 @@ struct RuntimeState {
     routes: BTreeSet<IpAddr>,
     route_mtus: BTreeMap<IpAddr, u16>,
     port: u16,
+    #[cfg(feature = "mesh-dns")]
+    dns_resolver: Option<crate::dns::Resolver>,
+    #[cfg(feature = "mesh-dns")]
+    dns_integration: crate::dns_integration::DnsIntegration,
 }
 
-/// Runs the Mac `GotaTun` device loop, applying requests in order and stopping when its queue closes.
+/// Applies queued requests on the Mac `GotaTun` worker and stops cleanly when its queue closes.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     while let Some(command) = commands.recv().await {
         match command {
             WorkerCommand::Apply { config, reply } => {
-                let result = state.apply(config).await;
+                let result = state.apply(*config).await;
                 let _ = reply.send(result);
             }
             WorkerCommand::SetPrivateKey { private_key, reply } => {
@@ -1256,12 +1299,14 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("WireGuard private key could not be changed."))
     }
 
-    /// Apply peers and endpoint-derived host-route MTUs while preserving the IPv6 link floor.
+    /// Apply one accepted snapshot, its endpoint-derived route MTUs, and its DNS names.
     /// # Errors
     /// Restores the old peer, route and interface MTU state when one update fails.
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let interface = utun.name().to_owned();
+        #[cfg(feature = "mesh-dns")]
+        let dns_records = crate::dns::Records::from_config(&config)?;
         let new_routes = route_addresses(&config);
         validate_underlay_routes(&config, &new_routes)?;
         let peers = peers_for_config(&config)?;
@@ -1281,6 +1326,18 @@ impl RuntimeState {
             return Err(error);
         }
         utun.set_mtu(staging_mtu);
+        #[cfg(feature = "mesh-dns")]
+        let pending_dns_resolver = if self.dns_resolver.is_none() {
+            match crate::dns::Resolver::bind(&config) {
+                Ok(resolver) => Some(resolver),
+                Err(error) => {
+                    rollback_device(device, &interface, old_config.as_ref(), utun).await;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         if let Err(error) = replace_peers(device, peers).await {
             rollback_device(device, &interface, old_config.as_ref(), utun).await;
             return Err(error);
@@ -1336,6 +1393,26 @@ impl RuntimeState {
         }
         self.routes.clone_from(&new_routes);
         self.route_mtus = new_route_mtus;
+        #[cfg(feature = "mesh-dns")]
+        {
+            let resolver = self
+                .dns_resolver
+                .as_ref()
+                .or(pending_dns_resolver.as_ref())
+                .ok_or(io::ErrorKind::NotConnected)?;
+            if let Err(error) = self.dns_integration.configure(
+                &interface,
+                &dns_records,
+                nix::unistd::Uid::effective().as_raw(),
+                false,
+            ) {
+                tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
+            }
+            resolver.publish(dns_records);
+            if self.dns_resolver.is_none() {
+                self.dns_resolver = pending_dns_resolver;
+            }
+        }
         self.config = Some(config);
         Ok(RuntimeInfo {
             interface,
@@ -1375,9 +1452,21 @@ impl RuntimeState {
         Ok(counters)
     }
 
-    /// Remove owned peer routes and stop GotaTun before dropping the utun descriptor.
-    /// # Errors
-    /// Reports missing utun state or a failed route removal.
+    /// Removes the host resolver route and listener before the Mac mesh device stops.
+    #[cfg(feature = "mesh-dns")]
+    fn stop_dns(&mut self) -> io::Result<()> {
+        self.dns_integration.remove()?;
+        self.dns_resolver = None;
+        Ok(())
+    }
+
+    /// Keeps Mac node cleanup available when this build omits mesh DNS.
+    #[cfg(not(feature = "mesh-dns"))]
+    fn stop_dns(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Removes managed DNS files, peer routes and the owned device before stopping the utun.
     async fn stop(&mut self) -> io::Result<()> {
         let interface = self
             .utun
@@ -1385,6 +1474,7 @@ impl RuntimeState {
             .map(MacUtun::name)
             .ok_or(io::ErrorKind::NotConnected)?
             .to_owned();
+        self.stop_dns()?;
         remove_routes(&interface, &self.routes)?;
         if let Some(device) = self.device.take() {
             device.stop().await;
@@ -1624,6 +1714,8 @@ impl Node {
     /// # Errors
     /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
     pub fn restore(state_directory: &Path, enrolment: Option<&Enrolment>) -> io::Result<Self> {
+        #[cfg(feature = "mesh-dns")]
+        crate::dns_integration::DnsIntegration::default().remove()?;
         let path = state_directory.join(PUBLIC_STATE);
         let (state, rotate) = match read_public_state(&path)? {
             Some(saved) => reconcile(saved, enrolment),
@@ -1802,8 +1894,8 @@ impl Node {
             public_key,
             port: self.port,
             compact_access: true,
-            #[cfg(feature = "mesh-dns-spike")]
-            dns_names: false,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: true,
             key_rotation: true,
         };
         self.identity = Some(identity.clone());
@@ -2175,6 +2267,7 @@ fn validate_config(config: &Config, identity: crate::policy::model::PublicKey) -
     Ok(())
 }
 
+/// Checks Mac peer routing, configuration validation, and atomic snapshot staging.
 #[cfg(test)]
 mod tests {
     //! Checks that the Mac adapter maps authenticated peers to `WireGuard` host routes.
@@ -2219,9 +2312,9 @@ mod tests {
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 3,
             addresses: Addresses {
@@ -2248,7 +2341,7 @@ mod tests {
                     access_ssh: None,
                 },
             )]),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         }
     }
@@ -2370,7 +2463,7 @@ mod tests {
             public_key: old.local_key.expect("bound key"),
             port: 51820,
             compact_access: true,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             key_rotation: false,
         };
@@ -2414,7 +2507,7 @@ mod tests {
             public_key: config.local_key.expect("bound key"),
             port: 51820,
             compact_access: true,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_names: false,
             key_rotation: false,
         };
@@ -2429,7 +2522,7 @@ mod tests {
         last.merged.clear();
         last.removed.clear();
         last.access_updates.clear();
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         {
             last.peer_names.clear();
             last.removed_peer_names.clear();

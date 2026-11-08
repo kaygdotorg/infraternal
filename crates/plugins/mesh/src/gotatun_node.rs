@@ -129,10 +129,11 @@ pub(crate) struct RuntimeInfo {
     offloads_enabled: bool,
 }
 
-/// Requests serialized by the Linux `GotaTun` worker, each with a synchronous result channel.
+/// Commands serialized by the Linux `GotaTun` worker; each request has a synchronous result channel.
 enum WorkerCommand {
     Apply {
-        config: Config,
+        /// Keeps the larger snapshot out of the enum's inline command payload.
+        config: Box<Config>,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
     SetMtu {
@@ -328,7 +329,10 @@ impl Engine {
     pub(crate) fn apply(&self, config: Config) -> io::Result<RuntimeInfo> {
         let (reply, result) = sync::sync_channel(1);
         self.commands
-            .send(WorkerCommand::Apply { config, reply })
+            .send(WorkerCommand::Apply {
+                config: Box::new(config),
+                reply,
+            })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
@@ -611,13 +615,13 @@ async fn restart_due(at: Option<Instant>) {
     }
 }
 
-/// Serialize device changes, relay work, fatal-error recovery, and shutdown on the runtime thread.
+/// Serializes device, relay, health-recovery, and shutdown commands on the `GotaTun` worker.
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     loop {
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
-                    let _ = reply.send(state.apply(config).await);
+                    let _ = reply.send(state.apply(*config).await);
                 }
                 Some(WorkerCommand::SetMtu { mtu, reply }) => {
                     let _ = reply.send(state.update_mtu(mtu));
@@ -1132,7 +1136,7 @@ pub(crate) fn secret_from_bytes(bytes: &[u8]) -> io::Result<(StaticSecret, Publi
     Ok((secret, PublicKey(*public.as_bytes())))
 }
 
-/// `GotaTun` engine selection and peer conversion checks.
+/// Checks engine selection, `GotaTun` peer conversion, and mesh-link lifecycle behavior.
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1296,9 +1300,9 @@ mod tests {
             local_key: Some(PublicKey([1; 32])),
             server: Some(NodeId(1)),
             node: NodeId(2),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             name: None,
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
             version: 7,
             addresses: Addresses {
@@ -1325,7 +1329,7 @@ mod tests {
                     access_ssh: None,
                 },
             )]),
-            #[cfg(feature = "mesh-dns-spike")]
+            #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         }
     }

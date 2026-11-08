@@ -188,8 +188,11 @@ fn install(executable: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Stops the system Mesh service and removes its managed DNS resolver files.
 fn stop() -> io::Result<()> {
     require_root()?;
+    #[cfg(feature = "mesh-dns")]
+    crate::dns_integration::DnsIntegration::default().remove()?;
     let target = format!("system/{LABEL}");
     launchctl_checked(&["disable".into(), target.clone()])?;
     if status()?.loaded {
