@@ -113,6 +113,7 @@ export class LayoutJournal {
     if (this.migration?.revision !== undefined && this.migration.revision <= this.canonical.revision) this.migration = undefined;
     return this.pending.length !== count;
   }
+  /** Turns the difference between the visible document and `doc` into queued intents. Adjacent unsent edits of one field, and unsent looks, merge into the latest; returns whether anything changed. Throws `LayoutQueueFull` when the unsaved edits would exceed the bound. */
   capture(doc: CanvasDocument, hints?: ReadonlyMap<string, LayoutEdit>, before?: CanvasDocument, unresolved: ReadonlySet<string> = new Set()): boolean {
     let projection = this.current();
     const previous = structuredClone(before ?? projection);
