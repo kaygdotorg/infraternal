@@ -1474,6 +1474,20 @@ mod tests {
         );
     }
 
+    /// #433 P2: no refusal claims a closed terminal unless one was closed.
+    #[test]
+    fn only_the_refusal_after_closing_mentions_closed_terminals() {
+        assert!(
+            !TAKEOVER_BUSY.contains("closed the")
+                && TAKEOVER_BUSY.contains("No terminal was closed")
+        );
+        assert!(
+            TAKEOVER_CHANGED.contains("no terminal was closed")
+                && !TAKEOVER_CHANGED.contains("stay closed")
+        );
+        assert!(TAKEOVER_BUSY_AFTER_CLOSE.contains("stay closed"));
+    }
+
     /// A set-aside install's record offers Put it back, and names which restore
     /// puts it back (Re-enroll or Take over, D359); unknown kinds refuse.
     #[test]
