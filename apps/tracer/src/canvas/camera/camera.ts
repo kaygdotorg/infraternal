@@ -50,9 +50,10 @@ export interface CameraHooks {
 
 export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 
-// Critically damped (no overshoot, no long tail): settles within 1 px in about 1.76 x the visual duration (a little more as measured on camera centre and zoom together), in
-// test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s). A key's flight has no spring at all (#427).
-const FLIGHT = { visualDuration: 0.16 } as const;
+// The ease-out curve of `Spring.set` (#471): a flight covers most of the way in its first frames and lands exactly at its
+// duration, with no tail. Pointer, touch and pill flights take 260 ms (90 % of the way by about 95 ms). A key's flight has no
+// spring at all (#427). The three springs share the curve and the start time, so centre and zoom arrive together on a straight path.
+const FLIGHT = { visualDuration: 0.26 } as const;
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;

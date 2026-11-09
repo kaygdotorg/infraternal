@@ -193,7 +193,7 @@ export class Wizard {
       this.float.style.opacity = String(clamped);
       this.float.style.transform = `translateY(${(1 - value) * 12}px) scale(${0.97 + value * 0.03})`;
       this.scrim.style.opacity = String(clamped);
-    }, { visualDuration: 0.32 });
+    }, { visualDuration: 0.26 });
     this.go("discovery", 0);
     requestAnimationFrame(() => this.spring.set(1));
     void this.loadDiscovery();

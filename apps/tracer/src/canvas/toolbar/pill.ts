@@ -112,13 +112,13 @@ export function createPill(cx: Ctx): PillModule {
     const target = ids[at + dir];
     const commits = target && (Math.abs(dx) > 56 || Math.abs(v) > 0.5) && Math.sign(v || dx) === Math.sign(dx);
     const width = capsule.offsetWidth;
-    if (!commits) { shiftSpring(dx, 0, { visualDuration: 0.4 }); return; }
+    if (!commits) { shiftSpring(dx, 0, { visualDuration: 0.26 }); return; }
     hold = true;
     cx.nav.flyView(target as ViewId);
     shiftSpring(dx, -dir * width * 0.6, { visualDuration: 0.18 }, () => {
       hold = false;
       paint();
-      shiftSpring(dir * width * 0.6, 0, { visualDuration: 0.42 });
+      shiftSpring(dir * width * 0.6, 0, { visualDuration: 0.26 });
     });
   };
   capsule.addEventListener("pointerup", end, { signal });

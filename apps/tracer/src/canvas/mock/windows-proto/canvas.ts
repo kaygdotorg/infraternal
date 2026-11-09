@@ -293,8 +293,8 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     restTimer = window.setTimeout(rest, REST_DELAY);
   };
   let targetX = 0, targetY = 0;
-  const springX = new Spring(0, (value) => { x = value; paint(); if (Math.abs(value - targetX) < 0.01) restSoon(); }, { visualDuration: 0.42 });
-  const springY = new Spring(0, (value) => { y = value; paint(); if (Math.abs(value - targetY) < 0.01) restSoon(); }, { visualDuration: 0.42 });
+  const springX = new Spring(0, (value) => { x = value; paint(); if (Math.abs(value - targetX) < 0.01) restSoon(); }, { visualDuration: 0.28 });
+  const springY = new Spring(0, (value) => { y = value; paint(); if (Math.abs(value - targetY) < 0.01) restSoon(); }, { visualDuration: 0.28 });
   const stopSprings = (): void => {
     springX.set(x, true);
     springY.set(y, true);

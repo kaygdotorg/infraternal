@@ -227,7 +227,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         if (v === 1) { preview.style.transform = ""; preview.style.transformOrigin = ""; return; }
         preview.style.transform = `scale(${v})`;
         preview.style.transformOrigin = "0 0";
-      }, { visualDuration: 0.34 });
+      }, { visualDuration: 0.28 });
       spring.set(1);
     }
     const done = (): void => { leaving.delete(rec); badge?.remove(); paint(rec); };
@@ -554,7 +554,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       li.style.setProperty("--sx-open", String(Math.min(1, Math.max(0, -value / (width || 1)))));
     };
     let start: { id: number; x: number; y: number; base: number } | undefined, dragging = false, open = false;
-    const spring = new Spring(0, slide, { visualDuration: 0.3 });
+    const spring = new Spring(0, slide, { visualDuration: 0.26 });
     const down = (event: PointerEvent): void => {
       if (event.pointerType === "mouse" || (event.target as Element).closest(".cl-sx-act, .cl-sx-name-input")) return;
       width = acts.offsetWidth + 8;

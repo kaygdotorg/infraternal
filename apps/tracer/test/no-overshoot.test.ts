@@ -6,7 +6,7 @@
  * Two kinds of check. The scans read the source of apps/tracer and packages/ui and reject anything that asks for an
  * easing that passes its end: a non-zero `bounce`, a `cubic-bezier` with a control point outside [0, 1] on the value
  * axis, a "back" or "elastic" easing, or a raw `{ stiffness, damping }` spring outside the short allow-list. The
- * numeric checks run the real `Spring` and the sampled FLIP curve and assert that no value passes its target.
+ * numeric checks run the real `Spring` and the FLIP curve and assert that no value passes its target.
  *
  * Allow-list (each entry needs a reason a reader can check):
  * - droplet.on-demand.ts: the split-window droplet. TASTE section 3 ("Splits are playful physics") and the row that
@@ -18,7 +18,7 @@ import { expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { Spring } from "../../../packages/ui/src/spring";
-import { springEasing } from "../src/canvas/layout/flip";
+import { flipEasing } from "../src/canvas/layout/flip";
 
 const repo = join(import.meta.dir, "../../..");
 const ROOTS = ["apps/tracer", "packages/ui"];
@@ -142,13 +142,9 @@ test("retargeting a moving Spring never carries it past the new target", () => {
   }
 });
 
-test("the FLIP curve rises to 1 and never passes it", () => {
-  for (const d of [0.22, 0.38, 0.5]) {
-    const { css, duration } = springEasing({ visualDuration: d, bounce: 0 });
-    const points = css.replace(/^linear\(|\)$/g, "").split(",").map(Number);
-    expect(points.length).toBeGreaterThan(4);
-    expect(Math.max(...points)).toBeLessThanOrEqual(1);
-    expect(points[points.length - 1]).toBe(1);
-    expect(duration).toBeGreaterThan(0);
-  }
+test("the FLIP curve never passes its end", () => {
+  // The reflow plays the product's ease-out (#471); its value-axis control points must stay in [0, 1].
+  const { css } = flipEasing({ visualDuration: 0.28 });
+  const [, y1, , y2] = /cubic-bezier\(([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\)/.exec(css)!.slice(1).map(Number);
+  for (const y of [y1!, y2!]) { expect(y).toBeGreaterThanOrEqual(0); expect(y).toBeLessThanOrEqual(1); }
 });

@@ -77,7 +77,7 @@ export function createLockToggle(options: LockToggleOptions): LockToggle {
     // t 0 = open (lifted, tilted), 1 = shut. t never passes 1, so the shackle stops exactly shut.
     shackle.style.transform = `translateY(${-LIFT * (1 - t)}px) rotate(${-TILT * (1 - t)}deg)`;
   };
-  const spring = new Spring(0, draw, { visualDuration: 0.26 });
+  const spring = new Spring(0, draw, { visualDuration: 0.2 });
   shackle.style.transformOrigin = `${PIVOT_X}px ${PIVOT_Y}px`;
 
   const label = (): void => {

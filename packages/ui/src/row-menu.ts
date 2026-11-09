@@ -75,9 +75,10 @@ export interface RowMenu {
   dispose(): void;
 }
 
-// Critically damped, never past the target (TASTE: no overshoot, ever; the row settles, it does not bounce).
-const OPEN: SpringConfig = { visualDuration: 0.32 };
-const SHUT: SpringConfig = { visualDuration: 0.32 };
+// A tap settles on the ease-out curve and a release flings from the finger, critically damped: never past the target
+// (TASTE: no overshoot, ever; the row settles, it does not bounce). Both at most 300 ms (#471).
+const OPEN: SpringConfig = { visualDuration: 0.24 };
+const SHUT: SpringConfig = { visualDuration: 0.24 };
 /** A swipe moves at most this far past the revealed button before the row stops following (never past its own width). */
 const MIN_REVEAL = 72;
 const LONG_PRESS = 480;
