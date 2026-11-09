@@ -15,7 +15,7 @@
  * - a `Spring` released from rest that does not cover most of its distance in the first frames.
  *
  * Durations written as `var(--t-press|pop|panel)` are read from packages/ui/styles.css, so a token that grows past
- * 300 ms fails here too. Toast and notice dwell times (`duration:` on a toast) are not motion and are not scanned.
+ * 300 ms fails here too; a `calc()` scaled by #427's `--ui-motion-scale` is read at scale 1, the pointer case. Toast and notice dwell times (`duration:` on a toast) are not motion and are not scanned.
  *
  * The allow-list holds continuous indicators and ambient loops, which run for as long as their state lasts, plus the
  * one deliberate stagger. Each entry is `file` + a fragment of the offending text, with the reason.
@@ -75,12 +75,28 @@ for (const m of readFileSync(join(repo, "packages/ui/styles.css"), "utf8").match
   tokens.set(m[1]!, Number(m[2]) * (m[3] === "s" ? 1000 : 1));
 }
 
-/** A time in milliseconds from `120ms`, `0.3s` or `var(--t-pop)`; undefined when it is not a time. */
+/**
+ * A time in milliseconds from `120ms`, `0.3s`, `var(--t-pop)` or a `calc()` of them, such as #427's
+ * `calc(var(--t-pop) * var(--ui-motion-scale, 1))` (read at scale 1); undefined when it is not a time.
+ */
 function ms(token: string): number | undefined {
   const lit = /^(-?[\d.]+)(ms|s)$/.exec(token);
   if (lit) return Number(lit[1]) * (lit[2] === "s" ? 1000 : 1);
-  const v = /^var\(--(t-[a-z]+)/.exec(token);
-  return v ? tokens.get(v[1]!) : undefined;
+  if (!/^(var|calc)\(/.test(token)) return undefined;
+  // Resolve each innermost `var()`: a duration token to its milliseconds, #427's `--ui-motion-scale` to 1 (a pointer
+  // change; a key sets it to 0, which is instant and needs no check), and anything else to its numeric fallback.
+  let expr = token, guard = 0;
+  for (let m = /var\(\s*--([\w-]+)\s*(?:,\s*([^()]*?))?\s*\)/.exec(expr); m && guard++ < 20; m = /var\(\s*--([\w-]+)\s*(?:,\s*([^()]*?))?\s*\)/.exec(expr)) {
+    const name = m[1]!, fallback = m[2];
+    const value = tokens.has(name) ? `${tokens.get(name)}ms` : name === "ui-motion-scale" ? "1" : fallback?.trim();
+    if (value === undefined || value === "") return undefined;
+    expr = expr.slice(0, m.index) + value + expr.slice(m.index + m[0].length);
+  }
+  // What is left is plain arithmetic on numbers and times; a time becomes its milliseconds.
+  const arithmetic = expr.replace(/^calc/, "").replace(/(-?[\d.]+)(ms|s)\b/g, (_, n: string, unit: string) => String(Number(n) * (unit === "s" ? 1000 : 1)));
+  if (!/^[\d.\s()+\-*/]+$/.test(arithmetic)) return undefined;
+  const value = Function(`"use strict"; return (${arithmetic});`)() as unknown;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 /** Properties whose change moves, resizes or fades something: these need an ease-out curve. Colours may use `ease`. */
@@ -176,6 +192,23 @@ test("the scan sees the motion it is meant to police", () => {
   expect(slowStart("ease-in-out")).toBe(true);
   expect(slowStart("cubic-bezier(0.42, 0, 1, 1)")).toBe(true);
   expect(slowStart("cubic-bezier(0.23, 1, 0.32, 1)")).toBe(false);
+});
+
+test("durations scaled by #427's --ui-motion-scale are read at scale 1, not as 0", () => {
+  // A key-caused change sets the scale to 0 (instant); a pointer leaves it at 1, which is the duration the rule judges.
+  expect(ms("calc(var(--t-pop) * var(--ui-motion-scale, 1))")).toBe(tokens.get("t-pop")!);
+  expect(ms("calc(var(--t-panel) * var(--ui-motion-scale, 1))")).toBe(tokens.get("t-panel")!);
+  expect(ms("calc(340ms * var(--ui-motion-scale, 1))")).toBe(340);
+  expect(ms("calc(var(--i, 0) * 50ms)")).toBe(0);
+  const item = parseItem("opacity calc(var(--t-pop) * var(--ui-motion-scale, 1)) ease", "transition");
+  expect(item.duration).toBe(tokens.get("t-pop")!);
+  expect(item.easing).toBe("ease");
+  expect(parseItem("transform calc(420ms * var(--ui-motion-scale, 1)) var(--ease-out)", "transition").duration).toBe(420);
+  // The scan really reads them: the stylesheets' scaled transitions come out with their durations, none as 0.
+  // A discrete flip written `visibility 0s calc(...)` really lasts 0 s (only its delay is scaled), so it is left out.
+  const scaled = cssMotions().filter((m) => m.text.includes("--ui-motion-scale") && !/\s0m?s\b/.test(m.text) && !m.text.startsWith("transition: display"));
+  expect(scaled.length).toBeGreaterThan(5);
+  expect(scaled.filter((m) => m.duration === 0).map((m) => `${m.at} ${m.text}`)).toEqual([]);
 });
 
 test("no spring lasts more than 300 ms", () => {
