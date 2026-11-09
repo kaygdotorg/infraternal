@@ -97,9 +97,7 @@ fn parse(output: &str, root: bool, service: bool) -> Option<Inputs> {
         } else {
             Path::new(directory)
         };
-        if !directory.is_absolute() {
-            return None;
-        }
+        let context = crate::access_command::Context::new(vec![directory.to_owned()], &[])?;
         let user = if service { string("User")? } else { "" };
         if service && root != matches!(user, "" | "root" | "0") {
             return None;
@@ -158,7 +156,7 @@ fn parse(output: &str, root: bool, service: bool) -> Option<Inputs> {
                     }
                 }
                 paths.extend(crate::access_command::arguments(
-                    executable, &argv, directory,
+                    executable, &argv, &context,
                 )?);
             }
         }

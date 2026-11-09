@@ -3,11 +3,12 @@
 //! including dormant services, timers and transient units. Nothing is stopped,
 //! edited or deleted. Unknown inventory is reported, never treated as empty.
 //!
-//! Root-job coverage is deliberately bounded to a cron command's direct target,
-//! every service lifecycle executable and file argument, and its fragment and
-//! drop-ins, with their writable parent directories. It does not trace libraries,
-//! sourced files or arbitrary executable-input graphs. Shell expansion and
-//! wrappers we cannot resolve fail closed as privileged instead of being ignored.
+//! Root-job coverage is deliberately bounded: every word of a cron command or
+//! service lifecycle command yields candidate paths (see `access_command`),
+//! plus cron's shell, the unit's fragment and drop-ins, with
+//! their writable parent directories. It does not trace libraries, sourced
+//! files or arbitrary executable-input graphs. Shell expansion and launchers we
+//! cannot resolve fail closed as privileged instead of being ignored.
 use nix::unistd::User;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -28,9 +29,11 @@ pub(crate) struct Observation {
     pub(crate) privileged: bool,
     /// Direct root-job inputs pending the single kernel permission query.
     root_inputs: Vec<(String, Vec<PathBuf>)>,
-    /// Aggregate path budget, charged before retaining any root-job candidate.
-    input_paths: usize,
-    /// Aggregate pathname bytes, also bounding the downgraded child's argv.
+    /// Every distinct candidate path across all jobs. Many jobs share the same
+    /// search directories, so the budget counts each path once.
+    unique_inputs: BTreeSet<PathBuf>,
+    /// Aggregate pathname bytes of `unique_inputs`, bounding the downgraded
+    /// child's argv.
     input_bytes: usize,
     /// Confirmed writable rows precede uncertain rows, even at the report cap.
     writable_jobs: usize,
@@ -137,9 +140,76 @@ fn after_columns(mut line: &str, count: usize) -> Option<&str> {
     Some(line.trim_start_matches(|c: char| c.is_ascii_whitespace()))
 }
 
-/// Feed cron's simple command text to the shared bounded input resolver.
-fn command_targets(command: &str) -> Option<Vec<PathBuf>> {
-    crate::access_command::targets(command)
+/// What a cron file tells the shell that runs its root lines: the possible
+/// working directories (root's home and any `HOME=`), extra search paths
+/// (`PATH=`) and the files the shell itself loads (`SHELL=`, `BASH_ENV=`,
+/// `ENV=`, else `/bin/sh`). Every value assigned anywhere in the file counts,
+/// a superset of the lines that follow each assignment.
+struct CronShell {
+    /// Directory and search context for the bounded command resolver.
+    context: crate::access_command::Context,
+    /// The shell and its startup files; root executes or reads each one.
+    files: Vec<PathBuf>,
+}
+
+/// Read the environment lines of one cron file. `None` when a value that
+/// decides where commands run is relative, uses `$`, or root has no home.
+fn cron_shell(text: &str) -> Option<CronShell> {
+    let home = User::from_name("root").ok()??.dir;
+    let mut directories = vec![home];
+    let mut path = Vec::new();
+    let mut files = Vec::new();
+    let mut shell = false;
+    for line in text.lines() {
+        let line = line.trim();
+        let columns: Vec<_> = line.split_ascii_whitespace().collect();
+        if line.starts_with('#')
+            || !(columns.first().is_some_and(|word| word.contains('='))
+                || columns.get(1).is_some_and(|word| word.starts_with('=')))
+        {
+            continue;
+        }
+        let (name, value) = line.split_once('=')?;
+        let value = value.trim();
+        let value = match value.as_bytes() {
+            [quote @ (b'"' | b'\''), inner @ .., last] if last == quote => {
+                std::str::from_utf8(inner).ok()?
+            }
+            _ => value,
+        };
+        let name = name.trim();
+        if !matches!(name, "HOME" | "PATH" | "SHELL" | "BASH_ENV" | "ENV") {
+            continue;
+        }
+        if value.contains(['$', '`', '"', '\'']) {
+            return None;
+        }
+        match name {
+            "PATH" => path.push(value.to_owned()),
+            "HOME" if Path::new(value).is_absolute() => directories.push(value.into()),
+            "SHELL" | "BASH_ENV" | "ENV" if Path::new(value).is_absolute() => {
+                shell |= name == "SHELL";
+                files.push(value.into());
+            }
+            _ => return None,
+        }
+    }
+    if !shell {
+        files.push(PathBuf::from("/bin/sh"));
+    }
+    let path: Vec<&str> = path.iter().map(String::as_str).collect();
+    Some(CronShell {
+        context: crate::access_command::Context::new(directories, &path)?,
+        files,
+    })
+}
+
+/// Feed one cron command to the shared bounded resolver, adding the shell
+/// that cron starts it with.
+fn command_targets(command: &str, shell: &CronShell) -> Option<Vec<PathBuf>> {
+    let mut paths = crate::access_command::targets(command, &shell.context)?;
+    paths.extend(shell.files.iter().cloned());
+    Some(paths)
 }
 
 /// Collect a root job's direct targets and unit files. Parents and resolved
@@ -216,8 +286,13 @@ fn root_job(observed: &mut Observation, name: String, inputs: Option<Vec<PathBuf
         observed.complete = false;
         return;
     }
-    let bytes: usize = paths.iter().map(|path| path.as_os_str().len()).sum();
-    if observed.input_paths + paths.len() > 4096 || observed.input_bytes + bytes > 128 * 1024 {
+    let new: Vec<_> = paths
+        .iter()
+        .filter(|path| !observed.unique_inputs.contains(*path))
+        .collect();
+    let bytes: usize = new.iter().map(|path| path.as_os_str().len()).sum();
+    if observed.unique_inputs.len() + new.len() > 4096 || observed.input_bytes + bytes > 128 * 1024
+    {
         observed.privileged = true;
         add(
             observed,
@@ -225,28 +300,30 @@ fn root_job(observed: &mut Observation, name: String, inputs: Option<Vec<PathBuf
         );
         return;
     }
-    observed.input_paths += paths.len();
     observed.input_bytes += bytes;
+    observed.unique_inputs.extend(paths.iter().cloned());
     observed
         .root_inputs
         .push((name, paths.into_iter().collect()));
 }
 
-/// Check all direct root inputs in one downgraded child. The kernel accounts
-/// for group permissions and ACLs. Unknown access marks each candidate job.
+/// Check all direct root inputs in one downgraded child, each distinct path
+/// once. The kernel accounts for group permissions and ACLs. Unknown access
+/// marks each candidate job.
 fn root_writes(account: &User, observed: &mut Observation) {
     let candidates = std::mem::take(&mut observed.root_inputs);
-    let paths: Vec<_> = candidates
-        .iter()
-        .flat_map(|(_, paths)| paths.iter().cloned())
+    let paths: Vec<PathBuf> = std::mem::take(&mut observed.unique_inputs)
+        .into_iter()
         .collect();
-    let writable = crate::access_write::writable(account, &paths);
-    let mut offset = 0;
-    for (name, paths) in candidates {
+    let writable = crate::access_write::writable(account, &paths).map(|indices| {
+        indices
+            .into_iter()
+            .filter_map(|index| paths.get(index).cloned())
+            .collect::<BTreeSet<_>>()
+    });
+    for (name, inputs) in candidates {
         match &writable {
-            Some(indices)
-                if (offset..offset + paths.len()).any(|index| indices.contains(&index)) =>
-            {
+            Some(found) if inputs.iter().any(|path| found.contains(path)) => {
                 observed.privileged = true;
                 add_writable(observed, &format!("Root-run job: {name} (input writable)"));
             }
@@ -259,7 +336,6 @@ fn root_writes(account: &User, observed: &mut Observation) {
             }
             Some(_) => {}
         }
-        offset += paths.len();
     }
 }
 
@@ -380,6 +456,7 @@ fn cron(account: &User, observed: &mut Observation) {
             observed.complete = false;
             continue;
         };
+        let shell = cron_shell(&text);
         for (line, user) in entries {
             if matches!(user, "root" | "0") {
                 let source = text.lines().nth(line - 1).unwrap_or_default().trim();
@@ -388,7 +465,9 @@ fn cron(account: &User, observed: &mut Observation) {
                 root_job(
                     observed,
                     format!("{}:{line}", path.display()),
-                    command.and_then(command_targets),
+                    command
+                        .zip(shell.as_ref())
+                        .and_then(|(command, shell)| command_targets(command, shell)),
                 );
             }
             if user == account.name || user == uid {
@@ -412,6 +491,7 @@ fn root_crontab(observed: &mut Observation) {
             observed.complete = false;
             continue;
         };
+        let shell = cron_shell(&text);
         for (line, command) in text.lines().enumerate() {
             let command = command.trim();
             if command.is_empty()
@@ -428,7 +508,9 @@ fn root_crontab(observed: &mut Observation) {
             root_job(
                 observed,
                 format!("{}:{}", path.display(), line + 1),
-                target.and_then(command_targets),
+                target
+                    .zip(shell.as_ref())
+                    .and_then(|(command, shell)| command_targets(command, shell)),
             );
         }
     }
@@ -743,16 +825,44 @@ mod tests {
         assert!(cron_accounts("* * * broken").is_none());
     }
 
-    /// Direct interpreter scripts are checked; shell graphs are unknown.
+    /// The default cron shell context: root's home, the default search path.
+    fn shell() -> CronShell {
+        cron_shell("").unwrap()
+    }
+
+    /// Interpreter scripts and cron's own shell are checked; shell expansion
+    /// is unknown; lists and bare program names resolve.
     #[test]
     fn direct_root_command_targets_are_bounded() {
         assert_eq!(
-            command_targets("/bin/sh /home/alice/task").unwrap(),
-            vec![PathBuf::from("/bin/sh"), PathBuf::from("/home/alice/task")]
+            command_targets("/bin/sh /home/alice/task", &shell()).unwrap(),
+            vec![
+                PathBuf::from("/bin/sh"),
+                PathBuf::from("/home/alice/task"),
+                PathBuf::from("/bin/sh")
+            ]
         );
-        assert!(command_targets("/bin/sh -c '$TARGET'").is_none());
-        assert!(command_targets("cd / && run-parts /etc/cron.daily").is_none());
-        assert!(command_targets("/usr/bin/env python3 /home/alice/task").is_none());
+        assert!(command_targets("/bin/sh -c '$TARGET'", &shell()).is_none());
+        let listed =
+            command_targets("cd / && run-parts --report /etc/cron.daily", &shell()).unwrap();
+        assert!(listed.contains(&PathBuf::from("/usr/bin/run-parts")));
+        assert!(listed.contains(&PathBuf::from("/etc/cron.daily")));
+        let wrapped = command_targets("/usr/bin/env python3 /home/alice/task", &shell()).unwrap();
+        assert!(wrapped.contains(&PathBuf::from("/usr/local/bin/python3")));
+        assert!(wrapped.contains(&PathBuf::from("/home/alice/task")));
+    }
+
+    /// A cron file's HOME, PATH and SHELL decide where its commands run.
+    #[test]
+    fn cron_environment_lines_shape_the_context() {
+        let shell = cron_shell("SHELL=/bin/bash\nPATH=/opt/jobs:/usr/bin\nHOME = /srv\n").unwrap();
+        let paths = command_targets("task ./local", &shell).unwrap();
+        for expected in ["/opt/jobs/task", "/srv/./local", "/bin/bash"] {
+            assert!(paths.contains(&PathBuf::from(expected)), "{expected}");
+        }
+        assert!(!paths.contains(&PathBuf::from("/bin/sh")));
+        assert!(cron_shell("PATH=bin:/usr/bin\n").is_none());
+        assert!(cron_shell("HOME=$X\n").is_none());
     }
 
     /// Wrappers and script arguments must retain each writable executable input.
@@ -767,7 +877,7 @@ mod tests {
             "/bin/bash -c '/bin/sh /home/alice/task'",
             "/usr/bin/python3 -B /home/alice/task",
         ] {
-            let paths = command_targets(command).expect(command);
+            let paths = command_targets(command, &shell()).expect(command);
             assert!(
                 paths.contains(&PathBuf::from("/home/alice/task")),
                 "{command}: {paths:?}"
