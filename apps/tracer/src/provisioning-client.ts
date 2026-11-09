@@ -48,6 +48,13 @@ export type NetworkProvider = "netbird" | "tailscale" | "twingate" | "other";
 export interface AuthenticationInfo { method: AuthMethod; network?: NetworkProvider }
 
 /** A failed or paused step as the server describes it: the public failure fields the add-host pages read. */
+/**
+ * One open terminal of an old install that confirming Take over closes (D368, #433): the account and
+ * foreground program, when it opened (Unix seconds), its `pts/<n>` when the host knows it, and how many
+ * other programs (its shell, background jobs) run in it and close with it.
+ */
+export interface TakeoverTerminal { account: string; program: string; since: number; tty?: string; others?: number }
+
 export interface FailureDetail {
   kind: FailureKind;
   message: string;
@@ -75,7 +82,7 @@ export interface FailureDetail {
    * `unrecognized_install`: the old install's id (32 lowercase hex characters), which the
    * confirmation names, and whether its infraternal agent is running (Take over stops it).
    */
-  takeover?: { install: string; live: boolean; terminals?: Array<{ account: string; program: string; since: number }>; close_challenge?: string };
+  takeover?: { install: string; live: boolean; terminals?: TakeoverTerminal[]; close_challenge?: string };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -206,12 +213,14 @@ function parseFailure(value: unknown): FailureDetail | undefined {
     if (terminals !== undefined && (!Array.isArray(terminals) || terminals.length > 1024 || !terminals.every((terminal: unknown) => isRecord(terminal)
       && typeof terminal.account === "string" && terminal.account.length > 0 && terminal.account.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.account)
       && typeof terminal.program === "string" && terminal.program.length > 0 && terminal.program.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.program)
-      && typeof terminal.since === "number" && Number.isSafeInteger(terminal.since) && terminal.since > 0 && terminal.since <= 253402300799))) return failure;
+      && typeof terminal.since === "number" && Number.isSafeInteger(terminal.since) && terminal.since > 0 && terminal.since <= 253402300799
+      && (terminal.tty === undefined || (typeof terminal.tty === "string" && /^pts\/(0|[1-9][0-9]{0,6})$/.test(terminal.tty)))
+      && (terminal.others === undefined || (typeof terminal.others === "number" && Number.isSafeInteger(terminal.others) && terminal.others >= 0 && terminal.others <= 1024))))) return failure;
     const closeChallenge = value.takeover.close_challenge;
     if (Array.isArray(terminals) && terminals.length && (!isCanonicalUuid(closeChallenge) || closeChallenge === "00000000-0000-0000-0000-000000000000")) return failure;
     failure.takeover = { install: value.takeover.install, live: value.takeover.live,
       ...(isCanonicalUuid(closeChallenge) ? { close_challenge: closeChallenge } : {}),
-      ...(Array.isArray(terminals) ? { terminals: terminals as Array<{ account: string; program: string; since: number }> } : {}) };
+      ...(Array.isArray(terminals) ? { terminals: terminals as TakeoverTerminal[] } : {}) };
   }
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;

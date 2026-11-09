@@ -429,14 +429,21 @@ export function failureDiagnostics(failure: FailureDetail | undefined, guide: Gu
   return [...new Set(evidence.filter((line) => line && !visible.includes(line)))];
 }
 
-/** Reuse the opening-date formatter across the terminal list without charging every row its own setup. */
+/** Reuse the opening-time formatter across the terminal list without charging every row its own setup. */
 let takeoverDateFormat: Intl.DateTimeFormat | undefined;
 
-/** The terminal account, foreground program and opening date reviewed before Take over (D368). */
-export function takeoverTerminalLabel(terminal: { account: string; program: string; since: number }): string {
-  takeoverDateFormat ??= new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" });
+/**
+ * One terminal row reviewed before Take over (D368): account, foreground program, its `pts/<n>`, how
+ * many other programs close with it, and when it opened, to the minute, so rows of the same account and
+ * program can be told apart (#433 P3-1, P3-2). For example "root, bash on pts/3 and 2 other programs,
+ * since 9 Nov 2026, 14:05".
+ */
+export function takeoverTerminalLabel(terminal: { account: string; program: string; since: number; tty?: string; others?: number }): string {
+  takeoverDateFormat ??= new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   const date = takeoverDateFormat.format(new Date(terminal.since * 1000));
-  return `${terminal.account}, ${terminal.program}, since ${date}`;
+  const tty = terminal.tty ? ` on ${terminal.tty}` : "";
+  const others = terminal.others ? ` and ${terminal.others} other program${terminal.others === 1 ? "" : "s"}` : "";
+  return `${terminal.account}, ${terminal.program}${tty}${others}, since ${date}`;
 }
 
 /** Explain the irreversible terminal close separately from restoring the install on failure (D368). */
