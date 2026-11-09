@@ -68,7 +68,10 @@ try {
           delete extensions.prf;
           return { id: credential.id, rawId: encode(credential.rawId), type: credential.type, response, extensions };
         };
-        check(JSON.stringify((await post('status', {})).body) === JSON.stringify({setup_required:true}), 'initial public status');
+        // The public status carries only first-run state and the local setup command (#252); nothing account-specific.
+        const publicStatus = (body, required) => body?.setup_required === required &&
+          Object.keys(body).every(key => key === 'setup_required' || key === 'setup_token_command');
+        check(publicStatus((await post('status', {})).body, true), 'initial public status');
         const start = await post('setup-start', { token, username: 'browser_owner', display_name: 'Browser owner' });
         check(start.status === 200, 'setup options');
         let credential;
@@ -122,7 +125,7 @@ try {
         const recoveryWrap = { salt: encode(recoverySalt), nonce: encode(recoveryNonce), ciphertext: encode(recoveryCiphertext) };
         const finish = await post('registration-finish', { ceremony: start.body.ceremony, proof: proof(credential), passkey_wrap: wrap, recovery_wrap: recoveryWrap, recovery_verifier: recoveryVerifier });
         check(finish.status === 200, 'registration finish');
-        check(JSON.stringify((await post('status', {})).body) === JSON.stringify({setup_required:false}), 'completed public status');
+        check(publicStatus((await post('status', {})).body, false), 'completed public status');
         check((await post('wraps', {})).status === 200, 'secure cookie unavailable');
         const login = await post('login-start', {});
         check(login.status === 200, 'login options');
