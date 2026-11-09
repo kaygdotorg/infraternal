@@ -160,10 +160,15 @@ numbered history, both timestamp arrival orders and altered checksums.
   `scripts/verify fast` runs a three-sample zero-delay byte-forwarding check
   without a timing bound; the configured RTT measurement stays in the latency
   profile. The full
-  `scripts/verify latency` profile runs the relay self-test, a real agent/PTy
-  echo and flood gate, `verify-auth-browser`, and the production tracer browser
-  suite. Playwright uses `TRACER_TEST_PORT` (default 4621); concurrent runs
-  must choose distinct ports.
+  `scripts/verify latency` profile runs the relay self-test, a real agent/PTY
+  echo and flood probe, `verify-auth-browser`, and the two production-tracer
+  specs that print D375 rows (`test/terminal.spec.ts`,
+  `test/latency-profile.spec.ts`), twice (see "Frame pacing" below). The
+  whole functional browser suite is not part of the profile: it took about
+  5 h on one worker and measures nothing the table needs; it runs in the
+  nightly browser suite (D373). Playwright uses `TRACER_TEST_PORT` (default
+  4621); concurrent runs must choose distinct ports. The agent is built for
+  the host's own target, so the profile runs on x86_64 and aarch64 VMs.
 - The TCP relay does not emulate the requested 0.5% packet loss: dropping bytes
   would corrupt a reliable TCP/WebSocket stream, and the available CDP
   `packetLoss` setting is documented for WebRTC rather than HTTP/WebSocket
@@ -184,7 +189,7 @@ numbered history, both timestamp arrival orders and altered checksums.
   | Reconnect, last screen | 8.3 ms | tracer scenario, socket drop to the first frame showing the last screen |
   | Reconnect, typable, resumed link | 1 round trip + 50 ms | `verify-latency.py`, re-attach over the live link to the agent's Ack |
   | Reconnect, typable, after a network change | 4 round trips + 50 ms | tracer scenario, socket drop to the first resumed echo painted (D267) |
-  | Rendering | 120 fps at 10 MB/s output | `latency-profile.spec.ts`, 1000 / p99 frame interval, frame-rate limit off |
+  | Rendering | 120 fps at 10 MB/s output | `latency-profile.spec.ts`, 1000 / p99 frame interval while the terminal takes 10 MB/s |
   | First paint | under 1 s on a mid-range phone | `latency-profile.spec.ts`, phone viewport, CPU slowed 4×, no injected delay |
   | Idle infraternal agent | under 15 MB RSS | `verify-latency.py`, agent RSS idle, with no session and with one quiet session (the larger) |
 
@@ -204,12 +209,48 @@ numbered history, both timestamp arrival orders and altered checksums.
   (#314); the report and the perf-VM suite (`apps/tracer/perf`) are what
   fail. Returning sign-in to a usable terminal keeps the 5 s budget tracked in
   #52; it is not a D375 row.
+- **Frame pacing [D375].** Headless Chromium paces animation frames at
+  60 Hz, so a frame-bound row (a letter, the last screen, the browser's own
+  share of overhead, rendering) measured there includes up to 16.7 ms of
+  waiting for the next 60 Hz frame, whatever our code does. The profile
+  therefore runs the row specs twice:
+  - **unthrottled** (`INFRATERNAL_LATENCY_DISPLAY=unthrottled`, Chromium
+    started with `--disable-gpu-vsync --disable-frame-rate-limit`): a frame
+    comes as soon as the previous one is done, so the rows measure our own
+    work. **This run gates.**
+  - **60 Hz** (`INFRATERNAL_LATENCY_DISPLAY=60hz`, normal pacing): what a
+    60 Hz screen shows. Reported in its own column, never gates.
+
+  Each run prints `METRIC name=frame_pacing display=… idle_fps=…`. The report
+  fails when the unthrottled run's idle rate is 70 fps or less: the flags then
+  had no effect and its rows would still include the 60 Hz wait. A row seen
+  only at 60 Hz counts as MISSING.
+- **Measuring on your own device.** The gate cannot see a real 120 Hz panel;
+  this is a manual check, not a gate. On the owner's iPhone or Mac, signed
+  in to a server running the build under test:
+  1. Open a terminal, then add `?probe=1&n=100&predict=1` to the address (the
+     probe panel ships in production builds; `predict=1` turns predictive
+     echo on). Prediction engages only when the round trip is above 60 ms;
+     on a faster link the letter you see is the real echo.
+  2. Press **Run probe**. It types 100 keys and shows p50/p95/p99 key-to-paint
+     and the hop breakdown. With prediction on, p99 is the "key to letter"
+     row; target 8.3 ms.
+  3. Press **Drop socket**. "Time to resume" is the reconnect after a lost
+     link (4 round trips + 50 ms); repeat it a few times.
+  4. Press **Copy results** and paste them on the issue with the device,
+     browser version, refresh rate and the network path (for example
+     "iPhone, Safari, 120 Hz, LTE to Frankfurt").
+  Whether the browser really paints at 120 Hz is the device's call: a laptop
+  on battery or a phone in low-power mode can drop to 60 Hz or lower, and
+  Safari may limit pages to 60 Hz unless its settings allow more. If p50
+  key-to-paint sits near 16 ms, the page is being painted at 60 Hz.
 - **Measurement limits.** The browser rows run against the tracer test double
   behind the relay, not the real server; the native rows run against the real
-  agent and PTY without a browser. The rendering row needs Chromium's frame
-  limit off, because headless Chromium paces frames at 60 Hz; `idle_fps` in
-  its line shows whether that took effect. Numbers from a shared build VM are
-  indicative; gate decisions use the perf VM.
+  agent and PTY without a browser. Chromium has no 120 Hz emulation, so the
+  unthrottled number is a floor for a 120 Hz display (a real one adds up to
+  8.3 ms of waiting for its next frame) and the 60 Hz number is the ceiling.
+  Numbers from a shared build VM are indicative; gate decisions use the perf
+  VM.
 
 ## 7. Rust build speed and static binary size
 
@@ -756,7 +797,7 @@ targets for one second each; it is a smoke check, not an hour of fuzzing.
 
 ### Nightly browser suite (D373, #443)
 
-The full tracer browser suite (the browser phase of `verify_latency`) runs
+The full tracer browser suite (`bun x playwright test` in `apps/tracer`) runs
 every night on the latest origin/dev on dev-02, so job gates stay fast. The
 timer fires at 05:00 IST (up to fifteen minutes of jitter), three hours after
 the fuzz, and takes one of the build slots like any other run. Everything is

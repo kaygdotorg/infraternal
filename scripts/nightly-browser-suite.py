@@ -7,7 +7,7 @@ Forgejo issues with a token read from a private file. Two subcommands keep the
 token away from the code under test:
 
 - `run` builds the tracer for production and runs the whole Playwright suite
-  (the browser phase of `verify_latency`) with the JSON reporter. It executes
+  (`bun x playwright test` in apps/tracer) with the JSON reporter. It executes
   the checked-out dev code, which nobody has reviewed yet, so it runs in an
   account that cannot read the Forgejo token.
 - `report` reads what `run` left behind and talks to Forgejo. It is installed
