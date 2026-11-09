@@ -2429,6 +2429,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infraternal-agent",
+ "infraternal-db",
  "infraternal-plugin-api",
  "infraternal-plugin-canvas",
  "infraternal-plugin-desktop",
