@@ -42,6 +42,16 @@ test("a copy over the cap is ignored whole and the next one still works", () => 
   expect(scanAll(`\u001b]52;c;${huge}\u0007`, `\u001b]52;c;${b64("after")}\u0007`)).toEqual(["after"]);
 });
 
+test("a copy over the cap is reported once, and a replayed one is not", () => {
+  const scanner = new Osc52Scanner(); let reported = 0; const copies: string[] = [];
+  const huge = encoder.encode(`\u001b]52;c;${"A".repeat(MAX_BASE64 + 4)}\u0007`);
+  scanner.scan(huge.subarray(0, 600_000), (text) => copies.push(text), () => reported++);
+  scanner.scan(huge.subarray(600_000), (text) => copies.push(text), () => reported++);
+  expect([reported, copies.length]).toEqual([1, 0]);
+  scanner.scan(huge, undefined, () => reported++);
+  expect(reported).toBe(1);
+});
+
 test("replayed bytes keep the scanner in step without copying", () => {
   const scanner = new Osc52Scanner(); const copies: string[] = [];
   scanner.scan(encoder.encode(`\u001b]52;c;${b64("old").slice(0, 2)}`), undefined);

@@ -7,12 +7,13 @@
  *
  * Rules, chosen for safety and for cost:
  * - Writes only. A read request (`?` as the text) is never answered, and an empty text never clears the clipboard.
- * - The text is capped ({@link MAX_BASE64}); a longer one is ignored whole, never cut in the middle.
+ * - The text is capped ({@link MAX_BASE64}: 1,048,576 base64 characters, which is 786,432 bytes of text). A longer copy is
+ *   dropped whole, never cut in the middle, and the caller is told so it can say that nothing was copied.
  * - Chunks can split a sequence anywhere. The scanner keeps its place between calls, and keeps the text only while
  *   inside a clipboard sequence. Other output costs one `indexOf` per chunk, so floods stay fast.
  */
 
-/** Most base64 characters of one copy: about 750 KiB of text. A larger copy is ignored. */
+/** Most base64 characters of one copy: 1,048,576 (1 Mi characters), which decodes to 786,432 bytes (768 KiB) of text. A larger copy is dropped. */
 export const MAX_BASE64 = 1_048_576;
 
 /** The escape byte that starts every control sequence. */
@@ -46,9 +47,10 @@ export class Osc52Scanner {
 
   /**
    * Reads one chunk. `onCopy` gets the decoded text of each finished clipboard write; pass `undefined` to keep the
-   * scanner in step with bytes that must not act (a replay of old output).
+   * scanner in step with bytes that must not act (a replay of old output). `onTooLarge` is called once for each live
+   * copy that passes {@link MAX_BASE64} and is therefore dropped, so the person is not left pasting the old clipboard.
    */
-  scan(bytes: Uint8Array, onCopy: ((text: string) => void) | undefined): void {
+  scan(bytes: Uint8Array, onCopy: ((text: string) => void) | undefined, onTooLarge?: () => void): void {
     let index = 0;
     const length = bytes.length;
     while (index < length) {
@@ -80,7 +82,10 @@ export class Osc52Scanner {
           let end = index;
           while (end < length && bytes[end] !== BEL && bytes[end] !== ESC) end += 1;
           this.text += ASCII.decode(bytes.subarray(index - 1, end));
-          if (this.text.length > MAX_BASE64) { this.text = ""; this.step = Step.Skip; }
+          if (this.text.length > MAX_BASE64) {
+            this.text = ""; this.step = Step.Skip;
+            if (onCopy && !this.replayed) onTooLarge?.();
+          }
           index = end;
           break;
         }
