@@ -4627,3 +4627,33 @@ access (#341 B19).
        are removed after their offline time (D370). D166 amended.
      - **Solid material (A16):** overlays are never opaque, except when the
        person chooses Solid. D160 amended.
+
+376. **Upgrading a host to root, design round (owner, 2026-11-09, #399;
+     completes D274's round):**
+     - **Open terminals keep running.** The root infraternal agent adopts
+       the person's running terminal sessions during the upgrade; if one
+       can't be adopted it stays reachable as before and the person is told.
+     - **Failure puts the host back as it was.** The user-level infraternal
+       agent keeps running until the root one has taken over; any failure
+       removes the half-installed root service, with a message and an Inbox
+       entry. The owner added: "please make sure that nothing runs as root
+       that it does not need. least privilege principle. also most people
+       wouldn't want the default user to be root so we need both: a way to
+       switch users in the UI on the same machine, preferred user per
+       machine (default being the user's infraternal username, we need to
+       hint in the sign up flow that teh user should ideally pick a username
+       that they use on their machines)".
+       - Least privilege: only the parts that need root run as root; terminals
+         and everything person-facing run as the person (D229, D270).
+       - Terminals open as the person's preferred account on each machine,
+         which defaults to their infraternal username; the UI lets them
+         switch the account on the same machine.
+       - Sign-up hints that the username should ideally match the one they
+         use on their machines.
+     - **Wrong password: 2 tries, then wait,** staying under the common
+       3-try account lockout; the message names the method used (sudo, doas
+       or su).
+     - **Who and where:** only admins of that host see "Full access". It is
+       offered in the host's Access level line (machine popover, the
+       approved D286 mockup) and in search; Add host offers it when root is
+       detected. Downgrading stays as D274 says.
