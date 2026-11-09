@@ -10,11 +10,12 @@
  * Measuring pixels (not tokens) means the check also sees blur, saturation, the glass bed and the page behind, which the unit
  * audit (`packages/ui/src/glass-contrast.test.ts`) does not.
  *
- * Screenshots of every case land in the external evidence directory as `<size>-<scheme>-<backdrop>-card<N>.png`.
+ * Screenshots of every case land in the external evidence directory as `<size>-<scheme>-<backdrop>-card<N>.png`, and the lowest
+ * contrast of each case as a line of `ratios.jsonl` next to them.
  * Needs the preview build, which this config's web server already builds, and the #146 mockup (skipped without it). The mockup marks
  * its window card with `data-glass-under`, the contract that gives a picture's glass the static floor (`packages/ui/src/themes.ts`).
  */
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
@@ -126,6 +127,8 @@ for (const size of SIZES) {
           const results = await measure(page, size.ready);
           expect(results.length, "text runs found in the popover").toBeGreaterThan(3);
           const worst = results[0]!;
+          // One line per case, so a run leaves a table of the lowest contrast it measured, passing or not.
+          appendFileSync(`${OUT}/ratios.jsonl`, `${JSON.stringify({ size: size.id, scheme, backdrop, card, lowest: Number(worst.ratio.toFixed(2)), text: worst.text, colour: worst.colour })}\n`);
           expect(worst.ratio, `lowest: "${worst.text}" ${worst.colour} ${worst.ratio.toFixed(2)}:1; next: ${results.slice(1, 4).map((r) => `"${r.text}" ${r.ratio.toFixed(2)}`).join(", ")}`).toBeGreaterThanOrEqual(LINE);
           await context.close();
         });
