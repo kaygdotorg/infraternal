@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 /* A docs page inside a canvas window (src/canvas/docs/docs-body.on-demand.ts). The page body is the one the standalone
-   docs render (docs.css); here it takes the app's colours and type scale (--fg, --fg-2, --text-body: 13 px, 16 px on touch)
+   docs render (docs.css); here it takes the app's colours and type scale (--fg, --fg-2, --ui-size-body: 14 px, 15 px on touch)
    so it follows the theme the person chose (the shared structure, doc.css, is loaded with it). One left edge for the title, paragraphs, lists, code and tables. The window
    scrolls by itself, and its last line breathes as much as its first. */
 .dr-scroll { container-type: inline-size; position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
-.dr-page { position: relative; box-sizing: border-box; max-width: calc(70ch + 17rem + 3rem); margin: 0 auto; padding: 1.25rem 1.5rem 1.5rem; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.7; }
+.dr-page { position: relative; box-sizing: border-box; max-width: calc(70ch + 17rem + 3rem); margin: 0 auto; padding: 1.25rem 1.5rem 1.5rem; color: var(--fg); font-size: var(--ui-size-body); font-weight: var(--fw-body); line-height: 1.7; }
 @media (pointer: coarse) { .dr-page { padding-inline: 1.25rem; padding-bottom: calc(1.5rem + env(safe-area-inset-bottom)); } }
 .dr-page p, .dr-page ul, .dr-page ol { margin: 0 0 1rem; }
 .dr-page ul, .dr-page ol { padding-left: 1.4em; }

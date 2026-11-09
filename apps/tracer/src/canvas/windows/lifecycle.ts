@@ -31,6 +31,7 @@ import { loadSplit, splitReady } from "./split-handle";
 import { iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { SCALE_REST, restAt } from "../springs";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 
 /** The window lifecycle API of the canvas: make, open, close, split, step. Each member is described on its own line. */
 export interface WindowsModule {
@@ -326,7 +327,7 @@ export function createWindows(cx: Ctx): WindowsModule {
   };
 
   const pulse = (rec: WinRec): void => {
-    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 360, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 360, easing: EASE_OUT });
   };
 
   /**

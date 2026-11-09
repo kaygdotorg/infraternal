@@ -9,7 +9,7 @@ root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 mkdir -p "$scratch/fake" "$scratch/target"
-printf '#!/bin/sh\necho 0.15.2\n' > "$scratch/fake/zig"
+printf '#!/bin/sh\necho 0.17.0\n' > "$scratch/fake/zig"
 chmod 755 "$scratch/fake/zig"
 if INFRATERNAL_ZIG="$scratch/fake" CARGO_TARGET_DIR="$scratch/target" \
     "$root/scripts/auth-toolchain" 2> "$scratch/error"; then

@@ -42,6 +42,7 @@ mod budgets {
 mod throughput {
     //! Exercises terminal invariants against real data and frozen expectations.
     use super::*;
+    /// Measures parser throughput on the production adapter's long VT stream.
     #[test]
     #[ignore = "VT observer and history throughput measurement"]
     fn measured_parser() {
@@ -56,7 +57,7 @@ mod throughput {
             / 1e6;
         println!(
             "shim Ghostty VT including carry: {rate:.2} MB/s, {SCROLLBACK_BYTES}-byte history budget, {} retained rows",
-            terminal.engine.history_rows()
+            terminal.engine.history_rows().unwrap()
         );
         assert!(rate > 10.0);
     }
@@ -80,6 +81,7 @@ mod memory {
             .unwrap()
     }
 
+    /// Measures RSS growth as one terminal fills its bounded history.
     #[test]
     #[ignore = "RSS measurement; run this filter alone in a fresh release process"]
     fn measured_terminal_rss() {
@@ -92,7 +94,7 @@ mod memory {
         let mut terminal = reset_terminal(200, 60).unwrap();
         let idle = resident_kib();
         terminal.process(&data);
-        let first_rows = terminal.engine.history_rows();
+        let first_rows = terminal.engine.history_rows().unwrap();
         let first = resident_kib();
         for _ in 0..10 {
             terminal.process(&data);
@@ -100,10 +102,10 @@ mod memory {
         let full = resident_kib();
         println!(
             "Ghostty terminal 200x60: baseline={before} KiB idle={idle} KiB first={first} KiB ({first_rows} rows) full={full} KiB ({} rows); first_delta={} KiB full_delta={} KiB budget={SCROLLBACK_BYTES} bytes",
-            terminal.engine.history_rows(),
+            terminal.engine.history_rows().unwrap(),
             first.saturating_sub(before),
             full.saturating_sub(before)
         );
-        assert!((5000..20000).contains(&terminal.engine.history_rows()));
+        assert!((5000..20000).contains(&terminal.engine.history_rows().unwrap()));
     }
 }

@@ -4657,3 +4657,22 @@ access (#341 B19).
        offered in the host's Access level line (machine popover, the
        approved D286 mockup) and in search; Add host offers it when root is
        detected. Downgrading stays as D274 says.
+
+377. **Canvas scrolling, round 2 (owner, 2026-11-09, #444; completes D374
+     A17):** The owner chose these after J426's review found that Shift+wheel
+     is how mouse users scroll sideways on Windows and Linux, and that Firefox
+     maps Alt+wheel to Back/Forward on every OS.
+     - **The canvas modifier is Option/Alt on every OS** ("Option/Alt
+       everywhere"). Modifier + wheel moves the canvas from anywhere, and
+       Shift + wheel scrolls content sideways again. If Firefox's Alt+wheel
+       history action can't be cancelled, Firefox falls back to Shift + wheel,
+       but only where the content under the pointer can't scroll sideways.
+     - **A vertical scroll stops at the end of a page** ("Stop at the end").
+       It no longer steps to the neighbouring window, which replaces D275's
+       vertical column step. Getting to the next window is a deliberate move:
+       a trackpad swipe that starts on bare canvas, modifier + wheel, or the
+       keyboard.
+     - **One finger on empty canvas still moves it on touch** ("Yes, one
+       finger on empty canvas moves it"). Nothing there can scroll, so the
+       drag can't be an accident. A one-finger drag that starts on a window
+       only ever scrolls that window's content.
