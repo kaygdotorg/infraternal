@@ -1,5 +1,6 @@
 /** Shared browser primitives used across infraternal interfaces. */
 export * from "./spring";
+export * from "./motion";
 export * from "./tick";
 export * from "./glitch";
 export * from "./countup";

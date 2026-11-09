@@ -23,6 +23,7 @@
  */
 import { attachGlassBed, type GlassBed } from "./glass-bed";
 import { currentUiScale } from "./ui-scale";
+import { EASE_OUT } from "./motion";
 export type PopoverSource = "pointer" | "keyboard";
 
 /** What an anchored popover needs: where it floats, what it is anchored to, its name, and how it lines up. */
@@ -85,7 +86,6 @@ export interface AnchoredPopover {
   close(source: PopoverSource): void;
 }
 
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** The window header's padding: the gap kept between the popover and its window's edges. */
 const INSET = 8;
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -198,7 +198,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   } else (inside ?? stage).append(root);
   if (source === "pointer") {
     if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
-    else root.animate([{ opacity: 0, transform: `translateY(${above ? 4 : -4}px) scale(0.96)` }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
+    else root.animate([{ opacity: 0, transform: `translateY(${above ? 4 : -4}px) scale(0.96)` }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE_OUT });
   }
   anchor.setAttribute("aria-expanded", "true");
 
@@ -214,7 +214,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     if (how === "keyboard" || reduced()) { done(); return; }
     root.style.pointerEvents = "none";
     root.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateY(${above ? 2 : -2}px) scale(0.98)` }],
-      { duration: 130, easing: EASE, fill: "forwards" }).onfinish = done;
+      { duration: 130, easing: EASE_OUT, fill: "forwards" }).onfinish = done;
   };
   // A confirmation anchored inside the popover lives on the body; pressing it must not dismiss the popover.
   document.addEventListener("pointerdown", (event) => {
