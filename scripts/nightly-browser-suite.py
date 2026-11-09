@@ -162,6 +162,7 @@ def run(root, runs):
         if run_step(command, tracer, log, env) != 0:
             print(f'browser suite: {" ".join(command)} failed, see {log}', flush=True)
             return 1
+    # `@perf` specs assert frame and motion budgets, which only mean something on the perf VM (PROCESS section 1); the config leaves them out unless TRACER_PERF=1.
     # `list` keeps readable progress in the log; `json` is what the reporter reads.
     status = run_step(['bun', 'x', 'playwright', 'test', '--reporter=list,json'], tracer, log, env)
     results = out / 'results.json'

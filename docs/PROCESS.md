@@ -25,6 +25,18 @@ judgment, and nothing waits on either.**
   - RSS at realistic scale (for example 50 sessions, not 1);
   - bundle size;
   - first paint.
+- Browser specs that assert a frame or motion budget carry the Playwright tag
+  `@perf` (`{ tag: "@perf" }` on the test). They only mean something on a quiet
+  machine, so `apps/tracer/playwright.config.ts` leaves them out (one
+  `grepInvert`) for `scripts/verify`, the nightly browser suite and every shared
+  build host (compute01, dev-02). On the perf VM, run them through
+  `TRACER_PERF=1 perf-run -- bun x playwright test --grep @perf` from
+  `apps/tracer`. A new spec that asserts wall-clock cost gets the tag.
+  Currently tagged: mesh-perf, the mesh frame budgets, motion-audit,
+  clusters-frames and clusters-keyboard-split. Not tagged: `perf-hud` (checks
+  that an injected stall is recorded, not how fast anything is) and
+  `row-swipe-continuity` (checks the row's position against the finger, and
+  only logs frame times).
 - Nightly: a trend of every budget, plus fuzzing of every parser.
 - Memory is always reported per unit × the expected count. A number for one
   session is not evidence.

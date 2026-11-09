@@ -43,6 +43,9 @@ const origin = `http://localhost:${port}`;
 export default defineConfig({
   testDir: "./test",
   testMatch: "*.spec.ts",
+  // Specs tagged `@perf` assert frame or motion budgets (PROCESS section 1). They only mean something on a quiet machine, so
+  // every shared host leaves them out; the perf VM sets `TRACER_PERF=1` and runs `--grep @perf`.
+  ...(process.env.TRACER_PERF === "1" ? {} : { grepInvert: /@perf/ }),
   fullyParallel: false,
   // All workers share one auth/terminal test-double process and its owner state.
   workers: 1,
