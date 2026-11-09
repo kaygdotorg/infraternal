@@ -336,7 +336,8 @@ fn members(
 /// Without a `leader` the boundary is an old-layout scope: it holds exactly one shim, and everything
 /// else in it is that terminal's. With a `leader` (the verified login worker) it is a host login: each
 /// process belongs to the terminal of its nearest ancestor, itself included, that has a PTY, and that
-/// PTY must be one of the shims'. A process under neither the worker nor a shim, a PTY no shim serves,
+/// PTY must be one of the shims'. The worker, the shims and systemd's `(sd-pam)` helper are the login
+/// itself and belong to no terminal. A process under neither the worker nor a shim, a PTY no shim serves,
 /// or a tty-less process with no such ancestor is refused (73), because the person could not have seen
 /// it in the confirmation.
 fn attribute(
@@ -358,8 +359,22 @@ fn attribute(
     {
         return Err(73);
     }
-    let infrastructure =
-        |pid: i32| leader == Some(pid) || shims.iter().any(|(shim, _)| *shim == pid);
+    // `PAMName=` leaves systemd's PAM helper, `(sd-pam)`, in the session scope as a tty-less direct
+    // child of the worker. It is part of the login like the worker itself. Anything on a terminal, or
+    // further down, stays that terminal's whatever it calls itself.
+    let pam_helper = |pid: i32| {
+        leader.is_some_and(|leader| {
+            members.iter().any(|process| {
+                process.pid == pid
+                    && process.ppid == leader
+                    && process.tty == 0
+                    && process.program == "(sd-pam)"
+            })
+        })
+    };
+    let infrastructure = |pid: i32| {
+        leader == Some(pid) || shims.iter().any(|(shim, _)| *shim == pid) || pam_helper(pid)
+    };
     // Which terminal each member belongs to, as an index into `shims`.
     let mut owners = vec![None; members.len()];
     if leader.is_none() {
