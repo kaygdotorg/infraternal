@@ -74,6 +74,12 @@ def job_plant(account, user, scenario, created):
     target.chmod(0o755)
     os.chown(target, user.pw_uid, user.pw_gid)
     runner = 'root' if privileged else (str(user.pw_uid) if scenario == 'system-uid' else account)
+    if scenario.startswith('root-job-priority'):
+        noisy = Path('/etc/cron.d') / (account + '-unknown')
+        with noisy.open('x') as cron:
+            cron.write('0 0 1 1 * root unresolved-command\n' * 70)
+        noisy.chmod(0o644)
+        created.append(noisy)
     if privileged and scenario != 'root-job-parent':
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(target), check=False).returncode == 0
     if scenario in ('system-cron', 'root-job-cron') or scenario.startswith('root-job-wrapper-'):
@@ -93,6 +99,8 @@ def job_plant(account, user, scenario, created):
         setting = scenario.removeprefix('root-job-exec-') if scenario.startswith('root-job-exec-') else 'ExecStart'
         prefix = scenario.removeprefix('root-job-prefix-') if scenario.startswith('root-job-prefix-') else ''
         invocation = f'{prefix}{target} /bin/true' if prefix == '@' else f'{prefix}/bin/sh {target}'
+        if scenario == 'root-job-priority-unit':
+            invocation = "/bin/sh -c 'test -f /root/unused && /bin/true'"
         if scenario == 'root-job-shell-expansion':
             invocation = f"/bin/bash -c '/bin/sh {target}{{,.backup}}'"
         service.write(f'[Unit]\nDescription=Disposable revoke job\n[Service]\nType=oneshot\nUser={runner}\n{setting}={invocation}\n')
@@ -100,7 +108,7 @@ def job_plant(account, user, scenario, created):
             service.write('ExecStart=/bin/true\n')
     created.append(unit)
     unit.chmod(0o644)
-    if scenario in ('root-job-unit',):
+    if scenario in ('root-job-unit', 'root-job-priority-unit'):
         os.chown(unit, user.pw_uid, user.pw_gid)
         os.chown(target, 0, 0)
     if scenario == 'root-job-group':
@@ -117,7 +125,7 @@ def job_plant(account, user, scenario, created):
                 (16, 7, 0xffffffff), (32, 5, 0xffffffff)])
         os.setxattr(target, 'system.posix_acl_access', acl)
     if privileged:
-        checked = target.parent if scenario == 'root-job-parent' else (unit if scenario in ('root-job-unit',) else target)
+        checked = target.parent if scenario == 'root-job-parent' else (unit if scenario in ('root-job-unit', 'root-job-priority-unit') else target)
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(checked), check=False).returncode == 0
     if scenario == 'system-timer':
         timer = unit.with_suffix('.timer')
@@ -172,6 +180,19 @@ def prove(binary, scenario="sessions"):
             print(json.dumps(dict(account=account, uid=uid)), flush=True)
             client = Binary(binary, state)
             prepare(client, 100, people[0], account)
+            if scenario == 'stock':
+                reply = control(client, 102, 'terminal.login.revoke', dict(person=str(people[0])))
+                print(json.dumps(dict(scenario=scenario, reply=reply)), flush=True)
+                report = reply['access']['accounts'][0]
+                for job in report.get('jobs', []):
+                    if 'system unit ' in job:
+                        unit = job.split('system unit ', 1)[1].split(' ', 1)[0]
+                        load = command('systemctl', 'show', '--value', '-p', 'LoadState', unit).stdout.strip()
+                        assert load != 'not-found', job
+                print('STOCK_ABSENT_UNIT_NOISE_PASS', flush=True)
+                assert report['state'] == 'unchanged', report
+                print('STOCK_CLEAN_REAL_ROOT_PASS', flush=True)
+                return
             if scenario.startswith('root-job-') or scenario in ('system-cron', 'system-unit', 'system-uid', 'system-timer',
                             'root-job-owner', 'root-job-group', 'root-job-parent',
                             'root-job-unit', 'root-job-cron', 'root-job-acl'):

@@ -32,6 +32,8 @@ pub(crate) struct Observation {
     input_paths: usize,
     /// Aggregate pathname bytes, also bounding the downgraded child's argv.
     input_bytes: usize,
+    /// Confirmed writable rows precede uncertain rows, even at the report cap.
+    writable_jobs: usize,
 }
 
 impl Observation {
@@ -104,6 +106,24 @@ fn add(observed: &mut Observation, name: &str) {
             })
             .collect(),
     );
+}
+
+/// Put an actionable writable job before uncertainty. Overflow remains unknown,
+/// but unrelated unknown rows cannot evict a job the account can actually edit.
+fn add_writable(observed: &mut Observation, name: &str) {
+    if observed.writable_jobs >= 64 {
+        observed.complete = false;
+        return;
+    }
+    if observed.jobs.len() >= 64 {
+        observed.jobs.pop();
+        observed.complete = false;
+    }
+    add(observed, name);
+    if let Some(row) = observed.jobs.pop() {
+        observed.jobs.insert(observed.writable_jobs, row);
+        observed.writable_jobs += 1;
+    }
 }
 
 /// Preserve the command tail exactly; normalizing whitespace can change a
@@ -223,14 +243,21 @@ fn root_writes(account: &User, observed: &mut Observation) {
     let writable = crate::access_write::writable(account, &paths);
     let mut offset = 0;
     for (name, paths) in candidates {
-        if writable.as_ref().is_none_or(|indices| {
-            (offset..offset + paths.len()).any(|index| indices.contains(&index))
-        }) {
-            observed.privileged = true;
-            add(
-                observed,
-                &format!("Root-run job: {name} (input writable or not checked)"),
-            );
+        match &writable {
+            Some(indices)
+                if (offset..offset + paths.len()).any(|index| indices.contains(&index)) =>
+            {
+                observed.privileged = true;
+                add_writable(observed, &format!("Root-run job: {name} (input writable)"));
+            }
+            None => {
+                observed.privileged = true;
+                add(
+                    observed,
+                    &format!("Root-run job: {name} (input not checked)"),
+                );
+            }
+            Some(_) => {}
         }
         offset += paths.len();
     }
@@ -450,7 +477,10 @@ fn system_units(account: &User, observed: &mut Observation) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     for unit in &units {
         let name = unit["Id"].as_str();
-        if matches!(unit.get("LoadState").map(String::as_str), Some("masked")) {
+        if matches!(
+            unit.get("LoadState").map(String::as_str),
+            Some("masked" | "not-found")
+        ) {
             continue;
         }
         if std::time::Instant::now() >= deadline {
@@ -493,7 +523,7 @@ pub(crate) fn inspect(account: &User) -> Observation {
     system_units(account, &mut observed);
     root_writes(account, &mut observed);
     if !observed.complete {
-        if observed.jobs.len() >= 64 {
+        if observed.jobs.len() >= 64 && observed.writable_jobs < 64 {
             observed.jobs.pop();
         }
         add(
@@ -560,6 +590,19 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A full uncertain inventory keeps the independently proven writable job.
+    #[test]
+    fn writable_rows_precede_uncertainty_at_the_cap() {
+        let mut observed = Observation::empty();
+        for index in 0..70 {
+            add(&mut observed, &format!("unknown {index}"));
+        }
+        add_writable(&mut observed, "writable service");
+        assert_eq!(observed.jobs.len(), 64);
+        assert_eq!(observed.jobs[0], "writable service");
+        assert!(!observed.complete);
     }
 
     /// Both standard and macro schedules retain the account column.
