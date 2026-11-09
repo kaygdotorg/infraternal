@@ -5,7 +5,7 @@
 //!
 //! Root-job coverage is deliberately bounded: every word of a cron command or
 //! service lifecycle command yields candidate paths (see `access_command`),
-//! plus cron's shell, the unit's fragment and drop-ins, with
+//! plus cron's shell, the unit's fragment, drop-ins and environment files, with
 //! their writable parent directories. It does not trace libraries, sourced
 //! files or arbitrary executable-input graphs. Shell expansion and launchers we
 //! cannot resolve fail closed as privileged instead of being ignored.
@@ -613,6 +613,11 @@ fn system_units(account: &User, observed: &mut Observation) {
         observed.complete = false;
         return;
     };
+    let manager = crate::access_units::manager_environment().unwrap_or_else(|| {
+        // Without the manager's PATH and defaults, expansions stay unknown.
+        observed.complete = false;
+        Vec::new()
+    });
     let uid = account.uid.to_string();
     let matching: BTreeSet<_> = units
         .iter()
@@ -642,7 +647,7 @@ fn system_units(account: &User, observed: &mut Observation) {
             add(observed, &format!("system unit {name}"));
         }
         let root = matches!(unit["User"].as_str(), "" | "root" | "0");
-        match crate::access_units::inputs(name, root) {
+        match crate::access_units::inputs(name, root, &manager) {
             Some(inputs) => {
                 if !inputs.complete {
                     root_job(observed, format!("system unit {name}"), None);
