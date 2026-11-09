@@ -96,6 +96,7 @@ async fn body(
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     Ok((token.to_owned(), now, bytes.to_vec(), permit))
 }
+/// Start a removal review: a dry run inside the owner's admin window.
 async fn start(
     State(api): State<Api>,
     incoming: axum::extract::Request,
@@ -108,6 +109,7 @@ async fn start(
         .map(Json)
         .map_err(|_| StatusCode::FORBIDDEN)
 }
+/// Finish a reviewed removal: revoke the host's access, then remove it.
 async fn finish(
     State(api): State<Api>,
     incoming: axum::extract::Request,
