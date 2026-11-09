@@ -23,24 +23,43 @@ let
     # must discover the Nix build host through an existing ELF, then pass that
     # resolved target explicitly to native generators. Cross targets keep the
     # shipping flags; only build-host discovery changes.
+    #
+    # The compiler binary's own host detection reads /usr/bin/env, which the
+    # sandbox lacks. The configure and make processes are compiled from this
+    # lib/ tree, so they detect correctly once system.zig points at a real ELF.
     substituteInPlace "$out/lib/std/zig/system.zig" \
       --replace-fail '"/usr/bin/env"' '"${coreutils}/bin/env"'
-    python3 - "$out/lib/std/Build/Module.zig" <<'PY'
+    # Zig 0.17 moved argv assembly from std/Build/Module.zig into the make
+    # step (lib/compiler/Maker/Step/Compile.zig). A host target's query is
+    # stored as `.none`, so stock Zig passes no -target and the compiler
+    # binary re-detects the host by itself. The patch rebuilds the query from
+    # the configured `result` (the target the build runner resolved), with the
+    # same add/sub feature arithmetic as std.Target.Query.fromTarget: the
+    # stored result lists every enabled feature as "add", so without the
+    # subtraction the model's defaults could switch on features the build
+    # host lacks. Explicit (cross) queries go through unchanged.
+    python3 - "$out/lib/compiler/Maker/Step/Compile.zig" <<'PY'
     from pathlib import Path
     import sys
     path = Path(sys.argv[1])
-    before = "        if (!target.query.isNative()) {"
-    after = """        if (target.query.isNative()) {
-                const native_query = std.Target.Query.fromTarget(&target.result);
-                try zig_args.appendSlice(&.{
-                    "-target", try native_query.zigTriple(b.allocator),
-                    "-mcpu", try native_query.serializeCpuAlloc(b.allocator),
-                });
-                if (target.result.dynamic_linker.get()) |dynamic_linker| {
-                    try zig_args.append("--dynamic-linker");
-                    try zig_args.append(dynamic_linker);
-                }
-            } else {"""
+    before = "        if (resolved_target.unwrapQuery(conf)) |query| {\n"
+    after = """        const explicit_query: ?std.Target.Query = resolved_target.unwrapQuery(conf) orelse host: {
+                const host_target: Configuration.ResolvedTarget = .{
+                    .query = .init(resolved_target.result),
+                    .result = resolved_target.result,
+                };
+                var host_query = host_target.unwrapQuery(conf).?;
+                const enabled = host_query.cpu_features_add;
+                var model_features = host_query.cpu_model.explicit.features;
+                model_features.populateDependencies(host_query.cpu_arch.?.allFeaturesList());
+                host_query.cpu_features_add = enabled;
+                host_query.cpu_features_add.removeFeatureSet(model_features);
+                host_query.cpu_features_sub = model_features;
+                host_query.cpu_features_sub.removeFeatureSet(enabled);
+                break :host host_query;
+            };
+            if (explicit_query) |query| {
+    """
     source = path.read_text()
     assert source.count(before) == 1, "native build target boundary changed"
     path.write_text(source.replace(before, after))
