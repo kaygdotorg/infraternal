@@ -202,6 +202,21 @@ export function installGestures(cx: Ctx): void {
     }
     return false;
   };
+  /** How wide (px) the band along a window's left and right edges is: it counts as the window's chrome for a sideways swipe. */
+  const EDGE_BAND = 16;
+  /**
+   * Whether a sideways swipe at (`x`, over `target`) starts on a window's chrome rather than on its content (D377): the
+   * header (pill, buttons), a band along the window's left and right edges, or a neighbour window that is mostly off
+   * screen (peeking in at the edge). Those are as good as bare canvas, so a trackpad or Magic Mouse swipe there moves the
+   * canvas even when a window fills the view and little bare canvas shows. Content scrolling stays inside the body.
+   */
+  const isWindowChrome = (target: Element, x: number): boolean => {
+    const win = target.closest<HTMLElement>(".ui-window");
+    if (!win) return false;
+    if (target.closest(".ui-window-head")) return true;
+    const r = win.getBoundingClientRect(), v = viewport.getBoundingClientRect(), mid = (r.left + r.right) / 2;
+    return x - r.left < EDGE_BAND || r.right - x < EDGE_BAND || mid < v.left || mid > v.right;
+  };
   /**
    * Whether `target` sits in content that scrolls in some direction (D374, D377): a docs page, a list, a log, the focused
    * terminal when it has scrollback or a program using the wheel. Gestures there belong to the content whichever way they
@@ -209,7 +224,8 @@ export function installGestures(cx: Ctx): void {
    * canvas. The canvas's own scrollers (column, group) are not content, and neither is a window with nothing to scroll.
    * A free canvas lets a column scroll vertically, so only a sideways gesture stops at the column there.
    */
-  const inScrollableContent = (target: Element, sideways: boolean): boolean => {
+  const inScrollableContent = (target: Element, sideways: boolean, x: number): boolean => {
+    if (sideways && isWindowChrome(target, x)) return false;
     for (let el: Element | null = target; el && el !== viewport; el = el.parentElement) {
       if (el.matches(".cl-col, .cl-group") && (state.canvasLock || sideways)) return false;
       if (el.classList.contains("terminal-host")) {
@@ -244,7 +260,7 @@ export function installGestures(cx: Ctx): void {
     const now = performance.now(), horizontal = Math.abs(dx) > Math.abs(dy), sign = Math.sign(horizontal ? dx : dy);
     const target = e.target as Element;
     if (now - lastWheel > 150 || sign * lastSign < 0) {
-      owner = canvasModifierHeld(e) || e.ctrlKey || e.metaKey || camera.lod !== "live" ? "canvas" : inScrollableContent(target, horizontal) ? "content" : "canvas";
+      owner = canvasModifierHeld(e) || e.ctrlKey || e.metaKey || camera.lod !== "live" ? "canvas" : inScrollableContent(target, horizontal, e.clientX) ? "content" : "canvas";
     }
     lastWheel = now;
     lastSign = sign || lastSign;
@@ -254,6 +270,14 @@ export function installGestures(cx: Ctx): void {
     if (!can) e.preventDefault();
     return !can;
   };
+  // The router above only hears events inside the canvas viewport. Firefox's own action for Alt+wheel is history back/forward,
+  // and it would still fire over the top pill, the toolbars or the screen edge (measured on Firefox 159). So an Alt gesture
+  // anywhere else in the page is cancelled too, and goes to the canvas, as it does inside it (D377).
+  window.addEventListener("wheel", (e) => {
+    if (!canvasModifierHeld(e) || viewport.contains(e.target as Node)) return;
+    e.preventDefault();
+    routeWheel(e);
+  }, { passive: false, signal });
   const canvasWheel = (e: WheelEvent): void => {
     if (state.canvasLock) { if (cx.inputLock.state) { e.preventDefault(); return; } snapWheel(e); return; }
     if (free) { free.wheel(e); return; }
