@@ -830,13 +830,26 @@ export class Wizard {
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red. Only a running
     // setup, which the person waits for, gets the clock (TASTE: the icon matches the news, #394).
     const icon = guide.fix === "start-fresh" || guide.fix === "take-over" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
+    // D368 (#433): a Start fresh that closes the stuck setup's own terminals lists each one before consent.
+    const closing = guide.fix === "start-fresh" && !replaceStuck ? job.view.failure?.closes?.terminals ?? [] : [];
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
-      <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${this.detailsBlock(job)}`;
+      <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${closing.length ? `
+      <p class="ah-text" data-terminal-summary>${closing.length === 1 ? "1 open terminal. Start fresh closes it." : `${closing.length} open terminals. Start fresh closes them.`}</p>
+      <div class="ah-keyblock" data-kv></div>` : ""}${this.detailsBlock(job)}`;
+    if (closing.length) {
+      const list = createKeyValueList("The terminals Start fresh closes");
+      list.set(closing.map((terminal, index) => ({ key: `Terminal ${index + 1}`, value: takeoverTerminalLabel(terminal) })));
+      page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
+    }
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
     const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${guide.fix === "none" || guide.fix === "take-over" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    if (closing.length) {
+      const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
+      if (label) label.textContent = closing.length === 1 ? "Close it and start fresh" : "Close them and start fresh";
+    }
     if (replaceStuck) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       const lock = job.view.failure?.setup_lock;
@@ -1139,7 +1152,7 @@ export class Wizard {
     else if (action === "cancel-install") this.dismiss();
     else if (action === "reload") void this.loadDiscovery();
     else if (action === "retry") { if (this.fixing) this.retryJob(this.fixing); }
-    else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing); }
+    else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing, this.fixing.view.failure?.closes?.close_challenge); }
     else if (action === "review-take-over") { if (this.fixing) this.go("takeover"); }
     else if (action === "take-over") { if (this.fixing) this.takeOver(this.fixing); }
     else if (action === "back-failure") this.go("failure", -1);

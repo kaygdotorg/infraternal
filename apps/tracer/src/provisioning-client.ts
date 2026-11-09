@@ -83,6 +83,11 @@ export interface FailureDetail {
    * confirmation names, and whether its infraternal agent is running (Take over stops it).
    */
   takeover?: { install: string; live: boolean; terminals?: TakeoverTerminal[]; close_challenge?: string };
+  /**
+   * `stale_previous_attempt`: the stuck first install's own open terminals that Start fresh closes, and the
+   * challenge only a confirmation that lists them may send (D368, #433).
+   */
+  closes?: { terminals: TakeoverTerminal[]; close_challenge: string };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -198,6 +203,16 @@ function parseSetupLock(value: unknown): FailureDetail["setup_lock"] | undefined
 }
 
 /** Keeps only the known, well-formed fields of a server failure; anything else is dropped, never shown. */
+/** Whether `value` is a bounded list of well-formed terminal rows a confirmation may show (D368). */
+function areTerminals(value: unknown): value is TakeoverTerminal[] {
+  return Array.isArray(value) && value.length <= 1024 && value.every((terminal: unknown) => isRecord(terminal)
+    && typeof terminal.account === "string" && terminal.account.length > 0 && terminal.account.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.account)
+    && typeof terminal.program === "string" && terminal.program.length > 0 && terminal.program.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.program)
+    && typeof terminal.since === "number" && Number.isSafeInteger(terminal.since) && terminal.since > 0 && terminal.since <= 253402300799
+    && (terminal.tty === undefined || (typeof terminal.tty === "string" && /^pts\/(0|[1-9][0-9]{0,6})$/.test(terminal.tty)))
+    && (terminal.others === undefined || (typeof terminal.others === "number" && Number.isSafeInteger(terminal.others) && terminal.others >= 0 && terminal.others <= 1024)));
+}
+
 function parseFailure(value: unknown): FailureDetail | undefined {
   if (!isRecord(value) || typeof value.kind !== "string" || !KINDS.includes(value.kind) || typeof value.message !== "string") return undefined;
   const failure: FailureDetail = { kind: value.kind as FailureKind, message: value.message, log_tail: isStrings(value.log_tail) ? value.log_tail : [] };
@@ -210,17 +225,17 @@ function parseFailure(value: unknown): FailureDetail | undefined {
     && /^[0-9a-f]{32}$/.test(value.takeover.install) && typeof value.takeover.live === "boolean") {
     const terminals = value.takeover.terminals;
     // Unknown or malformed terminal metadata must never turn into an offer with an empty list.
-    if (terminals !== undefined && (!Array.isArray(terminals) || terminals.length > 1024 || !terminals.every((terminal: unknown) => isRecord(terminal)
-      && typeof terminal.account === "string" && terminal.account.length > 0 && terminal.account.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.account)
-      && typeof terminal.program === "string" && terminal.program.length > 0 && terminal.program.length <= 64 && !/[\u0000-\u001f\u007f-\u009f]/.test(terminal.program)
-      && typeof terminal.since === "number" && Number.isSafeInteger(terminal.since) && terminal.since > 0 && terminal.since <= 253402300799
-      && (terminal.tty === undefined || (typeof terminal.tty === "string" && /^pts\/(0|[1-9][0-9]{0,6})$/.test(terminal.tty)))
-      && (terminal.others === undefined || (typeof terminal.others === "number" && Number.isSafeInteger(terminal.others) && terminal.others >= 0 && terminal.others <= 1024))))) return failure;
+    if (terminals !== undefined && !areTerminals(terminals)) return failure;
     const closeChallenge = value.takeover.close_challenge;
     if (Array.isArray(terminals) && terminals.length && (!isCanonicalUuid(closeChallenge) || closeChallenge === "00000000-0000-0000-0000-000000000000")) return failure;
     failure.takeover = { install: value.takeover.install, live: value.takeover.live,
       ...(isCanonicalUuid(closeChallenge) ? { close_challenge: closeChallenge } : {}),
       ...(Array.isArray(terminals) ? { terminals: terminals as TakeoverTerminal[] } : {}) };
+  }
+  // A Start fresh that closes the stuck setup's own terminals (D368, #433): both the list and its own challenge, or neither.
+  if (value.kind === "stale_previous_attempt" && isRecord(value.closes) && areTerminals(value.closes.terminals) && value.closes.terminals.length
+    && isCanonicalUuid(value.closes.close_challenge) && value.closes.close_challenge !== "00000000-0000-0000-0000-000000000000") {
+    failure.closes = { terminals: value.closes.terminals, close_challenge: value.closes.close_challenge };
   }
   if (isStrings(value.fingerprints) && value.fingerprints.length) failure.fingerprints = value.fingerprints;
   if (typeof value.host_key_challenge === "string") failure.host_key_challenge = value.host_key_challenge;
