@@ -587,6 +587,9 @@ impl Promotions {
         generation: Uuid,
     ) {
         let person = self.person(attempt).await.unwrap_or_default();
+        // The failed step's fixed word goes to the activity log; the
+        // install's own fixed failure text (never host output) goes to the
+        // operator's log below, for diagnosis.
         let outcome = tokio::time::timeout(
             Duration::from_secs(
                 u64::try_from(crate::enrollment::promotion::LIFETIME).unwrap_or(900),
@@ -706,7 +709,7 @@ impl Promotions {
         let key_digest = install
             .prepare_join_key(&binary, self.issuer.origin())
             .await
-            .map_err(|_| "stage")?;
+            .map_err(|failure| logged("stage", &failure))?;
         self.set(attempt, generation, Stage::Installing);
         let now = crate::runtime::unix_seconds().map_err(|_| "clock")?;
         let mut invitation = self
@@ -722,7 +725,10 @@ impl Promotions {
             stdin: Secret::new(stdin.map_err(|_| "join")?),
         };
         self.still_bound(host, generation).await?;
-        install.setup(&join).await.map_err(|_| "start")?;
+        install
+            .setup(&join)
+            .await
+            .map_err(|failure| logged("start", &failure))?;
         drop(join);
         self.set(attempt, generation, Stage::Starting);
         // R2: the successor proves itself on its private lane only.
@@ -748,7 +754,10 @@ impl Promotions {
         }
         self.still_bound(host, generation).await?;
         self.set(attempt, generation, Stage::Handover);
-        install.commit().await.map_err(|_| "commit")?;
+        install
+            .commit()
+            .await
+            .map_err(|failure| logged("commit", &failure))?;
         // The relay must end before the handover: the handover cuts the
         // rootless link that carries it. With `Commit` first it ends without
         // a rollback; a handover that then fails is undone by the
@@ -789,6 +798,20 @@ impl Promotions {
             Err("link")
         }
     }
+}
+
+/// Note an install step's failure for the operator and return its word.
+/// Only fixed text is logged: the step, the failure's own fixed message,
+/// its step and exit status; never host output or a secret.
+fn logged(step: &'static str, failure: &infraternal_plugin_ssh::model::Failure) -> &'static str {
+    tracing::warn!(
+        step,
+        message = failure.message,
+        failed_step = ?failure.failed_step,
+        exit_status = ?failure.exit_status,
+        "root upgrade install step failed"
+    );
+    step
 }
 
 /// Removes a private directory when dropped.

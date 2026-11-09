@@ -110,9 +110,11 @@ pub fn run_if_requested() -> Option<ExitCode> {
 const TOKEN_WAIT: Duration = Duration::from_secs(10);
 /// How long the rollback script may run.
 const ROLLBACK_BOUND: Duration = Duration::from_mins(2);
-/// Most stdin chunks queued per step before the relay stops that step: a
-/// step that stops reading its stdin must not stall the frame loop (B4).
-const STDIN_QUEUE: usize = 16;
+/// Most stdin bytes queued for one step before the relay stops it: a step
+/// that stops reading its stdin must not stall the frame loop (B4), but a
+/// step that is merely slow to start reading (the payload upload takes the
+/// setup lock first) must not be killed. The payload is far below this.
+const STDIN_CAP: usize = 256 << 20;
 
 /// Read the one-time token from stdin (the terminal the agent types it
 /// to): 64 lowercase hex digits and a newline, within `wait`. Then point
@@ -205,7 +207,9 @@ async fn connect(socket: &Path, uid: u32) -> std::io::Result<tokio::net::UnixStr
 /// One running install step.
 struct Channel {
     /// Where its stdin bytes go; dropping it closes the script's stdin.
-    stdin: Option<mpsc::Sender<Vec<u8>>>,
+    stdin: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// Bytes queued for the step's stdin and not yet written to it.
+    queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Its process group, to kill it.
     group: Option<nix::unistd::Pid>,
 }
@@ -306,10 +310,17 @@ pub async fn serve(
                     // Never wait on a step's stdin here: a step that stops
                     // reading would stall Kill and Close for every step (B4).
                     // A full queue stops that step instead.
-                    let stuck = channels
-                        .get(&channel)
-                        .and_then(|open| open.stdin.as_ref())
-                        .is_some_and(|stdin| stdin.try_send(bytes).is_err());
+                    let stuck = channels.get(&channel).is_some_and(|open| {
+                        let length = bytes.len();
+                        let queued = open
+                            .queued
+                            .fetch_add(length, std::sync::atomic::Ordering::AcqRel);
+                        queued + length > STDIN_CAP
+                            || open
+                                .stdin
+                                .as_ref()
+                                .is_some_and(|stdin| stdin.send(bytes).is_err())
+                    });
                     if stuck
                         && let Some(group) = channels.remove(&channel).and_then(|open| open.group)
                     {
@@ -424,6 +435,7 @@ fn open(channel: u32, script: &str, out: mpsc::Sender<Frame>) -> Channel {
         });
         return Channel {
             stdin: None,
+            queued: std::sync::Arc::default(),
             group: None,
         };
     };
@@ -431,13 +443,16 @@ fn open(channel: u32, script: &str, out: mpsc::Sender<Frame>) -> Channel {
         .id()
         .and_then(|pid| i32::try_from(pid).ok())
         .map(nix::unistd::Pid::from_raw);
-    let (stdin, mut queued) = mpsc::channel::<Vec<u8>>(STDIN_QUEUE);
+    let (stdin, mut pending) = mpsc::unbounded_channel::<Vec<u8>>();
+    let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     if let Some(mut pipe) = child.stdin.take() {
+        let written = queued.clone();
         tokio::spawn(async move {
-            while let Some(bytes) = queued.recv().await {
+            while let Some(bytes) = pending.recv().await {
                 if pipe.write_all(&bytes).await.is_err() {
                     break;
                 }
+                written.fetch_sub(bytes.len(), std::sync::atomic::Ordering::AcqRel);
             }
             // Dropping the pipe closes the script's stdin.
         });
@@ -504,6 +519,7 @@ fn open(channel: u32, script: &str, out: mpsc::Sender<Frame>) -> Channel {
     });
     Channel {
         stdin: Some(stdin),
+        queued,
         group,
     }
 }
@@ -828,8 +844,9 @@ mod tests {
         assert!(!ran.exists());
     }
 
-    /// B4: a step that never reads its stdin doesn't stall the frame loop;
-    /// a later Close is still served (and rolls back).
+    /// B4: a step that never reads its stdin doesn't stall the frame loop
+    /// (its input is queued, up to a cap); a later Close is still served
+    /// and rolls back.
     #[tokio::test]
     async fn a_step_that_stops_reading_does_not_stall_close() {
         let (dir, script) = marker();
