@@ -183,3 +183,11 @@ The failing Paper/Aurora sample was `fg3` (`#707075`) at 3.30:1 over
 `#fdbfff`; accent (`#3d63dd`) was 3.49:1 at that point. The test now checks
 both roles, every status colour and all ANSI text slots over every gradient
 sample.
+
+### What the gate does not cover
+
+The gradient gate audits the nine built-in gradients and the scheme solids. A
+person's own custom gradient, custom solid colour or Colour choice is not
+audited: it can put any colour behind text, and the text roles stay the
+scheme's. The choice is theirs, and the Themes window shows the result as they
+pick it.
