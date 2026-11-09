@@ -87,7 +87,7 @@ export function installFreeGestures(cx: Ctx): { wheel(e: WheelEvent): void } {
       e.preventDefault();
       camera.takeOver();
       if (e.ctrlKey || e.metaKey) { setActivity("zoom"); camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
-      const { dx, dy } = canvasDeltas(e); // Shift or the canvas modifier (D374) make it a sideways move
+      const { dx, dy } = canvasDeltas(e); // Shift or the canvas modifier (D377) make it a sideways move
       setActivity("pan");
       camera.drive({ cx: cam.cx + dx / cam.z, cy: cam.cy + dy / cam.z });
     },

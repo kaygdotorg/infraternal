@@ -3,8 +3,9 @@
  *
  * Canvas lock on (snapped):
  * - a wheel or trackpad gesture moves one column or window (a long flick, two); no zoom; the canvas moves on purpose
- *   (D374): a sideways swipe over scrollable content scrolls the content, and the canvas modifier plus the wheel moves it
- *   from anywhere;
+ *   (D374, D377): a swipe, vertical or sideways, that starts over scrollable content scrolls that content and never
+ *   overflows to the canvas; one that starts over bare canvas or chrome moves it; Option/Alt plus the wheel moves it from
+ *   anywhere;
  * - touch: one finger only ever scrolls the content under it, never the canvas; two fingers move between windows: a horizontal drag
  *   follows the fingers and springs to the nearest column (a flick may pass two), a vertical drag steps to the
  *   window above or below in the column under them;
@@ -12,8 +13,8 @@
  * Canvas lock off (free): wheel and drag pan, pinch and ctrl-wheel zoom, around the pointer; a tap on a view's
  * region flies in when zoomed out. The input lock freezes all of it.
  *
- * Scroll routing follows D275 (see `wheelRoute`): a vertical wheel gesture belongs to the content under the pointer
- * when that content can scroll the way it goes; only a gesture it cannot use moves the canvas. Everything goes
+ * Scroll routing (see `routeWheel`, D275 as amended by D374 and D377): a wheel gesture belongs to the content under the
+ * pointer when that content scrolls in any direction; only a gesture that starts elsewhere moves the canvas. Everything goes
  * through `camera.drive` so the springs always agree with what the fingers did.
  */
 import { columnEls, columnRect, stepWindow } from "../layout/columns";
@@ -170,19 +171,19 @@ export function installGestures(cx: Ctx): void {
     });
     host.dispatchEvent(forwarded);
   }, { passive: false, capture: true, signal });
-  // ---- who a vertical wheel gesture belongs to: the content under the pointer, or the canvas (D275) ------------------
-  // The rule, per gesture (a run of wheel events less than 150 ms apart; momentum is part of its
-  // gesture), decided by the gesture's first event:
-  // - the content under the pointer can scroll the way the wheel goes (a docs page, a list, a log, the focused
-  //   terminal's scrollback or its running program): the whole gesture is the content's. It scrolls natively and the
-  //   canvas never moves. When it reaches its end the rest of the gesture, momentum included, is swallowed: it never
-  //   carries over to the canvas.
-  // - otherwise (the pointer is over nothing that scrolls that way, an unfocused terminal, a window with nothing to
-  //   scroll, or content already at its end when the gesture began): the canvas has it, as before. So at a page's end
-  //   a *new* gesture moves on to the neighbouring window, and the input lock is how a person prevents that handoff.
-  // A sideways swipe (D374) is the content's when it starts over content that scrolls in any direction, and the canvas's when it
-  // starts over bare canvas or chrome (a window's pill, a gap). The canvas modifier (canvas-wheel-modifier.ts) and Ctrl/Cmd (zoom)
-  // are always the canvas's. Zoomed out to thumbnails there is no content to scroll, so the canvas has everything.
+  // ---- who a wheel gesture belongs to: the content under the pointer, or the canvas (D275, D374, D377) -------------------
+  // Scrolling never overflows to the canvas. The rule, per gesture (a run of wheel events less than 150 ms apart; momentum
+  // is part of its gesture), decided by the gesture's first event:
+  // - it starts over content that scrolls in some direction (a docs page, a list, a log, a wide block, the focused terminal
+  //   with scrollback or a running program): the whole gesture is the content's, vertical or sideways. It scrolls natively
+  //   where it can; at the content's end the rest of the gesture, momentum included, and every fresh gesture there, is
+  //   swallowed. It never carries over to the canvas, and the browser's own back/forward swipe never starts.
+  // - it starts over bare canvas or chrome (a window's pill, a gap, a window with nothing to scroll, an unfocused
+  //   terminal): the canvas has it, and a trackpad or Magic Mouse swipe there moves to the next window or column.
+  // - the canvas modifier (canvas-wheel-modifier.ts) or Ctrl/Cmd (zoom) is held: always the canvas's, from anywhere.
+  //   Shift is not a canvas key: Shift+wheel over content scrolls it sideways, the way browsers do.
+  // Zoomed out to thumbnails there is no content to scroll, so the canvas has everything. The input lock is how a person
+  // keeps every gesture in one window.
   let lastWheel = 0, lastSign = 0;
   /**
    * Whether the content under `target` can scroll the way the wheel goes. While the canvas is locked to windows the column
@@ -202,14 +203,19 @@ export function installGestures(cx: Ctx): void {
     return false;
   };
   /**
-   * Whether `target` sits in content that scrolls in some direction (D374): a docs page, a list, a log, the focused
-   * terminal. Swipes there belong to the content whichever way they point, so a sideways drift while reading never moves the
+   * Whether `target` sits in content that scrolls in some direction (D374, D377): a docs page, a list, a log, the focused
+   * terminal when it has scrollback or a program using the wheel. Gestures there belong to the content whichever way they
+   * point and wherever the content is scrolled to, so a drift while reading, or a swipe at the content's end, never moves the
    * canvas. The canvas's own scrollers (column, group) are not content, and neither is a window with nothing to scroll.
+   * A free canvas lets a column scroll vertically, so only a sideways gesture stops at the column there.
    */
-  const inScrollableContent = (target: Element): boolean => {
+  const inScrollableContent = (target: Element, sideways: boolean): boolean => {
     for (let el: Element | null = target; el && el !== viewport; el = el.parentElement) {
-      if (el.matches(".cl-col, .cl-group")) return false;
-      if (el.classList.contains("terminal-host")) { const w = state.activeWin; return !!w?.card.body.contains(el); }
+      if (el.matches(".cl-col, .cl-group") && (state.canvasLock || sideways)) return false;
+      if (el.classList.contains("terminal-host")) {
+        const w = state.activeWin;
+        return !!(w?.card.body.contains(el) && (w.binding?.wheelUse?.(-1) || w.binding?.wheelUse?.(1)));
+      }
       if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) {
         const s = getComputedStyle(el);
         if ((el.scrollHeight > el.clientHeight + 1 && /auto|scroll/.test(s.overflowY)) || (el.scrollWidth > el.clientWidth + 1 && /auto|scroll/.test(s.overflowX))) return true;
@@ -226,29 +232,25 @@ export function installGestures(cx: Ctx): void {
     }
     return false;
   };
-  /** Which side a gesture belongs to, decided once by its first event: "sideways" content, "vertical" content or the canvas. */
-  let owner: "canvas" | "vertical" | "sideways" = "canvas";
+  /** Which side the current gesture belongs to, decided once by its first event. */
+  let owner: "canvas" | "content" = "canvas";
   /**
-   * Routes one wheel event (D275, D374). False: it belongs to the content under the pointer and goes on untouched. The
-   * canvas has a gesture only when it was made on purpose (the canvas modifier or Ctrl/Cmd is held), when it started over
-   * bare canvas or chrome, or when it is vertical and the content could not use it (D275's column step).
+   * Routes one wheel event (D275, D374, D377). False: it belongs to the content under the pointer and goes on untouched.
+   * True: the canvas handled it, or the content could not use it and it was cancelled (nothing is left to carry on).
    */
   const routeWheel = (e: WheelEvent): boolean => {
-    const now = performance.now(), horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
-    const sign = Math.sign(horizontal ? e.deltaX : e.deltaY);
+    // Shift turns a vertical wheel into a sideways one, for content as the browser does and for bare canvas as the canvas does.
+    const swap = e.shiftKey && !e.deltaX, dx = swap ? e.deltaY : e.deltaX, dy = swap ? 0 : e.deltaY;
+    const now = performance.now(), horizontal = Math.abs(dx) > Math.abs(dy), sign = Math.sign(horizontal ? dx : dy);
+    const target = e.target as Element;
     if (now - lastWheel > 150 || sign * lastSign < 0) {
-      const target = e.target as Element;
-      if (canvasModifierHeld(e) || e.ctrlKey || e.metaKey || camera.lod !== "live") owner = "canvas";
-      else if (horizontal) owner = inScrollableContent(target) ? "sideways" : "canvas";
-      else owner = scrolls(target, e.deltaY) ? "vertical" : "canvas";
+      owner = canvasModifierHeld(e) || e.ctrlKey || e.metaKey || camera.lod !== "live" ? "canvas" : inScrollableContent(target, horizontal) ? "content" : "canvas";
     }
     lastWheel = now;
     lastSign = sign || lastSign;
     if (owner === "canvas") { canvasWheel(e); return true; }
-    const target = e.target as Element;
-    // The content's gesture: vertical turns it can still use scroll natively, and a sideways swipe scrolls what scrolls
-    // sideways. At the content's end the rest of the gesture, momentum included, goes nowhere.
-    const can = owner === "vertical" ? scrolls(target, e.deltaY) : horizontal && scrollsSideways(target, e.deltaX);
+    // The content's gesture: scroll natively where the content still can, either way; at its end the rest of it goes nowhere.
+    const can = (dy !== 0 && scrolls(target, dy)) || (dx !== 0 && scrollsSideways(target, dx));
     if (!can) e.preventDefault();
     return !can;
   };
