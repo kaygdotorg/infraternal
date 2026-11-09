@@ -21,7 +21,7 @@
  * on those hooks.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
-import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
+import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { endActivity, setActivity } from "../../perf-activity";
 
 export interface Cam { cx: number; cy: number; z: number }
@@ -148,7 +148,11 @@ export class Camera {
     const nextLod: Lod = this.lod === "live" ? (cam.z < 0.58 ? "thumb" : "live") : (cam.z > 0.62 ? "live" : "thumb");
     if (nextLod !== this.lod) { this.lod = nextLod; world.dataset.lod = nextLod; this.hooks.onLod?.(nextLod); }
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
-    if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
+    if (nextBand !== this.band) {
+      // The view regions fade in or out with the band; a key that sent the camera there shows them at once (#427, clusters.css).
+      markMotion(world);
+      this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand);
+    }
     if (!atRest) {
       if (!this.moving) world.dataset.moving = "";
       this.moving = true;

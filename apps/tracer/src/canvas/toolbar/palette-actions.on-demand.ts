@@ -4,6 +4,7 @@ import { beginRename } from "../mesh/rename.on-demand";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
 import { onDemand } from "../../on-demand";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 
 /** Flies to a Settings window (canvas-locked, snapped to its column). */
 export async function openSettings(cx: Ctx, section: string, source?: string): Promise<void> {
@@ -68,7 +69,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     cx.nav.focusWindow(rec);
     cx.details?.close(true);
     window.setTimeout(() => {
-      cx.details?.toggle(rec, "keyboard");
+      cx.details?.toggle(rec, triggeredByKeyboard() ? "keyboard" : "pointer");
       const t0 = performance.now();
       const press = (): void => {
         const row = [...document.querySelectorAll<HTMLElement>(".canvas-popover .ui-kv-row")].find((r) => r.textContent?.includes("Access level"));
