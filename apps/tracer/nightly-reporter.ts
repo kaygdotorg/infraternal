@@ -12,7 +12,7 @@
  */
 import { appendFileSync, writeFileSync } from "node:fs";
 import { relative } from "node:path";
-import type { FullConfig, Reporter, Suite, TestCase, TestResult } from "playwright/test/reporter";
+import type { FullConfig, Reporter, Suite, TestCase, TestResult } from "playwright/types/testReporter";
 
 /** Where the lines go, or `undefined` when this reporter is not wanted. */
 const target = process.env["NIGHTLY_JSONL"];
@@ -32,7 +32,7 @@ export default class NightlyJsonl implements Reporter {
   /** Appends one line for a finished test (after its last attempt: the suite runs without retries). */
   onTestEnd(test: TestCase, result: TestResult): void {
     if (target === undefined) return;
-    const message = result.errors.map((error) => error.message ?? "").join("\n").slice(0, maxError);
+    const message = result.errors.map((error: { message?: string }) => error.message ?? "").join("\n").slice(0, maxError);
     appendFileSync(
       target,
       `${JSON.stringify({
