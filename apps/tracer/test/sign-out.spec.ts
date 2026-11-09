@@ -290,9 +290,6 @@ for (const theme of ["ink", "paper"]) {
   });
 }
 
-/** The status the session check answers this page's cookie with (200 signed in, 401 not). */
-const sessionStatus = (page: Page): Promise<number> => page.evaluate(async () => (await fetch("/auth/session", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status);
-
 test("a session check that answers 401 right after setup goes to sign-in, not to a server-name error", async ({ page }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1280, height: 720 });
@@ -318,6 +315,29 @@ test("a session check that answers 401 right after setup goes to sign-in, not to
   await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText("Your session ended")).toBeVisible();
   await expect(page.getByText("Could not read this server")).toHaveCount(0);
+});
+
+test("a page loaded in another browser context does not end this context's session", async ({ browser, baseURL }) => {
+  const mine = await browser.newContext({ baseURL: baseURL! });
+  const stray = await browser.newContext({ baseURL: baseURL! });
+  const origin = new URL(baseURL!).origin;
+  // The real sign-in cookie (what the ceremonies hand out), not a preview one: a preview page recovers from a stale cookie by
+  // itself, a signed-in page on the real cookie does not, so it is the one a stray request ends.
+  const status = async () => (await mine.request.post("/auth/session", { data: {}, headers: { origin } })).status();
+  try {
+    await mine.request.post("/__mock/reset");
+    expect((await mine.request.post("/__mock/open-terminal")).ok()).toBe(true);
+    expect(await status(), "signed in before the other context loads").toBe(200);
+    // Another test, another tab or a probe on the same double: a plain preview page load, which hands out its own session.
+    const other = await stray.newPage();
+    await other.goto("/?mock=1&proto=clusters&scene=3&theme=ink");
+    await expect(other.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+    expect(await status(), "this context is still signed in").toBe(200);
+  } finally {
+    await mine.request.post("/__mock/reset");
+    await mine.close();
+    await stray.close();
+  }
 });
 
 test("the product canvas on the real cookie: sign out from the palette, a reload stays signed out", async ({ page }) => {
