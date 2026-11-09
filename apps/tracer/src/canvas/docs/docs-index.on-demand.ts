@@ -37,7 +37,7 @@ export function docsRows(pages: readonly DocsIndexPage[]): PaletteEntry[] {
     // A section says how many pages it holds; one with none yet says what it is about. The summary is for reading; only titles are searched.
     const hint = members > 0 ? `${members} ${members === 1 ? "page" : "pages"}` : page.summary;
     return [
-      { group: "Docs", glyph: "i", icon: viewIcon("docs"), label: trail, hint, search: "", action: `${DOCS_ACTION}${page.slug}` },
+      { group: "Docs", glyph: "i", icon: viewIcon("docs"), label: trail, title: page.title, hint, search: "", action: `${DOCS_ACTION}${page.slug}` },
       ...page.headings.map((heading): PaletteEntry => ({ group: "Docs", glyph: "§", icon: viewIcon("docs"), label: heading.text, hint: trail, search: "", queryOnly: true, action: `${DOCS_ACTION}${page.slug}#${heading.id}` })),
     ];
   });
