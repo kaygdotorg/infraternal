@@ -29,8 +29,12 @@ const SIZES = [{ name: "1440x900", width: 1440, height: 900 }, { name: "393x852"
 });
 /** The palette chord on the (non-Mac) test browser. */
 const PALETTE = "Control+Shift+K";
-/** Palette rows the sweep leaves out, with the reason; keep it short, every entry is a hole in the guard. */
-const SKIP_LABEL = /^(Reload|Sign out of every device)/i;
+/**
+ * Palette rows the sweep leaves out, with the reason; keep it short, every entry is a hole in the guard. Reload and Sign out of every
+ * device navigate the page or ask the same confirmation as Sign out; the Mockup: rows run the test mockup's scripted scenes, which move
+ * on their own timers by design.
+ */
+const SKIP_LABEL = /^(Reload|Sign out of every device|Mockup:)/i;
 /**
  * Elements whose motion is not a response to the key: the test double's badge (a test-only label that dims while the palette is open)
  * the terminal cursor's blink, which starts when a terminal takes focus, and a window's connection indicator, which morphs when the
