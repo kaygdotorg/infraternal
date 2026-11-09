@@ -753,6 +753,10 @@ thirty open at once: more, or a mostly red suite (a dead test
 server), becomes one roll-up issue. A spec that passes again gets one comment,
 and a later regression one more; issues are never closed. A build or suite
 that cannot run at all fails the unit and opens no spec issue.
+Time budgets: the wait for a build slot is bounded on its own (12 h; exit 75 and one
+`QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 6 h
+budget (`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot
+is granted; the unit's `TimeoutStartSec=24h` is just a backstop.
 `sudo systemctl start infraternal-browser-suite.service` is a manual run; the
 reporter's test is the `nightly browser suite reporter` gate row.
 

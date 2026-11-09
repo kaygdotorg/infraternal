@@ -6,7 +6,11 @@ Installed root-owned at /usr/local/libexec/infraternal-browser-suite-service by
 fuzz helper it runs no repository code as root, and it keeps the Forgejo
 token away from the code under test:
 
-1. holds one shared build slot as `claude` (through `runuser`) until step 5 ends;
+1. holds one shared build slot as `claude` (through `runuser`) until step 5 ends.
+   Waiting for the slot has its own bound (QUEUE_WAIT_SECONDS): on a timeout
+   the unit fails with exit 75 and one `QUEUE WAIT TIMEOUT` journal line, and no
+   suite runs. The suite's own budget (`timeout`, 6 h) starts only after the
+   slot is granted; a timeout is exit 124 and one `SUITE TIMEOUT` line;
 2. as `infraternal-browser` (no token, no sudo): fetches the newest origin/dev
    (hooks off) and runs `scripts/nightly-browser-suite.py run` in the dev shell,
    niced, then kills whatever that account still runs;
@@ -28,9 +32,11 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 BROWSER_USER = 'infraternal-browser'
@@ -40,6 +46,13 @@ REPORT_HOME = '/var/lib/infraternal-fuzz'
 REPORTER = '/usr/local/libexec/infraternal-browser-suite-report'
 BUILD_SLOT = '/home/claude/infraternal-ops/build-slot'
 READY = b'INFRATERNAL_BROWSER_SLOT_READY\n'
+# Two separate budgets, so a long build-slot queue can never look like a suite failure (#443):
+# the wait for a slot, and the suite itself (which starts only once a slot is held).
+# The unit's own TimeoutStartSec (24 h) is only a backstop above both plus the report.
+QUEUE_WAIT_SECONDS = 12 * 3600
+SUITE_BUDGET = '6h'
+QUEUE_TIMEOUT_EXIT = 75
+SUITE_TIMEOUT_EXIT = 124
 # What the suite may leave in a run folder, and the most the helper will copy of each.
 CAPS = {'meta.json': 64 << 10, 'results.json': 32 << 20, 'suite.log': 16 << 20}
 RUN_NAME = re.compile(r'\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7}\Z', re.ASCII)
@@ -177,14 +190,45 @@ def stage(runs, name, destination, owner, chown_to):
                 os.fchown(handle.fileno(), *chown_to)
 
 
+def stop_holder(holder):
+    """End a slot holder that is still queued: signal its whole process group, then let it go."""
+    try:
+        os.killpg(holder.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, TypeError):
+        holder.terminate()
+
+
+def wait_for_slot(holder):
+    """Wait up to QUEUE_WAIT_SECONDS for the holder to say it has a slot: True, False (it died) or None (still queued).
+
+    The wait is a short-lived reader thread, so the bound is enforced without
+    touching the pipe from two places. On a timeout the holder is stopped,
+    which also ends the reader.
+    """
+    answer = []
+    reader = threading.Thread(target=lambda: answer.append(holder.stdout.readline()), daemon=True)
+    reader.start()
+    reader.join(QUEUE_WAIT_SECONDS)
+    if reader.is_alive():
+        stop_holder(holder)
+        reader.join(5)
+        return None
+    return bool(answer) and answer[0] == READY
+
+
 def main():
     """Take a slot, run the suite without the token, report with it, release the slot."""
     holder = subprocess.Popen(
         ['runuser', '-u', 'claude', '--', BUILD_SLOT, '/usr/bin/python3', '-c',
          f'import sys; sys.stdout.buffer.write({READY!r}); sys.stdout.flush(); sys.stdin.buffer.read(1)'],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
     try:
-        if holder.stdout.readline() != READY:
+        slot = wait_for_slot(holder)
+        if slot is None:
+            print(f'nightly browser suite: QUEUE WAIT TIMEOUT: no build slot after {QUEUE_WAIT_SECONDS // 3600} h in the queue; '
+                  'no suite ran and nothing was reported', file=sys.stderr)
+            return QUEUE_TIMEOUT_EXIT
+        if not slot:
             print('nightly browser suite: could not take a build slot', file=sys.stderr)
             return 1
         checkout = f'{BROWSER_HOME}/checkout'
@@ -195,10 +239,14 @@ def main():
                    '&& git -c core.hooksPath=/dev/null -c core.fsmonitor=false checkout --quiet --detach origin/dev',
                    cwd=checkout) != 0:
             return 1
-        status = as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', 'nix', 'develop', '-c', 'python3',
+        status = as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', 'timeout', '--kill-after=60', SUITE_BUDGET, 'nix', 'develop', '-c', 'python3',
                          'scripts/nightly-browser-suite.py', 'run', '--runs-dir', runs, cwd=checkout)
         # Whatever the suite left running (browsers, servers) must not outlive its run or race the staging below.
         as_user(BROWSER_USER, BROWSER_HOME, 'kill', '-s', 'KILL', '--', '-1', cwd='/')
+        if status == 124:
+            print(f'nightly browser suite: SUITE TIMEOUT: the suite did not finish within {SUITE_BUDGET} of running '
+                  '(the time in the build-slot queue is not counted); nothing was reported', file=sys.stderr)
+            return SUITE_TIMEOUT_EXIT
         if status != 0:
             return 1
         # The run account wrote everything below `runs`: treat it as data (see stage).

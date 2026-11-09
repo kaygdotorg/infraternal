@@ -7,6 +7,7 @@ and hand-written Playwright JSON reports, so filing, deduplication and the
 "passes again" comments are tested end to end without a browser.
 """
 import importlib.machinery
+import io
 import importlib.util
 import json
 import os
@@ -372,6 +373,43 @@ class SeparateAccount(unittest.TestCase):
             self.assertLess(step.index('-C'), step.index('nice') if 'nice' in step else step.index('sh'))
         holder.stdin.write.assert_called_once()
 
+    def test_queue_wait_timeout_is_its_own_failure(self):
+        """Follow-up PoC: a build-slot queue that never frees ends the night with one clear line and no suite, staging or report."""
+        import threading
+        release = threading.Event()
+        holder = mock.MagicMock()
+        holder.stdout.readline.side_effect = lambda: (release.wait(10), b'')[1]
+        holder.stdin.close.side_effect = release.set
+        err = io.StringIO()
+        with mock.patch.object(service, 'QUEUE_WAIT_SECONDS', 0.2), mock.patch.object(service, 'stop_holder', side_effect=lambda h: release.set()), \
+                mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
+                mock.patch.object(service.subprocess, 'run', side_effect=AssertionError('ran without a slot')), \
+                mock.patch.object(service.sys, 'stderr', err):
+            self.assertEqual(service.main(), service.QUEUE_TIMEOUT_EXIT)
+        self.assertEqual(len([l for l in err.getvalue().splitlines() if 'QUEUE WAIT TIMEOUT' in l]), 1)
+        self.assertNotIn('SUITE TIMEOUT', err.getvalue())
+        self.assertNotEqual(service.QUEUE_TIMEOUT_EXIT, service.SUITE_TIMEOUT_EXIT)
+
+    def test_suite_budget_starts_after_the_slot_is_granted(self):
+        """Follow-up: the 6 h bound wraps only the suite command, and a timeout is reported as a suite timeout, with no report filed."""
+        holder = mock.MagicMock()
+        holder.stdout.readline.return_value = service.READY
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp:
+            self.run_dir(temp)
+            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+                    mock.patch.object(service.subprocess, 'Popen', return_value=holder), mock.patch.object(service.sys, 'stderr', err), \
+                    mock.patch.object(service.subprocess, 'run', side_effect=lambda cmd, **k: subprocess.CompletedProcess(cmd, 124 if 'nix' in cmd else 0)) as run:
+                self.assertEqual(service.main(), service.SUITE_TIMEOUT_EXIT)
+        steps = [call.args[0] for call in run.call_args_list]
+        suite_step = next(step for step in steps if 'nix' in step)
+        at = suite_step.index('timeout')
+        self.assertEqual(suite_step[at:at + 3], ['timeout', '--kill-after=60', '6h'])
+        self.assertEqual(suite_step[at + 3], 'nix')
+        self.assertEqual(len([l for l in err.getvalue().splitlines() if 'SUITE TIMEOUT' in l]), 1)
+        self.assertNotIn('QUEUE WAIT', err.getvalue())
+        self.assertFalse([step for step in steps if service.REPORTER in step], 'no report after a timed-out suite')
+
     def stage(self, temp, **kwargs):
         """Stage the run folder in `temp` the way the helper does, as the current user."""
         dest = Path(temp) / 'stage'
@@ -672,7 +710,7 @@ class Installer(unittest.TestCase):
         unit = installer.service_unit()
         for line in ('UMask=0077', 'ProtectSystem=strict', 'ProtectHome=read-only', 'ProtectKernelTunables=yes',
                      'ProtectKernelModules=yes', 'ProtectControlGroups=yes', 'RestrictSUIDSGID=yes', 'LockPersonality=yes',
-                     'TimeoutStartSec=6h'):
+                     'TimeoutStartSec=24h'):
             self.assertIn(line, unit)
         self.assertRegex(unit, r'ReadWritePaths=.*/var/lib/infraternal-browser')
         self.assertRegex(unit, r'ReadWritePaths=.*/var/lib/infraternal-fuzz')
