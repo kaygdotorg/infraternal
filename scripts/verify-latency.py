@@ -26,6 +26,7 @@ The process exits non-zero when a gated row or component fails;
 import argparse
 import os
 from pathlib import Path
+import signal
 import struct
 import sys
 import time
@@ -43,6 +44,9 @@ PROBE_SAMPLES = 100
 #: Re-attaches measured for the resumed-link row; p99 of 20 samples is their maximum.
 REATTACH_SAMPLES = 20
 ECHO_KEY = b"x"
+#: The longest one key's Ack and echo (or one re-attach) may take before the probe fails instead of waiting on. Echo
+#: under a same-session flood has measured up to ~0.5 s at 300 ms RTT, so 30 s only trips on a stalled stream.
+SAMPLE_TIMEOUT_S = 30
 
 
 def percentile(samples, fraction):
@@ -143,11 +147,18 @@ def attach_streams(client, streams):
         state["recent_output"] = bytearray()
 
 
-def wait_for(client, streams, predicate, timeout=20):
+def wait_for(client, streams, predicate, timeout=20, what="its expected marker"):
+    """Read frames until `predicate()` holds; raise TimeoutError after `timeout` seconds.
+
+    The deadline is checked between frames, so a link that keeps delivering
+    unrelated frames (connection-level traffic on stream 0) can never keep a
+    probe waiting forever: a stalled stream fails the run instead of holding
+    its build slot.
+    """
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() >= deadline:
-            raise TimeoutError("PTY latency fixture did not reach its expected marker")
+            raise TimeoutError(f"PTY latency fixture did not reach {what} within {timeout} s")
         frame(client, streams)
 
 
@@ -196,8 +207,8 @@ def sample_echoes(client, streams, stream, count):
         state["pending_ack"] = [target_ack, started, None]
         state["pending_echo"] = [target_echo, started, None]
         send_input(client, streams, stream, ECHO_KEY)
-        while state["pending_ack"][2] is None or state["pending_echo"][2] is None:
-            frame(client, streams)
+        wait_for(client, streams, lambda: state["pending_ack"][2] is not None and state["pending_echo"][2] is not None,
+                 timeout=SAMPLE_TIMEOUT_S, what=f"the Ack and echo of a key on stream {stream}")
         ack_ms.append((state["pending_ack"][2] - started) * 1000)
         echo_ms.append((state["pending_echo"][2] - started) * 1000)
         state["pending_ack"] = None
@@ -208,8 +219,10 @@ def sample_echoes(client, streams, stream, count):
 def fence(client, streams, nonce):
     """Send a Ping and read frames until its Pong: everything the agent queued before it has arrived."""
     client.send(0, 0x08, struct.pack("<QQ", nonce, 0))
+    deadline = time.monotonic() + SAMPLE_TIMEOUT_S
     while frame(client, streams) != (0, 0x09):
-        pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"no Pong for fence {nonce} within {SAMPLE_TIMEOUT_S} s")
 
 
 def sample_reattach(client, streams, stream, count):
@@ -234,14 +247,14 @@ def sample_reattach(client, streams, stream, count):
         state["pending_ack"] = [state["acked"], started, None]
         client.send(stream, 0x16, state["id"].bytes + struct.pack("<QQ", state["out"], state["acked"]))
         client.send(stream, 0x14, struct.pack("<I", 1024 * 1024))
-        while state["pending_ack"][2] is None:
-            frame(client, streams)
+        wait_for(client, streams, lambda: state["pending_ack"][2] is not None, timeout=SAMPLE_TIMEOUT_S,
+                 what=f"the Ack of a re-attach on stream {stream}")
         ready_ms.append((state["pending_ack"][2] - started) * 1000)
         state["pending_ack"] = None
         state["pending_echo"] = [state["echoes"] + len(ECHO_KEY), started, None]
         send_input(client, streams, stream, ECHO_KEY)
-        while state["pending_echo"][2] is None:
-            frame(client, streams)
+        wait_for(client, streams, lambda: state["pending_echo"][2] is not None, timeout=SAMPLE_TIMEOUT_S,
+                 what=f"the first key's echo after a re-attach on stream {stream}")
         echo_ms.append((state["pending_echo"][2] - started) * 1000)
         state["pending_echo"] = None
     return ready_ms, echo_ms
@@ -394,6 +407,9 @@ def parser_args():
 
 
 if __name__ == "__main__":
+    # A stopped run (SIGTERM from a slot timeout or an operator) still reaches the cleanup below, so the agent, its
+    # shims and their `yes`/`cat` children are not left running (a J407 run on dev-02 left nine such processes).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     args = parser_args()
     if args.samples < 20:
         raise SystemExit("--samples must be at least 20 for p99")
