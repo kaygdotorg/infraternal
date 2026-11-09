@@ -114,20 +114,19 @@ impl EndpointProbe {
         }
         let route_output = String::from_utf8_lossy(&route.stdout);
         let interface = parse_macos_route_interface(&route_output)?;
-        let link_mtu = match self.interfaces.get(&interface) {
-            Some(link_mtu) => *link_mtu,
-            None => {
-                let link_mtu = Command::new("/sbin/ifconfig")
-                    .arg(&interface)
-                    .output()
-                    .ok()
-                    .filter(|output| output.status.success())
-                    .and_then(|output| {
-                        parse_macos_interface_mtu(&String::from_utf8_lossy(&output.stdout)).ok()
-                    });
-                self.interfaces.insert(interface, link_mtu);
-                link_mtu
-            }
+        let link_mtu = if let Some(link_mtu) = self.interfaces.get(&interface) {
+            *link_mtu
+        } else {
+            let link_mtu = Command::new("/sbin/ifconfig")
+                .arg(&interface)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| {
+                    parse_macos_interface_mtu(&String::from_utf8_lossy(&output.stdout)).ok()
+                });
+            self.interfaces.insert(interface, link_mtu);
+            link_mtu
         }
         .ok_or(io::ErrorKind::NotFound)?;
         Ok(bound_route_mtu(&route_output, link_mtu))
@@ -223,9 +222,7 @@ pub(crate) fn parse_macos_route_mtu(route_output: &str, interface_output: &str) 
 /// Bound a `route -n get` reply's MTU by its interface MTU, or use the interface MTU alone.
 #[cfg(target_os = "macos")]
 fn bound_route_mtu(route_output: &str, link_mtu: u32) -> u32 {
-    parse_macos_route(route_output)
-        .map(|(route_mtu, _)| route_mtu.min(link_mtu))
-        .unwrap_or(link_mtu)
+    parse_macos_route(route_output).map_or(link_mtu, |(route_mtu, _)| route_mtu.min(link_mtu))
 }
 
 /// Read the MTU from macOS `ifconfig` output when the route has no explicit MTU.
