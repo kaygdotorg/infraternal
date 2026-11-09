@@ -271,7 +271,7 @@ export class Wizard {
   private setFoot(markup: string): void {
     this.foot.innerHTML = markup;
     this.foot.hidden = markup === "";
-    if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE });
+    if (!reducedMotion() && !triggeredByKeyboard() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE });
   }
 
   private hero(icon: string, tone = ""): string { return `<div class="ah-hero"${tone ? ` data-tone="${tone}"` : ""}>${svg(icon)}</div>`; }
@@ -1082,7 +1082,8 @@ export class Wizard {
     document.removeEventListener("keydown", this.onKeyDown, true);
     this.root.removeEventListener("paste", this.onPaste, true);
     const gone = (): void => { this.teardown(); after?.(); };
-    if (reducedMotion()) { gone(); return; }
+    // Closed by a key (Escape): the card is gone in the same frame (#427).
+    if (reducedMotion() || triggeredByKeyboard()) { gone(); return; }
     this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.98)" }], { duration: 160, easing: EASE, fill: "forwards" });
     this.scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, delay: 40, easing: EASE, fill: "forwards" }).onfinish = gone;
   }
