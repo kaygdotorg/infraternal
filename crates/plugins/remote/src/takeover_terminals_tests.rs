@@ -281,7 +281,13 @@ fn a_shim_reparented_by_the_agent_stop_keeps_its_fingerprint() {
         member(2720, 2696, pty(0), false, "sleep"),
     ];
     let digest = |members: &[Process]| {
-        members_digest(std::path::Path::new("/sys/fs/cgroup/s"), 7, members, &[2695], Some(2637))
+        members_digest(
+            std::path::Path::new("/sys/fs/cgroup/s"),
+            7,
+            members,
+            &[2695],
+            Some(2637),
+        )
     };
     let before = digest(&members);
     let mut reparented = members.clone();
@@ -289,7 +295,11 @@ fn a_shim_reparented_by_the_agent_stop_keeps_its_fingerprint() {
     assert_eq!(digest(&reparented), before);
     let mut moved = members.clone();
     moved[3].ppid = 1;
-    assert_ne!(digest(&moved), before, "a terminal's program changing parent is a change");
+    assert_ne!(
+        digest(&moved),
+        before,
+        "a terminal's program changing parent is a change"
+    );
     let mut started = members;
     started.push(member(2800, 2696, pty(0), false, "vim"));
     assert_ne!(digest(&started), before);

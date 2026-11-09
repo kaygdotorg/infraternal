@@ -490,6 +490,43 @@ fn shim(path: &Path, before: &fs::Metadata, base: &Path) -> Result<(Shim, PathBu
     ))
 }
 
+/// One digest of a boundary and every process in it, bound into each of its records: any process
+/// starting, ending, or changing account, program, terminal, foreground or parent invalidates the
+/// confirmation. A shim's parent is left out: a shim is bound by its pid and birth, and on a host login
+/// its parent is the old agent, which Take over stops before it compares the records again (the shim is
+/// then reparented, #433 e2e L1).
+fn members_digest(
+    root: &Path,
+    inode: u64,
+    processes: &[Process],
+    shims: &[i32],
+    leader: Option<i32>,
+) -> ring::digest::Digest {
+    let mut hash = Context::new(&SHA256);
+    hash.update(&inode.to_be_bytes());
+    hash.update(root.as_os_str().as_encoded_bytes());
+    hash.update(&[0]);
+    for process in processes {
+        let parent = if shims.contains(&process.pid) {
+            0
+        } else {
+            process.ppid
+        };
+        hash.update(&process.pid.to_be_bytes());
+        hash.update(&parent.to_be_bytes());
+        hash.update(&process.birth.to_be_bytes());
+        hash.update(&process.uid.to_be_bytes());
+        hash.update(&process.tty.to_be_bytes());
+        hash.update(process.program.as_bytes());
+        hash.update(&[
+            0,
+            u8::from(process.foreground),
+            u8::from(leader == Some(process.pid)),
+        ]);
+    }
+    hash.finish()
+}
+
 /// The records of one boundary: every member is read once, attributed, and bound into each record's
 /// fingerprint, so any process starting, ending or changing there invalidates the confirmation.
 fn boundary_records(
@@ -526,24 +563,8 @@ fn boundary_records(
     let pairs: Vec<_> = shims.iter().map(|shim| (shim.pid, shim.tty)).collect();
     let attributed = attribute(&processes, &pairs, leader)?;
     let unit = boundary.unit();
-    let mut members_hash = Context::new(&SHA256);
-    members_hash.update(&scope_metadata.ino().to_be_bytes());
-    members_hash.update(root.as_os_str().as_encoded_bytes());
-    members_hash.update(&[0]);
-    for process in &processes {
-        members_hash.update(&process.pid.to_be_bytes());
-        members_hash.update(&process.ppid.to_be_bytes());
-        members_hash.update(&process.birth.to_be_bytes());
-        members_hash.update(&process.uid.to_be_bytes());
-        members_hash.update(&process.tty.to_be_bytes());
-        members_hash.update(process.program.as_bytes());
-        members_hash.update(&[
-            0,
-            u8::from(process.foreground),
-            u8::from(leader == Some(process.pid)),
-        ]);
-    }
-    let members_hash = members_hash.finish();
+    let shim_pids: Vec<_> = shims.iter().map(|shim| shim.pid).collect();
+    let members_hash = members_digest(root, scope_metadata.ino(), &processes, &shim_pids, leader);
     let mut records = Vec::with_capacity(shims.len());
     for (shim, place) in shims.iter().zip(attributed) {
         let foreground = &processes[place.foreground];
