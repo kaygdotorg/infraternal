@@ -400,6 +400,7 @@ mod tests {
         );
     }
 
+    /// Hosted command syntax preserves the shared action identity and server selection.
     #[test]
     #[cfg(feature = "remote")]
     fn server_action_commands_use_the_shared_action_definitions() {
@@ -414,6 +415,11 @@ mod tests {
             (
                 &["hosts", "remove"][..],
                 "remote.host.remove",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+            (
+                &["hosts", "forget"][..],
+                "remote.host.forget",
                 Some("00000000-0000-0000-0000-000000000001"),
             ),
             (&["sessions", "list"][..], "sessions.list", None),
@@ -463,6 +469,27 @@ mod tests {
         assert_eq!(selected(&matches).path, ["status"]);
         assert_eq!(hosted.id, "server.status");
         assert!(!hosted.fresh_passkey);
+    }
+
+    /// Forget shares the hosted dry-run and explicit-confirmation flags (D369).
+    #[test]
+    #[cfg(feature = "remote")]
+    fn hosts_forget_takes_dry_run_and_yes_flags() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "hosts",
+                "forget",
+                "00000000-0000-0000-0000-000000000001",
+                "--dry-run",
+                "--yes",
+            ])
+            .expect("hosts forget");
+        let command = selected(&matches);
+        assert_eq!(command.path, ["hosts", "forget"]);
+        assert!(command.matches.get_flag("dry_run"));
+        assert!(command.matches.get_flag("yes"));
     }
 
     /// D333 keeps the dry run of a key-driven removal: `--dry-run` reaches the shared input.
