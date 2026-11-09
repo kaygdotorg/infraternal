@@ -517,9 +517,9 @@ test("a newer local appearance edit survives an older remote look while its anno
   }
 });
 
-/** Opens two clients on one real account, with the second tab ready to queue an offline look edit. */
-async function offlineConflictClients(browser: Browser) {
-  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
+/** Opens two clients on one real account, with the second tab ready to queue an offline look edit; `latencyMs` delays every server message one way. */
+async function offlineConflictClients(browser: Browser, latencyMs = 0) {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567), latencyMs });
   const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
   const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
   const a = watchLayout(await first.newPage());
@@ -577,6 +577,48 @@ test("a refused offline look does not suppress later remote looks", async ({ bro
     await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 30_000 }).toBe("tinted");
     await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 30_000 }).toBe("tinted");
     await expect(b.locator("html")).toHaveAttribute("data-look", "tinted");
+  } finally {
+    await second.close();
+    await first.close();
+    await server.dispose();
+  }
+});
+
+/** On a slow link a second look made while the first is still unacknowledged must not be refused: the latest pick wins on both devices. */
+test("a look picked while the previous one is still in flight is kept on a slow link (1 s one way)", async ({ browser }) => {
+  test.setTimeout(240_000);
+  const { server, first, second, a, b } = await offlineConflictClients(browser, 1000);
+  try {
+    await choosePaletteValue(a, "Theme: Frosted");
+    // sleep: past the 600 ms announce delay so the first look.set is already on the wire when the next pick is made.
+    await a.waitForTimeout(900);
+    await choosePaletteValue(a, "Theme: Solid");
+    await settled(a); await settled(b);
+    await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 60_000 }).toBe("solid");
+    await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 60_000 }).toBe("solid");
+    await expect(b.locator("html")).toHaveAttribute("data-look", "solid");
+  } finally {
+    await second.close();
+    await first.close();
+    await server.dispose();
+  }
+});
+
+/** Three quick picks over the same slow link end on the last pick on both devices. */
+test("three quick look picks on a slow link end on the last pick on both devices", async ({ browser }) => {
+  test.setTimeout(240_000);
+  const { server, first, second, a, b } = await offlineConflictClients(browser, 1000);
+  try {
+    await choosePaletteValue(a, "Theme: Frosted");
+    // sleep: let the first look.set reach the wire before the next pick, so each pick meets one still in flight.
+    await a.waitForTimeout(900);
+    await choosePaletteValue(a, "Theme: Tinted");
+    // sleep: the second pick is announced while the first is still unacknowledged.
+    await a.waitForTimeout(900);
+    await choosePaletteValue(a, "Theme: Solid");
+    await settled(a); await settled(b);
+    await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 90_000 }).toBe("solid");
+    await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 90_000 }).toBe("solid");
   } finally {
     await second.close();
     await first.close();
