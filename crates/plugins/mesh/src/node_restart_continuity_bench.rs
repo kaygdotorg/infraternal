@@ -195,14 +195,27 @@ fn deliver(node: &mut Node, config: &Config) -> usize {
     count
 }
 
+/// A child process that is killed and reaped when dropped, so a trial that
+/// fails part-way leaves no stray process or namespace behind.
+struct Reaped(Child);
+impl Drop for Reaped {
+    fn drop(&mut self) {
+        // Both calls fail harmlessly when the child already exited and was reaped.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Start a process that holds a fresh network namespace open, and wait until
 /// the kernel shows it in a namespace other than ours.
-fn sibling_namespace() -> Child {
-    let child = Command::new("unshare")
-        .args(["-n", "sleep", "600"])
-        .spawn()
-        .unwrap();
-    let pid = child.id();
+fn sibling_namespace() -> Reaped {
+    let child = Reaped(
+        Command::new("unshare")
+            .args(["-n", "sleep", "600"])
+            .spawn()
+            .unwrap(),
+    );
+    let pid = child.0.id();
     for _ in 0..200 {
         if std::fs::read_link(format!("/proc/{pid}/ns/net")).unwrap()
             != std::fs::read_link("/proc/self/ns/net").unwrap()
@@ -350,24 +363,26 @@ fn restart_continuity_same_content_snapshot() {
     let mut node = Node::restore_with_engine(&state.0, engine).unwrap();
     let identity = node.up().unwrap();
 
-    let mut sibling = sibling_namespace();
-    underlay(sibling.id());
-    let mut peer = Command::new("nsenter")
-        .args(["-t", &sibling.id().to_string(), "-n"])
-        .arg(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "node::restart_continuity_bench::restart_continuity_peer",
-            "--ignored",
-            "--nocapture",
-        ])
-        .env("RESTART_BENCH_DIR", &shared.0)
-        .env(
-            "RESTART_BENCH_MEASURED",
-            serde_json::to_string(&identity).unwrap(),
-        )
-        .spawn()
-        .unwrap();
+    let sibling = sibling_namespace();
+    underlay(sibling.0.id());
+    let mut peer = Reaped(
+        Command::new("nsenter")
+            .args(["-t", &sibling.0.id().to_string(), "-n"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "node::restart_continuity_bench::restart_continuity_peer",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("RESTART_BENCH_DIR", &shared.0)
+            .env(
+                "RESTART_BENCH_MEASURED",
+                serde_json::to_string(&identity).unwrap(),
+            )
+            .spawn()
+            .unwrap(),
+    );
     let identity_file = shared.0.join("peer-identity.json");
     assert!(
         wait_for_file(&identity_file, Duration::from_secs(60)),
@@ -453,7 +468,7 @@ fn restart_continuity_same_content_snapshot() {
     let counters_after = node.counters().unwrap()[&live.public_key].clone();
 
     std::fs::write(shared.0.join("stop"), b"stop").unwrap();
-    assert!(peer.wait().unwrap().success(), "the live peer failed");
+    assert!(peer.0.wait().unwrap().success(), "the live peer failed");
     done.store(true, Ordering::Relaxed);
     listener.join().unwrap();
     let sent: u64 = std::fs::read_to_string(shared.0.join("sent"))
@@ -461,8 +476,7 @@ fn restart_continuity_same_content_snapshot() {
         .trim()
         .parse()
         .unwrap();
-    sibling.kill().unwrap();
-    sibling.wait().unwrap();
+    drop(sibling);
     node.down().unwrap();
 
     let arrivals = std::mem::take(&mut *arrivals.lock().unwrap());
