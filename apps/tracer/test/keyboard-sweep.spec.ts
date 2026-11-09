@@ -21,8 +21,11 @@ const OPEN = "/?mock=1&proto=clusters&scene=1&theme=mocha&bg=none&sessions=1";
 const PALETTE = "Control+Shift+K";
 /** Palette rows the sweep leaves out, with the reason; keep it short, every entry is a hole in the guard. */
 const SKIP_LABEL = /^(Reload|Sign out of every device)/i;
-/** Elements whose motion is not product UI: the test double's badge (a test-only label that dims while the palette is open). */
-const NOT_PRODUCT = /#test-double-badge/;
+/**
+ * Elements whose motion is not a response to the key: the test double's badge (a test-only label that dims while the palette is open)
+ * and the terminal cursor's blink, which starts when a terminal takes focus.
+ */
+const NOT_PRODUCT = /#test-double-badge|terminal-cursor-layer/;
 
 /** One finding: what was still moving and where. */
 type Finding = string;
@@ -87,8 +90,10 @@ async function sweep(page: Page, act: () => Promise<void>): Promise<Finding[]> {
     const found: string[] = [];
     for (const [signature, frames] of sw.key) {
       if (sw.idle.has(signature)) continue;
+      // A spring or a transition writes on every frame; a late change that lasts one or two frames is an instant change that came after
+      // some code had loaded, so it takes at least four frames to count as motion.
       const late = [...frames].filter((f) => f >= sw.keyFrame + 3);
-      if (late.length) found.push(`${signature} (still moving in ${late.length} frames from ${late[0]! - sw.keyFrame} frames after the key)`);
+      if (late.length >= 4) found.push(`${signature} (still moving in ${late.length} frames from ${late[0]! - sw.keyFrame} frames after the key)`);
     }
     return found;
   });
