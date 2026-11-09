@@ -6,16 +6,28 @@ Installed root-owned at /usr/local/libexec/infraternal-browser-suite-service by
 fuzz helper it runs no repository code as root, and it keeps the Forgejo
 token away from the code under test:
 
-1. holds one shared build slot as `claude` (through `runuser`) until step 4 ends;
+1. holds one shared build slot as `claude` (through `runuser`) until step 5 ends;
 2. as `infraternal-browser` (no token, no sudo): fetches the newest origin/dev
    and runs `scripts/nightly-browser-suite.py run` in the dev shell, niced;
-3. reads where that run left its results;
-4. as `infraternal-fuzz` (the account that holds the token): runs the
-   root-owned, reviewed copy of the reporter on those results.
+3. as root, copies the run's three result files into a staging folder that
+   belongs to the token account. Everything in the run folder is hostile (the
+   suite wrote it), so each file is opened without following links, must be a
+   regular file owned by the suite account and under a size cap, and is
+   written out as a fresh private copy;
+4. checks the staged copies are all there;
+5. as `infraternal-fuzz` (the account that holds the token): runs the
+   root-owned, reviewed copy of the reporter on the staged copies only. That
+   account never opens a path the suite account controls.
 
-Its exit status is 1 when the build or the suite could not run, or a report
-could not be filed; failing specs that were filed are a success, as in the fuzz.
+Its exit status is 1 when the build or the suite could not run, a result file
+was refused, or a report could not be filed; failing specs that were filed
+are a success, as in the fuzz.
 """
+import os
+import pwd
+import re
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -27,13 +39,111 @@ REPORT_HOME = '/var/lib/infraternal-fuzz'
 REPORTER = '/usr/local/libexec/infraternal-browser-suite-report'
 BUILD_SLOT = '/home/claude/infraternal-ops/build-slot'
 READY = b'INFRATERNAL_BROWSER_SLOT_READY\n'
+# What the suite may leave in a run folder, and the most the helper will copy of each.
+CAPS = {'meta.json': 64 << 10, 'results.json': 32 << 20, 'suite.log': 16 << 20}
+RUN_NAME = re.compile(r'^\d{8}T\d{6}Z-[0-9a-f]{7}$')
 PATH = 'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin'
+
+
+class Refused(Exception):
+    """A run folder or file that is not what an honest suite run leaves behind."""
+
+
+def ids(user):
+    """The numeric user and group id of an account."""
+    entry = pwd.getpwnam(user)
+    return entry.pw_uid, entry.pw_gid
 
 
 def as_user(user, home, *command, cwd):
     """Run `command` as `user` with a clean environment and return the exit status."""
     return subprocess.run(['setpriv', f'--reuid={user}', f'--regid={user}', '--init-groups', '--reset-env', '--',
                            'env', f'HOME={home}', 'LANG=C.UTF-8', PATH, *command], cwd=cwd).returncode
+
+
+def read_owned(directory, name, cap, owner, tail=False):
+    """Read one regular file of `directory` (an open descriptor) owned by `owner`, never following links.
+
+    Opened with O_NOFOLLOW and O_NONBLOCK, so a symlink is refused and a FIFO
+    cannot hang the helper; then `fstat` on the open descriptor, so nothing
+    can be swapped in after the check. A file over `cap` is refused, except a
+    log (`tail=True`), where the last `cap` bytes are kept.
+    """
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    except OSError as error:
+        raise Refused(f'{name}: {error.strerror}') from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner:
+            raise Refused(f'{name}: not a regular file owned by the suite account')
+        if info.st_size > cap:
+            if not tail:
+                raise Refused(f'{name}: larger than {cap} bytes')
+            os.lseek(descriptor, info.st_size - cap, os.SEEK_SET)
+        data = b''
+        while len(data) <= cap:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            data += chunk
+        return data[:cap]
+    finally:
+        os.close(descriptor)
+
+
+def open_directory(parent, name):
+    """Open a subdirectory by name, refusing a symlink in its place."""
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    except OSError as error:
+        raise Refused(f'{name}: {error.strerror}') from error
+
+
+def latest_name(runs, owner):
+    """The run folder name the suite left in `runs/latest`, which must have the shape of a run folder."""
+    try:
+        root = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f'runs: {error.strerror}') from error
+    try:
+        text = read_owned(root, 'latest', 128, owner).decode(errors='replace')
+    finally:
+        os.close(root)
+    name = text.rstrip('\n')
+    if not RUN_NAME.match(name):
+        raise Refused('latest does not name a run folder')
+    return name
+
+
+def stage(runs, name, destination, owner, chown_to):
+    """Copy a run's result files into `destination` as private regular files, or raise Refused.
+
+    `owner` is the suite account's uid; the run folder and each file must
+    belong to it. `chown_to` is the `(uid, gid)` that gets the copies, or None.
+    """
+    if not RUN_NAME.match(name):
+        raise Refused('bad run name')
+    try:
+        root = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise Refused(f'runs: {error.strerror}') from error
+    try:
+        run = open_directory(root, name)
+    finally:
+        os.close(root)
+    try:
+        if os.fstat(run).st_uid != owner:
+            raise Refused('run folder is not owned by the suite account')
+        copies = {file: read_owned(run, file, cap, owner, tail=(file == 'suite.log')) for file, cap in CAPS.items()}
+    finally:
+        os.close(run)
+    for file, data in copies.items():
+        descriptor = os.open(Path(destination) / file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(data)
+            if chown_to:
+                os.fchown(handle.fileno(), *chown_to)
 
 
 def main():
@@ -55,13 +165,21 @@ def main():
         if as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', 'nix', 'develop', '-c', 'python3',
                    'scripts/nightly-browser-suite.py', 'run', '--runs-dir', runs, cwd=checkout) != 0:
             return 1
-        # The run account wrote this pointer, so treat it as data: it must name a directory inside `runs`.
-        results = Path((Path(runs) / 'latest').read_text().strip()).resolve()
-        if results.parent != Path(runs).resolve():
-            print('nightly browser suite: results path outside the runs directory', file=sys.stderr)
+        # The run account wrote everything below `runs`: treat it as data (see stage).
+        owner = ids(BROWSER_USER)[0]
+        reporter = ids(REPORT_USER)
+        try:
+            name = latest_name(runs, owner)
+            staging = Path(REPORT_HOME) / 'browser-staging'
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir(mode=0o700)
+            os.chown(staging, *reporter)
+            stage(runs, name, staging, owner, reporter)
+        except (Refused, OSError) as error:
+            print(f'nightly browser suite: refusing the run folder: {error}', file=sys.stderr)
             return 1
-        return as_user(REPORT_USER, REPORT_HOME, '/usr/bin/python3', REPORTER, 'report', '--results', str(results),
-                       '--token-file', f'{REPORT_HOME}/forgejo-token', cwd=REPORT_HOME)
+        return as_user(REPORT_USER, REPORT_HOME, '/usr/bin/python3', '-I', REPORTER, 'report', '--results', str(staging),
+                       '--run-name', name, '--token-file', f'{REPORT_HOME}/forgejo-token', cwd=REPORT_HOME)
     finally:
         try:
             holder.stdin.write(b'x')

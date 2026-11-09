@@ -9,6 +9,7 @@ and hand-written Playwright JSON reports, so filing, deduplication and the
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -264,17 +265,28 @@ class SeparateAccount(unittest.TestCase):
         self.assertEqual(installer.USER, service.BROWSER_USER)
         self.assertEqual(str(installer.REPORTER), service.REPORTER)
 
+    def run_dir(self, temp, name='20261109T061806Z-aaaaaaa'):
+        """A well-formed run folder under `temp/runs`, as the unprivileged suite would leave it."""
+        runs = Path(temp) / 'runs'
+        (runs / name).mkdir(parents=True)
+        (runs / name / 'meta.json').write_text(json.dumps({'head': 'a' * 40}))
+        (runs / name / 'results.json').write_text('{"suites": []}')
+        (runs / name / 'suite.log').write_text('ok\n')
+        (runs / 'latest').write_text(name + '\n')
+        return runs, name
+
     def test_token_account_never_runs_repository_code(self):
-        """The suite step runs as the browser account; the token account runs only the root-owned reporter."""
+        """The suite step runs as the browser account; the token account runs only the root-owned reporter on staged copies."""
         holder = mock.MagicMock()
         holder.stdout.readline.return_value = service.READY
         with tempfile.TemporaryDirectory() as temp:
-            runs = Path(temp) / 'runs'
-            (runs / 'one').mkdir(parents=True)
-            (runs / 'latest').write_text(str(runs / 'one') + '\n')
-            with mock.patch.object(service, 'BROWSER_HOME', temp), \
+            self.run_dir(temp)
+            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+                    mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), \
+                    mock.patch.object(service.os, 'chown'), \
                     mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                     mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                Path(temp, 'report').mkdir()
                 self.assertEqual(service.main(), 0)
         steps = [call.args[0] for call in run.call_args_list]
         self.assertEqual(len(steps), 3)
@@ -284,21 +296,111 @@ class SeparateAccount(unittest.TestCase):
         self.assertIn('nice', steps[1])
         self.assertEqual(steps[2][1], '--reuid=infraternal-fuzz')
         self.assertIn(service.REPORTER, steps[2])
+        self.assertIn('-I', steps[2])
+        self.assertIn('--run-name', steps[2])
         self.assertNotIn('nightly-browser-suite.py', ' '.join(steps[2]))
+        self.assertNotIn(temp + '/runs', ' '.join(steps[2]))
         holder.stdin.write.assert_called_once()
 
-    def test_results_path_must_stay_in_runs(self):
-        """A pointer written by the unprivileged run cannot aim the reporter elsewhere."""
+    def stage(self, temp, **kwargs):
+        """Stage the run folder in `temp` the way the helper does, as the current user."""
+        dest = Path(temp) / 'stage'
+        dest.mkdir(exist_ok=True)
+        return service.stage(Path(temp) / 'runs', '20261109T061806Z-aaaaaaa', dest, kwargs.pop('owner', os.getuid()), None), dest
+
+    def test_staging_copies_a_good_run(self):
+        """The three files arrive as private regular copies."""
+        with tempfile.TemporaryDirectory() as temp:
+            self.run_dir(temp)
+            _, dest = self.stage(temp)
+            self.assertEqual(sorted(p.name for p in dest.iterdir()), ['meta.json', 'results.json', 'suite.log'])
+            self.assertEqual((dest / 'suite.log').stat().st_mode & 0o777, 0o600)
+
+    def test_staging_refuses_a_symlinked_log_to_a_secret(self):
+        """Review PoC: suite.log -> a file only the token account can read is refused, and nothing is copied out of it."""
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            secret = Path(temp) / 'forgejo-token'
+            secret.write_text(TOKEN)
+            (runs / name / 'suite.log').unlink()
+            (runs / name / 'suite.log').symlink_to(secret)
+            with self.assertRaises(service.Refused):
+                self.stage(temp)
+            self.assertFalse([p for p in (Path(temp) / 'stage').iterdir() if TOKEN in p.read_text()])
+
+    def test_staging_refuses_pipes_devices_and_oversize_files(self):
+        """Review PoC: a FIFO, a link to /dev/zero and a file over the cap are refused without hanging or filling memory."""
+        for make in ('fifo', 'zero', 'big', 'dir'):
+            with self.subTest(make), tempfile.TemporaryDirectory() as temp:
+                runs, name = self.run_dir(temp)
+                target = runs / name / 'results.json'
+                target.unlink()
+                if make == 'fifo':
+                    os.mkfifo(target)
+                elif make == 'zero':
+                    target.symlink_to('/dev/zero')
+                elif make == 'big':
+                    with target.open('wb') as handle:
+                        handle.truncate(service.CAPS['results.json'] + 1)
+                else:
+                    target.mkdir()
+                with self.assertRaises(service.Refused):
+                    self.stage(temp)
+
+    def test_staging_refuses_files_not_owned_by_the_suite_account(self):
+        """A file owned by someone else (a hard link to a root file, say) is not read."""
+        with tempfile.TemporaryDirectory() as temp:
+            self.run_dir(temp)
+            with self.assertRaises(service.Refused):
+                self.stage(temp, owner=os.getuid() + 1)
+
+    def test_staging_refuses_a_symlinked_run_folder_and_pointer(self):
+        """Neither the run folder nor `latest` may be a link, and the name must have the run-folder shape."""
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            real = runs / (name + '-real')
+            (runs / name).rename(real)
+            (runs / name).symlink_to(real)
+            with self.assertRaises(service.Refused):
+                self.stage(temp)
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            (runs / 'latest').unlink()
+            (runs / 'latest').symlink_to('/etc/passwd')
+            with self.assertRaises(service.Refused):
+                service.latest_name(runs, os.getuid())
+        for bad in ('../../etc', '/etc', 'x\n20261109T061806Z-aaaaaaa', ''):
+            with tempfile.TemporaryDirectory() as temp:
+                runs, _ = self.run_dir(temp)
+                (runs / 'latest').write_text(bad)
+                with self.assertRaises(service.Refused):
+                    service.latest_name(runs, os.getuid())
+
+    def test_a_refused_run_never_reaches_the_reporter(self):
+        """If staging refuses, the unit fails and the token account runs nothing."""
         holder = mock.MagicMock()
         holder.stdout.readline.return_value = service.READY
         with tempfile.TemporaryDirectory() as temp:
-            (Path(temp) / 'runs').mkdir()
-            (Path(temp) / 'runs/latest').write_text('/etc\n')
-            with mock.patch.object(service, 'BROWSER_HOME', temp), \
+            runs, name = self.run_dir(temp)
+            (runs / name / 'suite.log').unlink()
+            (runs / name / 'suite.log').symlink_to('/etc/hostname')
+            with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+                    mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), mock.patch.object(service.os, 'chown'), \
                     mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                     mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                Path(temp, 'report').mkdir()
                 self.assertEqual(service.main(), 1)
         self.assertEqual(run.call_count, 2)
+
+    def test_the_reporter_itself_refuses_links_in_its_input(self):
+        """Defence in depth: even a staging folder with a link in it is not followed by the reporter."""
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / 'real').write_text(TOKEN)
+            (Path(temp) / 'link').symlink_to(Path(temp) / 'real')
+            os.mkfifo(Path(temp) / 'pipe')
+            for name in ('link', 'pipe'):
+                with self.assertRaises((OSError, ValueError)):
+                    suite.read_regular(Path(temp) / name, 1000)
 
     def test_no_slot_means_no_run(self):
         """Without a build slot nothing runs."""
