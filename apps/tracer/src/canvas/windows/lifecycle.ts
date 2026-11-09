@@ -234,8 +234,9 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.paintEmpty(c);
       cx.view.settle(c.view.id);
       // Neighbours close the gap without overshoot (the ease-out curve): no value passes its final place. A keyboard
-      // close moves nothing on screen with a motion: the layout is simply the new one.
-      if (!instant) flip.play(before, true, { visualDuration: 0.28 });
+      // close moves nothing on screen with a motion: the layout is simply the new one. The reflow follows the 100 ms
+      // exit below, so 200 ms here keeps the whole close within 300 ms (#471).
+      if (!instant) flip.play(before, true, { visualDuration: 0.2 });
       for (const w of c.wins.values()) w.binding?.refit();
       cx.tree.render();
       // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
@@ -244,11 +245,13 @@ export function createWindows(cx: Ctx): WindowsModule {
     };
     if (reduced.matches || instant) { finish(); return; }
     root.style.pointerEvents = "none";
+    // The exit is quicker than any entrance: on the ease-out curve the window is 90 % gone in about 35 ms, so the
+    // reflow that follows starts almost at once.
     const spring = new Spring(0, (p) => {
       root.style.transform = `scale(${1 - 0.04 * p})`;
       root.style.opacity = String(1 - p);
       if (p >= 1) finish();
-    }, { visualDuration: 0.22 });
+    }, { visualDuration: 0.1 });
     restAt(spring, SCALE_REST);
     spring.set(1);
   };
