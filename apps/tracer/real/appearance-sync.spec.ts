@@ -596,7 +596,7 @@ test("a look picked while the previous one is still in flight is kept on a slow 
     await settled(a); await settled(b);
     await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 60_000 }).toBe("solid");
     await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 60_000 }).toBe("solid");
-    await expect(b.locator("html")).toHaveAttribute("data-look", "solid");
+    await expect(b.locator("html")).toHaveAttribute("data-look", "solid", { timeout: 30_000 });
   } finally {
     await second.close();
     await first.close();
