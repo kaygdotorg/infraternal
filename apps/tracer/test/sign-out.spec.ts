@@ -364,24 +364,21 @@ test("D245: signing out removes the account's data from every storage area; sign
     localStorage.setItem("infraternal.canvas.someone-else", "{}");
     localStorage.setItem("tracer.sessions.someone-else", "[]");
   });
-  // Make a layout change and let the 300 ms coalescing save land, then see what the account owns.
-  // The product canvas finishes opening its windows a moment after the first one appears.
-  await page.waitForTimeout(3000);
-  const windows = await page.locator(".ui-window").count();
-  await page.locator(".ui-window").first().locator("[data-action='split-right']").click();
-  await expect(page.locator(".ui-window")).toHaveCount(windows + 1);
-  await expect.poll(() => page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("infraternal.canvas.") && !k.endsWith("someone-else")))).toBe(true);
+  // Since D312 the server holds the only saved layout and this build writes no account key into the browser, so the keys
+  // to clear are the ones an EARLIER build left on this device (its layout document, session list and tab pointer). Seed
+  // them under the real account id, which only the session endpoint tells the page, and prove sign-out still sweeps them.
+  const id = await page.evaluate(async () => ((await (await fetch("/auth/session", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as { user_id: string }).user_id);
+  expect(id).toMatch(/\S/);
+  await page.evaluate((account) => {
+    localStorage.setItem(`infraternal.canvas.${account}`, JSON.stringify({ format: "infraternal.canvas", version: 1, views: [] }));
+    localStorage.setItem(`tracer.sessions.${account}`, JSON.stringify([{ host: "h", id: "s1", name: "build", pinned: false, frecency: 1 }]));
+    localStorage.setItem("tracer.user-id", account);
+    sessionStorage.setItem(`tracer.session.${account}`, "s1");
+  }, id);
   const before = await storageSnapshot(page);
   const own = (snap: typeof before) => [...Object.keys(snap.local), ...Object.keys(snap.session)].filter((k) => ACCOUNT_KEY.test(k) && !k.endsWith("someone-else"));
   expect(own(before).some((k) => k.startsWith("infraternal.canvas."))).toBe(true);
-  const canvasBytes = Object.entries(before.local).filter(([k]) => k.startsWith("infraternal.canvas.")).reduce((n, [, v]) => n + v.length, 0);
-  console.log(`layout document: ${canvasBytes} bytes; keys: ${own(before).join(", ")}`);
-  // The mock host keeps no session list or tab pointer; seed what a real host's session leaves for this account.
-  const id = own(before).find((k) => k.startsWith("infraternal.canvas."))!.slice("infraternal.canvas.".length);
-  await page.evaluate((account) => {
-    localStorage.setItem(`tracer.sessions.${account}`, JSON.stringify([{ host: "h", id: "s1", name: "build", pinned: false, frecency: 1 }]));
-    sessionStorage.setItem(`tracer.session.${account}`, "s1");
-  }, id);
+  console.log(`keys: ${own(before).join(", ")}`);
 
   await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("sign out");
@@ -396,7 +393,15 @@ test("D245: signing out removes the account's data from every storage area; sign
   expect(after.local["tracer.theme"]).toBe("mocha");
   expect(after.local["infraternal.canvas.someone-else"]).toBe("{}");
   expect(after.local["tracer.sessions.someone-else"]).toBe("[]");
-  expect(after.caches).toEqual([]);
+  // The only cache is the offline worker's (offline.worker.ts): public app-shell files, fetched without credentials, shared by every
+  // account. Nothing of the account may be in it: only the page itself and script, style, font and wasm files without a query.
+  expect(after.caches.filter((name) => name !== "infraternal-drawing-v1")).toEqual([]);
+  const cached = await page.evaluate(async () => (await (await caches.open("infraternal-drawing-v1")).keys()).map((request) => new URL(request.url)).map((url) => ({ path: url.pathname, query: url.search })));
+  for (const entry of cached) {
+    expect(entry.query, `cached ${entry.path} has no query`).toBe("");
+    expect(entry.path === "/" || /\.(?:js|css|woff2|wasm)$/.test(entry.path), `cached ${entry.path} is a public app-shell file`).toBe(true);
+    expect(entry.path.includes(id), `cached ${entry.path} does not name the account`).toBe(false);
+  }
   expect(after.databases).toEqual([]);
   expect(after.cookies).toBe("");
   // Nothing mentions the signed-out account id anywhere in what is left.
