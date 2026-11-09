@@ -77,7 +77,7 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string; takeover?: { install: string; live: boolean } };
+  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string; takeover?: { install: string; live: boolean }; closes?: { terminals: Array<{ account: string; program: string; since: number; tty?: string; others?: number }>; close_challenge: string } };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
@@ -373,6 +373,16 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
               mode: target.mode,
               findings: ["An infraternal agent from an earlier setup that isn't one of this server's hosts", "Its infraternal agent is running; Take over stops it", "It is set aside, put back if setup fails, and deleted once this machine has joined"],
             });
+            return;
+          }
+          // Hosts named `stale-terminals*`: a stuck first install with one of its own terminals open. Start fresh lists it
+          // and only its own challenge confirms; the generic leftovers challenge is nil, as the server sends it (D368, #433).
+          if (/^stale-terminals/.test(target.name) && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "This host has leftovers from an earlier setup", { kind: "stale_previous_attempt", message: "An earlier setup of this host stopped before it finished.", log_tail: [],
+              closes: { terminals: [{ account: "root", program: "bash", since: 1792195200, tty: "pts/0", others: 0 }], close_challenge: target.challenge } }, undefined,
+              { challenge: "00000000-0000-0000-0000-000000000000", mode: target.mode, findings: ["Earlier setup ownership marker", "Fresh setup ownership journal", "No other live setup found", "An open terminal: root, bash on pts/0; Start fresh closes it"] });
             return;
           }
           // Hosts named `stale*`: the check finds leftovers and the attempt pauses on a `check` event until `start-fresh`.

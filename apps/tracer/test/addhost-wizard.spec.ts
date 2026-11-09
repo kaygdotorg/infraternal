@@ -529,6 +529,35 @@ test("leftovers: one Start fresh continues the same setup to done", async ({ pag
   await expect.poll(() => consoleWindows(page)).toContain("w-stale.lab");
 });
 
+/**
+ * D368 (#433, J205c legacy1): a stuck first install's own open terminal is listed before Start fresh closes it.
+ * The progress row's quick Start fresh must open that page too, never confirm from the row with the generic
+ * (nil) challenge, which the server refuses.
+ */
+test("leftovers with a terminal: the row opens the list, and only its button confirms", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  const sent: Array<Record<string, unknown>> = [];
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+    if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* binary frames */ } }
+  }));
+  await addTyped(page, "stale-terminals.lab");
+  const failure = page.locator(".ah-page[data-page='failure']");
+  await expect(failure.locator("[data-terminal-summary]")).toHaveText("1 open terminal. Start fresh closes it.", { timeout: 15_000 });
+  await expect(failure.locator(".ui-kv-value")).toContainText(["root, bash on pts/0, since 17 Oct 2026, "]);
+  await expect(inWizard(page, "Close it and start fresh")).toBeVisible();
+  // Back to the list: the row's quick fix opens the same page and sends nothing.
+  await wizard(page).locator('[data-ah="back-progress"]').click();
+  await wizard(page).locator('[data-ah="fix-job"]').first().click();
+  await expect(failure.locator("[data-terminal-summary]")).toBeVisible();
+  expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+  await inWizard(page, "Close it and start fresh").click();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  const fresh = sent.filter((command) => command.action === "start-fresh");
+  expect(fresh).toHaveLength(1);
+  expect(fresh[0]?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+});
+
 test("leftovers: Back returns to the host list and Start fresh needs the server's challenge", async ({ page }) => {
   await open(page);
   await openWizard(page);
