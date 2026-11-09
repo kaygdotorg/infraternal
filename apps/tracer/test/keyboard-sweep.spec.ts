@@ -42,8 +42,8 @@ const SKIP_LABEL = /^(Reload|Sign out of every device|Mockup:)/i;
  */
 const NOT_PRODUCT = /#test-double-badge|terminal-cursor-layer|ui-conn-g/;
 
-/** A palette family of this many rows or fewer is swept row by row; a larger one (twelve themes) takes one row. */
-const FAMILY_ALL = 6;
+/** A palette family of this many rows or fewer is swept row by row (nine fonts, four card levels); a larger one (the themes) takes one row. */
+const FAMILY_ALL = 10;
 
 /** One finding: what was still moving and where. */
 type Finding = string;
@@ -190,19 +190,10 @@ for (const size of SIZES) {
       await page.keyboard.press(PALETTE);
       await expect(page.locator("#palette")).toBeVisible();
       // Every row is swept except the rows of a large argument family, which run the same code with a different argument: theme:*,
-      // canvas:settings:*, canvas:view:* ... take one row each. A family of FAMILY_ALL rows or fewer (the four fonts, the four card
+      // canvas:settings:*, canvas:view:* ... take one row each. A family of FAMILY_ALL rows or fewer (the fonts, the card
       // levels) is swept whole: each row changes a different selection in a pane behind the palette, and the one that moves is not
       // always the one sampled. The canvas verbs (canvas:close, canvas:overview, canvas:sessions, ...) are different code each.
-      const listed = (): Promise<Array<{ label: string; action: string }>> => page.locator("#palette-results .result").evaluateAll((nodes) => nodes.map((node) => ({ label: node.querySelector(".result-label")?.textContent?.trim() ?? "", action: (node as HTMLElement).dataset.action ?? "" })));
-      const rows = await listed();
-      // The empty palette shows only some rows of an argument family (the current font, the current card level). Typing the family's
-      // name lists all of it, so the sweep reads each family once more that way and keeps the union.
-      for (const word of new Set(rows.map((row) => row.action).filter((action) => action.includes(":") && !action.startsWith("canvas:")).map((action) => action.slice(0, action.indexOf(":"))))) {
-        await page.locator("#palette-input").fill(word);
-        // sleep: the list is filtered to the family
-        await page.waitForTimeout(150);
-        for (const row of await listed()) if (row.action && !rows.some((known) => known.action === row.action)) rows.push(row);
-      }
+      const rows = await page.locator("#palette-results .result").evaluateAll((nodes) => nodes.map((node) => ({ label: node.querySelector(".result-label")?.textContent?.trim() ?? "", action: (node as HTMLElement).dataset.action ?? "" })));
       const familyOf = (action: string, label: string): string => {
         const colons = action.split(":").length - 1;
         return colons >= 2 ? action.slice(0, action.lastIndexOf(":")) : colons === 1 && !action.startsWith("canvas:") ? action.slice(0, action.indexOf(":")) : action || label;
@@ -215,7 +206,7 @@ for (const size of SIZES) {
       }
       const targets = [...members.values()].flatMap((list) => (list.length <= FAMILY_ALL ? list : [list[0]!]));
       expect(targets.length, "the palette lists its actions").toBeGreaterThan(14);
-      expect(targets.filter((target) => target.action.startsWith("font:")).length, "all four font rows are swept").toBe(4);
+      expect(targets.filter((target) => target.action.startsWith("font:")).length, "every font row is swept").toBe(rows.filter((row) => row.action.startsWith("font:")).length);
       const failures: string[] = [];
       for (const { label, action } of targets) {
         await fresh(page, size);
