@@ -1124,6 +1124,8 @@
 .ui-sp[data-ticks] { --ui-sp-end: calc(var(--ui-sp-tick, 1.125rem) + 0.625rem); }
 .ui-sp .ui-sp-row { position: relative; isolation: isolate; padding: 0; }
 .ui-sp .ui-sp-row:is(.ui-sp-switch, .ui-sp-status) { padding-right: var(--ui-sp-end); }
+/* A switch ends on the row's right edge. settings-edges.spec.ts measures that to 0.5 px and it was 0.8 px off when this 1 px margin was removed, so it stays (an optical hairline, not a grid step). */
+.ui-sp .ui-switch, .ui-ts-item .ui-switch { margin-right: 0.0625rem; }
 .ui-sp .ui-sp-row::before { content: ""; position: absolute; inset: 0 -0.5rem; z-index: -1; border-radius: var(--r-sm); pointer-events: none; transition: background-color var(--t-press) ease; }
 @media (hover: hover) and (pointer: fine) {
   .ui-sp .ui-sp-row:hover { background: none; }
