@@ -21,7 +21,7 @@ function fixture() {
       if (input.op === "set") enabled = input.enabled as boolean;
       return { saved: true };
     },
-  }, { show: (value) => { notice = value; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false }, (_anchor, options) => { confirmation = options; return { close() {} }; });
+  }, { show: (value) => { notice = value; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false, setEdge() {} }, (_anchor, options) => { confirmation = options; return { close() {} }; });
   return { hints, writes, notice: () => notice, confirmation: () => confirmation };
 }
 
@@ -69,7 +69,7 @@ test("✗ changes nothing and ? opens the docs without closing the question", as
   const opened: string[] = [];
   let notice: ToastMessage | undefined;
   const hints = createStartupHints({ isWelcomed: false, onWelcome: () => () => {}, async call(_action, input) { return input.op === "inspect" ? { multiplexer: "zellij", proposal: { ...proposal, multiplexer: "zellij" } } : { global_enabled: true }; } },
-    { show: (value) => { notice = value; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false }, undefined, { openDocs: (url) => opened.push(url) });
+    { show: (value) => { notice = value; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false, setEdge() {} }, undefined, { openDocs: (url) => opened.push(url) });
   await hints.inspect("01234567890123456789012345678901");
   expect(notice?.message.startsWith("Zellij started automatically.")).toBe(true);
   const [, keep, help] = notice!.iconActions!;
@@ -89,7 +89,7 @@ test("with no recognised startup line, ✓ copies the line instead of editing a 
   try {
     const writes: Record<string, unknown>[] = [];
     const hints = createStartupHints({ isWelcomed: false, onWelcome: () => () => {}, async call(_action, input) { if (input.op === "inspect") return { multiplexer: "tmux" }; if (input.op !== "get") writes.push(input); return { global_enabled: true }; } },
-      { show: (value) => { notice = value; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false });
+      { show: (value) => { notice = value; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false, setEdge() {} });
     await hints.inspect("01234567890123456789012345678901");
     expect(notice?.iconActions?.[0]?.label).toBe("Copy the line that switches");
     notice?.iconActions?.[0]?.onSelect(click);
@@ -116,7 +116,7 @@ test("disposing a pending detection never shows its late notice", async () => {
   let answer!: (value: Record<string, unknown>) => void;
   let shown = 0;
   const hints = createStartupHints({ isWelcomed: false, onWelcome: () => () => {}, call: () => new Promise((resolve) => { answer = resolve; }) },
-    { show: () => { shown++; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false });
+    { show: () => { shown++; return "t"; }, dismiss() {}, dispose() {}, focusAction: () => false, setEdge() {} });
   const pending = hints.inspect("01234567890123456789012345678901");
   hints.dispose();
   answer({ multiplexer: "tmux", proposal });
@@ -130,7 +130,7 @@ test("a newly seen host reads its saved override before showing its switch", asy
     async call(_action, input) {
       return input.op === "get" ? { global_enabled: true, host_override: false } : {};
     },
-  }, { show: () => "t", dismiss() {}, dispose() {}, focusAction: () => false });
+  }, { show: () => "t", dismiss() {}, dispose() {}, focusAction: () => false, setEdge() {} });
   await hints.inspect("01234567890123456789012345678901", undefined, "Local host");
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(hints.switches()[1]?.get()).toBe(false);
