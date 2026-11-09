@@ -4,7 +4,7 @@ import { branchedMenu, type BranchSection, type BranchedMenu, type BranchedOptio
 import { applyTheme, DEFAULT_CARD, DEFAULT_WINDOW, LEVEL_NAMES, terminalTheme, THEMES, type Theme } from "../../../packages/ui/src/themes";
 import { refreshTip } from "../../../packages/ui/src/tooltip";
 import { Spring } from "../../../packages/ui/src/spring";
-import { markMotion } from "../../../packages/ui/src/input-source";
+import { markMotion, triggeredByKeyboard } from "../../../packages/ui/src/input-source";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
 import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
@@ -1085,7 +1085,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     keytray.querySelectorAll<HTMLElement>(".keydots i").forEach((dot, i) => dot.toggleAttribute("data-on", i === index));
     canvasRowEl.inert = index !== 0;
     keysRowEl.inert = index !== 1;
-    rowSpring.set(index, instant);
+    // A key (Tab into a terminal, the canvas lock, a palette row) swaps the tray rows at once; a swipe or a tap glides them (#427).
+    rowSpring.set(index, instant || triggeredByKeyboard());
   };
   let rowLock: "keys" | undefined;
   // The key row exists only while a terminal has input focus (or an input lock holds it): without one there is

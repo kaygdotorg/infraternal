@@ -214,7 +214,8 @@ export function createWindowCard(options: WindowCardOptions): WindowCard {
   const setLocked = (next: boolean, instant = false): void => {
     if (next === lock.locked) return;
     // A key (Ctrl+Shift+L, or Space or Enter on the lock) locks with no border fade and no lock-icon motion (#427).
-    instant = markMotion(root) || instant;
+    // The lock button is marked as well: --ui-motion-scale does not inherit, so its own fade needs its own mark.
+    instant = markMotion(root, lock.root) || instant;
     root.toggleAttribute("data-locked", next);
     lock.setLocked(next, instant);
   };
