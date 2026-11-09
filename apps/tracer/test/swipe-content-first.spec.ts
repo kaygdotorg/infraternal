@@ -116,6 +116,60 @@ test.describe("phone: touch", () => {
     await expect.poll(() => stopIndex(page)).toBe(index - 1);
     await page.screenshot({ path: `${OUT}/phone-two-fingers.png` });
   });
+
+  /** One finger drags from the middle of `box`, `dx`/`dy` over 12 frames. */
+  async function oneFinger(page: Page, context: BrowserContext, at: { x: number; y: number }, dx: number, dy: number): Promise<void> {
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [at] });
+    // sleep: one touch or wheel step per frame, like a finger or a pad; there is no event to wait for
+    for (let i = 1; i <= 12; i++) { await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: at.x + (dx * i) / 12, y: at.y + (dy * i) / 12 }] }); await page.waitForTimeout(16); }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    // sleep: the camera spring and a gesture's momentum settle; no event marks the end
+    await page.waitForTimeout(500);
+  }
+
+  test("one finger on a window with nothing to scroll does not move the canvas either", async ({ context }) => {
+    test.setTimeout(90_000);
+    const page = await open(context);
+    // The first docs page that fits its window (a short page with nothing to scroll).
+    const short = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.ui-window[data-window-id^="d-"]')].find((w) => { const s = w.querySelector<HTMLElement>(".dr-scroll"); return !!s && s.scrollHeight <= s.clientHeight + 1; })?.dataset.windowId);
+    expect(short, "a docs window with nothing to scroll exists").toBeDefined();
+    await page.evaluate((id) => (window as unknown as { __tracerClusters: Api }).__tracerClusters.activateWindow!(id), short!);
+    // sleep: the camera flies to the activated window; no event marks the end
+    await page.waitForTimeout(1500);
+    const box = (await page.locator(`.ui-window[data-window-id="${short}"] .dr-scroll`).boundingBox())!;
+    const before = await canvasState(page), index = await stopIndex(page);
+    const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await oneFinger(page, context, at, -200, 0);
+    await oneFinger(page, context, at, 0, -200);
+    await oneFinger(page, context, at, 200, 120);
+    expect(await canvasState(page), "one finger over a short window left the canvas alone").toBe(before);
+    expect(await stopIndex(page)).toBe(index);
+  });
+
+  test("one finger on empty canvas still pans a free canvas (D377)", async ({ context }) => {
+    test.setTimeout(90_000);
+    mkdirSync(OUT, { recursive: true });
+    const page = await open(context);
+    await page.evaluate(() => (window as unknown as { __tracerClusters: Api }).__tracerClusters.setCanvasLock!(false));
+    await expect.poll(async () => ((await api(page, "canvasLock")) as { on: boolean }).on).toBe(false);
+    // Zoom the free canvas out with the overview so bare canvas shows around the windows.
+    await api(page, "overview");
+    // sleep: the overview's fly-out settles; no event marks the end
+    await page.waitForTimeout(1500);
+    const bare = await page.evaluate(() => {
+      for (let y = 120; y < 800; y += 16) for (let x = 24; x < 370; x += 16) {
+        const hit = document.elementFromPoint(x, y);
+        if (hit && hit.closest(".cl-viewport") && !hit.closest(".ui-window, button, .cl-label, .cl-edge, .cl-port, .cl-chip, [role=toolbar], #capsule")) return { x, y };
+      }
+      return undefined;
+    });
+    expect(bare, "a point of bare canvas exists").toBeDefined();
+    const before = await canvasState(page);
+    await oneFinger(page, context, bare!, -80, -60);
+    expect(await canvasState(page), "one finger on empty canvas pans the free canvas").not.toBe(before);
+    await page.screenshot({ path: `${OUT}/phone-free-bare-pan.png` });
+  });
 });
 
 test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
@@ -164,5 +218,88 @@ test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
     // sleep: the camera spring and a gesture's momentum settle; no event marks the end
     await page.waitForTimeout(600);
     expect(await pageTop(page), "and the page under the pointer did not scroll").toBe(0);
+  });
+
+  test("the canvas modifier is Option/Alt on every OS (D377)", () => {
+    expect(CANVAS_WHEEL_MODIFIER).toBe("Alt");
+  });
+
+  /** Puts a 2400 px wide block that scrolls sideways at the top of the docs page and returns the point at its middle. */
+  async function addWideBlock(page: Page): Promise<{ x: number; y: number }> {
+    await page.evaluate((sel) => {
+      const d = document.createElement("div");
+      d.id = "wide-block";
+      d.style.cssText = "overflow-x:auto;overflow-y:hidden;width:100%;height:56px;margin:0 0 12px";
+      const inner = document.createElement("div");
+      inner.style.cssText = "width:2400px;height:40px";
+      d.append(inner);
+      document.querySelector(`${sel} .dr-page`)!.prepend(d);
+      document.querySelector<HTMLElement>(`${sel} .dr-scroll`)!.scrollTop = 0;
+    }, PAGE);
+    const r = (await page.locator("#wide-block").boundingBox())!;
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }
+  const blockLeft = (page: Page): Promise<number> => page.evaluate(() => document.getElementById("wide-block")!.scrollLeft);
+
+  test("a sideways swipe over a wide block scrolls it to its end and beyond, and the canvas never moves", async ({ context }) => {
+    test.setTimeout(90_000);
+    mkdirSync(OUT, { recursive: true });
+    const page = await open(context);
+    const at = await addWideBlock(page);
+    const before = await canvasState(page), index = await stopIndex(page);
+    await page.mouse.move(at.x, at.y);
+    await swipe(page, 60, 0);
+    expect(await blockLeft(page), "the block scrolled sideways").toBeGreaterThan(100);
+    for (let i = 0; i < 10; i++) await swipe(page, 60, 0); // far past its end, in fresh gestures
+    const max = await page.evaluate(() => { const b = document.getElementById("wide-block")!; return b.scrollWidth - b.clientWidth; });
+    expect(await blockLeft(page), "to the end").toBeGreaterThanOrEqual(max - 2);
+    expect(await canvasState(page), "at its end the swipe still does not overflow to the canvas").toBe(before);
+    expect(await stopIndex(page)).toBe(index);
+    await page.screenshot({ path: `${OUT}/desktop-wide-block-end.png` });
+  });
+
+  test("Option/Alt plus the wheel over a wide block moves the canvas and the block stays", async ({ context }) => {
+    test.setTimeout(90_000);
+    const page = await open(context);
+    const at = await addWideBlock(page);
+    const index = await stopIndex(page);
+    await page.mouse.move(at.x, at.y);
+    await page.keyboard.down("Alt");
+    await page.mouse.wheel(0, -300);
+    await page.keyboard.up("Alt");
+    await expect.poll(() => stopIndex(page), "Alt + wheel moves the canvas").not.toBe(index);
+    expect(await blockLeft(page), "the block did not scroll").toBe(0);
+  });
+
+  test("Shift plus the wheel scrolls content sideways and does not move the canvas (D377)", async ({ context }) => {
+    test.setTimeout(90_000);
+    const page = await open(context);
+    const at = await addWideBlock(page);
+    const before = await canvasState(page), index = await stopIndex(page);
+    await page.mouse.move(at.x, at.y);
+    await page.keyboard.down("Shift");
+    for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 100); await page.waitForTimeout(16); }
+    await page.keyboard.up("Shift");
+    // sleep: the camera spring and a gesture's momentum settle; no event marks the end
+    await page.waitForTimeout(500);
+    expect(await blockLeft(page), "Shift + wheel scrolled the block sideways").toBeGreaterThan(100);
+    expect(await canvasState(page)).toBe(before);
+    expect(await stopIndex(page)).toBe(index);
+  });
+
+  test("a vertical wheel at the end of the page stays with the page: it never steps to another window (D377)", async ({ context }) => {
+    test.setTimeout(90_000);
+    const page = await open(context);
+    const box = (await page.locator(`${PAGE} .dr-scroll`).boundingBox())!;
+    await page.evaluate((sel) => { const s = document.querySelector<HTMLElement>(`${sel} .dr-scroll`)!; s.scrollTop = s.scrollHeight; }, PAGE);
+    const before = await canvasState(page), index = await stopIndex(page);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    for (let i = 0; i < 4; i++) {
+      await page.mouse.wheel(0, 300);
+      // sleep: a quiet gap longer than a gesture (150 ms), so each wheel is a fresh gesture at the end
+      await page.waitForTimeout(400);
+    }
+    expect(await canvasState(page), "fresh gestures at the end of the page did not move the canvas").toBe(before);
+    expect(await stopIndex(page)).toBe(index);
   });
 });
