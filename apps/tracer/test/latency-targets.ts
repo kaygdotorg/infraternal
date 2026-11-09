@@ -7,7 +7,7 @@
  * here match the Python ones, so change both together.
  *
  * Use `d375Row()` to print a measured row: it decides PASS/FAIL against the gate and prints the same line shape the
- * Python report parses. The functional suite only prints rows (it never asserts speed, #314); the report at the end of
+ * Python report parses, tagged with the run's frame pacing (`latencyDisplay()`). The functional suite only prints rows (it never asserts speed, #314); the report at the end of
  * `scripts/verify latency` and the perf-VM suite are what gate.
  */
 
@@ -21,6 +21,15 @@ export const FIRST_PAINT_MS = 1000;
 export const RENDER_FPS = 120;
 /** The CPU slowdown that stands in for a mid-range phone (Chromium's own mobile preset uses the same factor). */
 export const PHONE_CPU_SLOWDOWN = 4;
+
+/**
+ * The frame pacing this browser run uses, from `INFRATERNAL_LATENCY_DISPLAY`: `unthrottled` (vsync and the frame-rate
+ * limit off, so a frame-bound row measures our own work; this is what gates) or `60hz` (headless Chromium's normal
+ * pacing, reported beside it). `scripts/verify latency` runs the row specs once in each.
+ */
+export function latencyDisplay(): "unthrottled" | "60hz" {
+  return process.env.INFRATERNAL_LATENCY_DISPLAY === "unthrottled" ? "unthrottled" : "60hz";
+}
 
 /**
  * The slowest round trip the test profile produces: the configured RTT plus its full jitter (0 when the delay is off).
@@ -55,7 +64,8 @@ export function d375Row(row: D375Measurement): { line: string; passed: boolean }
   const within = (limit: number): boolean => (row.higherIsBetter ? row.value >= limit : row.value <= limit);
   const passed = Number.isFinite(row.value) && row.n > 0 && within(gate);
   const line =
-    `METRIC name=d375_${row.key} source=${row.source} n=${row.n} value=${row.value.toFixed(2)} unit=${row.unit} ` +
+    `METRIC name=d375_${row.key} source=${row.source} display=${latencyDisplay()} n=${row.n} ` +
+    `value=${row.value.toFixed(2)} unit=${row.unit} ` +
     `target=${row.target.toFixed(2)} gate=${gate.toFixed(2)} target_met=${within(row.target) ? "yes" : "no"} ` +
     `result=${passed ? "PASS" : "FAIL"}${row.extra ? ` ${row.extra}` : ""}`;
   return { line, passed };

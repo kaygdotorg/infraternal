@@ -32,7 +32,7 @@ class ReportTests(unittest.TestCase):
         log = "\n".join(line for line in full_log().splitlines() if "d375_idle_agent_rss" not in line)
         table, passed = targets.report(log)
         self.assertFalse(passed)
-        self.assertIn("| Idle infraternal agent | under 15 MB RSS | - | - | - | MISSING |", table)
+        self.assertIn("| Idle infraternal agent | under 15 MB RSS | - | - | - | - | MISSING |", table)
 
     def test_failed_row_fails(self):
         slow = targets.row_line("predicted_glyph", source="test", n=100, value=9.0, unit="ms", target=targets.FRAME_MS)
@@ -51,12 +51,51 @@ class ReportTests(unittest.TestCase):
     def test_own_overhead_is_composed_from_both_shares(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_own_overhead" not in line)
         parts = ("METRIC name=own_overhead_agent source=a n=100 p50_ms=0.4 p99_ms=0.74 result=REPORT\n"
-                 "METRIC name=own_overhead_browser source=b n=20 p50_ms=3 p99_ms=6.10 result=REPORT")
+                 "METRIC name=own_overhead_browser source=b display=unthrottled n=20 p50_ms=3 p99_ms=6.10 result=REPORT\n"
+                 "METRIC name=frame_pacing display=unthrottled idle_fps=250")
         table, passed = targets.report(log + "\n" + parts)
         self.assertTrue(passed)
-        self.assertIn("| 6.84 ms (n=20) | yes | PASS |", table)
-        _, passed = targets.report(log + "\n" + parts.splitlines()[0])
+        self.assertIn("| 6.84 ms (n=20) | - | yes | PASS |", table)
+        _, passed = targets.report(log + "\n" + parts.splitlines()[0] + "\n" + parts.splitlines()[2])
         self.assertFalse(passed, "one share alone must leave the row MISSING")
+
+    def test_unthrottled_gates_and_60hz_is_shown_beside_it(self):
+        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
+        fast = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=20, value=4.0, unit="ms",
+                                target=targets.FRAME_MS)
+        paced = targets.row_line("predicted_glyph", source="t", display="60hz", n=20, value=15.0, unit="ms",
+                                 target=targets.FRAME_MS)
+        pacing = "METRIC name=frame_pacing display=unthrottled idle_fps=240.0\nMETRIC name=frame_pacing display=60hz idle_fps=60.0"
+        table, passed = targets.report("\n".join([log, paced, fast, pacing]))
+        self.assertTrue(passed, table)
+        self.assertIn("| 4.00 ms (n=20) | 15.00 ms | yes | PASS |", table)
+        self.assertIn("unthrottled 240.0", table)
+
+    def test_60hz_alone_cannot_gate(self):
+        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
+        paced = targets.row_line("predicted_glyph", source="t", display="60hz", n=20, value=4.0, unit="ms",
+                                 target=targets.FRAME_MS)
+        table, passed = targets.report(log + "\n" + paced)
+        self.assertFalse(passed)
+        self.assertIn("| 4.00 ms | - | MISSING |", table)
+
+    def test_unthrottled_run_still_at_60hz_fails(self):
+        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
+        fast = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=20, value=4.0, unit="ms",
+                                target=targets.FRAME_MS)
+        table, passed = targets.report("\n".join([log, fast, "METRIC name=frame_pacing display=unthrottled idle_fps=60.1"]))
+        self.assertFalse(passed)
+        self.assertIn("did not run above 70 fps", table)
+
+    def test_own_overhead_per_display(self):
+        log = "\n".join(line for line in full_log().splitlines() if "d375_own_overhead" not in line)
+        parts = ("METRIC name=own_overhead_agent source=a n=100 p50_ms=0.4 p99_ms=0.70 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b display=unthrottled n=20 p50_ms=1 p99_ms=3.30 result=REPORT\n"
+                 "METRIC name=own_overhead_browser source=b display=60hz n=20 p50_ms=3 p99_ms=17.30 result=REPORT\n"
+                 "METRIC name=frame_pacing display=unthrottled idle_fps=300")
+        table, passed = targets.report(log + "\n" + parts)
+        self.assertTrue(passed, table)
+        self.assertIn("| 4.00 ms (n=20) | 18.00 ms | yes | PASS |", table)
 
     def test_frame_rate_compares_upwards(self):
         self.assertIn("result=PASS", targets.row_line("render_10mbps", source="t", n=1, value=121, unit="fps",
@@ -72,7 +111,7 @@ class ReportTests(unittest.TestCase):
         first = targets.row_line("real_echo", source="t", n=5, value=400, unit="ms", target=346.67)
         second = targets.row_line("real_echo", source="t", n=5, value=320, unit="ms", target=346.67)
         rows = targets.parse(f"[chromium] › spec  {first}\n{second}")
-        self.assertEqual(rows["real_echo"]["value"], "320.00")
+        self.assertEqual(rows["real_echo"]["native"]["value"], "320.00")
 
     def test_unknown_row_is_refused(self):
         with self.assertRaises(ValueError):

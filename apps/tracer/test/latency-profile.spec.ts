@@ -1,14 +1,16 @@
 /**
- * The two D375 rows only a browser can measure outside the terminal scenario: rendering at 10 MB/s and first paint on a
- * phone [D375, D41].
+ * The two D375 rows only a browser can measure outside the terminal scenario, rendering at 10 MB/s and first paint on a
+ * phone, plus the frame-pacing check that tells the unthrottled run from the 60 Hz one [D375, D41].
  *
  * These run only inside `scripts/verify latency` (which sets `INFRATERNAL_LATENCY_PROFILE=1`) and print `METRIC
  * name=d375_*` rows; like the rest of the functional suite they never assert speed (#314). The report at the end of the
  * latency profile gates the rows.
  *
- * - Rendering: Chromium normally paces animation frames to the display (60 Hz headless), which would cap any result at
- *   60 fps. The rendering test launches its own browser with the frame-rate limit and vsync off, so a frame comes as soon as the
- *   previous one is done and the interval measures the real cost of a frame. The row is the frame rate held for 99% of
+ * - Frame pacing: `scripts/verify latency` runs these specs twice, unthrottled (vsync and the frame-rate limit off, so a
+ *   frame comes as soon as the previous one is done; this run gates) and paced to a 60 Hz display (reported). The first
+ *   test prints the idle frame rate each run really got.
+ * - Rendering: in the unthrottled run the interval measures the real cost of a frame; in the 60 Hz run the result can
+ *   never exceed 60 fps. The row is the frame rate held for 99% of
  *   frames (1000 / p99 interval) while the terminal takes 10 MB/s; `idle_fps` shows the uncapped rate before the load,
  *   so a run where the flags had no effect is visible.
  * - First paint: a phone-sized page with the CPU slowed 4x, served directly (no injected delay), as the perf suite's
@@ -16,28 +18,40 @@
  *   reports the paint entry counts with the slower "visible after two frames" bound (`fcp_missing_n`).
  */
 import { expect, test, type Page } from "playwright/test";
-import { d375Row, FIRST_PAINT_MS, PHONE_CPU_SLOWDOWN, RENDER_FPS } from "./latency-targets";
+import { d375Row, FIRST_PAINT_MS, latencyDisplay, PHONE_CPU_SLOWDOWN, RENDER_FPS } from "./latency-targets";
 
 test.skip(process.env.INFRATERNAL_LATENCY_PROFILE !== "1", "runs only in scripts/verify latency");
 
-/** Chromium flags that stop animation frames from being paced to the display, so a frame's interval is its real cost. */
-const UNCAPPED_FRAMES = ["--disable-renderer-backgrounding", "--disable-frame-rate-limit", "--disable-gpu-vsync"];
+/**
+ * How fast this browser runs animation frames when nothing else happens: about 60 in the 60 Hz run, far above it in the
+ * unthrottled run. The report fails the unthrottled run if this stays near 60, because its frame-bound rows would then
+ * still include the wait for a 60 Hz frame.
+ */
+test("animation frame rate of this browser run", async ({ page, context }) => {
+  await context.request.post("/__mock/reset");
+  await page.goto("/?mock=1");
+  const intervals = await page.evaluate(() => new Promise<number[]>((resolve) => {
+    const seen: number[] = [];
+    let previous: number | undefined;
+    const tick = (at: number): void => {
+      if (previous !== undefined) seen.push(at - previous);
+      previous = at;
+      if (seen.length < 240) requestAnimationFrame(tick); else resolve(seen);
+    };
+    requestAnimationFrame(tick);
+  }));
+  const fps = intervals.length / (intervals.reduce((sum, ms) => sum + ms, 0) / 1000);
+  console.log(`METRIC name=frame_pacing display=${latencyDisplay()} n=${intervals.length} idle_fps=${fps.toFixed(1)}`);
+});
 
-test("rendering under 10 MB/s output, frame rate uncapped", async ({ playwright, baseURL }) => {
+test("rendering under 10 MB/s output", async ({ page, context }) => {
   test.setTimeout(120_000);
-  // Its own browser, so only this test runs uncapped; the first-paint test keeps the suite's normal browser.
-  const browser = await playwright.chromium.launch({ args: UNCAPPED_FRAMES });
-  try {
-    const context = await browser.newContext({ ...(baseURL === undefined ? {} : { baseURL }), viewport: { width: 1440, height: 900 } });
-    const page = await context.newPage();
-    await context.request.post("/__mock/reset");
-    await context.request.post("/__mock/open-terminal");
-    await page.goto("/?mock=1");
-    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
-    await measureRendering(page);
-  } finally {
-    await browser.close();
-  }
+  await context.request.post("/__mock/reset");
+  await context.request.post("/__mock/open-terminal");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/?mock=1");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  await measureRendering(page);
 });
 
 /** Feeds 10 MB/s through the terminal while counting animation frames, and prints the D375 rendering row. */

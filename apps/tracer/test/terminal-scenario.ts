@@ -1,7 +1,7 @@
 /** Shared access, input and resume scenario; performance budgets are enforced only by the perf-VM suite (#314). */
 import { writeFile } from "node:fs/promises";
 import { expect as baseExpect, test, type Page, type TestInfo } from "playwright/test";
-import { d375Row, FRAME_MS, RECONNECT_ALLOWANCE_MS, roundTripBoundMs } from "./latency-targets";
+import { d375Row, FRAME_MS, latencyDisplay, RECONNECT_ALLOWANCE_MS, roundTripBoundMs } from "./latency-targets";
 
 // A fresh proxied document loads assets before access is ready; its readiness wait is independent of speed budgets.
 const expect = baseExpect.configure({ timeout: 30_000 });
@@ -515,7 +515,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
       : [];
   }).sort((left, right) => left - right);
   console.log(
-    `METRIC name=own_overhead_browser source=tracer-production-build n=${browserOwnMs.length} ` +
+    `METRIC name=own_overhead_browser source=tracer-production-build display=${latencyDisplay()} n=${browserOwnMs.length} ` +
       `p50_ms=${percentile(browserOwnMs, 0.5).toFixed(2)} p99_ms=${percentile(browserOwnMs, 0.99).toFixed(2)} result=REPORT`,
   );
   const offConfirmed = offSamples.map((sample) => sample.confirmed).sort((left, right) => left - right);

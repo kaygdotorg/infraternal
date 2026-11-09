@@ -11,6 +11,9 @@ single Python copy of that table:
   same shape;
 - `compose_own_overhead()` adds the agent's and the browser's measured shares
   into the own-overhead row, since no single probe sees both;
+- browser rows carry a `display=` field: the profile runs them unthrottled
+  (the gate) and paced to a 60 Hz display (reported beside it), and checks
+  with `frame_pacing` that the unthrottled run really ran above 60 Hz;
 - `report()` reads a whole `scripts/verify latency` log and prints the table with
   the measured value next to each target. A row that is missing or failed makes
   the report exit non-zero, so a row cannot silently drop out of the gate.
@@ -86,14 +89,15 @@ def round_trip_bound_ms(rtt_ms: float, jitter_ms: float) -> float:
 
 
 def row_line(key: str, *, source: str, n: int, value: float, unit: str, target: float, gate: float | None = None,
-             higher_is_better: bool = False, extra: str = "") -> str:
+             higher_is_better: bool = False, extra: str = "", display: str | None = None) -> str:
     """Format one measured D375 row as a METRIC line and decide its result.
 
     `target` is the D375 number for this run (already expanded for the round trip
     where the row depends on it). `gate` is what fails the run; it defaults to the
     target and differs only for the own-overhead row. `higher_is_better` flips the
     comparison for frame rates. `extra` is appended verbatim (space-separated
-    `key=value` details such as p50 or sample breakdowns).
+    `key=value` details such as p50 or sample breakdowns). `display` tags a
+    browser row with the frame pacing it ran under (`unthrottled` or `60hz`).
     """
     if key not in {row.key for row in ROWS}:
         raise ValueError(f"unknown D375 row: {key}")
@@ -106,85 +110,140 @@ def row_line(key: str, *, source: str, n: int, value: float, unit: str, target: 
     result = "PASS" if n > 0 and value == value and abs(value) != float("inf") and within(gate) else "FAIL"
     met = "yes" if within(target) else "no"
     tail = f" {extra}" if extra else ""
-    return (f"METRIC name=d375_{key} source={source} n={n} value={value:.2f} unit={unit} "
+    shown = f" display={display}" if display else ""
+    return (f"METRIC name=d375_{key} source={source}{shown} n={n} value={value:.2f} unit={unit} "
             f"target={target:.2f} gate={gate:.2f} target_met={met} result={result}{tail}")
 
 
 _ROW_PATTERN = re.compile(r"METRIC name=d375_(\w+) (.*)$")
+_PACING_PATTERN = re.compile(r"METRIC name=frame_pacing (.*)$")
+
+#: The browser rows run twice (D375 round 2): with the display cap lifted, which is what gates, and paced to a 60 Hz
+#: display, which is reported beside it. Native rows have no display and gate as they are.
+GATED_DISPLAYS = ("unthrottled", "native")
+#: The idle animation-frame rate the unthrottled run must exceed to count as unthrottled. Headless Chromium paces
+#: frames at 60 Hz; a run whose flags had no effect sits there, and its frame-bound rows would then measure the
+#: wait for a 60 Hz frame again while claiming not to.
+UNTHROTTLED_MIN_FPS = 70.0
 
 
-def parse(log_text: str) -> dict[str, dict[str, str]]:
-    """Collect the last METRIC line for each D375 row in a log, as key=value fields.
+def _fields(text: str) -> dict[str, str]:
+    """Split `a=1 b=2` into a dict; tokens without `=` are ignored."""
+    return dict(part.split("=", 1) for part in text.split() if "=" in part)
 
-    Playwright may prefix test output; the pattern searches anywhere in a line.
-    A later line for the same row replaces an earlier one, so a rerun inside one
-    log reports its final value.
+
+def parse(log_text: str) -> dict[str, dict[str, dict[str, str]]]:
+    """Collect the last METRIC line for each D375 row and display, as key=value fields.
+
+    Returns `{row: {display: fields}}`, where display is `unthrottled`, `60hz` or
+    `native` (lines without a display field). Playwright may prefix test output,
+    so the pattern searches anywhere in a line. A later line for the same row
+    and display replaces an earlier one, so a rerun inside one log reports its
+    final value.
     """
-    rows: dict[str, dict[str, str]] = {}
+    rows: dict[str, dict[str, dict[str, str]]] = {}
     for line in log_text.splitlines():
         match = _ROW_PATTERN.search(line)
         if not match:
             continue
-        fields = dict(part.split("=", 1) for part in match.group(2).split() if "=" in part)
-        rows[match.group(1)] = fields
+        fields = _fields(match.group(2))
+        rows.setdefault(match.group(1), {})[fields.get("display", "native")] = fields
     return rows
+
+
+def frame_pacing(log_text: str) -> dict[str, float]:
+    """The idle animation-frame rate each browser display measured (`METRIC name=frame_pacing display= idle_fps=`)."""
+    rates: dict[str, float] = {}
+    for line in log_text.splitlines():
+        match = _PACING_PATTERN.search(line)
+        if match:
+            fields = _fields(match.group(1))
+            rates[fields.get("display", "60hz")] = float(fields.get("idle_fps", "0"))
+    return rates
 
 
 _PART_PATTERN = re.compile(r"METRIC name=own_overhead_(agent|browser) (.*)$")
 
 
-def compose_own_overhead(log_text: str) -> str | None:
-    """Build the own-overhead row from its two measured shares, or `None` if either is missing.
+def compose_own_overhead(log_text: str) -> list[str]:
+    """Build the own-overhead row from its measured shares, one line per browser display.
 
     No single probe sees all of our own work: the native probe measures the
     real agent and PTY with the relay delay at 0 (`own_overhead_agent`), and the
     browser suite measures the browser's spans around the network
     (`own_overhead_browser`: keydown to socket send, plus echo arrival to
-    paint). The row is the sum of the two p99s, which can only overstate the
-    p99 of the combined path, so a pass is never optimistic.
+    paint). Each row is the agent p99 plus that display's browser p99, which can
+    only overstate the p99 of the combined path, so a pass is never optimistic.
+    Returns no lines while either share is missing.
     """
-    parts: dict[str, dict[str, str]] = {}
+    agent: dict[str, str] | None = None
+    browsers: dict[str, dict[str, str]] = {}
     for line in log_text.splitlines():
         match = _PART_PATTERN.search(line)
-        if match:
-            parts[match.group(1)] = dict(part.split("=", 1) for part in match.group(2).split() if "=" in part)
-    if set(parts) != {"agent", "browser"}:
-        return None
-    agent, browser = float(parts["agent"]["p99_ms"]), float(parts["browser"]["p99_ms"])
-    return row_line(
-        "own_overhead", source="real-agent-pty+tracer-production-build",
-        n=min(int(parts["agent"]["n"]), int(parts["browser"]["n"])), value=agent + browser, unit="ms",
-        target=FRAME_MS, gate=OWN_OVERHEAD_BASELINE_MS,
-        extra=f"agent_p99_ms={agent:.2f} browser_p99_ms={browser:.2f} stretch_ms=5.00")
+        if not match:
+            continue
+        fields = _fields(match.group(2))
+        if match.group(1) == "agent":
+            agent = fields
+        else:
+            browsers[fields.get("display", "60hz")] = fields
+    if agent is None:
+        return []
+    lines = []
+    for display, browser in browsers.items():
+        agent_ms, browser_ms = float(agent["p99_ms"]), float(browser["p99_ms"])
+        lines.append(row_line(
+            "own_overhead", source="real-agent-pty+tracer-production-build", display=display,
+            n=min(int(agent["n"]), int(browser["n"])), value=agent_ms + browser_ms, unit="ms",
+            target=FRAME_MS, gate=OWN_OVERHEAD_BASELINE_MS,
+            extra=f"agent_p99_ms={agent_ms:.2f} browser_p99_ms={browser_ms:.2f} stretch_ms=5.00"))
+    return lines
 
 
 def report(log_text: str) -> tuple[str, bool]:
     """Render the D375 table for one run and say whether every row passed its gate.
 
-    Returns the markdown table and `True` only when all ten rows are present and
-    none failed. Missing rows are listed as MISSING: a producer that stopped
-    printing its row must fail the gate rather than vanish from the report.
+    Each row gates on its unthrottled (browser) or native measurement; the 60 Hz
+    display's value is shown beside it and never gates. Returns the markdown table
+    and `True` only when all ten rows have a gated measurement, none failed, and
+    the unthrottled run really ran above 60 Hz. Missing rows are listed as
+    MISSING: a producer that stopped printing its row must fail the gate rather
+    than vanish from the report.
     """
-    composed = compose_own_overhead(log_text)
-    measured = parse(log_text + ("\n" + composed if composed else ""))
+    measured = parse("\n".join([log_text, *compose_own_overhead(log_text)]))
     lines = [
-        "| Measure | Target, p99 | Gate this run | Measured | Target met | Result |",
-        "|---|---|---|---|---|---|",
+        "| Measure | Target, p99 | Gate this run | Measured (gated) | 60 Hz display | Target met | Result |",
+        "|---|---|---|---|---|---|---|",
     ]
     passed = True
+    unthrottled_rows = False
     for row in ROWS:
-        fields = measured.get(row.key)
-        if fields is None:
+        entries = measured.get(row.key, {})
+        display = next((name for name in GATED_DISPLAYS if name in entries), None)
+        at_60 = entries.get("60hz")
+        shown_60 = f"{at_60.get('value', '?')} {at_60.get('unit', '')}" if at_60 else "-"
+        if display is None:
             passed = False
-            lines.append(f"| {row.measure} | {row.target} | - | - | - | MISSING |")
+            lines.append(f"| {row.measure} | {row.target} | - | - | {shown_60} | - | MISSING |")
             continue
+        unthrottled_rows |= display == "unthrottled"
+        fields = entries[display]
         unit = fields.get("unit", "")
         result = fields.get("result", "FAIL")
         passed &= result == "PASS"
         lines.append(
             f"| {row.measure} | {row.target} | {fields.get('gate', '?')} {unit} | "
-            f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}) | {fields.get('target_met', '?')} | {result} |"
+            f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}) | {shown_60} | "
+            f"{fields.get('target_met', '?')} | {result} |"
         )
+    rates = frame_pacing(log_text)
+    lines.append("")
+    lines.append("Frame pacing (idle animation frames per second): " +
+                 (", ".join(f"{name} {fps:.1f}" for name, fps in sorted(rates.items())) or "not measured"))
+    if unthrottled_rows and rates.get("unthrottled", 0.0) <= UNTHROTTLED_MIN_FPS:
+        passed = False
+        lines.append(f"FAIL: the unthrottled run did not run above {UNTHROTTLED_MIN_FPS:.0f} fps, so its frame-bound "
+                     "rows still include the wait for a 60 Hz frame.")
     return "\n".join(lines), passed
 
 
