@@ -96,6 +96,9 @@ pub const UNINSTALL: ActionDef = ActionDef {
     api_scope: None,
     fresh_passkey: false,
 };
+/// The frames between the server and the root relay of a root upgrade (D376).
+#[cfg(feature = "transport")]
+pub mod privilege_relay;
 /// Opening the one-use sealed password of a root upgrade (D274, D376).
 #[cfg(feature = "agent")]
 pub mod privilege_seal;
