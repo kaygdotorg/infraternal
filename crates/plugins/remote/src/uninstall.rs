@@ -686,6 +686,54 @@ pub async fn cleanup(
     }
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
 }
+/// Retire this account's rootless installation after its host was upgraded
+/// to the root infraternal agent (D376, #399; J415 R5, R6).
+///
+/// Run as the account itself (the root agent starts this binary as the
+/// account; root never touches these files). Like [`cleanup`], ownership is
+/// decided before anything stops, under the setup lock. Unlike it, the
+/// running terminals stay: their shims and session sockets are left in
+/// place, so the person's own process can adopt them. The user unit is
+/// stopped (its `KillMode=process` stops only the agent, never a shim),
+/// disabled and removed with the launcher and the agent's state.
+///
+/// Idempotent: an installation that is already gone is a success, so the
+/// server's outbox can ask again after a lost receipt.
+/// # Errors
+/// Refuses another account's or another host's installation, and reports a
+/// service manager or file removal failure; nothing past the failure changes.
+pub async fn retire_for_promotion(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
+    let paths = layout(context, home, uid)?;
+    if !paths.user {
+        return Err(denied());
+    }
+    if !paths.base.join(".bootstrap-owner").exists() && !paths.unit.exists() {
+        return Ok(());
+    }
+    let _setup = setup_guard(&paths.base).await?;
+    validate(context, home, uid)?;
+    manager(&paths, &["disable", "--now", "infraternal-agent.service"]).await?;
+    // Recheck after the manager call; never unlink a replacement made meanwhile.
+    validate(context, home, uid)?;
+    std::fs::remove_file(&paths.unit)?;
+    infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
+    std::fs::remove_file(&paths.launcher)?;
+    manager(&paths, &["daemon-reload"]).await?;
+    for directory in ["bin", "state"] {
+        match std::fs::remove_dir_all(paths.base.join(directory)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    for file in [".bootstrap-ready", PLAN, STAGED, ".bootstrap-owner"] {
+        match std::fs::remove_file(paths.base.join(file)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Take the lock every infraternal setup command takes first (an exclusive
 /// `flock` on the base's parent directory, see the ssh plugin's
 /// `setup_guard.sh`), waiting a bounded time for a running setup step.

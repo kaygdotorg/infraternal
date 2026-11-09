@@ -1205,6 +1205,49 @@ fn replace(data: &Path, bytes: &[u8], expected: Option<&Snapshot>) -> io::Result
 #[path = "remote_tests.rs"]
 mod tests;
 
+/// `--promotion-retire <host>`: retire this account's rootless installation
+/// after a root upgrade (D376, #399). Only the root infraternal agent starts
+/// this, as the account (see `infraternal_agent::privilege_take_over`).
+#[cfg(target_os = "linux")]
+pub(crate) fn promotion_retire_if_requested() -> Option<std::process::ExitCode> {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if arguments
+        .get(1)
+        .is_none_or(|argument| argument != infraternal_agent::privilege_take_over::COMMAND)
+    {
+        return None;
+    }
+    let execute = || -> io::Result<()> {
+        let [_, _, host] = arguments.as_slice() else {
+            return Err(refused());
+        };
+        let home = std::env::var_os("HOME").map_or_else(|| "/".into(), PathBuf::from);
+        let uid = nix::unistd::Uid::effective().as_raw();
+        if uid == 0 {
+            return Err(refused());
+        }
+        let plan = infraternal_plugin_remote::uninstall::installation(
+            host.to_str().ok_or_else(refused)?,
+            &home,
+            uid,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        infraternal_agent::block_on_io(
+            &runtime,
+            Box::pin(infraternal_plugin_remote::uninstall::retire_for_promotion(
+                &plan, &home, uid,
+            )),
+        )
+    };
+    Some(if execute().is_ok() {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    })
+}
+
 /// Host uninstall: the independent helper service, or the owner by hand (#235).
 ///
 /// `--bootstrap-uninstall` alone is the transient service the infraternal
