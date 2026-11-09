@@ -75,7 +75,7 @@ terms are in its `LICENSE.txt`.
 | Family | Upstream release | Licence text |
 |---|---|---|
 | Maple Mono NF | github.com/subframe7536/maple-font v7.9 | SIL OFL 1.1, `fonts/maple-mono-nf/OFL.txt` |
-| Nerd Symbols | Prompt glyph subset extracted from the Maple Mono NF v7.9 release | SIL OFL 1.1, `fonts/maple-mono-nf/OFL.txt` |
+| Nerd Symbols | Prompt glyph subset extracted from the Maple Mono NF v7.9 release; see the individual glyph-source terms below | SIL OFL 1.1 for the base font, `fonts/maple-mono-nf/OFL.txt` |
 | Geist Sans, Geist Mono | github.com/vercel/geist-font; npm `geist` 1.9.2 | SIL OFL 1.1, `fonts/geist-mono/OFL.txt` |
 | JetBrains Mono | github.com/JetBrains/JetBrainsMono v2.304 | SIL OFL 1.1, `fonts/jetbrains-mono/OFL.txt` |
 | Commit Mono | github.com/eigilnikolajsen/commit-mono v1.143 | SIL OFL 1.1, `fonts/commit-mono/OFL.txt` |
@@ -84,6 +84,33 @@ terms are in its `LICENSE.txt`.
 | Fira Code | github.com/tonsky/FiraCode v6.2 | SIL OFL 1.1, `fonts/fira-code/OFL.txt` |
 | Source Code Pro | github.com/adobe-fonts/source-code-pro 2.042R-u/1.062R-i/1.026R-vf | SIL OFL 1.1, `fonts/source-code-pro/OFL.txt` |
 | Cascadia Code | github.com/microsoft/cascadia-code v2407.24 | SIL OFL 1.1, `fonts/cascadia-code/OFL.txt` |
+
+## Nerd Symbols glyph sources
+
+`apps/tracer/fonts/` ships only these Nerd Symbols ranges from the Maple Mono NF
+v7.9 face. The Maple face is the modified font that carries the ranges; its full
+SIL OFL 1.1 terms and copyright notice are in
+`/fonts/maple-mono-nf/OFL.txt`. The CSS exposes this extracted subset under its
+own family alias, Nerd Symbols, so the product does not use Maple's Reserved
+Font Name. Each source glyph set keeps its own
+licence alongside the font; the MIT notices below and complete MIT terms are in
+`/licenses/Nerd-Symbols-MIT.txt`.
+
+| Source range | Upstream glyph set | Licence and attribution |
+|---|---|---|
+| `U+E000–U+E00A` | [Pomicons](https://github.com/gabrielelana/pomicons) | SIL OFL 1.1; Gabriele Lana; full text at `/licenses/Pomicons-OFL-1.1.txt` |
+| `U+E0A0–U+E0D7` | [Powerline Symbols](https://github.com/powerline/powerline) and [Powerline Extra Symbols](https://github.com/ryanoasis/powerline-extra-symbols) | MIT; Kim Silkebækken and contributors, and Ryan L McIntyre; full text at `/licenses/Nerd-Symbols-MIT.txt` |
+| `U+E5FA–U+E6B7` | [Seti UI](https://github.com/jesseweed/seti-ui) | MIT; Jesse Weed; full text at `/licenses/Nerd-Symbols-MIT.txt` |
+| `U+E700–U+E7C5` | [Devicons](https://github.com/devicons/devicon) | MIT; konpa; full text at `/licenses/Nerd-Symbols-MIT.txt` |
+| `U+F000–U+F2E0` | [Font Awesome Free](https://github.com/FortAwesome/Font-Awesome) | CC BY 4.0 for the glyph artwork; Fonticons, Inc.; the release's CC BY 4.0, SIL OFL 1.1 and MIT terms are preserved at `/licenses/CC-BY-4.0.txt` and `/licenses/Font-Awesome-Free.txt` |
+| `U+F300–U+F381` | [Font Logos](https://github.com/Lukas-W/font-logos) | Unlicense; full text at `/licenses/Unlicense.txt` |
+| `U+F400–U+F532` | [Octicons](https://github.com/primer/octicons) | MIT; GitHub Inc.; full text at `/licenses/Nerd-Symbols-MIT.txt` |
+
+Checked for this use: the separate asset licences are AGPL-compatible for
+distribution alongside this AGPL-3.0-only application when each font keeps its
+own terms and attribution. This notice does not relicense those assets as AGPL.
+Attribution and complete licence texts ship with the production build.
+
 - `gotatun` (Rust crate, built into the infraternal agent's mesh engine on Linux):
   - Licence: MPL-2.0. infraternal builds it, unchanged, from our fork. Under MPL-2.0
     §3.2, its Source Code Form is available from
