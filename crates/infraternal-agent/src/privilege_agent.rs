@@ -76,6 +76,7 @@ struct Relay {
 
 /// The one state of this process.
 fn state() -> &'static Mutex<State> {
+    /// Created on first use; lives as long as the process.
     static STATE: OnceLock<Mutex<State>> = OnceLock::new();
     STATE.get_or_init(Mutex::default)
 }
@@ -143,39 +144,98 @@ fn first(paths: &[&'static str]) -> Option<&'static str> {
     paths.iter().copied().find(|path| Path::new(path).exists())
 }
 
+/// What sudo said, without a password.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Sudo {
+    /// sudo isn't installed.
+    #[default]
+    Absent,
+    /// `sudo -n true` worked: passwordless sudo.
+    NoPassword,
+    /// sudo is installed and wants a password (or refuses; it can't say which).
+    Password,
+}
+
+/// What the probe learned about this host, before choosing the way in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Facts {
+    /// What sudo said.
+    sudo: Sudo,
+    /// The account is in a group that conventionally may use sudo or doas
+    /// (`wheel`, `sudo`, `admin`).
+    admin_group: bool,
+    /// doas is installed and has a rule for this account.
+    doas: bool,
+    /// su is installed.
+    su: bool,
+}
+
+/// Choose the way in from the facts, in D274's order, as `(way, denied)`.
+///
+/// `sudo -n -l` can't tell "sudo needs your password" from "you may not use
+/// sudo at all": sudo asks for the password before it checks the rules, so
+/// both answer "a password is required" (seen for real on `AlmaLinux` 10, #399).
+/// Membership in an admin group decides instead. An account outside them is
+/// offered su with the root password, and is told sudo isn't allowed for it
+/// (D286's "denied"). An account with a per-user sudo rule outside those
+/// groups gets the same: elevating with sudo would report `denied` anyway if
+/// the guess were wrong, never a wrong password.
+fn choose(facts: Facts) -> (&'static str, bool) {
+    match facts.sudo {
+        Sudo::NoPassword => ("sudo-nopasswd", false),
+        Sudo::Password if facts.admin_group => ("sudo", false),
+        _ if facts.doas => ("doas", false),
+        sudo if facts.su => ("su", sudo != Sudo::Absent),
+        _ => ("none", true),
+    }
+}
+
+/// Whether this process's account is in a conventional admin group.
+fn in_admin_group() -> bool {
+    nix::unistd::getgroups().is_ok_and(|groups| {
+        groups
+            .into_iter()
+            .chain([nix::unistd::getegid()])
+            .any(|gid| {
+                nix::unistd::Group::from_gid(gid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|group| matches!(group.name.as_str(), "wheel" | "sudo" | "admin"))
+            })
+    })
+}
+
 /// Find the way in, in D274's order. Never prompts and never sends a password.
 async fn probe() -> String {
+    let mut facts = Facts {
+        admin_group: in_admin_group(),
+        su: first(&["/bin/su", "/usr/bin/su"]).is_some(),
+        ..Facts::default()
+    };
     if let Some(sudo) = first(&["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"]) {
-        if let Some((true, _)) = quiet(sudo, &["-n", "true"]).await {
-            return r#"{"way":"sudo-nopasswd","denied":false}"#.to_owned();
-        }
-        if let Some((_, text)) = quiet(sudo, &["-n", "-l"]).await {
-            if text.contains("password is required") {
-                return r#"{"way":"sudo","denied":false}"#.to_owned();
-            }
-        }
+        facts.sudo = if matches!(quiet(sudo, &["-n", "true"]).await, Some((true, _))) {
+            Sudo::NoPassword
+        } else {
+            Sudo::Password
+        };
     }
     if let Some(doas) = first(&["/usr/bin/doas", "/bin/doas", "/usr/local/bin/doas"]) {
-        if let Some((ok, text)) = quiet(doas, &["-n", "true"]).await {
-            if ok
-                || text.contains("Authorization required")
-                || text.contains("a password is required")
-            {
-                return r#"{"way":"doas","denied":false}"#.to_owned();
-            }
-        }
+        // doas checks its rules before asking, so "Authorization required"
+        // means a rule exists; "Operation not permitted" means none does.
+        facts.doas = quiet(doas, &["-n", "true"])
+            .await
+            .is_some_and(|(ok, text)| {
+                ok || text.contains("Authorization required")
+                    || text.contains("a password is required")
+            });
     }
-    // sudo installed but this account isn't allowed: the root password it is,
-    // and the person is told sudo isn't allowed for them (D286 "denied").
-    let denied = first(&["/usr/bin/sudo", "/bin/sudo", "/usr/local/bin/sudo"]).is_some();
-    if first(&["/bin/su", "/usr/bin/su"]).is_some() {
-        return format!(r#"{{"way":"su","denied":{denied}}}"#);
-    }
-    r#"{"way":"none","denied":true}"#.to_owned()
+    let (way, denied) = choose(facts);
+    format!(r#"{{"way":"{way}","denied":{denied}}}"#)
 }
 
 /// `privilege.key {attempt}`: a fresh one-use seal key for this attempt.
 async fn key(input: &[u8]) -> io::Result<Vec<u8>> {
+    /// The `privilege.key` request body.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Request {
@@ -212,6 +272,7 @@ fn way(word: &str) -> io::Result<Way> {
 /// password (when the way needs one), become root once, and wait for the
 /// relay to connect. Replies `{"outcome": …}`.
 async fn elevate(input: &[u8], sessions: &Path) -> io::Result<Vec<u8>> {
+    /// The `privilege.elevate` request body.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Request {
@@ -304,12 +365,11 @@ async fn elevate(input: &[u8], sessions: &Path) -> io::Result<Vec<u8>> {
     let _ = std::fs::remove_file(&socket);
     let word = match (outcome, &connected) {
         (Outcome::Started, Some(_)) => "started",
-        (Outcome::Started, None) => "failed",
+        (Outcome::Started, None) | (Outcome::Failed, _) => "failed",
         (Outcome::Wrong, _) => "wrong",
         (Outcome::Denied, _) => "denied",
         (Outcome::Mismatch, _) => "mismatch",
         (Outcome::Timeout, _) => "timeout",
-        (Outcome::Failed, _) => "failed",
     };
     match connected {
         Some((stream, elevated)) => {
@@ -318,7 +378,7 @@ async fn elevate(input: &[u8], sessions: &Path) -> io::Result<Vec<u8>> {
                 stream,
                 elevated,
                 directory,
-            })
+            });
         }
         None => {
             let _ = std::fs::remove_dir_all(&directory);
@@ -330,6 +390,7 @@ async fn elevate(input: &[u8], sessions: &Path) -> io::Result<Vec<u8>> {
 /// `privilege.pump {attempt, send}`: write `send` (base64) to the relay, then
 /// return what it says within [`PUMP_WAIT`] as `{"recv": base64, "closed": bool}`.
 async fn pump(input: &[u8]) -> io::Result<Vec<u8>> {
+    /// The `privilege.pump` request body.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Request {
@@ -355,7 +416,7 @@ async fn pump(input: &[u8]) -> io::Result<Vec<u8>> {
     let mut closed = false;
     // Wait for the first bytes, then take whatever else is already there.
     match tokio::time::timeout(PUMP_WAIT, relay.stream.read(&mut received)).await {
-        Ok(Ok(0)) | Ok(Err(_)) => closed = true,
+        Ok(Ok(0) | Err(_)) => closed = true,
         Ok(Ok(read)) => filled = read,
         Err(_) => {}
     }
@@ -368,16 +429,15 @@ async fn pump(input: &[u8]) -> io::Result<Vec<u8>> {
     }
     received.truncate(filled);
     let recv = base64::engine::general_purpose::STANDARD.encode(&received);
-    if closed {
-        if let Some(relay) = state.relay.take() {
-            finish(relay).await;
-        }
+    if closed && let Some(relay) = state.relay.take() {
+        finish(relay).await;
     }
     Ok(format!(r#"{{"recv":"{recv}","closed":{closed}}}"#).into_bytes())
 }
 
 /// `privilege.end {attempt}`: close the relay of this attempt.
 async fn end(input: &[u8]) -> io::Result<Vec<u8>> {
+    /// The `privilege.end` request body.
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Request {
@@ -391,10 +451,9 @@ async fn end(input: &[u8]) -> io::Result<Vec<u8>> {
         .relay
         .as_ref()
         .is_some_and(|relay| relay.attempt == attempt)
+        && let Some(relay) = state.relay.take()
     {
-        if let Some(relay) = state.relay.take() {
-            finish(relay).await;
-        }
+        finish(relay).await;
     }
     Ok(br#"{"ended":true}"#.to_vec())
 }
@@ -420,6 +479,48 @@ use std::os::unix::fs::DirBuilderExt as _;
 mod tests {
     //! Requests are checked before anything runs.
     use super::*;
+
+    /// D274's order, and the denied case found on the guest: sudo installed
+    /// but the account outside the admin groups gets su, marked denied.
+    #[test]
+    fn the_way_in_follows_d274s_order() {
+        let base = Facts {
+            sudo: Sudo::Password,
+            su: true,
+            ..Facts::default()
+        };
+        assert_eq!(
+            choose(Facts {
+                sudo: Sudo::NoPassword,
+                ..base
+            }),
+            ("sudo-nopasswd", false)
+        );
+        assert_eq!(
+            choose(Facts {
+                admin_group: true,
+                ..base
+            }),
+            ("sudo", false)
+        );
+        assert_eq!(choose(base), ("su", true));
+        assert_eq!(
+            choose(Facts {
+                doas: true,
+                sudo: Sudo::Absent,
+                ..base
+            }),
+            ("doas", false)
+        );
+        assert_eq!(
+            choose(Facts {
+                sudo: Sudo::Absent,
+                ..base
+            }),
+            ("su", false)
+        );
+        assert_eq!(choose(Facts::default()), ("none", true));
+    }
 
     /// Attempt ids must be UUIDs; anything else is refused.
     #[test]
