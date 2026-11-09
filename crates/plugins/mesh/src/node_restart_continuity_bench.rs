@@ -137,7 +137,11 @@ fn wait_for_file(path: &Path, limit: Duration) -> bool {
 }
 
 /// A one-peer-at-a-time policy entry that allows all traffic both ways.
-fn open_peer(key: PublicKey, addresses: Addresses, endpoint: Option<std::net::SocketAddr>) -> PeerPolicy {
+fn open_peer(
+    key: PublicKey,
+    addresses: Addresses,
+    endpoint: Option<std::net::SocketAddr>,
+) -> PeerPolicy {
     PeerPolicy {
         peer: Peer {
             key,
@@ -216,17 +220,42 @@ fn underlay(sibling: u32) {
     let pid = sibling.to_string();
     run(
         "ip",
-        &["link", "add", "underlay0", "type", "veth", "peer", "name", "underlay1"],
+        &[
+            "link",
+            "add",
+            "underlay0",
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "underlay1",
+        ],
     );
     run("ip", &["link", "set", "underlay1", "netns", &pid]);
-    run("ip", &["addr", "add", &format!("{UNDERLAY_MEASURED}/24"), "dev", "underlay0"]);
+    run(
+        "ip",
+        &[
+            "addr",
+            "add",
+            &format!("{UNDERLAY_MEASURED}/24"),
+            "dev",
+            "underlay0",
+        ],
+    );
     run("ip", &["link", "set", "underlay0", "up"]);
     let inside = |args: &[&str]| {
         let mut full = vec!["-t", &pid, "-n"];
         full.extend_from_slice(args);
         run("nsenter", &full);
     };
-    inside(&["ip", "addr", "add", &format!("{UNDERLAY_PEER}/24"), "dev", "underlay1"]);
+    inside(&[
+        "ip",
+        "addr",
+        "add",
+        &format!("{UNDERLAY_PEER}/24"),
+        "dev",
+        "underlay1",
+    ]);
     inside(&["ip", "link", "set", "underlay1", "up"]);
     inside(&["ip", "link", "set", "lo", "up"]);
 }
@@ -263,7 +292,11 @@ fn restart_continuity_peer() {
                 ipv4: MEASURED_IPV4.parse().unwrap(),
                 ipv6: "fd01::1".parse().unwrap(),
             },
-            Some(format!("{UNDERLAY_MEASURED}:{}", measured.port).parse().unwrap()),
+            Some(
+                format!("{UNDERLAY_MEASURED}:{}", measured.port)
+                    .parse()
+                    .unwrap(),
+            ),
         ),
     )]);
     deliver(
@@ -329,7 +362,10 @@ fn restart_continuity_same_content_snapshot() {
             "--nocapture",
         ])
         .env("RESTART_BENCH_DIR", &shared.0)
-        .env("RESTART_BENCH_MEASURED", serde_json::to_string(&identity).unwrap())
+        .env(
+            "RESTART_BENCH_MEASURED",
+            serde_json::to_string(&identity).unwrap(),
+        )
         .spawn()
         .unwrap();
     let identity_file = shared.0.join("peer-identity.json");
