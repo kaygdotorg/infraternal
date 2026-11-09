@@ -674,13 +674,20 @@ async fn join(
         .join(request.host_id, request.mode, &request.token, &der, now()?)
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
-    let identity = store
-        .admit(&certificate.record.fingerprint, now()?)
-        .await
-        .map_err(|_| StatusCode::FORBIDDEN)?;
+    // A root upgrade's successor (D376) is not the host yet, so ordinary
+    // admission refuses its certificate by design (J415 R1); it answers as
+    // uid 0 through its own check instead.
+    let execution_uid = match store.admit(&certificate.record.fingerprint, now()?).await {
+        Ok(identity) => identity.execution_uid,
+        Err(_) => store
+            .admit_successor(&certificate.record.fingerprint, now()?)
+            .await
+            .map(|_| 0)
+            .map_err(|_| StatusCode::FORBIDDEN)?,
+    };
     Ok(Json(JoinResponse {
         certificate_der: B64.encode(certificate.der),
-        execution_uid: identity.execution_uid,
+        execution_uid,
     }))
 }
 
