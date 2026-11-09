@@ -12,7 +12,9 @@
 //!    authority, and only then publishes the key as an application pin: a
 //!    public-key file in a private 0700 directory, written to a temporary name,
 //!    synced and renamed into place. A challenge can replace only the exact pin
-//!    it saw, and works once.
+//!    it saw, and works once. Sending the very same confirmation again (a
+//!    double-click) answers success without writing anything; any other key is
+//!    still refused.
 //!
 //! Trust configured outside the application (known-hosts files or a lookup
 //! command) always wins and is never modified. Pin files contain only public
@@ -108,6 +110,20 @@ struct Observation {
     received: Instant,
 }
 
+/// What a successful confirmation leaves behind, so the same confirmation sent again can be answered.
+///
+/// A person's second click, or a slow screen that sends the request twice, repeats the very same
+/// challenge and fingerprint. Remembering the outcome lets that repeat say "already trusted" instead of
+/// failing with the generic error. Only public values live here.
+struct Confirmed {
+    /// The endpoint that was pinned; a repeat must name the same one.
+    destination: Destination,
+    /// The fingerprint that was pinned; a repeat for any other key stays refused.
+    fingerprint: String,
+    /// When the observation was made. A repeat is answered only within the observation's own 120 seconds.
+    observed: Instant,
+}
+
 /// Shares public pin/challenge custody across every automatic method and batch.
 /// No private key, password, session capability or invitation enters this store.
 pub struct TrustedOpenSsh {
@@ -117,6 +133,11 @@ pub struct TrustedOpenSsh {
     root: PathBuf,
     /// Observations awaiting confirmation, by challenge id.
     pending: Mutex<HashMap<uuid::Uuid, Observation>>,
+    /// Challenges already confirmed, by challenge id, kept for the observation's lifetime (at most 128).
+    confirmed: Mutex<HashMap<uuid::Uuid, Confirmed>>,
+    /// Held for the whole of one confirmation, so identical requests that arrive together take turns:
+    /// the first pins the key, the others find it in `confirmed` and answer success.
+    confirming: tokio::sync::Mutex<()>,
 }
 impl TrustedOpenSsh {
     /// Wrap `ssh` with application pin custody under `root`. The directory is
@@ -127,6 +148,8 @@ impl TrustedOpenSsh {
             ssh,
             root,
             pending: Mutex::new(HashMap::new()),
+            confirmed: Mutex::new(HashMap::new()),
+            confirming: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -314,13 +337,18 @@ impl TrustedOpenSsh {
 
     /// Turn a pending observation into an application pin.
     ///
-    /// The challenge is consumed even if a later check fails, so it cannot be
-    /// retried. Requires: the same destination, under 120 seconds old, the same
-    /// effective trust policy, the same previous pin, no external trust, a
-    /// fingerprint equal to the observed key's, and a successful live
+    /// The challenge is consumed even if a later check fails, so a failed one
+    /// cannot be retried. Requires: the same destination, under 120 seconds old,
+    /// the same effective trust policy, the same previous pin, no external trust,
+    /// a fingerprint equal to the observed key's, and a successful live
     /// `authority` check just before publishing. All refusals use one generic
     /// host-key error. The write is atomic (temporary file, sync, rename, sync
     /// directory) and guarded by `PUBLICATION`.
+    ///
+    /// Confirming is idempotent for a challenge that already succeeded: the same
+    /// destination and fingerprint again, within the observation's 120 seconds,
+    /// answers success without writing anything, after the live `authority` check
+    /// (a repeat is no way around a revoked sign-in). Any other key stays refused.
     async fn confirm(
         &self,
         destination: Destination,
@@ -331,6 +359,21 @@ impl TrustedOpenSsh {
         let challenge = uuid::Uuid::parse_str(challenge).map_err(|_| denied())?;
         if !valid_fingerprint(fingerprint) {
             return Err(denied());
+        }
+        // One confirmation at a time: identical requests that arrive together queue here and then
+        // find the first one's outcome below, instead of racing it for the consumed challenge.
+        let _turn = self.confirming.lock().await;
+        let repeat = lock(&self.confirmed).get(&challenge).map(|done| {
+            done.observed.elapsed() < Duration::from_secs(120)
+                && done.destination == destination
+                && done.fingerprint == fingerprint
+        });
+        if let Some(same) = repeat {
+            if !same {
+                return Err(denied());
+            }
+            authority.authorize().await?;
+            return Ok(());
         }
         let observation = lock(&self.pending).remove(&challenge).ok_or_else(denied)?;
         if observation.received.elapsed() >= Duration::from_secs(120)
@@ -387,6 +430,19 @@ impl TrustedOpenSsh {
         })();
         let _ = fs::remove_file(temporary);
         result?;
+        let mut confirmed = lock(&self.confirmed);
+        confirmed.retain(|_, done| done.observed.elapsed() < Duration::from_secs(120));
+        // The cap only bounds memory: past it a repeat falls back to the generic refusal, as before.
+        if confirmed.len() < 128 {
+            confirmed.insert(
+                challenge,
+                Confirmed {
+                    destination: observation.destination,
+                    fingerprint: fingerprint.to_owned(),
+                    observed: observation.received,
+                },
+            );
+        }
         Ok(())
     }
 }
