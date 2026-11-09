@@ -1,9 +1,12 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
 import { keysIn } from "./input-keys";
-import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
+import { Osc52Scanner } from "./osc52";
+import { readProgramCopy } from "./program-copy";
+import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
@@ -23,6 +26,8 @@ import { captureFocusIntent } from "../../../packages/ui/src/focus-intent";
 import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
 import { SynchronizedOutput } from "./synchronized-output";
 
+/** How many terminals have been made on this page; names each one's remote-copy notice. */
+let remoteCopyCount = 0;
 const INITIAL_CREDIT = 1024 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
@@ -356,6 +361,12 @@ export class TerminalClient {
   private suppressTerminalResponses = false;
   // Allocate only when output is scanned; a reset before the first write has no query state.
   private terminalQueries: TerminalQueries | undefined;
+  /** Reads clipboard writes (OSC 52) out of live output; replayed output goes through it without acting (#440). */
+  private readonly clipboardWrites = new Osc52Scanner();
+  /** This window's own notice surface for remote copies, made on first use and disposed with the client. */
+  private remoteCopyNotice: ToastController | undefined;
+  /** Identifies this window's remote-copy notice, so two windows' notices stay separate on the shared toast. */
+  private readonly remoteCopyKey = `remote-copy-${++remoteCopyCount}`;
   private parserReplies: string[] | undefined;
   private parserReplyLength = 0;
   private renderIdleTimer = 0;
@@ -1002,6 +1013,8 @@ export class TerminalClient {
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputResendNotice?.dispose();
+    this.remoteCopyNotice?.dispose();
+    this.clipboardWrites.reset();
     this.inputQueue.clear();
     this.retainedInput?.fill(0);
     this.retainedInput = undefined;
@@ -1400,6 +1413,7 @@ export class TerminalClient {
     this.pendingWriteSynchronizedBatch = false;
     this.prediction?.resetForSnapshot();
     this.terminalQueries?.reset();
+    this.clipboardWrites.reset();
     this.synchronizedOutput.reset();
     this.synchronizedOutputBatchPending = false;
     this.terminal.reset();
@@ -1536,6 +1550,7 @@ export class TerminalClient {
     return this.inputResendNotice?.focusAction() ?? false;
   }
 
+  /** Offers to send the typing that was saved offline again, or to discard it. */
   private showInputResendNotice(): void {
     this.inputResendNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
     const focusShortcut = bindingLabel("focus-resend-actions") || "Ctrl+Shift+Space";
@@ -1550,6 +1565,67 @@ export class TerminalClient {
       secondaryAction: { label: "Discard", onSelect: () => this.discardRetainedInput() },
     });
     this.inputResendNoticeVisible = true;
+  }
+
+  /**
+   * Whether a copy that a program asked for may go to the clipboard without a tap. This is the one place that decides
+   * it, so a later policy (a setting, an allow-list, "only shortly after typing") changes here and nowhere else.
+   * Today: only the terminal that has the focus, on a visible page, and only while Settings allows program copies
+   * (`program-copy.ts`, on by default). Any other window, or every window when the setting is off, offers the copy instead.
+   */
+  private mayCopyWithoutTap(): boolean {
+    return readProgramCopy() && document.visibilityState === "visible" && this.config.host.contains(document.activeElement);
+  }
+
+  /**
+   * Shows a remote-copy notice in this window, under this window's own key. It rides the edge of the window that is
+   * farther from the cursor, so it never covers the line the person is typing on: the bottom edge while the cursor is
+   * in the top half, the top edge otherwise.
+   */
+  private showCopyNotice(notice: Omit<ToastMessage, "key">): void {
+    if (this.closed) return;
+    this.remoteCopyNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    const cursorRow = this.terminal.buffer.active.cursorY;
+    this.remoteCopyNotice.setEdge(cursorRow >= this.terminal.rows / 2 ? "top" : "bottom");
+    this.remoteCopyNotice.show({ ...notice, key: this.remoteCopyKey });
+  }
+
+  /**
+   * A program in the terminal asked to copy `text` (OSC 52). In the focused terminal it goes to the clipboard at once
+   * and a notice says so, so the clipboard is never replaced silently. Anywhere else, or when the browser refuses a
+   * write that no gesture backs (always in Safari), the text waits behind a "Copy" action that names this window; the
+   * tap on it is the gesture. A write that a program started never uses the focus-moving legacy fallback.
+   */
+  private remoteCopy(text: string): void {
+    if (this.closed) return;
+    if (!this.mayCopyWithoutTap()) { this.offerCopy(text); return; }
+    void writeClipboard(text, { legacy: false }).then((ok) => {
+      if (ok) this.showCopyNotice({ message: "Copied from the terminal", duration: 1800 });
+      else this.offerCopy(text);
+    });
+  }
+
+  /**
+   * Holds `text` behind a "Copy" action for 15 seconds. The message names the window by its host ("From build-01"),
+   * cut to 11 characters, so it stays on one line beside the action on a phone.
+   */
+  private offerCopy(text: string): void {
+    const name = this.config.hostName?.trim();
+    const from = name ? (name.length > 11 ? `${name.slice(0, 11)}…` : name) : undefined;
+    this.showCopyNotice({
+      message: from ? `From ${from}` : "Text to copy",
+      icon: CLIPBOARD,
+      duration: 15000,
+      dismissible: true,
+      action: {
+        label: "Copy",
+        onSelect: () => {
+          void writeClipboard(text).then((done) => this.showCopyNotice(done
+            ? { message: "Copied from the terminal", duration: 1800 }
+            : { message: "Couldn't copy. Select the text instead.", tone: "error" }));
+        },
+      },
+    });
   }
 
   private encoderIntoScratch(data: string): Uint8Array | undefined {
@@ -1821,6 +1897,7 @@ export class TerminalClient {
    * Keyboard callbacks run in later tasks and always use the unchanged typing path.
    */
   private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback?: () => void): void {
+    this.clipboardWrites.scan(bytes, (text) => this.remoteCopy(text), () => this.showCopyNotice({ message: "That copy was too large for the clipboard", tone: "error", duration: 6000 }));
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     this.linkRowsArmed = true;
     this.terminal.writeSlices(bytes, (writeSlice) => {
@@ -1851,6 +1928,8 @@ export class TerminalClient {
   private writeSuppressingTerminalResponses(bytes: Uint8Array, callback?: () => void, queryOffset?: bigint): void {
     const previous = this.suppressTerminalResponses;
     this.suppressTerminalResponses = true;
+    // Replayed bytes are old output: a copy in them must not rewrite what the person copied since.
+    this.clipboardWrites.scan(bytes, undefined);
     if (queryOffset !== undefined) (this.terminalQueries ??= new TerminalQueries()).scan(bytes, queryOffset, () => undefined);
     try {
       this.terminal.write(bytes, callback);

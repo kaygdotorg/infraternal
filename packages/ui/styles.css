@@ -200,6 +200,8 @@
   transition: opacity 170ms ease-out, transform 190ms var(--ease-out), translate 190ms var(--ease-out), scale 190ms var(--ease-out), height 190ms var(--ease-out);
 }
 .ui-toast-stack[data-placement="parent"] .ui-toast { margin-inline: 0; }
+/* A window notice can ride the top edge (toast.setEdge), under the window's own header row, so it stays off a bottom prompt. */
+.ui-toast-stack[data-placement="parent"][data-edge="top"] { top: 3.25rem; bottom: auto; }
 .ui-toast-stack[data-expanded="true"] .ui-toast { --y: var(--ey, 0px); --s: 1; }
 /* Collapsed: every toast behind the front one is as tall as the front one and shows only its top edge. */
 .ui-toast-stack[data-expanded="false"] .ui-toast[data-front="false"] { height: var(--front-h); width: var(--front-w); min-height: 0; overflow: hidden; }
