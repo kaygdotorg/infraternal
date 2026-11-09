@@ -93,8 +93,8 @@ function refusal(response: Response, what: string): ServiceError {
 export function createRealProvisioning(): ProvisioningService {
   const secrets = new Map<string, { target: string; address: string; auth: OneUseAuth; expires: number }>();
   const observations = new Map<string, { run: ProvisioningRun; target: string; challenge: string; fingerprints: string[] }>();
-  /** Trusts in flight, by host and fingerprint; a repeated call joins the one already running. */
-  const trusting = new Map<string, Promise<void>>();
+  /** Trusts in flight, by the challenge they confirm; a repeated call for the same one joins the promise already running. */
+  const trusting = new Map<string, { fingerprint: string; work: Promise<void> }>();
   /** Host and fingerprint pairs already confirmed; a repeat answers success until the host shows a new observation. */
   const trusted = new Set<string>();
   const prune = (): void => { for (const [key, value] of secrets) if (value.expires <= Date.now()) secrets.delete(key); };
@@ -169,22 +169,27 @@ export function createRealProvisioning(): ProvisioningService {
     dispose() { secrets.clear(); observations.clear(); trusting.clear(); trusted.clear(); },
 
     /**
-     * Trusting is idempotent: any number of calls for the same host and fingerprint make one confirmation.
-     * A call while one is in flight joins it; a call after it succeeded (and before the host shows another
-     * key) resolves at once. A fingerprint the server never showed is refused every time.
+     * Trusting is idempotent: any number of calls for the same observation make one confirmation.
+     * A call while one is in flight for the same challenge and fingerprint joins it; a call after it succeeded
+     * (and before the host shows another key) resolves at once. A newer observation of the host is its own
+     * trust, never joined to an older one. A fingerprint the server never showed is refused every time.
      */
     trustHostKey(host, fingerprint) {
+      const refuse = (): Promise<void> => Promise.reject(new ServiceError("Check the host key again before trusting it."));
       const key = `${host}\n${fingerprint}`;
-      const flying = trusting.get(key);
-      if (flying) return flying;
       const observed = observations.get(host);
-      if (!observed) return trusted.has(key) ? Promise.resolve() : Promise.reject(new ServiceError("Check the host key again before trusting it."));
-      if (!observed.fingerprints.includes(fingerprint)) return Promise.reject(new ServiceError("Check the host key again before trusting it."));
+      if (!observed) return trusted.has(key) ? Promise.resolve() : refuse();
+      if (!observed.fingerprints.includes(fingerprint)) return refuse();
+      const flying = trusting.get(observed.challenge);
+      if (flying && flying.fingerprint === fingerprint) return flying.work;
       const work = observed.run.confirmHostKey(observed.target, observed.challenge, fingerprint).then(() => {
-        observations.delete(host);
-        trusted.add(key);
-      }).finally(() => { trusting.delete(key); });
-      trusting.set(key, work);
+        // Only the observation this trust confirmed is finished; a newer one for the host stays.
+        if (observations.get(host) === observed) {
+          observations.delete(host);
+          trusted.add(key);
+        }
+      }).finally(() => { trusting.delete(observed.challenge); });
+      trusting.set(observed.challenge, { fingerprint, work });
       return work;
     },
 
