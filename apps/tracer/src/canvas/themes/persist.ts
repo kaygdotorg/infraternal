@@ -6,20 +6,15 @@
  */
 import { readLocal, writeLocal } from "../../../../../packages/ui/src/local-pref";
 import { clampUiSize, migrateLegacy, UI_SIZE } from "../../../../../packages/ui/src/ui-scale";
-import { lastAccountKey } from "../../account-storage";
+import { lastAccountKey, LEGACY_APPEARANCE_KEYS, LEGACY_OWNER_KEY } from "../../account-storage";
 import { parseLook, type DocLook } from "../model/schema";
 
 /** Keys moved into the account look and removed only after the server confirms the migrated values. */
-export const LEGACY_KEYS = [
-  "tracer.look", "tracer.theme", "tracer.font", "tracer.ui-size.v2", "tracer.ui-size",
-  "tracer.window-size.phone", "tracer.window-size.desktop", "tracer.extended-info", "tracer.card", "tracer.windows", "tracer.background", "tracer.ui-font",
-] as const;
+export const LEGACY_KEYS = LEGACY_APPEARANCE_KEYS;
 /** The old theme cache key, kept only to read previous releases and isolated mock pages. */
 export const CACHE_KEY = "tracer.look";
 /** Prefixes the first-paint cache with the authenticated account id. */
 const ACCOUNT_CACHE_PREFIX = "tracer.look.account.";
-/** Names the account that owns legacy device-wide appearance values during migration. */
-const LEGACY_OWNER_KEY = "tracer.look.legacy-owner";
 
 /** The old browser preferences, returned raw so the caller can validate each value against its own model. */
 export interface LegacyAppearance {
