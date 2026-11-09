@@ -23,9 +23,10 @@ const PALETTE = "Control+Shift+K";
 const SKIP_LABEL = /^(Reload|Sign out of every device)/i;
 /**
  * Elements whose motion is not a response to the key: the test double's badge (a test-only label that dims while the palette is open)
- * and the terminal cursor's blink, which starts when a terminal takes focus.
+ * the terminal cursor's blink, which starts when a terminal takes focus, and a window's connection indicator, which morphs when the
+ * connection state changes (a network event that happens to follow the key, not a response to it).
  */
-const NOT_PRODUCT = /#test-double-badge|terminal-cursor-layer/;
+const NOT_PRODUCT = /#test-double-badge|terminal-cursor-layer|ui-conn-g/;
 
 /** One finding: what was still moving and where. */
 type Finding = string;
@@ -56,6 +57,7 @@ async function fresh(page: Page): Promise<void> {
       seen.get(signature)!.add(sw.frame);
     };
     const PROPS = ["transform", "clip-path", "opacity"];
+    const GEOMETRY = new Set(["opacity", "transform", "translate", "scale", "clip-path", "height", "width", "top", "left"]);
     new MutationObserver((records) => {
       for (const record of records) {
         const el = record.target as HTMLElement;
@@ -69,6 +71,8 @@ async function fresh(page: Page): Promise<void> {
       for (const animation of document.getAnimations()) {
         if (animation instanceof CSSAnimation || animation.playState !== "running") continue;
         const target = (animation.effect as KeyframeEffect | null)?.target ?? null;
+        // A colour tint (a focus ring, a hover) is not open or close motion; the stepping and lock fades have their own specs.
+        if (animation instanceof CSSTransition && !GEOMETRY.has(animation.transitionProperty)) continue;
         note(animation instanceof CSSTransition ? `transition ${animation.transitionProperty}` : "animation", target);
       }
       requestAnimationFrame(tick);

@@ -25,6 +25,7 @@
  * Text crispness: springs write no transform at rest, so settled text never sits on a fractional transform.
  */
 import { createSpinner, hostIconMarkup, hostSourceIconMarkup, installFocusRing, mountChipInput, mountStepStatus, PaneStepper, Spring, springCheckbox, createKeyValueList } from "../../../../../packages/ui/src/index";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusController, Tick, ToastController } from "../../../../../packages/ui/src/index";
 import { awaitingFresh, awaitingKey, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
 import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../../provisioning-client";
@@ -184,7 +185,8 @@ export class Wizard {
     document.addEventListener("keydown", this.onKeyDown, true);
     this.root.addEventListener("paste", this.onPaste, true);
     // The card rises onto its dimmed stage; at rest it carries no transform at all.
-    this.spring = new Spring(reducedMotion() ? 1 : 0, (value) => {
+    // Opened by a key (a palette row, the plus on the keyboard) the card is simply there; a pointer open rises onto its stage (#427).
+    this.spring = new Spring(reducedMotion() || triggeredByKeyboard() ? 1 : 0, (value) => {
       if (value === 1) { this.float.style.transform = ""; this.float.style.opacity = ""; this.scrim.style.opacity = ""; return; }
       const clamped = Math.min(1, Math.max(0, value));
       this.float.style.opacity = String(clamped);
