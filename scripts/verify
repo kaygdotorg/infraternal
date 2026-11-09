@@ -28,7 +28,28 @@ source "${script_dir}/verify.d/rust.sh"
 source "${script_dir}/verify.d/ts.sh"
 source "${script_dir}/verify.d/quick.sh"
 
+# The latency profile (D375): runs every producer of a D375 row, keeps the whole
+# output as evidence outside the checkout, and ends with the ten-row table. The
+# run fails when any step fails or when a row is missing or misses its gate.
 verify_latency() {
+    local evidence_dir
+    evidence_dir="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import evidence_path; print(evidence_path.evidence_directory("latency"))' "$script_dir")"
+    mkdir -p "$evidence_dir"
+    local log="$evidence_dir/verify-latency-$(date -u +%Y%m%dT%H%M%SZ).log"
+    local status
+    # Every row producer reads this to take full samples (and the browser-only rows run at all).
+    export INFRATERNAL_LATENCY_PROFILE=1
+    set +e
+    verify_latency_steps 2>&1 | tee "$log"
+    status="${PIPESTATUS[0]}"
+    set -e
+    python3 "${script_dir}/latency_targets.py" report "$log" || status=1
+    printf 'latency profile log: %s\n' "$log"
+    return "$status"
+}
+
+# The measuring steps of the latency profile; verify_latency records and reports them.
+verify_latency_steps() {
     local repo_dir="$(cd -- "${script_dir}/.." && pwd)"
     local target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
     local failed=0
@@ -81,7 +102,7 @@ verify_integration() {
         scripts/static-cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl || return 1
         export INFRATERNAL_BIN="$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal"
     fi
-    # Chained for the same reason as verify_latency: the caller may test this function's
+    # Chained for the same reason as verify_latency_steps: the caller may test this function's
     # status, which turns `set -e` off inside it.
     (
         cd -- "$repo_dir/apps/tracer" &&
