@@ -5,6 +5,7 @@ import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
 import { Osc52Scanner } from "./osc52";
+import { readProgramCopy } from "./program-copy";
 import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
@@ -1544,10 +1545,11 @@ export class TerminalClient {
   /**
    * Whether a copy that a program asked for may go to the clipboard without a tap. This is the one place that decides
    * it, so a later policy (a setting, an allow-list, "only shortly after typing") changes here and nowhere else.
-   * Today: only the terminal that has the focus, on a visible page. Any other window offers the copy instead.
+   * Today: only the terminal that has the focus, on a visible page, and only while Settings allows program copies
+   * (`program-copy.ts`, on by default). Any other window, or every window when the setting is off, offers the copy instead.
    */
   private mayCopyWithoutTap(): boolean {
-    return document.visibilityState === "visible" && this.config.host.contains(document.activeElement);
+    return readProgramCopy() && document.visibilityState === "visible" && this.config.host.contains(document.activeElement);
   }
 
   /**
