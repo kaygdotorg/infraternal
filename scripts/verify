@@ -69,10 +69,13 @@ verify_latency_steps() {
     report_environment setup
 
     python3 "${script_dir}/latency_proxy.py" self-test --samples 31 || failed=1
-    if scripts/static-cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl; then
+    # The host's own target: the native rows run the agent, so they need a binary this
+    # machine executes (the profile runs on compute01 x86_64 and dev-02 aarch64).
+    local native_target="$(uname -m)-unknown-linux-musl"
+    if scripts/static-cargo build --locked --release --package infraternal --target "$native_target"; then
         report_environment native
         python3 "${script_dir}/verify-latency.py" \
-            --binary "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal" || failed=1
+            --binary "$CARGO_TARGET_DIR/$native_target/release/infraternal" || failed=1
     else
         failed=1
     fi
