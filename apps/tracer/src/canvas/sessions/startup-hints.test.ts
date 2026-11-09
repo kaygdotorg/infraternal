@@ -7,6 +7,7 @@ import type { ConfirmTipOptions } from "../../../../../packages/ui/src/tooltip";
 const proposal = { file: ".zshrc", line: 0, original: "exec tmux", guard: '[ -n "$INFRATERNAL_SESSION" ] || exec tmux', fingerprint: "public-fixture", multiplexer: "tmux" };
 const click = { currentTarget: {} } as MouseEvent;
 
+/** Builds a startup-hints controller wired to a fake toast and confirmation tip, and the handles a test reads them through. */
 function fixture() {
   let notice: ToastMessage | undefined;
   let confirmation: ConfirmTipOptions | undefined;
