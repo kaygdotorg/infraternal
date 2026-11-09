@@ -5,7 +5,7 @@
 //! confirmation. The real-root fixture (`takeover_terminals_root.py`) and the guest end-to-end run cover
 //! the parts that need a live system manager.
 
-use super::{Boundary, Process, attribute, boundary, login_leader, pts};
+use super::{Boundary, Process, attribute, boundary, login_leader, members_digest, pts};
 
 /// The id the tests use for the authenticated shim's session.
 const ID: &str = "d2f8649c0123456789abcdef01234567";
@@ -267,4 +267,30 @@ fn the_logins_own_pam_helper_belongs_to_the_login() {
         2,
         "a program on the terminal that calls itself (sd-pam) is still that terminal's"
     );
+}
+
+/// Seen on the real guest (#433 e2e L1, second run): a host-login shim's parent is the old agent, and
+/// Take over stops that agent before it compares the records again, so the shim is reparented to
+/// pid 1. That must not read as "changed since you reviewed"; any other process changing still does.
+#[test]
+fn a_shim_reparented_by_the_agent_stop_keeps_its_fingerprint() {
+    let members = vec![
+        member(2637, 1, 0, false, "infraternal"),
+        member(2695, 2529, 0, false, "infraternal"),
+        member(2696, 2637, pty(0), true, "bash"),
+        member(2720, 2696, pty(0), false, "sleep"),
+    ];
+    let digest = |members: &[Process]| {
+        members_digest(std::path::Path::new("/sys/fs/cgroup/s"), 7, members, &[2695], Some(2637))
+    };
+    let before = digest(&members);
+    let mut reparented = members.clone();
+    reparented[1].ppid = 1;
+    assert_eq!(digest(&reparented), before);
+    let mut moved = members.clone();
+    moved[3].ppid = 1;
+    assert_ne!(digest(&moved), before, "a terminal's program changing parent is a change");
+    let mut started = members;
+    started.push(member(2800, 2696, pty(0), false, "vim"));
+    assert_ne!(digest(&started), before);
 }
