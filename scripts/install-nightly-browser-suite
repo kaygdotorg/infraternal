@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Install the D373 nightly browser suite on dev-02, next to the nightly fuzz.
+
+Run `scripts/install-nightly-fuzz` first: this reuses its `infraternal-fuzz`
+account and Forgejo token for the reporter and installs nothing for the token.
+
+Accounts (see `nightly-browser-suite-service` for what runs as whom):
+- `infraternal-browser`, new: no sudo, no login shell, no token. It owns a
+  checkout that follows origin/dev, the suite's build outputs and Playwright's
+  browser, and runs the unreviewed latest dev code. Its home is mode 0711 so
+  the reporter account can read the run folders inside (never the checkout's
+  secrets: there are none).
+- `infraternal-fuzz`, existing: runs the reporter, a root-owned copy of
+  `scripts/nightly-browser-suite.py` from the reviewed `--ref`.
+
+Schedule: 05:00 Asia/Kolkata with up to 15 minutes of random delay. The fuzz
+starts at 02:00 (same delay) and needs about 1 h 15 min, so the two overlap
+only if the fuzz is badly delayed, and even then both wait for their own
+build slot (dev-02 has three).
+
+Usage, as root (on dev-02 that is `sudo` from the cua account):
+    install-nightly-browser-suite --ref <reviewed commit>
+"""
+import argparse
+import os
+from pathlib import Path
+import pwd
+import shutil
+import socket
+import subprocess
+
+USER = 'infraternal-browser'
+HOME = Path('/var/lib/infraternal-browser')
+SERVICE_HELPER = Path('/usr/local/libexec/infraternal-browser-suite-service')
+REPORTER = Path('/usr/local/libexec/infraternal-browser-suite-report')
+UNITS = Path('/etc/systemd/system')
+REPOSITORY = 'https://git.kayg.org/kayg/infraternal.git'
+
+
+def service_unit():
+    """The system service: a root-owned fixed helper, nothing else as root."""
+    return f'''# Nightly full browser suite on dev and failing-spec reports, D373 (#443).
+[Unit]
+Description=infraternal nightly browser suite
+After=network-online.target nix-daemon.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart={SERVICE_HELPER}
+# Covers the build-slot queue, the production build and the whole suite.
+TimeoutStartSec=4h
+KillMode=control-group
+Nice=10
+UMask=0022
+'''
+
+
+def timer_unit():
+    """The system timer: 05:00 in the owner's timezone, after the 02:00 fuzz run."""
+    return '''# Run at night in the owner's timezone, independent of VM timezone.
+[Unit]
+Description=infraternal nightly browser suite timer
+[Timer]
+OnCalendar=*-*-* 05:00:00 Asia/Kolkata
+RandomizedDelaySec=15m
+Persistent=true
+Unit=infraternal-browser-suite.service
+[Install]
+WantedBy=timers.target
+'''
+
+
+def run(*command, **kwargs):
+    """Run one install step, failing the install on any error."""
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def as_user(*command, cwd=None):
+    """Run a step as the browser account, with a clean environment."""
+    return run('setpriv', f'--reuid={USER}', f'--regid={USER}', '--init-groups', '--reset-env', '--',
+               'env', f'HOME={HOME}', 'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin',
+               *command, cwd=cwd)
+
+
+def ensure_user():
+    """Create the system account and its home (0711, so the reporter can read run folders) if missing."""
+    try:
+        pwd.getpwnam(USER)
+    except KeyError:
+        run('useradd', '--system', '--home-dir', str(HOME), '--create-home', '--shell', '/usr/sbin/nologin',
+            '--comment', 'infraternal nightly browser suite (D373)', USER)
+    entry = pwd.getpwnam(USER)
+    HOME.mkdir(parents=True, exist_ok=True)
+    os.chown(HOME, entry.pw_uid, entry.pw_gid)
+    HOME.chmod(0o711)
+    return entry
+
+
+def checkout(ref):
+    """Clone the public repository into the browser home and pin it to `ref` (the service moves it to dev nightly)."""
+    target = HOME / 'checkout'
+    if not (target / '.git').exists():
+        as_user('git', 'clone', '--quiet', REPOSITORY, str(target))
+    as_user('git', '-C', str(target), 'fetch', '--quiet', 'origin', ref)
+    as_user('git', '-C', str(target), 'checkout', '--quiet', '--detach', ref)
+    (HOME / 'runs').mkdir(exist_ok=True)
+    run('chown', f'{USER}:{USER}', str(HOME / 'runs'))
+    (HOME / 'runs').chmod(0o755)
+    return target
+
+
+def install_file(source, destination):
+    """Copy a reviewed script to a root-owned, world-executable place."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    os.chown(destination, 0, 0)
+    destination.chmod(0o755)
+
+
+def main():
+    """Create the account, pin the checkout, install both root-owned copies and the timer."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--ref', required=True, help='reviewed commit that supplies the helper and the reporter')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit('run as root (dev-02: sudo from the cua account)')
+    if socket.gethostname() != 'infraternal-dev-02-std':
+        raise SystemExit('install the nightly browser suite on dev-02')
+    if not Path('/var/lib/infraternal-fuzz/forgejo-token').is_file():
+        raise SystemExit('run install-nightly-fuzz first: the reporter uses its token')
+    ensure_user()
+    source = checkout(args.ref)
+    install_file(source / 'scripts/nightly-browser-suite-service', SERVICE_HELPER)
+    install_file(source / 'scripts/nightly-browser-suite.py', REPORTER)
+    (UNITS / 'infraternal-browser-suite.service').write_text(service_unit())
+    (UNITS / 'infraternal-browser-suite.timer').write_text(timer_unit())
+    run('systemd-analyze', 'verify', str(UNITS / 'infraternal-browser-suite.service'), str(UNITS / 'infraternal-browser-suite.timer'))
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', 'infraternal-browser-suite.timer')
+    run('systemctl', 'list-timers', 'infraternal-browser-suite.timer', '--no-pager')
+
+
+if __name__ == '__main__':
+    main()
