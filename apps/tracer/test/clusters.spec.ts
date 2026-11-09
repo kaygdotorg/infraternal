@@ -18,9 +18,13 @@ type Probe = {
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
+/** Opens a named mock canvas scene for cluster geometry and gesture assertions. */
 async function open(page: Page, scene: number, query = ""): Promise<void> {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft${query}`);
+  // These specs check gestures, geometry and timing, not a look: they run on the Solid theme (`look=solid`). Under the default Tinted theme the windows' 6 px blur costs
+  // enough frames in software rendering (17 ms a frame becomes 27 ms on a phone-sized page and 64 ms on a desktop one) that held fingers and wheel steps coalesce and a
+  // gesture is sometimes lost. The cost of the blur is measured on its own, with the frame times, on #323.
+  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft${query.includes("look=") ? "" : "&look=solid"}${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await expect.poll(() => probe(page, (p) => p.views().length)).toBeGreaterThan(0);
   // Let the camera come to rest before measuring.
@@ -196,7 +200,8 @@ test("a Ctrl+wheel that lands while the free-canvas code is still loading is kep
 });
 
 test("the dots sit on the gradient: the gradient shows everywhere, the dot layers are plain tiles with no cover or mask", async ({ page }) => {
-  await open(page, 3);
+  // The one spec that needs a gradient: Tinted's own (the other looks are asked for with `look=`; see `open`).
+  await open(page, 3, "&look=tinted");
   const info = await page.evaluate(() => {
     const fill = document.querySelector<HTMLElement>(".ui-canvas-backdrop-fill")!;
     const layers = [...document.querySelectorAll<HTMLElement>(".ui-canvas-backdrop-layer")];
@@ -205,7 +210,7 @@ test("the dots sit on the gradient: the gradient shows everywhere, the dot layer
     const stage = document.querySelector<HTMLElement>("#terminal-screen")!.getBoundingClientRect();
     const root = document.querySelector<HTMLElement>(".ui-canvas-backdrop")!.getBoundingClientRect();
     return {
-      fillOpacity: Number(getComputedStyle(fill).opacity), fillImage: getComputedStyle(fill).backgroundImage.startsWith("linear-gradient"),
+      fillOpacity: Number(getComputedStyle(fill).opacity), fillImage: /-gradient\(/.test(getComputedStyle(fill).backgroundImage),
       layerImage: cs.backgroundImage.startsWith("radial-gradient"), layerMask: cs.maskImage, layerBg: cs.backgroundColor,
       coversScreen: Math.abs(root.width - stage.width) < 1 && Math.abs(root.height - stage.height) < 1,
     };
@@ -448,7 +453,8 @@ async function touchPage(browser: Browser, scene: number): Promise<{ page: Page;
   // default (D191), has its own specs in real/phone.spec.ts.
   await context.addInitScript(() => { try { localStorage.setItem("tracer.window-size.phone", "comfortable"); } catch { /* storage blocked */ } });
   const page = await context.newPage();
-  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft`);
+  // Gestures, not a look: the Solid theme (see `open`).
+  await page.goto(`/?mock=1&proto=clusters&scene=${scene}&theme=ink&bg=soft&look=solid`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(900);
   const cdp = await context.newCDPSession(page);
@@ -852,7 +858,7 @@ test("closing the last window of a column removes the column, its neighbours clo
 
 /** The windows of Settings in rows (#304), in order: one row per component, one window per group; the administrator rows come from the owner's map. */
 const SETTINGS_WINDOWS = {
-  appearance: ["s-appearance-theme", "s-appearance-font", "s-appearance-size", "s-appearance-layout"],
+  appearance: ["s-appearance-themes", "s-appearance-layout"],
   terminal: ["s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-terminal-multiplexer"],
   you: ["s-you-profile", "s-you-passkeys", "s-you-recovery", "s-you-apps", "s-you-devices"],
   machines: ["s-machines-new-machines", "s-machines-updates"],
@@ -883,7 +889,7 @@ test("settings is a view: a gear after a divider, a row of windows for each comp
   await page.locator("#sidebar-toggle").click();
   // Appearance applies live: choosing a theme repaints at once.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { openSettings(s: string): void } }).__tracerClusters.openSettings("appearance"));
-  await page.locator('.ui-window[data-window-id="s-appearance-theme"] .ui-sp-row[data-id="ink"]').click();
+  await page.locator('.ui-window[data-window-id="s-appearance-themes"] .cl-colour-dot[data-id="ink"]').click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "ink");
   // Viewers get no administrator rows.
   await page.evaluate(() => (window as unknown as { __tracerClusters: { setRole(r: string): void } }).__tracerClusters.setRole("viewer"));

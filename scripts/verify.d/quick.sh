@@ -8,8 +8,8 @@
 #      merge base with origin/dev
 #   3. the unit tests (lib and bin targets) of the changed packages, never of a cargo-fuzz package
 #      (its bins loop forever, #329) and under a hard timeout that fails loudly instead of hanging
-#   4. the tracer typecheck, only when TypeScript changed; before it, "ui literals" (ui-literals.py):
-#      the change must not add pixel font sizes, pixel corner radii or pasted easing curves (#345)
+#   4. the tracer typecheck and D365 theme contrast audit, only when TypeScript changed; before them,
+#      "ui literals" (ui-literals.py): the change must not add pixel font sizes, pixel corner radii or pasted easing curves (#345)
 # It is NOT the gate. It does not check dependents of a changed crate, integration tests, the
 # static release builds, cargo-deny, the architecture checks or the size report. A green quick
 # run is never quoted as the gate; `scripts/verify fast` stays the gate (docs/PROCESS.md).
@@ -113,6 +113,10 @@ for pkg in meta["packages"]:
         if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
         rust_run_gate "tracer typecheck" bash -c \
             'cd "$1/apps/tracer" && bun install --frozen-lockfile && bun run check' _ "$(cd -- "${script_dir}/.." && pwd)"
+        if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
+        # D365 makes every text token meet 4.5:1 in each theme, so run the same audit from the pre-check whenever tracer changes.
+        rust_run_gate "D365 theme contrast audit" bash -c \
+            'cd "$1/apps/tracer" && bun test ../../packages/ui/src/theme-audit.test.ts' _ "$(cd -- "${script_dir}/.." && pwd)"
     fi
     rust_print_summary
     if ((RUST_GATE_FAILED)); then return 1; fi

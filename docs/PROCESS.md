@@ -191,8 +191,8 @@ numbered history, both timestamp arrival orders and altered checksums.
 
   | Target | Recorded baseline |
   | --- | ---: |
-  | `x86_64-unknown-linux-musl` | 21,443,824 bytes |
-  | `aarch64-unknown-linux-musl` | 19,629,240 bytes |
+  | `x86_64-unknown-linux-musl` | 28,268,440 bytes |
+  | `aarch64-unknown-linux-musl` | 25,378,504 bytes |
 
   On merge, the orchestrator updates `baseline_bytes` in each target arm of
   `scripts/verify.d/rust.sh` and this table to the merged stripped artifact’s
