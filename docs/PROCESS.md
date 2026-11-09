@@ -753,6 +753,19 @@ thirty open at once: more, or a mostly red suite (a dead test
 server), becomes one roll-up issue. A spec that passes again gets one comment,
 and a later regression one more; issues are never closed. A build or suite
 that cannot run at all fails the unit and opens no spec issue.
+**Shards.** The nightly runs `SHARDS` (2) Playwright shards side by side. Each has its own test
+server (a port pair: 4731/4732 and 4733/4734), its own build folder (`TRACER_DIST`) and its own evidence
+folder, because every spec of one server shares one test double (#377); the service helper holds one
+build slot per shard. Spec files are split longest-first by the previous night's seconds
+(`runs/file-times.json`, rewritten at the end of every run), or by Playwright's own `--shard=i/N` when
+there are no usable times. All shards append to one `results.jsonl`, each line tagged with its shard,
+and one `suite.log` with `[s1]`/`[s2]` prefixes; when a shard ends, `run` appends a `shard` line with its
+exit status. A shard that crashes does not hide the other: the night is still reported, each spec
+issue says which shard ran it, and the roll-up gets one note, for example "shard 1 of 2: 700 of 700 tests ran,
+finished (exit 1); shard 2 of 2: crashed (exit 2): none of its 90 assigned spec files ran". Tests tagged
+`@perf` (frame budgets and benchmarks, for example `clusters-bench`) are left out with
+`--grep-invert=@perf` and run on the performance VM.
+
 Time budgets: the wait for a build slot is bounded on its own (12 h; exit 75 and one
 `QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 9 h budget
 (`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot is granted; the
