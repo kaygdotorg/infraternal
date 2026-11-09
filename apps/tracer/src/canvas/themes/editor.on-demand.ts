@@ -24,7 +24,7 @@ import { TICK_PATH } from "../../../../../packages/ui/src/tick";
 import { THEMES, type Theme } from "../../../../../packages/ui/src/themes";
 import { UI_SIZE } from "../../../../../packages/ui/src/ui-scale";
 import { el } from "../dom";
-import { themeStore } from "./controller";
+import { lookBridge, themeStore } from "./controller";
 import { MAX_THEMES } from "./model";
 import { grainImage } from "./grain";
 import { FAMILIES, familyOf, versionIn } from "./colors";
@@ -56,6 +56,7 @@ export function renderThemeEditor(pane: HTMLElement): () => void {
   const store = themeStore();
   if (!store) { pane.append(el("p", "cl-settings-later", "Themes are not available on this screen.")); return () => undefined; }
   const disposers: Array<() => void> = [];
+  const look = lookBridge();
 
   // ---- the strip ---------------------------------------------------------------------------------------
   const top = el("div", "cl-theme-top");
@@ -106,6 +107,19 @@ export function renderThemeEditor(pane: HTMLElement): () => void {
 
   // Fonts: the product's option list.
   const font = choiceBlock("Fonts", FONTS.map((f) => ({ id: f.id, label: f.label, hint: f.hint })), "font", () => store.selected().font, (id) => store.edit({ font: id }));
+
+  // Interface font follows the account look through the same bridge as theme edits.
+  const interfaceFont = choiceBlock("Interface font", [
+    { id: "mono", label: "Maple Mono NF", hint: "Monospace" },
+    { id: "sans", label: "Geist Sans", hint: "Sans serif" },
+  ], "ui-font", () => look?.snapshot()?.uiFont ?? "mono", (id) => {
+    window.dispatchEvent(new CustomEvent("tracer:ui-font", { detail: { font: id } }));
+    paintChoice(interfaceFont, id);
+  });
+  /** Keeps the tick in step with local and canonical account-font changes. */
+  const paintInterfaceFont = (): void => paintChoice(interfaceFont, look?.snapshot()?.uiFont ?? "mono");
+  const offLook = look?.onChange(paintInterfaceFont);
+  if (offLook) disposers.push(offLook);
 
   // Colour: a row for each scheme, the name in one column and the circles in another. A circle is a version of the scheme (its background
   // with its accent), the light one first and the dark one second; a click on either chooses that version, which is how a person gets
@@ -239,7 +253,7 @@ export function renderThemeEditor(pane: HTMLElement): () => void {
   const tripleGrid = el("div", "cl-triple-grid");
   tripleGrid.append(field("Tint", tint), field("Blur", blur), field("Grain", grain));
   triple.append(tripleGrid);
-  root.append(section("UI size", size.root), colour, section("Backgrounds", tabs.root, solidBlock, gradientBlock), section("Windows", triple), font);
+  root.append(section("UI size", size.root), colour, section("Backgrounds", tabs.root, solidBlock, gradientBlock), section("Windows", triple), font, interfaceFont);
   // The name row sits between the strip and the controls and is outside the controls' grid, so closed it leaves no gap behind.
   pane.append(nameRow, root);
 
@@ -262,6 +276,7 @@ export function renderThemeEditor(pane: HTMLElement): () => void {
     grain.set(now.grain);
     size.set(now.uiSize);
     paintChoice(font, now.font);
+    paintInterfaceFont();
     const here = familyOf(now.colors).id;
     for (const [id, row] of rowOf) { row.toggleAttribute("data-current", id === here); row.setAttribute("aria-checked", String(id === here)); }
     for (const [id, dot] of dots) dot.setAttribute("aria-checked", String(id === now.colors));

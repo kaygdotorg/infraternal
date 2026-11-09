@@ -316,7 +316,15 @@ test("theme and font changes reach the same account live and after reload withou
       .filter((entry) => entry.name.startsWith("appearance:") && entry.startTime >= startedAt)
       .map((entry) => ({ name: entry.name, durationMs: entry.duration, startTimeMs: entry.startTime })), fontWindowStartedAt);
 
-    await a.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:ui-font", { detail: { font: "sans" } })));
+    await a.keyboard.press(await a.evaluate(isMacPlatform) ? "Meta+K" : "Control+Shift+K");
+    await expect(a.locator("#palette-input")).toBeFocused({ timeout: 10_000 });
+    await a.locator("#palette-input").fill("Appearance");
+    const appearance = a.locator('#palette-results [data-action="canvas:settings:appearance.themes"]');
+    await expect(appearance).toBeVisible({ timeout: 10_000 });
+    await appearance.click();
+    const uiFont = a.locator('[data-window-id="s-appearance-themes"] section[data-kind="ui-font"]');
+    await expect(uiFont).toBeVisible({ timeout: 10_000 });
+    await uiFont.locator('button[data-id="sans"]').click();
     await expect.poll(async () => (await cache(b)).canonical.look?.uiFont, { timeout: 5_000 }).toBe("sans");
     await expect(b.locator("html")).toHaveAttribute("data-ui-font", "sans");
     const themeFrames = measureAppearanceFrames(themeTrace, "data-look", "solid");

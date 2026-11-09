@@ -143,6 +143,28 @@ test.describe("the Themes window", () => {
     await expect.poll(async () => { const w = await where(); return Math.abs(w[0]!.y - w[1]!.y) < HALF && Math.abs(w[1]!.y - w[2]!.y) < HALF && w[0]!.x < w[1]!.x; }, { timeout: 5000 }).toBe(true);
   });
 
+  test("the interface font can be changed from Appearance and is saved with the account look", async ({ page, browser }) => {
+    await openProduct(page);
+    await openThemes(page);
+    const control = page.locator(`${WINDOW} section[data-kind="ui-font"]`);
+    await expect(control).toBeVisible();
+    await control.locator('button[data-id="sans"]').click();
+    await expect(page.locator("html")).toHaveAttribute("data-ui-font", "sans");
+    await expect.poll(async () => (await accountLook(page))?.uiFont).toBe("sans");
+
+    const other = await browser.newContext({ baseURL: baseURL(), viewport: { width: 1440, height: 900 } });
+    try {
+      const second = await other.newPage();
+      await openProduct(second, "", false);
+      await expect(second.locator("html")).toHaveAttribute("data-ui-font", "sans");
+      await second.reload();
+      await expect(second.locator('.cl[data-view="console"] .ui-window')).toHaveCount(1, { timeout: 30_000 });
+      await expect(second.locator("html")).toHaveAttribute("data-ui-font", "sans");
+    } finally {
+      await other.close();
+    }
+  });
+
   test("grain lies on the windows and the floating cards, never on the canvas behind them; 0% is none", async ({ page }) => {
     await open(page);
     expect((await look(page)).grain).toBe(false);
@@ -285,8 +307,8 @@ test.describe("custom background controls on a phone", () => {
 // look of the account on every other; the browser keeps only a first-paint cache of the selected theme.
 /** Product-canvas route backed by the real per-account layout adapter. */
 const PRODUCT = "/?mock=1&proto=product&layout=server&theme=mocha&bg=none";
-/** Appearance fields read from the account document in the test double. */
-interface DocLookLike { selected: string; themes: Array<{ id: string; name: string; tint: number; blur: number; font: string }> }
+/** The account-look fields this real-server spec reads back from its test double. */
+interface DocLookLike { selected: string; uiFont?: "mono" | "sans"; themes: Array<{ id: string; name: string; tint: number; blur: number; font: string }> }
 /** Base URL for the local real-server fixture used by product-canvas cases. */
 const baseURL = (): string => `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`;
 /** The look the account's document holds right now, as the test double has it (null: none yet). */
@@ -406,7 +428,7 @@ for (const size of SIZES) for (const [mode, theme] of Object.entries(MODES)) {
       await open(page, theme);
       await page.screenshot({ path: `${SHOTS}/${size.name}-${mode}-themes.png` });
       const pane = page.locator(`${WINDOW} .ui-settings-pane`);
-      for (const [n, title] of ["Colour", "Backgrounds", "Windows", "Fonts"].entries()) {
+      for (const [n, title] of ["Colour", "Backgrounds", "Windows", "Fonts", "Interface font"].entries()) {
         await page.locator(`${WINDOW} .ui-ts-title:text-is("${title}")`).scrollIntoViewIfNeeded();
         await pane.evaluate((el, t) => { const h = [...el.querySelectorAll(".ui-ts-title")].find((x) => x.textContent === t)!; (el as HTMLElement).scrollTop += h.getBoundingClientRect().top - el.getBoundingClientRect().top - 8; }, title);
         // sleep: let the scrolled settings section settle before capturing it.
