@@ -53,7 +53,7 @@ def service_unit():
     `ProtectSystem=strict` makes the file system read-only except the listed
     paths: the two account homes, /run and nix's state. `PrivateTmp` gives the
     run its own /tmp, so the suite's scratch files stay out of the shared one;
-    `BindPaths` keeps the build-slot queue (`/tmp/infraternal-build-slots`,
+    `BindPaths` (without a leading `-`, so a missing folder fails the unit instead of running it unserialised) keeps the build-slot queue (`/tmp/infraternal-build-slots`,
     created by `tmpfiles_config`) shared, so the suite cannot skip the queue.
     `NoNewPrivileges` only stops gaining privilege through setuid programs:
     root dropping to another account with `runuser`/`setpriv` is unaffected.
@@ -73,7 +73,7 @@ Nice=10
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
-BindPaths=-/tmp/infraternal-build-slots
+BindPaths=/tmp/infraternal-build-slots
 ProtectSystem=strict
 ReadWritePaths=/var/lib/infraternal-browser /var/lib/infraternal-fuzz /run /nix/var
 ProtectHome=read-only
@@ -86,8 +86,13 @@ LockPersonality=yes
 
 
 def tmpfiles_config():
-    """The tmpfiles.d line that makes sure the shared build-slot queue folder exists before the unit binds it in."""
-    return 'd /tmp/infraternal-build-slots 1777 claude claude -\n'
+    """The tmpfiles.d line that makes sure the shared build-slot queue folder exists before the unit binds it in.
+
+    Mode 0775 and owner `claude` are what `build-slot` itself creates. The
+    folder must never be world-writable: any account could then plant a
+    `queue` or `slot.N` entry there and stop every build-slot caller.
+    """
+    return 'd /tmp/infraternal-build-slots 0775 claude claude -\n'
 
 
 def timer_unit():
@@ -111,10 +116,15 @@ def run(*command, **kwargs):
 
 
 def as_user(*command, cwd=None):
-    """Run a step as the browser account, with a clean environment."""
+    """Run a step as the browser account, with a clean environment.
+
+    The step gets no input and no standard output: whatever the account's
+    files make a program start (a git hook, say) cannot read the admin's
+    terminal or write to it.
+    """
     return run('setpriv', f'--reuid={USER}', f'--regid={USER}', '--init-groups', '--reset-env', '--',
                'env', f'HOME={HOME}', 'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin',
-               *command, cwd=cwd)
+               *command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
 
 def secure_home(entry):
@@ -145,13 +155,22 @@ def ensure_user():
     return entry
 
 
+# Git settings for every git step here: no hooks, no fsmonitor, so nothing stored in a repository
+# (and the browser account's checkout is one the unreviewed suite can write to) runs during an install.
+GIT_SAFE = ('-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false')
+
+
 def checkout(ref):
-    """Clone the public repository into the browser home and pin it to `ref` (the service moves it to dev nightly)."""
+    """Create the browser account's working copy of the public repository, pinned to `ref`, if it is missing.
+
+    An existing copy is left alone: the service moves it to origin/dev every
+    night, and running git in a repository that account has written to is
+    exactly what an update should not do. Every git step runs as that account.
+    """
     target = HOME / 'checkout'
     if not (target / '.git').exists():
-        as_user('git', 'clone', '--quiet', REPOSITORY, str(target))
-    as_user('git', '-C', str(target), 'fetch', '--quiet', 'origin', ref)
-    as_user('git', '-C', str(target), 'checkout', '--quiet', '--detach', ref)
+        as_user('git', *GIT_SAFE, 'clone', '--quiet', REPOSITORY, str(target))
+        as_user('git', *GIT_SAFE, '-C', str(target), 'checkout', '--quiet', '--detach', ref)
     # Made by the suite account itself: root never names a path inside that account's home
     # (a link planted there would otherwise make root chown or chmod something else).
     as_user('mkdir', '-p', '-m', '0700', str(HOME / 'runs'))
@@ -172,10 +191,11 @@ def reviewed_tree(ref):
     parent = Path(tempfile.mkdtemp(prefix='infraternal-browser-install-'))
     tree = parent / 'src'
     try:
-        run('git', 'clone', '--quiet', REPOSITORY, str(tree))
+        environment = dict(os.environ, GIT_CONFIG_NOSYSTEM='1')
+        run('git', *GIT_SAFE, 'clone', '--quiet', '--no-checkout', REPOSITORY, str(tree), env=environment)
         tree.chmod(0o700)
-        run('git', '-C', str(tree), 'checkout', '--quiet', '--detach', ref)
-        head = subprocess.check_output(['git', '-C', str(tree), 'rev-parse', 'HEAD'], text=True).strip()
+        run('git', *GIT_SAFE, '-C', str(tree), 'checkout', '--quiet', '--detach', ref, env=environment)
+        head = subprocess.check_output(['git', '-C', str(tree), 'rev-parse', 'HEAD'], text=True, env=environment).strip()
     except (subprocess.CalledProcessError, OSError):
         shutil.rmtree(parent, ignore_errors=True)
         raise SystemExit(f'could not check out {ref}')

@@ -8,7 +8,8 @@ token away from the code under test:
 
 1. holds one shared build slot as `claude` (through `runuser`) until step 5 ends;
 2. as `infraternal-browser` (no token, no sudo): fetches the newest origin/dev
-   and runs `scripts/nightly-browser-suite.py run` in the dev shell, niced;
+   (hooks off) and runs `scripts/nightly-browser-suite.py run` in the dev shell,
+   niced, then kills whatever that account still runs;
 3. as root, copies the run's three result files into a staging folder (created
    by descriptor, never following a link) that belongs to the token account. Everything in the run folder is hostile (the
    suite wrote it), so each file is opened without following links, must be a
@@ -56,9 +57,14 @@ def ids(user):
 
 
 def as_user(user, home, *command, cwd):
-    """Run `command` as `user` with a clean environment and return the exit status."""
+    """Run `command` as `user` with a clean environment and return the exit status.
+
+    `cwd` is entered by `env -C` *after* `setpriv` has dropped privileges. Root
+    itself stays in `/`: the suite account owns its checkout and could make it
+    a link, and a root `chdir` would follow that link.
+    """
     return subprocess.run(['setpriv', f'--reuid={user}', f'--regid={user}', '--init-groups', '--reset-env', '--',
-                           'env', f'HOME={home}', 'LANG=C.UTF-8', PATH, *command], cwd=cwd).returncode
+                           'env', '-C', cwd, f'HOME={home}', 'LANG=C.UTF-8', PATH, *command], cwd='/').returncode
 
 
 def read_owned(directory, name, cap, owner, tail=False):
@@ -184,11 +190,16 @@ def main():
         checkout = f'{BROWSER_HOME}/checkout'
         runs = f'{BROWSER_HOME}/runs'
         # The nightly follows the latest dev (D361/D373), so the checkout moves every night.
-        if as_user(BROWSER_USER, BROWSER_HOME, 'sh', '-c', 'git fetch --quiet origin dev && git checkout --quiet --detach origin/dev',
+        if as_user(BROWSER_USER, BROWSER_HOME, 'sh', '-c',
+                   'git -c core.hooksPath=/dev/null -c core.fsmonitor=false fetch --quiet origin dev '
+                   '&& git -c core.hooksPath=/dev/null -c core.fsmonitor=false checkout --quiet --detach origin/dev',
                    cwd=checkout) != 0:
             return 1
-        if as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', 'nix', 'develop', '-c', 'python3',
-                   'scripts/nightly-browser-suite.py', 'run', '--runs-dir', runs, cwd=checkout) != 0:
+        status = as_user(BROWSER_USER, BROWSER_HOME, 'nice', '-n', '10', 'nix', 'develop', '-c', 'python3',
+                         'scripts/nightly-browser-suite.py', 'run', '--runs-dir', runs, cwd=checkout)
+        # Whatever the suite left running (browsers, servers) must not outlive its run or race the staging below.
+        as_user(BROWSER_USER, BROWSER_HOME, 'kill', '-s', 'KILL', '--', '-1', cwd='/')
+        if status != 0:
             return 1
         # The run account wrote everything below `runs`: treat it as data (see stage).
         owner = ids(BROWSER_USER)[0]

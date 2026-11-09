@@ -289,14 +289,46 @@ def open_issues(base, repo, token, login):
     return found
 
 
+def issue_comments(base, repo, token, number):
+    """All comments of one issue, oldest first, each id once.
+
+    Forgejo ignores `limit` and `page` on this route and returns the whole
+    list every time, so it is fetched with a single request: paging it would
+    repeat the same list until the page limit and stop the night's report.
+    """
+    unique = {}
+    for comment in api(base, f'repos/{repo}/issues/{number}/comments', token):
+        unique.setdefault(comment['id'], comment)
+    return list(unique.values())
+
+
 def last_state(base, repo, token, login, number):
     """`fixed` or `failing`: what the newest hidden marker in the account's own comments says (the issue body counts as `failing`)."""
     state = 'failing'
-    for comment in pages(base, f'repos/{repo}/issues/{number}/comments', token):
+    for comment in issue_comments(base, repo, token, number):
         match = STATE_MARKER.search(comment.get('body') or '')
         if match and written_by(comment, login):
             state = match[1]
     return state
+
+
+def note_pooled(base, repo, token, login, number, new, run_name, head, runs_root):
+    """Comment on the open roll-up with the failing specs it has not listed yet, once per name.
+
+    The roll-up's own body and the account's earlier comments are the memory:
+    a name already written there is not repeated, so a rerun adds nothing.
+    """
+    issue = api(base, f'repos/{repo}/issues/{number}', token)
+    seen = (issue.get('body') or '') if written_by(issue, login) else ''
+    for comment in issue_comments(base, repo, token, number):
+        if written_by(comment, login):
+            seen += '\n' + (comment.get('body') or '')
+    fresh = [name for name in sorted(new) if name not in seen]
+    if fresh:
+        listed = '\n'.join(fresh[:200])
+        api(base, f'repos/{repo}/issues/{number}/comments', token,
+            {'body': f'{len(fresh)} more spec files failed on `{head}` and are pooled here (evidence `{runs_root}/{run_name}/evidence`):\n\n{fence_for(listed)}\n{listed}\n{fence_for(listed)}'[:MAX_BODY]})
+        print(f'roll-up #{number}: {len(fresh)} more names', flush=True)
 
 
 def issue_body(marker, intro, blocks, run_name, head, runs_root):
@@ -358,10 +390,13 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS):
     pool = len(new) > MAX_NEW_ISSUES or len(known) + len(new) > MAX_OPEN_ISSUES or (len(failing) >= ROLLUP_MIN_FAILING and len(failing) * 2 >= len(failing) + len(passing))
     if pool and new:
         try:
-            if hashlib.sha256(ROLLUP.encode()).hexdigest()[:16] not in known:
+            rollup = known.get(hashlib.sha256(ROLLUP.encode()).hexdigest()[:16])
+            if rollup is None:
                 number = api(base, f'repos/{repo}/issues', token,
                              rollup_issue(new, len(failing) + len(passing), run_name, head, runs_root))['number']
                 print(f'opened roll-up issue #{number} specs={len(new)} head={head}', flush=True)
+            else:
+                note_pooled(base, repo, token, login, rollup, new, run_name, head, runs_root)
         except OSError as error:
             errors += 1
             print(f'report FAILED roll-up: {type(error).__name__}: {error}', flush=True)

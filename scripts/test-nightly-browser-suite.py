@@ -260,6 +260,34 @@ class Reporter(unittest.TestCase):
         self.assertEqual(self.forgejo.creates(), 31)
         self.assertIn('roll-up', next(reversed(self.forgejo.issues.values()))['title'])
 
+    def test_issue_with_many_comments_does_not_stop_the_night(self):
+        """Round-4 PoC: Forgejo ignores limit/page on comments and returns them all every time; 120 comments must not abort."""
+        self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        for n in range(119):
+            self.forgejo.comments[5000 + n] = {'id': 5000 + n, 'issue': 345, 'body': f'chatter {n}', 'user': {'login': 'somebody'}}
+        self.assertEqual(self.night(head='b' * 40, **{'docs-palette.spec.ts': ['expected'], 'ok.spec.ts': ['expected']}), 0)
+        self.assertTrue([c for c in self.forgejo.comments.values() if 'passes again' in c['body']])
+        # The newest state marker still wins when the same comments come back more than once.
+        self.assertEqual(self.night(head='c' * 40, **{'docs-palette.spec.ts': ['expected'], 'ok.spec.ts': ['expected']}), 0)
+        self.assertEqual(len([c for c in self.forgejo.comments.values() if 'passes again' in c['body']]), 1)
+
+    def test_later_reds_leave_a_trace_on_the_roll_up(self):
+        """Round-4: once the roll-up is open, names it has not listed yet are added as one comment, once."""
+        green = {f'ok{i}.spec.ts': ['expected'] for i in range(60)}
+        first = {f'r{i}.spec.ts': ['unexpected'] for i in range(12)}
+        self.night(**green, **first)
+        self.assertEqual(self.forgejo.creates(), 1)
+        self.assertEqual(self.forgejo.comments, {})
+        later = {**first, 'late1.spec.ts': ['unexpected'], 'late2.spec.ts': ['unexpected']}
+        self.night(head='b' * 40, **green, **later)
+        self.night(head='b' * 40, **green, **later)
+        self.assertEqual(self.forgejo.creates(), 1)
+        self.assertEqual(len(self.forgejo.comments), 1)
+        comment = next(iter(self.forgejo.comments.values()))['body']
+        self.assertIn('late1.spec.ts', comment)
+        self.assertIn('late2.spec.ts', comment)
+        self.assertNotIn('r3.spec.ts', comment)
+
     def test_run_without_report_is_an_infrastructure_failure(self):
         """`run` exits 1 and opens nothing when a build step fails or no report exists."""
         runs = Path(self.temp.name) / 'runs'
@@ -322,17 +350,26 @@ class SeparateAccount(unittest.TestCase):
                 Path(temp, 'report').mkdir()
                 self.assertEqual(service.main(), 0)
         steps = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(len(steps), 3)
-        for step in steps[:2]:
+        self.assertEqual(len(steps), 4)
+        for step in steps[:3]:
             self.assertEqual(step[1], '--reuid=infraternal-browser')
             self.assertNotIn('forgejo-token', ' '.join(step))
         self.assertIn('nice', steps[1])
-        self.assertEqual(steps[2][1], '--reuid=infraternal-fuzz')
-        self.assertIn(service.REPORTER, steps[2])
-        self.assertIn('-I', steps[2])
-        self.assertIn('--run-name', steps[2])
-        self.assertNotIn('nightly-browser-suite.py', ' '.join(steps[2]))
-        self.assertNotIn(temp + '/runs', ' '.join(steps[2]))
+        # Round 4: leftover suite processes are killed (as the suite account) before staging and reporting.
+        self.assertEqual(steps[2][steps[2].index('kill'):], ['kill', '-s', 'KILL', '--', '-1'])
+        self.assertEqual(steps[3][1], '--reuid=infraternal-fuzz')
+        self.assertIn(service.REPORTER, steps[3])
+        self.assertIn('-I', steps[3])
+        self.assertIn('--run-name', steps[3])
+        self.assertNotIn('nightly-browser-suite.py', ' '.join(steps[3]))
+        self.assertNotIn(temp + '/runs', ' '.join(steps[3]))
+        # Round 4: root never chdirs through the suite-owned checkout; env -C does it after privileges are dropped.
+        for call in run.call_args_list[:3]:
+            self.assertEqual(call.kwargs['cwd'], '/')
+        for step in steps[:2]:
+            self.assertIn('-C', step)
+            self.assertLess(step.index('env'), step.index('-C'))
+            self.assertLess(step.index('-C'), step.index('nice') if 'nice' in step else step.index('sh'))
         holder.stdin.write.assert_called_once()
 
     def stage(self, temp, **kwargs):
@@ -458,7 +495,13 @@ class SeparateAccount(unittest.TestCase):
                     mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
                 Path(temp, 'report').mkdir()
                 self.assertEqual(service.main(), 1)
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
+
+    def test_hooks_are_off_for_the_suite_checkout(self):
+        """Round-4: the nightly fetch runs with hooks and fsmonitor disabled."""
+        text = Path(__file__).with_name('nightly-browser-suite-service').read_text()
+        self.assertIn('core.hooksPath=/dev/null', text)
+        self.assertIn('core.fsmonitor=false', text)
 
     def test_the_reporter_itself_refuses_links_in_its_input(self):
         """Defence in depth: even a staging folder with a link in it is not followed by the reporter."""
@@ -540,6 +583,43 @@ class Installer(unittest.TestCase):
         self.assertNotIn("checkout(args.ref)\n    install_file(source", text)
         self.assertIn('reviewed_tree(args.ref)', text)
 
+    def test_git_runs_without_hooks_and_stdio(self):
+        """Round-4: the root clone and the suite-account git steps disable hooks and fsmonitor, and the account's steps get no terminal."""
+        seen = []
+        with tempfile.TemporaryDirectory() as temp:
+            repo, sha = self.make_repo(temp)
+            real_run = installer.run
+            with mock.patch.object(installer, 'REPOSITORY', str(repo)), \
+                    mock.patch.object(installer, 'run', side_effect=lambda *a, **k: (seen.append((a, k)), real_run(*a, **k))[1]):
+                tree = installer.reviewed_tree(sha)
+            installer.shutil.rmtree(tree.parent)
+        git_calls = [(a, k) for a, k in seen if a[0] == 'git']
+        self.assertTrue(git_calls)
+        for args, kwargs in git_calls:
+            self.assertIn('core.hooksPath=/dev/null', args)
+            self.assertEqual(kwargs['env']['GIT_CONFIG_NOSYSTEM'], '1')
+        with mock.patch.object(installer, 'run') as run:
+            installer.as_user('git', 'status')
+        self.assertEqual(run.call_args.kwargs['stdin'], installer.subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs['stdout'], installer.subprocess.DEVNULL)
+
+    def test_reinstall_does_not_run_git_in_the_suite_checkout(self):
+        """Round-4: when the suite checkout exists, the installer leaves it alone (the nightly moves it to dev)."""
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / 'home'
+            (home / 'checkout' / '.git').mkdir(parents=True)
+            calls = []
+            with mock.patch.object(installer, 'HOME', home), mock.patch.object(installer, 'as_user', side_effect=lambda *a, **k: calls.append(a)):
+                installer.checkout('a' * 40)
+            self.assertEqual([c for c in calls if c[0] == 'git'], [])
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / 'home'
+            home.mkdir()
+            calls = []
+            with mock.patch.object(installer, 'HOME', home), mock.patch.object(installer, 'as_user', side_effect=lambda *a, **k: calls.append(a)):
+                installer.checkout('a' * 40)
+            self.assertTrue([c for c in calls if c[:2] == ('git', '-c') and 'core.hooksPath=/dev/null' in c])
+
     def test_checkout_never_chowns_a_path_the_suite_controls(self):
         """Round-3 PoC: `runs` replaced by a link to a root directory is not chowned or chmodded by the installer."""
         with tempfile.TemporaryDirectory() as temp:
@@ -580,10 +660,12 @@ class Installer(unittest.TestCase):
         unit = installer.service_unit()
         self.assertIn('NoNewPrivileges=yes', unit)
         self.assertIn('PrivateTmp=yes', unit)
-        self.assertIn('BindPaths=-/tmp/infraternal-build-slots', unit)
+        self.assertIn('BindPaths=/tmp/infraternal-build-slots', unit)
+        self.assertNotIn('BindPaths=-', unit)
         writable = next(line for line in unit.splitlines() if line.startswith('ReadWritePaths='))
         self.assertNotRegex(writable, r'(^|[= ])/(var/)?tmp( |$)')
-        self.assertIn('d /tmp/infraternal-build-slots 1777 claude claude -', installer.tmpfiles_config())
+        self.assertEqual(installer.tmpfiles_config(), 'd /tmp/infraternal-build-slots 0775 claude claude -\n')
+        self.assertNotIn('777', installer.tmpfiles_config())
 
     def test_unit_hardening_and_umask(self):
         """The unit confines the helper as far as the suite tolerates, with the fuzz's 0077 umask."""
