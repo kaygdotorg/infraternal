@@ -54,7 +54,7 @@
 }
 /* On the thin material secondary text is a step stronger than on a page (contrast over a busy terminal comes
    from text colour and the halo, never from more tint). */
-.ui-overlay-surface, .ui-panel { --ui-text-secondary: color-mix(in oklab, var(--fg) 80%, var(--bg)); }
+.ui-overlay-surface, .ui-panel { --ui-text-secondary: var(--ui-glass-secondary, color-mix(in oklab, var(--fg) 80%, var(--bg))); }
 /* Form controls reset text-shadow in the browser's own styles; they take the halo too. */
 .ui-overlay-surface :is(button, input, textarea, select) { text-shadow: inherit; }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
