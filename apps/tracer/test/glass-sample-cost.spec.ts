@@ -32,6 +32,7 @@ function bundle(): string {
   return readFileSync(out, "utf8");
 }
 
+/** Summary of a list of readings, in milliseconds. */
 interface Stats { n: number; p50: number; p99: number; max: number; mean: number }
 /** `msPerSample` is each timed batch's mean (the browser's clock is coarse, so single calls read 0); frames are the rAF intervals. */
 interface Report { liveVideo: Stats; recordedVideo: Stats; canvas: Stats; framesIdle: Stats; framesSampling: Stats; samplesDuringRun: number }

@@ -60,6 +60,7 @@ export interface BackdropWatch {
 
 /** Remembers solved ranges: a steady picture asks the solver once, not four times a second. Keyed by theme, level and range. */
 const solved = new Map<string, ReturnType<typeof glassFor>>();
+/** The solved glass for a theme, level and sampled range, from the memo or the solver. */
 const solveFor = (theme: Theme, level: number, range: BackdropRange): ReturnType<typeof glassFor> => {
   // Quantised to 8/255 so a flicker of a few levels in a video reuses the answer.
   const q = (rgb: Rgb): string => rgb.map((v) => v >> 3).join(",");
@@ -73,6 +74,7 @@ const solveFor = (theme: Theme, level: number, range: BackdropRange): ReturnType
   return hit;
 };
 
+/** The one 8x8 canvas every sample is drawn into, created on first use. */
 let scratch: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | undefined;
 
 /** Reads the 8x8 average of `region` of `source`, or `null` if the source has nothing to draw yet. */
