@@ -5,12 +5,17 @@
 //! falls below IPv6's 1280-byte link minimum; unknown paths use a 1200-byte route
 //! budget without lowering that interface floor.
 
+#[cfg(target_os = "linux")]
 use crate::dataplane::Config;
 #[cfg(target_os = "linux")]
 use gotatun::tun::MtuWatcher;
 #[cfg(target_os = "macos")]
 use std::process::Command;
-use std::{io, net::SocketAddr};
+use std::{
+    collections::HashMap,
+    io,
+    net::{IpAddr, SocketAddr},
+};
 #[cfg(target_os = "linux")]
 use tokio::sync::watch;
 
@@ -36,20 +41,97 @@ pub(crate) const MIN_MESH_MTU: u16 = 68;
 /// A peer whose endpoint cannot be resolved uses [`FALLBACK_MESH_MTU`] only for its
 /// host routes. The shared link remains at least [`IPV6_MINIMUM_MTU`], including
 /// before the first peer exists.
+#[cfg(target_os = "linux")]
 pub(crate) fn for_config(config: Option<&Config>) -> u16 {
+    let mut probe = EndpointProbe::default();
     let peer_mtus: Vec<_> = config
         .into_iter()
         .flat_map(|config| config.peers.values())
-        .map(|peer| for_endpoint(peer.peer.endpoint))
+        .map(|peer| probe.mesh_mtu(peer.peer.endpoint))
         .collect();
     interface_mtu(&peer_mtus)
 }
 
 /// Derive one peer's route MTU from its numeric endpoint, using the safe fallback on lookup error.
+#[cfg(target_os = "linux")]
 pub(crate) fn for_endpoint(endpoint: Option<SocketAddr>) -> u16 {
-    endpoint
-        .and_then(|endpoint| endpoint_route_mtu(endpoint).ok())
-        .map_or(FALLBACK_MESH_MTU, mtu_for_route)
+    EndpointProbe::default().mesh_mtu(endpoint)
+}
+
+/// Derives route MTUs for many peers of one snapshot, looking each underlay path up once.
+///
+/// Peers often share an endpoint address, and on macOS every lookup starts two
+/// processes (`route` and `ifconfig`, about 6.5 ms together). The probe remembers the
+/// budget per endpoint IP and, on macOS, each underlay interface's MTU. Create a fresh
+/// probe per snapshot: its answers are only as current as the moment they were read.
+#[derive(Debug, Default)]
+pub(crate) struct EndpointProbe {
+    /// Mesh MTU already derived for an endpoint address.
+    endpoints: HashMap<IpAddr, u16>,
+    /// Underlay interface MTUs read with `ifconfig` during this probe (`None` if unreadable).
+    #[cfg(target_os = "macos")]
+    interfaces: HashMap<String, Option<u32>>,
+}
+
+impl EndpointProbe {
+    /// Return the mesh route MTU for `endpoint`, or the safe fallback when it is unknown.
+    pub(crate) fn mesh_mtu(&mut self, endpoint: Option<SocketAddr>) -> u16 {
+        let Some(endpoint) = endpoint else {
+            return FALLBACK_MESH_MTU;
+        };
+        if let Some(mtu) = self.endpoints.get(&endpoint.ip()) {
+            return *mtu;
+        }
+        let mtu = self
+            .route_mtu(endpoint)
+            .map_or(FALLBACK_MESH_MTU, mtu_for_route);
+        self.endpoints.insert(endpoint.ip(), mtu);
+        mtu
+    }
+
+    /// Query the underlay route MTU toward `endpoint` through Linux route netlink.
+    /// # Errors
+    /// Reports an unreachable endpoint, missing egress link, or malformed route reply.
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::unused_self)] // The macOS twin caches interface MTUs in `self`.
+    fn route_mtu(&mut self, endpoint: SocketAddr) -> io::Result<u32> {
+        crate::wireguard::route_mtu(endpoint)
+    }
+
+    /// Query the underlay route MTU toward `endpoint` with macOS routing tools.
+    ///
+    /// The route's own MTU is bounded by its interface's MTU; the interface is read once
+    /// per probe.
+    /// # Errors
+    /// Reports a failed route lookup or malformed route/interface output.
+    #[cfg(target_os = "macos")]
+    fn route_mtu(&mut self, endpoint: SocketAddr) -> io::Result<u32> {
+        let route = Command::new("/sbin/route")
+            .args(["-n", "get", &endpoint.ip().to_string()])
+            .output()?;
+        if !route.status.success() {
+            return Err(io::ErrorKind::NetworkUnreachable.into());
+        }
+        let route_output = String::from_utf8_lossy(&route.stdout);
+        let interface = parse_macos_route_interface(&route_output)?;
+        let link_mtu = match self.interfaces.get(&interface) {
+            Some(link_mtu) => *link_mtu,
+            None => {
+                let link_mtu = Command::new("/sbin/ifconfig")
+                    .arg(&interface)
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .and_then(|output| {
+                        parse_macos_interface_mtu(&String::from_utf8_lossy(&output.stdout)).ok()
+                    });
+                self.interfaces.insert(interface, link_mtu);
+                link_mtu
+            }
+        }
+        .ok_or(io::ErrorKind::NotFound)?;
+        Ok(bound_route_mtu(&route_output, link_mtu))
+    }
 }
 
 /// Derive a relayed peer's inner MTU from Quinn's current application-payload limit.
@@ -71,7 +153,7 @@ pub(crate) fn for_relay_datagram(max_datagram_size: Option<usize>) -> u16 {
 }
 
 /// Keep a shared link at IPv6's minimum while allowing larger peer route budgets.
-fn interface_mtu(peer_mtus: &[u16]) -> u16 {
+pub(crate) fn interface_mtu(peer_mtus: &[u16]) -> u16 {
     peer_mtus
         .iter()
         .copied()
@@ -99,37 +181,6 @@ fn mtu_for_inner_budget(inner: u32) -> u16 {
         return MIN_MESH_MTU;
     }
     u16::try_from(inner.min(u32::from(u16::MAX))).unwrap_or(FALLBACK_MESH_MTU)
-}
-
-#[cfg(target_os = "linux")]
-/// Query a numeric endpoint's route MTU through Linux route netlink.
-/// # Errors
-/// Reports an unreachable endpoint, missing egress link, or malformed route reply.
-fn endpoint_route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
-    crate::wireguard::route_mtu(endpoint)
-}
-
-#[cfg(target_os = "macos")]
-/// Query a numeric endpoint's route MTU with macOS routing tools.
-/// # Errors
-/// Reports a failed route lookup or malformed route/interface output.
-fn endpoint_route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
-    let route = Command::new("/sbin/route")
-        .args(["-n", "get", &endpoint.ip().to_string()])
-        .output()?;
-    if !route.status.success() {
-        return Err(io::ErrorKind::NetworkUnreachable.into());
-    }
-    let route_output = String::from_utf8_lossy(&route.stdout);
-    let interface = parse_macos_route_interface(&route_output)?;
-    let interface_output = Command::new("/sbin/ifconfig").arg(interface).output()?;
-    if !interface_output.status.success() {
-        return Err(io::ErrorKind::NotFound.into());
-    }
-    parse_macos_route_mtu(
-        &route_output,
-        &String::from_utf8_lossy(&interface_output.stdout),
-    )
 }
 
 /// Read the route MTU and interface name from macOS `route -n get` output.
@@ -161,13 +212,20 @@ pub(crate) fn parse_macos_route_interface(output: &str) -> io::Result<String> {
         .ok_or_else(|| io::ErrorKind::InvalidData.into())
 }
 
-/// Bound the route metric by the selected underlay interface's actual MTU.
-#[cfg(target_os = "macos")]
+/// Bound the route metric by the selected underlay interface's actual MTU (parser check only;
+/// [`EndpointProbe`] reads the interface once and calls [`bound_route_mtu`] directly).
+#[cfg(all(target_os = "macos", test))]
 pub(crate) fn parse_macos_route_mtu(route_output: &str, interface_output: &str) -> io::Result<u32> {
     let link_mtu = parse_macos_interface_mtu(interface_output)?;
-    Ok(parse_macos_route(route_output)
+    Ok(bound_route_mtu(route_output, link_mtu))
+}
+
+/// Bound a `route -n get` reply's MTU by its interface MTU, or use the interface MTU alone.
+#[cfg(target_os = "macos")]
+fn bound_route_mtu(route_output: &str, link_mtu: u32) -> u32 {
+    parse_macos_route(route_output)
         .map(|(route_mtu, _)| route_mtu.min(link_mtu))
-        .unwrap_or(link_mtu))
+        .unwrap_or(link_mtu)
 }
 
 /// Read the MTU from macOS `ifconfig` output when the route has no explicit MTU.

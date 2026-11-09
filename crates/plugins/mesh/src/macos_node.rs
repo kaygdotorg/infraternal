@@ -568,15 +568,45 @@ fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
         .collect()
 }
 
-/// Derive each installed peer host route's MTU from that peer's underlay endpoint route.
-fn route_mtus(config: &Config) -> BTreeMap<IpAddr, u16> {
-    let mut routes = BTreeMap::new();
-    for policy in installed_peers(config) {
-        let mtu = crate::mesh_mtu::for_endpoint(policy.peer.endpoint);
-        routes.insert(IpAddr::V4(policy.peer.addresses.ipv4), mtu);
-        routes.insert(IpAddr::V6(policy.peer.addresses.ipv6), mtu);
+/// The endpoint-derived MTUs for one snapshot: each installed peer host route's budget and
+/// the shared interface MTU.
+///
+/// Reading them costs a `route` and an `ifconfig` process per underlay path (about 6.5 ms
+/// each on the Mac VM). [`PathBudgets::probe`] therefore runs on the caller's thread before a
+/// snapshot is handed to the worker, never on the worker's runtime, which also drives every
+/// packet through the utun: probing there stalled traffic for the whole update (#381 J411).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PathBudgets {
+    /// Route MTU for each installed peer host route.
+    route_mtus: BTreeMap<IpAddr, u16>,
+    /// Shared utun MTU: the largest peer budget, never below IPv6's minimum.
+    interface_mtu: u16,
+}
+
+impl PathBudgets {
+    /// Probe each distinct underlay path of `config` once. `None` means no peers yet.
+    fn probe(config: Option<&Config>) -> Self {
+        let mut probe = crate::mesh_mtu::EndpointProbe::default();
+        let mut route_mtus = BTreeMap::new();
+        let mut peer_mtus = Vec::new();
+        if let Some(config) = config {
+            for policy in installed_peers(config) {
+                let mtu = probe.mesh_mtu(policy.peer.endpoint);
+                route_mtus.insert(IpAddr::V4(policy.peer.addresses.ipv4), mtu);
+                route_mtus.insert(IpAddr::V6(policy.peer.addresses.ipv6), mtu);
+            }
+            peer_mtus.extend(
+                config
+                    .peers
+                    .values()
+                    .map(|policy| probe.mesh_mtu(policy.peer.endpoint)),
+            );
+        }
+        Self {
+            route_mtus,
+            interface_mtu: crate::mesh_mtu::interface_mtu(&peer_mtus),
+        }
     }
-    routes
 }
 
 /// Return retained host routes whose freshly derived MTU differs from the installed metric.
@@ -954,6 +984,8 @@ enum WorkerCommand {
     Apply {
         /// Keeps the larger snapshot out of the enum's inline command payload.
         config: Box<Config>,
+        /// MTUs probed for `config` before it reached the worker.
+        budgets: PathBudgets,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
     SetPrivateKey {
@@ -987,6 +1019,7 @@ impl PendingWorker {
         requested_port: u16,
         config: Option<Config>,
         routes: BTreeSet<IpAddr>,
+        budgets: PathBudgets,
     ) -> io::Result<Self> {
         let (info_tx, info_rx) = sync::sync_channel(1);
         let (gate_tx, gate_rx) = sync::sync_channel(1);
@@ -1034,15 +1067,15 @@ impl PendingWorker {
                         return;
                     }
                 };
-                let initial_route_mtus = config.as_ref().map(route_mtus).unwrap_or_default();
+                let PathBudgets {
+                    route_mtus: initial_route_mtus,
+                    interface_mtu,
+                } = budgets;
                 if info_tx.send(Ok(info.clone())).is_err() || !gate_rx.recv().unwrap_or(false) {
                     return;
                 }
                 let device = runtime.block_on(async {
-                    let mtu = config
-                        .as_ref()
-                        .map(|config| crate::mesh_mtu::for_config(Some(config)))
-                        .unwrap_or(crate::mesh_mtu::IPV6_MINIMUM_MTU);
+                    let mtu = interface_mtu;
                     configure_interface(&info.interface, config.as_ref(), mtu)?;
                     utun.set_mtu(mtu);
                     #[cfg(feature = "mesh-dns")]
@@ -1120,6 +1153,7 @@ impl PendingWorker {
                     config,
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
+                    interface_mtu,
                     port: info.port,
                     #[cfg(feature = "mesh-dns")]
                     dns_resolver,
@@ -1185,11 +1219,16 @@ impl Drop for PendingWorker {
 
 impl Worker {
     /// Sends a new mesh configuration to the worker and waits for its result.
+    ///
+    /// Path MTUs are probed here, on the caller's thread, so the packet runtime only installs
+    /// the results.
     fn apply(&self, config: Config) -> io::Result<RuntimeInfo> {
+        let budgets = PathBudgets::probe(Some(&config));
         let (reply, result) = sync::sync_channel(1);
         self.commands
             .send(WorkerCommand::Apply {
                 config: Box::new(config),
+                budgets,
                 reply,
             })
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
@@ -1247,6 +1286,8 @@ struct RuntimeState {
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
     route_mtus: BTreeMap<IpAddr, u16>,
+    /// The utun MTU of the applied snapshot; a failed update restores it without re-probing.
+    interface_mtu: u16,
     port: u16,
     #[cfg(feature = "mesh-dns")]
     dns_resolver: Option<crate::dns::Resolver>,
@@ -1258,8 +1299,12 @@ struct RuntimeState {
 async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: RuntimeState) {
     while let Some(command) = commands.recv().await {
         match command {
-            WorkerCommand::Apply { config, reply } => {
-                let result = state.apply(*config).await;
+            WorkerCommand::Apply {
+                config,
+                budgets,
+                reply,
+            } => {
+                let result = state.apply(*config, budgets).await;
                 let _ = reply.send(result);
             }
             WorkerCommand::SetPrivateKey { private_key, reply } => {
@@ -1302,7 +1347,7 @@ impl RuntimeState {
     /// Apply one accepted snapshot, its endpoint-derived route MTUs, and its DNS names.
     /// # Errors
     /// Restores the old peer, route and interface MTU state when one update fails.
-    async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+    async fn apply(&mut self, config: Config, budgets: PathBudgets) -> io::Result<RuntimeInfo> {
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let interface = utun.name().to_owned();
         #[cfg(feature = "mesh-dns")]
@@ -1313,16 +1358,15 @@ impl RuntimeState {
         let old_config = self.config.clone();
         let old_routes = self.routes.clone();
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let new_route_mtus = route_mtus(&config);
+        let PathBudgets {
+            route_mtus: new_route_mtus,
+            interface_mtu: new_mtu,
+        } = budgets;
         let old_route_mtus = self.route_mtus.clone();
-        let old_mtu = old_config
-            .as_ref()
-            .map(|old| crate::mesh_mtu::for_config(Some(old)))
-            .unwrap_or(crate::mesh_mtu::IPV6_MINIMUM_MTU);
-        let new_mtu = crate::mesh_mtu::for_config(Some(&config));
+        let old_mtu = self.interface_mtu;
         let staging_mtu = old_mtu.max(new_mtu).max(crate::mesh_mtu::IPV6_MINIMUM_MTU);
         if let Err(error) = configure_interface(&interface, Some(&config), staging_mtu) {
-            rollback_device(device, &interface, old_config.as_ref(), utun).await;
+            rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
             return Err(error);
         }
         utun.set_mtu(staging_mtu);
@@ -1331,7 +1375,7 @@ impl RuntimeState {
             match crate::dns::Resolver::bind(&config) {
                 Ok(resolver) => Some(resolver),
                 Err(error) => {
-                    rollback_device(device, &interface, old_config.as_ref(), utun).await;
+                    rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
                     return Err(error);
                 }
             }
@@ -1339,7 +1383,7 @@ impl RuntimeState {
             None
         };
         if let Err(error) = replace_peers(device, peers).await {
-            rollback_device(device, &interface, old_config.as_ref(), utun).await;
+            rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
             return Err(error);
         }
         let mut added = BTreeSet::new();
@@ -1388,11 +1432,12 @@ impl RuntimeState {
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
                 let _ = route(&interface, *address, "add", Some(mtu));
             }
-            rollback_device(device, &interface, old_config.as_ref(), utun).await;
+            rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
             return Err(error);
         }
         self.routes.clone_from(&new_routes);
         self.route_mtus = new_route_mtus;
+        self.interface_mtu = new_mtu;
         #[cfg(feature = "mesh-dns")]
         {
             let resolver = self
@@ -1511,16 +1556,17 @@ async fn replace_peers(device: &GotaDevice, peers: Vec<WireGuardPeer>) -> io::Re
     result.and(resumed)
 }
 
-/// Restore the old peers and a safe interface MTU after a failed configuration transaction.
+/// Restore the old peers and their interface MTU after a failed configuration transaction.
+///
+/// `mtu` is the MTU recorded for `config` when it was applied, so rollback starts no probes
+/// on the packet runtime.
 async fn rollback_device(
     device: &GotaDevice,
     interface: &str,
     config: Option<&Config>,
+    mtu: u16,
     utun: &MacUtun,
 ) {
-    let mtu = config
-        .map(|config| crate::mesh_mtu::for_config(Some(config)))
-        .unwrap_or(crate::mesh_mtu::IPV6_MINIMUM_MTU);
     if let Some(config) = config {
         let _ = configure_interface(interface, Some(config), mtu);
         if let Ok(peers) = peers_for_config(config) {
@@ -1861,6 +1907,7 @@ impl Node {
             self.port,
             self.config.clone(),
             desired_routes.clone(),
+            PathBudgets::probe(self.config.as_ref()),
         )?;
         let info = startup.info().clone();
         self.interface = Some(info.interface.clone());
