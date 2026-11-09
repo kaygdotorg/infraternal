@@ -17,7 +17,7 @@ import { CANVAS_WHEEL_MODIFIER } from "../src/canvas/camera/canvas-wheel-modifie
 import { tracerEvidencePath } from "./evidence-path";
 
 const OUT = tracerEvidencePath("swipe-content-first");
-const PAGE = '.ui-window[data-window-id="d-keys"]';
+const PAGE = '.ui-window[data-window-id="d-reference/keys"]';
 
 type Api = Record<string, (...args: unknown[]) => unknown>;
 const api = (page: Page, fn: string, ...args: unknown[]): Promise<unknown> =>
