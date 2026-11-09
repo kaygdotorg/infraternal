@@ -127,6 +127,8 @@ async fn assert_bound_join_response(
     );
 }
 
+/// An invitation is bound to its key digest, used once, keeps its token while the CA is locked, and publishes the
+/// public origin plus the direct QUIC endpoint (#146).
 #[tokio::test]
 async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() {
     let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -173,7 +175,8 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     let published: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(published["public_origin"], "https://auth.example.test");
-    assert!(published.get("endpoint").is_none());
+    // The direct QUIC listener is published again; the HTTPS origin stays the fallback (#146).
+    assert!(published["endpoint"].is_string());
     let joined: JoinInvitation = serde_json::from_value(published).unwrap();
     assert_eq!(joined.execution_uid, 1002);
     assert_eq!(

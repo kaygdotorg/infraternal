@@ -47,8 +47,11 @@ pub struct JoinInvitation {
     /// Reverse-proxy HTTPS uses ordinary verified system roots instead of the internal CA.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub https_system_roots: bool,
-    /// Legacy direct transport address. New invitations omit it.
-    #[serde(default, skip_serializing)]
+    /// The server's direct QUIC listener, tried first after the join; the
+    /// public HTTPS origin stays the fallback, so the port is never required
+    /// (D196, D291). App-window lanes exist only on QUIC (#146). An unspecified
+    /// IP (a listener bound to all addresses) means "the public origin's host".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<std::net::SocketAddr>,
     /// D168 identity authority name retained when the transport moves to a public HTTPS origin.
     #[serde(default)]
