@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
 import { THEMES, type Theme } from "../../../packages/ui/src/themes";
+import { FRAME_MS } from "./latency-targets";
 
 type TerminalPixels = {
   background: string;
@@ -287,7 +288,8 @@ test("every curated theme recolors the initial terminal and its existing ANSI te
     body: JSON.stringify({ samples: switchDurations, p50, p99, colorUpdateDurations, renderDurations, longTasks }),
     contentType: "application/json",
   });
-  expect(p99).toBeLessThan(16.67);
+  // A theme switch's own work fits one 120 Hz frame (D375; was one 60 Hz frame).
+  expect(p99).toBeLessThan(FRAME_MS);
   expect(longTasks.filter((duration) => duration > 50)).toEqual([]);
   expect(await readSocketCounts(page)).toEqual(socketCounts);
   expect(await page.evaluate(() => window.__tracerTestDouble?.rendererMetrics()?.scrollbackRows ?? 0)).toBe(scrollbackRowsBefore);
