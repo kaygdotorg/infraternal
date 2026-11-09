@@ -613,8 +613,8 @@ test("three quick look picks on a slow link end on the last pick on both devices
     // sleep: let the first look.set reach the wire before the next pick, so each pick meets one still in flight.
     await a.waitForTimeout(900);
     await choosePaletteValue(a, "Theme: Tinted");
-    // sleep: the second pick is announced while the first is still unacknowledged.
-    await a.waitForTimeout(900);
+    // sleep: a quick third pick, made while the first look is still unacknowledged and the second has not left yet.
+    await a.waitForTimeout(300);
     await choosePaletteValue(a, "Theme: Solid");
     await settled(a); await settled(b);
     await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 90_000 }).toBe("solid");
