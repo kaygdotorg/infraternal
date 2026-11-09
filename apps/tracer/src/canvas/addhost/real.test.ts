@@ -107,6 +107,51 @@ describe("a server that lacks an endpoint", () => {
   });
 });
 
+describe("trusting a host key more than once (#449)", () => {
+  /** Opens a run, shows it a host-key failure for `host`, and returns the service and the one fingerprint offered. */
+  function observed(host: string): { service: ReturnType<typeof createRealProvisioning>; print: string } {
+    const service = createRealProvisioning();
+    const print = `SHA256:${"a".repeat(43)}`;
+    const run = service.open({ onEvent() {} }, { url: "ws://fixture.invalid" });
+    Socket.last.open();
+    run.start([{ id: "one", address: { kind: "manual", value: host } }]);
+    Socket.last.message({ sequence: 1, target: "one", attempt: 1, step: "failed", message: "Check the host key.", elapsed_ms: 1, log_tail: [],
+      failure: { kind: "host-key", message: "Check the host key.", log_tail: [], fingerprints: [print], host_key_challenge: "challenge" } });
+    return { service, print };
+  }
+  const confirmations = (): number => Socket.last.sent.filter((text) => text.includes("confirm-host-key")).length;
+  const acknowledge = (print: string): void => Socket.last.message({ host_key_confirmed: { target: "one", fingerprint: print } });
+
+  test("a second trust while the first is in flight joins it: one request, both resolve", async () => {
+    const { service, print } = observed("one.lab");
+    const first = service.trustHostKey("one.lab", print);
+    const second = service.trustHostKey("one.lab", print);
+    const third = service.trustHostKey("one.lab", print);
+    acknowledge(print);
+    await Promise.all([first, second, third]);
+    expect(confirmations()).toBe(1);
+  });
+  test("a trust repeated after it succeeded resolves without asking again", async () => {
+    const { service, print } = observed("one.lab");
+    const first = service.trustHostKey("one.lab", print);
+    acknowledge(print);
+    await first;
+    await service.trustHostKey("one.lab", print);
+    expect(confirmations()).toBe(1);
+  });
+  test("a different fingerprint is still refused, before or after a trust", async () => {
+    const { service, print } = observed("one.lab");
+    const other = `SHA256:${"b".repeat(43)}`;
+    await expect(service.trustHostKey("one.lab", other)).rejects.toBeInstanceOf(ServiceError);
+    const first = service.trustHostKey("one.lab", print);
+    acknowledge(print);
+    await first;
+    await expect(service.trustHostKey("one.lab", other)).rejects.toBeInstanceOf(ServiceError);
+    await expect(service.trustHostKey("never-seen.lab", print)).rejects.toBeInstanceOf(ServiceError);
+    expect(confirmations()).toBe(1);
+  });
+});
+
 describe("bootstrap failure parsing", () => {
   test("an already-added failure keeps its existing host id", () => {
     let failure: FailureDetail | undefined;
