@@ -198,7 +198,7 @@ async fn expired_identity(
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
         .bind(previous.record.fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(previous.record.issuer_fingerprint.as_slice())

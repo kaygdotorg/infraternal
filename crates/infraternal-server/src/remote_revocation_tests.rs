@@ -291,7 +291,7 @@ async fn guard_bookkeeping_at_1000_hosts() {
             .bind(host.as_bytes().as_slice()).bind(instant).execute(&mut *transaction).await.unwrap();
         // Placeholder public fingerprints isolate guard allocations after a
         // trusted admission boundary; crypto/ledger storage is not this metric.
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
             .bind(fingerprint.as_slice()).bind(host.as_bytes().as_slice()).bind([9u8;32].as_slice()).bind([3u8;32].as_slice())
             .bind(instant).bind(instant+604_800).execute(&mut *transaction).await.unwrap();
     }

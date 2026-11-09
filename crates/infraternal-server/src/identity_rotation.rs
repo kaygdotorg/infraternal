@@ -519,8 +519,8 @@ impl Service {
         .await
         .map_err(|_| denied())?;
         sqlx::query(
-            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) \
-             SELECT ?,h.id,?,?,?,? FROM remote_hosts h WHERE h.id=? AND h.revoked_at IS NULL \
+            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,role,execution_uid) \
+             SELECT ?,h.id,?,?,?,?,'active',h.execution_uid FROM remote_hosts h WHERE h.id=? AND h.revoked_at IS NULL \
              ON CONFLICT(fingerprint) DO NOTHING",
         )
         .bind(record.fingerprint.as_slice())

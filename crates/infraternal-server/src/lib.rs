@@ -108,6 +108,9 @@ mod remote_standby;
 pub mod remote_standby_request;
 #[cfg(feature = "remote")]
 mod remote_startup;
+/// A root upgrade's successor lane and its outboxes (D376, #399).
+#[cfg(feature = "remote")]
+mod remote_successor;
 mod runtime;
 mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]

@@ -472,6 +472,16 @@ async fn remote_router(
         .retire_unfinished_bootstraps()
         .await
         .map_err(ServerError::Storage)?;
+    // No promotion driver survives a restart either: abandon every live
+    // promotion, which bars its handover; the host's relay has rolled back
+    // by itself, and a joined successor uninstalls itself (D376, R4, R5).
+    enrollment_store
+        .sweep_promotions(
+            unix_seconds().map_err(|_| ServerError::InvalidConfiguration)?,
+            true,
+        )
+        .await
+        .map_err(|_| ServerError::InvalidConfiguration)?;
     let ca_api = ca_router(
         remote.as_ref(),
         &auth,
@@ -1563,7 +1573,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(zeroblob(32),?,zeroblob(32),zeroblob(32),?,?)")
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(zeroblob(32),?1,zeroblob(32),zeroblob(32),?2,?3,(SELECT execution_uid FROM remote_hosts WHERE id=?1))")
             .bind(host.as_bytes().as_slice()).bind(now-604_800).bind(now).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,'owner')")
             .bind(host.as_bytes().as_slice())

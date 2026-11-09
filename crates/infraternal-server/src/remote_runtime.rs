@@ -183,6 +183,8 @@ pub(crate) struct RemoteHosts(
     bool,
     pub(crate) crate::remote_inventory::InventoryChanges,
     pub(crate) Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
+    /// Root upgrades' successors waiting for their promotion's driver (D376).
+    pub(crate) Arc<crate::remote_successor::Successors>,
 );
 
 /// Identity and admission limits are shared; this factory never retains its host map.
@@ -287,6 +289,7 @@ impl RemoteHosts {
             host.admission.clone(),
         )))
     }
+    /// An empty registry whose enrollment signs with `source` (none: no CA yet).
     pub(crate) fn from_source(source: Option<Arc<dyn crate::ca::CaKeySource>>) -> Self {
         Self(
             Arc::default(),
@@ -295,6 +298,7 @@ impl RemoteHosts {
             Arc::default(),
             false,
             crate::remote_inventory::InventoryChanges::default(),
+            Arc::default(),
             Arc::default(),
         )
     }
@@ -497,6 +501,10 @@ impl RemoteHosts {
         if let Some(person) = authority.cleanup_person() {
             return deliver_login_cleanup(authority, link, person).await;
         }
+        // A root upgrade's successor never enters the registry (J415 R2).
+        if authority.successor_authority().is_some() {
+            return crate::remote_successor::deliver(&self.7, authority, link).await;
+        }
         if link.primed() {
             return self.admit_primed(authority, link).await;
         }
@@ -513,6 +521,21 @@ impl RemoteHosts {
         let generation = Uuid::new_v4();
         let peer = link.peer_address();
         let caps = link.peer_capabilities();
+        // After a root upgrade's handover the host's uid changed. The old
+        // epoch's actor was cut, but its retirement task may not have removed
+        // it yet; a live actor of another uid is still refused (R2).
+        if hosts
+            .get(&id)
+            .is_some_and(|host| host.uid != uid && !host.authority.permits())
+        {
+            let channel = hosts.remove(&id).and_then(|host| host.channel);
+            if let Some(channel) = channel
+                && let Some(runtime) = &runtime
+            {
+                runtime.detach_node_if(&channel).await;
+            }
+        }
+        let rootful = authority.identity.mode == crate::enrollment::Mode::Rootful;
         if let Some(host) = hosts.get_mut(&id) {
             if host.uid != uid {
                 return Err(io::ErrorKind::PermissionDenied.into());
@@ -590,6 +613,15 @@ impl RemoteHosts {
         }
         if let Some(host) = hosts.get(&id) {
             host.authority.bind_login_actor(&host.actor);
+            // A promoted host's new root agent retires the rootless install
+            // and leaves standby, from the durable outbox (J415 R5).
+            if rootful {
+                tokio::spawn(crate::remote_successor::retire_predecessor(
+                    host.authority.store(),
+                    host.actor.clone(),
+                    id,
+                ));
+            }
         }
         if let Some(runtime) = runtime
             && let Some(host) = hosts.get_mut(&id)
