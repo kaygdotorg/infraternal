@@ -8,7 +8,7 @@ import { WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { isMacPlatform } from "../../../packages/ui/src/platform";
 import { createThemeStore } from "../src/canvas/themes/model";
 import { cache, watchLayout } from "./layout-observer";
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Browser, type Page } from "playwright/test";
 import { personName, startRealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 
@@ -506,6 +506,73 @@ test("a newer local appearance edit survives an older remote look while its anno
       rounds.push(round);
     }
     console.log(`APPEARANCE_UNSENT_CONFLICT ${JSON.stringify({ rounds, expectedNewestWins: true })}`);
+  } finally {
+    await second.close();
+    await first.close();
+    await server.dispose();
+  }
+});
+
+/** Opens two clients on one real account, with the second tab ready to queue an offline look edit. */
+async function offlineConflictClients(browser: Browser) {
+  const server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4567) });
+  const first = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  const second = await browser.newContext({ viewport: { width: 1280, height: 800 }, ignoreHTTPSErrors: true });
+  const a = watchLayout(await first.newPage());
+  await enrol(a, server);
+  await settled(a);
+  await second.addCookies(await first.cookies());
+  const b = watchLayout(await second.newPage());
+  await b.goto(server.origin + "/");
+  await expect(windows(b)).toHaveCount(1);
+  await settled(b);
+  return { server, first, second, a, b };
+}
+
+/** A saved newer account look must survive an offline `look.set` based on an older revision. */
+test("an offline stale look cannot replace the newer account look", async ({ browser }) => {
+  const { server, first, second, a, b } = await offlineConflictClients(browser);
+  try {
+    await second.setOffline(true);
+    await choosePaletteValue(b, "Theme: Frosted");
+    await expect(b.locator("html")).toHaveAttribute("data-look", "frosted");
+    await expect.poll(async () => (await cache(b)).pending.some((entry) => (entry.intent as { type?: string } | undefined)?.type === "look.set"), { timeout: 15_000 }).toBe(true);
+
+    await choosePaletteValue(a, "Theme: Solid");
+    await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 30_000 }).toBe("solid");
+    await settled(a);
+
+    await second.setOffline(false);
+    await settled(b);
+    await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 15_000 }).toBe("solid");
+    expect((await cache(b)).canonical.look?.selected).toBe("solid");
+  } finally {
+    await second.close();
+    await first.close();
+    await server.dispose();
+  }
+});
+
+/** A definitive stale-look refusal releases the local guard so a later server look can still apply. */
+test("a refused offline look does not suppress later remote looks", async ({ browser }) => {
+  const { server, first, second, a, b } = await offlineConflictClients(browser);
+  try {
+    await second.setOffline(true);
+    await choosePaletteValue(b, "Theme: Frosted");
+    await expect(b.locator("html")).toHaveAttribute("data-look", "frosted");
+    await expect.poll(async () => (await cache(b)).pending.some((entry) => (entry.intent as { type?: string } | undefined)?.type === "look.set"), { timeout: 15_000 }).toBe(true);
+
+    await choosePaletteValue(a, "Theme: Solid");
+    await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 30_000 }).toBe("solid");
+    await settled(a);
+    await second.setOffline(false);
+    await settled(b);
+    await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 15_000 }).toBe("solid");
+
+    await choosePaletteValue(a, "Theme: Tinted");
+    await expect.poll(async () => (await cache(a)).canonical.look?.selected, { timeout: 30_000 }).toBe("tinted");
+    await expect.poll(async () => (await cache(b)).canonical.look?.selected, { timeout: 30_000 }).toBe("tinted");
+    await expect(b.locator("html")).toHaveAttribute("data-look", "tinted");
   } finally {
     await second.close();
     await first.close();

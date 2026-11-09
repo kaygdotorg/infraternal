@@ -161,7 +161,9 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     else if (definitive) core.toast.show({ message: "That layout change was not saved. The saved layout is back.", tone: "error", duration: 5000 });
     // A delayed save (`_delayed`) gets no toast of its own: the persistent "Not saved" status below is shown for exactly as long as
     // the layout is waiting and already says to keep the tab open. A second transient toast said the same and stacked on it (#377).
-  }, options.onSessionRevoked);
+  }, options.onSessionRevoked, (look) => {
+    if (!disposed) lookBridge()?.lookRefused(look);
+  });
   const pendingNotice = mountToast(core.stage, { aboveNotifications: true });
   // Shown only when an edit is still unsaved after about a second, so a normal move never flashes it (D358).
   const pendingWatch = watchPendingNotice(() => store.pending === true, {

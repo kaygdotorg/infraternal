@@ -54,6 +54,8 @@ export interface LookAdapter {
   apply(look: DocLook | undefined): void;
   /** Confirms a complete canonical look after the canvas store has no unacknowledged edits. */
   confirmed(look: DocLook | undefined): void;
+  /** A `look.set` was refused; forget only that local look while its fresh canvas snapshot is requested. */
+  lookRefused(look: DocLook): void;
   /** The account's default window widths, shared by phone and desktop clients. */
   windowSizes(): WindowSizes;
   setWindowSize<K extends keyof WindowSizes>(kind: K, value: WindowSizes[K]): void;
@@ -288,6 +290,12 @@ export function startThemes(core: CoreScreen, options: StartThemesOptions = {}):
       localLookPending = false;
       writeCache(accountId, canonical);
       clearLegacyAppearance(accountId);
+    },
+    lookRefused(look) {
+      if (!accountId || previewing || !sameLook(look, snapshot())) return;
+      localLookPending = false;
+      window.clearTimeout(cacheTimer); cacheTimer = 0;
+      window.clearTimeout(announceTimer); announceTimer = 0;
     },
     windowSizes: () => ({ ...defaults.windowSizes }),
     setWindowSize(kind, value) {
