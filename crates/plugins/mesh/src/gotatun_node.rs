@@ -129,12 +129,16 @@ pub(crate) struct RuntimeInfo {
     offloads_enabled: bool,
 }
 
-/// Commands serialized by the dedicated `GotaTun` worker; each operation replies after touching the device.
+/// Commands serialized by the Linux `GotaTun` worker; each request has a synchronous result channel.
 enum WorkerCommand {
     Apply {
         /// Keeps the larger snapshot out of the enum's inline command payload.
         config: Box<Config>,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
+    },
+    SetMtu {
+        mtu: u16,
+        reply: sync::SyncSender<io::Result<()>>,
     },
     SetPrivateKey {
         private_key: StaticSecret,
@@ -333,6 +337,17 @@ impl Engine {
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
 
+    /// Set the mesh MTU on the worker that owns the TUN and its packet-size watcher.
+    /// # Errors
+    /// Reports a stopped worker or a link update failure.
+    pub(crate) fn set_mtu(&self, mtu: u16) -> io::Result<()> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::SetMtu { mtu, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
     /// Switch the userspace device and its rebuild key to one journaled rotation identity.
     /// # Errors
     /// Reports a stopped worker or a failed device reconfiguration.
@@ -454,15 +469,14 @@ async fn initialize(
     if before.is_some() && !ours(before) {
         return Err(io::ErrorKind::AlreadyExists.into());
     }
+    // Keep a fresh TUN large enough for Linux to install its IPv6 address. The first coordinator
+    // snapshot applies the smaller route-derived MTU after Node::apply has installed addresses.
+    let mtu = crate::mesh_mtu::for_config(config).max(crate::mesh_mtu::IPV6_MINIMUM_MTU);
     // A persistent TUN another process holds refuses this attach with EBUSY.
-    let tun =
-        LinuxTun::create(crate::wireguard::INTERFACE, refused).map_err(|error| {
-            match error.raw_os_error() {
-                Some(code) if code == nix::libc::EBUSY => {
-                    io::Error::from(io::ErrorKind::AlreadyExists)
-                }
-                _ => error,
-            }
+    let tun = LinuxTun::create(crate::wireguard::INTERFACE, mtu, local_public_key, refused)
+        .map_err(|error| match error.raw_os_error() {
+            Some(code) if code == nix::libc::EBUSY => io::Error::from(io::ErrorKind::AlreadyExists),
+            _ => error,
         })?;
     // The check above and the attach are two steps: confirm the attached link is still the
     // proven one, or a fresh one under this name.
@@ -487,7 +501,7 @@ async fn initialize(
     if adopt.is_none() {
         crate::wireguard::Device::mark_tun(local_public_key)?;
     }
-    crate::wireguard::Device::activate_tun()?;
+    crate::wireguard::Device::activate_tun(tun.owned_ifindex()?, mtu)?;
     // Raised on a new and on a reattached TUN alike. A refusal does not stop the engine: the
     // length it really has goes to `mesh status`.
     let tx_queue_len = crate::wireguard::Device::raise_tx_queue_len(TUN_TX_QUEUE_LEN)
@@ -608,6 +622,9 @@ async fn run_worker(mut commands: UnboundedReceiver<WorkerCommand>, mut state: R
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
                     let _ = reply.send(state.apply(*config).await);
+                }
+                Some(WorkerCommand::SetMtu { mtu, reply }) => {
+                    let _ = reply.send(state.update_mtu(mtu));
                 }
                 Some(WorkerCommand::SetPrivateKey { private_key, reply }) => {
                     let _ = reply.send(state.set_private_key(private_key).await);
@@ -806,10 +823,25 @@ impl RuntimeState {
         }
     }
 
-    /// Apply a coordinator snapshot, updating both overlap keys when their route roles change.
+    /// Apply a coordinator snapshot while keeping the shared link above IPv6's minimum.
+    ///
+    /// The caller installs the new per-peer route MTUs before lowering the shared interface.
+    /// # Errors
+    /// Reports a missing TUN, route-netlink failure, or peer update failure.
     async fn apply(&mut self, config: Config) -> io::Result<RuntimeInfo> {
+        let mtu = crate::mesh_mtu::for_config(Some(&config));
+        let previous_mtu = self
+            .tun
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .tun
+            .current_mtu()?;
         if self.device.is_none() {
-            self.start_device(&config).await?;
+            self.update_mtu(mtu)?;
+            if let Err(error) = self.start_device(&config).await {
+                let _ = self.update_mtu(previous_mtu);
+                return Err(error);
+            }
             self.config = Some(config);
             return Ok(self.info.clone());
         }
@@ -838,9 +870,11 @@ impl RuntimeState {
             .copied()
             .map(|key| X25519PublicKey::from(key.0))
             .collect();
+        // Keep the larger link limit until the caller has replaced the peer route metrics.
+        self.update_mtu(previous_mtu.max(mtu))?;
         if !changed.is_empty() || !retired.is_empty() {
             // One device transaction: packet workers never see a half-applied snapshot.
-            device
+            if let Err(error) = device
                 .write(async |device| {
                     device.add_or_update_peers(changed).await;
                     for key in &retired {
@@ -848,10 +882,27 @@ impl RuntimeState {
                     }
                 })
                 .await
-                .map_err(|_| io::Error::other("GotaTun peers could not be updated."))?;
+                .map_err(|_| io::Error::other("GotaTun peers could not be updated."))
+            {
+                let _ = self.update_mtu(previous_mtu);
+                return Err(error);
+            }
         }
         self.config = Some(config);
         Ok(self.info.clone())
+    }
+
+    /// Set both the kernel link MTU and the packet workers' live MTU watcher.
+    ///
+    /// The link changes first so the host network stack stops creating packets that the
+    /// userspace tunnel would reject. The watcher is published only after that succeeds.
+    /// # Errors
+    /// Reports a missing TUN or a route-netlink failure.
+    fn update_mtu(&self, mtu: u16) -> io::Result<()> {
+        self.tun
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .set_mtu(mtu)
     }
 
     async fn counters(&self) -> io::Result<CounterMap> {
@@ -960,8 +1011,16 @@ struct LinuxPacketIo {
 }
 
 impl LinuxPacketIo {
+    /// Wrap the opened TUN for `GotaTun` packet delivery and its live MTU watcher.
     fn new(tun: LinuxTun) -> Self {
         Self { tun }
+    }
+
+    /// Keep the link MTU and `GotaTun`'s packet-size watcher in step.
+    /// # Errors
+    /// Reports a missing interface or route-netlink configuration failure.
+    fn set_mtu(&self, mtu: u16) -> io::Result<()> {
+        self.tun.set_mtu(mtu)
     }
 
     /// Future mesh-local services consume selected decrypted packets here before host delivery.

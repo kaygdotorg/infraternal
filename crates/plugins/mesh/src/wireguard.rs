@@ -1,5 +1,6 @@
 //! Drives Linux kernel `WireGuard` through checked generic and route netlink [163,165,169], #129.
 use crate::{
+    mesh_mtu,
     netlink::{self, NESTED, Socket, attribute},
     policy::model::{Addresses, PublicKey},
 };
@@ -428,9 +429,10 @@ impl Device {
         attribute(&mut payload, 3, &key.0)?;
         attribute(&mut payload, 6, &port.to_ne_bytes())?;
         // A zero listen port is bound only when the kernel device is running.
-        // Activate before advertising the public endpoint to the coordinator.
+        // Preserve the link MTU through key setup: the first IPv6 address must
+        // be installed before the route-derived packet ceiling is applied.
         send(&payload)?;
-        activate(ifindex)?;
+        activate(ifindex, None)?;
         if identity_at(ifindex)?.1 == 51820 {
             Self::allocate_port(ifindex)?;
         }
@@ -446,7 +448,7 @@ impl Device {
             // Port zero asks the kernel to allocate again. Never reserve a
             // userspace socket and release it into a bind race with WireGuard.
             send(&payload)?;
-            activate(ifindex)?;
+            activate(ifindex, None)?;
             let port = identity_at(ifindex)?.1;
             if port != 0 && port != 51820 {
                 return Ok(port);
@@ -504,11 +506,18 @@ impl Device {
         }
         Ok(())
     }
-    /// Install local /32+/128 addresses and bring the interface up with conservative direct-path MTU.
+    /// Install local /32+/128 addresses while the link meets IPv6's minimum MTU, then apply the
+    /// safe fallback until the node can derive a route-specific packet ceiling.
     /// # Errors
     /// Returns address, interface lookup or route-netlink errors.
     pub fn addresses(addresses: Addresses) -> io::Result<()> {
         let index = index()?;
+        // Linux rejects IPv6 address installation below 1280 bytes. A prior
+        // route update may already have narrowed this owned link to 1200, so
+        // temporarily raise only that link before changing either address.
+        if link_mtu(index)? < u32::from(crate::mesh_mtu::IPV6_MINIMUM_MTU) {
+            set_link_mtu(index, u32::from(crate::mesh_mtu::IPV6_MINIMUM_MTU))?;
+        }
         let mut route = Socket::open(SockProtocol::NetlinkRoute)?;
         for (family, prefix, address) in [
             (2_u8, 32, addresses.ipv4.octets().to_vec()),
@@ -550,13 +559,28 @@ impl Device {
                 }
             }
         }
-        activate(index)
+        activate(index, Some(crate::mesh_mtu::IPV6_MINIMUM_MTU))
     }
-    /// Raise a fresh `GotaTun` interface with the mesh MTU.
+    /// Raise the proven `GotaTun` interface by index with its derived mesh MTU.
     /// # Errors
     /// Reports link configuration errors.
-    pub fn activate_tun() -> io::Result<()> {
-        activate(index()?)
+    pub fn activate_tun(ifindex: u32, mtu: u16) -> io::Result<()> {
+        activate(ifindex, Some(mtu))
+    }
+    /// Set the already-proven mesh link's packet size by index after peer routes are known.
+    ///
+    /// Callers keep the owner proof and index together so a shared-name replacement is never
+    /// modified by an MTU update.
+    /// # Errors
+    /// Reports a missing link or route-netlink errors.
+    pub(crate) fn set_mtu(ifindex: u32, mtu: u16) -> io::Result<()> {
+        set_link_mtu(ifindex, u32::from(mtu))
+    }
+    /// Read one already-proven link MTU so a peer update can preserve its current packet ceiling.
+    /// # Errors
+    /// Reports a missing interface, malformed link reply, or an MTU wider than this engine can use.
+    pub(crate) fn mtu(ifindex: u32) -> io::Result<u16> {
+        u16::try_from(link_mtu(ifindex)?).map_err(|_| io::ErrorKind::InvalidData.into())
     }
     /// Raise the mesh TUN's transmit queue (`txqueuelen`) to at least `len` packets and return the
     /// length it has afterwards. A shorter queue drops bursts the host writes faster than the
@@ -626,9 +650,26 @@ impl Device {
     /// # Errors
     /// Returns route-netlink errors.
     pub fn routes(peers: &[Peer], remove: bool) -> io::Result<()> {
+        Self::routes_with_mtu_overrides(peers, &BTreeMap::new(), remove)
+    }
+
+    /// Install peer routes using live relay MTUs where one is active, otherwise the direct route.
+    /// # Errors
+    /// Returns route-netlink errors.
+    pub(crate) fn routes_with_mtu_overrides(
+        peers: &[Peer],
+        overrides: &BTreeMap<PublicKey, u16>,
+        remove: bool,
+    ) -> io::Result<()> {
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         let index = index()?;
         for peer in peers {
+            let mtu = (!remove).then(|| {
+                overrides
+                    .get(&peer.key)
+                    .copied()
+                    .unwrap_or_else(|| crate::mesh_mtu::for_endpoint(peer.endpoint))
+            });
             for (family, prefix, address) in [
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
@@ -636,6 +677,12 @@ impl Device {
                 let mut payload = vec![family, prefix, 0, 0, 254, 4, 253, 1, 0, 0, 0, 0];
                 attribute(&mut payload, 1, &address)?;
                 attribute(&mut payload, 4, &index.to_ne_bytes())?;
+                if let Some(mtu) = mtu {
+                    let mut metrics = Vec::new();
+                    attribute(&mut metrics, RTAX_MTU, &u32::from(mtu).to_ne_bytes())?;
+                    // RTAX_LOCK is deliberately absent so later PMTU information can refine this.
+                    attribute(&mut payload, RTA_METRICS | NLA_F_NESTED, &metrics)?;
+                }
                 let result = socket.request(
                     if remove { 25 } else { 24 },
                     if remove { 4 } else { 4 | 0x100 | 0x400 },
@@ -723,6 +770,7 @@ impl Device {
     ) -> io::Result<()> {
         Self::retire_routes(inventory, addresses)
     }
+    /// Remove stale peer routes owned by this mesh while preserving foreign routes.
     fn retire_routes(inventory: &BTreeSet<IpAddr>, addresses: &[Addresses]) -> io::Result<()> {
         let desired: BTreeSet<IpAddr> = addresses
             .iter()
@@ -752,6 +800,7 @@ impl Device {
             let mut destination = None;
             let mut table = 254;
             let mut exact_shape = true;
+            let mut route_mtu_seen = false;
             for field in netlink::attributes(&reply[12..])? {
                 match field.kind {
                     1 => destination = Some(field.payload),
@@ -760,6 +809,9 @@ impl Device {
                     6 if header[0] == 10 && field.payload == 1024_u32.to_ne_bytes() => {}
                     12 if header[0] == 10 && field.payload.len() == 32 => {}
                     20 if header[0] == 10 && field.payload == [0] => {}
+                    8 if !route_mtu_seen && mesh_route_metrics_are_owned(field) => {
+                        route_mtu_seen = true;
+                    }
                     _ => exact_shape = false,
                 }
             }
@@ -912,6 +964,39 @@ impl Device {
         Ok(counters)
     }
 }
+
+/// Recognize only the single MTU metric this mesh writes on a peer host route.
+///
+/// Routes from before per-peer MTUs may have no metrics at all; callers accept
+/// that legacy shape separately. Extra, repeated, malformed or out-of-range
+/// metrics stay foreign so restart cleanup cannot delete an operator route.
+/// Linux clears `NLA_F_NESTED` in route dumps, so the `RTA_METRICS` type identifies
+/// the nested payload even when that flag is absent.
+fn mesh_route_metrics_are_owned(field: netlink::Attribute<'_>) -> bool {
+    if field.kind != RTA_METRICS {
+        return false;
+    }
+    let Ok(metrics) = netlink::attributes(field.payload) else {
+        return false;
+    };
+    let [metric] = metrics.as_slice() else {
+        return false;
+    };
+    if metric.kind != RTAX_MTU || metric.nested || metric.payload.len() != 4 {
+        return false;
+    }
+    let Ok(mtu) = netlink::u32_at(metric.payload, 0) else {
+        return false;
+    };
+    (u32::from(mesh_mtu::MIN_MESH_MTU)..=u32::from(u16::MAX)).contains(&mtu)
+}
+
+/// `RTA_METRICS`: nested per-route metrics accepted by rtnetlink.
+const RTA_METRICS: u16 = 8;
+/// `RTAX_MTU`: the per-peer inner packet limit stored on a mesh host route.
+const RTAX_MTU: u16 = 2;
+/// Marks the route metrics payload as a nested netlink attribute.
+const NLA_F_NESTED: u16 = 1 << 15;
 /// Decode `WGPEER_A_ENDPOINT`: a kernel `sockaddr_in` (16 bytes) or
 /// `sockaddr_in6` (28 bytes). Family and scope are native-endian, port and
 /// flow information network order. Any other size or family is refused.
@@ -995,14 +1080,80 @@ mod timestamp_tests {
         }
     }
 }
-fn activate(index: u32) -> io::Result<()> {
+/// Bring one link up and optionally set its MTU in the same route-netlink request.
+///
+/// Passing `None` preserves the current MTU, which is useful while reallocating a listen port.
+/// # Errors
+/// Reports route-netlink encoding or kernel configuration failures.
+fn activate(index: u32, mtu: Option<u16>) -> io::Result<()> {
     let mut payload = vec![0; 16];
     payload[4..8].copy_from_slice(&index.to_ne_bytes());
     payload[8..12].copy_from_slice(&1_u32.to_ne_bytes());
     payload[12..16].copy_from_slice(&1_u32.to_ne_bytes());
-    attribute(&mut payload, 4, &1380_u32.to_ne_bytes())?;
+    if let Some(mtu) = mtu {
+        attribute(&mut payload, IFLA_MTU, &u32::from(mtu).to_ne_bytes())?;
+    }
     Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4, &payload)?;
     Ok(())
+}
+/// `IFLA_MTU`: the interface's link-layer packet size.
+const IFLA_MTU: u16 = 4;
+/// Change the MTU on one link index without resolving its shared name again.
+fn set_link_mtu(index: u32, mtu: u32) -> io::Result<()> {
+    let mut payload = vec![0; 16];
+    payload[4..8].copy_from_slice(&index.to_ne_bytes());
+    attribute(&mut payload, IFLA_MTU, &mtu.to_ne_bytes())?;
+    Socket::open(SockProtocol::NetlinkRoute)?.request(16, 4, &payload)?;
+    Ok(())
+}
+/// Look up the effective route MTU for a peer endpoint, falling back to its egress link MTU.
+///
+/// An explicit route MTU may be smaller than the interface, so use the lower value. A larger
+/// metric is not a usable packet budget because the egress link cannot carry it. `RTM_GETROUTE`
+/// and `RTM_GETLINK` are acknowledged requests and each uses one short-lived route-netlink socket.
+/// # Errors
+/// Reports an unreachable endpoint, a missing egress link, or malformed kernel replies.
+pub(crate) fn route_mtu(endpoint: SocketAddr) -> io::Result<u32> {
+    let (family, prefix, address) = match endpoint.ip() {
+        IpAddr::V4(address) => (2_u8, 32_u8, address.octets().to_vec()),
+        IpAddr::V6(address) => (10_u8, 128_u8, address.octets().to_vec()),
+    };
+    let mut request = vec![family, prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    attribute(&mut request, 1, &address)?;
+    let replies = Socket::open(SockProtocol::NetlinkRoute)?.request(26, 4, &request)?;
+    let reply = replies.first().ok_or(io::ErrorKind::NotFound)?;
+    let mut output_index = None;
+    let mut route_mtu = None;
+    for field in netlink::attributes(reply.get(12..).ok_or(io::ErrorKind::InvalidData)?)? {
+        match field.kind {
+            4 => output_index = Some(netlink::u32_at(field.payload, 0)?),
+            8 => {
+                for metric in netlink::attributes(field.payload)? {
+                    if metric.kind == 2 {
+                        route_mtu = Some(netlink::u32_at(metric.payload, 0)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let link_mtu = link_mtu(output_index.ok_or(io::ErrorKind::NotFound)?)?;
+    Ok(route_mtu
+        .filter(|mtu| *mtu > 0)
+        .map_or(link_mtu, |mtu| mtu.min(link_mtu)))
+}
+
+/// Read one egress link's MTU when the route has no explicit MTU metric.
+fn link_mtu(index: u32) -> io::Result<u32> {
+    let mut request = vec![0; 16];
+    request[4..8].copy_from_slice(&index.to_ne_bytes());
+    let replies = Socket::open(SockProtocol::NetlinkRoute)?.request(18, 4, &request)?;
+    let reply = replies.first().ok_or(io::ErrorKind::NotFound)?;
+    netlink::attributes(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)?
+        .into_iter()
+        .find(|field| field.kind == IFLA_MTU)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
+        .and_then(|field| netlink::u32_at(field.payload, 0))
 }
 /// `IFLA_TXQLEN`: a link's transmit queue length, in packets.
 const IFLA_TXQLEN: u16 = 13;
@@ -1297,5 +1448,100 @@ mod endpoint_tests {
         let mut unknown = v4;
         unknown[..2].copy_from_slice(&1_u16.to_ne_bytes());
         assert!(decode_sockaddr(&unknown).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod route_metric_tests {
+    //! Route retirement accepts its one valid mesh MTU metric and preserves other metric shapes.
+    use super::*;
+
+    /// Encode route metrics in the same nested format used by rtnetlink route dumps.
+    fn encoded_metrics(
+        outer_kind: u16,
+        outer_nested: bool,
+        metrics: &[(u16, bool, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut inner = Vec::new();
+        for (kind, nested, value) in metrics {
+            attribute(&mut inner, *kind | if *nested { NESTED } else { 0 }, value).unwrap();
+        }
+        let mut outer = Vec::new();
+        attribute(
+            &mut outer,
+            outer_kind | if outer_nested { NESTED } else { 0 },
+            &inner,
+        )
+        .unwrap();
+        outer
+    }
+
+    /// Decode one top-level attribute and check whether it is an owned MTU metric.
+    fn owns_encoded_metrics(bytes: &[u8]) -> bool {
+        let Ok(fields) = netlink::attributes(bytes) else {
+            return false;
+        };
+        let [field] = fields.as_slice() else {
+            return false;
+        };
+        mesh_route_metrics_are_owned(*field)
+    }
+
+    /// Accept the nested MTU payload when the kernel clears `NLA_F_NESTED` on route dumps.
+    #[test]
+    fn route_retirement_accepts_kernel_normalized_metrics() {
+        let encoded = encoded_metrics(
+            RTA_METRICS,
+            false,
+            &[(RTAX_MTU, false, 1200_u32.to_ne_bytes().to_vec())],
+        );
+        assert!(owns_encoded_metrics(&encoded));
+    }
+
+    /// Route cleanup recognizes exactly one nested MTU in the range the mesh can install.
+    #[test]
+    fn route_retirement_accepts_only_our_exact_mtu_metric() {
+        for mtu in [u32::from(mesh_mtu::MIN_MESH_MTU), u32::from(u16::MAX), 1200] {
+            let encoded = encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[(RTAX_MTU, false, mtu.to_ne_bytes().to_vec())],
+            );
+            assert!(owns_encoded_metrics(&encoded));
+        }
+
+        for mtu in [0_u32, 67, 65_536] {
+            let encoded = encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[(RTAX_MTU, false, mtu.to_ne_bytes().to_vec())],
+            );
+            assert!(!owns_encoded_metrics(&encoded));
+        }
+
+        let valid_mtu = (1200_u32).to_ne_bytes().to_vec();
+        for foreign in [
+            encoded_metrics(7, true, &[(RTAX_MTU, false, valid_mtu.clone())]),
+            encoded_metrics(RTA_METRICS, true, &[(1, false, valid_mtu.clone())]),
+            encoded_metrics(RTA_METRICS, true, &[(RTAX_MTU, true, valid_mtu.clone())]),
+            encoded_metrics(RTA_METRICS, true, &[(RTAX_MTU, false, vec![0; 3])]),
+            encoded_metrics(RTA_METRICS, true, &[]),
+            encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[
+                    (RTAX_MTU, false, valid_mtu.clone()),
+                    (RTAX_MTU, false, valid_mtu.clone()),
+                ],
+            ),
+            encoded_metrics(
+                RTA_METRICS,
+                true,
+                &[(RTAX_MTU, false, valid_mtu.clone()), (3, false, vec![1])],
+            ),
+        ] {
+            assert!(!owns_encoded_metrics(&foreign));
+        }
     }
 }
