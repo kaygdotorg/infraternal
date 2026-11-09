@@ -271,7 +271,7 @@ test("theme and font changes reach the same account live and after reload withou
 
     await panCamera(a);
     await expect.poll(() => cameraTransform(a)).not.toBe(aCameraBefore);
-    const aCamera = await cameraTransform(a);
+    let aCamera = await cameraTransform(a);
     expect(await cameraTransform(b)).toBe(bCamera);
 
     rendererProbe = browser.browserType().name() === "chromium" ? await startRendererMetrics(b) : undefined;
@@ -324,6 +324,10 @@ test("theme and font changes reach the same account live and after reload withou
     await appearance.click();
     const uiFont = a.locator('[data-window-id="s-appearance-themes"] section[data-kind="ui-font"]');
     await expect(uiFont).toBeVisible({ timeout: 10_000 });
+    // Opening a window pans this device's own camera to it. That is the device's choice, not a synced change: take the new resting
+    // camera as the reference before the font edit, then assert that neither the edit nor the OS scheme moves it again.
+    await expect.poll(async () => { const first = await cameraTransform(a); await a.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())))); return first === await cameraTransform(a); }, { timeout: 10_000 }).toBe(true);
+    aCamera = await cameraTransform(a);
     await uiFont.locator('button[data-id="sans"]').click();
     await expect.poll(async () => (await cache(b)).canonical.look?.uiFont, { timeout: 5_000 }).toBe("sans");
     await expect(b.locator("html")).toHaveAttribute("data-ui-font", "sans");
