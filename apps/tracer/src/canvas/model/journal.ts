@@ -49,7 +49,11 @@ export class LayoutJournal {
       this.#projection = undefined;
       if (!event.noop) reduce(this.canonical, event.intent as Intent);
       this.canonical.revision = Number(event.revision); this.initialized = true;
+      const ownLook = this.pending.some((p) => p.op_id === event.op_id && p.intent.type === "look.set");
       this.#retain((p) => p.op_id !== event.op_id);
+      // Our own look can arrive as an event before its receipt, which then finds nothing to acknowledge. Only our own
+      // op rebases: a look from another device must keep refusing a look written from before it.
+      if (ownLook && !event.noop) this.#rebaseLooks(Number(event.revision));
     } else return false;
     this.#prune(); return true;
   }
@@ -89,17 +93,18 @@ export class LayoutJournal {
     this.unresolved = new Set([...this.unresolved].filter((id) => live.has(id)));
     return true;
   }
+  /** Our own accepted look is the newest look on the server, so an unsent look queued behind it is based on it: the server
+   * refuses a look written from before another look, and that must not hit this tab's own quick successive edits. */
+  #rebaseLooks(revision: number, except?: Pending): void {
+    for (const next of this.pending) if (next !== except && !next.sent && next.intent.type === "look.set" && next.base_revision < revision) next.base_revision = revision;
+  }
   /** Records the server's receipt revision for a sent edit or migration. Returns whether the visible document may change. An accepted `look.set` also rebases the unsent looks queued behind it. */
   acknowledge(operation: Pending | Migration, revision: number, migration: boolean): boolean {
     if ("intent" in operation && !this.pending.includes(operation) || "document" in operation && this.migration !== operation) return false;
     const revealed = "intent" in operation && operation.held === true && revision > this.canonical.revision;
     this.#projection = undefined;
     operation.revision = revision;
-    // Our own accepted look is the newest look on the server, so a look queued behind it is based on it: the server
-    // refuses a look written from before another look, and that must not hit this tab's own quick successive edits.
-    if ("intent" in operation && operation.intent.type === "look.set") {
-      for (const next of this.pending) if (next !== operation && !next.sent && next.intent.type === "look.set" && next.base_revision < revision) next.base_revision = revision;
-    }
+    if ("intent" in operation && operation.intent.type === "look.set") this.#rebaseLooks(revision, operation);
     if ("intent" in operation) delete operation.held;
     if (migration) this.initialized = true;
     const changed = this.#prune(); return migration || changed || revealed;
