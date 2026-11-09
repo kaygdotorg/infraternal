@@ -4690,3 +4690,31 @@ access (#341 B19).
      - The Mac App Store build is out of scope, so private macOS APIs are
        acceptable in the Mac build when they are measured to help and have
        a runtime fallback.
+
+379. **The server database moves from sqlx to rusqlite (owner, 2026-11-09,
+     #473):** rusqlite 0.41 with one writer thread and reader threads, and our
+     own migration runner that keeps the existing `_sqlx_migrations` history.
+     The owner answered "agreed" to that recommendation, and added: "ask
+     calternal which sql driver it's using since it's a rust project too and
+     ask it to switch to russql too if it's using sqlx".
+     - **Why (J438, #473 comment 88933):**
+       - It is the only route that fixes RUSTSEC-2026-0459 today.
+       - It was faster on every hot query measured (median 25–78% lower).
+       - Session p99 at 64 tasks drops from 13.1 to 3.9 ms.
+       - The binary is 363 KiB smaller and cold compiles are about 35% faster.
+     - **How:** in reviewed slices: the pool and the migration runner, then the
+       hot paths, then the rest, then the plugin API. Each slice is measured
+       against sqlx and checked on a copy of production's data. The
+       time-limited RUSTSEC exception in deny.toml stays until the port lands.
+
+380. **Selected text and confirmation cards (owner, 2026-11-09, #426, #391):**
+     - **Selected text adapts in every theme.** Dark themes already switch to
+       white (nord: its background colour) when their own text colour can't
+       reach 4.5:1 on the selection. Light themes now follow the same rule
+       and switch to a dark colour when theirs can't. The owner, verbatim:
+       "yes i think apple's liquid glass adapts somewhat like this".
+     - **Confirmation cards follow the floating-card design.** They are
+       translucent glass like every other floating card, no longer opaque
+       (this reverses #391's opaque confirm cards). Readability comes from
+       the shared glass contrast guarantee (D365, #448). The owner,
+       verbatim: "make them follow the same design".

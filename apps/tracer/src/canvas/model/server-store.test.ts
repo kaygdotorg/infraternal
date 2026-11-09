@@ -5,6 +5,7 @@ import { ActionRefused } from "../../connection";
 import { reduce, type Intent } from "./operations";
 import type { CanvasDocument } from "./document";
 import { canvasKey, clearAccountStorage } from "../../account-storage";
+import { createThemeStore } from "../themes/model";
 const document = (): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision: 0, views: [{ id: "console", kind: "console", name: "Console", cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 class Transport implements LayoutTransport {
   resyncs = 0;
@@ -281,6 +282,36 @@ test("a definitive refusal paints rollback in memory and never retries after rec
     expect(store.pending).toBe(false); expect(store.current()).toEqual(baseline);
     transport.open(); transport.snapshot(); await tick();
     expect(transport.calls).toHaveLength(1);
+  } finally { store.dispose(); }
+});
+
+/** A refused whole-look edit must wait for canonical recovery instead of painting the stale local snapshot. */
+test("a refused look requests a fresh snapshot without painting its stale rollback", async () => {
+  const transport = new Transport(), store = new ServerCanvasStore(transport, "a");
+  const baseline = document();
+  baseline.revision = 1;
+  baseline.look = createThemeStore({ colors: "mocha", font: "maple-mono-nf", uiSize: 100 }).snapshot();
+  transport.snapshot(baseline);
+  const paints: string[] = [];
+  store.subscribe(() => paints.push(store.current().look?.selected ?? ""));
+  try {
+    const local = store.current();
+    local.look!.selected = "frosted";
+    await store.save(local);
+    expect(transport.calls[0]!.input.intent).toMatchObject({ type: "look.set" });
+    expect(paints).toEqual(["frosted"]);
+
+    transport.calls[0]!.reject(new ActionRefused(undefined, "stale revision"));
+    await tick();
+    expect(transport.resyncs).toBe(1);
+    expect(paints).toEqual(["frosted"]);
+
+    const remote = structuredClone(baseline);
+    remote.revision = 2;
+    remote.look!.selected = "tinted";
+    transport.snapshot(remote);
+    expect(paints).toEqual(["frosted", "tinted"]);
+    expect(store.current().look?.selected).toBe("tinted");
   } finally { store.dispose(); }
 });
 

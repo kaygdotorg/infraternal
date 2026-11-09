@@ -2,7 +2,7 @@
 import { reduce } from "./reducer";
 export { reduce } from "./reducer";
 import { MIN_COLUMN_WEIGHT, MIN_WINDOW_HEIGHT, documentWindows as windows } from "./schema";
-import type { CanvasDocument, DocColumn, DocTarget, DocView, DocWindow } from "./schema";
+import type { CanvasDocument, DocColumn, DocLook, DocTarget, DocView, DocWindow } from "./schema";
 export type Intent =
   | { type: "view.add"; view: DocView }
   | { type: "view.update"; view_id: string; cell?: { x: number; y: number }; name?: string }
@@ -15,7 +15,9 @@ export type Intent =
   | { type: "membership.remove"; view_id: string; window_id: string }
   | { type: "resize"; window_id: string; height?: number | null; span?: number | null; rows?: number | null; row?: number | null }
   | { type: "weight"; view_id: string; column_id: string; weight: number }
-  | { type: "pin"; view_id: string; node_id: string; position?: { x: number; y: number } };
+  | { type: "pin"; view_id: string; node_id: string; position?: { x: number; y: number } }
+  /** Replaces the account's whole look (D322): the server orders edits, so the last one to arrive is every device's look. */
+  | { type: "look.set"; look: DocLook };
 export interface MoveEdit { windowId: string; move: true }
 export type LayoutEdit = SplitEdit | MoveEdit;
 export interface SplitEdit { windowId: string; anchorId: string; axis: "right" | "down" }
@@ -98,6 +100,8 @@ export function edits(before: CanvasDocument, after: CanvasDocument, splits: Rea
       if (c.windows.length && Math.abs((prior?.weight ?? 1) - c.weight) > 0.001) result.push({ type: "weight", view_id: v.id, column_id: c.id, weight: Math.max(0.1, Math.min(10, c.weight)) });
     }
   }
+  // The account's look is one value: when it differs, the new one replaces the old whole.
+  if (after.look && !equal(before.look, after.look)) result.push({ type: "look.set", look: after.look });
   const working = structuredClone(before), compact: Intent[] = [];
   // Earlier insertions already move their following neighbours. Do not turn one drag into redundant moves.
   for (let intent of [...result.filter((i) => i.type !== "membership.remove"), ...result.filter((i) => i.type === "membership.remove")]) {

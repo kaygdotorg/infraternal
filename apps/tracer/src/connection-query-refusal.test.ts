@@ -1,6 +1,7 @@
 /** Exercises a pending renderer query across refusal, replay and explicit typing resend (#244, D307). */
 import { expect, test } from "bun:test";
 import { MuxConnection, type StreamHandler } from "./connection";
+import { Osc52Scanner } from "./osc52";
 import { TerminalClient } from "./terminal";
 import { Ghostty } from "../vendor/ghostty-web";
 import { QueryReplies } from "../test/query-replies-double";
@@ -76,6 +77,8 @@ for (const sentBeforeDrop of [false, true]) test(`pending query stays reply-mark
     const conn = connection;
     const terminal = Object.assign(Object.create(TerminalClient.prototype), {
       synchronizedOutput: { reset() {}, dispose() {} },
+      // The constructor builds this private field, and Object.create skips it; a real scanner keeps the OSC 52 path honest (#440).
+      clipboardWrites: new Osc52Scanner(),
       parsedOutputVersion: 0,
       closed: false, attached: false, attachmentConfirmed: false, sessionGone: false,
       hasAttached: false, sessionId: new Uint8Array(16), streamId: 1,
