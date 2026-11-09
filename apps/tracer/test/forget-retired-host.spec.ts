@@ -91,7 +91,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         // The same inventory row remains status-only when the server withholds owner actions.
         state = "retired-unreachable";
         await page.route("**/remote/hosts/actions", (route) => route.fulfill({ status: 403, body: "" }));
+        push = undefined;
         await page.reload();
+        await expect.poll(() => Boolean(push), { timeout: 20000 }).toBe(true);
         await page.keyboard.press("Control+Shift+K");
         await page.locator("#palette-input").fill("retired-worker");
         await expect(row).toContainText("retired-unreachable");
