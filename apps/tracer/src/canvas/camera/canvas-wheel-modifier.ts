@@ -12,8 +12,8 @@
 /** The `KeyboardEvent.key` names a wheel modifier can have, one per modifier flag on a `WheelEvent`. */
 export type WheelModifier = "Alt" | "Shift" | "Control" | "Meta";
 
-/** The chosen modifier. Provisional until the owner decides (D374 leaves it open). */
-export const CANVAS_WHEEL_MODIFIER: WheelModifier = "Alt";
+/** The chosen modifier. Provisional until the owner decides (D374 leaves it open): Shift is what D159 and D275 already use, so it changes nothing today. */
+export const CANVAS_WHEEL_MODIFIER: WheelModifier = "Shift";
 
 /** True when `e` was made with the canvas modifier held. */
 export function canvasModifierHeld(e: WheelEvent): boolean {
@@ -26,11 +26,11 @@ export function canvasModifierHeld(e: WheelEvent): boolean {
 }
 
 /**
- * The sideways and vertical amounts a wheel event asks of the canvas. With the modifier held an ordinary wheel's vertical
- * turn becomes a sideways move (as Shift does natively), so a mouse can reach every window in a row.
+ * The sideways and vertical amounts a wheel event asks of the canvas. With Shift or the modifier held the move is sideways
+ * only: an ordinary wheel's vertical turn becomes the sideways amount (as Shift does natively), so a mouse can reach every
+ * window in a row, and a trackpad's stray vertical drift is dropped.
  */
 export function canvasDeltas(e: WheelEvent): { dx: number; dy: number } {
-  let dx = e.deltaX, dy = e.deltaY;
-  if ((e.shiftKey || canvasModifierHeld(e)) && !dx) { dx = dy; dy = 0; }
-  return { dx, dy };
+  if (e.shiftKey || canvasModifierHeld(e)) return { dx: e.deltaX || e.deltaY, dy: 0 };
+  return { dx: e.deltaX, dy: e.deltaY };
 }
