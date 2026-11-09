@@ -1500,6 +1500,79 @@ mod tests {
         assert!(TAKEOVER_BUSY_AFTER_CLOSE.contains("stay closed"));
     }
 
+    /// #433 (J205c legacy1): a first install that crashed while activating, with one of its own
+    /// old-layout terminals still open, is offered Start fresh listing that terminal; the record
+    /// sent back binds it, and only the terminal-aware challenge can confirm.
+    #[test]
+    fn a_stuck_first_install_lists_the_terminal_start_fresh_closes() {
+        let id = "fe710269164440088a7513c35c6b41d8";
+        let terminal = format!(
+            "{id},726f6f74,62617368,1792195200,7074732f30,0,infraternal-session-{id}.scope,{}",
+            "c".repeat(64)
+        );
+        let line = format!(
+            "INFRATERNAL_SETUP_STALE {} {} 64:1234 1 {terminal}\n",
+            "1".repeat(32),
+            "2".repeat(32)
+        );
+        let previous = parse(line.as_bytes()).unwrap().unwrap();
+        assert_eq!(previous.terminals().len(), 1);
+        let findings = previous
+            .findings(InstallMode::Root, uuid::Uuid::nil())
+            .findings;
+        assert!(
+            findings
+                .iter()
+                .any(|line| line == "No other live setup found")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|line| line == "An open terminal: root, bash on pts/0; Start fresh closes it")
+        );
+        let challenge = uuid::Uuid::from_u128(7);
+        let offer = previous
+            .stuck_failure(false)
+            .with_terminal_confirmation(challenge);
+        assert_eq!(offer.terminal_confirmation(), Some(challenge));
+        let shown = serde_json::to_value(&offer).unwrap();
+        assert_eq!(shown["closes"]["terminals"][0]["program"], "bash");
+        assert_eq!(shown["closes"]["close_challenge"], challenge.to_string());
+        // More terminals than live sockets, or out of order, is not a record the host writes.
+        for invalid in [
+            line.replace(" 1 ", " 0 "),
+            line.replace('\n', &format!(" {terminal}\n")),
+        ] {
+            assert!(parse(invalid.as_bytes()).is_err(), "{invalid}");
+        }
+        // Without terminals nothing changes: no list, no terminal challenge.
+        let plain = parse(
+            format!(
+                "INFRATERNAL_SETUP_STALE {} {} 64:1234 0\n",
+                "1".repeat(32),
+                "2".repeat(32)
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            plain
+                .stuck_failure(false)
+                .with_terminal_confirmation(challenge)
+                .terminal_confirmation()
+                .is_none()
+        );
+    }
+
+    /// #433 P2 for Start fresh: only the refusal after closing mentions closed terminals.
+    #[test]
+    fn start_fresh_refusals_mention_closed_terminals_only_after_closing() {
+        assert!(START_FRESH_BUSY.contains("No terminal was closed"));
+        assert!(START_FRESH_CHANGED.contains("no terminal was closed"));
+        assert!(START_FRESH_BUSY_AFTER_CLOSE.contains("stay closed"));
+    }
+
     /// A set-aside install's record offers Put it back, and names which restore
     /// puts it back (Re-enroll or Take over, D359); unknown kinds refuse.
     #[test]

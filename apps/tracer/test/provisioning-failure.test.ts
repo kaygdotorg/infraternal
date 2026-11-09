@@ -139,3 +139,31 @@ test("a Take over offer reaches the wizard only in its exact shape", () => {
     expect(events.at(-1)?.leftovers).toBeUndefined();
   } finally { globalThis.WebSocket = original; }
 });
+
+/** D368 (#433): a Start fresh offer lists the stuck setup's own terminals only with its own challenge. */
+test("a Start fresh offer carries the terminals it closes", () => {
+  const previous = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    const terminal = { account: "root", program: "bash", since: 1792195200, tty: "pts/0", others: 0 };
+    const close_challenge = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    const offers: unknown[] = [
+      { terminals: [terminal], close_challenge },
+      { terminals: [terminal] },
+      { terminals: [terminal], close_challenge: "00000000-0000-0000-0000-000000000000" },
+      { terminals: [], close_challenge },
+      { terminals: [{ ...terminal, tty: "tty1" }], close_challenge },
+    ];
+    offers.forEach((closes, index) => socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: index + 1, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
+      failure: { kind: "stale_previous_attempt", message: "x", log_tail: [], closes } }) })));
+    expect(events.map((event) => event.failure?.closes)).toEqual([{ terminals: [terminal], close_challenge }, undefined, undefined, undefined, undefined]);
+  } finally {
+    globalThis.WebSocket = previous;
+  }
+});
