@@ -4,6 +4,7 @@
 /* ---- cluster frames: what the far zoom shows instead of cards ------------------------------------ */
 .cl-chips { position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: 0; transition: opacity var(--t-pop) var(--ease-out, ease-out); }
 .cl-chips[data-on="true"] { opacity: 1; }
+/* Nested outer frame: it surrounds windows whose corners are --r-lg, so its own corner is larger than the largest step (D372, UI-CONSISTENCY-AUDIT section 5). (.cl-chip) */
 .cl-chip {
   position: absolute; box-sizing: border-box; margin: 0; padding: 0; border: calc(1px * var(--inv, 1)) solid var(--overlay-line); border-radius: 1.75rem;
   background: color-mix(in oklab, var(--fg) 5%, transparent); color: var(--fg); font: inherit; text-align: left; cursor: pointer; pointer-events: none;

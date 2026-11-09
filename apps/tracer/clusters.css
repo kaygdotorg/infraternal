@@ -28,6 +28,7 @@
 .cl { position: absolute; left: 0; top: 0; pointer-events: none; }
 .cl[data-lifted] { z-index: calc(var(--z-overlay) + 2); }
 .cl[data-lifted] .cl-region { box-shadow: var(--shadow); }
+/* Nested outer frame: it surrounds windows whose corners are --r-lg, so its own corner is larger than the largest step (D372, UI-CONSISTENCY-AUDIT section 5). (.cl-region) */
 .cl-region {
   position: absolute; border-radius: 1.75rem; border: 1px solid var(--overlay-line);
   background: color-mix(in oklab, var(--fg) 3%, transparent);
@@ -104,6 +105,7 @@
   flex: none; box-sizing: border-box; border-radius: var(--r-lg, 1.125rem);
   border: 1px solid color-mix(in oklab, var(--accent) 40%, transparent); background: color-mix(in oklab, var(--accent) 6%, transparent);
 }
+/* Nested outer frame: it surrounds windows whose corners are --r-lg, so its own corner is larger than the largest step (D372, UI-CONSISTENCY-AUDIT section 5). (.cl-ghost) */
 .cl-ghost {
   position: absolute; left: 0; top: 0; z-index: 0; border-radius: 1.75rem; pointer-events: none; opacity: 0; transition: opacity var(--t-pop) ease;
   border: 1.5px dashed color-mix(in oklab, var(--accent) 55%, transparent); background: color-mix(in oklab, var(--accent) 5%, transparent);
