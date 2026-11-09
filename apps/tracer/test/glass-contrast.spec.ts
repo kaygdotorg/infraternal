@@ -73,7 +73,7 @@ async function measure(page: Page, selector: string): Promise<Result[]> {
   // sleep: one frame for the style to paint before the capture
   await page.waitForTimeout(80);
   const png = await page.screenshot({ clip: box });
-  await hide.evaluate((el) => el.remove());
+  await hide.evaluate((el) => { (el as unknown as Element).remove(); });
   const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
   return page.evaluate(async ({ url, runs, box }) => {
     const img = await createImageBitmap(await (await fetch(url)).blob());
