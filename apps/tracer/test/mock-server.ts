@@ -159,6 +159,8 @@ let nextClientId = 0;
 const attachHistory: Array<{ last_out_seq: string; output_sequence: string }> = [];
 const traceEvents: TraceEvent[] = [];
 
+/** A name a spec asked the double to give as "this host" (`POST /__mock/hostname`), instead of the short default; cleared by a reset. */
+let hostnameOverride: string | undefined;
 const perfSink = createPerfSink(FRONT_PORT);
 const server = createServer((request, response) => { void routeHttp(request, response); });
 // Never close an idle kept-alive connection. Specs reach the double through the test link's added delay with
@@ -718,6 +720,11 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     closeAfterAttachMs = delay;
     return sendJson(response, 200, { delay_ms: delay });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/hostname") {
+    const name = (await readJson(request))?.name;
+    hostnameOverride = typeof name === "string" && name.length > 0 ? name : undefined;
+    return sendJson(response, 200, { hostname: hostnameOverride ?? DOUBLE_HOSTNAME });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/reset") {
     resetMockState();
     return sendJson(response, 200, { setup_token: setupToken });
@@ -776,7 +783,7 @@ async function authAction(
       if (unlockPending) return sendJson(response, 401, { error: "authorization failed" });
     case "unlock-session":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
-      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: DOCS_DATASET ? "home-server" : DOUBLE_HOSTNAME });
+      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: DOCS_DATASET ? "home-server" : hostnameOverride ?? DOUBLE_HOSTNAME });
     case "setup-start": {
       const username = body.username;
       const suppliedDisplayName = body.display_name;
@@ -1380,6 +1387,7 @@ const mockShares: MockShare[] = [];
 const mockGroups: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["ravi", "asha"] };
 let accountToolbar: unknown;
 function resetMockState(): void {
+  hostnameOverride = undefined;
   mockShares.length = 0;
   accountToolbar = undefined;
   owner = undefined;
