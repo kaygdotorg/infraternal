@@ -15,6 +15,7 @@ function field(intent: Intent): string | undefined {
   // Tuple encoding preserves identifier boundaries even when an identifier contains a separator.
   return JSON.stringify([intent.type, row.view_id, row.window_id, row.column_id, row.node_id, Object.keys(row).sort()]);
 }
+/** The tab's ordered list of unconfirmed canvas edits over the last server-confirmed document; the visible document is that canonical state with these edits replayed on top. */
 export class LayoutJournal {
   #queuedBytes = 0;
 
@@ -85,6 +86,7 @@ export class LayoutJournal {
     this.unresolved = new Set([...this.unresolved].filter((id) => live.has(id)));
     return true;
   }
+  /** Records the server's receipt revision for a sent edit or migration. Returns whether the visible document may change. An accepted `look.set` also rebases the unsent looks queued behind it. */
   acknowledge(operation: Pending | Migration, revision: number, migration: boolean): boolean {
     if ("intent" in operation && !this.pending.includes(operation) || "document" in operation && this.migration !== operation) return false;
     const revealed = "intent" in operation && operation.held === true && revision > this.canonical.revision;
