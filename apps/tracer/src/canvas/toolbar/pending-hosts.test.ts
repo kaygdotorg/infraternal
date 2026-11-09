@@ -23,6 +23,10 @@ test("forget is offered only for retired-unreachable hosts to their owner", () =
       const entries = hostEntries(cx);
       expect(entries).toHaveLength(1);
       expect(entries[0]?.action).toBe(owner && state === "retired-unreachable" ? "canvas:forgethost:11111111-2222-3333-4444-555555555555" : undefined);
+      if (owner && state === "retired-unreachable") {
+        expect(entries[0]?.glyph).toBe("×");
+        expect(entries[0]?.hint).toBe("unreachable");
+      }
     }
   }
 });

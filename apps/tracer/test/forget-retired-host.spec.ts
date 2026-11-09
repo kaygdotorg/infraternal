@@ -50,7 +50,11 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await expect(row).toHaveAttribute("data-action", "");
         state = "retired-unreachable"; push?.();
         await expect(row).toContainText("Forget");
+        await expect(row.locator(".result-icon")).toHaveText("×");
+        await expect(row.locator(".result-hint")).toHaveText("unreachable");
         await page.locator(".palette").evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => undefined))));
+        const hintFits = await row.locator(".result-hint").evaluate((el) => el.scrollWidth <= el.clientWidth);
+        expect(hintFits, "the unreachable hint must fit without truncation on phones").toBe(true);
         const label = await row.locator(".result-label").boundingBox();
         const icon = await row.locator(".result-icon").boundingBox();
         expect(Math.abs(label!.y + label!.height / 2 - icon!.y - icon!.height / 2)).toBeLessThanOrEqual(0.5);

@@ -17,7 +17,7 @@ export function hostEntries(cx: Ctx): PaletteEntry[] {
   for (const host of cx.adapters.sessions.hosts()) {
     if (host.state) {
       const canForget = host.state === "retired-unreachable" && removal?.label() && removal.forget;
-      out.push({ group: "Hosts", glyph: "…", label: canForget ? `Forget ${host.name}` : host.name, ...(canForget ? { action: `canvas:forgethost:${host.id}` } : {}), hint: host.state === "pending" ? "removal pending · access revoked" : "retired-unreachable · cleanup certificate expired" });
+      out.push({ group: "Hosts", glyph: canForget ? "×" : "…", label: canForget ? `Forget ${host.name}` : host.name, ...(canForget ? { action: `canvas:forgethost:${host.id}` } : {}), hint: canForget ? "unreachable" : host.state === "pending" ? "removal pending · access revoked" : "retired-unreachable · cleanup certificate expired" });
       continue;
     }
     if (host.id !== "embedded" && removal?.label()) out.push({ group: "Hosts", glyph: "×", label: `${removal.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });

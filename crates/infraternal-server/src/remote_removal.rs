@@ -5,6 +5,7 @@
 //! bound to the session, the host and the uninstall choice for `REVIEW_SECONDS`. With an API
 //! key, the action route issues its own review token (D28, D333).
 //! D369 Forget archives an unreachable retirement and cancels its pending cleanup without touching the machine.
+//! Forget deletes the removal row; its details survive only in `mesh_audit.detail_json`.
 use crate::{auth::Auth, enrollment::EnrollmentStore, remote_runtime::RemoteHosts};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;

@@ -114,7 +114,7 @@ export interface Adapters {
   privilege?: import("./sessions/privilege").PrivilegeService;
   /** Registry-labelled removal and forgetting, shared by the palette and machine popover. */
   hostRemoval?: {
-    /** Whether the signed-in account can manage its hosts. */
+    /** The registry's removal label, or undefined when the signed-in account cannot manage hosts. */
     label(): string | undefined;
     /** Forget an expired pending retirement when this adapter supports it. */
     forget?(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void;
