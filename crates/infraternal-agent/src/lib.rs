@@ -33,6 +33,9 @@ pub mod plugins;
 /// Becoming root once with the person's password for a root upgrade (D376).
 #[cfg(all(feature = "remote", target_os = "linux"))]
 pub mod privilege_elevate;
+/// The short-lived root relay that runs a root upgrade's install steps (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_relay_host;
 // Shim census exists only on the local terminal platform; portable control has no PTYs.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_exits;

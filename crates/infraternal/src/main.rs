@@ -145,6 +145,11 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
+    // A root upgrade's relay, started by sudo, doas or su (D376, #399).
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    if let Some(result) = infraternal_agent::privilege_relay_host::run_if_requested() {
+        return result;
+    }
     #[cfg(feature = "plugin-agent")]
     if let Some(result) = infraternal_agent::startup_guard::run_if_requested() {
         return result;
