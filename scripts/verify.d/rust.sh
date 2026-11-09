@@ -113,11 +113,11 @@ rust_check_static_binary() {
     # Keep the last merged measurements for per-slice attribution, not approval.
     case "$target" in
         x86_64-unknown-linux-musl)
-            baseline_bytes=22418256
+            baseline_bytes=28268440
             expected_machine='Advanced Micro Devices X86-64'
             ;;
         aarch64-unknown-linux-musl)
-            baseline_bytes=20453280
+            baseline_bytes=25378504
             expected_machine='AArch64'
             ;;
         *)
@@ -341,6 +341,7 @@ rust_verify_fast() {
         rust_run_gate_skippable "privileged integration" verify_privileged
         rust_run_gate "probe release exclusion" python3 scripts/test-runtime-probe-gating.py
         rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
+        rust_run_gate "nightly browser suite reporter" python3 scripts/test-nightly-browser-suite.py
         rust_run_gate "static builds" rust_static_build_check
     fi
     rust_print_summary

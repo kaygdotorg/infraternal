@@ -4676,3 +4676,17 @@ access (#341 B19).
        finger on empty canvas moves it"). Nothing there can scroll, so the
        drag can't be an accident. A one-finger drag that starts on a window
        only ever scrolls that window's content.
+
+378. **macOS batched UDP sends in GotaTun (owner, 2026-11-09, #260):** The
+     Mac build turns on batched sends through Apple's private `sendmsg_x`.
+     A runtime check falls back to one send per packet, and
+     `GOTATUN_MACOS_BATCH_UDP=0` turns it off. The owner, verbatim: "don't
+     worry too much about private apis, we aren't going to ship that macos
+     one to the app store. so yes as long as it's faster than tailscale and
+     netbird, ship it on".
+     - **Condition:** it ships on only once a measurement shows GotaTun on
+       macOS beating both Tailscale and NetBird on the same machines and
+       links (throughput, loaded latency and CPU).
+     - The Mac App Store build is out of scope, so private macOS APIs are
+       acceptable in the Mac build when they are measured to help and have
+       a runtime fallback.

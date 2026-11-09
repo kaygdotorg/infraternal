@@ -20,7 +20,7 @@ time**, never while being built. Shared mutable state is one object, `cx.state`.
 
 | Folder / file | Owns | Public surface |
 |---|---|---|
-| `camera/camera.ts` | centre, zoom, springs, device-pixel snap, thumbnail and zoom-band switches, flights | `Camera`: `apply` `rest` `set` `flyTo` `keyFlight` `drive` `takeOver` `zoomAt` `fit` `toWorld` `toClient` `worldRect` |
+| `camera/camera.ts` | centre, zoom, springs, device-pixel snap, thumbnail and zoom-band switches, flights | `Camera`: `apply` `rest` `set` `flyTo` `drive` `takeOver` `zoomAt` `fit` `toWorld` `toClient` `worldRect` |
 | `camera/lock.ts` | canvas lock, stops, every way the camera is sent somewhere | `Nav`: `flyView` `focusWindow` `goStop` `setCanvasLock` `showOverview` `overviewCam` `stopsFor` `onLockChange` |
 | `camera/gestures.ts` | wheel, trackpad, touch and pointer on the canvas | `installGestures(cx)` |
 | `layout/geometry.ts` | cell grid, metrics, boxes, push-aside (pure) | `CELL` `metricsFor` `boxOf` `resolve` `snapToGrid` |

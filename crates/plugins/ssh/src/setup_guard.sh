@@ -27,11 +27,20 @@ setup_guard() {
   [ "$((0$permissions & 022))" = 0 ] || exit 71
   exec 9< "$parent"
   # A caller that must run after an in-flight setup (a restore) sets
-  # setup_guard_wait to the seconds it may queue; everyone else refuses at once.
+  # setup_guard_wait to the seconds it may queue. The locked-state inspector
+  # never waits, so a host check stays fast. Every other command waits up to
+  # 5 seconds: a starting infraternal agent holds a shared lock on this
+  # directory for the moment it admits its runtime (runtime_lock.rs), and a
+  # setup command colliding with that must not report a finished install as
+  # "setup is already running" (#439). A competing setup that holds the guard
+  # past the wait still refuses here; one that releases it sooner is refused
+  # by the transaction checks and the stage flock that follow.
   if [ -n "${setup_guard_wait:-}" ]; then
    setup_guard_flag="-w $setup_guard_wait"
-  else
+  elif [ "${setup_allow_locked_inspection:-no}" = yes ]; then
    setup_guard_flag=-n
+  else
+   setup_guard_flag="-w 5"
   fi
   if ! flock $setup_guard_flag 9; then
    if [ "${setup_allow_locked_inspection:-no}" = yes ]; then

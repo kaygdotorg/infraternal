@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""Install the D373 nightly browser suite on dev-02, next to the nightly fuzz.
+
+Run `scripts/install-nightly-fuzz` first: this reuses its `infraternal-fuzz`
+account and Forgejo token for the reporter and installs nothing for the token.
+
+Accounts (see `nightly-browser-suite-service` for what runs as whom):
+- `infraternal-browser`, new: no sudo, no login shell, no token. It owns a
+  checkout that follows origin/dev, the suite's build outputs and Playwright's
+  browser, and runs the unreviewed latest dev code. Its home is mode 0700:
+  the root helper reads the run folders, nobody else needs to.
+- `infraternal-fuzz`, existing: runs the reporter, a root-owned copy of
+  `scripts/nightly-browser-suite.py` from the reviewed `--ref`.
+
+The two root-owned files (helper and reporter) are never taken from the
+`infraternal-browser` checkout, which that account has written to. They come
+from a fresh, private, root-owned folder (`mktemp -d`) that this script clones
+itself, checked out at the full 40-character `--ref` and verified to be at
+exactly that commit, and each must be a regular file, not a link.
+
+Schedule: 05:00 Asia/Kolkata with up to 15 minutes of random delay. The fuzz
+starts at 02:00 (same delay) and needs about 1 h 15 min, so the two overlap
+only if the fuzz is badly delayed, and even then both wait for their own
+build slot (dev-02 has three).
+
+Usage, as root (on dev-02 that is `sudo` from the cua account). Run the
+installer from a clone you made in a `mktemp -d` folder, never from a fixed
+path in /tmp that another account could have created first:
+    install-nightly-browser-suite --ref <full 40-character reviewed commit>
+"""
+import argparse
+import os
+from pathlib import Path
+import pwd
+import re
+import shutil
+import socket
+import stat
+import subprocess
+import tempfile
+
+USER = 'infraternal-browser'
+HOME = Path('/var/lib/infraternal-browser')
+SERVICE_HELPER = Path('/usr/local/libexec/infraternal-browser-suite-service')
+REPORTER = Path('/usr/local/libexec/infraternal-browser-suite-report')
+UNITS = Path('/etc/systemd/system')
+REPOSITORY = 'https://git.kayg.org/kayg/infraternal.git'
+
+
+def service_unit():
+    """The system service: a root-owned fixed helper, confined as far as the suite tolerates.
+
+    `ProtectSystem=strict` makes the file system read-only except the listed
+    paths: the two account homes, /run and nix's state. `PrivateTmp` gives the
+    run its own /tmp, so the suite's scratch files stay out of the shared one;
+    `BindPaths` (without a leading `-`, so a missing folder fails the unit instead of running it unserialised) keeps the build-slot queue (`/tmp/infraternal-build-slots`,
+    created by `tmpfiles_config`) shared, so the suite cannot skip the queue.
+    `NoNewPrivileges` only stops gaining privilege through setuid programs:
+    root dropping to another account with `runuser`/`setpriv` is unaffected.
+    """
+    return f'''# Nightly full browser suite on dev and failing-spec reports, D373 (#443).
+[Unit]
+Description=infraternal nightly browser suite
+After=network-online.target nix-daemon.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart={SERVICE_HELPER}
+# Only a backstop: the helper bounds the queue wait (12 h) and the suite itself (6 h, counted
+# from when the slot is granted) on its own, so a long queue is never mistaken for a slow suite.
+TimeoutStartSec=24h
+KillMode=control-group
+Nice=10
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+BindPaths=/tmp/infraternal-build-slots
+ProtectSystem=strict
+ReadWritePaths=/var/lib/infraternal-browser /var/lib/infraternal-fuzz /run /nix/var
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+'''
+
+
+def tmpfiles_config():
+    """The tmpfiles.d line that makes sure the shared build-slot queue folder exists before the unit binds it in.
+
+    Mode 0775 and owner `claude` are what `build-slot` itself creates. The
+    folder must never be world-writable: any account could then plant a
+    `queue` or `slot.N` entry there and stop every build-slot caller.
+    """
+    return 'd /tmp/infraternal-build-slots 0775 claude claude -\n'
+
+
+def timer_unit():
+    """The system timer: 05:00 in the owner's timezone, after the 02:00 fuzz run."""
+    return '''# Run at night in the owner's timezone, independent of VM timezone.
+[Unit]
+Description=infraternal nightly browser suite timer
+[Timer]
+OnCalendar=*-*-* 05:00:00 Asia/Kolkata
+RandomizedDelaySec=15m
+Persistent=true
+Unit=infraternal-browser-suite.service
+[Install]
+WantedBy=timers.target
+'''
+
+
+def run(*command, **kwargs):
+    """Run one install step, failing the install on any error."""
+    return subprocess.run(command, check=True, **kwargs)
+
+
+def as_user(*command, cwd=None):
+    """Run a step as the browser account, with a clean environment.
+
+    The step gets no input and no standard output: whatever the account's
+    files make a program start (a git hook, say) cannot read the admin's
+    terminal or write to it.
+    """
+    return run('setpriv', f'--reuid={USER}', f'--regid={USER}', '--init-groups', '--reset-env', '--',
+               'env', f'HOME={HOME}', 'PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin',
+               *command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+
+
+def secure_home(entry):
+    """Give the browser home to its account and make it private, through a descriptor.
+
+    The home belongs to the account that runs unreviewed code, so it is opened
+    with O_NOFOLLOW and changed with `fchown`/`fchmod`: a link put there can
+    never make root change a directory elsewhere.
+    """
+    descriptor = os.open(HOME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchown(descriptor, entry.pw_uid, entry.pw_gid)
+        os.fchmod(descriptor, 0o700)
+    finally:
+        os.close(descriptor)
+
+
+def ensure_user():
+    """Create the system account and its private home (0700) if missing."""
+    try:
+        pwd.getpwnam(USER)
+    except KeyError:
+        run('useradd', '--system', '--home-dir', str(HOME), '--create-home', '--shell', '/usr/sbin/nologin',
+            '--comment', 'infraternal nightly browser suite (D373)', USER)
+    entry = pwd.getpwnam(USER)
+    HOME.mkdir(parents=True, exist_ok=True)
+    secure_home(entry)
+    return entry
+
+
+# Git settings for every git step here: no hooks, no fsmonitor, so nothing stored in a repository
+# (and the browser account's checkout is one the unreviewed suite can write to) runs during an install.
+GIT_SAFE = ('-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false')
+
+
+def checkout(ref):
+    """Create the browser account's working copy of the public repository, pinned to `ref`, if it is missing.
+
+    An existing copy is left alone: the service moves it to origin/dev every
+    night, and running git in a repository that account has written to is
+    exactly what an update should not do. Every git step runs as that account.
+    """
+    target = HOME / 'checkout'
+    if not (target / '.git').exists():
+        as_user('git', *GIT_SAFE, 'clone', '--quiet', REPOSITORY, str(target))
+        as_user('git', *GIT_SAFE, '-C', str(target), 'checkout', '--quiet', '--detach', ref)
+    # Made by the suite account itself: root never names a path inside that account's home
+    # (a link planted there would otherwise make root chown or chmod something else).
+    as_user('mkdir', '-p', '-m', '0700', str(HOME / 'runs'))
+    return target
+
+
+def reviewed_tree(ref):
+    """Clone the repository into a fresh private folder and check out exactly `ref`; return the checkout.
+
+    `ref` must be a full 40-character commit hash: a branch, tag or short name
+    could move or be ambiguous. The folder comes from `mkdtemp`, so it is new,
+    mode 0700 and owned by whoever runs this (root). After the checkout the
+    commit actually checked out is compared with `ref`. The caller removes the
+    folder's parent when done.
+    """
+    if not re.fullmatch(r'[0-9a-f]{40}', ref):
+        raise SystemExit('--ref must be the full 40-character commit hash')
+    parent = Path(tempfile.mkdtemp(prefix='infraternal-browser-install-'))
+    tree = parent / 'src'
+    try:
+        environment = dict(os.environ, GIT_CONFIG_NOSYSTEM='1')
+        run('git', *GIT_SAFE, 'clone', '--quiet', '--no-checkout', REPOSITORY, str(tree), env=environment)
+        tree.chmod(0o700)
+        run('git', *GIT_SAFE, '-C', str(tree), 'checkout', '--quiet', '--detach', ref, env=environment)
+        head = subprocess.check_output(['git', '-C', str(tree), 'rev-parse', 'HEAD'], text=True, env=environment).strip()
+    except (subprocess.CalledProcessError, OSError):
+        shutil.rmtree(parent, ignore_errors=True)
+        raise SystemExit(f'could not check out {ref}')
+    if head != ref:
+        shutil.rmtree(parent, ignore_errors=True)
+        raise SystemExit(f'checked out {head}, expected {ref}')
+    return tree
+
+
+def install_file(source, destination):
+    """Copy a reviewed script to a root-owned, world-executable place.
+
+    The source must be a regular file, not a link (git can store symlinks, and
+    a link to a secret would otherwise be copied into a world-readable file).
+    The copy is written beside the destination and renamed over it, so an
+    existing link at the destination is replaced, not written through.
+    """
+    if not stat.S_ISREG(os.lstat(source).st_mode):
+        raise SystemExit(f'{source} is not a regular file')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + '.new')
+    temporary.unlink(missing_ok=True)
+    shutil.copyfile(source, temporary)
+    os.chown(temporary, 0, 0)
+    temporary.chmod(0o755)
+    os.replace(temporary, destination)
+
+
+def main():
+    """Create the account, pin the checkout, install both root-owned copies and the timer."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--ref', required=True, help='full 40-character reviewed commit that supplies the helper and the reporter')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit('run as root (dev-02: sudo from the cua account)')
+    if socket.gethostname() != 'infraternal-dev-02-std':
+        raise SystemExit('install the nightly browser suite on dev-02')
+    if not Path('/var/lib/infraternal-fuzz/forgejo-token').is_file():
+        raise SystemExit('run install-nightly-fuzz first: the reporter uses its token')
+    ensure_user()
+    # The browser account's checkout is only the suite's working copy (the service moves it to dev nightly).
+    checkout(args.ref)
+    source = reviewed_tree(args.ref)
+    try:
+        install_file(source / 'scripts/nightly-browser-suite-service', SERVICE_HELPER)
+        install_file(source / 'scripts/nightly-browser-suite.py', REPORTER)
+    finally:
+        shutil.rmtree(source.parent, ignore_errors=True)
+    (UNITS / 'infraternal-browser-suite.service').write_text(service_unit())
+    (UNITS / 'infraternal-browser-suite.timer').write_text(timer_unit())
+    Path('/etc/tmpfiles.d/infraternal-browser-suite.conf').write_text(tmpfiles_config())
+    run('systemd-tmpfiles', '--create', '/etc/tmpfiles.d/infraternal-browser-suite.conf')
+    run('systemd-analyze', 'verify', str(UNITS / 'infraternal-browser-suite.service'), str(UNITS / 'infraternal-browser-suite.timer'))
+    run('systemctl', 'daemon-reload')
+    run('systemctl', 'enable', '--now', 'infraternal-browser-suite.timer')
+    run('systemctl', 'list-timers', 'infraternal-browser-suite.timer', '--no-pager')
+
+
+if __name__ == '__main__':
+    main()
