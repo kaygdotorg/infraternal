@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Read as _,
-    os::unix::fs::OpenOptionsExt as _,
+    os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _},
     path::{Path, PathBuf},
 };
 
@@ -255,8 +255,15 @@ fn root_job(observed: &mut Observation, name: String, inputs: Option<Vec<PathBuf
                 }
             }
         };
+        // A socket or device (a daemon's control socket, `/dev/null`) is not
+        // a file root runs or reads as code, even when anyone may write to
+        // it. Only its parent directories still count.
+        let special = fs::metadata(&canonical).is_ok_and(|meta| {
+            let kind = meta.file_type();
+            kind.is_socket() || kind.is_char_device() || kind.is_block_device()
+        });
         for path in [input, canonical] {
-            for (depth, parent) in path.ancestors().enumerate() {
+            for (depth, parent) in path.ancestors().enumerate().skip(usize::from(special)) {
                 if depth >= 64 {
                     observed.privileged = true;
                     add(

@@ -15,9 +15,7 @@ use std::{
 
 /// Variables the manager sets itself when it runs a command. Their values are
 /// a process id, a terminal type, a result keyword or a random id, never a
-/// file name, so they expand to plain data here. Any other variable that the
-/// unit and the manager leave unset may be a runtime path (for example
-/// `$STATE_DIRECTORY`), so a command using it stays unknown.
+/// file name, so they expand to plain data here when the unit leaves them unset.
 const MANAGER_DATA: &[&str] = &[
     "MAINPID",
     "MANAGERPID",
@@ -27,6 +25,42 @@ const MANAGER_DATA: &[&str] = &[
     "TERM",
     "INVOCATION_ID",
 ];
+
+/// Variables the manager may set at run time with a path or other value this
+/// scan cannot know, such as `$STATE_DIRECTORY` or `$NOTIFY_SOCKET`. Left unset
+/// by the unit, a command using one stays unknown. Every other unset variable
+/// expands to nothing, exactly as the manager does.
+const MANAGER_RUNTIME: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "PWD",
+    "XDG_RUNTIME_DIR",
+    "NOTIFY_SOCKET",
+    "JOURNAL_STREAM",
+    "LOG_NAMESPACE",
+    "PIDFILE",
+    "REMOTE_ADDR",
+    "REMOTE_PORT",
+    "FDSTORE",
+    "SYSTEMD_EXEC_PID",
+];
+
+/// Name shapes the manager uses for further run-time variables (for example
+/// `$TRIGGER_PATH`, `$LISTEN_FDNAMES`, `$CREDENTIALS_DIRECTORY`). Matching by
+/// shape also covers names a newer manager adds in the same families.
+const MANAGER_RUNTIME_SHAPES: &[&str] = &[
+    "LISTEN_",
+    "WATCHDOG_",
+    "MONITOR_",
+    "TRIGGER_",
+    "MEMORY_PRESSURE_",
+    "SYSTEMD_",
+];
+
+/// Suffixes that mark a run-time path variable, like `$RUNTIME_DIRECTORY`.
+const MANAGER_RUNTIME_SUFFIXES: &[&str] = &["_DIRECTORY", "_PATH", "_SOCKET", "_FILE"];
 
 /// All lifecycle commands that systemd can execute for a service. Extended
 /// properties retain privilege flags, so `+` and `!` also count on User= units.
@@ -181,7 +215,18 @@ fn expand(argv: &[String], environment: &BTreeMap<String, String>) -> Option<Vec
         match environment.get(name) {
             Some(value) => Some(value.clone()),
             None if MANAGER_DATA.contains(&name) => Some(String::new()),
-            None => None,
+            None if MANAGER_RUNTIME.contains(&name)
+                || MANAGER_RUNTIME_SHAPES
+                    .iter()
+                    .any(|shape| name.starts_with(shape))
+                || MANAGER_RUNTIME_SUFFIXES
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix)) =>
+            {
+                None
+            }
+            // Unset everywhere: the manager expands it to nothing.
+            None => Some(String::new()),
         }
     };
     let mut out = Vec::with_capacity(argv.len());
@@ -282,8 +327,11 @@ fn parse(output: &str, root: bool, service: bool, manager: &[String]) -> Option<
     })();
     let commands = |setting: &str| -> Option<Vec<PathBuf>> {
         let environment = environment.as_ref()?;
+        // `!` marks a directory that may be missing; `~` is a home we do not
+        // resolve here and stays unknown below.
         let directory = if service {
-            string("WorkingDirectory")?
+            let directory = string("WorkingDirectory")?;
+            directory.strip_prefix('!').unwrap_or(directory)
         } else {
             ""
         };
@@ -292,11 +340,18 @@ fn parse(output: &str, root: bool, service: bool, manager: &[String]) -> Option<
         } else {
             Path::new(directory)
         };
-        let search: Vec<&str> = environment
+        // The manager finds a bare executable through ExecSearchPath=, else
+        // through the command's PATH; both are searched.
+        let mut search: Vec<&str> = environment
             .get("PATH")
             .map(String::as_str)
             .into_iter()
             .collect();
+        if let Some(property) = fields.get("ExecSearchPath") {
+            for entry in property.get("data")?.as_array()? {
+                search.push(entry.as_str()?);
+            }
+        }
         let context = crate::access_command::Context::new(vec![directory.to_owned()], &search)?;
         let user = if service { string("User")? } else { "" };
         if service && root != matches!(user, "" | "root" | "0") {
@@ -478,6 +533,12 @@ mod tests {
             words(&["sh", "/srv/job", "-a", "-b", "--pid="])
         );
         assert!(expand(&words(&["sh", "$STATE_DIRECTORY"]), &environment).is_none());
+        assert!(expand(&words(&["sh", "${TRIGGER_PATH}"]), &environment).is_none());
+        // Unset ordinary variables expand to nothing, like `sshd -D $OPTIONS`.
+        assert_eq!(
+            expand(&words(&["sshd", "-D", "$OPTIONS"]), &environment).unwrap(),
+            words(&["sshd", "-D"])
+        );
         assert!(expand(&words(&["sh", "${JOB:-/x}"]), &environment).is_none());
         assert_eq!(
             expand(&words(&["sh", "-c", "echo $$x"]), &environment).unwrap()[2],

@@ -32,8 +32,16 @@ pub(crate) fn writable(account: &User, paths: &[PathBuf]) -> Option<BTreeSet<usi
     }
     let mut found = BTreeSet::new();
     for (index, path) in paths.iter().enumerate() {
-        if std::fs::metadata(path).ok()?.uid() == account.uid.as_raw() {
-            found.insert(index);
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.uid() == account.uid.as_raw() => {
+                found.insert(index);
+            }
+            Ok(_) => {}
+            // A file removed since it was listed is not writable as that file.
+            // The job scan lists its parents too (recreating it needs one),
+            // and the socket probe treats a missing socket as absent.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
         }
     }
     let mut command = crate::sessions::isolated(&setpriv);

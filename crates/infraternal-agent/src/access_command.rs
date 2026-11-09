@@ -6,8 +6,9 @@
 //! possible meaning of a word becomes a candidate path:
 //!
 //! - an absolute operand is itself a candidate; when it names a directory,
-//!   its entries are candidates too (a launcher may run them), and it becomes
-//!   a possible working directory and filesystem root for later operands;
+//!   its entries other than subdirectories are candidates too (a launcher
+//!   may run them), and it becomes a possible working directory and
+//!   filesystem root for later operands;
 //! - a relative operand is joined to every possible working directory;
 //! - a bare word (no `/`) may be a file in the working directory or a program
 //!   found through the search path, so it is joined to both.
@@ -485,7 +486,13 @@ fn value_candidates(value: &str, context: &mut Context, paths: &mut Vec<PathBuf>
                 if index >= DIRECTORY_ENTRIES {
                     return None;
                 }
-                paths.push(entry.ok()?.path());
+                // A launcher such as run-parts runs the files in a directory,
+                // not its subdirectories; `/` as an operand must not make a
+                // world-writable `/tmp` look like a script.
+                let entry = entry.ok()?;
+                if !entry.file_type().ok()?.is_dir() {
+                    paths.push(entry.path());
+                }
             }
             context.base(path)?;
         }
@@ -582,16 +589,23 @@ pub(crate) fn targets(command: &str, context: &Context) -> Option<Vec<PathBuf>> 
 
 /// Resolve one systemd command: the real `executable` (systemd's `path=`,
 /// independent of argv[0] for `ExecStart=@path argv0`) and its already
-/// variable-expanded `argv`.
+/// variable-expanded `argv`. The manager keeps a bare name such as
+/// `journalctl` when it looks the program up only at start time, so a bare
+/// executable is searched for like any other bare program name.
 pub(crate) fn arguments(
     executable: &str,
     argv: &[String],
     context: &Context,
 ) -> Option<Vec<PathBuf>> {
-    if !Path::new(executable).is_absolute() {
+    if executable.is_empty() {
         return None;
     }
-    let mut paths = vec![PathBuf::from(executable)];
+    let mut paths = Vec::new();
+    if executable.contains('/') {
+        file(executable, context, &mut paths);
+    } else {
+        context.programs(executable, &mut paths);
+    }
     program(executable, argv, context, 0, &mut paths)?;
     paths.sort();
     paths.dedup();
@@ -636,6 +650,19 @@ mod tests {
             );
         }
         assert!(targets("/bin/sh /run/job%", &root()).is_none());
+    }
+
+    /// A bare systemd executable is searched for on the search path.
+    #[test]
+    fn bare_manager_executables_are_searched() {
+        let paths = arguments(
+            "journalctl",
+            &["journalctl".into(), "--flush".into()],
+            &root(),
+        )
+        .unwrap();
+        assert!(paths.contains(&PathBuf::from("/usr/bin/journalctl")));
+        assert!(paths.contains(&PathBuf::from("/usr/local/sbin/journalctl")));
     }
 
     /// Ordinary quoting and escaped spaces still identify the exact file.
@@ -709,8 +736,10 @@ mod tests {
         let _fixture = Fixture(directory.clone());
         fs::write(directory.join("hourly"), "").unwrap();
         let shown = directory.display();
+        fs::create_dir(directory.join("nested")).unwrap();
         let paths = targets(&format!("run-parts {shown}"), &root()).unwrap();
         assert!(paths.contains(&directory.join("hourly")));
+        assert!(!paths.contains(&directory.join("nested")));
         let paths = targets(&format!("/usr/bin/env -C {shown} /bin/sh ./job"), &root()).unwrap();
         assert!(paths.contains(&directory.join("./job")));
         let paths = targets(&format!("chroot {shown} job"), &root()).unwrap();
