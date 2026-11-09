@@ -6,12 +6,12 @@
 #include <string.h>
 extern size_t infraternal_vt_snapshot(GhosttyTerminal, unsigned char *, size_t, size_t);
 extern size_t infraternal_vt_compare(GhosttyTerminal, GhosttyTerminal, bool);
-static size_t encode(GhosttyTerminal t, char *out, bool motion) {
+static size_t encode(GhosttyTerminal t, uint8_t *out, bool motion) {
  GhosttyMouseEncoder encoder; GhosttyMouseEvent event;
  if(ghostty_mouse_encoder_new(NULL,&encoder) || ghostty_mouse_event_new(NULL,&event)) exit(3);
- ghostty_mouse_encoder_setopt_from_terminal(encoder,t);
+ if(ghostty_mouse_encoder_set_from_terminal(encoder,t)!=GHOSTTY_SUCCESS) exit(3);
  GhosttyMouseEncoderSize size={.size=sizeof(GhosttyMouseEncoderSize),.screen_width=800,.screen_height=480,.cell_width=10,.cell_height=20};
- ghostty_mouse_encoder_setopt(encoder,GHOSTTY_MOUSE_ENCODER_OPT_SIZE,&size);
+ if(ghostty_mouse_encoder_set(encoder,GHOSTTY_MOUSE_ENCODER_OPT_SIZE,&size)!=GHOSTTY_SUCCESS) exit(3);
  ghostty_mouse_event_set_action(event,motion?GHOSTTY_MOUSE_ACTION_MOTION:GHOSTTY_MOUSE_ACTION_PRESS);
  ghostty_mouse_event_set_button(event,GHOSTTY_MOUSE_BUTTON_LEFT);
  ghostty_mouse_event_set_position(event,(GhosttyMousePosition){.x=20,.y=10});
@@ -32,7 +32,7 @@ int main(void) {
   if(!n||n==SIZE_MAX)return 5;
   ghostty_terminal_vt_write(b,paint,n);
   size_t difference=infraternal_vt_compare(a,b,true);
-  char aa[128],bb[128];size_t na=encode(a,aa,i==2),nb=encode(b,bb,i==2);
+  uint8_t aa[128],bb[128];size_t na=encode(a,aa,i==2),nb=encode(b,bb,i==2);
   bool equal=na==nb&&memcmp(aa,bb,na)==0;
   printf("mouse case=%zu strict_difference=%zu original_report_bytes=%zu replay_report_bytes=%zu equal=%d\n",i,difference,na,nb,equal);
   failures+=!equal;
