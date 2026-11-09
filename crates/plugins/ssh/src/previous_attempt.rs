@@ -1333,7 +1333,7 @@ mod tests {
     #[test]
     fn terminal_takeover_record_names_what_confirmation_will_close() {
         let terminal = format!(
-            "{},726f6f74,62617368,1792195200,{}",
+            "{},726f6f74,62617368,1792195200,7074732f33,2,session-8.scope,{}",
             "3".repeat(32),
             "a".repeat(64)
         );
@@ -1344,29 +1344,62 @@ mod tests {
             format!("INFRATERNAL_SETUP_INSTALLED {line}")
         );
         let offer = serde_json::to_value(installed.takeover_failure(InstallMode::Root)).unwrap();
-        assert_eq!(offer["takeover"]["terminals"][0]["account"], "root");
-        assert_eq!(offer["takeover"]["terminals"][0]["program"], "bash");
-        assert_eq!(
-            offer["takeover"]["terminals"][0]["since"],
-            1_792_195_200_u64
+        let shown = &offer["takeover"]["terminals"][0];
+        assert_eq!(shown["account"], "root");
+        assert_eq!(shown["program"], "bash");
+        assert_eq!(shown["since"], 1_792_195_200_u64);
+        assert_eq!(shown["tty"], "pts/3");
+        assert_eq!(shown["others"], 2);
+        assert!(
+            shown.get("unit").is_none(),
+            "the close unit stays between server and host"
         );
         let findings = installed.takeover_findings(InstallMode::Root, uuid::Uuid::nil());
-        assert!(
-            findings
-                .findings
-                .iter()
-                .any(|line| line.contains("bash") && line.contains("closes"))
-        );
+        assert!(findings.findings.iter().any(|line| line
+            == "An open terminal: root, bash on pts/3 and 2 other programs; Take over closes it"));
         for invalid in [
             terminal.replace("726f6f74", "bad name"),
             terminal.replace("62617368", "$(id)"),
+            terminal.replace("7074732f33", "7474793031"),
+            terminal.replace(",2,", ",02,"),
+            terminal.replace(",2,", ",-1,"),
+            terminal.replace(",2,", ",1025,"),
+            terminal.replace("session-8.scope", "sshd.service"),
+            terminal.replace("session-8.scope", "session-8 x.scope"),
+            terminal.replace(
+                "session-8.scope",
+                &format!("infraternal-session-{}.scope", "4".repeat(32)),
+            ),
+            terminal.replace(",session-8.scope", ""),
             format!("{terminal} {terminal}"),
         ] {
             assert!(
                 parse_installed(&format!("{} 64:1234 live ready {invalid}", "1".repeat(32)))
-                    .is_err()
+                    .is_err(),
+                "{invalid}"
             );
         }
+    }
+
+    /// #433: the old layout's own scope still parses, with no terminal name when the kernel had none.
+    #[test]
+    fn an_old_layout_terminal_record_closes_its_own_scope() {
+        let id = "3".repeat(32);
+        let terminal = format!(
+            "{id},726f6f74,62617368,1792195200,2d,0,infraternal-session-{id}.scope,{}",
+            "b".repeat(64)
+        );
+        let line = format!("{} 64:1234 idle ready {terminal}", "1".repeat(32));
+        let installed = parse_installed(&line).unwrap();
+        assert_eq!(
+            installed.record(),
+            format!("INFRATERNAL_SETUP_INSTALLED {line}")
+        );
+        assert_eq!(installed.terminals[0].tty, None);
+        assert_eq!(
+            installed.terminals[0].finding(),
+            "An open terminal: root, bash; Take over closes it"
+        );
     }
 
     /// A set-aside install's record offers Put it back, and names which restore

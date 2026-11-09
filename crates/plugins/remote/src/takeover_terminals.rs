@@ -250,3 +250,7 @@ pub(super) fn records(runtime: &File) -> Result<String, u8> {
     }
     Ok(records.join(" "))
 }
+
+#[cfg(test)]
+#[path = "takeover_terminals_tests.rs"]
+mod tests;

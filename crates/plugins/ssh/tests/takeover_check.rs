@@ -75,7 +75,12 @@ impl SshSession for LongCheck {
     fn check_stream<'a>(&'a self, _: &'a str) -> Operation<'a, (CommandOutput, Option<Checked>)> {
         Box::pin(async {
             let terminals = (1..=40)
-                .map(|id| format!("{id:032x},726f6f74,62617368,1792195200,{}", "a".repeat(64)))
+                .map(|id| {
+                    format!(
+                        "{id:032x},726f6f74,62617368,1792195200,7074732f33,0,session-8.scope,{}",
+                        "a".repeat(64)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             let record = format!(

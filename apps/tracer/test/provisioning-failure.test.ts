@@ -120,10 +120,15 @@ test("a Take over offer reaches the wizard only in its exact shape", () => {
       ["unrecognized_install", { install, live: true, terminals: "unknown" }],
       ["unrecognized_install", { install, live: true, terminals: [terminal] }],
       ["unrecognized_install", { install, live: true, terminals: [terminal], close_challenge: "00000000-0000-0000-0000-000000000000" }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, tty: "pts/3", others: 2 }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, tty: "tty1" }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, others: -1 }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, others: 1.5 }], close_challenge }],
     ];
     offers.forEach(([kind, takeover], index) => socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: index + 1, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
       failure: { kind, message: "x", log_tail: [], takeover } }) })));
-    expect(events.map((event) => event.failure?.takeover)).toEqual([{ install, live: true }, undefined, undefined, undefined, undefined, { install, live: true, terminals: [terminal], close_challenge }, undefined, undefined, undefined, undefined, undefined]);
+    expect(events.map((event) => event.failure?.takeover)).toEqual([{ install, live: true }, undefined, undefined, undefined, undefined, { install, live: true, terminals: [terminal], close_challenge }, undefined, undefined, undefined, undefined, undefined,
+      { install, live: true, terminals: [{ ...terminal, tty: "pts/3", others: 2 }], close_challenge }, undefined, undefined, undefined]);
     // The offer pauses its attempt like leftovers do: its challenge reaches the wizard (D359).
     const leftovers = { challenge: "1b4e28ba-2fa1-41d2-883f-0016d3cca427", mode: "root", findings: ["x"] };
     socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 20, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,

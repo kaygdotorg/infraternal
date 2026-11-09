@@ -819,7 +819,7 @@ for (const theme of ["ink", "paper"]) for (const viewport of [{ width: 1440, hei
     await expect(confirm.locator("[data-terminal-summary]")).toHaveText("1 open terminal. Take over closes it.");
     await expect(inWizard(page, "Close it and take over")).toBeVisible();
     await expect(page.locator(".ah-float")).toHaveCount(1);
-    await expect(confirm.locator(".ui-kv-value")).toContainText([TAKEOVER_INSTALL, "root, bash, since 17 Oct 2026"]);
+    await expect(confirm.locator(".ui-kv-value")).toContainText([TAKEOVER_INSTALL, "root, bash on pts/0 and 1 other program, since 17 Oct 2026, "]);
     expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
     await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
     const edges = await confirm.evaluate((root) => {

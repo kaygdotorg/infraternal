@@ -2732,7 +2732,7 @@ async fn duplex_check_carries_terminal_confirmation_records_larger_than_512_byte
     let terminals = (1_u128..=40)
         .map(|id| {
             format!(
-                "{},726f6f74,62617368,1792195200,{}",
+                "{},726f6f74,62617368,1792195200,7074732f33,0,session-8.scope,{}",
                 uuid::Uuid::from_u128(id).simple(),
                 "a".repeat(64)
             )
