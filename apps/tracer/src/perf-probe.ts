@@ -5,7 +5,11 @@ import type { TerminalClient, TerminalHooks, TerminalTraceHop } from "./terminal
 const KEY_SET = "abcdefghijklmnopqrstuvwxyz0123456789";
 /** The most keys one run may send. */
 const MAX_PROBE_KEYS = 5_000;
-/** The shortest time a run waits for its echoes before giving up; longer runs wait 50 ms per key. */
+/**
+ * How long a run waits with no new echo painted before it gives up. It restarts on every painted echo, so a run takes
+ * as long as its keys need: each key waits for the previous echo, about one round trip, and 100 keys over a 300 ms
+ * link take about 33 s. (A fixed run deadline of max(15 s, 50 ms per key) cut such runs off after about 45 keys, #447.)
+ */
 const ECHO_TIMEOUT_MS = 15_000;
 
 /** One measured key (or the resume marker): its trace `id`, when it started, and the time at each stage it passed. */
@@ -71,7 +75,7 @@ export class PerformanceProbe {
   private runTarget = 0;
   /** Whether a run is in progress. */
   private runActive = false;
-  /** The run's overall timeout. */
+  /** Ends the run when no echo has painted for `ECHO_TIMEOUT_MS`; restarted by each painted echo. */
   private timeout = 0;
   /** Fires 100 ms after the last output, marking the terminal as quiet. */
   private quietTimer = 0;
@@ -172,8 +176,14 @@ export class PerformanceProbe {
     this.results.textContent = `Painted 0 / ${count}`;
     this.syncButtons();
 
-    this.timeout = window.setTimeout(() => this.finishRun(true), Math.max(ECHO_TIMEOUT_MS, count * 50));
+    this.armIdleTimeout();
     this.sendNextKey();
+  }
+
+  /** (Re)starts the wait for the next painted echo; the run fails if none paints within `ECHO_TIMEOUT_MS`. */
+  private armIdleTimeout(): void {
+    window.clearTimeout(this.timeout);
+    this.timeout = window.setTimeout(() => this.finishRun(true), ECHO_TIMEOUT_MS);
   }
 
   /** Drops the socket to measure how long the resume takes. */
@@ -241,6 +251,7 @@ export class PerformanceProbe {
         this.latencies.push(duration);
         this.results.textContent = `Painted ${this.latencies.length} / ${this.runTarget}`;
         if (this.latencies.length >= this.runTarget) this.finishRun(false);
+        else this.armIdleTimeout();
       }
     }
     if (this.runActive && this.latencies.length === this.samples.length) {
