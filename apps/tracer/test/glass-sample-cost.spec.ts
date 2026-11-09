@@ -3,8 +3,9 @@
  *
  * Adaptive glass density reads an 8x8 average of the part of a remote window's picture under a card, at most every 250 ms
  * while the card is open. Latency comes first (D375), so this measures the price before anyone wires it into a window:
- *  - the time of one sample (`readSample`: one `drawImage` into an 8x8 canvas and one 256-byte read) from a playing 1920x1080
- *    `<video>` and from a 1920x1080 `<canvas>`, over 300 back-to-back samples;
+ *  - the time of one sample (`readSample`: one `drawImage` into an 8x8 canvas and one 256-byte read) from a live 1920x1080
+ *    stream, from a decoded 1920x1080 VP8 video and from a 1920x1080 `<canvas>`, as the mean of 50 back-to-back samples, 20 times
+ *    (the browser's clock moves in 0.1 ms steps, so a single call would read 0);
  *  - the page's frame intervals (`requestAnimationFrame` deltas) over a few seconds with the picture animating and no
  *    sampling, then with `watchBackdrop` running at its real 250 ms pace.
  *
@@ -32,7 +33,8 @@ function bundle(): string {
 }
 
 interface Stats { n: number; p50: number; p99: number; max: number; mean: number }
-interface Report { video: Stats; canvas: Stats; framesIdle: Stats; framesSampling: Stats; samplesDuringRun: number }
+/** `msPerSample` is each timed batch's mean (the browser's clock is coarse, so single calls read 0); frames are the rAF intervals. */
+interface Report { liveVideo: Stats; recordedVideo: Stats; canvas: Stats; framesIdle: Stats; framesSampling: Stats; samplesDuringRun: number }
 
 test("sampling a 1080p picture: cost of one sample and its effect on frame intervals", async ({ page }) => {
   test.setTimeout(120_000);
@@ -73,18 +75,34 @@ test("sampling a 1080p picture: cost of one sample and its effect on frame inter
     await new Promise<void>((done) => { const check = (): void => (video.readyState >= 2 && video.videoWidth > 0 ? done() : void setTimeout(check, 20)); check(); });
 
     const region = { x: 600, y: 300, width: 320, height: 240 };
+    /** 20 batches of 50 samples; the mean of each batch is one reading, which beats the browser's 0.1 ms clock steps. */
     const time = (source: HTMLVideoElement | HTMLCanvasElement): number[] => {
       const out: number[] = [];
-      for (let i = 0; i < 300; i++) {
+      for (let rep = 0; rep < 20; rep++) {
         const a = performance.now();
-        const px = GA.readSample(source, region);
-        out.push(performance.now() - a);
-        if (!px) throw new Error("no sample");
+        for (let i = 0; i < 50; i++) if (!GA.readSample(source, region)) throw new Error("no sample");
+        out.push((performance.now() - a) / 50);
       }
       return out;
     };
-    time(video); // warm the canvas and the decoder path once
-    const videoCost = time(video);
+    // A decoded video, not just a canvas stream: record two seconds of the picture as VP8 and play the file back.
+    const recorder = new MediaRecorder(pic.captureStream(30), { mimeType: "video/webm;codecs=vp8", videoBitsPerSecond: 8_000_000 });
+    const parts: Blob[] = [];
+    recorder.ondataavailable = (e) => parts.push(e.data);
+    const stopped = new Promise<void>((done) => { recorder.onstop = () => done(); });
+    recorder.start();
+    await new Promise((done) => setTimeout(done, 2500));
+    recorder.stop();
+    await stopped;
+    const recorded = document.createElement("video");
+    recorded.muted = true; recorded.playsInline = true; recorded.loop = true;
+    recorded.src = URL.createObjectURL(new Blob(parts, { type: "video/webm" }));
+    document.body.append(recorded);
+    await recorded.play();
+    await new Promise<void>((done) => { const check = (): void => (recorded.readyState >= 2 && recorded.videoWidth > 0 ? done() : void setTimeout(check, 20)); check(); });
+    time(video); time(recorded); // warm each path once
+    const liveCost = time(video);
+    const recordedCost = time(recorded);
     const canvasCost = time(pic);
 
     const frames = (ms: number): Promise<number[]> => new Promise((done) => {
@@ -103,10 +121,10 @@ test("sampling a 1080p picture: cost of one sample and its effect on frame inter
     const framesSampling = await frames(4000);
     stopWatching();
     window.clearInterval(painter);
-    return { video: stats(videoCost), canvas: stats(canvasCost), framesIdle: stats(framesIdle), framesSampling: stats(framesSampling), samplesDuringRun: samples };
+    return { liveVideo: stats(liveCost), recordedVideo: stats(recordedCost), canvas: stats(canvasCost), framesIdle: stats(framesIdle), framesSampling: stats(framesSampling), samplesDuringRun: samples };
   });
   writeFileSync(tracerEvidencePath("glass-sample-cost", "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
-  expect(report.video.n).toBe(300);
+  expect(report.liveVideo.n).toBe(20);
   expect(report.samplesDuringRun).toBeGreaterThan(5);
 });
