@@ -160,6 +160,12 @@ const traceEvents: TraceEvent[] = [];
 
 const perfSink = createPerfSink(FRONT_PORT);
 const server = createServer((request, response) => { void routeHttp(request, response); });
+// Never close an idle kept-alive connection. Specs reach the double through the test link's added delay with
+// Playwright's `context.request`, which reuses its connection between calls. With the default 5 s idle limit the
+// server can close a connection while the next request is already on the delayed link, and that request fails with
+// "socket hang up (ECONNRESET)" 5.65-5.8 s after the previous one (#438, mock-keepalive.spec.ts). The double lives
+// for one test run and has a handful of clients, so there is nothing to reclaim.
+server.keepAliveTimeout = 0;
 const webSockets = new WebSocketServer({ noServer: true, maxPayload: 2 * 1024 * 1024 });
 const connections = new Set<Connection>();
 // Theme regression tests compare these counters across a local palette change.

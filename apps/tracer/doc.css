@@ -11,6 +11,9 @@
 .doc-head, .doc-body { min-width: 0; max-width: 70ch; }
 .doc .lede { margin: 0 0 1.5rem; color: var(--fg-2); font-size: 1.08em; font-weight: var(--fw-secondary); line-height: 1.6; }
 
+/* Corner radii here are literal rem on purpose (ui-literal: #345): the standalone docs pages load only docs.css and this file, not the
+   app's ui.css where --r-sm/--r-md/--r-lg live, so a token would resolve to nothing there. The values are the scale's steps
+   (0.5rem, 0.75rem); change them together with packages/ui/styles.css. */
 /* ---- Type for long reading ---------------------------------------------------------------------------------------------------
    One scale in `em` of the page's own body size (13 px, 16 px on touch), so the standalone page and the canvas window step
    the same way: title 1.7, section 1.3, sub-section 1.08, then the body. A section starts with a hairline and a generous gap, a

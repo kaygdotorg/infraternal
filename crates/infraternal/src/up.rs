@@ -981,9 +981,17 @@ fn hash_stream(input: &mut impl Read, mut output: Option<&mut fs::File>) -> io::
 }
 
 /// Render the single system service installed by a fresh machine join.
+///
+/// `ExecStartPre` relabels the binary `bin_t` before every start (#401).
+/// Install labels it once, but a later `restorecon` or full relabel puts it
+/// back to `/var/lib`'s `var_lib_t`, which systemd refuses with `203/EXEC`
+/// before the agent could heal itself. `+` runs the step as root, `-` means it
+/// can never fail the unit, and the selinuxfs check makes it a no-op where
+/// `SELinux` is absent or disabled. The SSH installer's root unit carries the
+/// same step.
 fn systemd_unit() -> String {
     format!(
-        "[Unit]\nDescription=Infraternal machine service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={SERVICE_BINARY} agent run --data {SERVICE_DATA}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Infraternal machine service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStartPre=-+/bin/sh -c \"[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t {SERVICE_BINARY}\"\nExecStart={SERVICE_BINARY} agent run --data {SERVICE_DATA}\nRestart=on-failure\nRestartSec=2\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -1834,5 +1842,22 @@ mod tests {
         );
         assert_eq!(&*decoded.key_pkcs8, key);
         assert_eq!(decoded.key_digest, digest);
+    }
+
+    /// #401: the root unit `up` installs relabels its binary before every
+    /// start, so a `restorecon` or a full relabel can't leave systemd refusing
+    /// `/var/lib/infraternal/bin/infraternal` (`var_lib_t`) with `203/EXEC`.
+    /// The line never fails the unit (`-`) and is a no-op without `SELinux`.
+    #[test]
+    fn the_unit_relabels_its_binary_before_every_start() {
+        let unit = super::systemd_unit();
+        let lines: Vec<&str> = unit.lines().collect();
+        let relabel = lines.iter().position(|line| {
+            *line
+                == r#"ExecStartPre=-+/bin/sh -c "[ ! -e /sys/fs/selinux/enforce ] || chcon -t bin_t /var/lib/infraternal/bin/infraternal""#
+        });
+        let start = lines.iter().position(|line| line.starts_with("ExecStart="));
+        assert!(relabel.is_some(), "{unit}");
+        assert!(relabel < start, "{unit}");
     }
 }

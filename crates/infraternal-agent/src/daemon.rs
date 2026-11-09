@@ -328,7 +328,7 @@ mod refusal_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn selinux_label_failure_is_not_an_invalid_request() {
-        let failure = crate::login_binary::label_failure("test");
+        let failure = crate::exec_label::label_failure("test");
         assert_eq!(failure.kind(), io::ErrorKind::Unsupported);
         assert_eq!(open_refusal(&failure), OpenRefusal::ResourceUnavailable);
     }
