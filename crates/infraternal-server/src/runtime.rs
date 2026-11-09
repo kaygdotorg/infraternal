@@ -1596,8 +1596,19 @@ mod tests {
             .await
             .unwrap();
         let (status, _) = post_key_action(&app, token, action, serde_json::json!({"host_id":host,"dry_run":false,"review_token":review["review_token"]})).await;
-        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
         assert!(host_is_live(&pool, host).await);
+        let forgotten: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM mesh_audit WHERE action='remote.host.forget' AND resource=?",
+        )
+        .bind(host.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            forgotten, 0,
+            "a state conflict must not record a successful Forget"
+        );
         sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=? WHERE host_id=?")
             .bind(now - 604_800)
             .bind(now)

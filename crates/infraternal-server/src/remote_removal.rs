@@ -286,6 +286,7 @@ impl Removal {
 
     /// Snapshot cleanup and any removal details only while this owner's host is retired-unreachable.
     /// Inventory also shows abandoned setups without a removal row, so that row is optional here too.
+    /// An ineligible selection is Invalid, distinct from a Denied session or key authority check.
     async fn forget_record(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         person: &str,
@@ -308,7 +309,7 @@ impl Removal {
                             AND c.revoked_at IS NULL AND c.not_after>MAX(?,unixepoch()))",
         )
             .bind(host.as_bytes().as_slice()).bind(person).bind(now)
-            .fetch_optional(&mut **tx).await?.ok_or(crate::auth::Error::Denied)
+            .fetch_optional(&mut **tx).await?.ok_or(crate::auth::Error::Invalid)
     }
 
     /// Keep the shared bounded admission until commit publication, even if the caller disconnects.

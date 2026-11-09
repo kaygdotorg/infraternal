@@ -643,7 +643,7 @@ async fn post_json_inner(
     })?;
     let status = response.status();
     if !status.is_success() && status != StatusCode::BAD_REQUEST {
-        return Err(status_failure(status));
+        return Err(action_status_failure(path, status));
     }
     let bytes = Limited::new(response.into_body(), MAX_RESPONSE)
         .collect()
@@ -678,6 +678,18 @@ fn bad_request_failure(body: &[u8]) -> ActionFailure {
             "The removal review expired or was already used, so nothing was removed. Run the command again to see a new dry run.",
         ),
         _ => status_failure(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// Explain Forget's state conflict; keep authentication and other actions' shared diagnostics.
+fn action_status_failure(path: &str, status: StatusCode) -> ActionFailure {
+    if path == "/v1/actions/remote.host.forget" && status == StatusCode::CONFLICT {
+        ActionFailure::new(
+            Exit::NotAllowed,
+            "This host is no longer retired and unreachable, so nothing was forgotten.",
+        )
+    } else {
+        status_failure(status)
     }
 }
 
@@ -898,6 +910,29 @@ mod tests {
         assert_eq!(failure.exit, exit);
         assert_eq!(failure.message, message);
         assert_eq!(failure.exit, Exit::NotAllowed);
+    }
+
+    /// A reconnect between review and commit is a host-state refusal, not a sign-in failure.
+    #[test]
+    fn forget_state_conflict_does_not_blame_the_api_key() {
+        let path = "/v1/actions/remote.host.forget";
+        let failure = super::action_status_failure(path, StatusCode::CONFLICT);
+        assert_eq!(failure.exit, Exit::NotAllowed);
+        assert_eq!(
+            failure.message,
+            "This host is no longer retired and unreachable, so nothing was forgotten."
+        );
+        assert_eq!(
+            super::action_status_failure(path, StatusCode::FORBIDDEN).message,
+            status_failure(StatusCode::FORBIDDEN).message,
+            "authentication refusals keep the shared key diagnostic"
+        );
+        assert_eq!(
+            super::action_status_failure("/v1/actions/remote.host.remove", StatusCode::CONFLICT)
+                .message,
+            status_failure(StatusCode::CONFLICT).message,
+            "other actions must not report a Forget refusal"
+        );
     }
 
     /// D28: the dry run's token is taken out of what is printed, and the real call repeats the

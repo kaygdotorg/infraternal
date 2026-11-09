@@ -1072,7 +1072,7 @@ async fn forget_host(
             .await
             .map(|value| (Json(value), true))
             .map_err(|error| match error {
-                crate::auth::Error::Denied => StatusCode::NOT_FOUND,
+                crate::auth::Error::Invalid | crate::auth::Error::Denied => StatusCode::NOT_FOUND,
                 _ => StatusCode::SERVICE_UNAVAILABLE,
             });
     }
@@ -1086,7 +1086,13 @@ async fn forget_host(
         )
         .await
         .map(|value| (Json(value), true))
-        .map_err(|_| StatusCode::FORBIDDEN)
+        // A reviewed host can become ineligible before the writer locks it. That is a
+        // target conflict, not an invalid key; authority refusals retain their own status.
+        .map_err(|error| match error {
+            crate::auth::Error::Invalid => StatusCode::CONFLICT,
+            crate::auth::Error::Denied => StatusCode::FORBIDDEN,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        })
 }
 
 /// Tests the authorization table, bearer parser and per-key admission independently of storage.
