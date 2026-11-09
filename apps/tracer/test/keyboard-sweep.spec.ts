@@ -15,7 +15,7 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
-const OPEN = "/?mock=1&proto=clusters&scene=3&theme=ink&bg=soft";
+const OPEN = "/?mock=1&proto=clusters&scene=1&theme=mocha&bg=none&sessions=1";
 /** The palette chord on the (non-Mac) test browser. */
 const PALETTE = "Control+Shift+K";
 /** What the sweep leaves out, with the reason; keep it short, every entry is a hole in the guard. */
@@ -24,14 +24,20 @@ const SKIP_LABEL = /^(Reload|Sign out of every device)/i;
 /** One finding: what was still moving and where. */
 type Finding = string;
 
-/** Loads a fresh clusters mockup and installs the watcher in the page. */
+/**
+ * Loads a fresh clusters mockup with a second terminal window active (so window actions and the session manager have a target),
+ * and installs the watcher in the page.
+ */
 async function fresh(page: Page): Promise<void> {
-  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(OPEN);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-  // sleep: let the mockup's opening motion finish before the idle baseline is taken
+  // sleep: let the mockup's opening motion finish before the camera is sent to the Console view
+  await page.waitForTimeout(1200);
+  await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(id: string, instant?: boolean): void } }).__tracerClusters.flyView("console", true));
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:new:right", source: "pointer" } })));
+  // sleep: the new window is placed and the opening motion of the page is over, before the idle baseline is taken
   await page.waitForTimeout(1500);
-  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.evaluate(() => {
     type Seen = Map<string, Set<number>>;
     const w = window as unknown as { __sw: { phase: "idle" | "key"; frame: number; keyFrame: number; idle: Seen; key: Seen } };
@@ -87,7 +93,8 @@ async function sweep(page: Page, act: () => Promise<void>): Promise<Finding[]> {
 
 /** The pressable chords of the `?` panel: its rows' first run of key caps, as Playwright key names. */
 async function chordsOfPanel(page: Page): Promise<Array<{ label: string; key: string }>> {
-  await page.keyboard.press("?");
+  // Ctrl+Shift+/ works from inside a focused terminal, where a bare "?" is typed into the shell.
+  await page.keyboard.press("Control+Shift+/");
   await expect(page.locator(".ui-shortcuts")).toBeVisible();
   const rows = await page.locator(".ui-shortcuts-row").evaluateAll((nodes) => nodes.map((row) => ({
     label: row.querySelector(".ui-shortcuts-label")?.textContent ?? "",
@@ -120,14 +127,22 @@ test("no shortcut leaves anything animating three frames after the key", async (
 });
 
 test("no palette row leaves anything animating three frames after Enter", async ({ page }) => {
-  test.setTimeout(900_000);
+  test.setTimeout(1_800_000);
   await fresh(page);
   await page.keyboard.press(PALETTE);
   await expect(page.locator("#palette")).toBeVisible();
-  const labels = (await page.locator("#palette-results .result .result-label").allTextContents()).map((text) => text.trim()).filter((text) => text && !SKIP_LABEL.test(text));
-  expect(labels.length, "the palette lists its actions").toBeGreaterThan(10);
+  // One row per family of actions (theme:*, font:*, canvas:settings:*, ...): the rows of a family run the same code, and the sweep reloads the page for each.
+  const rows = await page.locator("#palette-results .result").evaluateAll((nodes) => nodes.map((node) => ({ label: node.querySelector(".result-label")?.textContent?.trim() ?? "", action: (node as HTMLElement).dataset.action ?? "" })));
+  const families = new Map<string, string>();
+  for (const { label, action } of rows) {
+    if (!label || SKIP_LABEL.test(label)) continue;
+    const family = action.includes(":") ? action.slice(0, action.lastIndexOf(":")) : action || label;
+    if (!families.has(family)) families.set(family, label);
+  }
+  const labels = [...families.values()];
+  expect(labels.length, "the palette lists its actions").toBeGreaterThan(8);
   const failures: string[] = [];
-  for (const label of new Set(labels)) {
+  for (const label of labels) {
     await fresh(page);
     await page.keyboard.press(PALETTE);
     await page.keyboard.type(label, { delay: 0 });
