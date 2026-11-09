@@ -20,6 +20,7 @@ import { join, resolve } from "node:path";
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** The shared UI package's source, bundled into the page under test. */
 const uiSrc = resolve(import.meta.dirname, "../../../packages/ui/src");
 
 /** Bundles the module and the themes for the browser; the scratch directory is outside the checkout. */

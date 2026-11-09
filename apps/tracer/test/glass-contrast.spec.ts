@@ -25,9 +25,12 @@ const HAS_MOCKUP = existsSync(resolve(import.meta.dirname, "../src/canvas/mock/a
 test.skip(!HAS_MOCKUP, "the app-window mockup (#146) is not on this branch");
 
 const OUT = tracerEvidencePath("glass-contrast");
+/** The line every text run must reach (D365). */
 const LINE = 4.5;
 
+/** One viewport and the popover that opens in it: its mockup query and the selector that says it is ready. */
 interface Size { id: string; width: number; height: number; phone: boolean; query: string; ready: string }
+/** The desktop's Send keys list and the phone's gear popover. */
 const SIZES: Size[] = [
   { id: "1440x900", width: 1440, height: 900, phone: false, query: "appmock=desktop&pop=keys", ready: ".awm-keys" },
   { id: "393x852", width: 393, height: 852, phone: true, query: "appmock=phone-app&pop=gear", ready: ".awm-gearpop" },
@@ -41,7 +44,9 @@ const BACKDROPS: Record<string, string> = {
   black: ".awm-surface { filter: brightness(0) !important; }",
 };
 
+/** One run of text in the popover: what it says, its colour (rgba) and its box on the page. */
 interface Run { text: string; colour: [number, number, number, number]; x: number; y: number; w: number; h: number }
+/** The lowest contrast measured for one text run. */
 interface Result { text: string; ratio: number; colour: string }
 
 /** Contrast of every text run in `selector`'s popover against the pixels under it; the lowest first. */
