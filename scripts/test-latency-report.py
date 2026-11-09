@@ -40,13 +40,14 @@ class ReportTests(unittest.TestCase):
         _, passed = targets.report(full_log(predicted_glyph=slow))
         self.assertFalse(passed)
 
-    def test_overhead_gates_on_baseline_until_target_is_reached(self):
-        line = targets.row_line("own_overhead", source="test", n=100, value=20.0, unit="ms",
-                                target=targets.FRAME_MS, gate=targets.OWN_OVERHEAD_BASELINE_MS)
+    def test_overhead_gates_at_12ms_until_target_is_reached(self):
+        line = targets.row_line("own_overhead", source="test", n=100, value=11.0, unit="ms",
+                                target=targets.FRAME_MS, gate=targets.OWN_OVERHEAD_GATE_MS)
         self.assertIn("target_met=no result=PASS", line)
-        worse = targets.row_line("own_overhead", source="test", n=100, value=26.0, unit="ms",
-                                 target=targets.FRAME_MS, gate=targets.OWN_OVERHEAD_BASELINE_MS)
+        worse = targets.row_line("own_overhead", source="test", n=100, value=12.5, unit="ms",
+                                 target=targets.FRAME_MS, gate=targets.OWN_OVERHEAD_GATE_MS)
         self.assertIn("result=FAIL", worse)
+        self.assertEqual(targets.OWN_OVERHEAD_GATE_MS, 12.0)
 
     def test_own_overhead_is_composed_from_both_shares(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_own_overhead" not in line)

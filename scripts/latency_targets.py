@@ -23,10 +23,10 @@ The browser suite keeps a TypeScript copy of the same numbers in
 that the two copies agree.
 
 How a row gates: most rows gate on their target. The own-overhead row is the
-exception D375 names: its 8.3 ms target becomes the gate only once a run reaches
-it. Until then the gate is "no worse than today's baseline", about 25 ms (D296),
-held in `OWN_OVERHEAD_BASELINE_MS`. When a perf-VM run first meets 8.3 ms, lower
-that constant to the target in the same change that records the run.
+exception D375 names: its 8.3 ms target becomes the gate only once it is
+reached. Until then the gate is `OWN_OVERHEAD_GATE_MS`, 12 ms since #447 round 3
+(was the D296 baseline of about 25 ms). After two consecutive perf-VM runs at or
+under 8.3 ms, set that constant to `FRAME_MS` in the change that records them.
 
 Usage: `python3 scripts/latency_targets.py report <log>`.
 """
@@ -40,9 +40,12 @@ sys.dont_write_bytecode = True
 
 #: One display frame at 120 Hz, in milliseconds: the unit every D375 budget is written in.
 FRAME_MS = 1000 / 120
-#: Today's own-overhead baseline (D296: the shipping terminal's pooled echo p99 on
-#: the perf VM, about 25 ms). It is the overhead row's gate until 8.3 ms is reached.
-OWN_OVERHEAD_BASELINE_MS = 25.0
+#: The own-overhead row's gate until its 8.3 ms target is reached (orchestrator, #447
+#: round 3). Measured unthrottled on dev-02: 8.56 ms (agent 0.56 + browser 8.00, the
+#: browser p99 then the slowest of 20 keys); 12 ms leaves room for shared-VM noise and
+#: halves the old 25 ms D296 baseline. Becomes FRAME_MS after two consecutive perf-VM
+#: runs at or under 8.3 ms (PROCESS.md §6).
+OWN_OVERHEAD_GATE_MS = 12.0
 #: The fixed allowance D259/D267 add after the round trips of a reconnect.
 RECONNECT_ALLOWANCE_MS = 50.0
 #: D41/D375: an idle infraternal agent stays under 15 MB resident (decimal megabytes).
@@ -67,7 +70,7 @@ ROWS = (
     Row("predicted_glyph", "Key to letter on screen, with prediction", "8.3 ms"),
     Row("real_echo", "Real echo", "round trip + 16.7 ms"),
     Row("flood_effect", "Flood effect on typing", "at most +8.3 ms"),
-    Row("own_overhead", "Own overhead, no network", "8.3 ms (stretch 5 ms); gate 25 ms until reached"),
+    Row("own_overhead", "Own overhead, no network", "8.3 ms (stretch 5 ms); gate 12 ms until reached"),
     Row("reconnect_last_screen", "Reconnect, last screen", "8.3 ms"),
     Row("reconnect_resumed_link", "Reconnect, typable, resumed link", "1 round trip + 50 ms"),
     Row("reconnect_network_change", "Reconnect, typable, after a network change", "4 round trips + 50 ms"),
@@ -195,7 +198,7 @@ def compose_own_overhead(log_text: str) -> list[str]:
         lines.append(row_line(
             "own_overhead", source="real-agent-pty+tracer-production-build", display=display,
             n=min(int(agent["n"]), int(browser["n"])), value=agent_ms + browser_ms, unit="ms",
-            target=FRAME_MS, gate=OWN_OVERHEAD_BASELINE_MS,
+            target=FRAME_MS, gate=OWN_OVERHEAD_GATE_MS,
             extra=f"agent_p99_ms={agent_ms:.2f} browser_p99_ms={browser_ms:.2f} stretch_ms=5.00"))
     return lines
 

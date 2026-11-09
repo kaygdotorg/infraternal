@@ -185,7 +185,7 @@ numbered history, both timestamp arrival orders and altered checksums.
   | Key to letter on screen, with prediction | 8.3 ms | tracer scenario, every probe key (a declined prediction counts as its real echo) |
   | Real echo | round trip + 16.7 ms | tracer scenario, prediction off, key to painted echo |
   | Flood effect on typing | at most +8.3 ms | `verify-latency.py`, echo p99 growth with another and the same PTY flooding (the worse one) |
-  | Own overhead, no network | 8.3 ms (stretch 5 ms) | the report: real agent echo p99 with the relay delay at 0 (`verify-latency.py`) plus the browser's own spans p99, keydown to send and echo arrival to paint (tracer scenario) |
+  | Own overhead, no network | 8.3 ms (stretch 5 ms); gate 12 ms until reached | the report: real agent echo p99 with the relay delay at 0 (`verify-latency.py`) plus the browser's own spans p99, keydown to send and echo arrival to paint (tracer scenario) |
   | Reconnect, last screen | 8.3 ms | tracer scenario, socket drop to the first frame showing the last screen |
   | Reconnect, typable, resumed link | 1 round trip + 50 ms | `verify-latency.py`, re-attach over the live link to the agent's Ack |
   | Reconnect, typable, after a network change | 4 round trips + 50 ms | tracer scenario, socket drop to the first resumed echo painted (D267) |
@@ -199,10 +199,17 @@ numbered history, both timestamp arrival orders and altered checksums.
   fails the run like a missed one. The full log is kept under
   `$HOME/.cache/codex-scratch/latency/evidence/`.
 - **How the rows gate [D375].** Each row gates on its target, except own
-  overhead: its 8.3 ms target becomes the gate only once a run reaches it.
-  Until then the gate is no regression past today's baseline, about 25 ms
-  (D296), set as `OWN_OVERHEAD_BASELINE_MS` in `scripts/latency_targets.py`.
-  The change that records the first perf-VM run at or under 8.3 ms lowers it.
+  overhead: its 8.3 ms target becomes the gate only once it is reached. Until
+  then the gate is **12 ms** (`OWN_OVERHEAD_GATE_MS` in
+  `scripts/latency_targets.py`; orchestrator, #447 round 3). It replaced the
+  D296 baseline of about 25 ms after the unthrottled profile measured
+  8.56 ms on dev-02.
+- **Switch rule for own overhead.** After **two consecutive perf-VM runs** of
+  `scripts/verify latency` with the own-overhead row (unthrottled) at or
+  under 8.3 ms, the gate becomes the 8.3 ms target: set
+  `OWN_OVERHEAD_GATE_MS = FRAME_MS` in the change that records both runs, with
+  their logs on the issue. A run on a shared build VM does not count toward
+  the two.
   "Round trip" in a row means the slowest round trip the profile produces
   (configured RTT plus its 30 ms jitter bound), so the relay's jitter cannot
   fail a row by itself. The functional browser suite only prints its rows
