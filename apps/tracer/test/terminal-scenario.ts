@@ -353,10 +353,12 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   // route refresh; the probe refuses to start on an unconfirmed terminal, so wait for the state it checks, then click.
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await page.locator("#probe-run").click();
+  // The panel re-renders after every painted key, so "p99:" shows after the first one; wait for the whole run. With
+  // 20 keys the early read happened to win the race, with 100 it read 49 echoed keys (#447 round 3).
   await expect.poll(
     async () => (await page.locator("#probe-results").textContent()) ?? "",
     { timeout: probeTimeoutMs },
-  ).toContain("p99:");
+  ).toContain(`Painted echoes: ${probeCount} / ${probeCount}`);
   const probeState = await (await context.request.get("/__mock/state")).json() as {
     echoed_text: string;
     accepted_input_bytes: number;
