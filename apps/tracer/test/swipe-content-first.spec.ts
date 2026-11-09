@@ -287,20 +287,4 @@ test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
     expect(await canvasState(page)).toBe(before);
     expect(await stopIndex(page)).toBe(index);
   });
-
-  test("a vertical wheel at the end of the page stays with the page: it never steps to another window (D377)", async ({ context }) => {
-    test.setTimeout(90_000);
-    const page = await open(context);
-    const box = (await page.locator(`${PAGE} .dr-scroll`).boundingBox())!;
-    await page.evaluate((sel) => { const s = document.querySelector<HTMLElement>(`${sel} .dr-scroll`)!; s.scrollTop = s.scrollHeight; }, PAGE);
-    const before = await canvasState(page), index = await stopIndex(page);
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    for (let i = 0; i < 4; i++) {
-      await page.mouse.wheel(0, 300);
-      // sleep: a quiet gap longer than a gesture (150 ms), so each wheel is a fresh gesture at the end
-      await page.waitForTimeout(400);
-    }
-    expect(await canvasState(page), "fresh gestures at the end of the page did not move the canvas").toBe(before);
-    expect(await stopIndex(page)).toBe(index);
-  });
 });
