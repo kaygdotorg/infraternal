@@ -278,7 +278,7 @@ test.describe("the Colour picker on a phone", () => {
 test.describe("custom background controls on a phone", () => {
   test.use({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true });
 
-  test("Solid, Gradient, Add and Remove have 44 px touch targets", async ({ page }) => {
+  test("Solid, Gradient, the colour stops, Add and Remove have 44 px touch targets", async ({ page }) => {
     await open(page);
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     const tabs = page.locator(`${WINDOW} [role="tablist"][aria-label="Background"] .ui-tab`);
@@ -298,6 +298,7 @@ test.describe("custom background controls on a phone", () => {
 
     const controls = [
       ...await tabs.evaluateAll((items) => items.map((item) => ({ label: item.textContent?.trim() ?? "tab", rect: item.getBoundingClientRect().toJSON() }))),
+      ...await gradientBlock.locator(".cl-bg-stop").evaluateAll((items) => items.map((item, n) => ({ label: `Gradient colour ${n + 1}`, rect: item.getBoundingClientRect().toJSON() }))),
       ...await Promise.all([add, remove].map(async (item) => ({ label: await item.getAttribute("aria-label"), rect: await item.boundingBox() }))),
     ];
     for (const control of controls) {
