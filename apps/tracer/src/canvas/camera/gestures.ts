@@ -24,6 +24,11 @@ import { canvasDeltas, canvasModifierHeld } from "./canvas-wheel-modifier";
 import { onDemand } from "../../on-demand";
 import { setActivity } from "../../perf-activity";
 
+/**
+ * Installs every canvas gesture on `cx`: the snapped and free wheel, the two-finger touch drag and the taps on a peeking
+ * neighbour. It routes each wheel gesture to the content under the pointer or to the canvas (D275, D374). It lives as long
+ * as `cx.signal`; aborting that removes every listener.
+ */
 export function installGestures(cx: Ctx): void {
   const { viewport, signal, camera, state, views } = cx;
   const cam = camera.cam;
