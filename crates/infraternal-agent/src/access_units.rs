@@ -11,6 +11,11 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Instant,
 };
 
 /// Variables the manager sets itself when it runs a command. Their values are
@@ -61,6 +66,11 @@ const MANAGER_RUNTIME_SHAPES: &[&str] = &[
 
 /// Suffixes that mark a run-time path variable, like `$RUNTIME_DIRECTORY`.
 const MANAGER_RUNTIME_SUFFIXES: &[&str] = &["_DIRECTORY", "_PATH", "_SOCKET", "_FILE"];
+
+/// How many unit property queries run at once. Each is one short `busctl`
+/// process (about 12 ms on a loaded compute01), and hosts have 100 to 200
+/// units, so a serial walk took about 2 s and slow guests hit the deadline.
+const QUERY_WORKERS: usize = 8;
 
 /// All lifecycle commands that systemd can execute for a service. Extended
 /// properties retain privilege flags, so `+` and `!` also count on User= units.
@@ -123,12 +133,10 @@ pub(crate) fn manager_environment() -> Option<Vec<String>> {
         .collect()
 }
 
-/// Return direct root command inputs, or unknown on a failed or unfamiliar
-/// manager reply. No job is started and no command text is copied to a report.
-/// `manager` is [`manager_environment`]'s answer, shared by every unit.
-pub(crate) fn inputs(name: &str, root: bool, manager: &[String]) -> Option<Inputs> {
+/// Ask the manager for every property of one unit, as JSON text.
+fn query(name: &str) -> Option<String> {
     let path = object_path(name);
-    let output = crate::access_privilege::host_output(
+    crate::access_privilege::host_output(
         "busctl",
         &[
             "--json=short",
@@ -140,8 +148,50 @@ pub(crate) fn inputs(name: &str, root: bool, manager: &[String]) -> Option<Input
             "s",
             "",
         ],
-    )?;
-    parse(&output, root, name.ends_with(".service"), manager)
+    )
+}
+
+/// One unit's place in [`query_all`]'s answer.
+#[derive(Clone)]
+pub(crate) enum Reply {
+    /// The deadline came before this unit was asked about.
+    Late,
+    /// The manager's JSON reply, or `None` when the query failed.
+    Done(Option<String>),
+}
+
+/// Query many units' properties, a few at a time, until `deadline`, keeping
+/// the order of `names`. Called from the scan's blocking worker; the helper
+/// threads join the same runtime so every command keeps its bounds.
+pub(crate) fn query_all(names: &[&str], deadline: Instant) -> Vec<Reply> {
+    let results = Mutex::new(vec![Reply::Late; names.len()]);
+    let next = AtomicUsize::new(0);
+    let handle = tokio::runtime::Handle::try_current().ok();
+    std::thread::scope(|scope| {
+        for _ in 0..QUERY_WORKERS.min(names.len()) {
+            scope.spawn(|| {
+                let _runtime = handle.as_ref().map(tokio::runtime::Handle::enter);
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= names.len() || Instant::now() >= deadline {
+                        break;
+                    }
+                    let answer = query(names[index]);
+                    if let Ok(mut results) = results.lock() {
+                        results[index] = Reply::Done(answer);
+                    }
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap_or_default()
+}
+
+/// Return a unit's direct root command inputs from its [`query`] reply, or
+/// unknown on an unfamiliar reply. No job is started and no command text is
+/// copied to a report. `manager` is [`manager_environment`]'s answer.
+pub(crate) fn inputs(name: &str, output: &str, root: bool, manager: &[String]) -> Option<Inputs> {
+    parse(output, root, name.ends_with(".service"), manager)
 }
 
 /// Parse an `EnvironmentFile=` the way the manager does for the simple forms:

@@ -641,18 +641,19 @@ fn system_units(account: &User, observed: &mut Observation) {
         .map(|unit| unit["Id"].as_str())
         .collect();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    for unit in &units {
+    let live: Vec<&BTreeMap<&str, String>> = units
+        .iter()
+        .filter(|unit| {
+            !matches!(
+                unit.get("LoadState").map(String::as_str),
+                Some("masked" | "not-found")
+            )
+        })
+        .collect();
+    let names: Vec<&str> = live.iter().map(|unit| unit["Id"].as_str()).collect();
+    let replies = crate::access_units::query_all(&names, deadline);
+    for (unit, reply) in live.into_iter().zip(replies) {
         let name = unit["Id"].as_str();
-        if matches!(
-            unit.get("LoadState").map(String::as_str),
-            Some("masked" | "not-found")
-        ) {
-            continue;
-        }
-        if std::time::Instant::now() >= deadline {
-            observed.complete = false;
-            break;
-        }
         if matching.contains(name)
             || unit.get("Triggers").is_some_and(|triggers| {
                 triggers
@@ -662,8 +663,13 @@ fn system_units(account: &User, observed: &mut Observation) {
         {
             add(observed, &format!("system unit {name}"));
         }
+        let crate::access_units::Reply::Done(reply) = reply else {
+            // The deadline came before this unit was asked about.
+            observed.complete = false;
+            continue;
+        };
         let root = matches!(unit["User"].as_str(), "" | "root" | "0");
-        match crate::access_units::inputs(name, root, &manager) {
+        match reply.and_then(|reply| crate::access_units::inputs(name, &reply, root, &manager)) {
             Some(inputs) => {
                 if !inputs.complete {
                     root_job(observed, format!("system unit {name}"), None);
