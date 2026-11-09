@@ -1132,7 +1132,6 @@
 }
 /* A switch's visible track is its ::before (content-box: 1px in, 2.875rem wide, 1px border either side), a hair wider than
    the 3rem box that holds it. The row's right edge is the track's, not the box's: the box stops short by the difference. */
-.ui-sp .ui-switch, .ui-ts-item .ui-switch { margin-right: calc(3px - 0.125rem); }
 .ui-sp[data-ticks] .ui-slider { margin-right: var(--ui-sp-end); }
 /* Icons are aligned by what you see: a glyph sits on the edge, and its hit box reaches past it into the pane's padding. */
 .ui-sp-kind { margin-left: calc((var(--ui-icon, 1rem) - 1.75rem) / 2); }
