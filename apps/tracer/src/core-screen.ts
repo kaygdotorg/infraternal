@@ -1575,7 +1575,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       return false;
     } else if (kind === "themes") {
       // A row of the Themes group (`canvas/themes/controller.ts` offers the rows and listens): the palette closes, the controller switches the theme.
-      setPalette(false, source);
+      setPalette(false);
       window.dispatchEvent(new CustomEvent("tracer:themes-action", { detail: { id: value } }));
       return true;
     } else if (kind === "settings") {
