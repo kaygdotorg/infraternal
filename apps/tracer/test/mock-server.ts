@@ -35,7 +35,8 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   throw new Error("TRACER_BACKEND_PORT must be an integer TCP port");
 }
 const MAX_HTTP_BODY = 32 * 1024;
-const MAX_MOCK_OUTPUT = 1024 * 1024;
+/** The most output one mock session keeps (2 MiB: room for a copy just over the OSC 52 cap, 1,048,576 base64 characters). */
+const MAX_MOCK_OUTPUT = 2 * 1024 * 1024;
 const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
 const MAX_TRACE_EVENTS = 120_000;

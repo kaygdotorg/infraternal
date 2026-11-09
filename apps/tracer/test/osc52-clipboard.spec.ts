@@ -25,7 +25,7 @@ const base64 = (text: string): string => Buffer.from(text, "utf8").toString("bas
 /** The bytes a program prints to copy `text`; `end` is BEL or the string terminator. */
 const copySequence = (text: string, targets = "c", end = "\u0007"): string => `\u001b]52;${targets};${base64(text)}${end}`;
 
-/** The notice is one line and stays off the last three terminal rows (where the prompt is). */
+/** The notice is one line and stays off the rows around the cursor (where the prompt is). */
 async function expectNoticeClearOfPrompt(page: Page, toast: import("playwright/test").Locator): Promise<void> {
   const message = toast.locator(".ui-toast-message");
   const lines = await message.evaluate((el) => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)));
@@ -33,8 +33,8 @@ async function expectNoticeClearOfPrompt(page: Page, toast: import("playwright/t
   const box = (await toast.boundingBox())!;
   const rows = await page.evaluate(() => {
     const canvas = document.querySelector("#terminal-host canvas")!.getBoundingClientRect();
-    const cell = window.__tracerProductTestDouble!.rendererMetrics()!.cellHeight;
-    return { top: canvas.bottom - cell * 3, bottom: canvas.bottom };
+    const metrics = window.__tracerProductTestDouble!.rendererMetrics()!;
+    return { top: canvas.top + (metrics.cursorY - 1) * metrics.cellHeight, bottom: canvas.top + (metrics.cursorY + 2) * metrics.cellHeight };
   });
   expect(box.y + box.height <= rows.top || box.y >= rows.bottom, `the notice (${box.y}-${box.y + box.height}) clears the prompt rows (${rows.top}-${rows.bottom})`).toBe(true);
 }
@@ -150,6 +150,18 @@ for (const viewport of VIEWPORTS) {
       await expect(toast).toContainText("That copy was too large for the clipboard");
       expect(await clipboard(page)).toBe("old clipboard");
       await page.screenshot({ path: `${OUT}/${viewport.name}-too-large.png` });
+    });
+
+    test("the notice also keeps off a prompt at the top of the screen", async ({ context }) => {
+      await context.grantPermissions(["clipboard-read"]);
+      const page = await open(context);
+      await focusTerminal(page);
+      await page.evaluate(() => { document.execCommand = () => false; Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw new DOMException("no gesture", "NotAllowedError"); } } }); });
+      await output(context, `\u001b[2J\u001b[H$ ${copySequence(COPIED)}`);
+      const toast = page.locator(".ui-toast").filter({ hasText: /copy/i });
+      await expect(toast).toBeVisible({ timeout: 10_000 });
+      await expectNoticeClearOfPrompt(page, toast);
+      await page.screenshot({ path: `${OUT}/${viewport.name}-copy-prompt-top.png` });
     });
 
     test("where the page cannot write by itself, the copy waits and no field takes the focus", async ({ context }) => {
