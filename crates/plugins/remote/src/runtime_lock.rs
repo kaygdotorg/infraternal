@@ -29,8 +29,11 @@ pub const LOCK: &str = ".lifetime-lock";
 /// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`;
 /// level 4: `sessions-count`; level 5: `enrolled`; level 6: `stage-processes`;
 /// level 7: root's `infraternal up` base may be 0711 ([`traversable_base`]);
-/// level 8: authenticated `takeover-terminals` confirmation records (D368).
-pub const LEVEL: &[u8] = b"8\n";
+/// level 8: authenticated `takeover-terminals` confirmation records (D368);
+/// level 9: those records identify terminals by their shim, cover host-login sessions and carry the
+/// close unit, terminal name and other-program count (#433). A level-8 helper from an earlier test build
+/// would still answer that mode with the old records, so the level moves and such a cache is refreshed.
+pub const LEVEL: &[u8] = b"9\n";
 
 /// Authenticate terminal records without attaching to or changing their sessions (D368).
 #[path = "takeover_terminals.rs"]
