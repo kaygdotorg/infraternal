@@ -269,6 +269,7 @@ export class Wizard {
     else if (!this.float.contains(document.activeElement)) { page.tabIndex = -1; page.focus({ preventScroll: true }); }
   }
 
+  /** Replaces the footer's buttons with `markup`; the footer fades in unless a key caused the change (#427). */
   private setFoot(markup: string): void {
     this.foot.innerHTML = markup;
     this.foot.hidden = markup === "";
@@ -1071,6 +1072,7 @@ export class Wizard {
     this.setFoot(`<span class="ah-count">Closing stops installation and asks the server to undo this attempt. Cleanup can remain pending if the host is unavailable.</span><button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="keep">Keep installing</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="cancel-install">Stop installing</button>`);
   }
 
+  /** Closes the card and runs `after` once it is gone: at once after a key, with a short fade after a pointer (#427). */
   private dismiss(after?: () => void): void {
     if (this.closing) return;
     this.closing = true;
