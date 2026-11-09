@@ -435,18 +435,18 @@
 :root[data-look][data-scheme="dark"] :is(.ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button) { --overlay: color-mix(in srgb, color-mix(in srgb, var(--bg) 94%, #fff) calc(var(--look-tint) * 100%), transparent); --ui-overlay-blur: var(--look-card-blur); }
 :root[data-look][data-scheme="light"] :is(.ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button) { --overlay: color-mix(in srgb, color-mix(in srgb, var(--bg) 40%, #fff) calc(var(--look-tint) * 100%), transparent); --ui-overlay-blur: var(--look-card-blur); }
 /* The Name row of a theme the person made opens and closes by height and opacity (nothing below it jumps); room for the focus ring is inside it. */
-.cl-theme-name { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms ease; }
+.cl-theme-name { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms var(--ease-out); }
 .cl-theme-name[data-open] { grid-template-rows: 1fr; opacity: 1; }
 .cl-theme-name > div { min-height: 0; overflow: hidden; padding: var(--focus-ring-room); margin: calc(-1 * var(--focus-ring-room)); }
 .cl-theme-name-input { width: 100%; }
 /* The row is outside the controls' grid, so it brings the same gap the grid puts between sections. */
 .cl-theme-name section { padding-bottom: 0.875rem; }
 .cl-theme-top { margin-bottom: 0.25rem; }
-@media (prefers-reduced-motion: reduce) { .cl-theme-name { transition: opacity 160ms ease; } }
+@media (prefers-reduced-motion: reduce) { .cl-theme-name { transition: opacity 160ms var(--ease-out); } }
 
 /* The background of a theme (themes/editor.on-demand.ts): the scheme's gradients as a grid of swatches, and the person's own.
    Each swatch is a picture of the gradient and its name; the selected one has the accent edge, as a card does. */
-.cl-glide { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms ease; }
+.cl-glide { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 200ms var(--ease-out, ease-out), opacity 160ms var(--ease-out); }
 .cl-glide[data-open] { grid-template-rows: 1fr; opacity: 1; }
 .cl-glide > div { min-height: 0; overflow: hidden; padding: var(--focus-ring-room); margin: calc(-1 * var(--focus-ring-room)); }
 .cl-bg-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(2.75rem, 1fr)); gap: 0.5rem; padding-top: 0.5rem; }
@@ -469,7 +469,7 @@
 .cl-bg-act:disabled { opacity: 0.35; pointer-events: none; }
 /* Keep the visible capsule and icon compact while giving coarse-pointer controls a full touch target. */
 @media (pointer: coarse) { .cl-bg-tabs .ui-tab { min-height: 44px; } .cl-bg-act { min-width: 44px; min-height: 44px; } .cl-bg-stop { width: 2.75rem; height: 2.75rem; } }
-@media (prefers-reduced-motion: reduce) { .cl-glide { transition: opacity 160ms ease; } .cl-bg-swatch { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .cl-glide { transition: opacity 160ms var(--ease-out); } .cl-bg-swatch { transition: none; } }
 
 /* The Colour list (themes/editor.on-demand.ts, D338): the product's option row with two columns of its own. The name is one
    column; the circles are another, light first and dark second, so the circles of one kind stay in one column down the list, and a
