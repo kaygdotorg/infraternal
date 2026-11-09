@@ -21,6 +21,7 @@
  * A menu opens under its pill, centred on it, in the shared overlay material, grows from the pill, and closes on a press outside, on Escape
  * and on choosing; the choice is ticked.
  */
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import { ICON, lineIcon, viewIcon } from "../views/icons";
@@ -79,7 +80,8 @@ export function createCrumbs(cx: Ctx): Crumbs {
     name.textContent = text;
     pillEl.setAttribute("aria-label", text);
     const now = performance.now();
-    if (had && now - lastMotion > 260 && !matchMedia("(prefers-reduced-motion: reduce)").matches) name.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: ease() });
+    // A crumb that changes because a key moved the camera or opened a view reads its new name at once (#427).
+    if (had && now - lastMotion > 260 && !triggeredByKeyboard() && !matchMedia("(prefers-reduced-motion: reduce)").matches) name.animate([{ opacity: 0, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 180, easing: ease() });
     if (had) lastMotion = now;
   };
 
