@@ -42,6 +42,9 @@ const SKIP_LABEL = /^(Reload|Sign out of every device|Mockup:)/i;
  */
 const NOT_PRODUCT = /#test-double-badge|terminal-cursor-layer|ui-conn-g/;
 
+/** A palette family of this many rows or fewer is swept row by row; a larger one (twelve themes) takes one row. */
+const FAMILY_ALL = 6;
+
 /** One finding: what was still moving and where. */
 type Finding = string;
 
@@ -63,7 +66,7 @@ async function fresh(page: Page, size: { width: number; height: number }): Promi
     type Seen = Map<string, number[]>;
     const w = window as unknown as { __sw: { phase: "idle" | "key"; now: number; keyTime: number; idle: Seen; key: Seen } };
     const sw = w.__sw = { phase: "idle", now: performance.now(), keyTime: 0, idle: new Map(), key: new Map() };
-    const name = (el: Element | null): string => el ? `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}.${el.className.toString().split(" ").filter(Boolean).slice(0, 2).join(".")}` : "?";
+    const name = (el: Element | null): string => el ? `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}.${(el.getAttribute("class") ?? "").split(" ").filter(Boolean).slice(0, 2).join(".")}` : "?";
     const note = (what: string, el: Element | null): void => {
       const seen = sw.phase === "idle" ? sw.idle : sw.key;
       const signature = `${what} on ${name(el)}`;
@@ -171,34 +174,58 @@ for (const size of SIZES) {
       expect(failures, `chords that kept animating:\n${failures.join("\n")}`).toEqual([]);
     });
 
+    test("Enter on the window's Sessions button leaves nothing animating", async ({ page }) => {
+      test.setTimeout(300_000);
+      await fresh(page, size);
+      const button = page.locator('.ui-window[data-active] [data-action="sessions"]').first();
+      // The button is in the active window's header; on a phone the header may hold it in a menu, and the test is then about the desktop.
+      test.skip(await button.count() === 0 || !(await button.isVisible()), "the Sessions button is not on this header");
+      await button.focus();
+      const found = await sweep(page, () => page.keyboard.press("Enter"));
+      expect(found, `Sessions button, Enter:\n${found.join("\n")}`).toEqual([]);
+    });
+
     test("no palette row leaves anything animating after Enter", async ({ page }) => {
       test.setTimeout(2_400_000);
       await fresh(page, size);
       await page.keyboard.press(PALETTE);
       await expect(page.locator("#palette")).toBeVisible();
-      // Every row is swept except the rows of an argument family, which run the same code with a different argument: theme:*, font:*,
-      // card:*, ... (one colon, and not a canvas verb) and canvas:settings:*, canvas:view:* ... (two colons or more) take one row each.
-      // The canvas verbs (canvas:close, canvas:overview, canvas:sessions, ...) are different code each and are all swept.
+      // Every row is swept except the rows of a large argument family, which run the same code with a different argument: theme:*,
+      // canvas:settings:*, canvas:view:* ... take one row each. A family of FAMILY_ALL rows or fewer (the four fonts, the four card
+      // levels) is swept whole: each row changes a different selection in a pane behind the palette, and the one that moves is not
+      // always the one sampled. The canvas verbs (canvas:close, canvas:overview, canvas:sessions, ...) are different code each.
       const rows = await page.locator("#palette-results .result").evaluateAll((nodes) => nodes.map((node) => ({ label: node.querySelector(".result-label")?.textContent?.trim() ?? "", action: (node as HTMLElement).dataset.action ?? "" })));
-      const families = new Map<string, string>();
+      const familyOf = (action: string, label: string): string => {
+        const colons = action.split(":").length - 1;
+        return colons >= 2 ? action.slice(0, action.lastIndexOf(":")) : colons === 1 && !action.startsWith("canvas:") ? action.slice(0, action.indexOf(":")) : action || label;
+      };
+      const members = new Map<string, Array<{ label: string; action: string }>>();
       for (const { label, action } of rows) {
         if (!label || SKIP_LABEL.test(label)) continue;
-        const colons = action.split(":").length - 1;
-        const family = colons >= 2 ? action.slice(0, action.lastIndexOf(":")) : colons === 1 && !action.startsWith("canvas:") ? action.slice(0, action.indexOf(":")) : action || label;
-        if (!families.has(family)) families.set(family, label);
+        const family = familyOf(action, label);
+        members.set(family, [...(members.get(family) ?? []), { label, action }]);
       }
-      const labels = [...families.values()];
-      expect(labels.length, "the palette lists its actions").toBeGreaterThan(14);
+      const targets = [...members.values()].flatMap((list) => (list.length <= FAMILY_ALL ? list : [list[0]!]));
+      expect(targets.length, "the palette lists its actions").toBeGreaterThan(14);
+      expect(targets.filter((target) => target.action.startsWith("font:")).length, "all four font rows are swept").toBe(4);
       const failures: string[] = [];
-      for (const label of labels) {
+      for (const { label, action } of targets) {
         await fresh(page, size);
         await page.keyboard.press(PALETTE);
         await page.keyboard.type(label, { delay: 0 });
         await expect(page.locator("#palette-results .result").first()).toBeVisible();
         // sleep: the filtered list is rendered and the palette's own open has finished, so only the Enter is measured
         await page.waitForTimeout(300);
+        // The label can match another row first ("Ink" matches a settings row whose action ends in add-link): walk down to the wanted
+        // row, and fail the row if it cannot be selected, rather than pressing Enter on the wrong one.
+        const actions = await page.locator("#palette-results .result").evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.action ?? ""));
+        const at = actions.indexOf(action);
+        if (at < 0) { failures.push(`${label}: the row ${action} is not in the list the label filters to`); continue; }
+        for (let step = 0; step < at; step++) await page.keyboard.press("ArrowDown");
+        const chosen = await page.locator('#palette-results .result[aria-selected="true"]').getAttribute("data-action");
+        if (chosen !== action) { failures.push(`${label}: Enter would press ${chosen}, not ${action}`); continue; }
         const found = await sweep(page, () => page.keyboard.press("Enter"));
-        if (found.length) failures.push(`${label}: ${found.join("; ")}`);
+        if (found.length) failures.push(`${label} (${action}): ${found.join("; ")}`);
       }
       expect(failures, `palette rows that kept animating:\n${failures.join("\n")}`).toEqual([]);
     });
