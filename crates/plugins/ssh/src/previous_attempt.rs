@@ -73,6 +73,9 @@ pub struct PreviousAttempt {
     /// A restore that finds nothing moved leaves it on the host, and the
     /// set-aside refuses to start once it is there (#305, J202 P2).
     cancel: Option<uuid::Uuid>,
+    /// D368 (#433): the stuck first install's own open terminals, authenticated by the host. Start fresh
+    /// lists them and closes them only after the person confirms; the record sent back binds them.
+    terminals: Vec<TakeoverTerminal>,
 }
 
 /// A stuck install an earlier attempt set aside, as Check found it (#305 P2-1).
@@ -294,8 +297,14 @@ impl TakeoverTerminal {
         )
     }
 
-    /// The row's text in the confirmation's Details: account, program, terminal and the other programs.
+    /// The row's text in the Take over confirmation's Details.
     fn finding(&self) -> String {
+        self.finding_for("Take over")
+    }
+
+    /// The row's text in a confirmation's Details: account, program, terminal and the other programs,
+    /// and the `action` that closes it.
+    fn finding_for(&self, action: &str) -> String {
         let mut text = format!("An open terminal: {}, {}", self.account, self.program);
         if let Some(tty) = &self.tty {
             let _ = write!(text, " on {tty}");
@@ -307,7 +316,7 @@ impl TakeoverTerminal {
                 let _ = write!(text, " and {others} other programs");
             }
         }
-        text.push_str("; Take over closes it");
+        let _ = write!(text, "; {action} closes it");
         text
     }
 }
@@ -562,6 +571,7 @@ impl FinishedInstall {
             }),
             live: self.live,
             cancel: None,
+            terminals: Vec::new(),
         }
     }
 
@@ -655,6 +665,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if let ["INFRATERNAL_SETUP_SET_ASIDE", record @ ..] = fields.as_slice() {
         return parse_set_aside(record).map(Some);
     }
+    let mut terminal_records: &[&str] = &[];
     let (host, transaction, identity, sockets, lease_owner, enrolled, live) =
         match fields.as_slice() {
             [
@@ -663,7 +674,11 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
                 transaction,
                 identity,
                 sockets,
-            ] => (*host, *transaction, *identity, *sockets, None, None, false),
+                records @ ..,
+            ] => {
+                terminal_records = records;
+                (*host, *transaction, *identity, *sockets, None, None, false)
+            }
             [
                 "INFRATERNAL_SETUP_UPGRADE",
                 host,
@@ -698,6 +713,16 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if sockets > 1024 {
         return Err(refused());
     }
+    let terminals = terminal_records
+        .iter()
+        .map(|record| TakeoverTerminal::parse(record))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Each listed terminal serves one of the counted sockets, in canonical id order.
+    if terminals.len() > usize::from(sockets)
+        || terminals.windows(2).any(|pair| pair[0].id >= pair[1].id)
+    {
+        return Err(refused());
+    }
     Ok(Some(PreviousAttempt {
         host,
         transaction,
@@ -708,6 +733,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         set_aside: None,
         live,
         cancel: None,
+        terminals,
     }))
 }
 
@@ -738,6 +764,7 @@ fn parse_set_aside(record: &[&str]) -> Result<PreviousAttempt, Failure> {
         enrolled: None,
         live: false,
         cancel: None,
+        terminals: Vec::new(),
         set_aside: Some(SetAside {
             kind,
             machine: parse_machine(machine)?,
@@ -919,8 +946,10 @@ impl PreviousAttempt {
                     }),
                     reenroll && self.live,
                 )
-        } else {
+        } else if self.terminals.is_empty() {
             failure
+        } else {
+            failure.with_closing_terminals(self.terminals.clone())
         }
     }
 
@@ -944,6 +973,13 @@ impl PreviousAttempt {
                 // An upgrade journal counts only sessions a live shim serves.
                 // A Replace keeps them: the new agent adopts them (D337, D13).
                 match (upgrade, self.sockets) {
+                    // Every socket is one of the listed terminals (D368, #433).
+                    (false, open)
+                        if !self.terminals.is_empty()
+                            && usize::from(open) == self.terminals.len() =>
+                    {
+                        Cow::Borrowed("No other live setup found")
+                    }
                     (false, 0) => Cow::Borrowed("No live setup found"),
                     (false, _) => Cow::Borrowed("Local sockets with no listener"),
                     (true, 0) => Cow::Borrowed("No open terminal sessions"),
@@ -952,8 +988,21 @@ impl PreviousAttempt {
                         Cow::Owned(format!("{open} open terminal sessions will carry over"))
                     }
                 },
-            ],
+            ]
+            .into_iter()
+            .chain(
+                self.terminals
+                    .iter()
+                    .map(|terminal| Cow::Owned(terminal.finding_for("Start fresh"))),
+            )
+            .collect(),
         }
+    }
+
+    /// The stuck first install's own open terminals that Start fresh closes (D368, #433).
+    #[must_use]
+    pub(crate) fn terminals(&self) -> &[TakeoverTerminal] {
+        &self.terminals
     }
 
     /// Whether Check found an install an earlier attempt set aside, and which
@@ -1204,33 +1253,62 @@ impl PreviousAttempt {
                 .upgrade_action(session, target, "replace_stuck_install")
                 .await;
         }
-        let expected = format!(
+        let mut expected = format!(
             "INFRATERNAL_SETUP_STALE {} {} {} {}",
             self.host.simple(),
             self.transaction.simple(),
             self.identity,
             self.sockets
         );
+        for terminal in &self.terminals {
+            expected.push(' ');
+            expected.push_str(&terminal.record());
+        }
+        expected.push('\n');
         // Revalidate listeners after ownership reads, immediately before removal.
         // The exact observed record already contains the root identity; reuse its
         // penultimate field rather than allocating another formatted shell argument.
+        // The record travels over stdin: with terminal records (D368) it can
+        // exceed the operating system's single-argument limit.
         let body = format!(
-            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\nidentity=${{observed% *}}\nidentity=${{identity##* }}\nnot_live\nstop_activated_agent\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{setup_lock}\n{}\n{INSPECT}\nIFS= read -r expected\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = \"$expected\" ] || exit 75\nidentity=${{observed% *}}\nidentity=${{identity##* }}\nnot_live\nstop_activated_agent\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
             crate::install::RUNTIME_CLEANUP,
-            crate::transport::shell_quote(&expected),
             crate::install::FRESH_CLEANUP,
             crate::install::ROLLBACK_TRANSACTION
         );
+        let closes = !self.terminals.is_empty();
         session
             .run(
                 &Installation::script_for(target.mode, self.host, self.transaction, &body),
-                Input::Empty,
+                Input::Bytes(expected.as_bytes()),
             )
             .await
-            .map_err(classify)?;
+            .map_err(classify)
+            .map_err(|mut error| {
+                // Only a Start fresh that lists terminals can close one (#433 P2).
+                match (closes, error.exit_status) {
+                    (true, Some(73)) => error.message = START_FRESH_BUSY,
+                    (_, Some(74)) => error.message = START_FRESH_BUSY_AFTER_CLOSE,
+                    (true, Some(75)) => error.message = START_FRESH_CHANGED,
+                    _ => {}
+                }
+                error
+            })?;
         Ok(())
     }
 }
+
+/// Start fresh with listed terminals, refused before any terminal closed: something besides the
+/// earlier setup's own terminals still uses it (#433, D368).
+pub const START_FRESH_BUSY: &str = "Something besides the earlier setup's own terminals is still using it, such as a program that runs from its folder. No terminal was closed and nothing was removed. Stop that program, then try again.";
+
+/// Start fresh closed the confirmed terminals, then something else still used the earlier setup
+/// (host exit 74). Nothing was removed; closed terminals cannot be reopened.
+pub const START_FRESH_BUSY_AFTER_CLOSE: &str = "Start fresh closed the terminals you confirmed, then found something else still using the earlier setup, such as a program that runs from its folder. Nothing was removed, and those terminals stay closed. Stop that program, then try again.";
+
+/// The earlier setup or its terminals changed between review and confirmation (host exit 75);
+/// every 75 happens before any terminal is closed.
+pub const START_FRESH_CHANGED: &str = "The earlier setup or its open terminals changed since you reviewed them, so no terminal was closed and nothing was removed. Try again to review it.";
 
 /// Installer-owned statuses are fixed vocabulary; remote output remains withheld.
 #[must_use]

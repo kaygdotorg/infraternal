@@ -1478,7 +1478,8 @@ impl Bootstrap {
                         started,
                         session.as_ref(),
                         &previous,
-                        if automatic {
+                        // Terminals never close without the person's confirmation (D368).
+                        if automatic && previous.terminals().is_empty() {
                             FreshMode::Automatic
                         } else {
                             FreshMode::Confirm
@@ -2058,7 +2059,9 @@ impl Bootstrap {
                 if mode == FreshMode::PutBack {
                     previous.set_aside_failure()
                 } else {
-                    previous.stuck_failure(mode == FreshMode::Reenroll)
+                    previous
+                        .stuck_failure(mode == FreshMode::Reenroll)
+                        .with_terminal_confirmation(challenge)
                 },
                 match mode {
                     FreshMode::Reenroll => previous.reenroll_findings(target.mode, challenge),

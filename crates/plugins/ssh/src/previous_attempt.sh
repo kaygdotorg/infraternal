@@ -413,8 +413,41 @@ not_live() {
    case "$agent_main_pid" in ''|*[!0-9]*) agent_main_pid=0;; esac
   fi
  fi
- live_session_sockets
+ # D368 (#433, J205c legacy1): a first install that crashed while activating
+ # can leave a terminal of its own running. When the helper attributes every
+ # live endpoint to this install's own shims, those terminals are listed in
+ # the record and Start fresh closes them after confirmation; any endpoint it
+ # cannot attribute still refuses (73) through live_session_sockets.
+ stale_terminals=
+ if [ "$not_live_scan" = unit ]; then
+  set +e
+  stale_terminals=$(set -e; finished_terminal_records)
+  stale_status=$?
+  set -e
+  case "$stale_status" in 0) :;; 76) exit 76;; *) stale_terminals=;; esac
+ fi
+ installed_terminals=$stale_terminals
+ [ -n "$stale_terminals" ] || live_session_sockets
  scan_holders "$not_live_scan"
+}
+# Start fresh with listed terminals: after the activated agent stopped, the
+# terminals must still be exactly the ones the person reviewed (else 75, with
+# nothing closed); then their units stop. A later refusal (73) leaves 74, so
+# the message can say that terminals were closed.
+close_stale_terminals() {
+ [ -n "${stale_terminals:-}" ] || return 0
+ [ "$(finished_terminal_records)" = "$stale_terminals" ] || exit 75
+ set --
+ for stale_terminal in $stale_terminals; do
+  terminal_unit "$stale_terminal"
+  case " $* " in *" $terminal_unit "*) :;; *) set -- "$@" "$terminal_unit";; esac
+ done
+ stale_closed=no
+ trap 'stale_status=$?; [ "$stale_status:$stale_closed" != 73:yes ] || stale_status=74; exit "$stale_status"' EXIT
+ for stale_close in "$@"; do
+  $manager stop "$stale_close" >/dev/null 2>&1 || exit 73
+  stale_closed=yes
+ done
 }
 # Refuse (73) while a shim serves a session socket under $base. Non-dumpable
 # shims: the helper asks the kernel by owner+inode, never by name.
@@ -433,6 +466,7 @@ live_session_sockets() {
 stop_activated_agent() {
  [ "${not_live_scan:-all}" = unit ] || return 0
  stop_agent_unit
+ close_stale_terminals
  live_session_sockets
  scan_holders all
  for marker in "$base/sessions/sessions"/*.readiness; do
@@ -511,6 +545,8 @@ scan_holders() {
    ! agent_unit_process "$process" || continue
   elif [ "$scan_skip" = unit ] && [ "${process##*/}" = "${agent_main_pid:-0}" ]; then
    agent_unit_process "$process" && continue
+  elif [ "$scan_skip" = unit ] && [ -n "${stale_terminals:-}" ] && reviewed_terminal_process "$process"; then
+   continue
   elif [ "$scan_skip" = agent ] || [ "$scan_skip" = takeover ]; then
    ! agent_unit_process "$process" || continue
    if [ "$scan_skip" = takeover ] && reviewed_terminal_process "$process"; then continue; fi
@@ -1007,7 +1043,9 @@ inspect_previous() {
    [ "$sockets" -le 1024 ] || refuse size
   done
  done
- printf 'INFRATERNAL_SETUP_STALE %s %s %s %s\n' "$previous_host" "$previous_transaction" "$identity" "$sockets"
+ printf 'INFRATERNAL_SETUP_STALE %s %s %s %s' "$previous_host" "$previous_transaction" "$identity" "$sockets"
+ [ -z "${stale_terminals:-}" ] || printf ' %s' "$stale_terminals"
+ printf '\n'
 }
 stop_stage_shims() {
  runtime_helper
