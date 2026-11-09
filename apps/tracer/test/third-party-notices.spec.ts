@@ -38,7 +38,7 @@ test("the Nerd Symbols subset credits each carried source range and serves its f
   expect(noticeResponse.status()).toBe(200);
   const notices = await noticeResponse.text();
   const sourceRows = notices.split("\n");
-  for (const [source, range, license] of [
+  const credited: Array<[string, string, string]> = [
     ["Pomicons", "U+E000–U+E00A", "SIL OFL 1.1"],
     ["Powerline Symbols", "U+E0A0–U+E0D7", "MIT"],
     ["Powerline Extra Symbols", "U+E0A0–U+E0D7", "MIT"],
@@ -47,7 +47,8 @@ test("the Nerd Symbols subset credits each carried source range and serves its f
     ["Font Awesome Free", "U+F000–U+F2E0", "CC BY 4.0"],
     ["Font Logos", "U+F300–U+F381", "Unlicense"],
     ["Octicons", "U+F400–U+F532", "MIT"],
-  ]) {
+  ];
+  for (const [source, range, license] of credited) {
     expect(sourceRows.some((row) => row.includes(source) && row.includes(range) && row.includes(license)),
       `the notice maps ${source} ${range} to its licence`).toBe(true);
   }

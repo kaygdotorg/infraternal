@@ -290,6 +290,11 @@ test.describe("custom background controls on a phone", () => {
     const remove = gradientBlock.locator('button[aria-label="Remove the last colour"]');
     await expect(add).toBeVisible();
     await expect(remove).toBeVisible();
+    if (SHOTS) {
+      mkdirSync(SHOTS, { recursive: true });
+      await gradientBlock.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: `${SHOTS}/phone-393x852-custom-background-editor.png` });
+    }
 
     const controls = [
       ...await tabs.evaluateAll((items) => items.map((item) => ({ label: item.textContent?.trim() ?? "tab", rect: item.getBoundingClientRect().toJSON() }))),
