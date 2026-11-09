@@ -172,10 +172,10 @@ pub struct FinishedInstall {
     pub terminals: Vec<TakeoverTerminal>,
 }
 
-/// A terminal shown on the Take over confirmation, with a private fingerprint binding its scope.
+/// A terminal shown on the Take over confirmation, with a private fingerprint binding its close unit.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TakeoverTerminal {
-    /// The scope's canonical session id, never a service name supplied by the host.
+    /// The terminal's canonical session id, never a service name supplied by the host.
     #[serde(skip)]
     id: uuid::Uuid,
     /// The account running the foreground program.
@@ -184,18 +184,33 @@ pub struct TakeoverTerminal {
     pub program: String,
     /// When the authenticated shim opened this terminal, in Unix seconds.
     pub since: u64,
-    /// Binds socket, shim, scope and process identities across the confirmation.
+    /// The terminal's `pts/<n>` name, which tells rows of the same account and program apart (#433 P3-2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tty: Option<String>,
+    /// How many other programs run in this terminal besides the named one, its shell and
+    /// background jobs included; Take over closes them too (#433 P3-1).
+    pub others: u32,
+    /// The unit whose stop closes it: the terminal's own `infraternal-session-<id>.scope`, or the
+    /// logind `session-<n>.scope` of the host login its shim runs in (#433 P1). Several terminals of
+    /// one login share it.
+    #[serde(skip)]
+    unit: String,
+    /// Binds socket, shim, close unit and every process in it across the confirmation.
     #[serde(skip)]
     fingerprint: String,
 }
 
 impl TakeoverTerminal {
-    /// Decode one bounded comma-separated terminal record; names cannot contain shell syntax.
+    /// Decode one bounded comma-separated terminal record
+    /// (`<id>,<account>,<program>,<since>,<tty>,<others>,<unit>,<fingerprint>`, names hex-encoded);
+    /// names cannot contain shell syntax.
     fn parse(record: &str) -> Result<Self, Failure> {
         let fields: Vec<_> = record.split(',').collect();
-        let [id, account, program, since, fingerprint] = fields.as_slice() else {
+        let [id, account, program, since, tty, others, unit, fingerprint] = fields.as_slice()
+        else {
             return Err(refused());
         };
+        let id = canonical_id(id)?;
         let account = decode_terminal_name(account)?;
         let program = decode_terminal_name(program)?;
         if fingerprint.len() != 64
@@ -215,25 +230,85 @@ impl TakeoverTerminal {
         if since == 0 || since > 253_402_300_799 {
             return Err(refused());
         }
+        let tty = match decode_terminal_name(tty)?.as_str() {
+            "-" => None,
+            name => {
+                let index = name.strip_prefix("pts/").ok_or_else(refused)?;
+                if index.is_empty()
+                    || index.len() > 7
+                    || (index.len() > 1 && index.starts_with('0'))
+                    || !index.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(refused());
+                }
+                Some(name.to_owned())
+            }
+        };
+        if others.is_empty()
+            || others.len() > 4
+            || (others.len() > 1 && others.starts_with('0'))
+            || !others.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(refused());
+        }
+        let others = others.parse::<u32>().map_err(|_| refused())?;
+        if others > 1024 {
+            return Err(refused());
+        }
+        let own = format!("infraternal-session-{}.scope", id.simple());
+        let login = unit
+            .strip_prefix("session-")
+            .and_then(|rest| rest.strip_suffix(".scope"))
+            .is_some_and(|session| {
+                !session.is_empty()
+                    && session.len() <= 32
+                    && session.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            });
+        if *unit != own && !login {
+            return Err(refused());
+        }
         Ok(Self {
-            id: canonical_id(id)?,
+            id,
             account,
             program,
             since,
+            tty,
+            others,
+            unit: (*unit).into(),
             fingerprint: (*fingerprint).into(),
         })
     }
 
-    /// Reproduce the exact host record, including its scope fingerprint.
+    /// Reproduce the exact host record, including its close unit and fingerprint.
     fn record(&self) -> String {
         format!(
-            "{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{}",
             self.id.simple(),
             encode_terminal_name(&self.account),
             encode_terminal_name(&self.program),
             self.since,
+            encode_terminal_name(self.tty.as_deref().unwrap_or("-")),
+            self.others,
+            self.unit,
             self.fingerprint
         )
+    }
+
+    /// The row's text in the confirmation's Details: account, program, terminal and the other programs.
+    fn finding(&self) -> String {
+        let mut text = format!("An open terminal: {}, {}", self.account, self.program);
+        if let Some(tty) = &self.tty {
+            let _ = write!(text, " on {tty}");
+        }
+        match self.others {
+            0 => {}
+            1 => text.push_str(" and 1 other program"),
+            others => {
+                let _ = write!(text, " and {others} other programs");
+            }
+        }
+        text.push_str("; Take over closes it");
+        text
     }
 }
 
@@ -455,10 +530,7 @@ impl FinishedInstall {
             ],
         };
         for terminal in &self.terminals {
-            leftovers.findings.push(Cow::Owned(format!(
-                "An open terminal: {}, {}; Take over closes it",
-                terminal.account, terminal.program
-            )));
+            leftovers.findings.push(Cow::Owned(terminal.finding()));
         }
         leftovers
     }

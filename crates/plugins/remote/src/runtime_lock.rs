@@ -1067,8 +1067,12 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
             return sessions(&runtime);
         }
         if mode == "takeover-terminals" {
-            return writeln!(io::stdout(), "{}", takeover_terminals::records(&runtime)?)
-                .map_err(|_| 77);
+            return writeln!(
+                io::stdout(),
+                "{}",
+                takeover_terminals::records(&runtime, base)?
+            )
+            .map_err(|_| 77);
         }
         if mode == "sessions-count" {
             let open = open_sessions(&runtime)?;

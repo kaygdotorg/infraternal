@@ -487,6 +487,8 @@ agent_unit_process() {
 # Take over stops only the old agent (D359). "takeover" additionally skips
 # exactly the authenticated terminal scopes reviewed in the confirmation (D368).
 # "takeover-all" keeps the all-account root scan after closing, with no skips.
+# Those close units are an old terminal's own scope or, since host login, the
+# logind session of the login its shim runs in.
 scan_holders() {
  scan_skip=$1
  scan_root=no
@@ -511,9 +513,7 @@ scan_holders() {
    agent_unit_process "$process" && continue
   elif [ "$scan_skip" = agent ] || [ "$scan_skip" = takeover ]; then
    ! agent_unit_process "$process" || continue
-   if [ "$scan_skip" = takeover ] && session_scope_process "$process"; then
-    case " $installed_terminals " in *" $session_scope_id,"*) continue;; esac
-   fi
+   if [ "$scan_skip" = takeover ] && reviewed_terminal_process "$process"; then continue; fi
   fi
   # A non-dumpable process (every infraternal agent and shim, and OpenSSH's own
   # session process) hides its exe and fds even from its owner. Never read that
@@ -600,6 +600,43 @@ install_process() {
 # account can use the same manager. Bind the scope's canonical session id to
 # an owned endpoint here, including a stale endpoint whose hidden holder is
 # still alive. A shim not yet bound is checked by its install path above.
+# The close unit a reviewed terminal record names (its seventh field), in one
+# of the only two shapes the helper produces (D368, #433): an old terminal's
+# own scope, or the logind session scope of a host login. Anything else refuses.
+terminal_unit() {
+ terminal_unit=$(printf '%s\n' "$1" | cut -d, -f7)
+ case "$terminal_unit" in
+  infraternal-session-*.scope)
+   terminal_unit_id=${terminal_unit#infraternal-session-}
+   hex_id "${terminal_unit_id%.scope}";;
+  session-*.scope)
+   terminal_unit_id=${terminal_unit#session-}
+   terminal_unit_id=${terminal_unit_id%.scope}
+   case "$terminal_unit_id" in ''|*[!0-9A-Za-z]*) refuse id;; esac;;
+  *) refuse id;;
+ esac
+}
+# Whether /proc entry $1 runs inside the close unit of a terminal record in
+# $installed_terminals. The helper authenticated those units from each shim;
+# this only keeps the holder scan from counting what Take over is about to
+# close. A login scope matches only as exactly
+# /user.slice/user-<uid>.slice/session-<N>.scope, never nested or elsewhere.
+reviewed_terminal_process() {
+ reviewed_unit=
+ { while IFS= read -r scan_cgroup; do
+    case "$scan_cgroup" in
+     0::*/infraternal-session-*.scope|0::*/infraternal-session-*.scope/*)
+      reviewed_unit=${scan_cgroup##*/infraternal-session-}
+      reviewed_unit=infraternal-session-${reviewed_unit%%/*};;
+     0::/user.slice/user-*.slice/session-*.scope)
+      reviewed_rest=${scan_cgroup#0::/user.slice/}
+      case "$reviewed_rest" in */*/*) :;; *) reviewed_unit=${reviewed_rest#*/};; esac;;
+    esac
+   done < "$1/cgroup"; } 2>/dev/null || :
+ [ -n "$reviewed_unit" ] || return 1
+ case " $installed_terminals " in *",$reviewed_unit,"*) return 0;; esac
+ return 1
+}
 session_scope_process() {
  session_scope=no
  { while IFS= read -r scan_cgroup; do
@@ -723,8 +760,10 @@ probe() {
  probed=$?
  set -e
 }
-# D368: authenticated records bind every bound endpoint to this install's
-# own session scope. Missing runtime state means there are no terminals.
+# D368: authenticated records bind every bound endpoint to this install's own
+# shim and to the unit that closes it: the terminal's own scope (before host
+# login) or its host login's logind session (#433). Missing runtime state means
+# there are no terminals.
 finished_terminal_records() {
  for terminal_socket in "$base/sessions"/*.sock "$base/sessions/sessions"/*.sock; do
   [ -S "$terminal_socket" ] && [ ! -L "$terminal_socket" ] || continue
@@ -1314,20 +1353,22 @@ take_over_finished_install() {
  trap 'replace_untrap; put_back_taken_over; exit 141' PIPE
  stop_agent_unit
  # Stop the source of new terminals first, then compare every record again
- # immediately before stopping exactly the scopes the person reviewed (D368).
+ # immediately before stopping exactly the units the person reviewed (D368).
  installed_terminals=$takeover_terminals_expected
  holders_beside_agent
  installed_terminals=$(finished_terminal_records)
  [ "$installed_terminals" = "$takeover_terminals_expected" ] || exit 75
+ # Several terminals of one host login share its logind session: stop it once.
  set --
  for takeover_terminal in $installed_terminals; do
-  takeover_session=${takeover_terminal%%,*}
-  hex_id "$takeover_session"
-  set -- "$@" "infraternal-session-$takeover_session.scope"
+  terminal_unit "$takeover_terminal"
+  case " $* " in *" $terminal_unit "*) :;; *) set -- "$@" "$terminal_unit";; esac
  done
- [ "$#" = 0 ] || $manager stop "$@" >/dev/null 2>&1 || exit 73
+ for takeover_close in "$@"; do
+  $manager stop "$takeover_close" >/dev/null 2>&1 || exit 73
+ done
  $manager disable infraternal-agent.service >/dev/null 2>&1 || exit 73
- # The old unit and only the confirmed scopes have stopped.
+ # The old unit and only the confirmed terminals' units have stopped.
  live_session_sockets
  scan_holders takeover-all
  mv -T "$base" "$aside/install"
