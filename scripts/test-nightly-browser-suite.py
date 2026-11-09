@@ -411,5 +411,80 @@ class SeparateAccount(unittest.TestCase):
             self.assertEqual(service.main(), 1)
 
 
+class Installer(unittest.TestCase):
+    """The root-owned copies come from a reviewed commit fetched into a fresh root-owned folder, never from the suite's checkout."""
+
+    def make_repo(self, temp):
+        """A tiny git repository with the two installable scripts; returns (path, commit sha)."""
+        repo = Path(temp) / 'origin'
+        (repo / 'scripts').mkdir(parents=True)
+        for name in ('nightly-browser-suite-service', 'nightly-browser-suite.py'):
+            (repo / 'scripts' / name).write_text('# reviewed\n')
+        git = ['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@example.com']
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        subprocess.run([*git, 'add', '.'], check=True)
+        subprocess.run([*git, 'commit', '-q', '-m', 'one'], check=True)
+        return repo, subprocess.check_output([*git, 'rev-parse', 'HEAD'], text=True).strip()
+
+    def test_installs_only_the_pinned_commit(self):
+        """The tree is a fresh private folder at exactly the commit given on the command line."""
+        with tempfile.TemporaryDirectory() as temp:
+            repo, sha = self.make_repo(temp)
+            with mock.patch.object(installer, 'REPOSITORY', str(repo)):
+                tree = installer.reviewed_tree(sha)
+            try:
+                self.assertEqual(subprocess.check_output(['git', '-C', str(tree), 'rev-parse', 'HEAD'], text=True).strip(), sha)
+                self.assertEqual(tree.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(tree.stat().st_uid, os.geteuid())
+            finally:
+                installer.shutil.rmtree(tree.parent)
+
+    def test_refuses_an_abbreviated_or_unknown_commit(self):
+        """A short name, a branch name or a SHA the repository does not have is not a pin."""
+        with tempfile.TemporaryDirectory() as temp:
+            repo, sha = self.make_repo(temp)
+            with mock.patch.object(installer, 'REPOSITORY', str(repo)):
+                for bad in (sha[:12], 'master', 'dev', '0' * 40, ''):
+                    with self.subTest(bad), self.assertRaises(SystemExit):
+                        installer.reviewed_tree(bad)
+
+    def test_refuses_a_symlink_where_a_script_should_be(self):
+        """Review PoC: scripts/nightly-browser-suite.py -> the token must never be copied into /usr/local/libexec."""
+        with tempfile.TemporaryDirectory() as temp:
+            secret = Path(temp) / 'token'
+            secret.write_text(TOKEN)
+            link = Path(temp) / 'script'
+            link.symlink_to(secret)
+            destination = Path(temp) / 'out' / 'copy'
+            with self.assertRaises(SystemExit):
+                installer.install_file(link, destination)
+            self.assertFalse(destination.exists())
+            real = Path(temp) / 'real'
+            real.write_text('# ok\n')
+            with mock.patch.object(installer.os, 'chown'):
+                installer.install_file(real, destination)
+            self.assertEqual(destination.read_text(), '# ok\n')
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o755)
+
+    def test_never_installs_from_the_browser_checkout(self):
+        """Review P1: no installed file is sourced from the suite account's home."""
+        text = Path(installer.__file__ if hasattr(installer, '__file__') else Path(__file__).with_name('install-nightly-browser-suite')).read_text()
+        self.assertNotIn("checkout(args.ref)\n    install_file(source", text)
+        self.assertIn('reviewed_tree(args.ref)', text)
+
+    def test_unit_hardening_and_umask(self):
+        """The unit confines the helper as far as the suite tolerates, with the fuzz's 0077 umask."""
+        unit = installer.service_unit()
+        for line in ('UMask=0077', 'ProtectSystem=strict', 'ProtectHome=read-only', 'ProtectKernelTunables=yes',
+                     'ProtectKernelModules=yes', 'ProtectControlGroups=yes', 'RestrictSUIDSGID=yes', 'LockPersonality=yes',
+                     'TimeoutStartSec=6h'):
+            self.assertIn(line, unit)
+        self.assertRegex(unit, r'ReadWritePaths=.*/var/lib/infraternal-browser')
+        self.assertRegex(unit, r'ReadWritePaths=.*/var/lib/infraternal-fuzz')
+        self.assertRegex(unit, r'ReadWritePaths=.*/tmp')
+        # A private /tmp would hide the shared build-slot queue and let the suite skip it.
+        self.assertNotIn('PrivateTmp', unit)
+
+
 if __name__ == '__main__':
     unittest.main()
