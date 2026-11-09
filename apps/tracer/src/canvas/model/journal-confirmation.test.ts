@@ -2,6 +2,7 @@
 import { expect, test } from "bun:test";
 import { LayoutJournal, type Pending } from "./journal";
 import type { CanvasDocument } from "./schema";
+import { createThemeStore } from "../themes/model";
 const document = (revision = 1, name = "Console"): CanvasDocument => ({ format: "infraternal.canvas", version: 1, revision, views: [{ id: "console", kind: "console", name, cell: { x: 0, y: 0 }, layout: { type: "tiled", columns: [] } }] });
 function setup() {
   const journal = new LayoutJournal();
@@ -46,4 +47,38 @@ test("an accepted look moves the base of the unsent looks queued behind it", () 
   journal.acknowledge(first, 5, false);
   expect(second.base_revision).toBe(5);
   expect(first.base_revision).toBe(1);
+});
+
+/** A look is not sent while another of ours is unacknowledged; it leaves after the receipt, rebased onto it (#400, J425 R1). */
+test("a second look waits for the first look's receipt and then goes out on its revision", () => {
+  const { journal, entry } = setup();
+  journal.acknowledge(entry, 2, false);
+  const look = { type: "look.set", look: {} } as never;
+  const first: Pending = { op_id: "look-1", base_revision: 2, intent: look }, second: Pending = { op_id: "look-2", base_revision: 2, intent: look };
+  journal.pending.push(first, second);
+  expect(journal.next()).toBe(first);
+  expect(journal.next()).toBeUndefined();
+  journal.acknowledge(first, 3, false);
+  expect(journal.next()).toBe(second);
+  expect(second.base_revision).toBe(3);
+});
+
+/** Looks that have not left yet are one change, so three quick picks queue at most two looks: the one in flight and the latest. */
+test("quick successive looks coalesce into the latest one while the first is in flight", () => {
+  const { journal, entry } = setup();
+  journal.acknowledge(entry, 2, false);
+  const doc = (selected: string): CanvasDocument => {
+    const next = document(2, "Mine");
+    next.look = createThemeStore({ colors: "mocha", font: "maple-mono-nf", uiSize: 100 }).snapshot();
+    next.look.selected = selected;
+    return next;
+  };
+  journal.capture(doc("frosted"));
+  const first = journal.next()!;
+  expect("intent" in first && first.intent.type).toBe("look.set");
+  journal.capture(doc("tinted"));
+  journal.capture(doc("solid"));
+  const looks = journal.pending.filter((p) => p.intent.type === "look.set");
+  expect(looks).toHaveLength(2);
+  expect(looks[1]!.intent.type === "look.set" && looks[1]!.intent.look.selected).toBe("solid");
 });

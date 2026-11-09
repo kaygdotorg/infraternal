@@ -63,6 +63,9 @@ export class LayoutJournal {
     else {
       const op = this.pending.find((p) => p.revision === undefined && !this.#inflight.has(p.op_id));
       if (op && (op.intent.type === "open" || op.intent.type === "split") && this.unresolved.has(op.intent.window.id)) return undefined;
+      // A whole look is a compare-and-set on the last look. One sent while another of ours is still unacknowledged would
+      // carry the same base and be refused, losing the later pick, so it waits for the acknowledgement and is rebased there.
+      if (op && op.intent.type === "look.set" && this.pending.some((p) => p !== op && p.intent.type === "look.set" && p.revision === undefined && this.#inflight.has(p.op_id))) return undefined;
       entry = op;
     }
     if (entry) { if ("intent" in entry) entry.sent = true; this.#inflight.add(entry.op_id); }
@@ -135,7 +138,9 @@ export class LayoutJournal {
     // Accepted inputs own their values; the canvas may mutate its next drawing in place.
     const intents = edits(baseline, doc, cancelled ? undefined : hints).map((intent) => structuredClone(intent));
     const last = retained.at(-1), next = intents[0];
-    const coalesced = !cancelled && intents.length === 1 && last && !last.sent && next && field(next) !== undefined && field(last.intent) === field(next);
+    // Two looks in a row that have not left yet are one change: only the latest pick matters.
+    const lookOverLook = next?.type === "look.set" && last?.intent.type === "look.set";
+    const coalesced = !cancelled && intents.length === 1 && last && !last.sent && next && (lookOverLook || field(next) !== undefined && field(last.intent) === field(next));
     const retainedBytes = cancelled ? retained.reduce((total, p) => total + entryBytes(p.intent), 0) : this.#queuedBytes;
     const patchBytes = patches.reduce((total, p) => total + entryBytes(p.intent) - entryBytes(p.entry.intent), 0);
     const bytes = intents.reduce((total, intent) => total + entryBytes(intent), 0) - (coalesced ? entryBytes(last.intent) : 0);
