@@ -20,10 +20,26 @@ async function config(page: Page, body: Record<string, string>): Promise<void> {
   await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
 
-async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
-  // Fixture setup is idempotent: retry only a reset keep-alive connection,
-  // never a product operation or an assertion failure.
+/**
+ * Puts the shared test double in a known state before a case. Fixture setup is idempotent: retry only a reset keep-alive
+ * connection, never a product operation or an assertion failure.
+ *
+ * The double keeps one owner session for the whole run, and a page load mints a session only while nothing has signed the
+ * preview out. A spec that ran before this one and signed out leaves every page here without a canvas (`.cl-mockup` never
+ * appears), and only the full `/__mock/reset` clears that. The bootstrap reset alone clears this wizard's own state, not
+ * the session, so both run: each case starts from a known double instead of from the previous spec's leftovers.
+ */
+async function resetDouble(page: Page): Promise<void> {
+  await page.request.post("/__mock/reset", { maxRetries: 1 });
   await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
+}
+
+/**
+ * Opens the clusters canvas at 1440x900 on a freshly reset double, with the double's `settings` applied first, and waits
+ * until the canvas has views. `query` is appended to the page address. Every case starts here.
+ */
+async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
+  await resetDouble(page);
   if (Object.keys(settings).length) await config(page, settings);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=ink&bg=none${query}`);
@@ -386,9 +402,7 @@ test("the wizard works on a phone and keeps the footer on screen", async ({ brow
   const context = await browser.newContext({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true, baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}` });
   const page = await context.newPage();
   try {
-    // Fixture setup is idempotent: retry only a reset keep-alive connection,
-  // never a product operation or an assertion failure.
-  await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
+    await resetDouble(page);
     await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await openWizard(page);
