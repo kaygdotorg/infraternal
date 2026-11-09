@@ -303,6 +303,9 @@ pub(crate) struct EmbeddedAgent {
     changes: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
     session_inventory: watch::Sender<SessionInventoryState>,
+    /// The OS the host's infraternal agent named in its latest Hello ("macOS" or
+    /// "Linux"), or `None` before a Hello, for the server itself and for older agents.
+    reported_os: watch::Sender<Option<&'static str>>,
 }
 
 /// Weak retirement routing never keeps a remote infraternal agent actor alive.
@@ -385,6 +388,7 @@ impl EmbeddedAgent {
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 
@@ -406,6 +410,7 @@ impl EmbeddedAgent {
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 
@@ -418,11 +423,13 @@ impl EmbeddedAgent {
         let (changes, notice) = tokio::sync::watch::channel(());
         let (accepts, incoming) = mpsc::channel(1);
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
+        let (reported_os, _) = watch::channel(None);
         tokio::spawn(run_actor(
             Source::Remote {
                 incoming,
                 uid,
                 pending: None,
+                reported_os: reported_os.clone(),
             },
             receiver,
             #[cfg(feature = "remote")]
@@ -438,6 +445,7 @@ impl EmbeddedAgent {
                 changes: notice,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
                 session_inventory,
+                reported_os,
             },
             accepts,
         )
@@ -704,6 +712,11 @@ impl EmbeddedAgent {
         self.session_inventory.subscribe()
     }
 
+    /// The OS the host's infraternal agent named in its latest Hello, if it named one.
+    pub(crate) fn reported_os(&self) -> Option<&'static str> {
+        *self.reported_os.borrow()
+    }
+
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
     // Native attachments belong to remote bootstrap; browser-only builds use monitored routes.
     #[cfg(any(test, feature = "remote"))]
@@ -804,6 +817,7 @@ impl EmbeddedAgent {
             changes: notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 }
@@ -943,6 +957,8 @@ enum Source {
         incoming: mpsc::Receiver<RemoteLink>,
         uid: u32,
         pending: Option<Box<RemoteLink>>,
+        /// Where each greeted link publishes the OS its agent named (#146).
+        reported_os: watch::Sender<Option<&'static str>>,
     },
 }
 
@@ -972,13 +988,14 @@ impl Source {
                 incoming,
                 uid,
                 pending,
+                reported_os,
             } => {
                 let link = if let Some(link) = pending.take() {
                     *link
                 } else {
                     incoming.recv().await.ok_or(AgentError::Unavailable)?
                 };
-                connect_remote(link, *uid).await
+                connect_remote(link, *uid, reported_os).await
             }
         }
     }
@@ -1011,8 +1028,15 @@ impl Source {
     }
 }
 
+/// Greets one admitted host link: sends the server Hello, reads the agent's,
+/// records the capabilities and the OS the agent named (#146), and wraps the
+/// link as the actor's connection. The whole greeting has a 5 s deadline.
 #[cfg(feature = "remote")]
-async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, AgentError> {
+async fn connect_remote(
+    link: RemoteLink,
+    uid: u32,
+    reported_os: &watch::Sender<Option<&'static str>>,
+) -> Result<AgentConnection, AgentError> {
     let mut receive = BytesMut::with_capacity(4096);
     let mut scratch = vec![0; READ_CHUNK];
     let hello = Frame::Hello {
@@ -1045,6 +1069,11 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
                     }
                     link.hello(&decoded.frame)
                         .map_err(|_| AgentError::Protocol)?;
+                    if let Frame::Hello { client_info, .. } = decoded.frame {
+                        // Only the exact forms the agent sends are kept (#146).
+                        reported_os
+                            .send_replace(infraternal_agent::host_os::reported_os(client_info));
+                    }
                     receive.advance(decoded.wire_len);
                     return Ok(());
                 }

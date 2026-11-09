@@ -603,7 +603,9 @@ async fn prepare(
     uid: u32,
     plans: Vec<(u32, [u8; 16], u64, u64)>,
 ) -> Result<Shadow, AgentError> {
-    let mut connection = connect_remote(link, uid).await?;
+    // A standby link's Hello repeats the agent the live link already
+    // reported; its OS is not recorded again here (#146).
+    let mut connection = connect_remote(link, uid, &tokio::sync::watch::channel(None).0).await?;
     let mut slots = HashMap::new();
     for (stream, session, out_seq, in_seq) in plans {
         if !send_attach(&mut connection, stream, session, out_seq, in_seq).await {
