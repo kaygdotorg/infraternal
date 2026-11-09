@@ -120,6 +120,10 @@ struct Confirmed {
     destination: Destination,
     /// The fingerprint that was pinned; a repeat for any other key stays refused.
     fingerprint: String,
+    /// The trust policy the pin was written under, to find the pin file again.
+    policy: TrustPolicy,
+    /// The exact record written; a repeat succeeds only while this is still the pin on disk.
+    record: String,
     /// When the observation was made. A repeat is answered only within the observation's own 120 seconds.
     observed: Instant,
 }
@@ -135,9 +139,46 @@ pub struct TrustedOpenSsh {
     pending: Mutex<HashMap<uuid::Uuid, Observation>>,
     /// Challenges already confirmed, by challenge id, kept for the observation's lifetime (at most 128).
     confirmed: Mutex<HashMap<uuid::Uuid, Confirmed>>,
-    /// Held for the whole of one confirmation, so identical requests that arrive together take turns:
-    /// the first pins the key, the others find it in `confirmed` and answer success.
-    confirming: tokio::sync::Mutex<()>,
+    /// One lock per challenge being confirmed, so identical requests that arrive together take turns:
+    /// the first pins the key, the others find it in `confirmed`. Entries exist only while someone
+    /// holds or waits for them (see [`ChallengeTurn`]).
+    confirming: Mutex<HashMap<uuid::Uuid, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// The per-challenge lock for one confirmation, removed from the map when the last user is done.
+///
+/// Dropping it (also when the request is cancelled mid-way) forgets the map entry if nobody else
+/// holds or waits on it, so the map never outgrows the confirmations in flight.
+struct ChallengeTurn<'a> {
+    /// The server's table of per-challenge locks.
+    table: &'a Mutex<HashMap<uuid::Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    /// Whose turn this is.
+    challenge: uuid::Uuid,
+    /// The lock to take with `lock().await`.
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+impl<'a> ChallengeTurn<'a> {
+    /// Finds or creates the lock for `challenge`.
+    fn new(
+        table: &'a Mutex<HashMap<uuid::Uuid, Arc<tokio::sync::Mutex<()>>>>,
+        challenge: uuid::Uuid,
+    ) -> Self {
+        let lock = Arc::clone(lock(table).entry(challenge).or_default());
+        Self {
+            table,
+            challenge,
+            lock,
+        }
+    }
+}
+impl Drop for ChallengeTurn<'_> {
+    fn drop(&mut self) {
+        let mut table = lock(self.table);
+        // The table's own handle and ours: nobody else is waiting.
+        if Arc::strong_count(&self.lock) <= 2 {
+            table.remove(&self.challenge);
+        }
+    }
 }
 impl TrustedOpenSsh {
     /// Wrap `ssh` with application pin custody under `root`. The directory is
@@ -149,7 +190,7 @@ impl TrustedOpenSsh {
             root,
             pending: Mutex::new(HashMap::new()),
             confirmed: Mutex::new(HashMap::new()),
-            confirming: tokio::sync::Mutex::new(()),
+            confirming: Mutex::new(HashMap::new()),
         }
     }
 
@@ -347,7 +388,8 @@ impl TrustedOpenSsh {
     ///
     /// Confirming is idempotent for a challenge that already succeeded: the same
     /// destination and fingerprint again, within the observation's 120 seconds,
-    /// answers success without writing anything, after the live `authority` check
+    /// answers success without writing anything, after the live `authority` check and
+    /// only while the pin it wrote is still the pin on disk (Forget, or another key since, refuses)
     /// (a repeat is no way around a revoked sign-in). Any other key stays refused.
     async fn confirm(
         &self,
@@ -360,19 +402,31 @@ impl TrustedOpenSsh {
         if !valid_fingerprint(fingerprint) {
             return Err(denied());
         }
-        // One confirmation at a time: identical requests that arrive together queue here and then
-        // find the first one's outcome below, instead of racing it for the consumed challenge.
-        let _turn = self.confirming.lock().await;
+        // One confirmation at a time *per challenge*: identical requests that arrive together queue
+        // here and then find the first one's outcome below, instead of racing it for the consumed
+        // challenge. Other challenges (other hosts, other people) never wait on this one.
+        let turn = ChallengeTurn::new(&self.confirming, challenge);
+        let _held = turn.lock.lock().await;
         let repeat = lock(&self.confirmed).get(&challenge).map(|done| {
-            done.observed.elapsed() < Duration::from_secs(120)
-                && done.destination == destination
-                && done.fingerprint == fingerprint
+            (
+                done.observed.elapsed() < Duration::from_secs(120)
+                    && done.destination == destination
+                    && done.fingerprint == fingerprint,
+                done.policy.clone(),
+                done.record.clone(),
+            )
         });
-        if let Some(same) = repeat {
+        if let Some((same, policy, record)) = repeat {
             if !same {
                 return Err(denied());
             }
             authority.authorize().await?;
+            // Say "trusted" only while the pin this challenge wrote is still the pin on disk: Forget,
+            // or another key's confirmation since, means the key is not trusted any more.
+            let _publication = lock(&PUBLICATION);
+            if self.recorded(&policy)?.as_deref() != Some(record.as_str()) {
+                return Err(denied());
+            }
             return Ok(());
         }
         let observation = lock(&self.pending).remove(&challenge).ok_or_else(denied)?;
@@ -439,6 +493,8 @@ impl TrustedOpenSsh {
                 Confirmed {
                     destination: observation.destination,
                     fingerprint: fingerprint.to_owned(),
+                    policy,
+                    record,
                     observed: observation.received,
                 },
             );
