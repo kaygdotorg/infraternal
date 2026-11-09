@@ -137,8 +137,9 @@ impl Store {
         )
         .await
     }
-    // Keep one storage state machine for edits and read repair. The caller holds
-    // only this operation handle rather than another copy of the write futures.
+    /// One storage state machine for edits and read repair. The caller holds
+    /// only this operation handle rather than another copy of the write futures.
+    /// A `look.set` is refused unless its base revision is the current one.
     #[inline(never)]
     fn transact<'a>(
         &'a self,

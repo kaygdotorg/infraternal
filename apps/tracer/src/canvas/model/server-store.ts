@@ -181,6 +181,7 @@ export class ServerCanvasStore implements CanvasStore {
     this.#notice = setTimeout(() => { this.#notice = undefined; if (!this.#disposed && this.pending) { this.#notified = true; this.refused(false, true); } }, Math.max(0, budget - (performance.now() - this.#pendingSince)));
   }
   #publish(): void { for (const listener of this.#listeners) listener(); }
+  /** Sends the next journaled intent when the connection is ready; a definitive refusal of a whole-look edit also requests a fresh snapshot. */
   #pump(): void {
     if (this.#disposed || this.#revoked || this.#paused || this.#resyncing || this.transport.isWelcomed === false) return;
     const entry = this.#journal.next(); if (!entry) return;
