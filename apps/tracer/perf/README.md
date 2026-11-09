@@ -34,7 +34,8 @@ see `docs/PROCESS.md` §6):
 The functional suite retains the corresponding access, input, resume,
 renderer-canary and incident-recording checks without asserting elapsed speed.
 Its access/resume scenario uses one returning sign-in and one reconnect;
-the perf scenario retains the original ten sign-ins and twenty reconnects for p99 samples.
+the perf scenario retains the original ten sign-ins and twenty reconnects for p99 samples, and types 100 probe keys
+(the functional suite types 20), so the key p99 is the 99th of 100 keys rather than the slowest of 20.
 
 The terminal scenario and paired throughput samples use the default 300 ms
 proxy profile. The access first-paint check uses the direct backend (0 ms

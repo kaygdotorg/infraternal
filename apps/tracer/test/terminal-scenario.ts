@@ -13,7 +13,10 @@ const expect = baseExpect.configure({ timeout: 30_000 });
  * returning-sign-in timings the perf VM reports. Call it from a spec that has set a timeout long enough for all of it.
  */
 export async function terminalScenario(page: Page, testInfo: TestInfo, { performanceSamples = false }: { performanceSamples?: boolean } = {}) {
-  test.setTimeout(180_000);
+  // The latency profile and the perf VM type 100 probe keys twice (prediction on and off) at a 300 ms round trip
+  // and drop the socket 20 times, about four minutes; the functional suite keeps its short run.
+  const latencySamples = performanceSamples || process.env.INFRATERNAL_LATENCY_PROFILE === "1";
+  test.setTimeout(latencySamples ? 420_000 : 180_000);
   const context = page.context();
   const testRttMs = Number(process.env.INFRATERNAL_TEST_RTT ?? "300");
   const signinTrials = performanceSamples ? Number(process.env.INFRATERNAL_SIGNIN_SAMPLES ?? "10") : 1;
@@ -311,7 +314,11 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
 
   // The probe serializes keys through a completed paint so its latency samples do not measure burst queueing.
   await context.request.post("/__mock/trace/reset");
-  const probeCount = 20;
+  // p99 of 20 keys is just the slowest key; 100 makes it the 99th of 100 (#447 round 3). The functional suite, which
+  // asserts no speed (#314), keeps 20 to stay quick.
+  const probeCount = latencySamples ? 100 : 20;
+  // Each probe key waits for its echo, about one round trip; allow a second per key, and never under 20 s.
+  const probeTimeoutMs = Math.max(20_000, probeCount * 1_000);
   // The throughput probe deliberately starts a fresh PTY; normal reloads now
   // keep the tab's public session id instead of silently opening another shell.
   await page.evaluate(() => sessionStorage.clear());
@@ -348,7 +355,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   await page.locator("#probe-run").click();
   await expect.poll(
     async () => (await page.locator("#probe-results").textContent()) ?? "",
-    { timeout: 20_000 },
+    { timeout: probeTimeoutMs },
   ).toContain("p99:");
   const probeState = await (await context.request.get("/__mock/state")).json() as {
     echoed_text: string;
@@ -363,7 +370,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   await expect(page.locator("#probe-results")).toContainText(`Painted echoes: ${probeCount} / ${probeCount}`);
   // Each drop is a browser reconnect after a lost link: a new socket and the first-message resume, D267's "after a
   // network change" row. The latency profile (INFRATERNAL_LATENCY_PROFILE=1) takes as many samples as the perf VM.
-  const reconnectTrials = performanceSamples || process.env.INFRATERNAL_LATENCY_PROFILE === "1" ? 20 : 1;
+  const reconnectTrials = latencySamples ? 20 : 1;
   const resumeSamples: number[] = [];
   const lastScreenSamples: number[] = [];
   for (let attempt = 0; attempt < reconnectTrials; attempt += 1) {
@@ -490,7 +497,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   await page.locator("#probe-run").click();
   await expect.poll(
     async () => (await page.locator("#probe-results").textContent()) ?? "",
-    { timeout: 20_000 },
+    { timeout: probeTimeoutMs },
   ).toContain(`Painted echoes: ${probeCount} / ${probeCount}`);
   const offTrace = await page.evaluate(() => window.__tracerTestDouble?.trace() ?? []);
   const offSamples = offTrace.flatMap((sample) => {

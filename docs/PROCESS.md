@@ -182,7 +182,7 @@ numbered history, both timestamp arrival orders and altered checksums.
 
   | Measure | Target, p99 | Measured by |
   |---|---|---|
-  | Key to letter on screen, with prediction | 8.3 ms | tracer scenario, every probe key (a declined prediction counts as its real echo) |
+  | Key to letter on screen, with prediction | 8.3 ms | tracer scenario, every one of 100 probe keys (a declined prediction counts as its real echo) |
   | Real echo | round trip + 16.7 ms | tracer scenario, prediction off, key to painted echo |
   | Flood effect on typing | at most +8.3 ms | `verify-latency.py`, echo p99 growth with another and the same PTY flooding (the worse one) |
   | Own overhead, no network | 8.3 ms (stretch 5 ms); gate 12 ms until reached | the report: real agent echo p99 with the relay delay at 0 (`verify-latency.py`) plus the browser's own spans p99, keydown to send and echo arrival to paint (tracer scenario) |
