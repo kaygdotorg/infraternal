@@ -194,28 +194,70 @@ fn installed_policy_roots() -> Option<Vec<(PathBuf, &'static str)>> {
     (bytes.len() <= 16 * 1024 * 1024).then(|| binary_policy_roots(&bytes))
 }
 
-/// Read effective .policy defaults through polkit's own XML parser. A `yes`
-/// grant can be administrative; action names are not proof of harmlessness,
-/// so all such grants conservatively count. Unknown formats also fail closed.
+/// Exact login1 actions approved as harmless for this root-route check (#355).
+/// Inhibition and self-linger affect session lifetime, and chvt selects a virtual
+/// terminal; none permits executing arbitrary code as root. Session teardown
+/// separately handles linger (D353). No prefix match or other yes grant is safe.
+const HARMLESS_ACTIONS: &[&str] = &[
+    "org.freedesktop.login1.chvt",
+    "org.freedesktop.login1.inhibit-block-idle",
+    "org.freedesktop.login1.inhibit-block-shutdown",
+    "org.freedesktop.login1.inhibit-block-sleep",
+    "org.freedesktop.login1.inhibit-delay-shutdown",
+    "org.freedesktop.login1.inhibit-delay-sleep",
+    "org.freedesktop.login1.inhibit-handle-hibernate-key",
+    "org.freedesktop.login1.inhibit-handle-lid-switch",
+    "org.freedesktop.login1.inhibit-handle-power-key",
+    "org.freedesktop.login1.inhibit-handle-reboot-key",
+    "org.freedesktop.login1.inhibit-handle-suspend-key",
+    "org.freedesktop.login1.set-self-linger",
+];
+
+/// Read effective .policy defaults through polkit's own XML parser. Every
+/// action must have exactly one of each scope; unknown formats fail closed.
+/// Only the exact approved action ids may retain a stock yes default.
 fn action_defaults_allow_or_unknown(text: &str) -> bool {
-    let mut fields = 0;
-    for line in text.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("implicit ") {
-            let Some((scope, value)) = rest.split_once(':') else {
+    let mut action = None;
+    let mut scopes = 0u8;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        if !line.starts_with(char::is_whitespace) {
+            if action.is_some() && scopes != 7 {
+                return true;
+            }
+            let Some(id) = line.strip_suffix(':') else {
                 return true;
             };
-            if !matches!(scope, "any" | "inactive" | "active")
-                || !matches!(
-                    value.trim(),
-                    "no" | "auth_self" | "auth_self_keep" | "auth_admin" | "auth_admin_keep"
-                )
+            if id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
             {
                 return true;
             }
-            fields += 1;
+            action = Some(id);
+            scopes = 0;
+        } else if let Some(rest) = line.trim_start().strip_prefix("implicit ") {
+            let Some((scope, value)) = rest.split_once(':') else {
+                return true;
+            };
+            let bit = match scope {
+                "any" => 1,
+                "inactive" => 2,
+                "active" => 4,
+                _ => return true,
+            };
+            if action.is_none() || scopes & bit != 0 {
+                return true;
+            }
+            match value.trim() {
+                "no" | "auth_self" | "auth_self_keep" | "auth_admin" | "auth_admin_keep" => {}
+                "yes" if action.is_some_and(|id| HARMLESS_ACTIONS.contains(&id)) => {}
+                _ => return true,
+            }
+            scopes |= bit;
         }
     }
-    fields == 0 || fields % 3 != 0
+    action.is_none() || scopes != 7
 }
 
 /// Check all current and legacy polkit roots. Unfamiliar executable policy is
@@ -287,12 +329,67 @@ mod tests {
         );
         assert!(roots.contains(&(PathBuf::from("/opt/site/polkit-1/rules.d"), "rules")));
         assert!(roots.contains(&(PathBuf::from("/opt/site/polkit-1/actions"), "policy")));
-        let denied = "  implicit any: no\n  implicit inactive: auth_admin\n  implicit active: auth_admin_keep\n";
+        let denied = "local.admin:\n  implicit any: no\n  implicit inactive: auth_admin\n  implicit active: auth_admin_keep\n";
         assert!(!action_defaults_allow_or_unknown(denied));
         assert!(action_defaults_allow_or_unknown(
             &denied.replace("auth_admin_keep", "yes")
         ));
         assert!(action_defaults_allow_or_unknown("unknown"));
+    }
+
+    /// Only the owner's exact harmless login1 ids may have a stock yes grant.
+    #[test]
+    fn harmless_stock_actions_do_not_hide_other_yes_grants() {
+        for id in [
+            "chvt",
+            "inhibit-block-idle",
+            "inhibit-block-shutdown",
+            "inhibit-block-sleep",
+            "inhibit-delay-shutdown",
+            "inhibit-delay-sleep",
+            "inhibit-handle-hibernate-key",
+            "inhibit-handle-lid-switch",
+            "inhibit-handle-power-key",
+            "inhibit-handle-reboot-key",
+            "inhibit-handle-suspend-key",
+            "set-self-linger",
+        ] {
+            let text = format!(
+                "org.freedesktop.login1.{id}:\n  implicit any: yes\n  implicit inactive: yes\n  implicit active: yes\n"
+            );
+            assert!(!action_defaults_allow_or_unknown(&text), "{id}");
+        }
+        for id in [
+            "org.freedesktop.login1.reboot",
+            "org.freedesktop.login1.set-self-linger-extra",
+            "local.admin",
+        ] {
+            let text = format!(
+                "{id}:\n  implicit any: yes\n  implicit inactive: no\n  implicit active: no\n"
+            );
+            assert!(action_defaults_allow_or_unknown(&text), "{id}");
+        }
+    }
+
+    /// Real host policy goes through the same parser as planted action defaults.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires real host root and the installed polkit policy"]
+    async fn real_stock_login1_action_is_harmless() {
+        assert!(nix::unistd::Uid::effective().is_root());
+        tokio::task::spawn_blocking(|| {
+            let text = crate::access_privilege::host_output(
+                "pkaction",
+                &[
+                    "--verbose",
+                    "--action-id",
+                    "org.freedesktop.login1.set-self-linger",
+                ],
+            )
+            .unwrap();
+            assert!(!action_defaults_allow_or_unknown(&text));
+        })
+        .await
+        .unwrap();
     }
 
     /// User rules, group rules, legacy grants and arbitrary JavaScript all warn.
