@@ -5,6 +5,12 @@ import { expect as baseExpect, test, type Page, type TestInfo } from "playwright
 // A fresh proxied document loads assets before access is ready; its readiness wait is independent of speed budgets.
 const expect = baseExpect.configure({ timeout: 30_000 });
 
+/**
+ * Runs the whole first-use story on one page against the test double behind the delayed link: passkey sign-up and
+ * sign-in, a terminal with predictive echo on, a dropped connection that resumes without losing or repeating a key, the
+ * safety rules of prediction (no echo, full-screen programs, wrong echoes) and, with `performanceSamples`, the
+ * returning-sign-in timings the perf VM reports. Call it from a spec that has set a timeout long enough for all of it.
+ */
 export async function terminalScenario(page: Page, testInfo: TestInfo, { performanceSamples = false }: { performanceSamples?: boolean } = {}) {
   test.setTimeout(180_000);
   const context = page.context();
@@ -122,12 +128,20 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("a");
 
   // The mock writes b once, drops its Ack and Output, then deduplicates b when it is resent.
+  const attachCount = async (): Promise<number> =>
+    ((await (await context.request.get("/__mock/state")).json()) as { attach_count: number }).attach_count;
+  const attachesBefore = await attachCount();
   await context.request.post("/__mock/drop-next-ack");
   await page.keyboard.press("b");
   await expect.poll(async () => {
     const state = await (await context.request.get("/__mock/state")).json() as { echoed_text: string };
     return state.echoed_text;
   }).toBe("ab");
+  // The double closes the socket as it writes b, and the page learns of it one link delay later. Until then
+  // `isConnected()` is still true for the old socket, so waiting on it alone let the scenario carry on and type the
+  // next key while the page was reconnecting, with no round trip yet (the reattach clears it, and the probe sent
+  // with the reattach measures it again). The double's attach count proves the resume happened first (#438).
+  await expect.poll(attachCount, { timeout: 30_000 }).toBeGreaterThan(attachesBefore);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.screenText() ?? "")).toContain("ab");
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0))

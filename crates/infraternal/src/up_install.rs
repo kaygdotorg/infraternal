@@ -404,6 +404,10 @@ impl Install {
     }
 
     /// Copy and verify the running image before its public pathname becomes visible.
+    ///
+    /// systemd starts the service from this file. Under `/var/lib` it would
+    /// inherit `var_lib_t`, which `SELinux` refuses as a service entrypoint
+    /// (`203/EXEC`, #401), so the staging inode is labelled `bin_t` first.
     fn binary(&mut self, source: &Path) -> io::Result<()> {
         let mut input = fs::File::open(source)?;
         if !input.metadata()?.is_file() {
@@ -415,6 +419,11 @@ impl Install {
         let (staging, mut output) = self.staging(&destination)?;
         let read = hash_stream(&mut input, Some(&mut output))?;
         output.set_permissions(fs::Permissions::from_mode(0o755))?;
+        infraternal_agent::exec_label::executable_label(&output).map_err(|_| {
+            refused(
+                "SELinux refused to mark the installed binary executable for systemd. Check the host's SELinux policy has the bin_t type.",
+            )
+        })?;
         output.sync_all()?;
         if hash_stream(&mut fs::File::open(&staging)?, None)? != read {
             return Err(io::Error::other(
