@@ -82,8 +82,8 @@ def job_plant(account, user, scenario, created):
         created.append(noisy)
     if privileged and scenario != 'root-job-parent':
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(target), check=False).returncode == 0
-    if scenario in ('system-cron', 'root-job-cron') or scenario.startswith('root-job-wrapper-'):
-        path = Path('/etc/cron.d') / account
+    if scenario in ('system-cron', 'system-cron-dot', 'root-job-cron') or scenario.startswith('root-job-wrapper-'):
+        path = Path('/etc/cron.d') / (account + ('.cron' if scenario == 'system-cron-dot' else ''))
         with path.open('x') as cron:
             wrappers = {'nice': '/usr/bin/nice ', 'env': '/usr/bin/env FLAG=1 ',
                         'ionice': '/usr/bin/ionice -c 3 ', 'flock': f'/usr/bin/flock /run/{account}.lock ',
@@ -193,7 +193,7 @@ def prove(binary, scenario="sessions"):
                 assert report['state'] == 'unchanged', report
                 print('STOCK_CLEAN_REAL_ROOT_PASS', flush=True)
                 return
-            if scenario.startswith('root-job-') or scenario in ('system-cron', 'system-unit', 'system-uid', 'system-timer',
+            if scenario.startswith('root-job-') or scenario in ('system-cron', 'system-cron-dot', 'system-unit', 'system-uid', 'system-timer',
                             'root-job-owner', 'root-job-group', 'root-job-parent',
                             'root-job-unit', 'root-job-cron', 'root-job-acl'):
                 label, privileged = job_plant(account, user, scenario, created_jobs)

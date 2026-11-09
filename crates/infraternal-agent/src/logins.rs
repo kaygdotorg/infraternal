@@ -1561,13 +1561,25 @@ pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt as _;
     if !matches!(
         name,
-        "systemctl" | "loginctl" | "sudo" | "pkaction" | "busctl" | "sh" | "setpriv"
+        "systemctl"
+            | "loginctl"
+            | "sudo"
+            | "pkaction"
+            | "busctl"
+            | "sh"
+            | "setpriv"
+            | "cron"
+            | "crond"
+            | "dpkg-query"
+            | "rpm"
     ) {
         return None;
     }
     for directory in [
         "/usr/bin",
         "/bin",
+        "/usr/sbin",
+        "/sbin",
         "/run/current-system/sw/bin",
         "/run/wrappers/bin",
     ] {

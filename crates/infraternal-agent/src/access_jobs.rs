@@ -263,8 +263,72 @@ fn root_writes(account: &User, observed: &mut Observation) {
     }
 }
 
+/// cron.d naming differs between Debian cron and cronie. The daemon's owning
+/// package identifies the implementation; ambiguity never proves an empty queue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CronNames {
+    /// Debian cron accepts only ASCII letters, digits, underscores and hyphens.
+    Debian,
+    /// cronie additionally accepts dots, except its documented backup suffixes.
+    Cronie,
+    /// No supported installed daemon could be identified.
+    Unknown,
+}
+
+impl CronNames {
+    /// Ask the installed package database about the actual protected daemon,
+    /// without starting it or inferring its semantics from the OS release name.
+    fn installed() -> Self {
+        let cron = crate::logins::account_tool("cron");
+        let crond = crate::logins::account_tool("crond");
+        let ((Some(path), None) | (None, Some(path))) = (cron, crond) else {
+            return Self::Unknown;
+        };
+        let Some(path) = path.to_str() else {
+            return Self::Unknown;
+        };
+        if let Some(output) =
+            crate::access_privilege::host_output("dpkg-query", &["--search", path])
+        {
+            if output.trim() == format!("cron: {path}") {
+                return Self::Debian;
+            }
+            if output.trim() == format!("cronie: {path}") {
+                return Self::Cronie;
+            }
+        }
+        if crate::access_privilege::host_output("rpm", &["-qf", "--qf", "%{NAME}", path])
+            .is_some_and(|output| output.trim() == "cronie")
+        {
+            return Self::Cronie;
+        }
+        Self::Unknown
+    }
+
+    /// Apply only the known implementation's exclusion rules. Unknown hosts
+    /// retain possibly scheduled names and mark the overall inventory incomplete.
+    fn accepts(self, name: &str) -> bool {
+        if name.is_empty() || name.starts_with('.') || name.ends_with('~') {
+            return false;
+        }
+        match self {
+            Self::Debian => name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)),
+            Self::Cronie => ![".rpmsave", ".rpmorig", ".rpmnew"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix)),
+            Self::Unknown => true,
+        }
+    }
+}
+
 /// Observe both system cron sources. Missing files are absent, other errors unknown.
 fn cron(account: &User, observed: &mut Observation) {
+    let implementation = CronNames::installed();
+    if implementation == CronNames::Unknown {
+        observed.complete = false;
+    }
     let mut paths = vec![std::path::PathBuf::from("/etc/crontab")];
     match fs::read_dir("/etc/cron.d") {
         Ok(entries) => {
@@ -281,14 +345,13 @@ fn cron(account: &User, observed: &mut Observation) {
                     observed.complete = false;
                     break;
                 }
-                // Cron ignores dotted backup files and hidden editor files.
-                if entry.file_name().to_str().is_none_or(|name| {
-                    name.is_empty()
-                        || !name
-                            .bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
-                }) {
-                    continue;
+                let name = entry.file_name();
+                if let Some(name) = name.to_str() {
+                    if !implementation.accepts(name) {
+                        continue;
+                    }
+                } else {
+                    observed.complete = false;
                 }
                 paths.push(entry.path());
             }
@@ -590,6 +653,71 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    /// A host without a known cron implementation cannot silently discard a
+    /// dotted cron.d file. The implementation may accept it, so list it as unknown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "real-root compute01 fixture with no cron daemon installed"]
+    async fn unknown_cron_implementation_keeps_dotted_work_visible() {
+        assert!(nix::unistd::Uid::effective().is_root());
+        assert!(!Path::new("/usr/sbin/cron").exists());
+        assert!(!Path::new("/usr/sbin/crond").exists());
+        tokio::task::spawn_blocking(|| {
+            use std::io::Write as _;
+            /// Own exactly one exclusive file and remove it on assertion
+            /// failure too. No installed cron binary can execute this fixture.
+            struct Fixture(PathBuf);
+            impl Drop for Fixture {
+                /// Remove only the file this test created exclusively.
+                fn drop(&mut self) {
+                    let _ = fs::remove_file(&self.0);
+                }
+            }
+            let account = User::from_name("nobody").unwrap().unwrap();
+            let path = PathBuf::from(format!(
+                "/etc/cron.d/ifrv-{}.cron",
+                uuid::Uuid::new_v4().simple()
+            ));
+            let file = fs::File::options()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            let _fixture = Fixture(path.clone());
+            writeln!(&file, "0 0 1 1 * nobody /bin/true").unwrap();
+            let mut observed = Observation::empty();
+            cron(&account, &mut observed);
+            assert!(
+                !observed.complete,
+                "unknown cron implementation was treated as complete"
+            );
+            assert!(
+                observed
+                    .jobs
+                    .iter()
+                    .any(|job| job.contains(path.to_str().unwrap()))
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Debian ignores dotted names that cronie schedules. Unknown identity
+    /// retains candidates rather than choosing the Debian exclusion silently.
+    #[test]
+    fn filenames_follow_the_identified_cron_implementation() {
+        assert!(CronNames::Debian.accepts("backup_job-1"));
+        assert!(!CronNames::Debian.accepts("backup.cron"));
+        assert!(CronNames::Cronie.accepts("backup.cron"));
+        assert!(CronNames::Unknown.accepts("backup.cron"));
+        for name in [".hidden", "backup~", ""] {
+            assert!(!CronNames::Debian.accepts(name));
+            assert!(!CronNames::Cronie.accepts(name));
+        }
+        for name in ["backup.rpmsave", "backup.rpmorig", "backup.rpmnew"] {
+            assert!(!CronNames::Cronie.accepts(name));
+        }
     }
 
     /// A full uncertain inventory keeps the independently proven writable job.
