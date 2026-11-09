@@ -499,7 +499,15 @@ pub async fn run(
         // attach with unknown rotation support wakes the worker. Closed sources retire it.
         tokio::select! {
             result=notices.changed()=> {if result.is_err() {return;}refresh_identity=true;installed=None;},
-            result=revisions.recv()=>if matches!(result,Err(tokio::sync::broadcast::error::RecvError::Closed)) {return;},
+            result=revisions.recv()=>{
+                if matches!(result,Err(tokio::sync::broadcast::error::RecvError::Closed)) {return;}
+                // A committed revision can be the owner re-enrolling a node whose attach was refused (J284 P3-a),
+                // so an unbound worker probes again. An ambiguous probe keeps its own fixed deadline instead, so
+                // unrelated revisions cannot turn its retry into a probe storm (#382 P2-b).
+                if binding.is_none() && identity_retry.is_none() {
+                    refresh_identity = true;
+                }
+            },
             result=presence_updates.changed()=>if result.is_err() {return;},
             result=rotation_updates.changed()=>if result.is_err() {return;},
             () = tokio::time::sleep(std::time::Duration::from_secs(5)), if ack_retry.is_some() => {
