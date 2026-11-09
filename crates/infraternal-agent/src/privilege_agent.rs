@@ -422,9 +422,11 @@ async fn elevate_unlocked(
             )
         }
     };
+    // Short, under the 108-byte cap on Unix socket paths however long the
+    // account's home is; a clash only fails this one try.
     let directory = sessions.join(format!(
         "privilege-{}",
-        uuid::Uuid::from_bytes(attempt).simple()
+        &uuid::Uuid::from_bytes(attempt).simple().to_string()[..12]
     ));
     std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
     let socket = directory.join("relay.sock");

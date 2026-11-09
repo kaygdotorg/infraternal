@@ -645,7 +645,10 @@ impl Promotions {
         agent: &crate::embedded::EmbeddedAgent,
         generation: Uuid,
     ) -> Result<(), &'static str> {
-        let directory = self.scratch.join(attempt.simple().to_string());
+        // A short name: Unix socket paths are capped at 108 bytes, and the
+        // data directory in front of it can be long (found on the guest rig,
+        // where the full attempt id pushed the helper socket past the cap).
+        let directory = self.scratch.join(&attempt.simple().to_string()[..8]);
         std::fs::create_dir(&directory).map_err(|_| "local")?;
         let _cleanup = RemoveDir(directory.clone());
         let session = RelaySession::start(
