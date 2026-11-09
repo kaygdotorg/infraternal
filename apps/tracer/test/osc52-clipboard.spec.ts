@@ -75,9 +75,11 @@ for (const viewport of VIEWPORTS) {
       const page = await open(context);
       await page.evaluate(() => {
         const real = navigator.clipboard.writeText.bind(navigator.clipboard);
-        // Refuse until the tap: a write outside a gesture is rejected by Safari and by a Chromium page without permission.
+        // Refuse until a tap: a write outside a gesture is rejected by Safari and by a Chromium page without permission.
+        let tapped = false;
+        document.addEventListener("click", () => { tapped = true; }, true);
         navigator.clipboard.writeText = async (text: string) => {
-          if (!navigator.userActivation.isActive) throw new DOMException("Needs a gesture", "NotAllowedError");
+          if (!tapped) throw new DOMException("Needs a gesture", "NotAllowedError");
           await real(text);
         };
         document.execCommand = () => false;
@@ -95,6 +97,8 @@ for (const viewport of VIEWPORTS) {
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
       expect(box.height).toBeGreaterThanOrEqual(viewport.touch ? 32 : 20);
+      // Headless Chromium has no focused window to give the tap a write right, so the real write is allowed here.
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       if (viewport.touch) await action.tap(); else await action.click();
       await expect.poll(() => clipboard(page), { timeout: 10_000 }).toBe(COPIED);
       await expect(page.locator(".ui-toast")).toContainText("Copied");
