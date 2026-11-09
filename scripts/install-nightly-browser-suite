@@ -51,11 +51,12 @@ def service_unit():
     """The system service: a root-owned fixed helper, confined as far as the suite tolerates.
 
     `ProtectSystem=strict` makes the file system read-only except the listed
-    paths: the two account homes, the shared /tmp (which holds the build-slot
-    queue and the suite's scratch files), /var/tmp, /run and nix's state.
-    There is deliberately no `PrivateTmp`: a private /tmp would hide the shared
-    build-slot queue, and the suite could then skip it. `NoNewPrivileges` is
-    left out because the helper starts programs through `runuser` and `setpriv`.
+    paths: the two account homes, /run and nix's state. `PrivateTmp` gives the
+    run its own /tmp, so the suite's scratch files stay out of the shared one;
+    `BindPaths` keeps the build-slot queue (`/tmp/infraternal-build-slots`,
+    created by `tmpfiles_config`) shared, so the suite cannot skip the queue.
+    `NoNewPrivileges` only stops gaining privilege through setuid programs:
+    root dropping to another account with `runuser`/`setpriv` is unaffected.
     """
     return f'''# Nightly full browser suite on dev and failing-spec reports, D373 (#443).
 [Unit]
@@ -70,8 +71,11 @@ TimeoutStartSec=6h
 KillMode=control-group
 Nice=10
 UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+BindPaths=-/tmp/infraternal-build-slots
 ProtectSystem=strict
-ReadWritePaths=/var/lib/infraternal-browser /var/lib/infraternal-fuzz /tmp /var/tmp /run /nix/var
+ReadWritePaths=/var/lib/infraternal-browser /var/lib/infraternal-fuzz /run /nix/var
 ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -79,6 +83,11 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 '''
+
+
+def tmpfiles_config():
+    """The tmpfiles.d line that makes sure the shared build-slot queue folder exists before the unit binds it in."""
+    return 'd /tmp/infraternal-build-slots 1777 claude claude -\n'
 
 
 def timer_unit():
@@ -108,6 +117,21 @@ def as_user(*command, cwd=None):
                *command, cwd=cwd)
 
 
+def secure_home(entry):
+    """Give the browser home to its account and make it private, through a descriptor.
+
+    The home belongs to the account that runs unreviewed code, so it is opened
+    with O_NOFOLLOW and changed with `fchown`/`fchmod`: a link put there can
+    never make root change a directory elsewhere.
+    """
+    descriptor = os.open(HOME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchown(descriptor, entry.pw_uid, entry.pw_gid)
+        os.fchmod(descriptor, 0o700)
+    finally:
+        os.close(descriptor)
+
+
 def ensure_user():
     """Create the system account and its private home (0700) if missing."""
     try:
@@ -117,8 +141,7 @@ def ensure_user():
             '--comment', 'infraternal nightly browser suite (D373)', USER)
     entry = pwd.getpwnam(USER)
     HOME.mkdir(parents=True, exist_ok=True)
-    os.chown(HOME, entry.pw_uid, entry.pw_gid)
-    HOME.chmod(0o700)
+    secure_home(entry)
     return entry
 
 
@@ -129,9 +152,9 @@ def checkout(ref):
         as_user('git', 'clone', '--quiet', REPOSITORY, str(target))
     as_user('git', '-C', str(target), 'fetch', '--quiet', 'origin', ref)
     as_user('git', '-C', str(target), 'checkout', '--quiet', '--detach', ref)
-    (HOME / 'runs').mkdir(exist_ok=True)
-    run('chown', f'{USER}:{USER}', str(HOME / 'runs'))
-    (HOME / 'runs').chmod(0o700)
+    # Made by the suite account itself: root never names a path inside that account's home
+    # (a link planted there would otherwise make root chown or chmod something else).
+    as_user('mkdir', '-p', '-m', '0700', str(HOME / 'runs'))
     return target
 
 
@@ -203,6 +226,8 @@ def main():
         shutil.rmtree(source.parent, ignore_errors=True)
     (UNITS / 'infraternal-browser-suite.service').write_text(service_unit())
     (UNITS / 'infraternal-browser-suite.timer').write_text(timer_unit())
+    Path('/etc/tmpfiles.d/infraternal-browser-suite.conf').write_text(tmpfiles_config())
+    run('systemd-tmpfiles', '--create', '/etc/tmpfiles.d/infraternal-browser-suite.conf')
     run('systemd-analyze', 'verify', str(UNITS / 'infraternal-browser-suite.service'), str(UNITS / 'infraternal-browser-suite.timer'))
     run('systemctl', 'daemon-reload')
     run('systemctl', 'enable', '--now', 'infraternal-browser-suite.timer')

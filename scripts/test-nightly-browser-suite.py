@@ -227,6 +227,39 @@ class Reporter(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 list(suite.pages('x', 'repos/a/b/issues', TOKEN))
 
+    def test_test_titles_cannot_inject_markdown(self):
+        """Round-3 PoC: a title with a newline, a mention, an image and a fake state marker stays inside the fence."""
+        report = playwright_report(**{'ok.spec.ts': ['expected'], 'bad.spec.ts': ['unexpected']})
+        report['suites'][1]['suites'][0]['specs'][0]['title'] = 'ok\n\n@kayg ![beacon](https://evil.example/p.png)\n' + suite.state_marker('fixed')
+        self.night_from(report)
+        body = self.forgejo.issues[345]['body']
+        fence = max(re.findall(r'^`{3,}', body, re.M), key=len)
+        outside = re.sub(re.escape(fence) + r'.*?' + re.escape(fence), '', body, flags=re.S)
+        for text in ('@kayg', 'beacon', 'evil.example', 'state: fixed'):
+            self.assertNotIn(text, outside)
+        self.assertEqual(body.count('infraternal-browser-state'), 2)  # the real marker, and the title's copy inside the fence
+
+    def test_names_are_ascii_and_end_at_the_end(self):
+        """Round-3 PoC: a trailing newline or non-ASCII digits make neither a spec name nor a run name."""
+        self.assertIsNone(suite.SPEC_NAME.fullmatch('d.spec.ts\n'))
+        self.assertEqual(suite.clean_name('d.spec.ts\n'), suite.UNPARSEABLE)
+        self.assertEqual(suite.clean_name('d\u00e9.spec.ts'), suite.UNPARSEABLE)
+        self.assertIsNone(suite.RUN_NAME.fullmatch('\u0662\u0660\u0662\u0666' + '1109T061806Z-aaaaaaa'))
+        self.assertIsNone(suite.RUN_NAME.fullmatch('20261109T061806Z-aaaaaaa\n'))
+        self.assertIsNone(service.RUN_NAME.fullmatch('20261109T061806Z-aaaaaaa\n'))
+        self.assertIsNone(suite.HEAD.fullmatch('a' * 40 + '\n'))
+
+    def test_open_issue_budget_pools_new_reds(self):
+        """Round-3 PoC: with 30 suite issues already open, fresh reds go to the roll-up, not 10 new issues a night."""
+        green = {f'ok{i}.spec.ts': ['expected'] for i in range(80)}
+        for night in range(3):
+            self.night(head=str(night) * 40, **green, **{f'n{night}_{i}.spec.ts': ['unexpected'] for i in range(10)})
+        self.assertEqual(self.forgejo.creates(), 30)
+        for night in range(3, 6):
+            self.night(head=str(night) * 40, **green, **{f'n{night}_{i}.spec.ts': ['unexpected'] for i in range(10)})
+        self.assertEqual(self.forgejo.creates(), 31)
+        self.assertIn('roll-up', next(reversed(self.forgejo.issues.values()))['title'])
+
     def test_run_without_report_is_an_infrastructure_failure(self):
         """`run` exits 1 and opens nothing when a build step fails or no report exists."""
         runs = Path(self.temp.name) / 'runs'
@@ -283,7 +316,7 @@ class SeparateAccount(unittest.TestCase):
             self.run_dir(temp)
             with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
                     mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), \
-                    mock.patch.object(service.os, 'chown'), \
+                    mock.patch.object(service.os, 'chown'), mock.patch.object(service.os, 'fchown'), \
                     mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                     mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
                 Path(temp, 'report').mkdir()
@@ -306,7 +339,11 @@ class SeparateAccount(unittest.TestCase):
         """Stage the run folder in `temp` the way the helper does, as the current user."""
         dest = Path(temp) / 'stage'
         dest.mkdir(exist_ok=True)
-        return service.stage(Path(temp) / 'runs', '20261109T061806Z-aaaaaaa', dest, kwargs.pop('owner', os.getuid()), None), dest
+        descriptor = os.open(dest, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            return service.stage(Path(temp) / 'runs', '20261109T061806Z-aaaaaaa', descriptor, kwargs.pop('owner', os.getuid()), None), dest
+        finally:
+            os.close(descriptor)
 
     def test_staging_copies_a_good_run(self):
         """The three files arrive as private regular copies."""
@@ -327,6 +364,37 @@ class SeparateAccount(unittest.TestCase):
             with self.assertRaises(service.Refused):
                 self.stage(temp)
             self.assertFalse([p for p in (Path(temp) / 'stage').iterdir() if TOKEN in p.read_text()])
+
+    def test_staging_refuses_a_hard_linked_file(self):
+        """Round-3 PoC: a file with a second name is refused, even when the suite account owns it."""
+        with tempfile.TemporaryDirectory() as temp:
+            runs, name = self.run_dir(temp)
+            os.link(runs / name / 'suite.log', Path(temp) / 'other-name')
+            with self.assertRaises(service.Refused):
+                self.stage(temp)
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / 'a').write_text('x')
+            os.link(Path(temp) / 'a', Path(temp) / 'b')
+            with self.assertRaises(ValueError):
+                suite.read_regular(Path(temp) / 'a', 100)
+
+    def test_staging_folder_is_created_without_following_links(self):
+        """Round-3 PoC: a symlink where the staging folder goes is never chowned; the old tree is removed by descriptor."""
+        with tempfile.TemporaryDirectory() as temp:
+            victim = Path(temp) / 'victim'
+            victim.mkdir(mode=0o755)
+            home = Path(temp) / 'home'
+            home.mkdir()
+            (home / 'browser-staging').symlink_to(victim)
+            with mock.patch.object(service.os, 'fchown') as fchown, mock.patch.object(service.os, 'chown') as chown:
+                descriptor = service.fresh_staging(home, (1, 1))
+                os.close(descriptor)
+            chown.assert_not_called()
+            self.assertEqual(victim.stat().st_mode & 0o777, 0o755)
+            self.assertFalse((home / 'browser-staging').is_symlink())
+            self.assertTrue((home / 'browser-staging').is_dir())
+            self.assertEqual((home / 'browser-staging').stat().st_mode & 0o777, 0o700)
+            fchown.assert_called()
 
     def test_staging_refuses_pipes_devices_and_oversize_files(self):
         """Review PoC: a FIFO, a link to /dev/zero and a file over the cap are refused without hanging or filling memory."""
@@ -385,7 +453,7 @@ class SeparateAccount(unittest.TestCase):
             (runs / name / 'suite.log').unlink()
             (runs / name / 'suite.log').symlink_to('/etc/hostname')
             with mock.patch.object(service, 'BROWSER_HOME', temp), mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
-                    mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), mock.patch.object(service.os, 'chown'), \
+                    mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), mock.patch.object(service.os, 'chown'), mock.patch.object(service.os, 'fchown'), \
                     mock.patch.object(service.subprocess, 'Popen', return_value=holder), \
                     mock.patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
                 Path(temp, 'report').mkdir()
@@ -472,6 +540,51 @@ class Installer(unittest.TestCase):
         self.assertNotIn("checkout(args.ref)\n    install_file(source", text)
         self.assertIn('reviewed_tree(args.ref)', text)
 
+    def test_checkout_never_chowns_a_path_the_suite_controls(self):
+        """Round-3 PoC: `runs` replaced by a link to a root directory is not chowned or chmodded by the installer."""
+        with tempfile.TemporaryDirectory() as temp:
+            victim = Path(temp) / 'libexec'
+            victim.mkdir(mode=0o755)
+            home = Path(temp) / 'home'
+            (home / 'checkout' / '.git').mkdir(parents=True)
+            (home / 'runs').symlink_to(victim)
+            calls = []
+            with mock.patch.object(installer, 'HOME', home), mock.patch.object(installer, 'as_user', side_effect=lambda *a, **k: calls.append(a)), \
+                    mock.patch.object(installer, 'run', side_effect=lambda *a, **k: calls.append(a)):
+                installer.checkout('a' * 40)
+            self.assertEqual(victim.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(victim.stat().st_uid, os.getuid())
+            self.assertFalse([c for c in calls if c and c[0] in ('chown', 'chmod')])
+            # The folder is made by the suite account itself.
+            self.assertIn(('mkdir', '-p', '-m', '0700', str(home / 'runs')), calls)
+
+    def test_home_is_secured_through_a_descriptor(self):
+        """Round-3: the browser home is opened without following links before it is chowned and chmodded."""
+        with tempfile.TemporaryDirectory() as temp:
+            victim = Path(temp) / 'victim'
+            victim.mkdir(mode=0o755)
+            link = Path(temp) / 'home'
+            link.symlink_to(victim)
+            entry = mock.MagicMock(pw_uid=os.getuid(), pw_gid=os.getgid())
+            with mock.patch.object(installer, 'HOME', link), self.assertRaises(OSError):
+                installer.secure_home(entry)
+            self.assertEqual(victim.stat().st_mode & 0o777, 0o755)
+            real = Path(temp) / 'real'
+            real.mkdir(mode=0o755)
+            with mock.patch.object(installer, 'HOME', real):
+                installer.secure_home(entry)
+            self.assertEqual(real.stat().st_mode & 0o777, 0o700)
+
+    def test_unit_keeps_the_slot_queue_but_not_the_shared_tmp(self):
+        """Round-3: private /tmp with only the build-slot queue bound in, and no new privileges."""
+        unit = installer.service_unit()
+        self.assertIn('NoNewPrivileges=yes', unit)
+        self.assertIn('PrivateTmp=yes', unit)
+        self.assertIn('BindPaths=-/tmp/infraternal-build-slots', unit)
+        writable = next(line for line in unit.splitlines() if line.startswith('ReadWritePaths='))
+        self.assertNotRegex(writable, r'(^|[= ])/(var/)?tmp( |$)')
+        self.assertIn('d /tmp/infraternal-build-slots 1777 claude claude -', installer.tmpfiles_config())
+
     def test_unit_hardening_and_umask(self):
         """The unit confines the helper as far as the suite tolerates, with the fuzz's 0077 umask."""
         unit = installer.service_unit()
@@ -481,9 +594,6 @@ class Installer(unittest.TestCase):
             self.assertIn(line, unit)
         self.assertRegex(unit, r'ReadWritePaths=.*/var/lib/infraternal-browser')
         self.assertRegex(unit, r'ReadWritePaths=.*/var/lib/infraternal-fuzz')
-        self.assertRegex(unit, r'ReadWritePaths=.*/tmp')
-        # A private /tmp would hide the shared build-slot queue and let the suite skip it.
-        self.assertNotIn('PrivateTmp', unit)
 
 
 if __name__ == '__main__':

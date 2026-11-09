@@ -748,7 +748,8 @@ of the name) in issues written by the token's own account, so a persistent red
 is one issue. It carries the dev SHA, the error text, a log tail and the
 evidence path (the newest seven nights are kept under
 `/var/lib/infraternal-browser/runs/`), all inside a code fence no content can
-close. At most ten new issues a night: more, or a mostly red suite (a dead test
+close, with test titles inside it too. At most ten new issues a night and
+thirty open at once: more, or a mostly red suite (a dead test
 server), becomes one roll-up issue. A spec that passes again gets one comment,
 and a later regression one more; issues are never closed. A build or suite
 that cannot run at all fails the unit and opens no spec issue.

@@ -24,8 +24,8 @@ Reporting rules, one issue per failing spec *file* (`docs-palette.spec.ts`):
   comment.
 - A run that produced no usable results (build failure, crashed server, no
   JSON) is an infrastructure failure: exit status 1, no spec issues.
-- At most MAX_NEW_ISSUES new issues a night. More, or a mostly red suite,
-  becomes one roll-up issue.
+- At most MAX_NEW_ISSUES new issues a night and MAX_OPEN_ISSUES open at once.
+  More, or a mostly red suite, becomes one roll-up issue.
 - The suite's output is hostile data (see `report`): hashed markers, validated
   names, bounded fields, Markdown fences no content can close, and only
   markers written by the token's own account are believed.
@@ -60,17 +60,20 @@ KEEP_RUNS = 7
 BROWSER_RUNS = '/var/lib/infraternal-browser/runs'
 
 # A run directory is `<UTC stamp>-<first seven hex of the commit>`.
-RUN_NAME = re.compile(r'^\d{8}T\d{6}Z-[0-9a-f]{7}$')
-HEAD = re.compile(r'^[0-9a-f]{40}$')
+RUN_NAME = re.compile(r'\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{7}\Z', re.ASCII)
+HEAD = re.compile(r'\A[0-9a-f]{40}\Z', re.ASCII)
 # A spec file as Playwright names it, relative to the test folder. Anything
 # else (spaces, `-->`, newlines, `..`) is pooled under UNPARSEABLE.
-SPEC_NAME = re.compile(r'^(?!.*\.\.)[A-Za-z0-9._/-]{1,120}\.spec\.ts$')
+SPEC_NAME = re.compile(r'\A(?!.*\.\.)[A-Za-z0-9._/-]{1,120}\.spec\.ts\Z', re.ASCII)
 UNPARSEABLE = '(unparseable spec names)'
 ROLLUP = '(roll-up)'
 
 # More new red specs than this in one night, or a mostly red suite, is filed as
 # one roll-up issue: it is more likely a dead test server than that many bugs.
 MAX_NEW_ISSUES = 10
+# The most suite issues kept open at once; with that many open, new reds go to the roll-up
+# instead, so dev code that fails fresh names every night cannot grow the list without end.
+MAX_OPEN_ISSUES = 30
 ROLLUP_MIN_FAILING = 5
 
 # Byte caps for what the reporter will read, and text caps for what it will write.
@@ -107,8 +110,8 @@ def read_regular(path, cap, tail=False):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError(f'{path} is not a regular file')
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError(f'{path} is not a plain regular file with a single name')
         if info.st_size > cap:
             if not tail:
                 raise ValueError(f'{path} is larger than {cap} bytes')
@@ -183,7 +186,7 @@ def run(root, runs):
 
 def clean_name(name):
     """The spec file name if it is well formed, else the pooled UNPARSEABLE name."""
-    return name if isinstance(name, str) and SPEC_NAME.match(name) else UNPARSEABLE
+    return name if isinstance(name, str) and SPEC_NAME.fullmatch(name) else UNPARSEABLE
 
 
 def collect(report):
@@ -313,7 +316,8 @@ def issue_body(marker, intro, blocks, run_name, head, runs_root):
 
 def spec_issue(spec, failures, tail, run_name, head, runs_root):
     """Title and body of the issue for one failing spec file."""
-    blocks = [(title, text) for title, text in failures[:5]] + [('Log tail for this spec', tail)]
+    # Titles come from the suite, so they sit inside the fence like the error text; the headings are fixed.
+    blocks = [(f'Failing test {number}', f'{title}\n{text}') for number, (title, text) in enumerate(failures[:5], 1)] + [('Log tail for this spec', tail)]
     more = f'\n(and {len(failures) - 5} more failing tests)\n' if len(failures) > 5 else ''
     intro = f"Spec: `{spec}`\n{more}Rerun with `cd apps/tracer && bun x playwright test test/{spec}`.\n"
     return {'title': f'browser suite: {spec} fails on dev',
@@ -338,11 +342,11 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS):
     (see the module doc). Raises ValueError when the inputs are not what the
     suite should have written, and RuntimeError when the issue list is too long.
     """
-    if not RUN_NAME.match(run_name):
+    if not RUN_NAME.fullmatch(run_name):
         raise ValueError('bad run name')
     meta = json.loads(read_regular(results / 'meta.json', MAX_META_BYTES))
     head = meta.get('head') if isinstance(meta, dict) else None
-    if not isinstance(head, str) or not HEAD.match(head) or not head.startswith(run_name[-7:]):
+    if not isinstance(head, str) or not HEAD.fullmatch(head) or not head.startswith(run_name[-7:]):
         raise ValueError('meta.json: head is not the commit named by the run folder')
     failing, passing = collect(json.loads(read_regular(results / 'results.json', MAX_RESULTS_BYTES)))
     log_text = read_regular(results / 'suite.log', MAX_LOG_BYTES, tail=True).decode(errors='replace')
@@ -351,7 +355,7 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS):
     new = sorted(spec for spec in failing if hashlib.sha256(spec.encode()).hexdigest()[:16] not in known)
     errors = 0
     # A mostly red suite is a dead server, not that many bugs.
-    pool = len(new) > MAX_NEW_ISSUES or (len(failing) >= ROLLUP_MIN_FAILING and len(failing) * 2 >= len(failing) + len(passing))
+    pool = len(new) > MAX_NEW_ISSUES or len(known) + len(new) > MAX_OPEN_ISSUES or (len(failing) >= ROLLUP_MIN_FAILING and len(failing) * 2 >= len(failing) + len(passing))
     if pool and new:
         try:
             if hashlib.sha256(ROLLUP.encode()).hexdigest()[:16] not in known:
