@@ -23,12 +23,12 @@ test.skip(process.env.INFRATERNAL_LATENCY_PROFILE !== "1", "runs only in scripts
 /** Chromium flags that stop animation frames from being paced to the display, so a frame's interval is its real cost. */
 const UNCAPPED_FRAMES = ["--disable-renderer-backgrounding", "--disable-frame-rate-limit", "--disable-gpu-vsync"];
 
-test("rendering under 10 MB/s output, frame rate uncapped", async ({ browserType, baseURL }) => {
+test("rendering under 10 MB/s output, frame rate uncapped", async ({ playwright, baseURL }) => {
   test.setTimeout(120_000);
   // Its own browser, so only this test runs uncapped; the first-paint test keeps the suite's normal browser.
-  const browser = await browserType.launch({ args: UNCAPPED_FRAMES });
+  const browser = await playwright.chromium.launch({ args: UNCAPPED_FRAMES });
   try {
-    const context = await browser.newContext({ baseURL, viewport: { width: 1440, height: 900 } });
+    const context = await browser.newContext({ ...(baseURL === undefined ? {} : { baseURL }), viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     await context.request.post("/__mock/reset");
     await context.request.post("/__mock/open-terminal");
