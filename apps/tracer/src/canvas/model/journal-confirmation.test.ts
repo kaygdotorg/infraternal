@@ -97,10 +97,10 @@ test("a look queued behind our own look is rebased when that look's event arrive
   const first = journal.next()!;
   journal.capture(doc("solid"));
   const intent = "intent" in first ? first.intent : undefined;
-  expect(journal.accept({ type: "canvas.layout.operation", revision: 3, op_id: first.op_id, intent, noop: false })).toBe(true);
+  expect(journal.accept({ type: "canvas.layout.operation", revision: 2, op_id: first.op_id, intent, noop: false })).toBe(true);
   const second = journal.next()!;
   expect("intent" in second && second.intent.type).toBe("look.set");
-  expect("base_revision" in second && second.base_revision).toBe(3);
+  expect("base_revision" in second && second.base_revision).toBe(2);
 });
 
 /** A look from another device must not rebase ours: the compare-and-set has to keep refusing a look written from before it. */
@@ -108,8 +108,8 @@ test("a look from another device does not rebase a queued look", () => {
   const { journal, entry } = setup();
   journal.acknowledge(entry, 2, false);
   const look = { type: "look.set", look: createThemeStore({ colors: "mocha", font: "maple-mono-nf", uiSize: 100 }).snapshot() } as never;
-  const mine: Pending = { op_id: "look-mine", base_revision: 2, intent: look };
+  const mine: Pending = { op_id: "look-mine", base_revision: 1, intent: look };
   journal.pending.push(mine);
-  expect(journal.accept({ type: "canvas.layout.operation", revision: 3, op_id: "someone-else", intent: look, noop: false })).toBe(true);
-  expect(mine.base_revision).toBe(2);
+  expect(journal.accept({ type: "canvas.layout.operation", revision: 2, op_id: "someone-else", intent: look, noop: false })).toBe(true);
+  expect(mine.base_revision).toBe(1);
 });
