@@ -194,6 +194,40 @@ fn installed_policy_roots() -> Option<Vec<(PathBuf, &'static str)>> {
     (bytes.len() <= 16 * 1024 * 1024).then(|| binary_policy_roots(&bytes))
 }
 
+/// Every other way polkit's authority daemon can run, besides its systemd
+/// unit: the system bus activation file and the daemon's installed paths on
+/// Debian-, Fedora- and Arch-style hosts.
+const DAEMON_PATHS: &[&str] = &[
+    "/usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service",
+    "/usr/lib/polkit-1/polkitd",
+    "/usr/libexec/polkitd",
+    "/usr/libexec/polkit-1/polkitd",
+];
+
+/// Decide from observations whether polkit is absent. `load_state` is the
+/// manager's `LoadState` of `polkit.service` (`None` when the manager did
+/// not answer) and `exists` reports whether a path exists or may exist.
+/// Only a definite "not-found" with none of [`DAEMON_PATHS`] present proves
+/// that no polkit authority can answer; anything uncertain is "present".
+fn absent_from(load_state: Option<&str>, exists: impl Fn(&str) -> bool) -> bool {
+    load_state.is_some_and(|state| state.trim() == "not-found")
+        && !DAEMON_PATHS.iter().any(|path| exists(path))
+}
+
+/// True when polkit is not installed, so no rule or action default can grant
+/// this account anything (#355). Without this, a host without polkit failed
+/// closed (it has no polkit.service to read), and no host could be clean.
+/// Installing polkit or claiming its bus name both need root.
+fn absent() -> bool {
+    let state = crate::access_privilege::host_output(
+        "systemctl",
+        &["show", "polkit.service", "-p", "LoadState", "--value"],
+    );
+    absent_from(state.as_deref(), |path| {
+        !fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// Exact login1 actions approved as harmless for this root-route check (#355).
 /// Inhibition and self-linger affect session lifetime, and chvt selects a virtual
 /// terminal; none permits executing arbitrary code as root. Session teardown
@@ -264,6 +298,9 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
 /// privileged even if it appears to name somebody else: textual matching cannot
 /// establish the meaning of a JavaScript rule or an imported helper.
 pub(crate) fn privileged(account: &User) -> bool {
+    if absent() {
+        return false;
+    }
     let mut budget = Budget {
         entries: 1024,
         bytes: 1024 * 1024,
@@ -335,6 +372,17 @@ mod tests {
             &denied.replace("auth_admin_keep", "yes")
         ));
         assert!(action_defaults_allow_or_unknown("unknown"));
+    }
+
+    /// Polkit counts as absent only when its unit is definitely not found and
+    /// neither its bus activation file nor its daemon exists.
+    #[test]
+    fn only_a_proven_missing_polkit_is_absent() {
+        assert!(absent_from(Some("not-found\n"), |_| false));
+        assert!(!absent_from(Some("loaded\n"), |_| false));
+        assert!(!absent_from(None, |_| false));
+        assert!(!absent_from(Some("not-found"), |path| path.ends_with(".service")));
+        assert!(!absent_from(Some("not-found"), |path| path.ends_with("polkitd")));
     }
 
     /// Only the owner's exact harmless login1 ids may have a stock yes grant.
