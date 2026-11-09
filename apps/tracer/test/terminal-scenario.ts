@@ -377,6 +377,8 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   const lastScreenSamples: number[] = [];
   for (let attempt = 0; attempt < reconnectTrials; attempt += 1) {
     await expect(page.locator("#probe-drop")).toBeEnabled();
+    await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 })
+      .toBe(true);
     lastScreenSamples.push(await dropAndTimeLastScreen(page));
     await expect.poll(async () => (await page.locator("#probe-results").textContent()) ?? "")
       .toMatch(/Time to resume: [0-9.]+ ms/);
@@ -496,12 +498,64 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   await page.evaluate(() => window.__tracerTestDouble?.setPredictiveEcho(false));
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.optedIn ?? true)).toBe(false);
   await expect(page.locator("#probe-run")).toBeEnabled();
+  // INFRATERNAL_LATENCY_TRACE=1 records a Chromium trace over this run, to say what the slow keys overlapped (#447).
+  // Tracing costs time itself, so gating runs leave it off.
+  const tracing = latencySamples && process.env.INFRATERNAL_LATENCY_TRACE === "1" ? page.context().browser() : null;
+  if (tracing) {
+    await tracing.startTracing(page, {
+      // Lean on purpose: with frames uncapped (~350 fps) "disabled-by-default-devtools.timeline" and "toplevel" made
+      // a trace over 512 MB, longer than a JavaScript string can hold. These keep GC, timers, script and layout.
+      categories: ["devtools.timeline", "disabled-by-default-v8.gc", "blink.user_timing"],
+    });
+  }
+  // INFRATERNAL_LATENCY_ALLOC=1 samples where the page allocates during this run, including objects GC already
+  // collected, to find what feeds the major GCs that delay keys (#447).
+  const sampling = latencySamples && process.env.INFRATERNAL_LATENCY_ALLOC === "1";
+  if (sampling) {
+    await cdp.send("HeapProfiler.enable");
+    await cdp.send("HeapProfiler.startSampling", {
+      samplingInterval: 8192, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true,
+    });
+  }
+  const offStartedAt = Date.now();
+  // Count animation frames while the keys are typed: the report's frame-rate floor uses this rate, measured under the
+  // rows' own load, not an idle page (J459 review, #447).
+  await page.evaluate(() => {
+    const counter = { frames: 0, startedAt: performance.now(), running: true };
+    (window as typeof window & { __rowFrames?: typeof counter }).__rowFrames = counter;
+    const tick = (): void => { counter.frames += 1; if (counter.running) requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
   await page.locator("#probe-run").click();
   await expect.poll(
     async () => (await page.locator("#probe-results").textContent()) ?? "",
     { timeout: probeTimeoutMs },
   ).toContain(`Painted echoes: ${probeCount} / ${probeCount}`);
+  if (sampling) {
+    const { profile } = await cdp.send("HeapProfiler.stopSampling");
+    const seconds = (Date.now() - offStartedAt) / 1000;
+    console.log(`METRIC name=own_overhead_browser_allocations display=${latencyDisplay()} seconds=${seconds.toFixed(1)} ` +
+      `top=${JSON.stringify(topAllocators(profile.head, seconds, 12))}`);
+  }
+  const rowFrames = await page.evaluate(() => {
+    const counter = (window as typeof window & { __rowFrames?: { frames: number; startedAt: number; running: boolean } })
+      .__rowFrames!;
+    counter.running = false;
+    return { frames: counter.frames, seconds: (performance.now() - counter.startedAt) / 1000 };
+  });
+  console.log(`METRIC name=frame_pacing display=${latencyDisplay()} phase=rows n=${rowFrames.frames} ` +
+    `fps=${(rowFrames.frames / rowFrames.seconds).toFixed(1)}`);
   const offTrace = await page.evaluate(() => window.__tracerTestDouble?.trace() ?? []);
+  const slowKeys = slowestOwnKeys(offTrace, 6);
+  console.log(`METRIC name=own_overhead_browser_slowest display=${latencyDisplay()} keys=${JSON.stringify(slowKeys)}`);
+  if (tracing) {
+    const syncAt = await page.evaluate(() => performance.mark("j407-trace-sync").startTime);
+    const traceBuffer = await tracing.stopTracing();
+    const tracePath = testInfo.outputPath(`probe-off-${latencyDisplay()}.trace.json`);
+    await writeFile(tracePath, traceBuffer);
+    console.log(`METRIC name=own_overhead_browser_overlaps display=${latencyDisplay()} trace=${tracePath} ` +
+      `overlaps=${JSON.stringify(traceOverlaps(traceBuffer.toString("utf8"), syncAt, slowKeys))}`);
+  }
   const offSamples = offTrace.flatMap((sample) => {
     const started = sample.stages.keydown;
     const painted = sample.stages.paint;
@@ -588,6 +642,12 @@ async function dropAndTimeLastScreen(page: Page): Promise<number> {
       reject(new Error("the probe drop or the terminal's screen is unavailable"));
       return;
     }
+    // The probe ignores a drop while the terminal is not attached (forceDrop needs it connected), and the button can be
+    // enabled a moment before the previous resume's attachment is confirmed; that click then dropped nothing (#447).
+    if (!double.isConnected()) {
+      reject(new Error("the terminal is not attached, so a drop would be ignored"));
+      return;
+    }
     // The renderer's canvas, not the prediction overlay: the overlay is a separate canvas that stays hidden while no
     // prediction is pending, so "any canvas" would wrongly read as "the screen is gone".
     const shown = (): boolean => Array.from(document.querySelectorAll<HTMLCanvasElement>("#terminal-screen canvas"))
@@ -613,6 +673,97 @@ async function dropAndTimeLastScreen(page: Page): Promise<number> {
     };
     requestAnimationFrame(check);
   }));
+}
+
+/** One prediction-off probe key, broken into the browser's own hops (ms), for finding what made it slow. */
+interface OwnKey {
+  index: number;
+  atMs: number;
+  startMs: number;
+  endMs: number;
+  totalMs: number;
+  hops: Record<string, number>;
+}
+
+/**
+ * The `count` keys whose browser-own time (keydown to socket send, plus echo arrival to paint) was longest, slowest
+ * first, with each key's place in the run (`index`, `atMs` since the first keydown) and every hop between the stages it
+ * passed. `startMs`/`endMs` are its keydown and paint in page time, for matching against a trace.
+ */
+function slowestOwnKeys(
+  trace: ReadonlyArray<{ stages: Partial<Record<string, number>> }>,
+  count: number,
+): OwnKey[] {
+  const order = ["keydown", "onData", "encode", "wsSend", "wsMessage", "decode", "termWrite", "writeCallback", "paint"];
+  const firstKeydown = trace[0]?.stages.keydown ?? 0;
+  const keys = trace.flatMap((sample, index) => {
+    const { keydown, wsSend, wsMessage, paint } = sample.stages;
+    if (keydown === undefined || wsSend === undefined || wsMessage === undefined || paint === undefined) return [];
+    const hops: Record<string, number> = {};
+    let previous: string | undefined;
+    for (const stage of order) {
+      const at = sample.stages[stage];
+      if (at === undefined) continue;
+      if (previous !== undefined && stage !== "wsMessage") hops[`${previous}>${stage}`] = round(at - sample.stages[previous]!);
+      previous = stage;
+    }
+    return [{ index, atMs: round(keydown - firstKeydown), startMs: keydown, endMs: paint,
+      totalMs: round((wsSend - keydown) + (paint - wsMessage)), hops }];
+  });
+  return keys.sort((left, right) => right.totalMs - left.totalMs).slice(0, count);
+}
+
+/**
+ * For each slow key, the trace events of 2 ms or longer that overlap its keydown-to-paint window, with how long they
+ * ran: a GC, a timer, layout, paint or script that ran while the key was in flight. `syncAt` is the page time of the
+ * `j407-trace-sync` mark, which ties trace time (microseconds) to page time.
+ */
+function traceOverlaps(traceText: string, syncAt: number, keys: OwnKey[]): Array<{ index: number; events: string[] }> {
+  const events = (JSON.parse(traceText) as { traceEvents: Array<{ name: string; ph: string; ts: number; dur?: number }> })
+    .traceEvents;
+  const sync = events.find((event) => event.name === "j407-trace-sync");
+  if (!sync) return keys.map((key) => ({ index: key.index, events: ["no sync mark in trace"] }));
+  const offsetMs = sync.ts / 1000 - syncAt;
+  return keys.map((key) => {
+    const from = key.startMs + offsetMs;
+    const to = key.endMs + offsetMs;
+    const hits = events.filter((event) => event.ph === "X" && (event.dur ?? 0) >= 2000 &&
+      event.ts / 1000 < to && (event.ts + (event.dur ?? 0)) / 1000 > from);
+    return { index: key.index, events: hits.map((event) => `${event.name}:${round((event.dur ?? 0) / 1000)}`) };
+  });
+}
+
+/** One node of a V8 sampling heap profile: the function and the bytes it allocated itself. */
+interface HeapNode {
+  callFrame: { functionName: string; url: string; lineNumber: number; columnNumber: number };
+  selfSize: number;
+  children: HeapNode[];
+}
+
+/**
+ * The `count` functions that allocated the most during a sampling heap profile, as KiB per second, plus the total.
+ * Allocation by the same function at the same place in the bundle is summed across call paths.
+ */
+function topAllocators(head: HeapNode, seconds: number, count: number): Array<{ where: string; kibPerSecond: number }> {
+  const bySite = new Map<string, number>();
+  let total = 0;
+  const visit = (node: HeapNode): void => {
+    const { functionName, url, lineNumber, columnNumber } = node.callFrame;
+    const where = `${functionName || "(anonymous)"}@${url.split("/").pop() ?? ""}:${lineNumber + 1}:${columnNumber + 1}`;
+    bySite.set(where, (bySite.get(where) ?? 0) + node.selfSize);
+    total += node.selfSize;
+    for (const child of node.children) visit(child);
+  };
+  visit(head);
+  const perSecond = (bytes: number): number => round(bytes / 1024 / seconds);
+  return [{ where: "TOTAL", kibPerSecond: perSecond(total) },
+    ...[...bySite].sort((left, right) => right[1] - left[1]).slice(0, count)
+      .map(([where, bytes]) => ({ where, kibPerSecond: perSecond(bytes) }))];
+}
+
+/** Rounds to 0.1 ms for compact METRIC lines. */
+function round(value: number): number {
+  return Math.round(value * 10) / 10;
 }
 
 function readResumeDuration(report: string | null): number {
