@@ -993,9 +993,16 @@ export class Wizard {
     return address.value;
   }
 
+  /**
+   * Marks a request in flight: every foot button is disabled, so a second click cannot send a second request,
+   * and the primary one says it is working (`aria-busy`) for assistive tech and for specs.
+   */
   private setBusy(busy: boolean): void {
     this.busy = busy;
-    for (const button of this.foot.querySelectorAll<HTMLButtonElement>("button")) button.disabled = busy;
+    for (const button of this.foot.querySelectorAll<HTMLButtonElement>("button")) {
+      button.disabled = busy;
+      if (button.dataset.button === "primary") button.setAttribute("aria-busy", String(busy));
+    }
   }
 
   private renderInstall(page: HTMLElement): void {
