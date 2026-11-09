@@ -2,7 +2,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { hostname } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { CLOSE_SESSION_GONE, encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
@@ -11,6 +10,7 @@ import { QueryReplies } from "./query-replies-double";
 import { terminalFixtures } from "./terminal-fixtures";
 import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
 import { serveSetup } from "./setup-double";
+import { DOUBLE_HOSTNAME } from "./double-hostname";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { renameDataset } from "../docs-dataset";
@@ -776,7 +776,7 @@ async function authAction(
       if (unlockPending) return sendJson(response, 401, { error: "authorization failed" });
     case "unlock-session":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
-      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: DOCS_DATASET ? "home-server" : hostname() });
+      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: DOCS_DATASET ? "home-server" : DOUBLE_HOSTNAME });
     case "setup-start": {
       const username = body.username;
       const suppliedDisplayName = body.display_name;

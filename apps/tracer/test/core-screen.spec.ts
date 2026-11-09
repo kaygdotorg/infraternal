@@ -1,7 +1,7 @@
 /** Exercises the authenticated core screen and saves the requested production-build views. */
 import { tracerEvidencePath } from "./evidence-path";
+import { DOUBLE_HOSTNAME } from "./double-hostname";
 import { mkdir, readFile } from "node:fs/promises";
-import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
 import { contrastRatio } from "../../../packages/ui/src/color";
@@ -178,7 +178,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await page.goto("/?mock=1&theme=paper&bg=mesh");
   await waitForAttached(page);
   await expect(page.locator("#terminal-host").locator("xpath=..")).toHaveClass(/pane-card/);
-  await expect(page.locator("#tree .bm-sec[data-id='current-host']")).toHaveAttribute("aria-label", hostname());
+  await expect(page.locator("#tree .bm-sec[data-id='current-host']")).toHaveAttribute("aria-label", DOUBLE_HOSTNAME);
   await expect(page.locator("#tree .bm-sec")).toHaveCount(1);
   await expect(page.locator("#tree .bm-leaf:not(:disabled)")).toHaveCount(1);
   await expect(page.locator("#tree .bm-leaf:disabled")).toHaveCount(0);
