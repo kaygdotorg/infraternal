@@ -117,7 +117,7 @@ test.describe("the Themes window", () => {
     await open(page);
     // The controls, in the owner's order (D338); the Name of a theme the person made sits above them and is closed for a built-in theme.
     const heads = await page.locator(`${WINDOW} .ui-sp > section > .ui-ts-title`).allTextContents();
-    expect(heads).toEqual(["UI size", "Colour", "Backgrounds", "Windows", "Fonts"]);
+    expect(heads).toEqual(["UI size", "Colour", "Backgrounds", "Windows", "Fonts", "Interface font"]);
     const windows = page.locator(`${WINDOW} section:has(> .ui-ts-title:text-is("Windows"))`);
     await windows.scrollIntoViewIfNeeded();
     const labels = await windows.locator(".cl-field-label").allTextContents();
