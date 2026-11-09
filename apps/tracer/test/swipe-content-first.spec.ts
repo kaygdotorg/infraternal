@@ -97,8 +97,9 @@ test.describe("phone: touch", () => {
     const page = await open(context);
     const box = (await page.locator(`${PAGE} .dr-scroll`).boundingBox())!;
     const index = await stopIndex(page);
-    await twoFingers(page, context, box.x + box.width / 2, box.y + box.height / 2, -240);
-    await expect.poll(() => stopIndex(page)).toBe(index + 1);
+    // The page is the last window of the view, so the canvas can only move back: drag the content right.
+    await twoFingers(page, context, box.x + box.width / 2, box.y + box.height / 2, 240);
+    await expect.poll(() => stopIndex(page)).toBe(index - 1);
     await page.screenshot({ path: `${OUT}/phone-two-fingers.png` });
   });
 });
@@ -127,7 +128,7 @@ test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
     // The same swipe over the pill (chrome) is the canvas's.
     const pill = (await page.locator(`${PAGE} .ui-window-pill`).boundingBox())!;
     await page.mouse.move(pill.x + pill.width / 2, pill.y + pill.height / 2);
-    await swipe(page, 60, 0);
+    await swipe(page, -60, 0); // the page is the view's last window: only the previous one can be reached
     await expect.poll(() => stopIndex(page), "over chrome a sideways swipe moves to the neighbouring window").not.toBe(index);
     await page.screenshot({ path: `${OUT}/desktop-swipe-chrome.png` });
   });
@@ -140,7 +141,7 @@ test.describe("desktop: trackpad, Magic Mouse and mouse", () => {
     const index = await stopIndex(page);
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.keyboard.down(CANVAS_WHEEL_MODIFIER);
-    await page.mouse.wheel(0, 300); // an ordinary mouse wheel only has a vertical axis
+    await page.mouse.wheel(0, -300); // (the previous window: this is the last one) an ordinary mouse wheel only has a vertical axis
     await page.keyboard.up(CANVAS_WHEEL_MODIFIER);
     await expect.poll(() => stopIndex(page), "modifier + wheel moves the canvas").not.toBe(index);
     await page.waitForTimeout(600);
