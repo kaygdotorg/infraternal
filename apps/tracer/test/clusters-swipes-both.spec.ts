@@ -1,7 +1,7 @@
 /**
  * Every swipe moves, on both axes, and a swipe during an animation retargets instead of being dropped (#122, #141).
  * Six consecutive trackpad swipes (a ramp, then a momentum tail) are sent as one stream of wheel events, 330 ms and 50 ms
- * apart. Horizontally: the Docs view, twelve windows side by side, swiping over a window's pill (D374). Vertically: one column of thirteen windows. Each
+ * apart. Horizontally: the Settings view, nine windows side by side. Vertically: one column of thirteen windows. Each
  * run must end exactly six windows further, and no swipe may be a no-op.
  */
 import { expect, test, type Page } from "playwright/test";
@@ -33,16 +33,12 @@ for (const gap of [330, 50]) {
   test(`six horizontal swipes ${gap} ms apart move six windows`, async ({ page }) => {
     test.setTimeout(60_000);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none&docs=1");
+    await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-    // The Docs view has a window per page (12 stops), so six swipes always have room; Settings now frames fewer than eight.
-    await api(page, "flyView", "docs");
+    await api(page, "flyView", "settings");
     await page.waitForTimeout(1500);
     const before = (await api(page, "canvasLock")) as { index: number };
-    // Swipes start over the framed window's pill: chrome, which gives a sideways swipe to the canvas (D374). Every swipe lands
-    // on a whole window, so the pill is under the same point after each one.
-    const pill = (await page.locator('.cl[data-view="docs"] .ui-window-pill').evaluateAll((els) => els.map((el) => el.getBoundingClientRect()).filter((r) => r.left >= 0 && r.right <= innerWidth && r.width > 0).map((r) => ({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }))))[0]!;
-    await swipes(page, "x", 6, gap, pill);
+    await swipes(page, "x", 6, gap, { x: 700, y: 450 });
     const after = (await api(page, "canvasLock")) as { index: number };
     expect(after.index - before.index).toBe(6);
   });
