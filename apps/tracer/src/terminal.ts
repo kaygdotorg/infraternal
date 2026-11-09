@@ -156,8 +156,6 @@ export interface TerminalConfig {
   shouldFocusOnOpen?: () => boolean;
   /** Readable label for refusal guidance; hostId remains the routing authority. */
   hostName?: string;
-  /** The page's shared toast, used for remote-copy notices so they sit where every other notice does; a private one is made without it. */
-  toast?: ToastController;
   host: HTMLElement;
   /** Stage that follows the visual viewport when iOS opens its on-screen keyboard. */
   screen?: HTMLElement;
@@ -359,7 +357,7 @@ export class TerminalClient {
   private terminalQueries: TerminalQueries | undefined;
   /** Reads clipboard writes (OSC 52) out of live output; replayed output goes through it without acting (#440). */
   private readonly clipboardWrites = new Osc52Scanner();
-  /** The notice surface for remote copies: the shared one from the config, or a private one made on first use (then disposed with this client). */
+  /** This window's own notice surface for remote copies, made on first use and disposed with the client. */
   private remoteCopyNotice: ToastController | undefined;
   /** Identifies this window's remote-copy notice, so two windows' notices stay separate on the shared toast. */
   private readonly remoteCopyKey = `remote-copy-${++remoteCopyCount}`;
@@ -989,7 +987,7 @@ export class TerminalClient {
     window.visualViewport?.removeEventListener("resize", this.onViewportChange);
     window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
     this.inputResendNotice?.dispose();
-    if (this.config.toast) this.remoteCopyNotice?.dismiss(this.remoteCopyKey); else this.remoteCopyNotice?.dispose();
+    this.remoteCopyNotice?.dispose();
     this.clipboardWrites.reset();
     this.inputQueue.clear();
     this.retainedInput?.fill(0);
@@ -1552,10 +1550,16 @@ export class TerminalClient {
     return document.visibilityState === "visible" && this.config.host.contains(document.activeElement);
   }
 
-  /** Shows a remote-copy notice on the shared toast (or a private one), under this window's own key. */
+  /**
+   * Shows a remote-copy notice in this window, under this window's own key. It rides the edge of the window that is
+   * farther from the cursor, so it never covers the line the person is typing on: the bottom edge while the cursor is
+   * in the top half, the top edge otherwise.
+   */
   private showCopyNotice(notice: Omit<ToastMessage, "key">): void {
     if (this.closed) return;
-    this.remoteCopyNotice ??= this.config.toast ?? mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    this.remoteCopyNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    const cursorRow = this.terminal.buffer.active.cursorY;
+    this.remoteCopyNotice.setEdge(cursorRow >= this.terminal.rows / 2 ? "top" : "bottom");
     this.remoteCopyNotice.show({ ...notice, key: this.remoteCopyKey });
   }
 
@@ -1574,12 +1578,15 @@ export class TerminalClient {
     });
   }
 
-  /** Holds `text` behind a "Copy" action for 15 seconds. The message is short enough for one line on a phone. */
+  /**
+   * Holds `text` behind a "Copy" action for 15 seconds. The message names the window by its host ("From build-01"),
+   * cut to 11 characters, so it stays on one line beside the action on a phone.
+   */
   private offerCopy(text: string): void {
     const name = this.config.hostName?.trim();
-    const from = name ? (name.length > 16 ? `${name.slice(0, 15)}…` : name) : undefined;
+    const from = name ? (name.length > 11 ? `${name.slice(0, 11)}…` : name) : undefined;
     this.showCopyNotice({
-      message: from ? `Text to copy from ${from}` : "Text to copy",
+      message: from ? `From ${from}` : "Text to copy",
       icon: CLIPBOARD,
       duration: 15000,
       dismissible: true,

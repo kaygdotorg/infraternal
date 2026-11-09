@@ -608,7 +608,6 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     const { TerminalClient } = await import("./terminal");
     const client = await TerminalClient.open({
       host: screen.terminalHost,
-      toast: screen.toast,
       screen: screen.stage,
       status: screen.status,
       theme: screen.theme(),
