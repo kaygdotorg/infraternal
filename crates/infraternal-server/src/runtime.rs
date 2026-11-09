@@ -1146,6 +1146,11 @@ fn set_private_file(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// D379 slice 1: the rusqlite runner must accept what this module's sqlx path built.
+#[cfg(test)]
+#[path = "runtime_rusqlite_compat_tests.rs"]
+mod rusqlite_compat_tests;
+
 #[cfg(test)]
 mod tests {
     //! Verifies startup storage, setup-token socket lifecycle, and proxy validation with local fixtures.
