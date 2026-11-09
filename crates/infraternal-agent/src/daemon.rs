@@ -1114,6 +1114,18 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 reply(&control, Message::Result(stream, call_id, false, OpenRefusal::Invalid.json()?))?;
                             }
                         }
+                        // A root upgrade (D376, #399): only from the server's control
+                        // stream, outside the one-at-a-time plugin worker, because an
+                        // elevation takes seconds and the relay carries the payload.
+                        #[cfg(all(feature = "remote", target_os = "linux"))]
+                        Frame::Call {call_id, action_id, input_json} if !SESSION_ONLY && stream == 0 && crate::privilege_agent::ACTIONS.contains(&action_id) => {
+                            if input_json.len() > 2 * 1024 * 1024 || renewals.len() >= 4 {
+                                reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;
+                            } else {
+                                let action = action_id.to_owned(); let state = state.clone(); let input = input_json.to_vec();
+                                renewals.spawn(async move { (call_id, crate::privilege_agent::execute(&action, &input, &state).await) });
+                            }
+                        }
                         Frame::Call {call_id, action_id: "terminal.startup", input_json} if !SESSION_ONLY && plugins.is_some() && stream == 0 => {
                             if input_json.len() > 8192 || renewals.len() >= 4 {
                                 reply(&control, Message::Result(0, call_id, false, b"{}".to_vec()))?;

@@ -30,6 +30,9 @@ pub mod logins;
 mod native_dispatch;
 pub mod plugin_control;
 pub mod plugins;
+/// The rootless infraternal agent's control actions for its own root upgrade (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_agent;
 /// Becoming root once with the person's password for a root upgrade (D376).
 #[cfg(all(feature = "remote", target_os = "linux"))]
 pub mod privilege_elevate;
