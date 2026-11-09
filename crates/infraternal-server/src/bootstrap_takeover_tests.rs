@@ -163,7 +163,7 @@ async fn a_root_add_offers_take_over_and_a_failed_install_puts_the_old_one_back(
     let f = fixture(true).await;
     let old = Uuid::new_v4();
     let terminal = format!(
-        "{},726f6f74,62617368,1792195200,{}",
+        "{},726f6f74,62617368,1792195200,7074732f30,0,session-8.scope,{}",
         "2".repeat(32),
         "a".repeat(64)
     );
