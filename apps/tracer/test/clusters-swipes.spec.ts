@@ -1,5 +1,5 @@
 /**
- * Quick swipes are never swallowed (#122). In the Settings view with nine windows side by side, six trackpad swipes in
+ * Quick swipes are never swallowed (#122). In the Docs view with twelve windows side by side, six trackpad swipes in
  * two seconds land six windows further, with and without momentum events: a swipe is a run of wheel events that ramps
  * up and, with momentum, tails off for a few hundred milliseconds. The next swipe may start inside that tail.
  */
@@ -33,10 +33,11 @@ for (const momentum of [false, true]) {
   test(`six swipes in 2 s land six windows further ${momentum ? "with" : "without"} momentum events`, async ({ page }) => {
     test.setTimeout(60_000);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
+    await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none&docs=1");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     const api = (fn: string, ...args: unknown[]): Promise<unknown> => page.evaluate(([f, a]) => ((window as unknown as { __tracerClusters: Record<string, (...x: unknown[]) => unknown> }).__tracerClusters[f as string] as (...x: unknown[]) => unknown)(...(a as unknown[])), [fn, args] as const);
-    await api("flyView", "settings");
+    // The Docs view has a window per page (12 stops), so six swipes always have room; Settings now frames fewer than eight.
+    await api("flyView", "docs");
     await page.waitForTimeout(1500);
     const lock = (await api("canvasLock")) as { on: boolean; index: number; stops: number };
     expect(lock.on).toBe(true);
