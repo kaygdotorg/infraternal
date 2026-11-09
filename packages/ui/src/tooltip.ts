@@ -32,6 +32,7 @@
  * updates an open tooltip through `refreshTip`.
  */
 import { attachGlassBed } from "./glass-bed";
+import { markMotion } from "./input-source";
 
 const DELAY = 400, WARM = 300, GRACE = 80, LONG_PRESS = 500, SLOP = 10;
 const POP = 160, SWAP = 140, SHIFT = 10, TRAVEL = 200, OUT = 100;
@@ -69,7 +70,7 @@ const STYLE = `
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
 .ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
   border-radius: 0.875rem; opacity: 0; transform: scale(0.96); pointer-events: none;
-  transition: opacity 150ms ease-out, transform 180ms var(--ease-out); }
+  transition: opacity calc(150ms * var(--ui-motion-scale, 1)) ease-out, transform calc(180ms * var(--ui-motion-scale, 1)) var(--ease-out); }
 .ui-confirm-tip[hidden] { display: none !important; }
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
 .ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 0.625rem; height: 0.625rem; margin-left: -0.3125rem; background: inherit;
@@ -344,6 +345,7 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
       cleanup();
       anchor.setAttribute("aria-expanded", "false");
       anchor.removeAttribute("aria-controls");
+      markMotion(tip);
       tip.dataset.open = "false";
       bed.setOpen(false);
       if (restoreFocus) {
@@ -366,6 +368,8 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   place();
   requestAnimationFrame(() => {
     if (closing || !tip.isConnected) return;
+    // Opened with a key (palette, then Enter on a row that asks): the question appears whole. Read here, where it flips (#427).
+    markMotion(tip);
     tip.dataset.open = "true";
     bed.setOpen(true);
     cancel.focus({ preventScroll: true });
