@@ -163,6 +163,7 @@ export function renderThemeEditor(pane: HTMLElement): () => void {
   let lastGradient = isSolid(store.selected().background) ? DEFAULT_GRADIENT : store.selected().background;
   const tabs = createCapsuleTabs([{ id: "solid", label: "Solid" }, { id: "gradient", label: "Gradient" }], kindOf(store.selected().background),
     (id) => store.edit({ background: id === "solid" ? lastSolid : lastGradient }), "Background");
+  tabs.root.classList.add("cl-bg-tabs");
   disposers.push(() => tabs.dispose());
   // A swatch is a picture and a name for assistive technology and the shared warm tooltip: no text on it. Custom is marked by a dashed
   // ring and a small pen, so the person can tell which one is theirs.

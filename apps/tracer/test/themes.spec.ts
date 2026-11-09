@@ -253,6 +253,33 @@ test.describe("the Colour picker on a phone", () => {
   });
 });
 
+test.describe("custom background controls on a phone", () => {
+  test.use({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true });
+
+  test("Solid, Gradient, Add and Remove have 44 px touch targets", async ({ page }) => {
+    await open(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const tabs = page.locator(`${WINDOW} [role="tablist"][aria-label="Background"] .ui-tab`);
+    await expect(tabs).toHaveCount(2);
+    await tabs.filter({ hasText: "Gradient" }).click();
+    const gradientBlock = page.locator(`${WINDOW} .cl-bg-block`).nth(1);
+    await gradientBlock.locator('.cl-bg-swatch[data-custom]').click();
+    const add = gradientBlock.locator('button[aria-label="Add a colour"]');
+    const remove = gradientBlock.locator('button[aria-label="Remove the last colour"]');
+    await expect(add).toBeVisible();
+    await expect(remove).toBeVisible();
+
+    const controls = [
+      ...await tabs.evaluateAll((items) => items.map((item) => ({ label: item.textContent?.trim() ?? "tab", rect: item.getBoundingClientRect().toJSON() }))),
+      ...await Promise.all([add, remove].map(async (item) => ({ label: await item.getAttribute("aria-label"), rect: await item.boundingBox() }))),
+    ];
+    for (const control of controls) {
+      expect(control.rect?.width ?? 0, `${control.label} touch target width`).toBeGreaterThanOrEqual(44);
+      expect(control.rect?.height ?? 0, `${control.label} touch target height`).toBeGreaterThanOrEqual(44);
+    }
+  });
+});
+
 // ---- in the product: the look is the account's, in the canvas document (D322, D178, D180) ----------------------------------------------------------------
 // Against the real layout store (`layout=server`) and the test double's server, which applies the same edits as the real one: a look chosen on one device is the
 // look of the account on every other; the browser keeps only a first-paint cache of the selected theme.

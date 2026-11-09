@@ -463,6 +463,8 @@
 .cl-bg-stop::-webkit-color-swatch-wrapper { padding: 0; }
 .cl-bg-stop::-webkit-color-swatch { border: 1px solid rgb(128 128 128 / 0.4); border-radius: 0.5rem; }
 .cl-bg-act:disabled { opacity: 0.35; pointer-events: none; }
+/* Keep the visible capsule and icon compact while giving coarse-pointer controls a full touch target. */
+@media (pointer: coarse) { .cl-bg-tabs .ui-tab { min-height: 44px; } .cl-bg-act { min-width: 44px; min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) { .cl-glide { transition: opacity 160ms ease; } .cl-bg-swatch { transition: none; } }
 
 /* The Colour list (themes/editor.on-demand.ts, D338): the product's option row with two columns of its own. The name is one
