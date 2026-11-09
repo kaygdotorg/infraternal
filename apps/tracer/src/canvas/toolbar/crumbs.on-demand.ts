@@ -33,6 +33,7 @@ const ease = (): string => getComputedStyle(document.documentElement).getPropert
 const CHEVRON = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.chevron}</svg>`;
 const TICK = '<svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>';
 
+/** Builds the breadcrumb pills (view, window, session) in the top bar and returns their controls; a name changed by a key shows at once (#427). */
 export function createCrumbs(cx: Ctx): Crumbs {
   const { stage, state, camera, signal, views } = cx;
   const outline = cx.adapters.settings.outline!;
