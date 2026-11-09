@@ -421,6 +421,16 @@ function stopBackdrop(instant = false): void {
   }, 260);
 }
 
+/**
+ * Test double only: tells a spec how a terminal that finished opening after its session ended was dealt with. Its absence cannot
+ * be observed any other way, so a spec waiting for "nothing happened" waits for this instead of sleeping. Sets
+ * `data-late-terminal` on the root element to "cancelled" (nothing was built: the right outcome), "disposed" (a client was built
+ * and closed at once: the backstop) or "failed". The product itself never reads it.
+ */
+function markLateTerminal(mockMode: boolean, how: "cancelled" | "disposed" | "failed"): void {
+  if (mockMode) document.documentElement.dataset.lateTerminal = how;
+}
+
 /** Opens the terminal screen for the signed-in person, reusing the startup snapshot, and publishes the test double in mock mode. */
 async function showTerminal(knownSession?: DrawingIdentity, instant = false): Promise<void> {
   // Startup already authenticated this snapshot. Reuse it rather than adding
@@ -626,14 +636,16 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       onInputActivity: () => screen?.onInputActivity(),
       onRecoveryPending: (readyAt) => { recoveryNoticeGeneration++; screen?.setRecoveryPending(readyAt); },
       onRecoveryCompleted: (message) => { if (generation === sessionGeneration) endSession(message); },
+      // Nothing is constructed, and so no connection opened, for a session that has already ended (sign-out while loading).
+      isCurrent: () => generation === sessionGeneration,
       traceMockServer: probeMode && mockMode,
       ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
       ...(initialSessionId ? { initialSessionId } : {}),
     });
-    // The person may have signed out (or the session ended) while the terminal was still connecting. endSession() could not
+    // Backstop for a session that ended during the last step of the open, after `isCurrent` was asked: endSession() could not
     // dispose a client it did not have yet, so a late one is closed here instead of being kept, bound to a dead screen and
     // left connected to the host after sign-out.
-    if (generation !== sessionGeneration) { client.dispose(); return; }
+    if (generation !== sessionGeneration) { client.dispose(); markLateTerminal(mockMode, "disposed"); return; }
     currentTerminal = client;
     screen.bindTerminal(client);
     if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
@@ -676,6 +688,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       };
     }
   } catch (error: unknown) {
+    // A terminal that was cancelled, or that failed after the session ended, has nothing to tell the person on the sign-in screen.
+    if (generation !== sessionGeneration) { markLateTerminal(mockMode, error instanceof Error && error.name === "TerminalOpenCancelled" ? "cancelled" : "failed"); return; }
     const status = document.querySelector<HTMLElement>("#connection-status");
     if (status) status.textContent = safeMessage(error);
   }
