@@ -1,6 +1,7 @@
 /** Shared access, input and resume scenario; performance budgets are enforced only by the perf-VM suite (#314). */
 import { writeFile } from "node:fs/promises";
 import { expect as baseExpect, test, type Page, type TestInfo } from "playwright/test";
+import { d375Row, FRAME_MS, RECONNECT_ALLOWANCE_MS, roundTripBoundMs } from "./latency-targets";
 
 // A fresh proxied document loads assets before access is ready; its readiness wait is independent of speed budgets.
 const expect = baseExpect.configure({ timeout: 30_000 });
@@ -360,14 +361,14 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   expect(probeState.accepted_input_bytes).toBe(probeCount);
   expect(probeState.output_sequence).toBe(String(probeCount));
   await expect(page.locator("#probe-results")).toContainText(`Painted echoes: ${probeCount} / ${probeCount}`);
-  await page.locator("#probe-drop").click();
-  await expect.poll(async () => (await page.locator("#probe-results").textContent()) ?? "")
-    .toMatch(/Time to resume: [0-9.]+ ms/);
-  const resumeSamples = [readResumeDuration(await page.locator("#probe-results").textContent())];
-  const reconnectTrials = performanceSamples ? 20 : 1;
-  for (let attempt = 1; attempt < reconnectTrials; attempt += 1) {
+  // Each drop is a browser reconnect after a lost link: a new socket and the first-message resume, D267's "after a
+  // network change" row. The latency profile (INFRATERNAL_LATENCY_PROFILE=1) takes as many samples as the perf VM.
+  const reconnectTrials = performanceSamples || process.env.INFRATERNAL_LATENCY_PROFILE === "1" ? 20 : 1;
+  const resumeSamples: number[] = [];
+  const lastScreenSamples: number[] = [];
+  for (let attempt = 0; attempt < reconnectTrials; attempt += 1) {
     await expect(page.locator("#probe-drop")).toBeEnabled();
-    await page.locator("#probe-drop").click();
+    lastScreenSamples.push(await dropAndTimeLastScreen(page));
     await expect.poll(async () => (await page.locator("#probe-results").textContent()) ?? "")
       .toMatch(/Time to resume: [0-9.]+ ms/);
     resumeSamples.push(readResumeDuration(await page.locator("#probe-results").textContent()));
@@ -375,12 +376,18 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   const resumeSorted = resumeSamples.sort((left, right) => left - right);
   const resumeP50 = percentile(resumeSorted, 0.5);
   const resumeP99 = percentile(resumeSorted, 0.99);
-  const resumeBudgetMs = testRttMs * 2 + 300;
-  console.log(
-    `METRIC name=reconnect_resumed source=tracer-production-build n=${resumeSamples.length} ` +
-      `p50_ms=${resumeP50.toFixed(2)} p99_ms=${resumeP99.toFixed(2)} ` +
-      `budget_ms=${resumeBudgetMs} result=${resumeP99 <= resumeBudgetMs ? "PASS" : "FAIL"}`,
-  );
+  // D375/D267: four round trips (connect, TLS, upgrade, resume token) + 50 ms; "RTT x 2 + 300 ms" is retired.
+  const resumeBudgetMs = 4 * roundTripBoundMs(testRttMs) + RECONNECT_ALLOWANCE_MS;
+  console.log(d375Row({
+    key: "reconnect_network_change", source: "tracer-production-build", n: resumeSamples.length, value: resumeP99,
+    unit: "ms", target: resumeBudgetMs, extra: `p50_ms=${resumeP50.toFixed(2)} rtt_ms=${testRttMs}`,
+  }).line);
+  const lastScreenSorted = lastScreenSamples.sort((left, right) => left - right);
+  console.log(d375Row({
+    key: "reconnect_last_screen", source: "tracer-production-build", n: lastScreenSorted.length,
+    value: percentile(lastScreenSorted, 0.99), unit: "ms", target: FRAME_MS,
+    extra: `p50_ms=${percentile(lastScreenSorted, 0.5).toFixed(2)}`,
+  }).line);
   const probeReport = (await page.locator("#probe-results").textContent()) ?? "";
   console.log(`S1 probe result (${probeCount} keys)\n${probeReport}`);
   await testInfo.attach("tracer-probe-results.txt", {
@@ -415,8 +422,8 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   const predictedP50 = percentile(predictedMs, 0.5);
   const predictedP99 = percentile(predictedMs, 0.99);
   const predictedOverlayCount = keySamples.filter((sample) => sample.overlayVisible).length;
-  const profileJitterMs = testRttMs === 0 ? 0 : 30;
-  const echoBudgetMs = testRttMs + profileJitterMs + 34;
+  // D375: the real echo may take the round trip plus two 120 Hz frames.
+  const echoBudgetMs = roundTripBoundMs(testRttMs) + 2 * FRAME_MS;
   console.log(
     `METRIC name=keystroke_echo_confirmed_prediction_on source=tracer-production-build n=${keySamples.length} ` +
       `p50_ms=${confirmedP50.toFixed(2)} p99_ms=${confirmedP99.toFixed(2)} ` +
@@ -434,16 +441,17 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
       `result=${predictionCost.length > 0 && percentile(predictionCost, 0.99) <= 2 ? "PASS" : "FAIL"}`,
   );
   console.log(`METRIC name=keystroke_prediction_fallback_reasons source=tracer-production-build reasons=${JSON.stringify(fallbackReasons)} result=REPORT`);
-  console.log(
-    `METRIC name=keystroke_glyph_visible_prediction_on source=tracer-production-build n=${predictedMs.length} ` +
-      `overlay_n=${predictedOverlayCount} fallback_n=${predictionFallbackCount} ` +
-      `p50_ms=${predictedP50.toFixed(2)} p99_ms=${predictedP99.toFixed(2)} budget_ms=17 ` +
-      `result=${predictedP99 <= 17 ? "PASS" : "FAIL"}`,
-  );
+  // D375 row: every key counts, so a key prediction declined shows up as its (slow) real echo.
+  console.log(d375Row({
+    key: "predicted_glyph", source: "tracer-production-build", n: predictedMs.length, value: predictedP99, unit: "ms",
+    target: FRAME_MS,
+    extra: `p50_ms=${predictedP50.toFixed(2)} overlay_n=${predictedOverlayCount} fallback_n=${predictionFallbackCount}`,
+  }).line);
   console.log(
     `METRIC name=keystroke_predicted_glyph_visible_prediction_on source=tracer-production-build n=${predictedSamples.length} ` +
-      `p50_ms=${percentile(predictedSamples, 0.5).toFixed(2)} p99_ms=${percentile(predictedSamples, 0.99).toFixed(2)} budget_ms=17 ` +
-      `result=${predictedSamples.length > 0 && percentile(predictedSamples, 0.99) <= 17 ? "PASS" : "FAIL"}`,
+      `p50_ms=${percentile(predictedSamples, 0.5).toFixed(2)} p99_ms=${percentile(predictedSamples, 0.99).toFixed(2)} ` +
+      `budget_ms=${FRAME_MS.toFixed(2)} ` +
+      `result=${predictedSamples.length > 0 && percentile(predictedSamples, 0.99) <= FRAME_MS ? "PASS" : "FAIL"}`,
   );
   console.log(
     `METRIC name=keystroke_browser_cpu_prediction_on source=tracer-production-build n=${cpuOnMs.length} ` +
@@ -499,10 +507,11 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   const offConfirmed = offSamples.map((sample) => sample.confirmed).sort((left, right) => left - right);
   const offVisible = offSamples.map((sample) => sample.painted).sort((left, right) => left - right);
   const cpuOff = offSamples.map((sample) => sample.cpu).sort((left, right) => left - right);
-  console.log(
-    `METRIC name=keystroke_glyph_visible_prediction_off source=tracer-production-build n=${offVisible.length} ` +
-      `p50_ms=${percentile(offVisible, 0.5).toFixed(2)} p99_ms=${percentile(offVisible, 0.99).toFixed(2)} budget_ms=17 result=REPORT`,
-  );
+  // D375 row: with prediction off, the letter appears only when the host's real echo is painted.
+  console.log(d375Row({
+    key: "real_echo", source: "tracer-production-build", n: offVisible.length, value: percentile(offVisible, 0.99),
+    unit: "ms", target: echoBudgetMs, extra: `p50_ms=${percentile(offVisible, 0.5).toFixed(2)} rtt_ms=${testRttMs}`,
+  }).line);
   console.log(
     `METRIC name=keystroke_echo_confirmed_prediction_off source=tracer-production-build n=${offConfirmed.length} ` +
       `p50_ms=${percentile(offConfirmed, 0.5).toFixed(2)} p99_ms=${percentile(offConfirmed, 0.99).toFixed(2)} ` +
@@ -539,6 +548,43 @@ async function instrumentPasskeyGet(page: import("playwright/test").Page): Promi
 }
 
 /** Parse the exact duration the production probe reports from a completed reconnect. */
+/**
+ * Drops the terminal's socket through the probe and times how long until a frame shows the last screen while the link
+ * is down (D375 "reconnect, last screen": 8.3 ms, drawn from the device's own copy).
+ *
+ * The clock starts at the click and stops at the first animation frame in which the terminal reports the link down,
+ * still holds exactly the text it held before the drop, and its canvas is visible. The drop itself runs the probe's
+ * normal handler, so the resume stopwatch it reports is unaffected. Rejects after 5 s if no such frame happens.
+ */
+async function dropAndTimeLastScreen(page: Page): Promise<number> {
+  return page.evaluate(() => new Promise<number>((resolve, reject) => {
+    const double = window.__tracerTestDouble;
+    const button = document.querySelector<HTMLButtonElement>("#probe-drop");
+    const canvas = document.querySelector<HTMLCanvasElement>("#terminal-screen canvas");
+    const before = double?.screenText() ?? "";
+    if (!double || !button || !canvas || before.trim() === "") {
+      reject(new Error("the probe drop, the terminal canvas or its screen is unavailable"));
+      return;
+    }
+    const started = performance.now();
+    button.click();
+    const shown = (): boolean => {
+      const style = getComputedStyle(canvas);
+      return canvas.isConnected && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0;
+    };
+    const check = (at: number): void => {
+      if (!double.isConnected() && double.screenText() === before && shown()) {
+        resolve(Math.max(0, at - started));
+      } else if (performance.now() - started > 5_000) {
+        reject(new Error("no frame showed the last screen while the link was down"));
+      } else {
+        requestAnimationFrame(check);
+      }
+    };
+    requestAnimationFrame(check);
+  }));
+}
+
 function readResumeDuration(report: string | null): number {
   const match = /Time to resume: ([\d.]+) ms/.exec(report ?? "");
   if (!match) throw new Error("resume probe did not report a completed duration");

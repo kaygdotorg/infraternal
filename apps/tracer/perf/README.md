@@ -14,11 +14,12 @@ perf-run --out "$HOME/.cache/codex-scratch/browser-budgets/evidence" -- \
   bun x playwright test -c playwright.perf.config.ts
 ```
 
-The moved thresholds remain unchanged:
+The thresholds (D375 rewrote the latency ones at 120 Hz, one frame = 8.3 ms;
+see `docs/PROCESS.md` §6):
 
-- terminal: returning sign-in p99 ≤ 5000 ms, predicted paint p99 ≤ 17 ms,
-  resume p99 within the original RTT-derived budget, access render upper
-  bound < 1000 ms;
+- terminal: returning sign-in p99 ≤ 5000 ms, predicted paint p99 ≤ 8.3 ms,
+  reconnect after a dropped socket p99 ≤ 4 round trips + 50 ms (D267), access
+  render upper bound < 1000 ms;
 - renderer: prediction-on median 50 MB throughput ≥ 95% of prediction-off;
 - frame incident: injected 200 ms stall has worst interval > 190 ms, attributed
   script > 150 ms and heartbeat lateness > 100 ms;
