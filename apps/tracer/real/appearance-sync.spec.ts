@@ -695,6 +695,8 @@ test("legacy appearance values migrate once into the new account document", asyn
     const page = watchLayout(await context.newPage());
     await enrol(page, server); await settled(page);
     const accountId = await page.evaluate(async () => (await (await fetch("/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json()).user_id as string);
+    // `settled` can return before the seeded look is announced (600 ms), so wait for the account look itself.
+    await expect.poll(async () => (await cache(page)).canonical.look, { timeout: 30_000 }).toBeTruthy();
     const document = (await cache(page)).canonical;
     const look = document.look as unknown as {
       selected: string;
@@ -739,6 +741,8 @@ test("superseded appearance levels seed one fresh theme only when there is no sa
     });
     const page = watchLayout(await context.newPage());
     await enrol(page, server); await settled(page);
+    // `settled` can return before the seeded look is announced (600 ms), so wait for the account look itself.
+    await expect.poll(async () => (await cache(page)).canonical.look, { timeout: 30_000 }).toBeTruthy();
     const document = (await cache(page)).canonical;
     const look = document.look as unknown as {
       selected: string;
