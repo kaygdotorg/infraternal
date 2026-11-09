@@ -19,6 +19,7 @@ const target = process.env["NIGHTLY_JSONL"];
 /** Longest error text kept per test; the nightly cuts it again. */
 const maxError = 3000;
 
+/** The reporter class Playwright loads (`--reporter=./nightly-reporter.ts`): one JSON line per finished test, written as it ends. */
 export default class NightlyJsonl implements Reporter {
   private root = "";
 
