@@ -33,8 +33,12 @@
  * there is no window of frames after the key to get wrong. The root also carries `data-input="keyboard" | "pointer"`, for
  * inspection and tests; no style depends on it.
  *
- * Before any input has happened, and for changes that no key caused (a timer, a network event), the source is `"pointer"`,
- * so those keep their animation.
+ * What the source means for changes that are not a direct answer to a press. It is the *last trusted key or pointer press*, nothing
+ * more, so a change that no press caused (a timer, a network message, a camera flight started by data arriving) and an activation
+ * that sends a click without a trusted pointerdown (VoiceOver, Voice Control, a script's `.click()`) simply follow it: before any
+ * key has been pressed they animate; after one, until the next click, tap or wheel, they are instant. That errs toward instant,
+ * never toward a swallowed press or a half-played animation. Hover moves nothing here: only a press or a wheel returns the source to
+ * pointer.
  */
 
 /** The two kinds of input that can open or close a surface. */
