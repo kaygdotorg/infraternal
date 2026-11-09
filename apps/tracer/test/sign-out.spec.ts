@@ -177,15 +177,22 @@ test("Settings, Account has the row; it asks, then signs out", async ({ page }) 
   await reloadStaysSignedOut(page);
 });
 
-test("signing out while the terminal is still connecting leaves no terminal behind", async ({ page }) => {
+test("signing out while the terminal is still connecting opens no connection afterwards and leaves no terminal behind", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   // The terminal cannot finish opening until its WebAssembly module arrives. Hold that one request until the person has
   // signed out, then let it through: the terminal client completes AFTER sign-out, the order a slow link produces.
   let release!: () => void;
   const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
   await page.route(/\.wasm$/, async (route) => { await gate; await route.continue(); });
-  let closedAfterRelease = 0, released = false;
-  page.on("websocket", (socket) => { socket.on("close", () => { if (released) closedAfterRelease++; }); });
+  // Count every WebSocket the page constructs, in the page itself: the constructor call is the event, so a socket whose handshake
+  // is refused (no cookie to present after sign-out) or that dies young still counts. "No connection after sign-out" is the property.
+  await page.addInitScript(() => {
+    const counter = window as unknown as { __wsConstructed: number };
+    counter.__wsConstructed = 0;
+    const Native = window.WebSocket;
+    window.WebSocket = new Proxy(Native, { construct(target, args: [string | URL, (string | string[])?]) { counter.__wsConstructed++; return Reflect.construct(target, args); } });
+  });
+  const constructed = () => page.evaluate(() => (window as unknown as { __wsConstructed: number }).__wsConstructed);
   const live = trackSockets(page);
   const hook = () => page.evaluate(() => (window as unknown as { __tracerTestDouble?: unknown }).__tracerTestDouble !== undefined);
   await open(page);
@@ -195,12 +202,13 @@ test("signing out while the terminal is still connecting leaves no terminal behi
   await page.keyboard.press("Enter");
   await confirm(page).getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 10_000 });
-  released = true;
+  const atSignOut = await constructed();
   release();
-  // The late client either closes its own connection straight away or never connects at all (what it does depends on how far the
-  // sign-out got when the module arrived). Both are fine; what is not is a client that stays. Wait, up to a deadline, for the
-  // first close after the release, which a kept client also produces when it reconnects but never without having set its hook.
-  await expect.poll(() => closedAfterRelease, { timeout: 4_000 }).toBeGreaterThan(0).catch(() => undefined);
+  // The terminal is cancelled before it is built, and the page says so (a test double marker). Whether a built-and-closed client
+  // opens a socket before it dies depends on timing, so the marker is what the spec requires; the socket count, the open
+  // connections and the test hook are then checked as well.
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.lateTerminal ?? "none"), { timeout: 20_000, message: "the late terminal is cancelled before it is built" }).toBe("cancelled");
+  expect(await constructed(), "no WebSocket is constructed after sign-out").toBe(atSignOut);
   expect(await live(), "no connection is left open after sign-out").toBe(0);
   expect(await hook(), "no live terminal is left behind the sign-in screen").toBe(false);
 });
