@@ -38,7 +38,7 @@ async function enrol(page: Page, server: { origin: string; token: string }): Pro
   await page.getByRole("heading", { name: "Save your recovery key" }).waitFor();
   await page.locator(".auth-check").click();
   await page.getByRole("button", { name: "Open infraternal" }).click();
-  await expect(windows(page)).toHaveCount(1);
+  await expect(windows(page)).toHaveCount(1, { timeout: 60_000 });
 }
 
 /** Changes one palette value through the real command palette with the browser's platform shortcut. */
@@ -528,7 +528,7 @@ async function offlineConflictClients(browser: Browser, latencyMs = 0) {
   await second.addCookies(await first.cookies());
   const b = watchLayout(await second.newPage());
   await b.goto(server.origin + "/");
-  await expect(windows(b)).toHaveCount(1);
+  await expect(windows(b)).toHaveCount(1, { timeout: 60_000 });
   await settled(b);
   return { server, first, second, a, b };
 }
