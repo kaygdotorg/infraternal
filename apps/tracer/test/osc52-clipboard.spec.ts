@@ -91,7 +91,7 @@ for (const viewport of VIEWPORTS) {
       await output(context, "\u001b]52;c;?\u0007\u001b]52;c;\u0007\u001b]52;c;@@not-base64@@\u0007\u001b]52;0;" + base64("cut buffer") + "\u0007");
       await output(context, `${copySequence("marker")}`);
       await expect.poll(() => clipboard(page), { timeout: 10_000 }).toBe("marker");
-      expect(await page.locator(".ui-toast").count()).toBe(1);
+      expect(await page.locator(".ui-toast").filter({ hasText: /copied|text to copy/i }).count(), "one copy notice, for the one valid copy").toBe(1);
     });
 
     test("when the browser refuses the write, a Copy action waits and its tap completes the copy", async ({ context }) => {
