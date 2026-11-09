@@ -500,6 +500,12 @@ async fn send_live(
     }
 }
 
+/// Serves one admitted bootstrap socket until it closes, is revoked or expires.
+///
+/// Reads one client request at a time (start, retry, start-fresh, confirm-host-key, replay) and runs it
+/// to completion. While a host-key confirmation is looking up, a repeat of that same confirmation is
+/// dropped (see [`is_same_confirmation`]) and any other request gets the busy error, so neither can
+/// cancel the batch that owns the confirmation. Dropping the batch on return cancels its hosts.
 async fn run(
     socket: &mut WebSocket,
     api: Arc<Api>,

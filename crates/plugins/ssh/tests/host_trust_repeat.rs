@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: AGPL-3.0-only
 //! A repeated "trust this host key" for the same pending key must answer success, and a different key must not.
 //!
 //! The person's second or third click on "Trust and continue" (a double-click, or a slow screen) sends the same
@@ -8,6 +7,7 @@
 //! `ssh-keygen` are real.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+/// Shared scratch-directory helper for the SSH fixtures.
 mod common;
 use infraternal_plugin_ssh::{
     model::{Destination, Failure, FailureKind, MeshEvidence},
@@ -122,6 +122,7 @@ async fn observe(trust: &TrustedOpenSsh, destination: &Destination) -> (String, 
 }
 
 #[tokio::test]
+/// The same confirmation sent again, one after another, answers success and writes exactly one pin.
 async fn the_same_confirmation_repeated_answers_success_and_pins_once() {
     let scratch = common::scratch();
     let root = scratch.join(format!("repeat-{}", uuid::Uuid::new_v4().simple()));
@@ -148,6 +149,7 @@ async fn the_same_confirmation_repeated_answers_success_and_pins_once() {
 }
 
 #[tokio::test]
+/// Three identical confirmations that arrive together all answer success: they take turns, none loses the consumed challenge.
 async fn simultaneous_identical_confirmations_all_succeed() {
     let scratch = common::scratch();
     let root = scratch.join(format!("race-{}", uuid::Uuid::new_v4().simple()));
@@ -165,6 +167,7 @@ async fn simultaneous_identical_confirmations_all_succeed() {
 }
 
 #[tokio::test]
+/// A repeat is only for the exact key that was pinned: another key, another destination, a revoked sign-in or an unknown challenge stay refused.
 async fn a_repeat_with_another_key_or_revoked_authority_is_still_refused() {
     let scratch = common::scratch();
     let root = scratch.join(format!("other-{}", uuid::Uuid::new_v4().simple()));

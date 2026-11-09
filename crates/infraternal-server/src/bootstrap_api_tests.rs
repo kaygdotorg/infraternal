@@ -498,6 +498,7 @@ async fn confirmation_interrupt(component_off: bool) {
     );
 }
 
+/// A replay (or any different request) sent during a pending confirmation gets the busy error and keeps the batch alive.
 #[tokio::test]
 async fn a_client_request_during_a_pending_confirmation_keeps_the_batch() {
     // A well-formed request that arrives while a confirmation lookup is pending
@@ -506,6 +507,7 @@ async fn a_client_request_during_a_pending_confirmation_keeps_the_batch() {
     pending_confirmation_with(|_| serde_json::json!({"action":"replay","after":0}), true).await;
 }
 
+/// A repeat of the confirmation in flight (a double-click) gets no busy error: the first one's reply answers both.
 #[tokio::test]
 async fn an_identical_confirmation_during_a_pending_one_is_not_refused_as_busy() {
     // A double-click resends the very same confirmation while the first is still
