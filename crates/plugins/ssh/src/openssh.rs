@@ -445,7 +445,7 @@ impl SshSession for Session {
 /// (The master connection has no command status and matches on the line
 /// alone.) On exit 71 the fixed cause line names which staging check refused
 /// ([`crate::model::Refusal`]); the rest of stderr stays withheld.
-fn command_failure(stderr: &[u8], exit_status: Option<u8>) -> Failure {
+pub(crate) fn command_failure(stderr: &[u8], exit_status: Option<u8>) -> Failure {
     let mut failure = classify(stderr, false, MeshEvidence::default());
     if failure.kind == FailureKind::NoAccount && exit_status != Some(1) {
         failure = classify(b"", false, MeshEvidence::default());
@@ -461,7 +461,7 @@ fn command_failure(stderr: &[u8], exit_status: Option<u8>) -> Failure {
 }
 
 /// Keep remote stderr only for the trusted setup script families sent by this adapter.
-fn capture_setup_stderr(mut failure: Failure, script: &str, stderr: &[u8]) -> Failure {
+pub(crate) fn capture_setup_stderr(mut failure: Failure, script: &str, stderr: &[u8]) -> Failure {
     if script.starts_with("# INFRATERNAL_SETUP_STEPS_V1\n")
         || script.starts_with("# INFRATERNAL_TRANSFER_SETUP_V1\n")
     {

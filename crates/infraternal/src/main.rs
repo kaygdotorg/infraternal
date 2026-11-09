@@ -164,6 +164,11 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = ssh_internal::run_if_requested() {
         return result;
     }
+    // One install step of a root upgrade, bridged to the host's relay (D376).
+    #[cfg(feature = "ssh")]
+    if let Some(result) = infraternal_plugin_ssh::relay_session::run_if_requested() {
+        return result;
+    }
     #[cfg(all(feature = "session-payload", target_os = "linux"))]
     if shim_cli::PAYLOAD_ONLY {
         return shim_cli::payload_entry();

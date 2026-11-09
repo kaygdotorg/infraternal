@@ -97,7 +97,7 @@ pub const UNINSTALL: ActionDef = ActionDef {
     fresh_passkey: false,
 };
 /// The frames between the server and the root relay of a root upgrade (D376).
-#[cfg(feature = "transport")]
+/// Plain std, so the SSH plugin's relay adapter uses it without the transport.
 pub mod privilege_relay;
 /// Opening the one-use sealed password of a root upgrade (D274, D376).
 #[cfg(feature = "agent")]
