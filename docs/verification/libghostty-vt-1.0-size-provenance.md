@@ -79,10 +79,13 @@ checkouts were clean. The common inputs have identical hashes in both builds:
 | `x86_64-unknown-linux-musl` | 28,240,792 | `a83c742f3e2430566e98bf241cfc7e70fd7418a0dcff3201d6d08587c1a2c0bd` | 27,884,728 | `f79d9d1b644881a7d4cbd71896f1a9b20c0d0383bca8bc0991a7f2f3cd7ac230` | -356,064 (-1.26%) |
 | `aarch64-unknown-linux-musl` | 25,388,760 | `fd965d1679fd1dca6b9604431ae9193483efab837527707239c4452f79a773a2` | 25,051,144 | `d6faa2a5a53a6a83238320ba5705e9ab6277911aa07a313fefe653655f9850c0` | -337,616 (-1.33%) |
 
-The direct pair measures the static product effect after restoring function
-and data section emission for final-link garbage collection. The private
-`session-image` logger override is checked separately and does not change the
-ordinary product configuration. The direct x86 pre-P2 rebuild is 3,712 bytes
+The direct product pair measures the combined static effect of restoring
+function and data section emission for final-link garbage collection and
+removing the private `session-image` logger symbols. Both product builds
+enable `session-image`, so this pair does not isolate the bytes saved by
+sectioning from those saved by logger removal. The private-only archive check
+confirms that those symbols are absent from that archive, but it is not a
+separate product size measurement. The direct x86 pre-P2 rebuild is 3,712 bytes
 larger than the older preserved `infraternal-after-final`; the latter's
 recipe was not retained, so the reproducible pair above is used for the
 before/after comparison.
