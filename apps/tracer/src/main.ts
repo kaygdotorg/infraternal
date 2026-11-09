@@ -439,6 +439,9 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   sessionStarted = performance.timeOrigin + performance.now();
   const identity = knownSession ?? await checkSession();
   if (generation !== sessionGeneration) return;
+  // No session at all is a 401: the cookie is gone or no longer valid (another sign-in, a server restart). That sends the
+  // person to sign-in, exactly as the background session check does; it is not a server whose name could not be read.
+  if (!identity) { endSession("Your session ended. Sign in again to continue."); return; }
   const hostName = sessionHostname(identity);
   if (!hostName) {
     renderUnavailable("Could not read this server's name. Try again.");
