@@ -574,23 +574,30 @@ async function dropAndTimeLastScreen(page: Page): Promise<number> {
   return page.evaluate(() => new Promise<number>((resolve, reject) => {
     const double = window.__tracerTestDouble;
     const button = document.querySelector<HTMLButtonElement>("#probe-drop");
-    const canvas = document.querySelector<HTMLCanvasElement>("#terminal-screen canvas");
     const before = double?.screenText() ?? "";
-    if (!double || !button || !canvas || before.trim() === "") {
-      reject(new Error("the probe drop, the terminal canvas or its screen is unavailable"));
+    if (!double || !button || before.trim() === "") {
+      reject(new Error("the probe drop or the terminal's screen is unavailable"));
       return;
     }
+    // The renderer's canvas, not the prediction overlay: the overlay is a separate canvas that stays hidden while no
+    // prediction is pending, so "any canvas" would wrongly read as "the screen is gone".
+    const shown = (): boolean => Array.from(document.querySelectorAll<HTMLCanvasElement>("#terminal-screen canvas"))
+      .filter((canvas) => !canvas.classList.contains("terminal-text-overlay"))
+      .some((canvas) => {
+        const style = getComputedStyle(canvas);
+        const box = canvas.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0 &&
+          box.width > 0 && box.height > 0;
+      });
     const started = performance.now();
     button.click();
-    const shown = (): boolean => {
-      const style = getComputedStyle(canvas);
-      return canvas.isConnected && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0;
-    };
+    let last = { linkDown: false, sameText: false, shown: false };
     const check = (at: number): void => {
-      if (!double.isConnected() && double.screenText() === before && shown()) {
+      last = { linkDown: !double.isConnected(), sameText: double.screenText() === before, shown: shown() };
+      if (last.linkDown && last.sameText && last.shown) {
         resolve(Math.max(0, at - started));
       } else if (performance.now() - started > 5_000) {
-        reject(new Error("no frame showed the last screen while the link was down"));
+        reject(new Error(`no frame showed the last screen while the link was down: ${JSON.stringify(last)}`));
       } else {
         requestAnimationFrame(check);
       }
