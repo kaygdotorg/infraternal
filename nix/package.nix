@@ -37,13 +37,18 @@ let
     # same add/sub feature arithmetic as std.Target.Query.fromTarget: the
     # stored result lists every enabled feature as "add", so without the
     # subtraction the model's defaults could switch on features the build
-    # host lacks. Explicit (cross) queries go through unchanged.
+    # host lacks. Explicit (cross) queries keep upstream's branch unchanged.
+    #
+    # The host branch emits its own flags and copies the dynamic-linker path
+    # into the arena. A DynamicLinker keeps its path in an inline buffer, so
+    # a slice of a stack-local query's copy dangles once the block ends; the
+    # compiler then got a garbage --dynamic-linker and crashed (SEGV, #476).
     python3 - "$out/lib/compiler/Maker/Step/Compile.zig" <<'PY'
     from pathlib import Path
     import sys
     path = Path(sys.argv[1])
     before = "        if (resolved_target.unwrapQuery(conf)) |query| {\n"
-    after = """        const explicit_query: ?std.Target.Query = resolved_target.unwrapQuery(conf) orelse host: {
+    after = """        if (resolved_target.query == .none) {
                 const host_target: Configuration.ResolvedTarget = .{
                     .query = .init(resolved_target.result),
                     .result = resolved_target.result,
@@ -56,9 +61,16 @@ let
                 host_query.cpu_features_add.removeFeatureSet(model_features);
                 host_query.cpu_features_sub = model_features;
                 host_query.cpu_features_sub.removeFeatureSet(enabled);
-                break :host host_query;
-            };
-            if (explicit_query) |query| {
+                try zig_args.appendSlice(gpa, &.{
+                    "-target", try host_query.zigTriple(arena),
+                    "-mcpu", try host_query.serializeCpuAlloc(arena),
+                });
+                if (host_query.dynamic_linker) |dynamic_linker| {
+                    if (dynamic_linker.get()) |dynamic_linker_path| {
+                        try zig_args.appendSlice(gpa, &.{ "--dynamic-linker", try arena.dupe(u8, dynamic_linker_path) });
+                    }
+                }
+            } else if (resolved_target.unwrapQuery(conf)) |query| {
     """
     source = path.read_text()
     assert source.count(before) == 1, "native build target boundary changed"
