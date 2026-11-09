@@ -61,6 +61,7 @@ export interface ViewsModule {
   dispose(): void;
 }
 
+/** Makes the views module for the canvas `cx`: builds each view, lays them out in the world and keeps them from overlapping. */
 export function createViews(cx: Ctx): ViewsModule {
   const { viewport, world, overlay, signal, camera, state, views } = cx;
 

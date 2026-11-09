@@ -148,6 +148,7 @@ export class Wizard {
   private alive = true;
   private closing = false;
 
+/** Builds the add-host card and shows it: on a spring from a pointer, in place when a key opened it (#427). */
   constructor(private readonly deps: WizardDeps) {
     installFocusRing();
     this.surface = deps.host.open({ title: "Add hosts" });
