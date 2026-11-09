@@ -80,8 +80,11 @@ test.describe("phone: touch", () => {
     await drag(220, 0);
     expect(await canvasState(page), "a one-finger sideways swipe over content left the canvas alone").toBe(before);
     expect(await stopIndex(page)).toBe(index);
-    // Read to the end of the page, then keep dragging and swipe diagonally at the end.
-    for (let i = 0; i < 8; i++) await drag(0, -300);
+    // One real drag scrolls the page; then jump to its end (the page is about 17,000 px long) and keep dragging at the end.
+    await drag(0, -300);
+    expect(await pageTop(page), "a one-finger drag scrolls the page").toBeGreaterThan(100);
+    await page.evaluate((sel) => { const s = document.querySelector<HTMLElement>(`${sel} .dr-scroll`)!; s.scrollTop = s.scrollHeight; }, PAGE);
+    await drag(0, -300);
     const room = await page.evaluate((sel) => { const s = document.querySelector<HTMLElement>(`${sel} .dr-scroll`)!; return s.scrollHeight - s.clientHeight; }, PAGE);
     expect(await pageTop(page), "the page reached its end").toBeGreaterThanOrEqual(room - 2);
     await drag(-200, -300);
