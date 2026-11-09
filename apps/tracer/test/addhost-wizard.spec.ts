@@ -49,6 +49,12 @@ async function open(page: Page, query = "", settings: Record<string, string> = {
 }
 
 const wizard = (page: Page) => page.locator(".ah-float");
+/**
+ * The wizard page named `name` that is on screen. When a page hands over to another (Back, Continue), the page being left stays
+ * in the DOM for its exit, inert and marked `is-leaving`, next to the new one; both then match a plain `data-page` selector, and
+ * the progress page's job rows exist in both. Ask for the page on screen, and look for rows inside it.
+ */
+const onScreen = (page: Page, name: string) => page.locator(`.ah-page[data-page='${name}']:not(.is-leaving)`);
 /** Buttons of the wizard card only: the canvas has its own Back, Close and Retry-like controls. */
 const inWizard = (page: Page, name: string) => wizard(page).getByRole("button", { name, exact: true });
 /** Waits until a closed wizard has finished its exit, so the next one is the only one on screen. */
@@ -548,11 +554,12 @@ test("leftovers: Back returns to the host list and Start fresh needs the server'
   await addTyped(page, "stale.lab");
   await expect(page.getByRole("heading", { name: "This host has leftovers from an earlier setup" })).toBeVisible({ timeout: 15_000 });
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  const progress = onScreen(page, "progress");
+  await expect(progress).toBeVisible();
   // The row offers the same one tap instead of a retry that would only find the leftovers again.
-  await expect(page.locator(".ah-job-retry")).toBeHidden();
-  await expect(page.locator(".ah-job-fix")).toHaveText("Start fresh");
-  await page.locator(".ah-job-fix").click();
+  await expect(progress.locator(".ah-job-retry")).toBeHidden();
+  await expect(progress.locator(".ah-job-fix")).toHaveText("Start fresh");
+  await progress.locator(".ah-job-fix").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
@@ -565,8 +572,8 @@ test("a setup that is still running: wait, then try again", async ({ page }) => 
   expect(await heroTone(page)).toBeNull();
   await expect(inWizard(page, "Start fresh")).toHaveCount(0);
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
-  await page.locator(".ah-job-retry").click();
+  await expect(onScreen(page, "progress")).toBeVisible();
+  await onScreen(page, "progress").locator(".ah-job-retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
@@ -715,7 +722,8 @@ for (const [host, title] of [
     await expect(inWizard(page, "Try again")).toHaveCount(0);
     await expect(inWizard(page, "Retry")).toHaveCount(0);
     await inWizard(page, "Back").click();
-    await expect(page.locator(".ah-job-retry")).toBeHidden();
+    await expect(onScreen(page, "progress")).toBeVisible();
+    await expect(onScreen(page, "progress").locator(".ah-job-retry")).toBeHidden();
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `refusal-${host.split(".")[0]}-1440.png`) });
   });
 }
@@ -794,10 +802,11 @@ test("root: Back from the Take over confirmation changes nothing, and the row as
   await inWizard(page, "Back").click();
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
-  await expect(page.locator(".ah-job-retry")).toBeHidden();
-  await expect(page.locator(".ah-job-fix")).toHaveText("Take over");
-  await page.locator(".ah-job-fix").click();
+  const progress = onScreen(page, "progress");
+  await expect(progress).toBeVisible();
+  await expect(progress.locator(".ah-job-retry")).toBeHidden();
+  await expect(progress.locator(".ah-job-fix")).toHaveText("Take over");
+  await progress.locator(".ah-job-fix").click();
   // The row opens the page, never the action itself.
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
   expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
