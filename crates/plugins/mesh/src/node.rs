@@ -13,34 +13,91 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-/// Serializes relay route budgets shared by config updates and active path callbacks.
-type RelayRouteMtuOverrides = BTreeMap<crate::policy::model::PublicKey, u16>;
+/// The per-peer route state that config updates and relay path callbacks share (#381).
+///
+/// One mutex guards both maps, and every peer host-route write happens while it is held.
+/// `peers` is the set of peers whose routes this node last installed, keyed by public key,
+/// so a relay callback resolves the *current* endpoint and membership at write time instead
+/// of a copy taken when its relay shim started. A key missing from `peers` means the
+/// coordinator removed that peer: callbacks for it write nothing.
+#[derive(Clone, Debug, Default)]
+struct PeerRouteState {
+    /// Active relay budgets; a peer without an entry uses its direct-path budget.
+    overrides: BTreeMap<crate::policy::model::PublicKey, u16>,
+    /// The installed peers, refreshed in the same critical section as their routes. Only relay
+    /// callbacks read it, so builds without the relay feature never do.
+    #[cfg_attr(not(feature = "relay"), allow(dead_code))]
+    peers: BTreeMap<crate::policy::model::PublicKey, crate::dataplane::Peer>,
+}
 
-/// Recover route-budget state after a callback panics while holding its mutex.
-fn lock_route_mtu_overrides(
-    overrides: &Mutex<RelayRouteMtuOverrides>,
-) -> MutexGuard<'_, RelayRouteMtuOverrides> {
-    overrides
+impl PeerRouteState {
+    /// Record `peers` as the installed set, replacing the previous one.
+    fn set_peers(&mut self, peers: &[crate::dataplane::Peer]) {
+        self.peers = peers.iter().map(|peer| (peer.key, peer.clone())).collect();
+    }
+}
+
+/// Recover route state after a callback panics while holding its mutex.
+fn lock_route_state(state: &Mutex<PeerRouteState>) -> MutexGuard<'_, PeerRouteState> {
+    state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Apply a route snapshot while retaining relay budgets, restoring state if the write fails.
+/// Apply a full route snapshot while retaining relay budgets, restoring state if the write fails.
+///
+/// On success `peers` becomes the installed set that relay callbacks resolve against. The
+/// returned snapshot lets an enclosing transaction roll both maps back.
 fn refresh_peer_routes_from(
-    state: &Mutex<RelayRouteMtuOverrides>,
+    state: &Mutex<PeerRouteState>,
     peers: &[crate::dataplane::Peer],
     clear_overrides_for: &BTreeSet<crate::policy::model::PublicKey>,
-) -> io::Result<RelayRouteMtuOverrides> {
-    let mut overrides = lock_route_mtu_overrides(state);
-    let previous = overrides.clone();
+) -> io::Result<PeerRouteState> {
+    let mut state = lock_route_state(state);
+    let previous = state.clone();
     for key in clear_overrides_for {
-        overrides.remove(key);
+        state.overrides.remove(key);
     }
-    if let Err(error) = Device::routes_with_mtu_overrides(peers, &overrides, false) {
-        *overrides = previous;
+    if let Err(error) = Device::routes_with_mtu_overrides(peers, &state.overrides, false) {
+        *state = previous;
         return Err(error);
     }
+    state.set_peers(peers);
     Ok(previous)
+}
+
+/// Write one peer's route from the accepted state, for a relay path change or MTU refresh.
+///
+/// `relay_mtu` is `Some` while a relay carries the peer and `None` once it falls back to its
+/// direct endpoint. The peer is looked up by key under the state lock, so the write uses the
+/// endpoint of the latest accepted snapshot. When the peer is gone, its override is dropped
+/// and nothing is written: re-adding the host route would leak it outside the route inventory.
+/// # Errors
+/// Returns route-netlink errors and leaves the override map as it was.
+#[cfg(feature = "relay")]
+fn update_relay_route_mtu(
+    state: &Mutex<PeerRouteState>,
+    key: crate::policy::model::PublicKey,
+    relay_mtu: Option<u16>,
+) -> io::Result<()> {
+    let mut state = lock_route_state(state);
+    let Some(peer) = state.peers.get(&key).cloned() else {
+        state.overrides.remove(&key);
+        return Ok(());
+    };
+    let previous = match relay_mtu {
+        Some(mtu) => state.overrides.insert(key, mtu),
+        None => state.overrides.remove(&key),
+    };
+    let result =
+        Device::routes_with_mtu_overrides(std::slice::from_ref(&peer), &state.overrides, false);
+    if result.is_err() {
+        match previous {
+            Some(previous) => state.overrides.insert(key, previous),
+            None => state.overrides.remove(&key),
+        };
+    }
+    result
 }
 
 pub use crate::dataplane::Chunk;
@@ -428,8 +485,8 @@ pub struct Node {
     config: Option<Config>,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
-    /// Live relay budgets are retained across full snapshots and route re-derivation.
-    relay_route_mtu_overrides: Arc<Mutex<RelayRouteMtuOverrides>>,
+    /// Installed peers and live relay budgets; relay callbacks share it (see [`PeerRouteState`]).
+    peer_route_state: Arc<Mutex<PeerRouteState>>,
     firewall: Firewall,
     proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress,
     owned: bool,
@@ -459,7 +516,7 @@ impl Default for Node {
             config: None,
             pending: None,
             routes: BTreeSet::new(),
-            relay_route_mtu_overrides: Arc::default(),
+            peer_route_state: Arc::default(),
             firewall: Firewall::default(),
             proxy_ingress: infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
             owned: false,
@@ -917,63 +974,56 @@ impl Node {
 
     /// Return a callback that keeps this peer's kernel route on its active path budget.
     ///
-    /// The direct endpoint remains in the accepted peer record. `Some(mtu)` records the active
-    /// relay's derived route MTU; `None` removes that override and re-derives from the direct path.
+    /// The callback keeps only the peer's key. Each call resolves the accepted peer under the
+    /// route-state lock (see [`update_relay_route_mtu`]), so it follows endpoint moves and does
+    /// nothing once the peer is removed. `Some(mtu)` records the active relay's derived route
+    /// MTU; `None` removes that override and re-derives from the current direct endpoint.
     #[cfg(feature = "relay")]
     pub(crate) fn relay_route_mtu_updater(
         &self,
         peer: &crate::dataplane::Peer,
     ) -> crate::relay_path::RouteMtuUpdater {
-        let overrides = Arc::clone(&self.relay_route_mtu_overrides);
-        let peer = peer.clone();
-        Arc::new(move |relay_mtu| {
-            let mut overrides = lock_route_mtu_overrides(&overrides);
-            let previous = match relay_mtu {
-                Some(mtu) => overrides.insert(peer.key, mtu),
-                None => overrides.remove(&peer.key),
-            };
-            let result =
-                Device::routes_with_mtu_overrides(std::slice::from_ref(&peer), &overrides, false);
-            if result.is_err() {
-                if let Some(previous) = previous {
-                    overrides.insert(peer.key, previous);
-                } else {
-                    overrides.remove(&peer.key);
-                }
-            }
-            result
-        })
+        let state = Arc::clone(&self.peer_route_state);
+        let key = peer.key;
+        Arc::new(move |relay_mtu| update_relay_route_mtu(&state, key, relay_mtu))
     }
 
     /// Refresh peer host routes using active relay budgets where present.
+    ///
+    /// `peers` is the complete installed set (an accepted snapshot or the one a rollback
+    /// restores). After a successful install it becomes the set relay callbacks resolve against.
     /// # Errors
-    /// Returns route-netlink errors without changing relay override state.
+    /// Returns route-netlink errors without changing the route state.
     fn install_peer_routes(
         &self,
         peers: &[crate::dataplane::Peer],
         remove: bool,
     ) -> io::Result<()> {
-        let overrides = lock_route_mtu_overrides(&self.relay_route_mtu_overrides);
-        Device::routes_with_mtu_overrides(peers, &overrides, remove)
+        let mut state = lock_route_state(&self.peer_route_state);
+        Device::routes_with_mtu_overrides(peers, &state.overrides, remove)?;
+        if !remove {
+            state.set_peers(peers);
+        }
+        Ok(())
     }
 
     /// Apply a full route refresh after clearing overrides for peers that returned to direct paths.
     ///
-    /// The returned snapshot lets the caller restore the previous relay budgets if a later part of
-    /// the enclosing configuration transaction rolls back.
+    /// The returned snapshot lets the caller restore the previous relay budgets and installed
+    /// peers if a later part of the enclosing configuration transaction rolls back.
     /// # Errors
-    /// Returns route-netlink errors and restores the override map if route installation fails.
+    /// Returns route-netlink errors and restores the route state if route installation fails.
     fn refresh_peer_routes(
         &self,
         peers: &[crate::dataplane::Peer],
         clear_overrides_for: &BTreeSet<crate::policy::model::PublicKey>,
-    ) -> io::Result<RelayRouteMtuOverrides> {
-        refresh_peer_routes_from(&self.relay_route_mtu_overrides, peers, clear_overrides_for)
+    ) -> io::Result<PeerRouteState> {
+        refresh_peer_routes_from(&self.peer_route_state, peers, clear_overrides_for)
     }
 
-    /// Restore relay budgets after a failed configuration transaction.
-    fn restore_peer_route_mtu_overrides(&self, previous: RelayRouteMtuOverrides) {
-        *lock_route_mtu_overrides(&self.relay_route_mtu_overrides) = previous;
+    /// Restore relay budgets and the installed peer set after a failed configuration transaction.
+    fn restore_peer_route_state(&self, previous: PeerRouteState) {
+        *lock_route_state(&self.peer_route_state) = previous;
     }
 
     fn apply_peer_changes(
@@ -1007,7 +1057,7 @@ impl Node {
             store.record_routes(&BTreeSet::new())?;
         }
         self.routes.clear();
-        lock_route_mtu_overrides(&self.relay_route_mtu_overrides).clear();
+        *lock_route_state(&self.peer_route_state) = PeerRouteState::default();
         Ok(())
     }
     /// The key an interrupted Linux rotation left as this node's identity: the candidate once
@@ -2153,7 +2203,7 @@ impl Node {
                 self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.1.max(mesh_mtu.2))?;
                 let route_overrides_to_clear: BTreeSet<_> =
                     updates.iter().map(|(previous, _)| previous.key).collect();
-                let route_mtu_overrides = Arc::clone(&self.relay_route_mtu_overrides);
+                let route_state = Arc::clone(&self.peer_route_state);
                 let peers: Vec<_> = config
                     .peers
                     .values()
@@ -2176,7 +2226,7 @@ impl Node {
                         }
                     }
                     previous_route_overrides = Some(refresh_peer_routes_from(
-                        &route_mtu_overrides,
+                        &route_state,
                         &peers,
                         &route_overrides_to_clear,
                     )?);
@@ -2186,7 +2236,7 @@ impl Node {
                 let installed = installed.and_then(|()| self.set_mesh_mtu(mesh_mtu.0, mesh_mtu.2));
                 if let Err(error) = installed {
                     if let Some(previous) = previous_route_overrides {
-                        self.restore_peer_route_mtu_overrides(previous);
+                        self.restore_peer_route_state(previous);
                     }
                     match self.engine_kind {
                         EngineKind::Kernel => {
@@ -2420,7 +2470,7 @@ impl Node {
         })();
         if let Err(error) = result {
             if let Some(previous) = previous_route_overrides {
-                self.restore_peer_route_mtu_overrides(previous);
+                self.restore_peer_route_state(previous);
             }
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             if !dns_was_running && self.config.is_none() {
