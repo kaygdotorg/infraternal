@@ -1164,8 +1164,8 @@ export class Wizard {
     else if (action === "fix-job") {
       const job = jobOf();
       // Leftovers are cleared right from the row; every other fix opens its own page. A Take over always asks
-      // first, on its own page (D359).
-      if (job) { if (job.view.leftovers && !job.view.failure?.takeover) this.startFresh(job); else this.openFix(job); }
+      // first, on its own page (D359), and so does a Start fresh that closes terminals, which lists them (D368).
+      if (job) { if (job.view.leftovers && !job.view.failure?.takeover && !job.view.failure?.closes) this.startFresh(job); else this.openFix(job); }
     }
     else if (action === "toggle-job") {
       const row = target.closest<HTMLElement>(".ah-run");
