@@ -4530,3 +4530,149 @@ access (#341 B19).
      layer scale for z-index (content, chrome, sidebar, overlay, toast,
      tooltip) with captures of every overlay pair, and one exported
      `EASE_OUT` curve for Web Animations calls.
+
+373. **Morning answers (owner, 2026-11-09):** answered inline, all as
+     recommended.
+     - Phone rows: palette result rows and sidebar names use the 15 px body
+       size on phones; only true labels (eyebrows, captions, field labels)
+       are 13 px. TASTE's "phone text 15-16 px or larger" stays (refines
+       D372).
+     - Programs copying to the clipboard (OSC 52, #440): copies from the
+       terminal in use land automatically with a "Copied from the terminal"
+       notice, and Settings gets "Programs can copy to your clipboard", on
+       by default. Other windows offer a Copy button instead. Rejected:
+       always asking; no switch.
+     - Browser tests: the full browser suite runs nightly on dev, like the
+       nightly fuzz (D361), opening an issue per new failure; job gates stay
+       fast. Rejected: the suite in every job's gate; leaving it as is.
+     - Scrollback copy (#426): ship the wrap guess now; later add a small
+       wrap-flag export for history rows to our pinned terminal-engine
+       build so history copies are exact. Rejected: holding text selection
+       for the engine change; no smart wrap in history.
+
+374. **#341 answers, round 1 (owner, 2026-11-09):**
+     - **Sideways swipe on touch (A17; amends D159, D177, D275, D329):** the
+       owner: "content first but I don't scrolls should overflow to the
+       canvas once there's nothing to scroll in the content. canvas
+       scrolling has to be intentional: two fingers on mobile, on desktop
+       swipes wtih magic mouse/magic trackpad or optoin + scroll for regular
+       people? the option modifier is open because i don't know which ones
+       are stolen/hijacked by the browser." So a one-finger swipe scrolls
+       the content under it and never passes to the canvas, even at its
+       end. Moving the canvas is a deliberate gesture: two fingers on touch;
+       on desktop, trackpad or Magic Mouse swipes, and for ordinary mice a
+       modifier plus scroll. Which modifier is chosen after measuring which
+       ones browsers already use.
+     - **Community edition (A14):** one person, signing in with a passkey
+       or their own identity provider. Inviting others, extra users and
+       local groups are EE. Supersedes the multi-user parts of D30, D154
+       and D187 for Community.
+     - **Proxy engine (A15; closes D316's open choice):** Traefik is the
+       proxy engine, run as a managed sidecar in its own cgroup (D320,
+       D336). D7 notes that some components (Traefik, OpenBao) run as
+       managed child processes. Rejected: a measurement round first; an
+       embedded engine.
+     - **New fonts:** the owner asked to add Ioskeley Mono
+       (github.com/ahatem/IoskeleyMono) and Obel Mono
+       (typographic.systems/obel-mono) to the app's font choices, licences
+       permitting.
+
+375. **#341 answers, round 2, and 120 Hz latency targets (owner,
+     2026-11-09; rewrites D41's budgets):**
+     - **Latency targets at 120 Hz (A9).** The owner: "please aim for 120hz,
+       not 60hz.. much like superlogical's rex, in our terminal too
+       everything remote should feel local. I want the numbers recrunched
+       against 120hz and i want a table of targets". One frame is 8.3 ms.
+
+       | Measure | Target (p99) |
+       |---|---|
+       | Key to letter on screen, prediction on | 8.3 ms (1 frame) |
+       | Server's real echo | round trip + 16.7 ms (2 frames) |
+       | A flooding terminal's effect on typing | at most +8.3 ms |
+       | Our own overhead, no network | 8.3 ms; 5 ms stretch aim |
+       | Reconnect: last screen back | 8.3 ms, from the device's copy |
+       | Reconnect: typable, resumed link | 1 round trip + 50 ms |
+       | Reconnect: typable, after a network change | 4 round trips + 50 ms (D267) |
+       | Rendering under 10 MB/s output | 120 fps sustained |
+       | First paint, mid-range phone | under 1 s |
+       | Idle infraternal agent | under 15 MB RSS |
+
+       Every target is reported on each run. Owner chose "Adopt; overhead
+       gate at today's baseline": the 8.3 ms own-overhead target becomes a
+       merge gate once reached; until then no change may be worse than the
+       current baseline (about 25 ms, D296). PROCESS.md's "RTT x 2 + 300 ms"
+       is replaced by these rows.
+     - **API-key lifetime (A1):** every key has an approved hard end
+       (default 24 h) and an idle limit; a "never expires" key has no hard
+       end and keeps only its own idle setting (D370). D311's "permanent
+       keys rejected" is superseded.
+     - **Sign-in (A2):** the owner: "Continue with: → Passkey → OIDC". Sign-in
+       is usernameless with two choices, passkey or the person's own
+       identity provider; the username is asked only at setup. Amends D230
+       and D239.
+     - **Taps (A4):** saving access rules (D209) and downgrading a root
+       install (D274) both work inside the 15-minute admin window (D333).
+     - **Mesh SSH (A5):** stays off until its security review (D344); the
+       automatic switch-on of D197 and D289 waits for it.
+     - **Idle sessions (A8):** never ended automatically by default (D178);
+       a per-host idle limit is optional. D56 is superseded.
+     - **Scale (A10):** budgets are sized for D170's 200 sessions; D124's 500
+       sessions and 50 desktops are stress-test headroom that must work.
+     - **Backup key (A11):** backups are encrypted with the key derived from
+       the owner's recovery words (D147). Rejected: D186's per-admin key.
+     - **Log retention (A12):** the owner: "30 days for the community
+       editino default and non-configurable, 90 days + configurable for EE".
+     - **Mesh membership (A13):** never expires, except a machine offline
+       over 90 days needs passkey re-approval (D237) and ephemeral machines
+       are removed after their offline time (D370). D166 amended.
+     - **Solid material (A16):** overlays are never opaque, except when the
+       person chooses Solid. D160 amended.
+
+376. **Upgrading a host to root, design round (owner, 2026-11-09, #399;
+     completes D274's round):**
+     - **Open terminals keep running.** The root infraternal agent adopts
+       the person's running terminal sessions during the upgrade; if one
+       can't be adopted it stays reachable as before and the person is told.
+     - **Failure puts the host back as it was.** The user-level infraternal
+       agent keeps running until the root one has taken over; any failure
+       removes the half-installed root service, with a message and an Inbox
+       entry. The owner added: "please make sure that nothing runs as root
+       that it does not need. least privilege principle. also most people
+       wouldn't want the default user to be root so we need both: a way to
+       switch users in the UI on the same machine, preferred user per
+       machine (default being the user's infraternal username, we need to
+       hint in the sign up flow that teh user should ideally pick a username
+       that they use on their machines)".
+       - Least privilege: only the parts that need root run as root; terminals
+         and everything person-facing run as the person (D229, D270).
+       - Terminals open as the person's preferred account on each machine,
+         which defaults to their infraternal username; the UI lets them
+         switch the account on the same machine.
+       - Sign-up hints that the username should ideally match the one they
+         use on their machines.
+     - **Wrong password: 2 tries, then wait,** staying under the common
+       3-try account lockout; the message names the method used (sudo, doas
+       or su).
+     - **Who and where:** only admins of that host see "Full access". It is
+       offered in the host's Access level line (machine popover, the
+       approved D286 mockup) and in search; Add host offers it when root is
+       detected. Downgrading stays as D274 says.
+
+377. **Canvas scrolling, round 2 (owner, 2026-11-09, #444; completes D374
+     A17):** The owner chose these after J426's review found that Shift+wheel
+     is how mouse users scroll sideways on Windows and Linux, and that Firefox
+     maps Alt+wheel to Back/Forward on every OS.
+     - **The canvas modifier is Option/Alt on every OS** ("Option/Alt
+       everywhere"). Modifier + wheel moves the canvas from anywhere, and
+       Shift + wheel scrolls content sideways again. If Firefox's Alt+wheel
+       history action can't be cancelled, Firefox falls back to Shift + wheel,
+       but only where the content under the pointer can't scroll sideways.
+     - **A vertical scroll stops at the end of a page** ("Stop at the end").
+       It no longer steps to the neighbouring window, which replaces D275's
+       vertical column step. Getting to the next window is a deliberate move:
+       a trackpad swipe that starts on bare canvas, modifier + wheel, or the
+       keyboard.
+     - **One finger on empty canvas still moves it on touch** ("Yes, one
+       finger on empty canvas moves it"). Nothing there can scroll, so the
+       drag can't be an accident. A one-finger drag that starts on a window
+       only ever scrolls that window's content.

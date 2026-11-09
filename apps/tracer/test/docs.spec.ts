@@ -27,7 +27,7 @@ const SIZES = [
 async function asPhone(page: Page): Promise<void> {
   const source = await (await page.request.get("/docs/docs.css")).text();
   const css = /@media \(pointer: coarse\)\s*\{\s*(:root\s*\{[^}]*\})\s*\}/.exec(source)?.[1] ?? "";
-  expect(css, "docs.css has a pointer: coarse rule").toContain("--text-body: 16px");
+  expect(css, "docs.css has a pointer: coarse rule").toContain("--ui-size-body: 0.9375rem");
   await page.addStyleTag({ content: css });
 }
 
@@ -116,14 +116,14 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
         const before = await page.evaluate(() => document.querySelector(".toc")!.getBoundingClientRect().top);
         await page.mouse.wheel(0, 900);
         await page.waitForTimeout(250);
-        const after = await page.evaluate(() => ({ top: document.querySelector(".toc")!.getBoundingClientRect().top, scrolled: window.scrollY }));
+        const after = await page.evaluate(() => ({ top: document.querySelector(".toc")!.getBoundingClientRect().top, scrolled: window.scrollY, rem: parseFloat(getComputedStyle(document.documentElement).fontSize) }));
         expect(after.scrolled, "the page scrolled").toBeGreaterThan(400);
-        expect(Math.abs(after.top - 24), "the contents stay 1.5rem under the top").toBeLessThanOrEqual(1);
+        expect(Math.abs(after.top - 1.5 * after.rem), "the contents stay 1.5rem under the top").toBeLessThanOrEqual(1);
         expect(before).toBeGreaterThan(after.top - 1);
         // An entry jumps to its heading, which stops a little under the top.
         await page.locator('.toc-side a[href="#undoing-a-switch"]').click();
         await page.waitForTimeout(250);
-        expect(await page.evaluate(() => Math.abs(document.getElementById("undoing-a-switch")!.getBoundingClientRect().top - 16)), "the heading is 16 px under the top").toBeLessThanOrEqual(1);
+        expect(await page.evaluate(() => Math.abs(document.getElementById("undoing-a-switch")!.getBoundingClientRect().top - parseFloat(getComputedStyle(document.documentElement).fontSize))), "the heading is 1rem under the top").toBeLessThanOrEqual(1);
         await page.screenshot({ path: `${OUT}/${size.name}-${scheme}-multiplexer-scrolled.png` });
       } else {
         // Narrow: one folded row under the summary, closed until it is tapped; it is a 44 px target and starts at the text's left edge.
@@ -146,7 +146,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
 
       // Nothing scrolls sideways (wide tables and code scroll inside their own box), and the text meets the type scale.
       expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
-      expect(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".doc-body p")!).fontSize))).toBe(size.touch ? 16 : 13);
+      expect(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector(".doc-body p")!).fontSize))).toBe(size.touch ? 15 : 15.4);
       if (size.touch) expect(await page.evaluate(() => document.querySelector("header a")!.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
 
       // The keys page: a long page with sub-headings under three groups.

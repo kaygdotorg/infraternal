@@ -16,6 +16,7 @@
  *   settings.open("about", "pointer");
  */
 import type { KeyValueRow } from "./kv-list";
+import { EASE_OUT } from "./motion";
 
 /** One entry of the settings list: a stable `id`, the `title`, an `icon` and `render`, which fills the pane and may return a function that cleans up when the pane closes. */
 export interface SettingsSection {
@@ -50,7 +51,6 @@ export interface AboutInfo {
 }
 
 /** The strong ease-out curve of the open and close motion. */
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** The About section's icon, as inner SVG markup. */
 const INFO_ICON = '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>';
 /** The close button's icon, as inner SVG markup. */
@@ -116,7 +116,7 @@ export function createSettingsOverlay(options: SettingsOverlayOptions): Settings
     if (source === "keyboard") { teardown(); return; }
     node.style.pointerEvents = "none";
     node.animate(reduced.matches ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.98)" }],
-      { duration: 130, easing: EASE, fill: "forwards" }).onfinish = () => { if (root === node) teardown(); };
+      { duration: 130, easing: EASE_OUT, fill: "forwards" }).onfinish = () => { if (root === node) teardown(); };
   };
 
   const open = (sectionId: string, source: "pointer" | "keyboard"): void => {
@@ -164,7 +164,7 @@ export function createSettingsOverlay(options: SettingsOverlayOptions): Settings
     card.focus({ preventScroll: true });
     if (source === "pointer") {
       card.animate(reduced.matches ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, transform: "scale(0.96)" }, { opacity: 1, transform: "none" }],
-        { duration: 200, easing: EASE });
+        { duration: 200, easing: EASE_OUT });
     }
   };
 

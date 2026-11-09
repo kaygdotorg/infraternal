@@ -1,14 +1,48 @@
-/** Routes touch gestures to Ghostty scrollback/font size while the PWA viewport stays fixed [37,84]. */
+/**
+ * Touch gestures on the terminal: scroll, pinch to zoom the font, long press and double tap to select text (#426).
+ * The gesture rules live here; what a selection does with the terminal's cells is in `terminal-touch-select.on-demand.ts`.
+ */
+import type { TouchSelectHooks } from "./terminal-touch-select.on-demand";
+
+/** How long a finger must rest on the terminal before it starts a selection (the system's long press is about the same). */
+const HOLD_MS = 450;
+/** Two taps within this time and distance are a double tap, which selects the word under them. */
+const DOUBLE_TAP_MS = 350;
+/** See {@link DOUBLE_TAP_MS}: the most the second tap may land from the first. */
+const DOUBLE_TAP_PX = 30;
+/** A touch that ends sooner than this without moving is a tap. */
+const TAP_MS = 300;
+
+/**
+ * Routes touch gestures to Ghostty scrollback/font size while the PWA viewport stays fixed [37,84].
+ *
+ * One finger that moves scrolls, as before (D159). One finger that rests for {@link HOLD_MS} instead selects the word under
+ * it, and moving on then extends the selection; a double tap selects a word too (#426). The selection itself is built by
+ * `loadSelect` the first time a finger touches the terminal, so a desktop session never loads it. Any later touch of the
+ * terminal clears the selection first.
+ */
 export function terminalTouch(host: HTMLElement, terminal: {
   options: { fontSize: number };
   scrollLines(lines: number): void;
   viewportY: number;
-}, metrics: () => { height: number }, fit: () => void, wake: () => void): () => void {
+}, metrics: () => { height: number }, fit: () => void, wake: () => void, loadSelect?: () => Promise<TouchSelectHooks>): () => void {
   const events = new AbortController();
   let x = 0, y = 0, startX = 0, startY = 0, carry = 0, velocity = 0, lastTime = 0;
   let axis: "x" | "y" | undefined;
   let dragging = false, pinching = false, distance = 0, baseFont = terminal.options.fontSize;
   let momentum = 0, pinchFrame = 0, suppressClick = false;
+  let holdTimer = 0, press = 0, selecting = false, pressTime = 0, lastTap = 0, tapX = 0, tapY = 0, lastTouchAt = 0;
+  let loading: Promise<TouchSelectHooks> | undefined;
+  /** Runs `use` with the selection hooks, loading them on first use; calls made in order stay in order. */
+  const withSelect = (use: (hooks: TouchSelectHooks) => void): void => {
+    if (!loadSelect) return;
+    if (!loading) {
+      loading = loadSelect();
+      // A failed load (the network dropped) is tried again by the next touch.
+      loading.catch(() => { loading = undefined; });
+    }
+    loading.then(use).catch((error: unknown) => { console.error("touch selection failed", error); });
+  };
   const stop = (): void => { cancelAnimationFrame(momentum); momentum = 0; velocity = 0; };
   const scroll = (pixels: number): boolean => {
     carry += pixels;
@@ -38,23 +72,52 @@ export function terminalTouch(host: HTMLElement, terminal: {
   );
   host.addEventListener("touchstart", (event) => {
     stop();
+    clearTimeout(holdTimer);
+    const wasSelecting = selecting;
+    selecting = false;
+    lastTouchAt = event.timeStamp;
+    if (event.touches.length === 1) {
+      // A new touch is a new press: it ends any selection. The code is loaded now, so it is there by the time the finger
+      // has rested long enough.
+      press++;
+      withSelect((hooks) => { if (hooks.active()) hooks.clear(); });
+    }
     dragging = event.touches.length === 1;
     axis = undefined;
     carry = 0;
     if (event.touches.length === 2) {
       pinching = true;
       suppressClick = true;
-      distance = separation(event.touches);
-      baseFont = terminal.options.fontSize;
+      if (wasSelecting) {
+        // A second finger after the hold finishes the selection (its Copy callout shows) and is not a pinch.
+        distance = 0;
+        withSelect((hooks) => hooks.end());
+      } else {
+        distance = separation(event.touches);
+        baseFont = terminal.options.fontSize;
+      }
     } else if (dragging && !pinching) {
       suppressClick = false;
       x = startX = event.touches[0]!.clientX;
       y = startY = event.touches[0]!.clientY;
-      lastTime = event.timeStamp;
+      lastTime = pressTime = event.timeStamp;
+      holdTimer = window.setTimeout(() => {
+        if (axis || pinching || !dragging) return;
+        selecting = true;
+        suppressClick = true;
+        // The hooks may still be loading when the finger lifts, so the check is "still the same touch", not "still selecting".
+        const [mine, at, to] = [press, startX, startY];
+        withSelect((hooks) => { if (press === mine) hooks.start(at, to); });
+      }, HOLD_MS);
     }
   }, { passive: true, signal: events.signal });
   host.addEventListener("touchmove", (event) => {
     event.preventDefault();
+    if (selecting) {
+      const finger = event.touches[0];
+      if (finger && event.touches.length === 1) { const [x, y] = [finger.clientX, finger.clientY]; withSelect((hooks) => hooks.extend(x, y)); }
+      return;
+    }
     if (event.touches.length === 2 && distance > 0) {
       pinch(separation(event.touches) / distance);
       return;
@@ -63,6 +126,7 @@ export function terminalTouch(host: HTMLElement, terminal: {
     const next = event.touches[0]!;
     if (!axis && Math.hypot(next.clientX - startX, next.clientY - startY) < 6) return;
     axis ??= Math.abs(next.clientX - startX) > Math.abs(next.clientY - startY) ? "x" : "y";
+    clearTimeout(holdTimer);
     suppressClick = true;
     if (axis === "x") host.scrollLeft -= next.clientX - x;
     else {
@@ -77,8 +141,26 @@ export function terminalTouch(host: HTMLElement, terminal: {
   host.addEventListener("touchend", (event) => {
     // A remaining finger after a pinch never becomes a fling or a focus tap.
     if (pinching) { if (!event.touches.length) pinching = false; dragging = false; distance = 0; return; }
+    lastTouchAt = event.timeStamp;
+    clearTimeout(holdTimer);
+    if (selecting) {
+      // The finger lifts: show Copy. No click or mouse events follow, or the renderer's own mouse handling would clear it.
+      selecting = false; dragging = false; event.preventDefault();
+      withSelect((hooks) => hooks.end());
+      return;
+    }
     if (!dragging || event.touches.length) return;
     dragging = false;
+    const lifted = event.changedTouches[0];
+    if (!axis && lifted && event.timeStamp - pressTime < TAP_MS) {
+      if (event.timeStamp - lastTap < DOUBLE_TAP_MS && Math.hypot(lifted.clientX - tapX, lifted.clientY - tapY) < DOUBLE_TAP_PX) {
+        lastTap = 0; suppressClick = true; event.preventDefault();
+        const [x, y] = [lifted.clientX, lifted.clientY];
+        withSelect((hooks) => { hooks.start(x, y); hooks.end(); });
+        return;
+      }
+      lastTap = event.timeStamp; tapX = lifted.clientX; tapY = lifted.clientY;
+    }
     if (axis !== "y" || event.timeStamp - lastTime > 80 || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     let previous = performance.now();
     const step = (now: number): void => {
@@ -93,12 +175,19 @@ export function terminalTouch(host: HTMLElement, terminal: {
     momentum = requestAnimationFrame(step);
   }, { signal: events.signal });
   host.addEventListener("touchcancel", () => {
+    clearTimeout(holdTimer);
+    if (selecting) { selecting = false; withSelect((hooks) => hooks.end()); }
     stop(); dragging = pinching = false; distance = carry = 0;
     cancelAnimationFrame(pinchFrame);
   }, { signal: events.signal });
   host.addEventListener("click", (event) => {
     if (!suppressClick) return;
     event.preventDefault(); event.stopImmediatePropagation(); suppressClick = false;
+  }, { capture: true, signal: events.signal });
+  // A long press can make the browser send a context-menu event; the renderer would answer it by focusing a hidden field.
+  host.addEventListener("contextmenu", (event) => {
+    if (!dragging && !selecting && event.timeStamp - lastTouchAt > 800) return;
+    event.preventDefault(); event.stopImmediatePropagation();
   }, { capture: true, signal: events.signal });
   // Safari's native gestures and touch-distance events coalesce into the same frame.
   host.addEventListener("gesturestart", (event) => {
@@ -112,5 +201,5 @@ export function terminalTouch(host: HTMLElement, terminal: {
   host.addEventListener("gestureend", (event) => { event.preventDefault(); pinching = false; }, { signal: events.signal });
   const hidden = (): void => { if (document.hidden) stop(); };
   document.addEventListener("visibilitychange", hidden, { signal: events.signal });
-  return () => { events.abort(); stop(); cancelAnimationFrame(pinchFrame); };
+  return () => { events.abort(); clearTimeout(holdTimer); stop(); cancelAnimationFrame(pinchFrame); void loading?.then((hooks) => hooks.clear()); };
 }

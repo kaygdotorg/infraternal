@@ -244,7 +244,7 @@ fn widening_a_full_history_stays_inside_its_share() {
         for (cols, rows) in [(133, 40), (400, 100), (80, 24), (400, 160), (200, 50)] {
             terminal.resize(cols, rows).unwrap();
             let (used, peak, refused) = terminal.memory();
-            let kept = terminal.retained_history_rows();
+            let kept = terminal.retained_history_rows().unwrap();
             eprintln!(
                 "wraparound {wraparound} {cols}x{rows}: used {used} peak {peak} history rows {kept}"
             );

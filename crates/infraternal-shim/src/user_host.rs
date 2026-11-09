@@ -421,7 +421,7 @@ impl Session {
         let history_rows = state
             .terminal
             .as_ref()
-            .map_or(0, |t| t.retained_history_rows());
+            .map_or(Ok(0), |t| t.retained_history_rows())?;
         write!(
             writer,
             "{{\"kind\":\"ownership\",\"session\":{index},\"total_bytes\":{},\"pool_bytes\":{},\"pool_limit_bytes\":{},\"native_ordinary_bytes\":{ordinary},\"native_page_bytes\":{pages},\"native_resident_bytes\":{resident},\"native_encoded_bytes\":{encoded},\"native_history_rows\":{history_rows},\"carry_bytes\":{carry},\"struct_bytes\":{},\"path_bytes\":{},\"config_path_bytes\":{},\"prefix_bytes\":{},\"geometry_bytes\":{},\"ring_bytes\":{},\"input_bytes\":{},\"writer_bytes\":{},\"peer_bytes\":{},\"peer_slots_bytes\":{}",
