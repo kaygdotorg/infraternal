@@ -290,6 +290,36 @@ for (const theme of ["ink", "paper"]) {
   });
 }
 
+/** The status the session check answers this page's cookie with (200 signed in, 401 not). */
+const sessionStatus = (page: Page): Promise<number> => page.evaluate(async () => (await fetch("/auth/session", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status);
+
+test("a session check that answers 401 right after setup goes to sign-in, not to a server-name error", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const context = page.context();
+  await context.request.post("/__mock/reset");
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true },
+  });
+  await page.goto("/?mock=1");
+  const token = (await (await context.request.get("/__mock/setup-token")).json() as { setup_token: string }).setup_token;
+  await page.locator("#setup-token").fill(token);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.locator("#setup-username").fill("expired_test");
+  await page.locator("#setup-display-name").fill("Expired test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Create passkey" }).click();
+  await page.locator(".auth-check").click();
+  // The cookie stops being valid between the ceremony and the first screen (another sign-in elsewhere, a restart of the server).
+  await page.route("**/auth/session", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: "authorization failed" }) }));
+  await page.getByRole("button", { name: "Open infraternal" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Your session ended")).toBeVisible();
+  await expect(page.getByText("Could not read this server")).toHaveCount(0);
+});
+
 test("the product canvas on the real cookie: sign out from the palette, a reload stays signed out", async ({ page }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1280, height: 720 });
