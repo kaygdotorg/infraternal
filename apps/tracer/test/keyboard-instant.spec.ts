@@ -455,6 +455,8 @@ test.describe("window stepping and the lock do not animate from the keyboard", (
     const names = document.getAnimations().filter((a) => a.playState === "running" && !(a instanceof CSSAnimation)).map((a) => {
       const target = (a.effect as KeyframeEffect | null)?.target;
       const el = target instanceof Element ? target : null;
+      // The terminal's cursor blinks on its own; that is no response to a key.
+      if (el?.closest(".terminal-cursor-layer")) return "";
       const hit = el?.closest(".ui-window, .ui-window-lock, .bm-marker, .bm-lit, .bm-branches");
       return hit ? `${a instanceof CSSTransition ? a.transitionProperty : a.constructor.name} on ${hit.className.toString().split(" ").slice(0, 2).join(".")} (${el!.tagName.toLowerCase()}.${el!.className.toString().split(" ")[0]})` : "";
     }).filter(Boolean);
