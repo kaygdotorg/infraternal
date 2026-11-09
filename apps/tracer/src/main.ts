@@ -626,6 +626,10 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       ...(scrollbackLimit === undefined ? {} : { scrollbackLimit }),
       ...(initialSessionId ? { initialSessionId } : {}),
     });
+    // The person may have signed out (or the session ended) while the terminal was still connecting. endSession() could not
+    // dispose a client it did not have yet, so a late one is closed here instead of being kept, bound to a dead screen and
+    // left connected to the host after sign-out.
+    if (generation !== sessionGeneration) { client.dispose(); return; }
     currentTerminal = client;
     screen.bindTerminal(client);
     if (canvasMode && mockMode && query.get("fixture") !== "none") void seedItalicFixture(client);
