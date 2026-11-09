@@ -288,6 +288,8 @@ fn a_shim_reparented_by_the_agent_stop_keeps_its_fingerprint() {
             &[2695],
             Some(2637),
         )
+        .as_ref()
+        .to_vec()
     };
     let before = digest(&members);
     let mut reparented = members.clone();
