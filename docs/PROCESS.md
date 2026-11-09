@@ -16,8 +16,8 @@ judgment, and nothing waits on either.**
   shared with calternal and is used only for benchmarks, never for builds.
   Each run holds the shared lock (`scripts/perf-run`, agreed with the
   calternal session). Built binaries are copied to the VM.
-- Each budget in DECISIONS 41 and 81 is a CI check that fails on a
-  regression:
+- Each budget in DECISIONS 41 (rewritten as D375's 120 Hz table, §6) and 81
+  is a CI check that fails on a regression:
   - keystroke overhead and frame time, measured from the real UI;
   - flood throughput;
   - reconnect time;
@@ -171,14 +171,45 @@ numbered history, both timestamp arrival orders and altered checksums.
 
   The gate therefore reports `loss=unsupported`; packet loss needs a separate
   transport-level mechanism that preserves TCP semantics.
-- The input-to-photon report uses fixed `METRIC` records. Keystroke-to-glyph
-  p99 is report-only until predictive echo #50 lands, then its budget is 17 ms.
-  Echo confirmation is bounded by RTT + 34 ms. Flooding either another PTY or
-  the same PTY may grow echo p99 by at most one 60 Hz frame (16.67 ms).
-  Returning sign-in to a usable terminal uses the 5 s budget tracked in #52.
-  Reconnect-to-resumed is bounded by RTT × 2 + 300 ms; at the default 300 ms
-  RTT this is 900 ms, while D41's under-300 ms reconnect budget remains the
-  zero-network-overhead reference.
+- **Latency targets [D375].** The owner set every latency budget at 120 Hz on
+  2026-11-09; one frame is 8.3 ms. This table replaces D41's budgets and the
+  old "RTT × 2 + 300 ms" reconnect bound.
+
+  | Measure | Target, p99 | Measured by |
+  |---|---|---|
+  | Key to letter on screen, with prediction | 8.3 ms | tracer scenario, every probe key (a declined prediction counts as its real echo) |
+  | Real echo | round trip + 16.7 ms | tracer scenario, prediction off, key to painted echo |
+  | Flood effect on typing | at most +8.3 ms | `verify-latency.py`, echo p99 growth with another and the same PTY flooding (the worse one) |
+  | Own overhead, no network | 8.3 ms (stretch 5 ms) | `verify-latency.py`, real agent echo with the relay delay at 0 |
+  | Reconnect, last screen | 8.3 ms | tracer scenario, socket drop to the first frame showing the last screen |
+  | Reconnect, typable, resumed link | 1 round trip + 50 ms | `verify-latency.py`, re-attach over the live link to the agent's Ack |
+  | Reconnect, typable, after a network change | 4 round trips + 50 ms | tracer scenario, socket drop to the first resumed echo painted (D267) |
+  | Rendering | 120 fps at 10 MB/s output | `latency-profile.spec.ts`, 1000 / p99 frame interval, frame-rate limit off |
+  | First paint | under 1 s on a mid-range phone | `latency-profile.spec.ts`, phone viewport, CPU slowed 4×, no injected delay |
+  | Idle infraternal agent | under 15 MB RSS | `verify-latency.py`, agent RSS idle, with no session and with one quiet session (the larger) |
+
+  Every row is printed on every run as `METRIC name=d375_<row>`, and
+  `scripts/latency_targets.py report` ends `scripts/verify latency` with the
+  table: measured value, target, the gate used and PASS/FAIL. A missing row
+  fails the run like a missed one. The full log is kept under
+  `$HOME/.cache/codex-scratch/latency/evidence/`.
+- **How the rows gate [D375].** Each row gates on its target, except own
+  overhead: its 8.3 ms target becomes the gate only once a run reaches it.
+  Until then the gate is no regression past today's baseline, about 25 ms
+  (D296), set as `OWN_OVERHEAD_BASELINE_MS` in `scripts/latency_targets.py`.
+  The change that records the first perf-VM run at or under 8.3 ms lowers it.
+  "Round trip" in a row means the slowest round trip the profile produces
+  (configured RTT plus its 30 ms jitter bound), so the relay's jitter cannot
+  fail a row by itself. The functional browser suite only prints its rows
+  (#314); the report and the perf-VM suite (`apps/tracer/perf`) are what
+  fail. Returning sign-in to a usable terminal keeps the 5 s budget tracked in
+  #52; it is not a D375 row.
+- **Measurement limits.** The browser rows run against the tracer test double
+  behind the relay, not the real server; the native rows run against the real
+  agent and PTY without a browser. The rendering row needs Chromium's frame
+  limit off, because headless Chromium paces frames at 60 Hz; `idle_fps` in
+  its line shows whether that took effect. Numbers from a shared build VM are
+  indicative; gate decisions use the perf VM.
 
 ## 7. Rust build speed and static binary size
 
