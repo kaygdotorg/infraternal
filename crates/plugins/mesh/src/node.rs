@@ -3252,6 +3252,7 @@ mod tests {
 #[path = "node_rotation_tests.rs"]
 mod rotation_tests;
 
+/// Root-only measurement of live traffic across a same-content coordinator restart (#382 P2-c).
 #[cfg(test)]
 #[path = "node_restart_continuity_bench.rs"]
 mod restart_continuity_bench;
