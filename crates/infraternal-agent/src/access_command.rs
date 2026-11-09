@@ -419,7 +419,7 @@ fn list(text: &str, context: &Context, depth: usize, paths: &mut Vec<PathBuf>) -
                         // Values may name files the command reads, such as a
                         // startup file for `BASH_ENV`.
                         for part in value.split(':') {
-                            value_candidates(part, &mut context, paths)?;
+                            value_candidates(part, false, &mut context, paths)?;
                         }
                         continue;
                     }
@@ -472,8 +472,16 @@ fn file(word: &str, context: &Context, paths: &mut Vec<PathBuf>) {
 }
 
 /// Add the candidates of one operand value (see the module doc). An absolute
-/// directory also contributes its entries and becomes a base for later words.
-fn value_candidates(value: &str, context: &mut Context, paths: &mut Vec<PathBuf>) -> Option<()> {
+/// directory becomes a base for later words. With `entries`, which callers
+/// pass for plain operands only, its entries are candidates too: a launcher
+/// such as run-parts takes its directory as an operand, while an option value
+/// like `--exclude-prefix=/dev` names a directory the program does not run.
+fn value_candidates(
+    value: &str,
+    entries: bool,
+    context: &mut Context,
+    paths: &mut Vec<PathBuf>,
+) -> Option<()> {
     if value.is_empty() {
         return Some(());
     }
@@ -481,8 +489,12 @@ fn value_candidates(value: &str, context: &mut Context, paths: &mut Vec<PathBuf>
     if path.is_absolute() {
         paths.push(path.to_owned());
         if fs::metadata(path).is_ok_and(|meta| meta.is_dir()) {
-            let entries = fs::read_dir(path).ok()?;
-            for (index, entry) in entries.enumerate() {
+            let listed = if entries {
+                Some(fs::read_dir(path).ok()?)
+            } else {
+                None
+            };
+            for (index, entry) in listed.into_iter().flatten().enumerate() {
                 if index >= DIRECTORY_ENTRIES {
                     return None;
                 }
@@ -519,27 +531,27 @@ fn argument(
     if arg.contains(|c: char| c.is_whitespace() || "$`;&|<>(){}*?[~'\"\\#".contains(c)) {
         // The word may also be a literal file name such as `/srv/a b`. Both
         // readings stay candidates; a failed shell reading is unknown.
-        value_candidates(arg, context, paths)?;
+        value_candidates(arg, true, context, paths)?;
         return list(arg, context, depth + 1, paths);
     }
     if let Some(flag) = arg.strip_prefix('-') {
         if let Some((_, value)) = arg.split_once('=') {
-            return value_candidates(value, context, paths);
+            return value_candidates(value, false, context, paths);
         }
         if let Some(index) = arg.find('/') {
-            value_candidates(&arg[index..], context, paths)?;
+            value_candidates(&arg[index..], false, context, paths)?;
             // `-cdir/file` may also mean the relative file `dir/file`.
             let attached = flag.trim_start_matches('-');
-            return value_candidates(attached.get(1..).unwrap_or_default(), context, paths);
+            return value_candidates(attached.get(1..).unwrap_or_default(), false, context, paths);
         }
         return Some(());
     }
     if let Some((_, value)) = arg.split_once('=') {
         for part in value.split(':') {
-            value_candidates(part, context, paths)?;
+            value_candidates(part, false, context, paths)?;
         }
     }
-    value_candidates(arg, context, paths)
+    value_candidates(arg, true, context, paths)
 }
 
 /// Resolve a program's operands. `executable` names the program actually
@@ -740,6 +752,10 @@ mod tests {
         let paths = targets(&format!("run-parts {shown}"), &root()).unwrap();
         assert!(paths.contains(&directory.join("hourly")));
         assert!(!paths.contains(&directory.join("nested")));
+        // An option value names a directory the program does not run.
+        let paths = targets(&format!("/bin/tool --exclude-prefix={shown}"), &root()).unwrap();
+        assert!(paths.contains(&directory));
+        assert!(!paths.contains(&directory.join("hourly")));
         let paths = targets(&format!("/usr/bin/env -C {shown} /bin/sh ./job"), &root()).unwrap();
         assert!(paths.contains(&directory.join("./job")));
         let paths = targets(&format!("chroot {shown} job"), &root()).unwrap();
