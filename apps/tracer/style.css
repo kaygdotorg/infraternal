@@ -465,7 +465,7 @@ button { color: inherit; }
 .bm-meta { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
 /* The detached note is an icon, drawn like the marks beside it: small, quiet, on the right of the row. */
 .bm-meta.is-detached { display: grid; flex: none; place-items: center; }
-.bm-icon { display: grid; width: 1.125rem; height: 1.125rem; flex: none; place-items: center; color: var(--fg-3); }
+.bm-icon { display: grid; width: var(--ui-icon); height: var(--ui-icon); flex: none; place-items: center; color: var(--fg-3); }
 .bm-icon svg { width: var(--ui-icon); height: var(--ui-icon); fill: currentColor; stroke: none; }
 .bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--t-panel) var(--ease-out); }
 .bm-sec[data-open] > .bm-fold { grid-template-rows: 1fr; }

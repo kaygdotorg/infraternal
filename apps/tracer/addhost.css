@@ -122,7 +122,7 @@
   background: rgb(from var(--fg) r g b / 0.06);
   color: var(--fg-2);
 }
-.ah-hero .ah-icon { width: 1.125rem; height: 1.125rem; }
+.ah-hero .ah-icon { width: var(--ui-icon); height: var(--ui-icon); }
 .ah-hero[data-tone="danger"] { background: rgb(from var(--danger) r g b / 0.13); color: var(--danger); }
 .ah-title { margin: 0 2.5rem 0.625rem 0; font-size: var(--ui-size-title); font-weight: var(--fw-title); line-height: 1.25; letter-spacing: -0.03em; text-wrap: balance; }
 .ah-lede { margin: 0 0 1.5rem; color: var(--fg-2); text-wrap: pretty; }
@@ -187,7 +187,7 @@
 .ah-candidate .ah-meta > span { white-space: normal; }
 .ah-srcs { display: inline-flex; flex: none; gap: 0.375rem; }
 .ah-src { display: inline-grid; color: var(--fg-3); }
-.ah-src .ui-source-icon { width: 0.8125rem; height: 0.8125rem; stroke-width: 1.5; }
+.ah-src .ui-source-icon { width: var(--ui-icon-sm); height: var(--ui-icon-sm); stroke-width: 1.5; }
 .ah-status { display: inline-flex; align-items: center; gap: 0.375rem; color: var(--fg-2); font-size: var(--ui-size-label); white-space: nowrap; }
 .ah-status-icon { width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--fg-3); }
 .ah-status[data-tone="ok"] .ah-status-icon { color: var(--ok); }

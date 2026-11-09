@@ -754,7 +754,7 @@
 
 /* DECISION 120 icon slot for branched-menu hosts. */
 .bm-icon { display: grid; place-items: center; width: var(--ui-icon); height: var(--ui-icon); flex: none; color: var(--fg-2); }
-.bm-icon svg { display: block; width: 0.9375rem; height: 0.9375rem; fill: currentColor; stroke: none; }
+.bm-icon svg { display: block; width: var(--ui-icon-sm); height: var(--ui-icon-sm); fill: currentColor; stroke: none; }
 
 /* Shared step transitions (pane-stepper.ts): leaving panes stack over the incoming one. */
 .ui-pane-viewport { position: relative; }
