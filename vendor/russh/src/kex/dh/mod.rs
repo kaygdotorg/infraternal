@@ -1,3 +1,4 @@
+//! Implements finite-field DH; only optional legacy exchanges instantiate SHA-1.
 pub mod groups;
 use std::marker::PhantomData;
 
@@ -6,17 +7,18 @@ use digest::Digest;
 use groups::DH;
 use log::{error, trace};
 use num_bigint::BigUint;
+#[cfg(feature = "legacy-transport")]
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use ssh_encoding::{Decode, Encode, Reader, Writer};
 
-use self::groups::{
-    DhGroup, DH_GROUP1, DH_GROUP14, DH_GROUP15, DH_GROUP16, DH_GROUP17, DH_GROUP18,
-};
-use super::{compute_keys, KexAlgorithm, KexAlgorithmImplementor, KexType, SharedSecret};
+#[cfg(feature = "legacy-transport")]
+use self::groups::DH_GROUP1;
+use self::groups::{DH_GROUP14, DH_GROUP15, DH_GROUP16, DH_GROUP17, DH_GROUP18, DhGroup};
+use super::{KexAlgorithm, KexAlgorithmImplementor, KexType, SharedSecret, compute_keys};
 use crate::client::GexParams;
 use crate::session::Exchange;
-use crate::{cipher, mac, msg, CryptoVec, Error};
+use crate::{CryptoVec, Error, cipher, mac, msg};
 
 pub(crate) struct DhGroup15Sha512KexType {}
 
@@ -42,8 +44,11 @@ impl KexType for DhGroup18Sha512KexType {
     }
 }
 
+/// Optional legacy SHA-1 exchange factory, excluded from the mesh build.
+#[cfg(feature = "legacy-transport")]
 pub(crate) struct DhGexSha1KexType {}
 
+#[cfg(feature = "legacy-transport")]
 impl KexType for DhGexSha1KexType {
     fn make(&self) -> KexAlgorithm {
         DhGroupKex::<Sha1>::new(None).into()
@@ -58,16 +63,22 @@ impl KexType for DhGexSha256KexType {
     }
 }
 
+/// Optional legacy SHA-1 exchange factory, excluded from the mesh build.
+#[cfg(feature = "legacy-transport")]
 pub(crate) struct DhGroup1Sha1KexType {}
 
+#[cfg(feature = "legacy-transport")]
 impl KexType for DhGroup1Sha1KexType {
     fn make(&self) -> KexAlgorithm {
         DhGroupKex::<Sha1>::new(Some(&DH_GROUP1)).into()
     }
 }
 
+/// Optional legacy SHA-1 exchange factory, excluded from the mesh build.
+#[cfg(feature = "legacy-transport")]
 pub(crate) struct DhGroup14Sha1KexType {}
 
+#[cfg(feature = "legacy-transport")]
 impl KexType for DhGroup14Sha1KexType {
     fn make(&self) -> KexAlgorithm {
         DhGroupKex::<Sha1>::new(Some(&DH_GROUP14)).into()
@@ -195,7 +206,9 @@ impl<D: Digest> KexAlgorithmImplementor for DhGroupKex<D> {
 
         // fill exchange.
         exchange.server_ephemeral.clear();
-        exchange.server_ephemeral.extend_from_slice(&encoded_server_pubkey);
+        exchange
+            .server_ephemeral
+            .extend_from_slice(&encoded_server_pubkey);
 
         let decoded_client_pubkey = DH::decode_public_key(client_pubkey);
         if !dh.validate_public_key(&decoded_client_pubkey) {

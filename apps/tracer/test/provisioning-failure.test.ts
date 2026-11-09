@@ -92,3 +92,37 @@ test("malformed setup-lock coordinates cannot expose the replacement action", ()
     expect(events[0]?.failure?.setup_lock).toBeUndefined();
   } finally { globalThis.WebSocket = original; }
 });
+
+// D359: the Take over offer names the old install's id. Only the exact public shape on its own kind survives the
+// decoder; anything else is dropped, so the wizard falls back to the plain "set up elsewhere" page.
+test("a Take over offer reaches the wizard only in its exact shape", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    const install = "c10909d16e8147a3b0f2e5d4c3b2a190";
+    const offers: Array<[string, unknown]> = [
+      ["unrecognized_install", { install, live: true }],
+      ["unrecognized_install", { install: install.toUpperCase(), live: true }],
+      ["unrecognized_install", { install: install.slice(1), live: true }],
+      ["unrecognized_install", { install, live: "yes" }],
+      ["install", { install, live: false }],
+    ];
+    offers.forEach(([kind, takeover], index) => socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: index + 1, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
+      failure: { kind, message: "x", log_tail: [], takeover } }) })));
+    expect(events.map((event) => event.failure?.takeover)).toEqual([{ install, live: true }, undefined, undefined, undefined, undefined]);
+    // The offer pauses its attempt like leftovers do: its challenge reaches the wizard (D359).
+    const leftovers = { challenge: "1b4e28ba-2fa1-41d2-883f-0016d3cca427", mode: "root", findings: ["x"] };
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 9, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
+      failure: { kind: "unrecognized_install", message: "x", log_tail: [], takeover: { install, live: false } }, leftovers }) }));
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 10, target: "host", attempt: 1, step: "check", message: "plain", elapsed_ms: 1,
+      failure: { kind: "unrecognized_install", message: "x", log_tail: [] }, leftovers }) }));
+    expect(events.at(-2)?.leftovers?.challenge).toBe(leftovers.challenge);
+    expect(events.at(-1)?.leftovers).toBeUndefined();
+  } finally { globalThis.WebSocket = original; }
+});

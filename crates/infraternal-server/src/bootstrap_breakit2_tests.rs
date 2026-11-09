@@ -967,6 +967,11 @@ impl Backend for ObservedBackend {
     fn enrollment_origin(&self) -> Option<String> {
         self.0.enrollment_origin()
     }
+    /// The server's own D359 answer; without this the trait's default (never)
+    /// would refuse every Take over in the live replay.
+    fn takeover_allowed<'a>(&'a self, a: &'a Authority, h: Uuid) -> Operation<'a, bool> {
+        self.0.takeover_allowed(a, h)
+    }
     fn observe_link(&self, a: &Authority, h: Uuid, round_trip: Duration) {
         self.0.observe_link(a, h, round_trip);
     }

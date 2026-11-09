@@ -758,7 +758,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       syncFontPreview();
     }
   };
-  const sidebarClick = (event: MouseEvent): void => setSidebar(sidebar.hidden, event.detail === 0);
+  /** Open the sidebar from either native hidden state while preserving pointer focus behavior. */
+  const sidebarClick = (event: MouseEvent): void => setSidebar(Boolean(sidebar.hidden), event.detail === 0);
   // The `?` view: the capsule morphs into the shortcut list. Sections come from the registry; the
   // canvas registers its own, and a future container or cluster area registers its sections the same way.
   // The panel lists the area it was opened in first: from a focused terminal the Terminal section leads (D160).
@@ -788,7 +789,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   // The font chords act on the one terminal here; on the canvas the canvas binds them to its active window.
   if (!options.canvas) removeShortcuts.push(...bindTerminalFont(() => client));
   removeShortcuts.push(bindShortcut("focus-resend-actions", () => { client?.focusInputResendActions(); }, (event) => !isComposingKey(event) && (client?.hasPendingInputResend() ?? false)));
-  removeShortcuts.push(bindShortcut("palette", () => setPalette(palette.hidden, "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
+  // The DOM may report "until-found"; both hidden states should open the palette.
+  removeShortcuts.push(bindShortcut("palette", () => setPalette(Boolean(palette.hidden), "keyboard"), (event) => !stage.hasAttribute("data-locked") || (isMacPlatform() && event.metaKey)));
   // The panel's keys ("?" and ⌘/) come from the registry, so they can be rebound and reach a focused terminal. Only the canvas
   // screen has the panel, as before.
   if (options.canvas) removeShortcuts.push(bindShortcut("shortcuts", (event) => {

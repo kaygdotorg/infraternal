@@ -51,7 +51,8 @@ import os, sys, time
 from pathlib import Path
 # The one-byte setup-script reader preserves its exact framing unchanged.
 block = int(next(arg[3:] for arg in sys.argv[1:] if arg.startswith('bs=')))
-if block == 1:
+count = int(next(arg[6:] for arg in sys.argv[1:] if arg.startswith('count=')))
+if block == 1 and count != 1:
     os.execv('/usr/bin/dd', ['dd', *sys.argv[1:]])
 # Each invocation reads at most one short chunk, just as production dd does.
 payload = Path({payload:?})
@@ -59,12 +60,14 @@ hashed = Path({hashed:?})
 released = Path({released:?})
 input_progress = Path({input_progress:?})
 sent = int(input_progress.read_text()) if input_progress.exists() else 0
-if block < 65536 and sent > 0 and not released.exists():
+# A decoder may buffer more than 64 KiB of compressed input before its first
+# output. Reserve only the final byte, so the oracle cannot starve that buffer.
+if block == 1 and sent > 0 and not released.exists():
     # sleep: reserve the final bounded chunk until the real decoder and hash advance.
     while not (hashed.exists() and payload.exists() and payload.stat().st_size > 0):
         time.sleep(0.01)
     released.write_text("%d:%d" % (block, payload.stat().st_size))
-chunk = os.read(0, min(block, 8192))
+chunk = os.read(0, min(max(1, block - 1), 8192))
 view = memoryview(chunk)
 while view:
     view = view[os.write(1, view):]
@@ -78,8 +81,9 @@ input_progress.write_text(str(sent + len(chunk)))
     );
     let id = uuid::Uuid::new_v4();
     large_fixture_binary(&f, id);
-    // A deterministic public sample keeps the compressed image larger than a
-    // pipe buffer, so completing a tiny upload cannot accidentally pass.
+    // A deterministic public sample keeps the compressed image larger than
+    // gzip's initial input buffer as well as the pipe. Holding its final byte
+    // must still let the decoder produce a prefix, rather than starve it.
     let mut binary = std::fs::read(&f.binary).unwrap();
     let mut sample = 1_u32;
     let mut suffix = String::from("\n#");

@@ -19,7 +19,7 @@ ts_verify_fast() {
     (cd -- "$repo_dir/apps/tracer/vendor/ghostty-web" && sha256sum --check SHA256SUMS) || return $?
 
     printf '\n==> TypeScript protocol compiler\n'
-    (cd -- "$protocol_dir" && bun x --package typescript@5.9.3 tsc --project tsconfig.json) || return $?
+    (cd -- "$protocol_dir" && bun x --package typescript@7.0.2 tsc --project tsconfig.json) || return $?
 
     # Resolve connection suite filenames in the shell: Bun's combined substring
     # filters omitted them despite a green frontend row (#244). A separate run

@@ -16,6 +16,11 @@ export type WindowKind = "terminal" | "containers" | "logs" | "node" | "settings
 /** The built-in views have fixed ids; a view someone shared with you gets an id of its own. */
 export type ViewId = string;
 
+/**
+ * One window on the canvas as the runtime sees it: what it shows (its kind and target, such as a terminal's host and
+ * session), where it sits in its column, and a few in-memory flags. `toDocument` turns the parts worth keeping into
+ * the saved layout; everything else lives only in this tab.
+ */
 export interface WindowModel {
   id: string;
   kind: WindowKind;
@@ -30,6 +35,12 @@ export interface WindowModel {
   sessionPinned?: boolean;
   /** The session this window shows (a terminal window): stable across renames and reloads (D180). */
   sessionId?: string;
+  /**
+   * The host refused to start this window's shell, so it has no session and none is on its way (#395). Kept in memory
+   * only, never saved: such a window shows the refusal in place but is left out of the saved layout, so it does not hold
+   * its birth and every later layout edit as "waiting for a session id". Cleared when a new shell in it does start.
+   */
+  openRefused?: boolean;
   user?: string;
   os?: HostPlatform;
   /** Fixed height in px, or a ratio of the column height when 1 or less; a window without one shares its column equally. */

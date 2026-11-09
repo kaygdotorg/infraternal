@@ -787,6 +787,20 @@ impl Backend for RemoteBackend {
             Ok(self.hosts.actor(host).await.is_some())
         })
     }
+    /// D359: the old install's id is no working host of this server, for any
+    /// person: unknown here, removed, or revoked. A host this server still
+    /// serves is never taken over from under it, even by root SSH.
+    fn takeover_allowed<'a>(&'a self, authority: &'a Authority, host: Uuid) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            let working: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts h WHERE h.id=? AND h.revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id))")
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(&self.issuer.store().0)
+                .await
+                .map_err(|_| unavailable())?;
+            Ok(!working)
+        })
+    }
     fn owns_failed_setup<'a>(
         &'a self,
         authority: &'a Authority,
@@ -1868,6 +1882,10 @@ mod tests {
     /// A failed Replace or Re-enroll restores the stuck installation.
     #[path = "../bootstrap_stuck_restore_tests.rs"]
     mod stuck_restore;
+
+    /// Take over of another server's finished install, and its put-back (D359).
+    #[path = "../bootstrap_takeover_tests.rs"]
+    mod takeover;
 
     mod retirement_contention {
         //! A separate SQLite writer can outlive the connection's busy timeout.

@@ -1,5 +1,5 @@
 //! Mesh-only DNS records, snapshot replacement and real UDP delivery [#266].
-#![cfg(all(feature = "agent", feature = "mesh-dns-spike", target_os = "linux"))]
+#![cfg(all(feature = "agent", feature = "mesh-dns", target_os = "linux"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use hickory_proto::{
@@ -8,7 +8,7 @@ use hickory_proto::{
 };
 use infraternal_plugin_mesh::{
     dataplane::{Config, DefaultPolicy, Peer, PeerPolicy},
-    dns::{self, DNS_PORT, Resolver},
+    dns::{self, DNS_PORT, DNS_SYSTEM_PORT, Resolver},
     policy::{
         model::{Addresses, NodeId, PublicKey},
         rules::TrafficPolicy,
@@ -70,10 +70,18 @@ fn config() -> Config {
     }
 }
 
+/// Encode the authoritative response for one name in the shared DNS fixture.
 fn response_wire(name: &str, qtype: u16) -> Vec<u8> {
     dns::response(&query(name, qtype), &config())
         .unwrap()
         .expect("mesh suffix is authoritative")
+}
+
+/// Re-encode a response without its echoed question to compare its DNS answer sections exactly.
+fn response_without_question(wire: &[u8]) -> Vec<u8> {
+    let mut message = Message::from_vec(wire).unwrap();
+    message.queries.clear();
+    message.to_vec().unwrap()
 }
 
 #[test]
@@ -333,6 +341,7 @@ fn edns0_opt_queries_still_receive_mesh_answers() {
 
 #[tokio::test]
 #[ignore = "Run as root inside a disposable network namespace; #266"]
+/// Checks high-port and standard-port DNS delivery on the isolated mesh address.
 async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
     let parent = std::env::var("INFRATERNAL_DNS_TEST_PARENT_NETNS")
         .expect("network test must be launched by the isolated namespace runner");
@@ -356,7 +365,7 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
     );
 
     let snapshot = config();
-    let resolver = Resolver::bind(&snapshot).unwrap();
+    let resolver = Resolver::bind_for_node(&snapshot).unwrap();
     let client = tokio::net::UdpSocket::bind("10.254.0.2:0").await.unwrap();
     let mut response = [0; 512];
     let (len, _) = exchange(&client, &snapshot, "build-01.internal", &mut response).await;
@@ -364,6 +373,26 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
         Message::from_vec(&response[..len]).unwrap().answers.len(),
         1,
         "the DNS socket must answer from the configured mesh address"
+    );
+
+    client
+        .send_to(
+            &query("build-01.internal", 1),
+            SocketAddr::from((snapshot.addresses.ipv4, DNS_SYSTEM_PORT)),
+        )
+        .await
+        .unwrap();
+    let (len, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.recv_from(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        Message::from_vec(&response[..len]).unwrap().answers.len(),
+        1,
+        "NetworkManager split DNS needs the standard DNS port on the mesh address"
     );
 
     let mut renamed = snapshot.clone();
@@ -453,8 +482,9 @@ async fn exchange(
 }
 
 // Keep the coordinator policy and both sides of the UDP boundary in one regression.
+/// A remote denied name returns the same negative answer as a nonexistent name.
 #[test]
-fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
+fn denied_remote_names_match_the_nonexistent_name_response() {
     use infraternal_plugin_mesh::{
         configuration,
         policy::{
@@ -477,6 +507,15 @@ fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
             id: RuleId(1),
             from: Endpoint::Node(NodeId(1)),
             to: Endpoint::Node(NodeId(3)),
+            both_ways: false,
+            ports: TrafficPolicy::All,
+        })
+        .unwrap();
+    coordinator
+        .add_arrow(Arrow {
+            id: RuleId(2),
+            from: Endpoint::Node(NodeId(2)),
+            to: Endpoint::Node(NodeId(1)),
             both_ways: false,
             ports: TrafficPolicy::All,
         })
@@ -521,21 +560,24 @@ fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
     client
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .unwrap();
+    let mut buffer = [0; 512];
     client
         .send_to(
             &query("host-3.internal", 1),
             (server.addresses.ipv4, DNS_PORT),
         )
         .unwrap();
-    let mut buffer = [0; 512];
     let (length, _) = client.recv_from(&mut buffer).unwrap();
-    let reply = Message::from_vec(&buffer[..length]).unwrap();
-    let remote_rcode = reply.metadata.response_code;
-    let remote_answer_count = reply.answers.len();
-    let remote_authority_count = reply.authorities.len();
-    eprintln!(
-        "asker 2 -> target 3: denied; asker 2 -> server 1 DNS: permitted; remote response: {remote_rcode:?}, {remote_answer_count} answers"
-    );
+    let denied_wire = buffer[..length].to_vec();
+
+    client
+        .send_to(
+            &query("nonexistent.internal", 1),
+            (server.addresses.ipv4, DNS_PORT),
+        )
+        .unwrap();
+    let (length, _) = client.recv_from(&mut buffer).unwrap();
+    let nonexistent_wire = buffer[..length].to_vec();
 
     let local_client = std::net::UdpSocket::bind("127.68.0.1:0").unwrap();
     local_client
@@ -552,12 +594,29 @@ fn review_j68_remote_resolver_must_not_disclose_a_name_denied_to_the_asker() {
 
     drop(resolver);
     assert_eq!(
-        remote_rcode,
-        ResponseCode::Refused,
-        "remote mesh sources must not inherit the resolver host's broader policy"
+        Message::from_vec(&denied_wire)
+            .unwrap()
+            .metadata
+            .response_code,
+        ResponseCode::NXDomain,
+        "a name hidden from the asker must look nonexistent"
     );
-    assert_eq!(remote_answer_count, 0, "a remote refusal has no names");
-    assert_eq!(remote_authority_count, 0, "a remote refusal has no names");
+    let denied = Message::from_vec(&denied_wire).unwrap();
+    let nonexistent = Message::from_vec(&nonexistent_wire).unwrap();
+    assert_eq!(denied.answers.len(), 0);
+    assert_eq!(denied.authorities.len(), 1);
+    assert_eq!(nonexistent.metadata.response_code, ResponseCode::NXDomain);
+    assert_eq!(nonexistent.authorities.len(), 1);
+    assert_eq!(
+        response_without_question(&denied_wire),
+        response_without_question(&nonexistent_wire),
+        "the denied name and a missing name must have byte-identical DNS response sections"
+    );
+    assert_eq!(
+        response_without_question(&own_reply),
+        response_without_question(&denied_wire),
+        "the resolver must return the asker's policy-filtered negative answer"
+    );
     assert_eq!(local_reply.metadata.response_code, ResponseCode::NoError);
     assert_eq!(local_reply.answers.len(), 1);
 }

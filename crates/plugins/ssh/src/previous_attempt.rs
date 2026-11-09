@@ -75,12 +75,23 @@ pub struct PreviousAttempt {
 /// A stuck install an earlier attempt set aside, as Check found it (#305 P2-1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SetAside {
-    /// A Replace moved only the journal; a Re-enroll moved the whole install.
-    replaced: bool,
+    /// Which action set it aside, so the matching restore puts it back.
+    kind: AsideKind,
     machine: String,
     /// Whether its service was enabled and running when it was set aside.
     enabled: bool,
     active: bool,
+}
+
+/// What an earlier attempt set aside, which decides how it is put back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AsideKind {
+    /// A Replace moved only the stuck journal (`restore_replaced_install`).
+    Replaced,
+    /// A Re-enroll moved the whole stuck install (`restore_superseded_install`, D335).
+    Superseded,
+    /// A Take over moved a whole finished install (`restore_taken_over_install`, D359).
+    TakenOver,
 }
 
 /// The stuck install's enrolled key digest and the server that issued it (#305, D335).
@@ -123,14 +134,58 @@ pub fn parse_check(bytes: &[u8]) -> Result<(Check, Option<PreviousAttempt>), Fai
     parse_check_with_absence(bytes).map(|(check, previous, _)| (check, previous))
 }
 
-/// [`parse_check`], plus whether the check proved that the account has no
-/// infraternal install at all (`INFRATERNAL_SETUP_ABSENT`, D355): its base, unit
-/// and launcher each do not exist. "Clear" or anything else proves nothing.
+/// What the read-only check found in place of an earlier unfinished setup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Remains {
+    /// `INFRATERNAL_SETUP_CLEAR`, or a journal record: proves nothing more.
+    Unproven,
+    /// `INFRATERNAL_SETUP_ABSENT` (D355): the base, unit and launcher each do
+    /// not exist, so the account has no infraternal install at all.
+    Absent,
+    /// `INFRATERNAL_SETUP_INSTALLED …` (#394): a finished install with no
+    /// journal. Its `.bootstrap-owner` names a host id this attempt does not
+    /// carry, so staging would refuse it (exit 71). The caller answers before
+    /// staging: already added here, a Take over (D359), or
+    /// [`installed_elsewhere`].
+    Installed(FinishedInstall),
+}
+
+/// A finished install the check found, as its fixed record names it (#394, D359):
+/// `INFRATERNAL_SETUP_INSTALLED <host> <dev:ino> <live|idle> <ready|busy|unproven>`.
+/// The whole record is sent back to the host with a Take over, which refuses
+/// unless the install is still exactly this one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishedInstall {
+    /// The host id in its `.bootstrap-owner`: the old install's id, which the
+    /// Take over confirmation names.
+    pub host: uuid::Uuid,
+    /// The install root's `device:inode`.
+    identity: String,
+    /// Its agent's unit is active.
+    pub live: bool,
+    /// Whether the host may take it over.
+    pub takeover: Takeover,
+}
+
+/// Whether a finished install may be taken over, as the host proved it (D359).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Takeover {
+    /// Root's own install, every part proven infraternal's, and used by
+    /// nothing but its agent: Take over may be offered.
+    Ready,
+    /// Proven infraternal's, but an open terminal or another process uses it.
+    Busy,
+    /// Not provably infraternal's, or not root's: never offered.
+    Unproven,
+}
+
+/// [`parse_check`], plus what the check proved about the account's install
+/// ([`Remains`]).
 /// # Errors
 /// As [`parse_check`].
 pub fn parse_check_with_absence(
     bytes: &[u8],
-) -> Result<(Check, Option<PreviousAttempt>, bool), Failure> {
+) -> Result<(Check, Option<PreviousAttempt>, Remains), Failure> {
     // The check lines plus an upgrade record with two host names stay below 1 KiB.
     if bytes.len() > 1024 {
         return Err(refused());
@@ -143,13 +198,200 @@ pub fn parse_check_with_absence(
         .map(|(index, _)| index + 1)
         .ok_or_else(refused)?;
     let check = Check::parse(&bytes[..end])?;
-    if &bytes[end..] == b"INFRATERNAL_SETUP_ABSENT\n" {
-        return Ok((check, None, true));
+    let rest = &bytes[end..];
+    if rest == b"INFRATERNAL_SETUP_ABSENT\n" {
+        return Ok((check, None, Remains::Absent));
     }
-    let previous = parse(&bytes[end..])?;
-    Ok((check, previous, false))
+    if let Some(record) = rest
+        .strip_prefix(b"INFRATERNAL_SETUP_INSTALLED ")
+        .and_then(|record| record.strip_suffix(b"\n"))
+    {
+        let installed = parse_installed(std::str::from_utf8(record).map_err(|_| refused())?)?;
+        return Ok((check, None, Remains::Installed(installed)));
+    }
+    let previous = parse(rest)?;
+    Ok((check, previous, Remains::Unproven))
 }
 
+/// `<host> <dev:ino> <live|idle> <ready|busy|unproven>`, exactly (D359).
+fn parse_installed(record: &str) -> Result<FinishedInstall, Failure> {
+    let fields: Vec<&str> = record.split(' ').collect();
+    let [host, identity, live, takeover] = fields.as_slice() else {
+        return Err(refused());
+    };
+    Ok(FinishedInstall {
+        host: canonical_id(host)?,
+        identity: parse_identity(identity)?,
+        live: parse_liveness(live)?,
+        takeover: match *takeover {
+            "ready" => Takeover::Ready,
+            "busy" => Takeover::Busy,
+            "unproven" => Takeover::Unproven,
+            _ => return Err(refused()),
+        },
+    })
+}
+
+/// A root identity, `device:inode`, both plain decimal numbers.
+fn parse_identity(identity: &str) -> Result<String, Failure> {
+    let (device, inode) = identity.split_once(':').ok_or_else(refused)?;
+    for number in [device, inode] {
+        if number.is_empty()
+            || !number.bytes().all(|b| b.is_ascii_digit())
+            || number.parse::<u64>().is_err()
+        {
+            return Err(refused());
+        }
+    }
+    Ok(identity.to_owned())
+}
+
+/// The answer for [`Remains::Installed`] when Take over is not offered: the
+/// machine runs a finished infraternal install for another host id (another
+/// server's, another person's on this server, or one whose host was removed
+/// here). Setup stops before changing anything, because removing it is a Take
+/// over (D359), not leftover cleanup (#394). Reported at the connect step,
+/// whose check found it; the location goes in Details.
+#[must_use]
+pub fn installed_elsewhere(mode: InstallMode) -> Failure {
+    let mut failure = Failure::new(FailureKind::UnrecognizedInstall, INSTALLED_ELSEWHERE);
+    failure.failed_step = Some(crate::model::InstallStep::Connect);
+    failure.log_tail.push(crate::model::setup_location(mode));
+    failure
+}
+
+/// Public text for [`installed_elsewhere`]; also pinned by the tracer copy test.
+/// True in every case it covers: an install of another server, of another
+/// person on this server, or of an earlier setup this server retired (J314).
+pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.";
+
+/// The Take over offer's own words: what was found and what Take over does (D359).
+pub const TAKEOVER_OFFER: &str = "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.";
+
+/// The refusal for a finished install that something still uses (D359).
+/// It holds before the stop (nothing touched) and after it (the agent was put
+/// back as it was found), so it never claims that nothing changed (J342 P3-4).
+pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something is using it right now, such as an open terminal. It was left as it was found. Close it, then try again.";
+
+impl FinishedInstall {
+    /// The exact record the host compares before it changes anything.
+    fn record(&self) -> String {
+        format!(
+            "INFRATERNAL_SETUP_INSTALLED {} {} {} {}",
+            self.host.simple(),
+            self.identity,
+            if self.live { "live" } else { "idle" },
+            match self.takeover {
+                Takeover::Ready => "ready",
+                Takeover::Busy => "busy",
+                Takeover::Unproven => "unproven",
+            }
+        )
+    }
+
+    /// The refusal when Take over is not offered: in use ([`TAKEOVER_BUSY`]),
+    /// or set up elsewhere ([`installed_elsewhere`]).
+    #[must_use]
+    pub fn refusal(&self, mode: InstallMode) -> Failure {
+        let mut failure = installed_elsewhere(mode);
+        if self.takeover == Takeover::Busy {
+            failure.message = TAKEOVER_BUSY;
+        }
+        failure
+    }
+
+    /// The paused step that offers Take over and names the old install (D359).
+    #[must_use]
+    pub(crate) fn takeover_failure(&self, mode: InstallMode) -> Failure {
+        let mut failure = installed_elsewhere(mode).with_takeover(self.host, self.live);
+        failure.message = TAKEOVER_OFFER;
+        failure
+    }
+
+    /// What confirming Take over does, for the confirmation's Details.
+    #[must_use]
+    pub(crate) fn takeover_findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
+        Leftovers {
+            challenge,
+            mode,
+            findings: vec![
+                Cow::Borrowed(
+                    "An infraternal agent from an earlier setup that isn't one of this server's hosts",
+                ),
+                Cow::Borrowed(if self.live {
+                    "Its infraternal agent is running; Take over stops it"
+                } else {
+                    "Its infraternal agent is stopped"
+                }),
+                Cow::Borrowed(
+                    "It is set aside, put back if setup fails, and deleted once this machine has joined",
+                ),
+            ],
+        }
+    }
+
+    /// This install as the attempt that takes it over with `token` sees it:
+    /// what the server puts back if the new install fails (D359).
+    #[must_use]
+    pub(crate) fn taken_over(&self, token: uuid::Uuid) -> PreviousAttempt {
+        PreviousAttempt {
+            host: self.host,
+            transaction: token,
+            identity: self.identity.clone(),
+            sockets: 0,
+            lease_owner: None,
+            enrolled: None,
+            set_aside: Some(SetAside {
+                kind: AsideKind::TakenOver,
+                machine: String::new(),
+                enabled: false,
+                active: false,
+            }),
+            live: self.live,
+            cancel: None,
+        }
+    }
+
+    /// Set this exact install aside on the host so a fresh one can take its
+    /// place (`take_over_finished_install`, D359). `token` names the set-aside;
+    /// [`PreviousAttempt::restore_set_aside`] with the same token puts it back.
+    /// # Errors
+    /// Refuses a changed or busy install, a rootless base and a token whose
+    /// restore already ran; any failure after the stop has put it back.
+    pub(crate) async fn take_over(
+        &self,
+        session: &dyn SshSession,
+        target: &Target,
+        token: uuid::Uuid,
+    ) -> Result<(), Failure> {
+        target.validate()?;
+        let body = format!(
+            "{}\n{}\n{INSPECT}\ntake_over_finished_install {} {}\n",
+            crate::install::SETUP_LOCK,
+            crate::install::RUNTIME_CLEANUP,
+            crate::transport::shell_quote(&self.record()),
+            token.simple()
+        );
+        session
+            .run(
+                &Installation::script_for(target.mode, self.host, token, &body),
+                Input::Empty,
+            )
+            .await
+            .map_err(classify)
+            .map_err(|mut error| {
+                if error.exit_status == Some(73) {
+                    error.kind = FailureKind::UnrecognizedInstall;
+                    error.message = TAKEOVER_BUSY;
+                }
+                error
+            })?;
+        Ok(())
+    }
+}
+
+/// Decode the check's record after its fixed check lines: clear, a refusal, a
+/// running setup, a set-aside install, or an earlier attempt to recover.
 fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if bytes == b"INFRATERNAL_SETUP_CLEAR\n" {
         return Ok(None);
@@ -223,15 +465,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         };
     let host = canonical_id(host)?;
     let transaction = canonical_id(transaction)?;
-    let (device, inode) = identity.split_once(':').ok_or_else(refused)?;
-    for number in [device, inode] {
-        if number.parse::<u64>().is_err()
-            || number.is_empty()
-            || !number.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err(refused());
-        }
-    }
+    let identity = parse_identity(identity)?;
     if sockets.is_empty() || !sockets.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(refused());
     }
@@ -242,7 +476,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     Ok(Some(PreviousAttempt {
         host,
         transaction,
-        identity: (*identity).into(),
+        identity,
         sockets,
         lease_owner,
         enrolled,
@@ -252,8 +486,9 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     }))
 }
 
-/// `<superseded|replaced> <host> <tx> <machine> <enabled> <active>`: an install
-/// an earlier Replace or Re-enroll set aside and did not put back (#305 P2-1).
+/// `<superseded|replaced|taken_over> <host> <tx> <machine> <enabled> <active>`:
+/// an install an earlier Replace, Re-enroll or Take over set aside and did not
+/// put back (#305 P2-1, D359). A Take over's `<tx>` is its token.
 fn parse_set_aside(record: &[&str]) -> Result<PreviousAttempt, Failure> {
     let [kind, host, transaction, machine, enabled, active] = record else {
         return Err(refused());
@@ -263,9 +498,10 @@ fn parse_set_aside(record: &[&str]) -> Result<PreviousAttempt, Failure> {
         "no" => Ok(false),
         _ => Err(refused()),
     };
-    let replaced = match *kind {
-        "replaced" => true,
-        "superseded" => false,
+    let kind = match *kind {
+        "replaced" => AsideKind::Replaced,
+        "superseded" => AsideKind::Superseded,
+        "taken_over" => AsideKind::TakenOver,
         _ => return Err(refused()),
     };
     Ok(PreviousAttempt {
@@ -278,7 +514,7 @@ fn parse_set_aside(record: &[&str]) -> Result<PreviousAttempt, Failure> {
         live: false,
         cancel: None,
         set_aside: Some(SetAside {
-            replaced,
+            kind,
             machine: parse_machine(machine)?,
             enabled: flag(enabled)?,
             active: flag(active)?,
@@ -495,11 +731,11 @@ impl PreviousAttempt {
         }
     }
 
-    /// Whether Check found an install an earlier attempt set aside, and if so
-    /// whether that was a Replace (true) or a Re-enroll (false).
+    /// Whether Check found an install an earlier attempt set aside, and which
+    /// action set it aside.
     #[must_use]
-    pub(crate) fn set_aside(&self) -> Option<bool> {
-        self.set_aside.as_ref().map(|aside| aside.replaced)
+    pub(crate) fn set_aside(&self) -> Option<AsideKind> {
+        self.set_aside.as_ref().map(|aside| aside.kind)
     }
 
     /// The offer to put a set-aside install back as it was found (#305 P2-1).
@@ -673,28 +909,33 @@ impl PreviousAttempt {
     }
 
     /// Put a set-aside install back after the new enrollment failed and rolled back.
-    /// `replaced` names a Replace (journal only) rather than a Re-enroll (whole install).
+    /// `kind` names the action that set it aside, and so the restore that undoes it.
     /// Returns false when this transaction was never set aside, so nothing changed.
     /// # Errors
     /// Refuses while any new installation or unit is still in place.
-    pub async fn restore_set_aside(
+    pub(crate) async fn restore_set_aside(
         &self,
         session: &dyn SshSession,
         target: &Target,
-        replaced: bool,
+        kind: AsideKind,
     ) -> Result<bool, Failure> {
         target.validate()?;
+        // A Take over's token is its transaction and its cancel at once.
+        let action = match kind {
+            AsideKind::Replaced => "restore_replaced_install",
+            AsideKind::Superseded => "restore_superseded_install",
+            AsideKind::TakenOver => "restore_taken_over_install",
+        };
+        let cancel = if kind == AsideKind::TakenOver {
+            String::new()
+        } else {
+            self.cancel_argument()
+        };
         let body = format!(
-            "{}\n{}\n{INSPECT}\n{} {} {}\n",
+            "{}\n{}\n{INSPECT}\n{action} {} {cancel}\n",
             crate::install::SETUP_LOCK,
             crate::install::RUNTIME_CLEANUP,
-            if replaced {
-                "restore_replaced_install"
-            } else {
-                "restore_superseded_install"
-            },
             self.transaction.simple(),
-            self.cancel_argument()
         );
         let output = session
             .run(
@@ -917,6 +1158,38 @@ mod tests {
         }
     }
 
+    /// D359: the record a Take over sends back is exactly the one Check reported,
+    /// the offer names the old install, and only "ready" reads as offerable.
+    #[test]
+    fn a_finished_install_record_round_trips_into_its_take_over() {
+        let line = format!("{} 64:1234 live ready", "a".repeat(32));
+        let installed = parse_installed(&line).unwrap();
+        assert_eq!(
+            installed.record(),
+            format!("INFRATERNAL_SETUP_INSTALLED {line}")
+        );
+        assert_eq!(installed.takeover, Takeover::Ready);
+        let offer = serde_json::to_value(installed.takeover_failure(InstallMode::Root)).unwrap();
+        assert_eq!(offer["kind"], "unrecognized_install");
+        assert_eq!(offer["takeover"]["install"], "a".repeat(32));
+        assert_eq!(offer["takeover"]["live"], true);
+        assert_eq!(offer["message"], TAKEOVER_OFFER);
+        assert!(!TAKEOVER_OFFER.contains('/'), "paths go in Details only");
+        let plain = serde_json::to_value(installed.refusal(InstallMode::Root)).unwrap();
+        assert!(plain.get("takeover").is_none(), "a refusal offers nothing");
+        let busy = parse_installed(&format!("{} 64:1234 idle busy", "a".repeat(32))).unwrap();
+        assert_eq!(busy.refusal(InstallMode::Root).message, TAKEOVER_BUSY);
+        let taken = installed.taken_over(uuid::Uuid::from_u128(7));
+        assert_eq!(taken.set_aside(), Some(AsideKind::TakenOver));
+        assert_eq!(
+            taken.transaction,
+            uuid::Uuid::from_u128(7),
+            "the token names the set-aside"
+        );
+    }
+
+    /// A set-aside install's record offers Put it back, and names which restore
+    /// puts it back (Re-enroll or Take over, D359); unknown kinds refuse.
     #[test]
     fn a_set_aside_install_is_offered_back_by_its_record() {
         let record = format!(
@@ -925,7 +1198,7 @@ mod tests {
             "2".repeat(32)
         );
         let previous = parse(record.as_bytes()).unwrap().unwrap();
-        assert_eq!(previous.set_aside(), Some(false));
+        assert_eq!(previous.set_aside(), Some(AsideKind::Superseded));
         assert_eq!(previous.replacement_host(), None, "never a Replace offer");
         let failure = serde_json::to_value(previous.set_aside_failure()).unwrap();
         assert_eq!(failure["setup_lock"]["set_aside"], true);
@@ -941,7 +1214,16 @@ mod tests {
             findings.findings[2],
             "Its service is enabled again but not started, as it was found"
         );
-        for bad in ["moved", "superseded-x"] {
+        // D359: a Take over's set-aside is put back by its own restore, named by its token.
+        let record = format!(
+            "INFRATERNAL_SETUP_SET_ASIDE taken_over {} {} host yes yes\n",
+            "1".repeat(32),
+            "7".repeat(32)
+        );
+        let taken = parse(record.as_bytes()).unwrap().unwrap();
+        assert_eq!(taken.set_aside(), Some(AsideKind::TakenOver));
+        assert_eq!(taken.transaction.simple().to_string(), "7".repeat(32));
+        for bad in ["moved", "superseded-x", "taken-over"] {
             let record = format!(
                 "INFRATERNAL_SETUP_SET_ASIDE {bad} {} {} host yes no\n",
                 "1".repeat(32),

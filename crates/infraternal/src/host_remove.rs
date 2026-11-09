@@ -608,6 +608,36 @@ mod tests {
         assert_eq!(result.data, serde_json::json!({}));
     }
 
+    /// A connected host's answer comes back in the removal result (#409): people
+    /// read which kernel objects it left in place, scripts get them as `left`.
+    #[test]
+    fn removed_result_names_what_the_host_left() {
+        use crate::cli::output::{RenderOptions, render_pretty};
+        let line = "Left infraternal0 because infraternal didn't create it here.";
+        let value = serde_json::json!({"state":"removed", "host_cleanup":"requested",
+            "message":format!("worker was removed. Its infraternal agent is uninstalling itself. {line}"),
+            "manual":null, "left":["infraternal0"]});
+        let human = super::command_result(uuid::Uuid::nil(), value.clone(), true, false);
+        let output = render_pretty(
+            &human,
+            RenderOptions {
+                terminal: false,
+                color: false,
+                width: 120,
+            },
+        )
+        .unwrap();
+        // The renderer wraps long sentences; compare the words, not the breaks.
+        let words = output.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains(line),
+            "left object missing from human output: {output}"
+        );
+        assert_eq!(human.state, crate::cli::output::CommandState::Ready);
+        let machine = super::command_result(uuid::Uuid::nil(), value, true, true);
+        assert_eq!(machine.data["left"], serde_json::json!(["infraternal0"]));
+    }
+
     /// D356: people see each account's outcome and each reported file with
     /// its new lines after a removal, with the reminder that infraternal did
     /// not change them; scripts get the server's object. A report still

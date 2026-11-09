@@ -291,3 +291,25 @@ async fn review_stopped_commit_channel_finishes_the_private_probe() {
         "a stopped commit channel left the registered private probe without cleanup"
     );
 }
+
+/// J342 P2-1 (D359, D335): after a failure, a committed fresh install, Take over
+/// or Re-enroll is uninstalled (each enrolled a new host the server revokes, and
+/// the old install of a Take over or Re-enroll went at commit), while a Replace
+/// keeps its enrolled host and is rolled back. An install that never committed
+/// is always rolled back.
+#[test]
+fn a_committed_take_over_or_reenroll_is_uninstalled_after_a_late_failure() {
+    use crate::previous_attempt::AsideKind;
+    assert!(uninstall_after_commit(true, None));
+    assert!(uninstall_after_commit(true, Some(AsideKind::TakenOver)));
+    assert!(uninstall_after_commit(true, Some(AsideKind::Superseded)));
+    assert!(!uninstall_after_commit(true, Some(AsideKind::Replaced)));
+    for kind in [
+        None,
+        Some(AsideKind::TakenOver),
+        Some(AsideKind::Replaced),
+        Some(AsideKind::Superseded),
+    ] {
+        assert!(!uninstall_after_commit(false, kind), "{kind:?}");
+    }
+}

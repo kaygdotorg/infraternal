@@ -158,3 +158,26 @@ test("the dismiss control and an action each close only their own toast", () => 
     toast.dispose();
   });
 });
+
+test("showing a toast again while it is leaving brings the same card back, never a second copy", () => {
+  withFakeDom((parent, clock) => {
+    const toast = mount(parent);
+    const stack = (): FakeElement => parent.children[0]!;
+    // A status that comes and goes quickly (#395: "Not saved" during a burst of layout edits) must stay one card.
+    toast.show({ message: "Not saved", duration: 0 });
+    clock.flushFrames();
+    toast.dismiss();
+    expect(stack().children[0]!.dataset.open).toBe("false");
+    toast.show({ message: "Not saved", duration: 0 });
+    expect(stack().children).toHaveLength(1);
+    clock.flushFrames();
+    expect(stack().children[0]!.dataset.open).toBe("true");
+    // The cancelled exit never removes the card it brought back.
+    clock.runTimers();
+    expect(stack().children).toHaveLength(1);
+    // A fresh showing counts from one again: it is not a repeat of the one that was dismissed.
+    const all = (node: FakeElement): FakeElement[] => [node, ...node.children.flatMap(all)];
+    expect(all(stack().children[0]!).some((child) => child.className === "ui-toast-count")).toBe(false);
+    toast.dispose();
+  });
+});

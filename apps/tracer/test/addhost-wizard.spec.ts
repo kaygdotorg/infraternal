@@ -217,10 +217,57 @@ test("an unknown host key shows its fingerprint and is never trusted without a c
   await expect(page.getByText("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", { exact: true })).toBeVisible();
   // Nothing proceeds by itself.
   await page.waitForTimeout(800);
-  await expect(inWizard(page, "Trust this key")).toBeVisible();
+  await expect(inWizard(page, "Trust and continue")).toBeVisible();
   expect(await consoleWindows(page)).not.toContain("w-newkey.lab");
-  await inWizard(page, "Trust this key").click();
+  await inWizard(page, "Trust and continue").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+});
+
+/** Records every moment a failure screen, a failed row or a danger-toned hero is on screen, so a flow can prove it never showed one. */
+async function watchForFailure(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const seen: string[] = [];
+    (window as unknown as { __sawFailure: string[] }).__sawFailure = seen;
+    const look = (): void => {
+      if (document.querySelector(".ah-page[data-page='failure']")) seen.push("failure page");
+      if (document.querySelector(".ah-run[data-state='failed'], .ah-job[data-state='failed']")) seen.push("failed row");
+      if (document.querySelector(".ah-hero[data-tone='danger']")) seen.push("danger hero");
+    };
+    new MutationObserver(look).observe(document.body, { subtree: true, childList: true, attributes: true });
+    look();
+  });
+}
+const sawFailure = (page: Page) => page.evaluate(() => (window as unknown as { __sawFailure: string[] }).__sawFailure);
+
+test("a never-seen host goes straight to the key step: no failure screen, no error icon or tone (#397)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await watchForFailure(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const hero = wizard(page).locator(".ah-page[data-page='hostkey'] .ah-hero");
+  await expect(hero).not.toHaveAttribute("data-tone", "danger");
+  await expect(hero.locator("path[d^='M10.3 4.6']")).toHaveCount(0);
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).not.toContainText(/warning/i);
+  await expect(inWizard(page, "Trust and continue")).toBeVisible();
+  await expect(inWizard(page, "Cancel")).toBeVisible();
+  await expect(page.locator(".ah-keyblock")).toContainText(/SHA256:/);
+  await expect(page.getByText("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", { exact: true })).toBeVisible();
+  // The step is part of the progress: going back to it shows the host waiting on the key, not failed.
+  expect(await sawFailure(page)).toEqual([]);
+  await inWizard(page, "Trust and continue").click();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  expect(await sawFailure(page)).toEqual([]);
+});
+
+test("a changed host key stays a real warning with the strong wording (#397)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@changedkey.lab");
+  await expect(page.getByRole("heading", { name: /Check changedkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-hero")).toHaveAttribute("data-tone", "danger");
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).toContainText("Warning: this host’s trusted key changed");
+  await expect(inWizard(page, "Replace trusted key")).toBeVisible();
 });
 
 test("a host that does not answer: what happened, Retry, and the one-line install from the host", async ({ page }) => {
@@ -545,6 +592,88 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
   });
 }
 
+// #394 (owner, production): a root add of minipc01 showed the exit-71 paragraph, and the progress row wrapped it in red.
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
+  test(`an install this server didn't make is named once, with its location only in Details at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "installed.lab");
+    await expect(page.getByRole("heading", { name: "installed.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
+    const failure = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(failure.locator(".ah-lede")).toContainText("nothing was changed");
+    // What the page says outside the collapsed Details: no path, no "didn't finish".
+    for (const visible of [failure.locator(".ah-title"), failure.locator(".ah-lede")]) {
+      await expect(visible).not.toContainText("/var/lib/infraternal");
+      await expect(visible).not.toContainText("didn't finish");
+    }
+    await expect(failure.locator(".ah-text")).toHaveCount(0);
+    await expect(inWizard(page, "Try again")).toBeVisible();
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    // The page as it opens: its icon and title are fully inside the card (J314: clipped at 375).
+    const top = await failure.evaluate((page) => {
+      const scroller = page.closest<HTMLElement>(".ah-scroll") ?? page.parentElement!;
+      const box = scroller.getBoundingClientRect();
+      return { scrolled: scroller.scrollTop, hero: page.querySelector(".ah-hero")!.getBoundingClientRect().top - box.top, title: page.querySelector(".ah-title")!.getBoundingClientRect().top - box.top };
+    });
+    expect(top.scrolled).toBe(0);
+    expect(top.hero).toBeGreaterThanOrEqual(0);
+    expect(top.title).toBeGreaterThanOrEqual(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-failure-${viewport.width}.png`) });
+    // Details open shows its text, not an empty caret (J314).
+    await failure.locator(".ah-details summary").click();
+    await expect(failure.locator(".ah-details pre")).toBeVisible();
+    await expect(failure.locator(".ah-details pre")).toContainText("Setup location: /var/lib/infraternal");
+    await failure.locator(".ah-details pre").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `installed-details-${viewport.width}.png`) });
+  });
+
+  test(`a login name with no account says so by name at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@noacct.lab");
+    await expect(page.getByRole("heading", { name: "noacct.lab couldn't find an account named kayg" })).toBeVisible({ timeout: 15_000 });
+    await expect(wizard(page).locator(".ah-page[data-page='failure'] .ah-lede")).toHaveText("Use an account that exists there, or add it as root.");
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });
+  });
+
+  test(`a failed host's progress row says it in one line beside its name at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    // Two hosts keep the progress page up after the failure, the interim state the owner saw.
+    await page.locator(".ui-chip-text").click();
+    await page.keyboard.type("installed.lab broken.lab ", { delay: 5 });
+    await inWizard(page, "Continue").click();
+    await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+    const row = wizard(page).locator(".ah-run[data-state='failed']").first();
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    const step = row.locator(".ah-job-step");
+    await expect(step).not.toHaveText("");
+    const box = await step.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const name = element.parentElement!.querySelector(".ah-name")!.getBoundingClientRect();
+      const own = element.getBoundingClientRect();
+      return { lines: Math.round(own.height / parseFloat(style.lineHeight)), overlap: own.top < name.bottom - 0.5 };
+    });
+    expect(box).toEqual({ lines: 1, overlap: false });
+    // The row tells this news in the page's neutral tone, never red (J314).
+    const tone = await row.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--fg-2)";
+      element.append(probe);
+      const neutral = getComputedStyle(probe).color;
+      probe.remove();
+      return { tone: (element as HTMLElement).dataset.tone, step: getComputedStyle(element.querySelector(".ah-job-step")!).color, neutral };
+    });
+    expect(tone.tone).toBe("info");
+    expect(tone.step).toBe(tone.neutral);
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `progress-row-${viewport.width}.png`) });
+  });
+}
+
 test("a failure with nothing beyond the summary shows no Details at all", async ({ page }) => {
   await open(page);
   await openWizard(page);
@@ -554,4 +683,119 @@ test("a failure with nothing beyond the summary shows no Details at all", async 
   const failure = wizard(page).locator(".ah-page[data-page='failure']");
   await expect(failure.locator(".ah-lede")).toHaveText("Setup stopped before this host was ready.");
   await expect(failure.locator(".ah-details")).toHaveCount(0);
+});
+
+// J314 P2-1: the other staging refusals each say what was found, and offer no retry that would meet the same files.
+for (const [host, title] of [
+  ["unproven-cache.lab", "unproven-cache.lab's download cache isn't setup's own"],
+  ["unproven-prepared.lab", "An earlier copy of the agent is in the way on unproven-prepared.lab"],
+  ["unproven-foreign.lab", "unproven-foreign.lab's setup folder has files setup didn't make"],
+] as const) {
+  test(`a staging refusal is named by its cause, with no retry: ${host}`, async ({ page }) => {
+    await open(page);
+    await openWizard(page);
+    await addTyped(page, host);
+    await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+    await expect(page.getByRole("heading", { name: title, exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(wizard(page).getByText("set up elsewhere", { exact: false })).toHaveCount(0);
+    await expect(inWizard(page, "Try again")).toHaveCount(0);
+    await expect(inWizard(page, "Retry")).toHaveCount(0);
+    await inWizard(page, "Back").click();
+    await expect(page.locator(".ah-job-retry")).toBeHidden();
+    await page.screenshot({ path: tracerEvidencePath("addhost-394", `refusal-${host.split(".")[0]}-1440.png`) });
+  });
+}
+
+// ── D359: Take over a finished install of another server (#394) ─────────────────────────────────────────────
+
+/** The old install's id the provisioning double reports for `takeover*` hosts. */
+const TAKEOVER_INSTALL = "c10909d16e8147a3b0f2e5d4c3b2a190";
+
+/** Adds `root@takeover.lab` as root, with consent, and waits for the "set up elsewhere" page. */
+async function addTakeoverAsRoot(page: Page): Promise<Array<Record<string, unknown>>> {
+  const sent: Array<Record<string, unknown>> = [];
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+    if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* unrelated binary protocol */ } }
+  }));
+  await addTyped(page, "root@takeover.lab");
+  await page.locator(".ah-consent").click();
+  await inWizard(page, "Install as root").click();
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
+  return sent;
+}
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
+  test(`root: Take over asks first, names the old install, then sets the host up at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    const sent = await addTakeoverAsRoot(page);
+    const failure = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(failure.locator(".ah-lede")).toHaveText("This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.");
+    expect(await heroTone(page)).toBeNull();
+    await expect(inWizard(page, "Try again")).toHaveCount(0);
+    await expect(inWizard(page, "Start fresh")).toHaveCount(0);
+    // Capture only once the step transition has settled on this one page.
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `offer-${viewport.width}.png`) });
+
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
+    const confirm = wizard(page).locator(".ah-page[data-page='takeover']");
+    await expect(confirm.getByRole("heading", { name: "Take over takeover.lab?", exact: true })).toBeVisible();
+    await expect(confirm.locator(".ah-lede")).toHaveText("Its old infraternal agent is stopped and set aside, and a new one is installed for this server.");
+    await expect(confirm.locator(".ui-kv-key")).toHaveText("Old install");
+    await expect(confirm.locator(".ui-kv-value")).toHaveText(TAKEOVER_INSTALL);
+    await expect(confirm.locator(".ah-text")).toHaveText("If setup fails, the old one is put back as it was. Once takeover.lab has joined, the old one is deleted.");
+    // Nothing reaches the server until the confirmation's own button.
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    // One left edge: title, lede, the key and the text line up; the value ends on the list's right edge.
+    const edges = await confirm.evaluate((page) => {
+      const left = (selector: string) => page.querySelector(selector)!.getBoundingClientRect().left;
+      // Marks are the glyphs (TASTE), not the text run's padded highlight box.
+      const glyphs = (selector: string) => { const range = document.createRange(); range.selectNodeContents(page.querySelector(selector)!); return range.getBoundingClientRect(); };
+      const text = glyphs(".ui-kv-key .ui-kv-text");
+      const value = glyphs(".ui-kv-value .ui-kv-text");
+      const list = page.querySelector(".ui-kv")!.getBoundingClientRect();
+      return { title: left(".ah-title"), lede: left(".ah-lede"), text: left(".ah-text"), key: text.left, valueRight: value.right, listRight: list.right, inside: value.left >= list.left - 0.5 };
+    });
+    expect(Math.abs(edges.lede - edges.title)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(edges.text - edges.title)).toBeLessThanOrEqual(0.5);
+    expect(edges.inside).toBe(true);
+    expect(edges.valueRight).toBeLessThanOrEqual(edges.listRight + 0.5);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `confirm-${viewport.width}.png`) });
+
+    await wizard(page).locator('[data-ah="take-over"]').click();
+    await expect.poll(() => sent.filter((command) => command.action === "start-fresh").length).toBe(1);
+    await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  });
+}
+
+test("root: Back from the Take over confirmation changes nothing, and the row asks first too", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  const sent = await addTakeoverAsRoot(page);
+  await wizard(page).locator('[data-ah="review-take-over"]').click();
+  await expect(wizard(page).locator(".ah-page[data-page='takeover']")).toBeVisible();
+  await inWizard(page, "Back").click();
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
+  await inWizard(page, "Back").click();
+  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  await expect(page.locator(".ah-job-retry")).toBeHidden();
+  await expect(page.locator(".ah-job-fix")).toHaveText("Take over");
+  await page.locator(".ah-job-fix").click();
+  // The row opens the page, never the action itself.
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
+  expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+});
+
+test("rootless: a finished install of another server offers no Take over", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "takeover.lab");
+  await inWizard(page, "Install as user").click({ timeout: 2_000 }).catch(() => undefined);
+  await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible({ timeout: 15_000 });
+  await expect(wizard(page).locator('[data-ah="review-take-over"], [data-ah="take-over"]')).toHaveCount(0);
+  await expect(inWizard(page, "Try again")).toBeVisible();
+  await page.screenshot({ path: tracerEvidencePath("addhost-takeover", "rootless-1440.png") });
 });

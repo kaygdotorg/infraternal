@@ -69,7 +69,7 @@ canvas = ["plugin-server", "infraternal-server/canvas"]
 default = ["canvas", "release", "remote", "ssh", "plugin-host-facts", "plugin-agent", "plugin-backup", "plugin-mesh", "plugin-proxy", "plugin-relay", "plugin-server", "plugin-ssh"]
 plugin-agent = ["dep:infraternal-agent", "dep:tokio", "tokio/rt-multi-thread"]
 plugin-backup = ["dep:infraternal-plugin-backup"]
-plugin-mesh = ["dep:infraternal-mesh", "dep:infraternal-plugin-mesh", "infraternal-server?/mesh", "plugin-agent", "infraternal-agent/mesh", "dep:tokio"]
+plugin-mesh = ["dep:infraternal-mesh", "dep:infraternal-plugin-mesh", "infraternal-plugin-mesh/mesh-dns", "infraternal-server?/mesh", "plugin-agent", "infraternal-agent/mesh", "dep:tokio"]
 plugin-proxy = ["dep:infraternal-plugin-proxy", "plugin-agent", "infraternal-agent/proxy", "infraternal-server?/proxy"]
 # Preserve the production feature name without enabling a server role.
 mesh = ["plugin-mesh"]

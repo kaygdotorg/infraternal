@@ -41,7 +41,16 @@ default = [
     "flate2",
     "aws-lc-rs",
     "rsa",
+    "nist-ecdh",
+    "extra-ciphers",
+    "legacy-transport",
 ]
+# Ciphers outside the mesh offer remain available to callers that opt in.
+extra-ciphers = []
+# Optional SHA-1 exchanges/MACs and unencrypted key exchange, never offered by the mesh.
+legacy-transport = []
+# Optional exchanges outside the mesh offer; ECDSA signing and verification stay enabled.
+nist-ecdh = ["elliptic-curve/ecdh", "p256/ecdh", "p384/ecdh", "p521/ecdh"]
 des = ["dep:des"]
 dsa = ["ssh-key/dsa"]
 ring = ["dep:ring"]
@@ -218,7 +227,6 @@ features = [
 
 [dependencies.elliptic-curve]
 version = "0.14"
-features = ["ecdh"]
 
 [dependencies.enum_dispatch]
 version = "0.3.13"
@@ -271,15 +279,12 @@ features = ["rand_0_10"]
 
 [dependencies.p256]
 version = "0.14"
-features = ["ecdh"]
 
 [dependencies.p384]
 version = "0.14"
-features = ["ecdh"]
 
 [dependencies.p521]
 version = "0.14"
-features = ["ecdh"]
 
 [dependencies.pbkdf2]
 version = "0.13"

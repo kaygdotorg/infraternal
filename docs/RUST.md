@@ -1,7 +1,7 @@
 <!-- Rust workspace and static-build notes. -->
 # Rust workspace and static builds
 
-The workspace pins Rust 1.99.0 with rustfmt, Clippy, and the x86_64 and aarch64
+The workspace pins Rust 1.99.1 with rustfmt, Clippy, and the x86_64 and aarch64
 musl standard libraries. The package manifests inherit the AGPL-3.0-only
 license and workspace lint policy. The shim repeats the Clippy settings because
 Cargo rejects overriding a lint while inheriting `[lints] workspace = true`; it
@@ -53,6 +53,9 @@ the recorded native x86 build (#296). Gate portability does not change the
 release profile or select a new toolchain.
 
 ## Cross-host reproducibility boundary (#296, J81)
+
+The source audit and measurements in this section use the original Rust 1.99.0
+toolchain. They remain the recorded baseline when the current patch pin advances.
 
 The pinned Cargo cannot provide host-independent crate identities through its
 supported build flags. This is a limitation of the current recipe, not a claim

@@ -86,6 +86,14 @@ impl CleanupSlots {
 
 /// Deliver one server-retained refusal without publishing a host or normal actor.
 /// Busy admission and failed/lost replies leave the durable obligation untouched.
+///
+/// This is the removal outbox, and the only path that asks a person's host
+/// to uninstall itself (#409). In order: the login revocation and its durable
+/// receipt (D352); then, if the removal asked for it and the host has not
+/// accepted yet, the uninstall request; then one transaction records the
+/// host's answer and confirms the receipt, which retires the entry. The
+/// receipt is in before the uninstall can stop the agent, and a lost answer
+/// confirms nothing, so the next reconnect asks again.
 async fn deliver_login_cleanup(
     authority: AuthorityGuard,
     link: RemoteLink,
@@ -97,6 +105,10 @@ async fn deliver_login_cleanup(
     // A lost acknowledgement leaves the durable outbox for next reconnect.
     let store = authority.store();
     let host = authority.identity.host;
+    let uninstall = store
+        .pending_uninstall(host)
+        .await
+        .map_err(io::Error::other)?;
     let (actor, accepts) = EmbeddedAgent::remote(authority.identity.execution_uid);
     let mut inventory = actor.session_inventory();
     accepts
@@ -107,7 +119,21 @@ async fn deliver_login_cleanup(
         async {
             tokio::select! {
                 biased;
-                durable = crate::remote_guard::durable_cleanup(actor.downgrade(), person) => durable,
+                delivered = async {
+                    let revoked = crate::remote_guard::durable_cleanup(actor.downgrade(), person).await?;
+                    if !uninstall {
+                        return Some((revoked, None));
+                    }
+                    match crate::remote_removal::ask_uninstall(&actor, host).await {
+                        // Its report of the kernel objects it leaves is kept
+                        // with the answer, for the removal result (#235, #409).
+                        crate::remote_removal::UninstallReply::Accepted(left) => Some((revoked, Some(("requested", left)))),
+                        // The host answered no: the install stays, and the
+                        // removal toast already handed over the manual command.
+                        crate::remote_removal::UninstallReply::Refused => Some((revoked, Some(("unreachable", Vec::new())))),
+                        crate::remote_removal::UninstallReply::Lost => None,
+                    }
+                } => delivered,
                 // This private actor owns one transport. After a busy reply,
                 // disconnect can precede the next retry; its unavailable census
                 // ends that attempt instead of awaiting an impossible replacement.
@@ -116,9 +142,16 @@ async fn deliver_login_cleanup(
         },
     )
     .await;
-    if let Ok(Some(revoked)) = result {
+    if let Ok(Some((revoked, answer))) = result {
         store
-            .confirm_login_cleanup_with_report(host, person, revoked.report.as_ref())
+            .confirm_removal_cleanup(
+                host,
+                person,
+                answer
+                    .as_ref()
+                    .map(|(cleanup, left)| (*cleanup, left.as_slice())),
+                revoked.report.as_ref(),
+            )
             .await
             .map_err(io::Error::other)?;
     }

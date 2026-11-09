@@ -1,5 +1,5 @@
 //! Regressions for negotiated bounded access deltas and refusal before mutation [242,252], #173.
-#![cfg(feature = "agent")]
+#![cfg(all(feature = "agent", target_os = "linux"))]
 #![allow(clippy::unwrap_used)]
 use infraternal_plugin_mesh::{
     configuration,
@@ -20,9 +20,9 @@ fn config() -> Config {
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         version: 1,
         addresses: Addresses {
@@ -53,7 +53,7 @@ fn config() -> Config {
                 )
             })
             .collect::<BTreeMap<_, _>>(),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
     }
 }
@@ -254,12 +254,13 @@ fn uniform_changes_fit_one_frame_after_churn_with_distinct_kept_services() {
     );
 }
 
+/// Accepts the DNS capability probe only in builds that include mesh DNS support.
 #[test]
 fn compact_identity_support_requires_an_explicit_strict_probe() {
     let parse = infraternal_plugin_mesh::node_actions::parse_action;
     assert!(parse("mesh.identity", br#"{"compact_access":true}"#).is_ok());
     assert!(parse("mesh.identity", b"{}").is_ok());
-    #[cfg(feature = "mesh-dns-spike")]
+    #[cfg(feature = "mesh-dns")]
     assert!(
         parse(
             "mesh.identity",
@@ -267,7 +268,7 @@ fn compact_identity_support_requires_an_explicit_strict_probe() {
         )
         .is_ok()
     );
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     assert!(
         parse(
             "mesh.identity",

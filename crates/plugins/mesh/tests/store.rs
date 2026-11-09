@@ -81,7 +81,7 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
 }
 
 #[tokio::test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(feature = "mesh-dns")]
 async fn public_origin_sets_the_default_suffix_and_origin_changes_advance_the_snapshot() {
     let pool = pool().await;
     let first = Store::with_public_origin(pool.clone(), "https://ssh.kayg.org");
@@ -98,6 +98,7 @@ async fn public_origin_sets_the_default_suffix_and_origin_changes_advance_the_sn
 }
 
 #[tokio::test]
+/// Tracks the server's published DNS suffix across restart and advances the snapshot revision.
 async fn publication_identity_tracks_server_public_host_across_restart() {
     let pool = pool().await;
     let first = Store::with_public_origin(pool.clone(), "https://ssh.example.test");
@@ -105,7 +106,7 @@ async fn publication_identity_tracks_server_public_host_across_restart() {
     let (node, _) = first.attach("host", key(2), None, false).await.unwrap();
     let before = first.config(node).await.unwrap();
 
-    #[cfg(not(feature = "mesh-dns-spike"))]
+    #[cfg(not(feature = "mesh-dns"))]
     assert!(
         serde_json::to_value(&before)
             .unwrap()
@@ -129,7 +130,7 @@ async fn publication_identity_tracks_server_public_host_across_restart() {
 }
 
 #[tokio::test]
-#[cfg(feature = "mesh-dns-spike")]
+#[cfg(all(feature = "agent", feature = "mesh-dns"))]
 async fn a_fallback_named_node_is_not_published_in_mesh_dns_until_it_has_a_real_name() {
     let pool = pool().await;
     let store = Store::new(pool.clone());

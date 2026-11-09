@@ -277,6 +277,7 @@ fn wait_for_detached_completion(session: &Session, marker: &Path) -> (u64, Strin
     wait_for_detached_completion_with_caps(session, marker, 0)
 }
 
+/// Reattach with the requested capabilities after the detached producer completes.
 fn wait_for_detached_completion_with_caps(
     session: &Session,
     marker: &Path,
@@ -296,7 +297,11 @@ fn wait_for_detached_completion_with_caps(
     peer.set_read_timeout(Some(Duration::from_secs(60)))
         .unwrap();
     let mut seq = 0;
-    let mut screen = vt100::Parser::new(60, 200, 10000);
+    let mut screen = vt100::Parser::new(
+        60_u16.try_into().unwrap(),
+        200_u16.try_into().unwrap(),
+        10000,
+    );
     loop {
         match read(&mut peer) {
             Frame::Snapshot(offset, bytes) | Frame::SnapshotWithFlags(offset, _, bytes) => {
@@ -391,6 +396,7 @@ fn vim_path() -> PathBuf {
         .expect("Vim must be available in the verification toolchain");
     fs::canonicalize(vim).unwrap()
 }
+/// Check that a wrapped output ring repaints the real editor's complete screen.
 #[test]
 fn ring_wrap_snapshot_repaints_real_vim() {
     let vim = vim_path().to_str().unwrap().replace('\'', "'\\''");
@@ -411,7 +417,11 @@ fn ring_wrap_snapshot_repaints_real_vim() {
         fixture.display()
     );
     send(&mut peer, Frame::Input(command.into_bytes()));
-    let mut expected = vt100::Parser::new(60, 200, 10000);
+    let mut expected = vt100::Parser::new(
+        60_u16.try_into().unwrap(),
+        200_u16.try_into().unwrap(),
+        10000,
+    );
     expected.process(&until(
         &mut peer,
         &mut original_seq,
@@ -448,7 +458,11 @@ fn ring_wrap_snapshot_repaints_real_vim() {
         panic!("wrapped ring did not snapshot")
     };
     assert_eq!(seq, original_seq);
-    let mut screen = vt100::Parser::new(60, 200, 10000);
+    let mut screen = vt100::Parser::new(
+        60_u16.try_into().unwrap(),
+        200_u16.try_into().unwrap(),
+        10000,
+    );
     screen.process(&bytes);
     assert!(screen.screen().alternate_screen());
     assert_eq!(

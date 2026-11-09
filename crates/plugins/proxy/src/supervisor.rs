@@ -1009,22 +1009,32 @@ fn validate_proxy_directory(
     Ok(())
 }
 
+/// Reserve each destination in the parent so spawn cannot allocate its error pipe there.
+/// The limit counts inherited files, independent of a busy parent's descriptor numbers.
 fn add_inherited_file(
     file: std::fs::File,
     files: &mut Vec<std::fs::File>,
     descriptors: &mut Vec<(i32, i32)>,
     next_child_fd: &mut i32,
 ) -> io::Result<i32> {
-    if *next_child_fd >= FIRST_PROXY_CHILD_FD + 64 {
+    if descriptors.len() >= 64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "proxy child descriptor count exceeds its limit",
         ));
     }
-    let target = *next_child_fd;
-    descriptors.push((file.as_raw_fd(), target));
+    #[cfg(target_os = "linux")]
+    let file = {
+        let reserved = infraternal_shim::reserve_proxy_descriptor(&file, *next_child_fd)?;
+        // Keep one owned parent descriptor per entry, rather than retaining
+        // the original low slot alongside its reserved replacement.
+        drop(file);
+        reserved
+    };
+    let target = file.as_raw_fd();
+    descriptors.push((target, target));
     files.push(file);
-    *next_child_fd += 1;
+    *next_child_fd = target.checked_add(1).ok_or(io::ErrorKind::InvalidInput)?;
     Ok(target)
 }
 

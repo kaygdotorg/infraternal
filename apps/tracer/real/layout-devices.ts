@@ -10,13 +10,26 @@ import { WebSocket } from "ws";
 import { encodeMuxedFrame, WebSocketFrameDecoder } from "../../../packages/protocol/src/codec";
 import { LAYOUT_SESSION_INCARNATION } from "../src/connection";
 import { personName, startRealServer, type RealServer } from "./server";
-import type { CanvasDocument } from "../src/canvas/model/schema";
+import { documentWindows, type CanvasDocument } from "../src/canvas/model/schema";
 
 export const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
+/**
+ * Waits until the tab has nothing left to save: the layout loaded, every console window it draws is in the server's
+ * confirmed copy, no sent edit waits for its receipt, and no "Not saved" notice is up.
+ *
+ * The notice alone is no proof: it shows only after an edit has waited about a second (D358), and a new shell's
+ * window is not even sent until its session id arrives. So the helper compares what the tab draws with what the
+ * server holds instead of reading the notice.
+ */
 export const settled = async (page: Page): Promise<void> => {
   await expect.poll(async () => (await cache(page)).initialized, { timeout: 30_000 }).toBe(true);
-  await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toBeHidden();
+  await expect.poll(async () => {
+    const drawn = await windows(page).evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.windowId ?? ""));
+    const saved = new Set(documentWindows((await cache(page)).canonical).map((window) => window.id));
+    return drawn.filter((id) => !saved.has(id));
+  }, { timeout: 15_000, message: "console windows the server has not confirmed" }).toEqual([]);
   await expect.poll(async () => (await cache(page))?.pending.length, { timeout: 15_000 }).toBe(0);
+  await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toHaveCount(0);
 };
 export async function enrol(page: Page, server: RealServer): Promise<void> {
   const cdp = await page.context().newCDPSession(page);

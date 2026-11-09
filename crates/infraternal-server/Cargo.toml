@@ -21,7 +21,7 @@ staging-trust = []
 default = ["mesh", "proxy", "cli-plugin", "ssh", "release", "canvas"]
 canvas = ["dep:infraternal-plugin-canvas"]
 cli-plugin = []
-mesh = ["dep:infraternal-plugin-mesh"]
+mesh = ["dep:infraternal-plugin-mesh", "infraternal-plugin-mesh/mesh-dns"]
 proxy = ["infraternal-agent/proxy"]
 # Opt-in namespace proof compiles the existing node engine in this test process.
 mesh-transport-proof = ["mesh", "remote", "infraternal-agent/mesh", "infraternal-plugin-mesh/test-support", "infraternal-plugin-remote/test-support"]

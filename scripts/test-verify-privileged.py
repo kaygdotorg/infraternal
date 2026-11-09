@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 from unittest import mock
 import uuid
@@ -43,6 +44,36 @@ def userns_available():
 
 class PrivilegedAreas(unittest.TestCase):
     """Trigger the namespace tests only for relevant code paths."""
+
+    def test_missing_host_frontend_skips_the_row_without_claiming_coverage(self):
+        """An absent absolute-path backend is an environment gap, not a mesh failure."""
+        with mock.patch.object(sys, 'argv', ['verify-privileged']), \
+             mock.patch.object(p.subprocess, 'check_output', side_effect=[b'base', b'crates/plugins/mesh/src/iptables.rs\0', b'']), \
+             mock.patch.object(p, 'workspace_graph', return_value={}), \
+             mock.patch.object(p, 'dependency_directories', return_value={}), \
+             mock.patch.object(p, 'areas', return_value={'mesh'}), \
+             mock.patch.object(p.os, 'access', return_value=False), \
+             mock.patch.object(p, 'run', return_value=[]) as run:
+            with self.assertRaises(SystemExit) as result:
+                p.main()
+            self.assertEqual(result.exception.code, p.SKIP_EXIT)
+            run.assert_not_called()
+
+    def test_present_host_frontends_and_nonmesh_changes_still_run(self):
+        """Preflight must not hide product failures or require mesh tools for other areas."""
+        for selected, available in (({'mesh'}, True), ({'shim'}, False)):
+            with self.subTest(selected=selected), \
+                 mock.patch.object(sys, 'argv', ['verify-privileged']), \
+                 mock.patch.object(p.subprocess, 'check_output', side_effect=[b'base', b'changed\0', b'']), \
+                 mock.patch.object(p, 'workspace_graph', return_value={}), \
+                 mock.patch.object(p, 'dependency_directories', return_value={}), \
+                 mock.patch.object(p, 'areas', return_value=selected), \
+                 mock.patch.object(p.os, 'access', return_value=available), \
+                 mock.patch.object(p, 'run', return_value=['fixture failure']) as run:
+                with self.assertRaises(SystemExit) as result:
+                    p.main()
+                self.assertIn('fixture failure', str(result.exception.code))
+                run.assert_called_once()
 
     def test_scopes(self):
         """Cover production files, fixtures, shared manifests and harmless docs."""
@@ -193,11 +224,36 @@ class IgnoredSelection(unittest.TestCase):
         for target in ('test:kernel', 'test:proxy_ingress_namespace', 'test:review_retire_ownership'):
             self.assertIn(target, found)
 
-    def test_dns_spike_only_for_dns(self):
-        """The default-off resolver feature applies to the DNS target alone."""
+    def test_mesh_dns_is_default_and_explicit_in_the_privileged_matrix(self):
+        """Shipping enables mesh DNS; the namespace matrix enables it only for the DNS target."""
         shared = dict((name, f) for name, _, f in p.PACKAGES['mesh'])['infraternal-plugin-mesh']
-        self.assertNotIn('mesh-dns-spike', shared)
-        self.assertIn('mesh-dns-spike', p.TARGET_FEATURES[('infraternal-plugin-mesh', 'test:dns')])
+        manifest = tomllib.loads(Path(__file__).resolve().parents[1].joinpath(
+            'crates/plugins/mesh/Cargo.toml').read_text())
+        self.assertIn('mesh-dns', manifest['features']['default'])
+        self.assertNotIn('mesh-dns-spike', manifest['features'])
+        self.assertNotIn('mesh-dns', shared)
+        self.assertIn('mesh-dns', p.TARGET_FEATURES[('infraternal-plugin-mesh', 'test:dns')])
+
+    def test_mesh_dns_is_forwarded_to_both_shipping_roles(self):
+        """A rootless node and the coordinator both need DNS in their normal mesh build."""
+        root = Path(__file__).resolve().parents[1]
+        product = tomllib.loads(root.joinpath('crates/infraternal/Cargo.toml').read_text())
+        self.assertIn('plugin-mesh', product['features']['default'])
+        self.assertIn('infraternal-plugin-mesh/mesh-dns', product['features']['plugin-mesh'])
+        for manifest_path in ('crates/infraternal-agent/Cargo.toml',
+                              'crates/infraternal-server/Cargo.toml'):
+            manifest = tomllib.loads(root.joinpath(manifest_path).read_text())
+            self.assertIn('infraternal-plugin-mesh/mesh-dns', manifest['features']['mesh'], manifest_path)
+
+    def test_mesh_privileged_builds_disable_default_features(self):
+        """The shared namespace fixtures stay separate from DNS-specific Config fields."""
+        entries = p.builds({'mesh'})
+        shared = next(args for args, provides in entries if provides == 'infraternal-plugin-mesh')
+        dns = next(args for args, provides in entries
+                   if provides == ('infraternal-plugin-mesh', 'test:dns'))
+        self.assertIn('--no-default-features', shared)
+        self.assertIn('--no-default-features', dns)
+        self.assertIn('mesh-dns', dns[dns.index('--features') + 1])
 
 
 class RealRootProof(unittest.TestCase):
@@ -544,6 +600,16 @@ class SandboxShape(unittest.TestCase):
         self.assertNotIn('M=two\nlines', command)
         self.assertEqual(command[-3:], ['/t/debug/deps/x', '--exact', 'y'])
 
+    def test_outer_network_namespace_identity_reaches_inner_test(self):
+        """The inner PID namespace must compare its network namespace to the actual outer one."""
+        command, _ = self.command()
+        start = command.index('env') + 2
+        end = command.index('bash', start)
+        environment = dict(pair.split('=', 1) for pair in command[start:end])
+        marker = 'INFRATERNAL_VERIFY_OUTER_NETNS'
+        self.assertIn(marker, environment)
+        self.assertEqual(environment[marker], os.readlink('/proc/self/ns/net'))
+
     def test_test_runs_one_namespace_down(self):
         """The test runs in a nested user namespace, after pivot_root, with --kill-child (79752 P1)."""
         _, setup = self.command()
@@ -799,5 +865,21 @@ class RealSandbox(unittest.TestCase):
                 process.kill()
 
 
+class GateFixtureOutput(unittest.TestCase):
+    """Keep simulated gate verdicts from masquerading as the real privileged row."""
+
+    def test_successful_missing_frontend_fixture_does_not_print_a_real_skip(self):
+        """Run the actual test entrypoint: a passing mocked SKIP must stay out of stdout."""
+        result = subprocess.run(
+            [sys.executable, __file__,
+             'PrivilegedAreas.test_missing_host_frontend_skips_the_row_without_claiming_coverage'],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OK', result.stderr)
+        self.assertNotIn('privileged integration:', result.stdout)
+
+
 if __name__ == '__main__':
-    unittest.main()
+    # Passing mocks exercise SKIP/FAIL paths; only failures should expose their
+    # captured output beside the real runner's verdict in verify fast.
+    unittest.main(buffer=True)

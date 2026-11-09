@@ -279,7 +279,7 @@ rust_static_build_check() {
     scripts/test-auth-toolchain-pin || return $?
     python3 scripts/test-musl-cc.py || return $?
     python3 scripts/test-native-metadata.py || return $?
-    python3 scripts/test-rustc-paths.py || return $?
+    python3 scripts/test-rustc-path-layouts.py || return $?
     python3 scripts/test-path-remap-flags.py || return $?
     python3 scripts/release/production_trust_test.py || return $?
 

@@ -93,8 +93,8 @@ let
     dontConfigure = true;
     buildPhase = ''
       export BUN_INSTALL_CACHE_DIR="$TMPDIR/bun-cache"
-      # Optional native packages belong to unused font-package peer tooling.
-      # Omitting them keeps this browser-only dependency tree architecture-neutral.
+      # Optional native packages are development compilers and unused font peers.
+      # Bun builds production assets without them, keeping this cache architecture-neutral.
       bun install --frozen-lockfile --ignore-scripts --omit optional
     '';
     installPhase = ''
@@ -103,7 +103,7 @@ let
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-o9hhp0aYmmnLsfo1u9ZaA81ldO8hnF1ZSbhrkyB5d4Y=";
+    outputHash = "sha256-PSBZH4iSSZJJSTImCUk4ayupmor08VwHXfXHR/vh7i4=";
     dontFixup = true;
   };
   rustupShim = writeShellScriptBin "rustup" ''

@@ -27,6 +27,7 @@ async function mockState(page: import("playwright/test").Page): Promise<MockStat
   return (await (await retry(() => page.request.get(mockUrl("/__mock/state")))).json()) as MockState;
 }
 
+/** Verify that a held synchronized paint still forwards and acknowledges real terminal input. */
 export async function synchronizedInputScenario(page: Page) {
   test.setTimeout(20_000);
   const request = page.context().request;
@@ -73,7 +74,8 @@ export async function synchronizedInputScenario(page: Page) {
       probe.keydownAt = performance.now();
       probe.keydownWhileHeld = window.__tracerTestDouble?.rendererMetrics()?.synchronizedOutputHoldsPaint ?? false;
       const nativeSend = WebSocket.prototype.send;
-      WebSocket.prototype.send = function (data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+      /** Observe sends without widening the browser's accepted buffer types. */
+      WebSocket.prototype.send = function (data: Parameters<WebSocket["send"]>[0]): void {
         if (probe.inputSentAt === 0 && typeof data !== "string" && !(data instanceof Blob)) {
           const bytes = data instanceof ArrayBuffer
             ? new Uint8Array(data)

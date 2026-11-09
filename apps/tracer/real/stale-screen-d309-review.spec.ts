@@ -5,10 +5,10 @@
  */
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "../test/evidence-path";
-import { everShown, recordNote } from "../test/stale-note-recorder";
+import { everShown, FLOATING_NOTE, NOTE, recordNote } from "../test/stale-note-recorder";
 import { pair } from "./layout-devices";
 
-test("a silent real shell shows the note after a reattach that changed its size, and fresh output clears it", async ({ browser }) => {
+test("a silent real shell shows the pill icon after a reattach that changed its size, and fresh output clears it", async ({ browser }) => {
   test.setTimeout(90_000);
   const f = await pair(browser);
   try {
@@ -24,8 +24,9 @@ test("a silent real shell shows the note after a reattach that changed its size,
       await f.page.setViewportSize({ width: 1100, height: 700 });
       await f.page.waitForTimeout(500);
     });
-    const note = f.page.locator('.ui-terminal-note[data-shown]');
-    await expect(note).toHaveText("screen may be out of date", { timeout: 10_000 });
+    const note = f.page.locator(NOTE);
+    await expect(note).toHaveAttribute("aria-label", "Screen may be out of date", { timeout: 10_000 });
+    await expect(f.page.locator(FLOATING_NOTE)).toHaveCount(0);
     await f.page.screenshot({ path: tracerEvidencePath("stale-review-real-pty-note.png") });
     await host.locator("textarea").focus();
     await f.page.keyboard.press("Control+C");
@@ -33,7 +34,7 @@ test("a silent real shell shows the note after a reattach that changed its size,
   } finally { await f.dispose(); }
 });
 
-test("a reload of an idle shell at an unchanged size never shows the note", async ({ browser }) => {
+test("a reload of an idle shell at an unchanged size never shows the pill icon", async ({ browser }) => {
   test.setTimeout(90_000);
   const f = await pair(browser);
   try {
@@ -56,7 +57,7 @@ test("a reload of an idle shell at an unchanged size never shows the note", asyn
     // Past the longest wait the client allows (1.5 s), so a late note would have shown.
     await f.page.waitForTimeout(3_000);
     expect(await everShown(f.page)).toBe(0);
-    await expect(f.page.locator('.ui-terminal-note[data-shown]')).toHaveCount(0);
+    await expect(f.page.locator(NOTE)).toHaveCount(0);
     // Every reload reattached to the one shell; a fresh shell would have nothing to be out of date.
     expect(new Set(f.server.bridges.flatMap((bridge) => [...bridge.attached.values()].flat())).size).toBe(1);
     await f.page.screenshot({ path: tracerEvidencePath("stale-review-real-pty-reload-idle.png") });

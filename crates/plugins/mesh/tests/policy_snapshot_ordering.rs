@@ -35,9 +35,9 @@ fn install(fallback: bool) -> (Node, Config) {
         local_key: None,
         server: None,
         node: NodeId(1),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         name: None,
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         dns_suffix: "internal".to_owned(),
         version: 10,
         addresses: Addresses {
@@ -64,7 +64,7 @@ fn install(fallback: bool) -> (Node, Config) {
                 access_ssh: None,
             },
         )]),
-        #[cfg(feature = "mesh-dns-spike")]
+        #[cfg(feature = "mesh-dns")]
         peer_names: std::collections::BTreeMap::new(),
     };
     for chunk in configuration::chunks(None, &config).unwrap() {

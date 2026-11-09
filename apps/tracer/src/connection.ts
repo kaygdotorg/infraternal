@@ -142,6 +142,11 @@ export const DESKTOP_VIDEO_CAP = DESKTOP_VIDEO;
 
 interface ResumeCredentials { connectionId: Uint8Array; resumeToken: Uint8Array; deadline: number; windowMs: number }
 
+/**
+ * The page's one connection to the server. Terminals open streams on it with `openStream`, calls go through
+ * `call`, and `onRoundTrip` reports the measured connection delay to whoever shows it. See the module comment
+ * for the handshake, resume, backoff and liveness rules it keeps.
+ */
 export class MuxConnection {
   private socket: WebSocket | undefined;
   private decoder: WebSocketFrameDecoder | undefined;
@@ -429,8 +434,16 @@ export class MuxConnection {
     return () => { this.rttListeners.delete(listener); };
   }
 
-  /** Probe only on connection activation or input; correlated RTT and jitter bound silence [D265, #199]. */
-  sampleRoundTrip(): void {
+  /**
+   * Probe only on connection activation or input; correlated RTT and jitter bound silence [D265, #199].
+   *
+   * Pass `clearedReadout` when the caller has just blanked the round-trip readout (a terminal attaching does).
+   * The next answer then reaches the listeners even if an earlier answer was reported under two seconds ago.
+   * Otherwise the report throttle would swallow it and the readout would stay blank until the next key press (#430).
+   * Like a reconnect (`resetPings`), this pairs "the readout was cleared" with "the throttle may report again".
+   */
+  sampleRoundTrip(clearedReadout = false): void {
+    if (clearedReadout) this.lastRttReportAt = -Infinity;
     const startedAt = performance.now();
     if (!this.isWelcomed || this.closed || this.pageHidden() || this.pendingPings.size > 0) return;
     this.accountLivenessDelay(startedAt);

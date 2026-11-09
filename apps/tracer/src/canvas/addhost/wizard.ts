@@ -26,7 +26,7 @@
  */
 import { createSpinner, hostIconMarkup, hostSourceIconMarkup, installFocusRing, mountChipInput, mountStepStatus, PaneStepper, Spring, springCheckbox, createKeyValueList } from "../../../../../packages/ui/src/index";
 import type { Chip, ChipInputController, HostPlatform, HostSource, StepStatusController, Tick, ToastController } from "../../../../../packages/ui/src/index";
-import { awaitingFresh, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
+import { awaitingFresh, awaitingKey, foldEvent, pendingTarget, ProvisioningRun, targetIdFor } from "../../provisioning-client";
 import type { BootstrapEvent, FailureDetail, StartTarget, TargetView } from "../../provisioning-client";
 import type { FlowHost, FlowSurface } from "./flow-host";
 import { hostKeyPresentation } from "./host-key";
@@ -50,7 +50,8 @@ const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const SOURCE_LABELS: Record<HostSource, string> = { netbird: "NetBird", tailscale: "Tailscale", "known-hosts": "Known hosts", "ssh-config": "SSH config", "already-added": "Added" };
 const reducedMotion = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-type Page = "authority" | "discovery" | "root" | "progress" | "choose" | "hostkey" | "failure" | "install";
+/** The wizard's pages; `takeover` is the Take over confirmation that names the old install (D359). */
+type Page = "authority" | "discovery" | "root" | "progress" | "choose" | "hostkey" | "failure" | "takeover" | "install";
 type Direction = 1 | -1 | 0;
 
 /** One host the person picked or typed. */
@@ -68,9 +69,9 @@ interface Entry {
 interface Job { entry: Entry; target: string; view: TargetView; run: ProvisioningRun | undefined; root: boolean }
 
 /** What the person sees for a host: an attempt paused on leftovers reads as needing attention, like a failure. */
-const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : job.view.state;
-/** Still working without the person: not done, not failed, not paused. */
-const working = (job: Job): boolean => { const state = shownState(job); return state === "pending" || state === "running"; };
+const shownState = (job: Job): TargetView["state"] => awaitingFresh(job.view) ? "failed" : awaitingKey(job.view) ? "running" : job.view.state;
+/** Still working without the person: not done, not failed, not paused on a new host key (a question, not a fault). */
+const working = (job: Job): boolean => { const state = shownState(job); return (state === "pending" || state === "running") && !awaitingKey(job.view); };
 
 export function platformOf(name: string | undefined): HostPlatform {
   const os = (name ?? "").toLowerCase();
@@ -254,6 +255,7 @@ export class Wizard {
     else if (next === "progress") this.renderProgress(page);
     else if (next === "choose") this.renderChoose(page);
     else if (next === "hostkey") this.renderHostKey(page);
+    else if (next === "takeover") this.renderTakeOver(page);
     else if (next === "install") this.renderInstall(page);
     else this.renderFailure(page);
     this.stepper.show(page, dir);
@@ -613,7 +615,7 @@ export class Wizard {
       // A new host window takes the camera; the wizard stays where the person is looking while it still has work to show.
       if (this.jobs.some((item) => item.view.state === "pending" || item.view.state === "running" || item.view.state === "failed")) this.surface.reveal?.();
     }
-    if (job.view.state === "done" || shownState(job) === "failed") this.settle();
+    if (job.view.state === "done" || shownState(job) === "failed" || awaitingKey(job.view)) this.settle();
   }
 
   /** A refused command (for example the server's batch limit): shown on the hosts that had not started. */
@@ -724,13 +726,17 @@ export class Wizard {
     if (this.page !== "progress") return;
     const settled = !this.jobs.some(working);
     if (!settled) { this.setFoot(""); return; }
-    const failed = this.jobs.some((job) => shownState(job) === "failed");
+    const failed = this.jobs.some((job) => shownState(job) === "failed" || awaitingKey(job.view));
     const done = this.jobs.some((job) => job.view.state === "done");
     this.setFoot(failed
       ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${done ? "finish" : "back"}">${done ? "Close" : "Back"}</button>`
       : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="finish"><span>Done</span></button>`);
   }
 
+  /**
+   * Redraws one host's row on the progress page from its view: state and tone, its one-line status, each stage,
+   * and the row's retry and fix buttons. Does nothing when the progress page isn't showing.
+   */
   private paint(job: Job, page: HTMLElement | undefined = this.current): void {
     const row = page?.dataset.page === "progress" ? page.querySelector<HTMLElement>(`[data-job="${CSS.escape(job.target)}"]`) : null;
     if (!row) return;
@@ -739,7 +745,7 @@ export class Wizard {
     row.dataset.state = state;
     const active = stages.find((stage) => stage.state === "running" || stage.state === "failed");
     // The server's own text for the latest event; a host with no event yet is queued.
-    row.querySelector<HTMLElement>(".ah-job-step")!.textContent = state === "pending" ? "Waiting" : state === "done" ? "Ready" : state === "failed" ? failureLine(job.view.failure) : RUNNING_TEXT[active?.id ?? "detect"];
+    row.querySelector<HTMLElement>(".ah-job-step")!.textContent = awaitingKey(job.view) ? "Waiting for you to check the key" : state === "pending" ? "Waiting" : state === "done" ? "Ready" : state === "failed" ? failureLine(job.view.failure) : RUNNING_TEXT[active?.id ?? "detect"];
     stages.forEach((stage, index) => {
       const stageRow = row.querySelector<HTMLElement>(`[data-stage="${stage.id}"]`)!;
       stageRow.dataset.state = stage.state;
@@ -749,12 +755,15 @@ export class Wizard {
     });
     // "Fix" opens the page that can mend this failure; plain retries and dead ends have only the retry button.
     // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
-    const fix = state === "failed" ? guideFor(job.entry.label, job.view.failure).fix : "none";
-    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install";
+    const fix = state === "failed" || awaitingKey(job.view) ? guideFor(job.entry.label, job.view.failure).fix : "none";
+    // A dead end ("none") has no retry either: it would only meet the same refusal (J314 P2-1).
+    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none" || fix === "take-over";
+    // The row tells the news in the page's tone: neutral news is never red here (TASTE: the icon matches the news).
+    row.dataset.tone = state === "failed" ? guideFor(job.entry.label, job.view.failure).tone : "";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.
-    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : "Install from the host";
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -765,10 +774,11 @@ export class Wizard {
     if (!summary) return;
     const done = this.jobs.filter((job) => job.view.state === "done").length;
     const failed = this.jobs.filter((job) => shownState(job) === "failed").length;
-    const running = this.jobs.length - done - failed;
+    const asking = this.jobs.filter((job) => awaitingKey(job.view)).length;
+    const running = this.jobs.length - done - failed - asking;
     summary.textContent = this.jobs.length === 1
-      ? (running ? "Working out how to sign in, then installing." : done ? "Ready. The host is in your sidebar." : "This host needs attention.")
-      : `${done} of ${this.jobs.length} ready${failed ? `, ${failed} ${failed === 1 ? "needs" : "need"} attention` : ""}${running ? "" : "."}`;
+      ? (running ? "Working out how to sign in, then installing." : asking ? "Check this host's key to continue." : done ? "Ready. The host is in your sidebar." : "This host needs attention.")
+      : `${done} of ${this.jobs.length} ready${failed ? `, ${failed} ${failed === 1 ? "needs" : "need"} attention` : ""}${asking ? `, ${asking} ${asking === 1 ? "needs" : "need"} a key check` : ""}${running ? "" : "."}`;
   }
 
   /** When nothing is running: a lone failure gets its own page; a clean batch closes itself. */
@@ -776,6 +786,12 @@ export class Wizard {
     if (this.jobs.some(working)) return;
     this.footForProgress();
     const failed = this.jobs.filter((job) => shownState(job) === "failed");
+    const asking = this.jobs.filter((job) => awaitingKey(job.view));
+    // A new key is the next step of the flow: a lone host goes straight to it, a batch keeps its row's button.
+    if (!failed.length && asking.length) {
+      if (this.jobs.length === 1 && this.page === "progress") this.later(0, () => { if (this.page === "progress" && awaitingKey(asking[0]!.view)) this.openFix(asking[0]!); });
+      return;
+    }
     if (!failed.length) { this.later(700, () => this.finish()); return; }
     if (this.jobs.length === 1 && this.page === "progress") this.later(500, () => { if (this.page === "progress") this.openFix(failed[0]!); });
   }
@@ -803,21 +819,24 @@ export class Wizard {
       <details class="ah-details"><summary>${svg(ICON.caret)}<span>Details</span></summary><pre>${escapeHtml(text)}</pre></details>` : "";
   }
 
+  /** The page for one failed host: what happened, what to do, Details, and the one action that fixes it. */
   private renderFailure(page: HTMLElement): void {
     const job = this.fixing!;
     const hostId = job.view.failure?.already_added ? job.view.failure.host_id : undefined;
     const openId = hostId && this.deps.sink.hasHost?.(hostId) !== false ? hostId : undefined;
-    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined);
+    const guide: Guide = guideFor(job.entry.label, job.view.failure, openId !== undefined, job.entry.user);
     const replaceStuck = guide.fix === "replace-stuck-install";
     if (replaceStuck) guide.fix = "start-fresh";
-    // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red.
-    const icon = guide.fix === "start-fresh" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? ICON.pending : ICON.warning;
+    // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red. Only a running
+    // setup, which the person waits for, gets the clock (TASTE: the icon matches the news, #394).
+    const icon = guide.fix === "start-fresh" || guide.fix === "take-over" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
       <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${this.detailsBlock(job)}`;
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${guide.fix === "none" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${guide.fix === "none" || guide.fix === "take-over" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
     if (replaceStuck) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       const lock = job.view.failure?.setup_lock;
@@ -825,19 +844,45 @@ export class Wizard {
     }
   }
 
+  /**
+   * D359: the confirmation for taking over a finished install of another server. It names the old install's id
+   * (the person compares it with the machine's), says what happens to it, and only its Take over button sends the
+   * paused attempt's challenge. The server offers this in root mode only; anything else goes back to the failure.
+   */
+  private renderTakeOver(page: HTMLElement): void {
+    const job = this.fixing!;
+    const offer = job.view.failure?.takeover;
+    const name = escapeHtml(job.entry.label);
+    page.innerHTML = `${this.hero(ICON.servers)}<h1 class="ah-title">Take over ${name}?</h1>
+      <p class="ah-lede">Its old infraternal agent is ${offer?.live ? "stopped and " : ""}set aside, and a new one is installed for this server.</p>
+      <div class="ah-keyblock" data-kv></div>
+      <p class="ah-text">If setup fails, the old one is put back as it was. Once ${name} has joined, the old one is deleted.</p>${this.detailsBlock(job)}`;
+    const list = createKeyValueList("The install that is taken over");
+    list.set(offer ? [{ key: "Old install", value: offer.install }] : []);
+    page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-failure">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="take-over"><span>Take over</span></button>`);
+  }
+
+  /** Confirmed on the Take over page: continue the paused attempt, only for a root-mode offer (D359). */
+  private takeOver(job: Job): void {
+    if (!job.view.failure?.takeover || job.view.leftovers?.mode !== "root") { this.go("failure", -1); return; }
+    this.startFresh(job);
+  }
+
   private renderHostKey(page: HTMLElement): void {
     const job = this.fixing!;
     const print = job.view.failure?.fingerprints?.[0];
     const key = hostKeyPresentation(job.view.failure?.host_key_type);
     const changed = job.view.failure?.host_key_changed === true;
-    page.innerHTML = `${this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(job.entry.label)}'s key</h1>
+    // A new key is an ordinary question (neutral icon). Only a changed pin is a warning (TASTE: the icon matches the news).
+    page.innerHTML = `${changed ? this.hero(ICON.warning, "danger") : this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(job.entry.label)}'s key</h1>
       <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : "Compare this fingerprint with the one on the host before trusting it."}</p>
       <div class="ah-keyblock" data-kv></div>
       <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>${this.detailsBlock(job)}`;
     const list = createKeyValueList("Host key fingerprint");
     list.set(print ? [{ key: "Host key", value: `${key.label} · ${print}` }] : []);
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>${changed ? "Replace trusted key" : "Trust this key"}</span></button>`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="${changed ? "back-progress" : "back"}">${changed ? "Back" : "Cancel"}</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="trust-key">${svg(ICON.shieldCheck)}<span>${changed ? "Replace trusted key" : "Trust and continue"}</span></button>`);
   }
 
   private renderChoose(page: HTMLElement): void {
@@ -1092,6 +1137,9 @@ export class Wizard {
     else if (action === "reload") void this.loadDiscovery();
     else if (action === "retry") { if (this.fixing) this.retryJob(this.fixing); }
     else if (action === "start-fresh") { if (this.fixing) this.startFresh(this.fixing); }
+    else if (action === "review-take-over") { if (this.fixing) this.go("takeover"); }
+    else if (action === "take-over") { if (this.fixing) this.takeOver(this.fixing); }
+    else if (action === "back-failure") this.go("failure", -1);
     else if (action === "install") { this.installFrom = this.page === "choose" ? "choose" : "failure"; this.go("install"); }
     else if (action === "back-install") this.go(this.installFrom, -1);
     else if (action === "trust-key") void this.trustKey();
@@ -1099,8 +1147,9 @@ export class Wizard {
     else if (action === "retry-job") { const job = jobOf(); if (job) this.retryJob(job); }
     else if (action === "fix-job") {
       const job = jobOf();
-      // Leftovers are cleared right from the row; every other fix opens its own page.
-      if (job) { if (job.view.leftovers) this.startFresh(job); else this.openFix(job); }
+      // Leftovers are cleared right from the row; every other fix opens its own page. A Take over always asks
+      // first, on its own page (D359).
+      if (job) { if (job.view.leftovers && !job.view.failure?.takeover) this.startFresh(job); else this.openFix(job); }
     }
     else if (action === "toggle-job") {
       const row = target.closest<HTMLElement>(".ah-run");

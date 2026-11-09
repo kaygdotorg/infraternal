@@ -10,6 +10,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SCRATCH = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
 SCRATCH.mkdir(parents=True, exist_ok=True)
+# The compiler wrapper maps its physical checkout root (pwd -P). Keep absolute
+# source arguments in that same tree when a job's target is a symlink (#421).
+SCRATCH = SCRATCH.resolve()
 with tempfile.TemporaryDirectory(prefix="remap-test-", dir=SCRATCH) as directory:
     artifacts = []
     for name in ("short", "a-deliberately-longer-checkout-location"):

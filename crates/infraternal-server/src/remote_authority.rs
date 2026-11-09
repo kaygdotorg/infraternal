@@ -104,21 +104,97 @@ impl EnrollmentStore {
         host: Uuid,
         person: Uuid,
     ) -> Result<(), EnrollmentError> {
-        self.confirm_login_cleanup_with_report(host, person, None)
-            .await
+        self.confirm_removal_cleanup(host, person, None, None).await
     }
 
     /// [`Self::confirm_login_cleanup`] with the host's D356 report of access
-    /// files changed since the grant. The report is kept in the same
-    /// transaction as the receipt, and only for a receipt that matches a
-    /// pending cleanup: a foreign or duplicate receipt stores nothing.
+    /// files changed since the grant, in the same transaction as the
+    /// #409 uninstall answer. Only tests call it
+    /// directly; the outbox passes the report to `confirm_removal_cleanup`.
+    #[cfg(test)]
     pub(crate) async fn confirm_login_cleanup_with_report(
         &self,
         host: Uuid,
         person: Uuid,
         report: Option<&crate::access_report::AccessReport>,
     ) -> Result<(), EnrollmentError> {
+        self.confirm_removal_cleanup(host, person, None, report)
+            .await
+    }
+
+    /// Wait up to `wait` for this host's removal to be confirmed by its
+    /// cleanup receipt, then return how the host answered its uninstall
+    /// (`host_cleanup`) and the kernel objects it said it leaves (#409).
+    /// `None` when the receipt has not arrived in time; nothing changes then.
+    ///
+    /// Subscribes before reading, as [`Self::wait_login_cleanup`] does, so a
+    /// receipt that commits in between is not missed.
+    pub(crate) async fn wait_removal_outcome(
+        &self,
+        host: Uuid,
+        wait: std::time::Duration,
+    ) -> Result<Option<(String, Vec<String>)>, EnrollmentError> {
+        let mut changed = self.2.subscribe();
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let row: Option<(bool, String, Option<String>)> = sqlx::query_as("SELECT q.confirmed=1, r.host_cleanup, r.retained FROM remote_login_cleanup q JOIN remote_host_removals r ON r.host_id=q.host_id WHERE q.host_id=?")
+                .bind(host.as_bytes().as_slice())
+                .fetch_optional(&self.0)
+                .await?;
+            match row {
+                Some((true, cleanup, retained)) => {
+                    // A malformed column reads as "nothing reported", never as text.
+                    let retained = retained
+                        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+                        .unwrap_or_default();
+                    return Ok(Some((cleanup, retained)));
+                }
+                None => return Ok(None),
+                Some(_) => {}
+            }
+            match tokio::time::timeout_at(deadline, changed.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return Ok(None),
+            }
+        }
+    }
+
+    /// Whether this host's removal asked for an uninstall that its infraternal
+    /// agent has not accepted yet, so the removal outbox must still ask (#409).
+    /// `unreachable` rows come from before the outbox delivered uninstalls,
+    /// when the one live attempt failed; they are asked again too.
+    pub(crate) async fn pending_uninstall(&self, host: Uuid) -> Result<bool, EnrollmentError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_removals WHERE host_id=? AND uninstall=1 AND host_cleanup IN ('pending','unreachable'))")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&self.0)
+            .await?)
+    }
+
+    /// [`Self::confirm_login_cleanup`], also recording how the host answered
+    /// its removal's uninstall request (`host_cleanup`) and the server-known
+    /// kernel objects it leaves (`retained`, #409), in the same
+    /// transaction as the receipt. Once the receipt commits, the host is never
+    /// admitted again, so an answer recorded later could be lost (#409).
+    pub(crate) async fn confirm_removal_cleanup(
+        &self,
+        host: Uuid,
+        person: Uuid,
+        answer: Option<(&'static str, &[&'static str])>,
+        report: Option<&crate::access_report::AccessReport>,
+    ) -> Result<(), EnrollmentError> {
         let mut transaction = self.0.begin().await?;
+        // Like the receipt below, only this person's unconfirmed cleanup may
+        // record an answer; a foreign or duplicate one changes nothing.
+        if let Some((host_cleanup, retained)) = answer {
+            let retained = serde_json::to_string(retained).map_err(|_| EnrollmentError::Denied)?;
+            sqlx::query("UPDATE remote_host_removals SET host_cleanup=?,retained=? WHERE host_id=? AND uninstall=1 AND host_cleanup IN ('pending','unreachable') AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_host_removals.host_id AND q.person_id=? AND q.confirmed=0)")
+                .bind(host_cleanup)
+                .bind(retained)
+                .bind(host.as_bytes().as_slice())
+                .bind(person.to_string())
+                .execute(&mut *transaction)
+                .await?;
+        }
         let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND person_id=? AND confirmed=0)")
             .bind(host.as_bytes().as_slice())
             .bind(person.to_string())
