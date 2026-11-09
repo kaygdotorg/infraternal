@@ -152,3 +152,34 @@ Ink and Paper show the main difference clearly. Other unchanged roles are retain
 | Ink | fg3 | `#5f5f65` | `#818187` |
 | Ink | ANSI black text | `#1b1c1f` | `#797b7e` |
 | Ink | bright ANSI black text | `#5c5c62` | `#7a7a80` |
+
+## D365 gradient contrast
+
+The solid-surface audit did not cover every colour behind text. A radial
+gradient can blend to a lighter or darker point than either its stop or the
+scheme background. The expanded gate in `packages/ui/src/theme-audit.test.ts`
+checks every text role against every built-in gradient. It composites the
+radial layers in CSS paint order over the scheme background, samples each
+whole-percent point, and compares every sample to find the weakest point for
+each role and gradient. The Horizon ramp is sampled across its horizontal
+axis. Primary `fg` keeps D80's 7:1 requirement; every other text role must
+reach 4.5:1.
+
+The gradient repair keeps generated stops on the readable side of each
+scheme's background, preserving the schemes' hue while preventing blended
+layers from crossing to the lower-contrast side. The previous gradient audit
+found 3,832 failing role/scheme/gradient combinations. The expanded gate now
+reports no failures; the weakest sampled results are Paper at 4.547:1 and Ink
+at 4.527:1.
+
+Representative gradient-centre swatches before and after the repair:
+
+| Scheme | Before | After | Weakest sampled text contrast after |
+|---|---|---|---:|
+| Paper | `#aedaff` | `#f6ffff` | 4.547:1 |
+| Ink | `#13226a` | `#050010` | 4.527:1 |
+
+The failing Paper/Aurora sample was `fg3` (`#707075`) at 3.30:1 over
+`#fdbfff`; accent (`#3d63dd`) was 3.49:1 at that point. The test now checks
+both roles, every status colour and all ANSI text slots over every gradient
+sample.

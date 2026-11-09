@@ -26,6 +26,9 @@ export interface NamedGradient { id: string; name: string; css: string }
 /** A solid background option; an empty colour selects the scheme's own background. */
 export interface NamedSolid { id: string; name: string; /** "" for the scheme's own colour, else the colour. */ colour: string }
 
+/** One deterministic point in a built-in gradient's rendered colour field, used by the D365 contrast audit. */
+export interface GradientSample { gradientId: string; xPercent: number; yPercent: number; colour: string }
+
 
 /** Where each blob sits (percent of the width and height) for the three colours of a recipe. */
 type At = [number, number];
@@ -47,11 +50,19 @@ const RECIPES: readonly Recipe[] = [
   { id: "haze", name: "Haze", colours: [0, 4, 0], at: [[25, 30], [80, 70], [55, 5]] },
 ];
 
-/** Moves a colour to a lightness just off the scheme's background and keeps its hue: a glow on dark, a wash on light. */
+/** Moves a colour away from the text side of the scheme background; channel clamping keeps every blend on that safe side. */
 export function toned(theme: Theme, hex: string): string {
   const bgL = hexToOklab(theme.bg)[0];
   const [, a, b] = hexToOklab(hex);
-  return oklabToHex([bgL + (theme.dark ? 0.13 : -0.07), a * 0.85, b * 0.85]);
+  const lightened = oklabToHex([bgL + (theme.dark ? -0.13 : 0.07), a * 0.85, b * 0.85]);
+  const channels = (colour: string): number[] => [1, 3, 5].map((index) => Number.parseInt(colour.slice(index, index + 2), 16));
+  const background = channels(theme.bg), candidate = channels(lightened);
+  // A light theme's text is darker than its background; a dark theme's text is lighter. Keep each stop's RGB channels
+  // on the opposite side of the background so alpha-composited layers cannot make any text role less readable.
+  return `#${candidate.map((channel, index) => {
+    const safe = theme.dark ? Math.min(channel, background[index]!) : Math.max(channel, background[index]!);
+    return safe.toString(16).padStart(2, "0");
+  }).join("")}`;
 }
 /** Adds zero alpha to a hex stop so the gradient fades without changing its hue. */
 const clear = (hex: string): string => `${hex}00`;
@@ -73,6 +84,49 @@ export function gradientsFor(theme: Theme): NamedGradient[] {
   const meshes = RECIPES.map((r) => ({ id: r.id, name: r.name, css: meshOf(theme, r) }));
   const horizon = `linear-gradient(160deg in oklab, ${theme.bg} 15%, ${toned(theme, theme.accent)} 100%)`;
   return [...meshes, { id: "horizon", name: "Horizon", css: horizon }];
+}
+
+/**
+ * Samples one rendered built-in gradient on a percent grid for contrast audits. Mesh samples composite each radial layer over the next
+ * layer and the scheme background, matching the CSS paint order; Horizon samples its Oklab ramp. A 100-step grid includes every whole
+ * percentage position and every recipe centre, so the audit reports the worst sampled point for each text role and gradient.
+ */
+export function sampleGradientBackdrop(theme: Theme, gradientId: string, divisions = 100): GradientSample[] {
+  const steps = Math.max(1, Math.floor(divisions));
+  if (gradientId === "horizon") {
+    const start = hexToOklab(theme.bg), end = hexToOklab(toned(theme, theme.accent));
+    return Array.from({ length: steps + 1 }, (_, index) => {
+      const xPercent = index * 100 / steps;
+      const progress = Math.max(0, (xPercent - 15) / 85);
+      const colour = oklabToHex([
+        start[0] + (end[0] - start[0]) * progress,
+        start[1] + (end[1] - start[1]) * progress,
+        start[2] + (end[2] - start[2]) * progress,
+      ]);
+      return { gradientId, xPercent, yPercent: 0, colour };
+    });
+  }
+  const recipe = RECIPES.find((item) => item.id === gradientId);
+  if (!recipe) return [];
+  const colours = palette(theme);
+  const layers = recipe.colours.map((index) => toned(theme, colours[index]!));
+  const rgb = (hex: string): [number, number, number] => [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16) / 255) as [number, number, number];
+  const hexOf = (channels: [number, number, number]): string => `#${channels.map((value) => Math.round(Math.max(0, Math.min(1, value)) * 255).toString(16).padStart(2, "0")).join("")}`;
+  const stops = recipe.colours.map((_, index) => recipe.at[index]!);
+  const output: GradientSample[] = [];
+  for (let yi = 0; yi <= steps; yi++) for (let xi = 0; xi <= steps; xi++) {
+    const xPercent = xi * 100 / steps, yPercent = yi * 100 / steps;
+    let channels = rgb(theme.bg);
+    for (let layer = layers.length - 1; layer >= 0; layer--) {
+      const [cx, cy] = stops[layer]!;
+      const radius = Math.hypot((xPercent - cx) / 70, (yPercent - cy) / 80);
+      const alpha = Math.max(0, Math.min(1, 1 - radius / 0.72));
+      const foreground = rgb(layers[layer]!);
+      channels = channels.map((background, at) => foreground[at]! * alpha + background * (1 - alpha)) as [number, number, number];
+    }
+    output.push({ gradientId, xPercent, yPercent, colour: hexOf(channels) });
+  }
+  return output;
 }
 
 /** The palette roles a solid colour can come from, with the plain name a tooltip shows. */
