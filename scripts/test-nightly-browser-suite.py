@@ -10,6 +10,7 @@ import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -30,6 +31,7 @@ fuzz_tests = load_script('test-nightly-fuzz.py')
 service = load_script('nightly-browser-suite-service')
 installer = load_script('install-nightly-browser-suite')
 TOKEN = 'synthetic-token'
+RUN_NAME = '20261109T061806Z-aaaaaaa'
 
 
 def playwright_report(**outcomes):
@@ -60,9 +62,9 @@ class Reporter(unittest.TestCase):
     def night(self, head='a' * 40, **outcomes):
         """File one night's results and return the request-error count."""
         (self.results / 'results.json').write_text(json.dumps(playwright_report(**outcomes)))
-        (self.results / 'meta.json').write_text(json.dumps({'head': head, 'evidence': '/var/lib/x/evidence',
+        (self.results / 'meta.json').write_text(json.dumps({'head': head, 'evidence': '/attacker/chosen/path',
                                                             'log': str(self.results / 'suite.log')}))
-        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results)
+        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, f'20261109T061806Z-{head[:7]}')
 
     def test_collect_sorts_files(self):
         """Failures name their file; skipped-only files are neither failing nor passing."""
@@ -79,7 +81,7 @@ class Reporter(unittest.TestCase):
                                        'ok.spec.ts': ['expected']}), 0)
         self.assertEqual(self.forgejo.creates(), 2)
         body = next(i['body'] for i in self.forgejo.issues.values() if 'docs-palette' in i['title'])
-        for expected in ('a' * 40, '/var/lib/x/evidence', 'expected 1 got 2', 'docs-palette.spec.ts:12 opens',
+        for expected in ('a' * 40, suite.BROWSER_RUNS + '/' + RUN_NAME + '/evidence', 'expected 1 got 2', 'docs-palette.spec.ts:12 opens',
                          suite.spec_marker('docs-palette.spec.ts')):
             self.assertIn(expected, body)
         self.assertNotIn('\x1b', body)
@@ -124,6 +126,105 @@ class Reporter(unittest.TestCase):
         self.night(**{'docs-palette.spec.ts': ['unexpected']})
         self.assertTrue(self.forgejo.requests)
         self.assertEqual({auth for _, _, auth in self.forgejo.requests}, {'token ' + TOKEN})
+
+    def bodies(self):
+        """Every issue body and comment body the reporter wrote, in one list."""
+        return [i['body'] for i in self.forgejo.issues.values()] + [c['body'] for c in self.forgejo.comments.values()]
+
+    def test_token_in_a_symlinked_log_is_not_published(self):
+        """Review PoC: a spec named `a` and a log full of other text must not pull in unrelated lines (the token)."""
+        (self.results / 'suite.log').write_text(f'a line with {TOKEN} in it\n')
+        self.night(**{'a': ['unexpected']})
+        self.assertFalse([b for b in self.bodies() if TOKEN in b])
+
+    def test_issue_storm_becomes_one_roll_up(self):
+        """Review PoC: 501 invented failing names open one roll-up issue, not 501 issues."""
+        self.night(**{f'spec{i}.spec.ts': ['unexpected'] for i in range(501)})
+        self.assertEqual(self.forgejo.creates(), 1)
+        self.night(**{f'spec{i}.spec.ts': ['unexpected'] for i in range(501)})
+        self.assertEqual(self.forgejo.creates(), 1)
+        self.assertLess(max(len(b) for b in self.bodies()), 70000)
+
+    def test_cap_on_new_issues_per_night(self):
+        """Eleven new red specs, among many green ones, are a roll-up; ten are ten issues."""
+        green = {f'ok{i}.spec.ts': ['expected'] for i in range(60)}
+        self.night(**green, **{f'r{i}.spec.ts': ['unexpected'] for i in range(10)})
+        self.assertEqual(self.forgejo.creates(), 10)
+        self.night(head='b' * 40, **green, **{f'n{i}.spec.ts': ['unexpected'] for i in range(11)})
+        self.assertEqual(self.forgejo.creates(), 11)
+        self.assertIn('roll-up', next(reversed(self.forgejo.issues.values()))['title'])
+
+    def test_a_crashed_server_is_one_roll_up(self):
+        """Everything red at once reads as an infrastructure failure: a single roll-up."""
+        self.night(**{f'r{i}.spec.ts': ['unexpected'] for i in range(8)})
+        self.assertEqual(self.forgejo.creates(), 1)
+        self.assertIn('roll-up', next(iter(self.forgejo.issues.values()))['title'])
+
+    def test_spec_names_with_spaces_cannot_bypass_dedupe(self):
+        """Review PoC: a name with spaces or `-->` goes to one bucket and is deduplicated like any other."""
+        green = {f'ok{i}.spec.ts': ['expected'] for i in range(60)}
+        for night in range(3):
+            self.night(**green, **{'x --> y z.spec.ts': ['unexpected']})
+        self.assertEqual(self.forgejo.creates(), 1)
+        self.assertNotIn('x --> y', self.forgejo.issues[345]['body'])
+
+    def test_marker_is_a_hash_of_the_name(self):
+        """The hidden marker has no raw name in it."""
+        self.assertRegex(suite.spec_marker('docs-palette.spec.ts'), r'^<!-- infraternal-browser-spec: [0-9a-f]{16} -->$')
+
+    def test_markdown_cannot_break_out_of_the_fence(self):
+        """Review PoC: a line of three backticks, then a mention and an image, stays inside the code block."""
+        hostile = 'oops\n```\n@everyone ![x](http://evil.example/p.png) [click](http://evil.example)\n````\n@victim'
+        report = playwright_report(**{'ok.spec.ts': ['expected'], 'bad.spec.ts': ['unexpected']})
+        report['suites'][1]['suites'][0]['specs'][0]['tests'][0]['results'][0]['errors'] = [{'message': hostile}]
+        (self.results / 'suite.log').write_text('bad.spec.ts ' + hostile.replace('\n', ' ') + '\n' + 'bad.spec.ts ```\n@victim2\n')
+        self.night_from(report)
+        body = self.forgejo.issues[345]['body']
+        # Every line that holds the hostile text sits between a fence longer than the longest backtick run in it.
+        fence = max(re.findall(r'^`{3,}', body, re.M), key=len)
+        self.assertGreaterEqual(len(fence), 5)
+        outside = re.sub(re.escape(fence) + r'.*?' + re.escape(fence), '', body, flags=re.S)
+        for hostile_text in ('@everyone', '@victim', '![x]', 'evil.example'):
+            self.assertNotIn(hostile_text, outside)
+
+    def night_from(self, report, head='a' * 40, meta=None):
+        """File a hand-built Playwright report."""
+        (self.results / 'results.json').write_text(json.dumps(report))
+        (self.results / 'meta.json').write_text(json.dumps(meta or {'head': head}))
+        return suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, f'20261109T061806Z-{head[:7]}')
+
+    def test_fields_are_bounded_and_the_head_is_validated(self):
+        """Review: a 5000-character `head` is refused, and long log lines are cut."""
+        report = playwright_report(**{'bad.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        with self.assertRaises(ValueError):
+            self.night_from(report, meta={'head': 'z' * 5000})
+        (self.results / 'suite.log').write_text('bad.spec.ts ' + 'w' * 100000 + '\n')
+        self.night_from(report)
+        self.assertLess(len(self.forgejo.issues[345]['body']), 20000)
+
+    def test_only_the_token_owners_markers_count(self):
+        """Review: someone else's issue carrying the marker does not mute the spec."""
+        self.forgejo.author = 'somebody-else'
+        self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        self.forgejo.author = self.forgejo.login
+        self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        self.assertEqual(self.forgejo.creates(), 2)
+
+    def test_a_forged_fixed_comment_is_ignored(self):
+        """Review: a comment by another user with the 'fixed' marker does not decide the issue's state."""
+        self.night(**{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        self.forgejo.author = 'somebody-else'
+        self.forgejo.comments[1] = {'id': 1, 'issue': 345, 'body': suite.state_marker('fixed'), 'user': {'login': 'somebody-else'}}
+        self.forgejo.author = self.forgejo.login
+        self.night(head='b' * 40, **{'docs-palette.spec.ts': ['unexpected'], 'ok.spec.ts': ['expected']})
+        self.assertEqual(len(self.forgejo.comments), 1)
+
+    def test_more_than_two_thousand_open_issues_fails_closed(self):
+        """Review: when the listing hits the page limit, the reporter stops instead of deduplicating blindly."""
+        full = [{'number': n, 'body': '', 'user': {'login': self.forgejo.login}} for n in range(50)]
+        with mock.patch.object(suite, 'api', return_value=full):
+            with self.assertRaises(RuntimeError):
+                list(suite.pages('x', 'repos/a/b/issues', TOKEN))
 
     def test_run_without_report_is_an_infrastructure_failure(self):
         """`run` exits 1 and opens nothing when a build step fails or no report exists."""
