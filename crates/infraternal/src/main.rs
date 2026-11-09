@@ -2559,6 +2559,17 @@ fn run_remote_agent(
                 "",
             );
         }
+        // A relabel (`restorecon`, autorelabel) resets the install image to its
+        // directory's SELinux type, which systemd refuses to start (#401). This
+        // start already succeeded, so a failure here only warns: the next start
+        // would show the same label problem as `203/EXEC`. A remote agent has no
+        // tracing subscriber, so the warning goes to stderr, which is the unit's
+        // journal; `<4>` makes journald record it at warning priority.
+        if let Err(error) = infraternal_agent::exec_label::heal_running_image() {
+            eprintln!(
+                "<4>infraternal agent: could not keep the install image executable for SELinux: {error}"
+            );
+        }
         remote_service::run(runtime, remote::run(&data, state))
     })();
     if result.is_ok() {

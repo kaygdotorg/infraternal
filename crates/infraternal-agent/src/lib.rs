@@ -18,6 +18,8 @@ mod durable_io;
 /// Hold real saves until unrelated reactor work proves it can still run.
 #[cfg(test)]
 mod durable_tests;
+/// Keep binaries that systemd starts executable under `SELinux` (#401).
+pub mod exec_label;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle;
 mod login_auth;
