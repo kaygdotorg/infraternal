@@ -24,6 +24,7 @@ import { tracerEvidencePath } from "./evidence-path";
 const HAS_MOCKUP = existsSync(resolve(import.meta.dirname, "../src/canvas/mock/appwin-scenes/mount.on-demand.ts"));
 test.skip(!HAS_MOCKUP, "the app-window mockup (#146) is not on this branch");
 
+/** Where this spec writes its screenshots and `ratios.jsonl`. */
 const OUT = tracerEvidencePath("glass-contrast");
 /** The line every text run must reach (D365). */
 const LINE = 4.5;
