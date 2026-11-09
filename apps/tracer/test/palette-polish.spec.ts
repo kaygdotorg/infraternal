@@ -11,6 +11,7 @@ import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { devices, expect, test, type Page } from "playwright/test";
 import { denseText, ghost } from "./ghost-metric";
+import { motionSettled } from "./motion";
 
 const CAPTURES = tracerEvidencePath("palette-polish");
 mkdirSync(CAPTURES, { recursive: true });
@@ -77,6 +78,8 @@ for (const [w, h] of [[393, 852], [375, 667]] as const) {
     await page.keyboard.press(PALETTE_KEY);
     await expect(page.locator("#palette")).toBeVisible();
     await expect(page.locator(".palette-foot")).toBeHidden();
+    // The palette opens with a small scale-in; a rect read before it ends is a fraction of a pixel narrower than the layout.
+    await motionSettled(page);
     const m = await page.evaluate(() => {
       const pal = document.getElementById("palette")!.getBoundingClientRect();
       const res = document.getElementById("palette-results")!.getBoundingClientRect();

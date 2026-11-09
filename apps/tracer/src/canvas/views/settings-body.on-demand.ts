@@ -16,6 +16,7 @@ import { SIZE_EVENT, readSizes, writeSize, type DesktopSize, type PhoneSize } fr
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import { EXTENDED_INFO_EVENT, readExtendedInfo, writeExtendedInfo } from "../windows/extended-info";
+import { PROGRAM_COPY_EVENT, readProgramCopy, writeProgramCopy } from "../../program-copy";
 
 /** Account- and instance-level panels. Each returns what to run when its window goes away. */
 export interface SettingsSource {
@@ -57,7 +58,7 @@ function authorityPref(control: AuthorityControl): StatusActionPref {
   };
 }
 
-/** Renders one settings section inside a canvas window and returns its cleanup callback. */
+/** Fills one Settings window (`section`, such as "terminal.hosts") inside `body` and returns the function that tears it down. */
 export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement): () => void {
   const { core } = cx;
   // Plain names; the technical detail (the percentage) is in each option's subtitle (the plain-names rule).
@@ -83,6 +84,11 @@ export function renderSettingsBody(cx: Ctx, section: string, body: HTMLElement):
       id: "extended-info", title: "Details", label: "Extended info", hint: "Init, virtualization, shell and locale in each window's details",
       get: readExtendedInfo, set: writeExtendedInfo,
       onChange(listener) { window.addEventListener(EXTENDED_INFO_EVENT, listener); return () => window.removeEventListener(EXTENDED_INFO_EVENT, listener); },
+    },
+    {
+      id: "program-copy", title: "Clipboard", label: "Programs can copy to your clipboard", hint: "Off: a Copy button appears instead",
+      get: readProgramCopy, set: writeProgramCopy,
+      onChange(listener) { window.addEventListener(PROGRAM_COPY_EVENT, listener); return () => window.removeEventListener(PROGRAM_COPY_EVENT, listener); },
     },
     // Offered only when the server says it can stream (D208): a server without the feature never shows a switch that does nothing.
     ...(cx.adapters.appWindows?.serverCan() ? [{

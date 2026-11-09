@@ -935,8 +935,8 @@ test("palette: Ctrl+K then typing within 20 ms lands every character; arrow sele
   expect(await page.locator(".result[aria-selected='true']").getAttribute("data-action")).not.toBe(before);
   const transitions = await page.evaluate(() => [...document.querySelectorAll(".result")].slice(0, 4).map((row) => getComputedStyle(row, "::before").transitionDuration));
   expect(transitions.every((duration) => duration === "0s")).toBe(true);
-  // The key-triggered open is short (about 180 ms) and the pointer one longer.
-  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0.18s");
+  // Keyboard opens instantly (#427): the key-triggered open has no transition (keyboard-instant.spec.ts samples the frames).
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0s");
 });
 
 // ---- text behind glass is never legible through it --------------------------------------------

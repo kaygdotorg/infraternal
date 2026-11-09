@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provide the checksum-pinned Zig C compiler in the target directory [7,20] (D213, D328).
 #
-# There is one Zig: version 0.15.2, from the official release tarball whose
+# There is one Zig: version 0.17.0, from the official release tarball whose
 # SHA-256 is in scripts/zig.sha256 (shared with nix/zig.nix). Inside the nix
 # development shell INFRATERNAL_ZIG names that same tarball, already fetched
 # and checked as a fixed-output derivation, and it is copied here instead of
@@ -16,7 +16,7 @@ case "$(uname -s)-$(uname -m)" in
     Darwin-arm64) host=aarch64-macos ;;
     *) printf 'unsupported Zig build host\n' >&2; exit 1 ;;
 esac
-version=0.15.2
+version=0.17.0
 archive="zig-$host-$version.tar.xz"
 checksum="$(awk -v file="$archive" '$2 == file { print $1 }' "$root/scripts/zig.sha256")"
 [[ -n "$checksum" ]] || { printf 'no pinned checksum for %s\n' "$archive" >&2; exit 1; }

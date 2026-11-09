@@ -9,7 +9,7 @@
  *   carries `data-moving` for the same span, so CSS can give what is expensive to repaint its own layer while it moves.
  * - At rest the translation is snapped to whole device pixels (crisp text).
  * - A flight is a spring per axis; a new target keeps the current velocity, so a flight is always interruptible.
- *   A flight a gesture drives may take its time; one a key triggers is the short version (`keyFlight`).
+ *   A flight a gesture drives may take its time; one a key triggers jumps (decided in `flyTo` from the input source, #427).
  *   Reduced motion jumps (with a short fade) instead of flying.
  * - `data-lod` flips mid-gesture and only changes non-inherited properties; `data-hit` (which windows take the pointer)
  *   follows it at rest, because `pointer-events` is inherited and flipping it on the windows restyles every element
@@ -21,6 +21,7 @@
  * on those hooks.
  */
 import { Spring } from "../../../../../packages/ui/src/spring";
+import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { endActivity, setActivity } from "../../perf-activity";
 
 export interface Cam { cx: number; cy: number; z: number }
@@ -50,9 +51,8 @@ export interface CameraHooks {
 export const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 
 // Critically damped (no overshoot, no long tail): settles within 1 px in about 1.76 x the visual duration (a little more as measured on camera centre and zoom together), in
-// test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s); a key's about 190 ms (was 430 ms) (the motion rule).
+// test/clusters-flight.spec.ts. Pointer, touch and pill flights about 350 ms (was 1.3 s). A key's flight has no spring at all (#427).
 const FLIGHT = { visualDuration: 0.16 } as const;
-const KEY_FLIGHT = { visualDuration: 0.08 } as const;
 const REST_DELAY = 140;
 export const MIN_ZOOM = 0.08;
 export const MAX_ZOOM = 2;
@@ -65,6 +65,10 @@ export const MAX_ZOOM = 2;
  */
 const willChangeMinZoom = (): number => (matchMedia("(pointer: fine)").matches ? 0.25 : 0.5);
 
+/**
+ * The canvas camera: one centre and one zoom, flown by springs (see the module note). Gesture flights spring; a flight run
+ * that a key starts (any of them, decided in {@link Camera.flyTo}) jumps to its target in the same call.
+ */
 export class Camera {
   readonly cam: Cam = { cx: 0, cy: 0, z: 1 };
   tx = 0;
@@ -89,8 +93,6 @@ export class Camera {
   /** Whether `will-change: transform` is on the world right now. */
   private hinted = false;
   private ready = false;
-  /** The screen around the canvas: its glass (the pills, the sidebar) blurs the canvas behind it, which moves with the camera. */
-  private flightKind: "gesture" | "key" = "gesture";
 
   constructor(private readonly viewport: HTMLElement, private readonly world: HTMLElement, private readonly hooks: CameraHooks = {}) {
     world.dataset.lod = this.lod;
@@ -146,7 +148,11 @@ export class Camera {
     const nextLod: Lod = this.lod === "live" ? (cam.z < 0.58 ? "thumb" : "live") : (cam.z > 0.62 ? "live" : "thumb");
     if (nextLod !== this.lod) { this.lod = nextLod; world.dataset.lod = nextLod; this.hooks.onLod?.(nextLod); }
     const nextBand: ZoomBand = this.band === "in" ? (cam.z < 0.76 ? "out" : "in") : (cam.z > 0.82 ? "in" : "out");
-    if (nextBand !== this.band) { this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand); }
+    if (nextBand !== this.band) {
+      // The view regions fade in or out with the band; a key that sent the camera there shows them at once (#427, clusters.css).
+      markMotion(world);
+      this.band = nextBand; world.dataset.zoom = nextBand; this.hooks.onBand?.(nextBand);
+    }
     if (!atRest) {
       if (!this.moving) world.dataset.moving = "";
       this.moving = true;
@@ -210,29 +216,27 @@ export class Camera {
   }
 
   /**
-   * Motion rule: a flight the user's gesture drives (a swipe, a tap, a drag) may take its time; one a key
-   * triggers (Command or Ctrl with a digit, the palette by keyboard) is the short version.
+   * Flies the camera (interruptible: a new target keeps the current velocity).
+   *
+   * Motion rule (owner, 2026-11-08: "actions originating from keyboard shortcuts = no animation"): a flight the user's
+   * pointer, touch or wheel drives (a swipe, a tap, a drag) may take its time; one that a key started (Escape to the
+   * overview, a digit, the canvas lock, a palette pick, whatever is added next) jumps to its target in the same call, with
+   * no spring. The source comes from the shared input tracker (input-source.ts), read here once, so a new caller can't
+   * forget to ask for it.
    */
-  keyFlight<T>(run: () => T): T {
-    this.flightKind = "key";
-    try { return run(); } finally { this.flightKind = "gesture"; }
-  }
-
-  /** Flies the camera (interruptible: a new target keeps the current velocity). */
   flyTo(target: () => Cam, instant = false): void {
     this.target = target;
     setActivity("flight");
     this.hooks.onFlight?.();
     const t = target();
-    if (instant) { this.set(t); return; }
+    if (instant || triggeredByKeyboard()) { this.set(t); return; }
     if (this.reduced.matches) {
       this.world.animate([{ opacity: 1 }, { opacity: 0.15 }, { opacity: 1 }], { duration: 240, easing: "ease-out" });
       this.set(t);
       return;
     }
     this.restThresholds(Math.max(t.z, this.cam.z));
-    const cfg = this.flightKind === "key" ? KEY_FLIGHT : FLIGHT;
-    this.springCx.configure(cfg); this.springCy.configure(cfg); this.springLz.configure(cfg);
+    this.springCx.configure(FLIGHT); this.springCy.configure(FLIGHT); this.springLz.configure(FLIGHT);
     const { cam } = this;
     this.springCx.value = cam.cx; this.springCy.value = cam.cy; this.springLz.value = Math.log(cam.z);
     this.springCx.set(t.cx); this.springCy.set(t.cy); this.springLz.set(Math.log(t.z));

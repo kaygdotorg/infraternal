@@ -6,6 +6,8 @@
 const std = @import("std");
 const lz4 = @import("terminal/compress/lz4.zig");
 const native = @import("terminal/page.zig");
+const c = @import("terminal/c/terminal.zig");
+const lib = @import("terminal/lib.zig");
 const header = 36;
 // Bounded stack scratch makes restore allocation-free even at large geometry.
 // Literal UTF-8 compresses repeated words/digits without a run header per cell.
@@ -21,6 +23,22 @@ comptime {
 }
 const EncodeError = lz4.CompressError || error{InvalidText};
 const DecodeError = lz4.DecompressError || error{InvalidInput};
+
+/// Compress eligible cold history pages through the internal PageList policy.
+/// The stable C API keeps screens opaque and has no compact-history operation;
+/// this optional experiment therefore needs this guarded internal driver.
+pub fn compact(handle: c.Terminal, full: bool) callconv(lib.calling_conv) void {
+    const terminal = c.zigTerminal(handle) orelse return;
+    inline for (.{ .primary, .alternate }) |key| {
+        if (terminal.screens.get(key)) |screen| {
+            if (full) {
+                _ = screen.pages.compress(.full);
+            } else {
+                _ = screen.pages.compress(.incremental);
+            }
+        }
+    }
+}
 
 const Writer = struct {
     bytes: []u8,

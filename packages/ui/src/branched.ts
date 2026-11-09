@@ -3,6 +3,8 @@ import { ICON_DETACHED, icon } from "./icons";
 import { onDoubleActivate } from "./double-activate";
 
 import { cssPx } from "./ui-scale";
+import { triggeredByKeyboard } from "./input-source";
+import { EASE_OUT } from "./motion";
 export interface BranchLeaf {
   id: string;
   label: string;
@@ -70,7 +72,6 @@ const MARK_TIP = { output: "New output", ok: "Finished successfully", fail: "Fai
 const MARK_NAME ={ output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;
 const STUB = 12;
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string): HTMLElementTagNameMap[K] {
@@ -255,7 +256,7 @@ export function branchedMenu(
         : "");
       dim.replaceChildren(dimPath);
       const mineIndex = leaves.findIndex((leaf) => leaf.dataset.id === active);
-      lit.style.transition = animate && !reduced() ? `opacity 150ms ${EASE}` : "none";
+      lit.style.transition = animate && !reduced() ? `opacity 150ms ${EASE_OUT}` : "none";
       // Cancelling by handle: `getAnimations()` flushes style for the whole document.
       if (animate) { drawOn.get(lit)?.cancel(); drawOn.delete(lit); }
       if (mineIndex >= 0) {
@@ -263,7 +264,7 @@ export function branchedMenu(
         // The owner approved paint-based draw-on for this small, rarely changed tree.
         if (animate && !reduced()) drawOn.set(lit, lit.animate(
           [{ strokeDashoffset: 1 }, { strokeDashoffset: 0 }],
-          { duration: 300, easing: EASE, fill: "both" },
+          { duration: 300, easing: EASE_OUT, fill: "both" },
         ));
         lit.style.opacity = "1";
       } else {
@@ -278,7 +279,7 @@ export function branchedMenu(
     const currentHead = current ? headMetrics.find(({ head }) => head.parentElement === current.section) : undefined;
     marker.style.opacity = currentHead ? "1" : "0";
     if (currentHead) {
-      marker.style.transition = animate && !reduced() ? `transform 280ms ${EASE}` : "none";
+      marker.style.transition = animate && !reduced() ? `transform 280ms ${EASE_OUT}` : "none";
       marker.style.transform = `translateY(${Math.round(currentHead.top + (currentHead.height - markerHeight) / 2)}px)`;
     }
   }
@@ -323,7 +324,8 @@ export function branchedMenu(
   const api: BranchedMenu = {
     select(id, instant = false, notify = true) {
       active = id;
-      layout(!instant);
+      // A key moves the marker and draws the branch with no animation, whatever the caller passed (#427, TASTE).
+      layout(!(instant || triggeredByKeyboard()));
       if (notify) opts.onSelect?.(id);
     },
     rename(id) {

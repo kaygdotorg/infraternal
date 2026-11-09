@@ -7,11 +7,11 @@
 /* A card that grows out of its pill (sidebar-card-morph.ts): the script sets the pill's box as an inline transform and
    the transition below takes it to rest, so nothing but transform and opacity moves. The card sits above the pill while it
    travels; its content fades in after the shape is mostly there and out before it shrinks. A keyboard open has no motion. */
-.ui-sidebar-card[data-morph="from"], .ui-sidebar-card[data-morph="in"], .ui-sidebar-card[data-morph="out"] { position: relative; z-index: 1; transform-origin: 0 0; }
-.ui-sidebar-card[data-morph="in"] { transition: transform 200ms var(--ease-out), opacity 90ms ease-out; }
-.ui-sidebar-card[data-morph="out"] { transition: transform 180ms var(--ease-out), opacity 110ms ease-out 50ms; }
+.ui-sidebar-card[data-morph="from"], .ui-sidebar-card[data-morph="in"], .ui-sidebar-card[data-morph="out"] { position: relative; z-index: var(--z-content); transform-origin: 0 0; }
+.ui-sidebar-card[data-morph="in"] { transition: transform var(--t-pop) var(--ease-out), opacity 90ms ease-out; }
+.ui-sidebar-card[data-morph="out"] { transition: transform var(--t-pop) var(--ease-out), opacity var(--t-press) ease-out 50ms; }
 .ui-sidebar-card[data-morph="from"] > *, .ui-sidebar-card[data-morph="out"] > * { opacity: 0; }
-.ui-sidebar-card[data-morph="in"] > * { transition: opacity 130ms ease-out 70ms; }
+.ui-sidebar-card[data-morph="in"] > * { transition: opacity var(--t-press) ease-out 70ms; }
 .ui-sidebar-card[data-morph="out"] > * { transition: opacity 60ms ease-out; }
 .ui-sidebar-card[data-morph="none"], .ui-sidebar-card[data-morph="none"] > * { transition: none; }
 
@@ -46,7 +46,7 @@
 .ui-version-number { min-width: 0; max-width: 14ch; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 /* A long version (a release candidate with a build number) is the first thing to give way once the person's name has: it ends in an ellipsis,
    and the whole version is in the pill's spoken name and in the panel's heading. */
-.ui-version-edition { flex: none; color: var(--fg-3); font-weight: 600; letter-spacing: 0.02em; transition: color 160ms ease; }
+.ui-version-edition { flex: none; color: var(--fg-3); font-weight: 600; letter-spacing: 0.02em; transition: color var(--t-pop) ease; }
 .ui-version-edition[data-attention] { color: var(--warn); }
 .ui-version-pill[data-status="offline"] .ui-version-mark { color: var(--fg-2); }
 @container (max-width: 14.875rem) { .ui-version-edition { display: none; } .ui-version-pill { padding-right: 0.625rem; } }

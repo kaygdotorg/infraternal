@@ -177,6 +177,34 @@ test("Settings, Account has the row; it asks, then signs out", async ({ page }) 
   await reloadStaysSignedOut(page);
 });
 
+test("signing out while the terminal is still connecting leaves no terminal behind", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // The terminal cannot finish opening until its WebAssembly module arrives. Hold that one request until the person has
+  // signed out, then let it through: the terminal client completes AFTER sign-out, the order a slow link produces.
+  let release!: () => void;
+  const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+  await page.route(/\.wasm$/, async (route) => { await gate; await route.continue(); });
+  let closedAfterRelease = 0, released = false;
+  page.on("websocket", (socket) => { socket.on("close", () => { if (released) closedAfterRelease++; }); });
+  const live = trackSockets(page);
+  const hook = () => page.evaluate(() => (window as unknown as { __tracerTestDouble?: unknown }).__tracerTestDouble !== undefined);
+  await open(page);
+  expect(await hook(), "the terminal is still connecting").toBe(false);
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("sign out");
+  await page.keyboard.press("Enter");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 10_000 });
+  released = true;
+  release();
+  // The late client either closes its own connection straight away or never connects at all (what it does depends on how far the
+  // sign-out got when the module arrived). Both are fine; what is not is a client that stays. Wait, up to a deadline, for the
+  // first close after the release, which a kept client also produces when it reconnects but never without having set its hook.
+  await expect.poll(() => closedAfterRelease, { timeout: 4_000 }).toBeGreaterThan(0).catch(() => undefined);
+  expect(await live(), "no connection is left open after sign-out").toBe(0);
+  expect(await hook(), "no live terminal is left behind the sign-in screen").toBe(false);
+});
+
 test("a sign-out the server could not complete says so and leaves the person signed in", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page);
@@ -336,24 +364,21 @@ test("D245: signing out removes the account's data from every storage area; sign
     localStorage.setItem("infraternal.canvas.someone-else", "{}");
     localStorage.setItem("tracer.sessions.someone-else", "[]");
   });
-  // Make a layout change and let the 300 ms coalescing save land, then see what the account owns.
-  // The product canvas finishes opening its windows a moment after the first one appears.
-  await page.waitForTimeout(3000);
-  const windows = await page.locator(".ui-window").count();
-  await page.locator(".ui-window").first().locator("[data-action='split-right']").click();
-  await expect(page.locator(".ui-window")).toHaveCount(windows + 1);
-  await expect.poll(() => page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("infraternal.canvas.") && !k.endsWith("someone-else")))).toBe(true);
+  // Since D312 the server holds the only saved layout and this build writes no account key into the browser, so the keys
+  // to clear are the ones an EARLIER build left on this device (its layout document, session list and tab pointer). Seed
+  // them under the real account id, which only the session endpoint tells the page, and prove sign-out still sweeps them.
+  const id = await page.evaluate(async () => ((await (await fetch("/auth/session", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as { user_id: string }).user_id);
+  expect(id).toMatch(/\S/);
+  await page.evaluate((account) => {
+    localStorage.setItem(`infraternal.canvas.${account}`, JSON.stringify({ format: "infraternal.canvas", version: 1, views: [] }));
+    localStorage.setItem(`tracer.sessions.${account}`, JSON.stringify([{ host: "h", id: "s1", name: "build", pinned: false, frecency: 1 }]));
+    localStorage.setItem("tracer.user-id", account);
+    sessionStorage.setItem(`tracer.session.${account}`, "s1");
+  }, id);
   const before = await storageSnapshot(page);
   const own = (snap: typeof before) => [...Object.keys(snap.local), ...Object.keys(snap.session)].filter((k) => ACCOUNT_KEY.test(k) && !k.endsWith("someone-else"));
   expect(own(before).some((k) => k.startsWith("infraternal.canvas."))).toBe(true);
-  const canvasBytes = Object.entries(before.local).filter(([k]) => k.startsWith("infraternal.canvas.")).reduce((n, [, v]) => n + v.length, 0);
-  console.log(`layout document: ${canvasBytes} bytes; keys: ${own(before).join(", ")}`);
-  // The mock host keeps no session list or tab pointer; seed what a real host's session leaves for this account.
-  const id = own(before).find((k) => k.startsWith("infraternal.canvas."))!.slice("infraternal.canvas.".length);
-  await page.evaluate((account) => {
-    localStorage.setItem(`tracer.sessions.${account}`, JSON.stringify([{ host: "h", id: "s1", name: "build", pinned: false, frecency: 1 }]));
-    sessionStorage.setItem(`tracer.session.${account}`, "s1");
-  }, id);
+  console.log(`keys: ${own(before).join(", ")}`);
 
   await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("sign out");
@@ -368,7 +393,15 @@ test("D245: signing out removes the account's data from every storage area; sign
   expect(after.local["tracer.theme"]).toBe("mocha");
   expect(after.local["infraternal.canvas.someone-else"]).toBe("{}");
   expect(after.local["tracer.sessions.someone-else"]).toBe("[]");
-  expect(after.caches).toEqual([]);
+  // The only cache is the offline worker's (offline.worker.ts): public app-shell files, fetched without credentials, shared by every
+  // account. Nothing of the account may be in it: only the page itself and script, style, font and wasm files without a query.
+  expect(after.caches.filter((name) => name !== "infraternal-drawing-v1")).toEqual([]);
+  const cached = await page.evaluate(async () => (await (await caches.open("infraternal-drawing-v1")).keys()).map((request) => new URL(request.url)).map((url) => ({ path: url.pathname, query: url.search })));
+  for (const entry of cached) {
+    expect(entry.query, `cached ${entry.path} has no query`).toBe("");
+    expect(entry.path === "/" || /\.(?:js|css|woff2|wasm)$/.test(entry.path), `cached ${entry.path} is a public app-shell file`).toBe(true);
+    expect(entry.path.includes(id), `cached ${entry.path} does not name the account`).toBe(false);
+  }
   expect(after.databases).toEqual([]);
   expect(after.cookies).toBe("");
   // Nothing mentions the signed-out account id anywhere in what is left.

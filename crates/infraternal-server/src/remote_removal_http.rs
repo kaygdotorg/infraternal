@@ -1,5 +1,6 @@
 //! Bounded same-origin adapters for the remote plugin's removal action: a dry run, then the
 //! removal, inside the browser's admin window [16][168], #87, D339.
+//! D369 Forget uses that same window to cancel unreachable cleanup without a machine-side effect.
 use crate::{auth::Auth, remote_removal::Removal};
 use axum::{
     Json, Router,
@@ -36,11 +37,13 @@ pub struct Finish {
     host_id: Uuid,
     review: String,
 }
+/// Mount the bounded same-origin removal and Forget routes with shared owner authority.
 pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
     Router::new()
         .route("/remote/hosts/actions", post(actions))
         .route("/remote/hosts/remove/start", post(start))
         .route("/remote/hosts/remove/finish", post(finish))
+        .route("/remote/hosts/forget", post(forget))
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(axum::middleware::from_fn(deadline))
         .with_state(Api {
@@ -110,6 +113,27 @@ async fn finish(
     let input = decode_finish(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     api.removal
         .finish_host(&token, input.host_id, &input.review, now)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::FORBIDDEN)
+}
+
+/// A Forget selection carries only a host UUID; the transaction derives ownership and state.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Forget {
+    host_id: Uuid,
+}
+
+/// Forget only within the same-origin owner's admin window, with the existing bounded decoder.
+async fn forget(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    let (token, now, bytes, _permit) = body(&api, incoming).await?;
+    let input: Forget = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    api.removal
+        .forget_browser(&token, input.host_id, now)
         .await
         .map(Json)
         .map_err(|_| StatusCode::FORBIDDEN)

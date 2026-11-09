@@ -390,7 +390,7 @@ impl EnrollmentStore {
     }
 
     /// Notify plugin readers after the denial or final retirement commits.
-    async fn publish_revoked_authority(&self) {
+    pub(crate) async fn publish_revoked_authority(&self) {
         let plugins = self
             .1
             .plugins

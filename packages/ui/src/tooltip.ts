@@ -32,11 +32,12 @@
  * updates an open tooltip through `refreshTip`.
  */
 import { attachGlassBed } from "./glass-bed";
+import { markMotion } from "./input-source";
+import { EASE_OUT } from "./motion";
 
 const DELAY = 400, WARM = 300, GRACE = 80, LONG_PRESS = 500, SLOP = 10;
 const POP = 160, SWAP = 140, SHIFT = 10, TRAVEL = 200, OUT = 100;
 const GAP = 8, MARGIN = 8;
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 
 type Side = "top" | "bottom";
 /** Optional layout for one point-anchored tooltip: a clamped two-line preview (a long link). Every other tooltip shows its whole label. */
@@ -57,9 +58,9 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 /** The tooltip and confirmation styles, installed once by `buildStyleOnly`. */
 const STYLE = `
-.tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
+.tip-pos { position: fixed; left: 0; top: 0; z-index: calc(var(--z-tooltip) + 2); pointer-events: none; will-change: transform; }
 .tip, .tip-sizer { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: var(--r-sm); width: max-content; max-width: min(17.5rem, calc(100vw - 2 * ${MARGIN}px)); overflow: hidden;
-  font: var(--fw-label, 500) var(--text-secondary, 0.75rem)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
+  font: var(--fw-label, 500) var(--text-secondary)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label.is-leaving { position: absolute; left: 0.625rem; top: 0.375rem; white-space: nowrap; }
 .tip-arrow { position: absolute; left: 0; width: 0.5rem; height: 0.5rem; margin-left: -0.25rem; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
@@ -67,9 +68,9 @@ const STYLE = `
    and cap are never restated as pixel constants that drift when a token changes. Its own class keeps the .tip element unique in the page. */
 .tip-pos.tip-measure { visibility: hidden; will-change: auto; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
-.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
-  border-radius: 0.875rem; opacity: 0; transform: scale(0.96); pointer-events: none;
-  transition: opacity 150ms ease-out, transform 180ms var(--ease-out); }
+.ui-confirm-tip { position: fixed; z-index: calc(var(--z-tooltip) + 1); display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
+  border-radius: var(--r-md); opacity: 0; transform: scale(0.96); pointer-events: none;
+  transition: opacity calc(var(--t-press) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out); }
 .ui-confirm-tip[hidden] { display: none !important; }
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
 .ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 0.625rem; height: 0.625rem; margin-left: -0.3125rem; background: inherit;
@@ -77,12 +78,12 @@ const STYLE = `
 .ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -0.3125rem; border-right: 0; border-bottom: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
 .ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -0.3125rem; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
 .ui-confirm-tip-text { display: grid; gap: 0.1875rem; }
-.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 0.8125rem)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 0.75rem)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button { display: inline-grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent;
   color: var(--fg-2); cursor: pointer;
-  transition: transform 120ms var(--ease-out), background-color 120ms ease, color 120ms ease; }
+  transition: transform var(--t-press) var(--ease-out), background-color var(--t-press) ease, color var(--t-press) ease; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button:active { transform: scale(0.97); }
 :is(.ui-confirm-tip, .ui-confirm-bar) button:focus { outline: none; }
@@ -105,7 +106,7 @@ const STYLE = `
   .ui-confirm-tip[data-stack][data-named] button { width: 100%; }
 }
 /* Named actions: the buttons carry their words. */
-.ui-confirm-tip[data-named] button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: 100%; overflow: hidden; padding: 0 0.75rem; font: 500 var(--text-secondary, 0.75rem)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+.ui-confirm-tip[data-named] button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: 100%; overflow: hidden; padding: 0 0.75rem; font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 /* A label that still does not fit (a long host name) is cut with an ellipsis inside its button, never run past the card's edge. */
 .ui-confirm-tip[data-named] button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Two named actions sit side by side and share the row; the dismissal is a real button with a quiet flat fill, not loose text. */
@@ -119,7 +120,7 @@ const STYLE = `
   :is(.ui-confirm-tip, .ui-confirm-bar) button { width: 2.75rem; height: 2.75rem; }
   :is(.ui-confirm-tip, .ui-confirm-bar) button svg { width: 1.125rem; height: 1.125rem; }
 }
-@media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity 120ms ease; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity var(--t-press) ease; transform: none; } }
 `;
 
 function build() {
@@ -344,6 +345,7 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
       cleanup();
       anchor.setAttribute("aria-expanded", "false");
       anchor.removeAttribute("aria-controls");
+      markMotion(tip);
       tip.dataset.open = "false";
       bed.setOpen(false);
       if (restoreFocus) {
@@ -366,6 +368,8 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   place();
   requestAnimationFrame(() => {
     if (closing || !tip.isConnected) return;
+    // Opened with a key (palette, then Enter on a row that asks): the question appears whole. Read here, where it flips (#427).
+    markMotion(tip);
     tip.dataset.open = "true";
     bed.setOpen(true);
     cancel.focus({ preventScroll: true });
@@ -437,7 +441,7 @@ function place(el: HTMLElement, animateMove: boolean): number {
   const x = Math.max(MARGIN, Math.min(cx - w / 2, innerWidth - MARGIN - w));
   const y = Math.max(MARGIN, Math.min(side === "top" ? r.top - GAP - h : r.bottom + GAP, innerHeight - MARGIN - h));
   const prev = new DOMMatrix(getComputedStyle(pos).transform).m41;
-  pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE}` : "none";
+  pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE_OUT}` : "none";
   pos.style.transform = `translate(${x}px, ${y}px)`;
   surface.style.width = `${w}px`;
   // The arrow follows the anchor, but never leaves the surface when a shift moved the surface off-centre.
@@ -450,20 +454,22 @@ function place(el: HTMLElement, animateMove: boolean): number {
   return x >= prev ? 1 : -1;
 }
 
+/** Swaps the tooltip's text for `text`, sliding in the direction `dir` (0 for no slide, and no slide under reduced motion). */
 function setLabel(text: string, dir: number) {
   const old = surface.querySelector<HTMLElement>(".tip-label:not(.is-leaving)")!;
   if (old.textContent === text) return;
   if (dir === 0 || reduced() || !shown) { old.textContent = text; return; }
   // Slide: the old label leaves against the travel, the new one arrives with it.
   old.classList.add("is-leaving");
-  old.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateX(${-dir * SHIFT}px)` }], { duration: SWAP, easing: EASE, fill: "forwards" }).onfinish = () => old.remove();
+  old.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateX(${-dir * SHIFT}px)` }], { duration: SWAP, easing: EASE_OUT, fill: "forwards" }).onfinish = () => old.remove();
   const next = document.createElement("span");
   next.className = "tip-label";
   next.textContent = text;
   surface.appendChild(next);
-  next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE });
+  next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE_OUT });
 }
 
+/** Shows the tooltip for `el`, popping in or appearing instantly; `pointCall` marks a label tied to a point, not to the element. */
 function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   if (!pos) build();
   clearTimeout(closeTimer); clearTimeout(openTimer);
@@ -478,13 +484,14 @@ function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   if (!shown && how === "pop") {
     const from = reduced() ? { opacity: 0 } : { opacity: 0, transform: "scale(0.94)" };
     const to = reduced() ? { opacity: 1 } : { opacity: 1, transform: "scale(1)" };
-    surface.animate([from, to], { duration: POP, easing: EASE });
-    arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE });
+    surface.animate([from, to], { duration: POP, easing: EASE_OUT });
+    arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE_OUT });
   }
   shown = true;
   watch();
 }
 
+/** Hides the tooltip, skipping the exit animation when `instant` is true. */
 function hide(instant = false) {
   clearTimeout(openTimer); clearTimeout(closeTimer);
   if (!shown) {
@@ -497,7 +504,7 @@ function hide(instant = false) {
   current = null;
   warmUntil = performance.now() + WARM;
   if (instant) { pos.style.visibility = "hidden"; return; }
-  pos.animate([{ opacity: 1 }, { opacity: 0 }], { duration: OUT, easing: EASE }).onfinish = () => { if (!shown) pos.style.visibility = "hidden"; };
+  pos.animate([{ opacity: 1 }, { opacity: 0 }], { duration: OUT, easing: EASE_OUT }).onfinish = () => { if (!shown) pos.style.visibility = "hidden"; };
 }
 
 const warm = () => shown || performance.now() < warmUntil;
@@ -528,7 +535,7 @@ export function refreshTip(el: HTMLElement, animate = false) {
   if (!(shown && current === el)) return;
   if (!animate || reduced()) { place(el, false); setLabel(labelOf(el), 0); return; }
   const dir = place(el, true);
-  surface.style.transition = `width ${TRAVEL}ms ${EASE}`;
+  surface.style.transition = `width ${TRAVEL}ms ${EASE_OUT}`;
   window.setTimeout(() => { surface.style.transition = ""; }, TRAVEL + 40);
   setLabel(labelOf(el), dir);
 }
