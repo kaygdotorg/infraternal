@@ -351,6 +351,30 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
         )
         .with_cli_positionals(["host_id"]),
         hosted_action(
+            infraternal_plugin_remote::FORGET,
+            &["hosts", "forget"],
+            JsonSchema::object(
+                [
+                    (
+                        "host_id".to_owned(),
+                        JsonSchema::string("ID of the retired-unreachable host to forget."),
+                    ),
+                    (
+                        "dry_run".to_owned(),
+                        JsonSchema::boolean("Show what would be forgotten and change nothing."),
+                    ),
+                    (
+                        "yes".to_owned(),
+                        JsonSchema::boolean(
+                            "Forget after showing the dry run, without asking. For scripts that already reviewed it.",
+                        ),
+                    ),
+                ],
+                ["host_id".to_owned()],
+            ),
+        )
+        .with_cli_positionals(["host_id"]),
+        hosted_action(
             infraternal_plugin_api::CORE_API_ACTIONS[1],
             &["sessions", "list"],
             JsonSchema::empty_object(),

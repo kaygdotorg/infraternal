@@ -496,7 +496,7 @@ export function mountPerfHud(options: { bench?: boolean } = {}): { dispose(): vo
 /** Plain on purpose: a dev instrument. Tokens and the caption type of the product, faint, in the pane's bottom-right
     corner (nothing may sit bottom-left, TASTE; on desktop it rests above the mock badge, in the free band beside the windows). */
 const HUD_CSS = `
-.perf-hud { position: absolute; z-index: 3; right: calc(var(--gutter, 12px) + env(safe-area-inset-right)); bottom: calc(52px + env(safe-area-inset-bottom)); width: 272px; height: 150px; contain: strict; pointer-events: none; color: var(--fg-2); font: var(--fw-label, 550) var(--text-caption, 11px)/1.35 var(--font-mono, monospace); font-variant-numeric: tabular-nums; --perf-gap: 24px; }
+.perf-hud { position: absolute; z-index: calc(var(--z-content) + 2); right: calc(var(--gutter, 12px) + env(safe-area-inset-right)); bottom: calc(52px + env(safe-area-inset-bottom)); width: 272px; height: 150px; contain: strict; pointer-events: none; color: var(--fg-2); font: var(--fw-label, 550) var(--text-caption, 11px)/1.35 var(--font-mono, monospace); font-variant-numeric: tabular-nums; --perf-gap: 24px; }
 .perf-hud-row { position: absolute; right: 0; bottom: 0; display: flex; align-items: center; gap: 8px; height: 22px; padding: 0 6px; margin: 0; border: 0; border-radius: 6px; outline: none; background: transparent; color: inherit; font: inherit; cursor: pointer; pointer-events: auto; opacity: 0.7; -webkit-tap-highlight-color: transparent; }
 .perf-hud-fps { min-width: 3ch; text-align: right; }
 .perf-hud-spark { width: ${SPARK_W}px; height: ${SPARK_H}px; display: block; }

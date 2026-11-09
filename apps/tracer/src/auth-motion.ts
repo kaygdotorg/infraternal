@@ -10,8 +10,8 @@
  *
  * Reduced motion, and a first mount with no card to leave, render with no swap.
  */
-/** The strong ease-out curve used for every part of the swap. */
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
+import { EASE_OUT } from "../../../packages/ui/src/motion";
+
 /** How far (px) a card travels sideways as it enters or leaves. */
 const SLIDE = 28;
 
@@ -38,10 +38,10 @@ export function swapCard(host: HTMLElement, direction: 1 | -1 | 0, render: () =>
   const next = host.querySelector<HTMLElement>(":scope > .auth-screen:not(.auth-leaving) > .auth-card");
   if (!next) { layer.remove(); return; }
   next.style.animation = "none";
-  next.animate([{ opacity: 0, transform: `translateX(${direction * SLIDE}px)` }, { opacity: 1, transform: "translateX(0)" }], { duration: 260, easing: EASE });
+  next.animate([{ opacity: 0, transform: `translateX(${direction * SLIDE}px)` }, { opacity: 1, transform: "translateX(0)" }], { duration: 260, easing: EASE_OUT });
   const height = next.getBoundingClientRect().height;
   if (Math.abs(height - from.height) > 1) {
-    next.animate([{ height: `${from.height}px`, overflow: "hidden" }, { height: `${height}px`, overflow: "hidden" }], { duration: 320, easing: EASE });
+    next.animate([{ height: `${from.height}px`, overflow: "hidden" }, { height: `${height}px`, overflow: "hidden" }], { duration: 320, easing: EASE_OUT });
   }
   const out = ghost.animate([{ opacity: from.opacity, transform: from.transform }, { opacity: 0, transform: `translateX(${-direction * SLIDE}px)` }], { duration: 200, easing: "ease-out", fill: "forwards" });
   out.onfinish = () => layer.remove();

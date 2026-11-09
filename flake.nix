@@ -58,6 +58,7 @@
               pkgs.nodejs_26           # JavaScript CLI shebangs in type checks
               pkgs.vim                 # Real-editor terminal repaint fixture
               pkgs.openssh             # Release-signature and SSH key fixtures
+              pkgs.minisign            # Verify signed libghostty-vt source archives
               pkgs.python3             # release and fixture scripts
               pkgs.gnumake pkgs.perl   # vendored OpenSSL build drivers
               pkgs.gcc                 # host-side build scripts and proc macros

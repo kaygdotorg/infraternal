@@ -23,7 +23,7 @@ const SIZES = [
 async function asPhone(page: Page): Promise<void> {
   const source = await (await page.request.get("/docs/docs.css")).text();
   const css = /@media \(pointer: coarse\)\s*\{\s*(:root\s*\{[^}]*\})\s*\}/.exec(source)?.[1] ?? "";
-  expect(css, "docs.css has a pointer: coarse rule").toContain("--text-body: 16px");
+  expect(css, "docs.css has a pointer: coarse rule").toContain("--ui-size-body: 0.9375rem");
   const reading = await (await page.request.get("/docs/doc.css")).text();
   // Every `@media (pointer: coarse)` block of doc.css, so the 44 px rows and larger hit areas are the real rules.
   const coarse = [...reading.matchAll(/@media \(pointer: coarse\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)].map((m) => m[1]).join("\n");
@@ -94,8 +94,8 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
         expect(Math.abs(c.left), `${c.kind}: the panel starts on the text's left edge`).toBeLessThanOrEqual(0.5);
         expect(c.over, `${c.kind}: the panel is no wider than the text`).toBeLessThanOrEqual(0.5);
         expect(Math.abs(c.iconMid - c.labelMid), `${c.kind}: icon and title share a centre line`).toBeLessThanOrEqual(0.5);
-        expect(c.iconSize, `${c.kind}: icon size`).toBeCloseTo(size.touch ? 20 : 17, 0);
-        expect(Math.abs(c.titleLeft - c.padLeft - c.iconSize - 8), `${c.kind}: title starts one gap after the icon`).toBeLessThanOrEqual(1.5);
+        expect(c.iconSize, `${c.kind}: icon size`).toBeCloseTo(size.touch ? 20 : 18.7, 0);
+        expect(Math.abs(c.titleLeft - c.padLeft - c.iconSize - 0.5 * (size.touch ? 16 : 17.6)), `${c.kind}: title starts one gap after the icon`).toBeLessThanOrEqual(1.5);
         // Over the real background: the fill is the tone at 9% on the page colour.
         const panel = await page.evaluate(([fill, page]) => { const c = document.createElement("canvas").getContext("2d")!; c.fillStyle = page!; c.fillRect(0, 0, 1, 1); c.fillStyle = fill!; c.fillRect(0, 0, 1, 1); const d = c.getImageData(0, 0, 1, 1).data; return `rgb(${d[0]}, ${d[1]}, ${d[2]})`; }, [c.fill, bodyBg]);
         expect(await contrast(page, c.stroke, panel), `${c.kind}: icon against its panel`).toBeGreaterThanOrEqual(3);
@@ -125,7 +125,7 @@ for (const size of SIZES) for (const scheme of ["dark", "light"] as const) {
       await expect(why.locator(".why-body p").first()).toBeVisible();
       const whyEdges = await page.evaluate(() => { const w = document.querySelector("details.why")!; return { box: w.getBoundingClientRect().left, text: document.querySelector(".doc-body > p")!.getBoundingClientRect().left, body: w.querySelector(".why-body p")!.getBoundingClientRect().left, title: w.querySelector("summary")!.getBoundingClientRect().left }; });
       expect(Math.abs(whyEdges.box - whyEdges.text), "the reasoning panel starts on the text's left edge").toBeLessThanOrEqual(0.5);
-      expect(Math.abs(whyEdges.body - whyEdges.title - 16), "its text is inset like its title").toBeLessThanOrEqual(0.5);
+      expect(Math.abs(whyEdges.body - whyEdges.title - (size.touch ? 16 : 17.6)), "its text is inset like its title").toBeLessThanOrEqual(0.5);
       await shot("keys-why-open");
       await why.locator("summary").click();
       await page.waitForTimeout(350);

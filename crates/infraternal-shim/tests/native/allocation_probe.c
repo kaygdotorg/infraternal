@@ -16,7 +16,9 @@ static void free_mem(void *c,void *p,size_t n,uint8_t a,uintptr_t ret){(void)c;(
 extern size_t infraternal_vt_snapshot(GhosttyTerminal,uint8_t*,size_t,size_t);
 int main(int argc,char **argv){
  struct context ctx={0,0};GhosttyAllocatorVtable v={allocate,resize_mem,remap_mem,free_mem};GhosttyAllocator a={&ctx,&v};
- GhosttyTerminal t=NULL;if(ghostty_terminal_new(&a,&t,(GhosttyTerminalOptions){80,24,17825792})!=GHOSTTY_SUCCESS)return 2;
+ GhosttyTerminal t=NULL;if(ghostty_terminal_new(&a,&t,80,24)!=GHOSTTY_SUCCESS)return 2;
+ size_t max_scrollback=17825792;
+ if(ghostty_terminal_set(t,GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,&max_scrollback)!=GHOSTTY_SUCCESS)return 2;
  const char *input="\033cPRIMARY\033[?47hALT\033[?47l";ghostty_terminal_vt_write(t,(const uint8_t*)input,strlen(input));
  ctx.enabled=1;ctx.left=argc>1?strtoul(argv[1],NULL,10):0;
  int result=ghostty_terminal_resize(t,20000,2,0,0);ctx.enabled=0;

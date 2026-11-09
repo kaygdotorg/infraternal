@@ -16,6 +16,7 @@ import { createKeyValueList } from "../../../../../packages/ui/src/kv-list";
 import type { Ctx, WinRec } from "../context";
 import type { DetailsFacts, DetailsSource } from "./details-source";
 import { currentUiScale } from "../../../../../packages/ui/src/ui-scale";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 
 export interface DetailsPopover {
   readonly windowId: string;
@@ -31,7 +32,6 @@ interface DetailsInput {
   action?: { label: string; hint?: string; run(anchor: HTMLElement): void };
 }
 
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** The window header's padding: the gap kept between the popover and its window's edges. */
 const INSET = 8;
 
@@ -106,7 +106,7 @@ export function openDetailsPopover(
     // Resetting the scroll position forces a layout; only a popover that was scrolled needs it.
     if (scrolled) { scroll.scrollTop = 0; scrolled = false; }
     if (animate && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      list.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE });
+      list.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 140, easing: EASE_OUT });
     }
   };
   const tabs = createCapsuleTabs(first.sections.map((s) => ({ id: s.id, label: s.label, icon: s.icon })), first.sections[0]?.id ?? "", (id, how) => show(id, how === "pointer"), "Details", true);
@@ -144,7 +144,7 @@ export function openDetailsPopover(
     root.animate([
       { opacity: 0, transform: "translateY(-4px) scale(0.96)" },
       { opacity: 1, transform: "none" },
-    ], { duration: 200, easing: EASE });
+    ], { duration: 200, easing: EASE_OUT });
   } else if (source === "pointer") {
     root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
   }
@@ -163,7 +163,7 @@ export function openDetailsPopover(
     root.animate([
       { opacity: 1, transform: "none" },
       { opacity: 0, transform: "translateY(-2px) scale(0.98)" },
-    ], { duration: 130, easing: EASE, fill: "forwards" }).onfinish = done;
+    ], { duration: 130, easing: EASE_OUT, fill: "forwards" }).onfinish = done;
   };
   // Outside presses close it (the pill toggles it itself); Escape closes it instantly.
   document.addEventListener("pointerdown", (event) => {

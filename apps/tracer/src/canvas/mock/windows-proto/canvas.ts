@@ -40,6 +40,7 @@ import { openDetailsPopover, type DetailsPopover } from "../../windows/details.o
 import { prototypeFacts } from "./details-facts";
 import type { BranchSection, BranchedMenu } from "../../../../../../packages/ui/src/branched";
 import type { CoreScreen } from "../../../core-screen";
+import { EASE_OUT } from "../../../../../../packages/ui/src/motion";
 
 /** A session as the prototype windows show it: its name, size and age, and the lines of its screen. */
 export interface CanvasSession {
@@ -467,7 +468,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
           // Height and opacity together, short stagger; no fill so nothing stays clipped at rest.
           section.style.overflow = "hidden";
           const animation = section.animate([{ height: "0px", opacity: 0 }, { height: `${height}px`, opacity: 1 }],
-            { duration: 260, delay, easing: "cubic-bezier(0.23, 1, 0.32, 1)", fill: "backwards" });
+            { duration: 260, delay, easing: EASE_OUT, fill: "backwards" });
           animation.onfinish = animation.oncancel = () => { section.style.overflow = ""; };
         }
       });
@@ -605,7 +606,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     if (reducedMotion.matches) return;
     // No fill: nothing stays transformed at rest, so text keeps rendering crisp.
     entry.card.root.animate([{ opacity: 0, transform: "translateY(10px) scale(0.985)" }, { opacity: 1, transform: "none" }],
-      { duration: 280, delay, easing: "cubic-bezier(0.23, 1, 0.32, 1)", fill: "backwards" });
+      { duration: 280, delay, easing: EASE_OUT, fill: "backwards" });
   };
   let serial = 0;
   const hostFromFixture = (id: string, name: string): CanvasHost => ({

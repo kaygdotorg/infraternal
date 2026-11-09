@@ -1,6 +1,7 @@
 //! Bounded same-origin adapters for the remote plugin's removal action: a dry run, then the
 //! removal, inside the browser's admin window [16][168], #87, D339. Also the owner's read-only
-//! view of the access files a removal's revocation reported (D356).
+//! view of the access files a removal's revocation reported (D356). D369 Forget uses that same
+//! window to cancel unreachable cleanup without a machine-side effect.
 use crate::{auth::Auth, remote_removal::Removal};
 use axum::{
     Json, Router,
@@ -37,14 +38,15 @@ pub struct Finish {
     host_id: Uuid,
     review: String,
 }
-/// The removal routes and the owner's read-only access report, bounded in body
-/// size, time and concurrency.
+/// Mount the bounded same-origin removal and Forget routes and the owner's read-only access
+/// report, all with shared owner authority and bounded in body size, time and concurrency.
 pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
     Router::new()
         .route("/remote/hosts/actions", post(actions))
         .route("/remote/hosts/remove/start", post(start))
         .route("/remote/hosts/remove/finish", post(finish))
         .route("/remote/hosts/access-report", post(access_report))
+        .route("/remote/hosts/forget", post(forget))
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(axum::middleware::from_fn(deadline))
         .with_state(Api {
@@ -150,6 +152,27 @@ async fn access_report(
         Err(crate::auth::Error::Storage(_)) => Err(StatusCode::SERVICE_UNAVAILABLE),
         Err(_) => Err(StatusCode::FORBIDDEN),
     }
+}
+
+/// A Forget selection carries only a host UUID; the transaction derives ownership and state.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Forget {
+    host_id: Uuid,
+}
+
+/// Forget only within the same-origin owner's admin window, with the existing bounded decoder.
+async fn forget(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    let (token, now, bytes, _permit) = body(&api, incoming).await?;
+    let input: Forget = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    api.removal
+        .forget_browser(&token, input.host_id, now)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::FORBIDDEN)
 }
 
 async fn actions(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {

@@ -1,6 +1,7 @@
 //! Perf-VM-only native allocation and resident warm-up accounting for shared terminals [D270].
 use super::*;
 
+/// Checks small histories do not retain megabyte-sized native page quanta.
 #[test]
 #[ignore = "perf VM only: sparse history residency and native ownership"]
 fn small_history_does_not_retain_megabyte_page_quanta() {
@@ -21,7 +22,7 @@ fn small_history_does_not_retain_megabyte_page_quanta() {
         println!(
             "PPU_SPARSE lines={} ordinary_bytes={ordinary} page_bytes={pages} live_blocks={blocks} pss_kib={pss} anon_kib={anonymous} rows={}",
             (round + 1) * 256,
-            terminal.engine.history_rows()
+            terminal.engine.history_rows().unwrap()
         );
     }
     let (ordinary, pages, _) = terminal.engine.allocation_classes();

@@ -19,7 +19,11 @@ args.evidence.mkdir(parents=True, exist_ok=True)
 # Select the most recent completed adapter build, never an in-progress archive.
 lib = args.library or max((target_root / "debug/build").glob("infraternal-shim-*/out/native/lib/libghostty-vt.a"), key=lambda p: p.stat().st_mtime)
 lib = lib.resolve()
-include = lib.parents[2] / "ghostty-source/include"
+cache = lib.parents[2]
+source_dirs = [cache / "libghostty-vt-1.0.0", cache / "ghostty-source"]
+include = next((path / "include" for path in source_dirs if (path / "include").is_dir()), None)
+if include is None:
+    raise SystemExit("native probe headers not found beside the built archive")
 source = Path("crates/infraternal-shim/tests/native") / (args.probe + "_probe.c")
 # Match scripts/build-vt: stage the checksum-pinned compiler even when the
 # invoking dev shell has no Zig on PATH. Never substitute a host compiler.

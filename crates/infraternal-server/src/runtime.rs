@@ -1529,6 +1529,115 @@ mod tests {
             .expect("host row")
     }
 
+    /// Forget requires hosts:write and a reviewed dry run; its audit commits with the tombstone.
+    #[cfg(feature = "remote")]
+    #[tokio::test]
+    async fn forget_retired_host_api_enforces_scope_review_and_audit() {
+        let data_dir = temp_dir();
+        let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
+        let (app, _) = router_with_agent(
+            config(data_dir.clone()),
+            EmbeddedAgent::from_test_socket(agent_socket),
+        )
+        .await
+        .expect("server router startup");
+        let pool = super::open_database(&data_dir).await.expect("real SQLite");
+        let token = "fixture-forget-key-never-print";
+        let read_token = "fixture-forget-read-key-never-print";
+        let host = removal_fixture(&pool, &[token, read_token]).await;
+        let now = super::unix_seconds().expect("time");
+        sqlx::query("UPDATE api_keys SET scopes='[\"hosts:read\"]' WHERE token_hash=?")
+            .bind(crate::auth::hash(read_token))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(zeroblob(32),?,zeroblob(32),zeroblob(32),?,?)")
+            .bind(host.as_bytes().as_slice()).bind(now-604_800).bind(now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,'owner')")
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,'owner',1,1,'pending')")
+            .bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        let action = "remote.host.forget";
+        let (status, _) = post_key_action(
+            &app,
+            read_token,
+            action,
+            serde_json::json!({"host_id":host,"dry_run":true}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        let (status, _) = post_key_action(
+            &app,
+            token,
+            action,
+            serde_json::json!({"host_id":host,"dry_run":false}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(host_is_live(&pool, host).await);
+        let (status, review) = post_key_action(
+            &app,
+            token,
+            action,
+            serde_json::json!({"host_id":host,"dry_run":true}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(host_is_live(&pool, host).await);
+        // A reviewed target can change before commit: a new valid certificate makes it pending again.
+        sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=? WHERE host_id=?")
+            .bind(now - 604_800 + 3600)
+            .bind(now + 3600)
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, _) = post_key_action(&app, token, action, serde_json::json!({"host_id":host,"dry_run":false,"review_token":review["review_token"]})).await;
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(host_is_live(&pool, host).await);
+        let forgotten: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM mesh_audit WHERE action='remote.host.forget' AND resource=?",
+        )
+        .bind(host.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            forgotten, 0,
+            "a state conflict must not record a successful Forget"
+        );
+        sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=? WHERE host_id=?")
+            .bind(now - 604_800)
+            .bind(now)
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (status, review) = post_key_action(
+            &app,
+            token,
+            action,
+            serde_json::json!({"host_id":host,"dry_run":true}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let input = serde_json::json!({"host_id":host,"dry_run":false,"review_token":review["review_token"]});
+        let (status, result) = post_key_action(&app, token, action, input.clone()).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(result["state"], "forgotten");
+        assert!(!host_is_live(&pool, host).await);
+        let audit: (String, Option<String>) = sqlx::query_as("SELECT state,result FROM api_action_audit WHERE action_id='remote.host.forget' AND key_id=? ORDER BY id DESC LIMIT 1")
+            .bind(crate::auth::hash(token)).fetch_one(&pool).await.unwrap();
+        assert_eq!(audit, ("complete".into(), Some("forgotten".into())));
+        let (status, _) = post_key_action(&app, token, action, input).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        pool.close().await;
+        std::fs::remove_dir_all(data_dir).expect("remove temporary data directory");
+    }
+
     /// J154 P2-2 / D28: "a destructive MCP action needs a dry run first". A key cannot remove
     /// a host in one call: `dry_run: false` without the dry run's review token is refused.
     #[cfg(feature = "remote")]

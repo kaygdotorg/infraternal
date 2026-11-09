@@ -2,12 +2,13 @@
    the toast come from packages/ui; only the cluster frames and the state marks are drawn here. */
 
 /* ---- cluster frames: what the far zoom shows instead of cards ------------------------------------ */
-.cl-chips { position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: 0; transition: opacity 200ms var(--ease-out, ease-out); }
+.cl-chips { position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: 0; transition: opacity var(--t-pop) var(--ease-out, ease-out); }
 .cl-chips[data-on="true"] { opacity: 1; }
+/* Nested outer frame: it surrounds windows whose corners are --r-lg, so its own corner is larger than the largest step (D372, UI-CONSISTENCY-AUDIT section 5). (.cl-chip) */
 .cl-chip {
   position: absolute; box-sizing: border-box; margin: 0; padding: 0; border: calc(1px * var(--inv, 1)) solid var(--overlay-line); border-radius: 1.75rem;
   background: color-mix(in oklab, var(--fg) 5%, transparent); color: var(--fg); font: inherit; text-align: left; cursor: pointer; pointer-events: none;
-  transition: background-color 160ms var(--ease-out, ease-out);
+  transition: background-color var(--t-pop) var(--ease-out, ease-out);
 }
 .cl-chips[data-on="true"] .cl-chip { pointer-events: auto; }
 @media (hover: hover) and (pointer: fine) { .cl-chip:hover { background: color-mix(in oklab, var(--fg) 9%, transparent); } }
@@ -36,15 +37,15 @@
 .cl-graph-arrows .cl-arrow[data-leaving] { opacity: 0; }
 
 /* ---- states: loading, unreachable, empty, stale -------------------------------------------------- */
-.cl-meshstate { opacity: 1; transition: opacity 200ms var(--ease-out, ease-out); }
+.cl-meshstate { opacity: 1; transition: opacity var(--t-pop) var(--ease-out, ease-out); }
 .cl-meshstate[data-open="false"] { opacity: 0; }
 .cl-meshstate-mark { display: grid; place-items: center; width: 2rem; height: 2rem; margin-bottom: 0.25rem; color: var(--fg-2); }
 .cl-meshstate-mark svg { width: 1.25rem; height: 1.25rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .cl-meshstate-mark .ui-spinner { --ui-spinner-size: 1.25rem; }
 .cl-empty-add svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.cl-meshnote { position: absolute; right: 0; top: 0; z-index: 3; --pill-h: 1.875rem; color: var(--fg-2); cursor: pointer; pointer-events: auto; transition: opacity 200ms var(--ease-out, ease-out); }
+.cl-meshnote { position: absolute; right: 0; top: 0; z-index: calc(var(--z-content) + 2); --pill-h: 1.875rem; color: var(--fg-2); cursor: pointer; pointer-events: auto; transition: opacity var(--t-pop) var(--ease-out, ease-out); }
 .cl-meshnote[data-open="false"] { opacity: 0; }
-.cl-meshnote svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.cl-meshnote svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 /* A quiet breathing says the data is old and the connection is being waited for. */
 @keyframes cl-note-breathe { 50% { opacity: 0.55; } }
 .cl-meshnote[data-open="true"] svg { animation: cl-note-breathe 2.4s ease-in-out infinite; }
@@ -85,4 +86,4 @@
 
 /* A host's new name is on the card while the server decides; it settles to full strength when the server accepts it (and the old name returns with the refusal). */
 .cl-graph .ui-window[data-renaming="pending"] .ui-window-host { opacity: 0.6; }
-.cl-graph .ui-window-host { transition: opacity 140ms ease; }
+.cl-graph .ui-window-host { transition: opacity var(--t-press) ease; }

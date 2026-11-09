@@ -1,6 +1,7 @@
-//! Snapshot adapter over pinned libghostty-vt's Zig screen/cell API [13][94].
-//! The C API does not yet expose inactive screens, saved cursors, tabs or
-//! charsets. This read-only adapter accesses those fields without a mirror VT.
+//! Snapshot adapter over libghostty-vt 1.0's bounded state [13][94].
+//! The stable C API has a binary snapshot codec, while existing clients resume
+//! from VT escape sequences. This read-only adapter accesses engine-owned
+//! screen and cell state to produce that bounded replay without a mirror VT.
 const std = @import("std");
 const c = @import("terminal/c/terminal.zig");
 const vt = @import("terminal/main.zig");
@@ -19,9 +20,10 @@ pub fn snapshot(handle: c.Terminal, buf: [*]u8, len: usize, tail: usize) callcon
 }
 
 fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void {
-    // OSC 133 metadata drives resize and prompt interaction. VT painting
-    // cannot import arbitrary cell/row semantics without triggering actions;
-    // refuse the faithful path instead of silently certifying visible text.
+    // OSC 133 click settings and live prompt state affect interaction. VT
+    // painting cannot import retained cell/row semantics without triggering
+    // actions, so reject those while allowing history metadata outside the
+    // bounded export tail to be omitted.
     // C initialization starts at false, while RIS starts at true. Restoring
     // false through OSC 133 would itself create unimportable semantic state.
     if (t.flags.shell_redraws_prompt != .true) return error.Unrepresentable;
@@ -30,15 +32,18 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     // exposes nonprinting row-wrap restoration instead of emitting a lossy VT.
     inline for (.{ .primary, .alternate }) |key| {
         if (t.screens.get(key)) |screen| {
-            if (!std.meta.eql(screen.semantic_prompt, vt.Screen.SemanticPrompt.disabled) or screen.cursor.semantic_content != .output or screen.cursor.semantic_content_clear_eol) return error.Unrepresentable;
+            // `seen` is a screen-wide aggregate over all history. The bounded
+            // snapshot may omit the rows it summarizes, so only the live click
+            // behavior must be preserved here; retained rows are checked below.
+            if (screen.semantic_prompt.click != .none or screen.cursor.semantic_content != .output or screen.cursor.semantic_content_clear_eol) return error.Unrepresentable;
             // Cursor copies can inherit protection into a screen whose sticky
             // mode is off. VT can set protection only by selecting a mode;
             // reject this construction gap rather than changing later erase.
             if (screen.protected_mode == .off and (screen.cursor.protected or if (screen.saved_cursor) |saved| saved.protected else false)) return error.Unrepresentable;
             // Validate the exported extent, not intentionally omitted older
-            // history. Frozen v1 permits tail truncation; the oracle compares
-            // every returned row, while live semantic scalars above remain
-            // mandatory. This bounds validation to visible rows plus the tail
+            // history. Frozen v1 permits tail truncation, so a screen-wide
+            // `seen` aggregate may differ when its marked rows fall outside
+            // this range. This bounds validation to visible rows plus the tail
             // instead of scanning ~10k stored rows on every Snapshot request.
             const history = screen.pages.total_rows - t.rows;
             const first_exported = history - @min(history, tail);
@@ -66,11 +71,12 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     // DECSM stores values independently of live modes. Seed these before
     // painting, because screen and cursor modes can have destructive effects.
     const defaults: vt.modes.ModeState = .{};
-    inline for (std.meta.fields(vt.modes.Mode)) |field| {
-        const mode: vt.modes.Mode = @enumFromInt(field.value);
+    const mode_info = @typeInfo(vt.modes.Mode).@"enum";
+    inline for (mode_info.field_names, mode_info.field_values) |name, value| {
+        const mode: vt.modes.Mode = @fromBackingInt(@intCast(value));
         const tag = vt.modes.ModeTag.fromMode(mode);
-        const saved = @field(t.modes.saved, field.name);
-        if (saved != @field(defaults.saved, field.name)) {
+        const saved = @field(t.modes.saved, name);
+        if (saved != @field(defaults.saved, name)) {
             if (tag.ansi) return error.Unrepresentable;
             try w.print("\x1b[?{d}{c}\x1b[?{d}s\x1b[?{d}{c}", .{ tag.value, @as(u8, if (saved) 'h' else 'l'), tag.value, tag.value, @as(u8, if (defaults.get(mode)) 'h' else 'l') });
         }
@@ -120,8 +126,8 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     }
     // Modes with screen-switching or reset side effects are represented by
     // the screen construction above, rather than dispatched a second time.
-    inline for (std.meta.fields(vt.modes.Mode)) |field| {
-        const mode: vt.modes.Mode = @enumFromInt(field.value);
+    inline for (@typeInfo(vt.modes.Mode).@"enum".field_values) |value| {
+        const mode: vt.modes.Mode = @fromBackingInt(@intCast(value));
         const tag = vt.modes.ModeTag.fromMode(mode);
         if (!(tag.value == 47 or tag.value == 1047 or tag.value == 1049 or tag.value == 1048 or tag.value == 6 or tag.value == 7 or tag.value == 69 or tag.value == 2026)) {
             try w.print("\x1b[{s}{d}{c}", .{ if (tag.ansi) "" else "?", tag.value, @as(u8, if (t.modes.get(mode)) 'h' else 'l') });
@@ -144,7 +150,11 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     if (screen.cursor.pending_wrap) {
         if (t.previous_char) |cp| {
             const saved_anchor = if (screen.saved_cursor) |saved| saved.pending_wrap and saved.x == screen.cursor.x and saved.y == screen.cursor.y and saved.origin == t.modes.get(.origin) else false;
-            if (unicode.table.get(cp).width == 2 and !saved_anchor) {
+            // liveCursor already reprints the edge cell to recreate pending
+            // wrap. If that cell's base codepoint is also the REP source, a
+            // second wrap-disabled print would clear the restored pending flag.
+            const edge_rep_matches = if (saved_anchor) false else pendingEdgeRepMatches(screen, cp);
+            if (unicode.table.get(cp).width == 2 and !saved_anchor and !edge_rep_matches) {
                 try w.writeAll("\x1b[?7l\x1b[?2027l\x1b(B\x1b*B\x1b+B\x0f");
                 try codepoint(w, cp);
                 try w.print("\x1b[?7{c}\x1b[?2027{c}", .{ @as(u8, if (t.modes.get(.wraparound)) 'h' else 'l'), @as(u8, if (t.modes.get(.grapheme_cluster)) 'h' else 'l') });
@@ -153,6 +163,16 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     try w.print("\x1b[4{c}", .{@as(u8, if (t.modes.get(.insert)) 'h' else 'l')});
+}
+
+/// Whether recreating the pending cursor already restored its REP source.
+/// Grapheme extensions do not replace the terminal's base-codepoint REP source.
+fn pendingEdgeRepMatches(screen: *const vt.Screen, cp: u21) bool {
+    const cursor = screen.cursor;
+    var p = screen.pages.pin(.{ .active = .{ .x = cursor.x, .y = cursor.y } }) orelse return false;
+    if (p.rowAndCell().cell.wide == .spacer_tail and p.x > 0) p.x -= 1;
+    const value = p.rowAndCell().cell;
+    return value.hasText() and value.codepoint() == cp;
 }
 
 // Mouse booleans are independent of the effective reporting fields. Every
@@ -437,8 +457,8 @@ fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool) SnapshotError!bool {
         if (value.wide == .spacer_tail or value.wide == .spacer_head) continue;
         var style = p.style(value);
         switch (value.content_tag) {
-            .bg_color_palette => style.bg_color = .{ .palette = value.content.color_palette },
-            .bg_color_rgb => style.bg_color = .{ .rgb = .{ .r = value.content.color_rgb.r, .g = value.content.color_rgb.g, .b = value.content.color_rgb.b } },
+            .bg_color_palette => style.bg_color = .palette(value.content.color_palette.data),
+            .bg_color_rgb => style.bg_color = .rgb(.{ .r = value.content.color_rgb.r, .g = value.content.color_rgb.g, .b = value.content.color_rgb.b }),
             else => {},
         }
         if (last == null or !std.meta.eql(last.?, style)) {
@@ -643,7 +663,10 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
                 if (!std.meta.eql(sa.?.cursor.style, sb.?.cursor.style)) return 3000002;
 
                 if (strict) {
-                    if (!std.meta.eql(sa.?.semantic_prompt, sb.?.semantic_prompt) or sa.?.cursor.semantic_content != sb.?.cursor.semantic_content or sa.?.cursor.semantic_content_clear_eol != sb.?.cursor.semantic_content_clear_eol) return 6200001;
+                    // `seen` summarizes prompt history that may fall outside
+                    // the bounded export tail; click behavior and live cursor
+                    // semantics remain observable and must still compare.
+                    if (!std.meta.eql(sa.?.semantic_prompt.click, sb.?.semantic_prompt.click) or sa.?.cursor.semantic_content != sb.?.cursor.semantic_content or sa.?.cursor.semantic_content_clear_eol != sb.?.cursor.semantic_content_clear_eol) return 6200001;
                     if (sa.?.protected_mode != sb.?.protected_mode or sa.?.cursor.protected != sb.?.cursor.protected) return 6300000;
                     if (!charsetEqual(sa.?.charset, sb.?.charset)) return 6400000;
                     if (!cursorLinkEqual(sa.?.cursor.hyperlink, sb.?.cursor.hyperlink)) return 6400001;
@@ -655,8 +678,8 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
         }
     }
     if (a.screens.active_key != b.screens.active_key) return 3000003;
-    inline for (std.meta.fields(vt.modes.Mode)) |field| {
-        const mode: vt.modes.Mode = @enumFromInt(field.value);
+    inline for (@typeInfo(vt.modes.Mode).@"enum".field_values) |value| {
+        const mode: vt.modes.Mode = @fromBackingInt(@intCast(value));
         const tag = vt.modes.ModeTag.fromMode(mode);
         if (!(tag.value == 47 or tag.value == 1047 or tag.value == 1049 or tag.value == 1048 or tag.value == 2026)) {
             if (a.modes.get(mode) != b.modes.get(mode)) return 4000000 + @as(usize, tag.value);
@@ -684,8 +707,8 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
 fn effectiveStyle(p: vt.PageList.Pin, value: *const vt.page.Cell) vt.Style {
     var s = p.style(value);
     switch (value.content_tag) {
-        .bg_color_palette => s.bg_color = .{ .palette = value.content.color_palette },
-        .bg_color_rgb => s.bg_color = .{ .rgb = .{ .r = value.content.color_rgb.r, .g = value.content.color_rgb.g, .b = value.content.color_rgb.b } },
+        .bg_color_palette => s.bg_color = .palette(value.content.color_palette.data),
+        .bg_color_rgb => s.bg_color = .rgb(.{ .r = value.content.color_rgb.r, .g = value.content.color_rgb.g, .b = value.content.color_rgb.b }),
         else => {},
     }
     return s;
@@ -768,7 +791,7 @@ pub fn approximate(handle: c.Terminal, buf: [*]u8, len: usize) callconv(lib.call
         for (p.cells(.all), 0..) |*value, x| {
             if (value.wide == .spacer_tail or value.wide == .spacer_head) continue;
             const style = effectiveStyle(p, value);
-            if (!value.hasText() and style.bg_color == .none) continue;
+            if (!value.hasText() and style.bg_color.tag == .none) continue;
             const boundary = w.end;
             // Roll back a whole cell if its bounded operation cannot fit. No
             // borrowed engine data is modified by failure or clipping.

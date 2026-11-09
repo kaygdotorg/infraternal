@@ -2,7 +2,7 @@
 /**
  * The palette rows that act on a host (#215, #259), built by an on-demand module (D188) the palette loads at idle: "Remove
  * host: <host>" where the instance offers removal, "Allow full access on <host>" where it has a privilege service, and
- * "Rename <host>" for the Mesh's hosts. Rows are computed each time the palette opens, like the rest.
+ * "Rename <host>" for the Mesh's hosts. An owner can Forget an expired pending removal on its existing row (D369). Rows are computed each time the palette opens, like the rest.
  */
 import { ICON_KEY } from "../../../../../packages/ui/src/icons";
 import type { PaletteEntry } from "../../core-screen";
@@ -16,7 +16,8 @@ export function hostEntries(cx: Ctx): PaletteEntry[] {
   const removal = cx.adapters.hostRemoval;
   for (const host of cx.adapters.sessions.hosts()) {
     if (host.state) {
-      out.push({ group: "Hosts", glyph: "…", label: host.name, hint: host.state === "pending" ? "removal pending · access revoked" : "retired-unreachable · cleanup certificate expired" });
+      const canForget = host.state === "retired-unreachable" && removal?.label() && removal.forget;
+      out.push({ group: "Hosts", glyph: canForget ? "×" : "…", label: canForget ? `Forget ${host.name}` : host.name, ...(canForget ? { action: `canvas:forgethost:${host.id}` } : {}), hint: canForget ? "unreachable" : host.state === "pending" ? "removal pending · access revoked" : "retired-unreachable · cleanup certificate expired" });
       continue;
     }
     if (host.id !== "embedded" && removal?.label()) out.push({ group: "Hosts", glyph: "×", label: `${removal.label()}: ${host.name}`, hint: "revoke access · uninstall", action: `canvas:removehost:${host.id}` });

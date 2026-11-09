@@ -290,8 +290,8 @@ fn review_r3_recycled_history_matches_unbounded_reference() {
                 0,
                 "share {history} {stage}: recycled terminal differs from reference \
                  (code {difference}, history rows {} vs {})",
-                bounded.retained_history_rows(),
-                reference.retained_history_rows()
+                bounded.retained_history_rows().unwrap(),
+                reference.retained_history_rows().unwrap()
             );
             // The faithful painter refuses some wrap states in every build;
             // recycling must not refuse a state the reference can paint.

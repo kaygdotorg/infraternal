@@ -385,9 +385,10 @@ impl Terminal {
             self.pending.capacity(),
         ))
     }
-    /// Read only native row-count metadata; compressed backing stays cold.
+    /// Read native row-count metadata while compressed backing stays cold.
+    /// Unsupported keys and other live getter failures remain visible to callers.
     #[cfg(feature = "process-per-user")]
-    pub(super) fn retained_history_rows(&self) -> usize {
+    pub(super) fn retained_history_rows(&self) -> io::Result<usize> {
         self.engine.history_rows()
     }
     /// A clean or still-pending rebuild cannot certify faithful state. Keep

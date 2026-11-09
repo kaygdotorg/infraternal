@@ -101,15 +101,15 @@ button { color: inherit; }
   padding: max(2rem, env(safe-area-inset-top)) 1.5rem max(2rem, env(safe-area-inset-bottom));
   justify-content: center;
 }
-.access h1 { margin: 0; font-size: 1.375rem; font-weight: var(--fw-label); letter-spacing: -0.04em; }
-.lead { margin: -0.375rem 0 0.625rem; color: #a6a8ad; font-size: 0.875rem; line-height: 1.6; }
+.access h1 { margin: 0; font-size: var(--ui-size-title); font-weight: var(--fw-label); letter-spacing: -0.04em; }
+.lead { margin: -0.375rem 0 0.625rem; color: #a6a8ad; font-size: var(--ui-size-body); line-height: 1.6; }
 .access form { display: flex; flex-direction: column; gap: 0.625rem; }
-.access label { color: #a6a8ad; font-size: 0.75rem; }
+.access label { color: #a6a8ad; font-size: var(--ui-size-eyebrow); }
 .access input:not([type="checkbox"]) {
   width: 100%;
   min-height: 3rem;
   border: 1px solid #393b40;
-  border-radius: 0.5625rem;
+  border-radius: var(--r-sm);
   outline: none;
   background: #191a1d;
   color: #f2f3f5;
@@ -119,29 +119,29 @@ button { color: inherit; }
 .access input:focus { border-color: color-mix(in oklab, currentColor 32%, transparent); }
 .access button {
   min-height: 2.875rem;
-  border-radius: 0.5625rem;
+  border-radius: var(--r-sm);
   padding: 0 0.875rem;
   cursor: pointer;
-  font-size: 0.8125rem;
+  font-size: var(--ui-size-label);
 }
 .primary { border: 1px solid #c8ceff; background: #c8ceff; color: #171820 !important; font-weight: var(--fw-title); }
 .primary:disabled { opacity: 0.45; cursor: default !important; }
 .quiet { border: 1px solid #393b40; background: transparent; color: #d6d7da; }
-.message { min-height: 1.4em; margin: 0; color: #d0d2d7; font-size: 0.75rem; line-height: 1.5; }
+.message { min-height: 1.4em; margin: 0; color: #d0d2d7; font-size: var(--ui-size-eyebrow); line-height: 1.5; }
 .recovery { width: min(100%, 35rem); }
 .recovery-words {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   padding: 1.25rem;
   border: 1px solid #393b40;
-  border-radius: 0.5625rem;
+  border-radius: var(--r-sm);
   background: #191a1d;
   color: #f2f3f5;
-  font: var(--fw-body) 0.9375rem/1.8 var(--font-face);
+  font: var(--fw-body) var(--ui-size-body)/1.8 var(--font-face);
 }
 .account-copy { display: grid; grid-template-columns: 1fr auto; gap: 0.4375rem 0.625rem; align-items: center; }
-.account-copy span { color: #a6a8ad; font-size: 0.75rem; }
-.account-copy code { min-width: 0; overflow-wrap: anywhere; color: #f2f3f5; font-size: 0.75rem; }
+.account-copy span { color: #a6a8ad; font-size: var(--ui-size-eyebrow); }
+.account-copy code { min-width: 0; overflow-wrap: anywhere; color: #f2f3f5; font-size: var(--ui-size-eyebrow); }
 .account-copy button { grid-column: 2; grid-row: 1 / span 2; }
 .check-row { display: flex; gap: 0.625rem; align-items: center; min-height: 2.75rem; }
 .check-row input { width: 1.25rem; height: 1.25rem; accent-color: #c8ceff; }
@@ -172,6 +172,8 @@ button { color: inherit; }
   overflow-y: hidden;
   padding: 0.875rem 1rem;
   touch-action: none;
+  /* A finger's long press selects text through our own gesture (terminal-touch.ts, #426); the system's callout must not open over it. */
+  -webkit-touch-callout: none;
   overscroll-behavior: none;
   scrollbar-width: none;
   /* The renderer measures its cells from the host's computed font settings, so UI
@@ -187,7 +189,7 @@ button { color: inherit; }
 [data-focus-ring="on"] .terminal-host:focus-visible { outline: 2px solid var(--accent, #7a9cff); outline-offset: -0.1875rem; }
 .connection-status {
   position: absolute;
-  z-index: 3;
+  z-index: calc(var(--z-content) + 2);
   left: max(1rem, env(safe-area-inset-left));
   bottom: max(0.75rem, env(safe-area-inset-bottom));
   margin: 0;
@@ -202,15 +204,15 @@ button { color: inherit; }
 /* Mock-only marker: it sits in the pane's top-right corner, below the top bar, and never takes clicks. */
 .test-double-badge {
   position: absolute;
-  z-index: 4;
+  z-index: var(--z-chrome);
   top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 1.25rem);
   right: calc(var(--gutter) + 0.5rem);
-  padding: 0.1875rem 0.375rem;
+  padding: 0.25rem 0.375rem;
   pointer-events: none;
   opacity: 0.85;
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--t-press) ease-out;
   border: 1px solid #695643;
-  border-radius: 0.3125rem;
+  border-radius: var(--r-xs);
   background: #211b15;
   color: #e4c8a3;
   font-size: 0.625rem;
@@ -221,7 +223,7 @@ button { color: inherit; }
 .terminal-screen[data-overlay] .test-double-badge { opacity: 0; }
 .probe-panel {
   position: absolute;
-  z-index: 5;
+  z-index: var(--z-sidebar);
   top: max(0.75rem, env(safe-area-inset-top));
   right: max(0.75rem, env(safe-area-inset-right));
   width: min(22.5rem, calc(100% - 1.5rem));
@@ -229,20 +231,20 @@ button { color: inherit; }
   overflow: auto;
   padding: 0.875rem;
   border: 1px solid #393b40;
-  border-radius: 0.625rem;
+  border-radius: var(--r-sm);
   background: rgb(25 26 29 / 96%);
   box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 28%);
   color: #e6e7e9;
   touch-action: pan-y;
 }
-.probe-panel h2 { margin: 0 0 0.625rem; font-size: 0.8125rem; font-weight: var(--fw-label); }
-.probe-panel label { display: block; margin-bottom: 0.3125rem; color: #a6a8ad; font-size: 0.6875rem; }
+.probe-panel h2 { margin: 0 0 0.625rem; font-size: var(--ui-size-label); font-weight: var(--fw-label); }
+.probe-panel label { display: block; margin-bottom: 0.25rem; color: #a6a8ad; font-size: var(--ui-size-eyebrow); }
 .probe-panel input {
   width: 100%;
   min-height: 2.75rem;
   margin-bottom: 0.625rem;
   border: 1px solid #393b40;
-  border-radius: 0.4375rem;
+  border-radius: var(--r-xs);
   background: #101113;
   color: #f2f3f5;
   padding: 0 0.625rem;
@@ -252,15 +254,15 @@ button { color: inherit; }
 .probe-actions button {
   min-height: 2.75rem;
   border: 1px solid #45474d;
-  border-radius: 0.4375rem;
+  border-radius: var(--r-xs);
   background: #242529;
   padding: 0 0.5625rem;
-  font-size: 0.6875rem;
+  font-size: var(--ui-size-eyebrow);
   touch-action: manipulation;
 }
 .probe-actions button:disabled { opacity: 0.45; }
-.probe-panel pre { margin: 0.75rem 0 0.3125rem; white-space: pre-wrap; font-size: 0.75rem; line-height: 1.7; }
-.probe-panel p { margin: 0; color: #b6b8bd; font-size: 0.6875rem; line-height: 1.5; }
+.probe-panel pre { margin: 0.75rem 0 0.25rem; white-space: pre-wrap; font-size: var(--ui-size-eyebrow); line-height: 1.7; }
+.probe-panel p { margin: 0; color: #b6b8bd; font-size: var(--ui-size-eyebrow); line-height: 1.5; }
 
 /* The pinned ghostty-web (0.5 line, D109) marks the terminal host itself
    contenteditable="true", not only its hidden textarea. iOS then draws its native
@@ -290,7 +292,7 @@ button { color: inherit; }
   .access { padding-right: 1.25rem; padding-left: 1.25rem; }
 }
 
-.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 1.25rem; text-align: center; color: #9a9aa2; font: var(--fw-body) 0.9375rem/1.5 var(--font-face); }
+.boot-error { margin: 30vh auto 0; max-width: 28rem; padding: 0 1.25rem; text-align: center; color: #9a9aa2; font: var(--fw-body) var(--ui-size-body)/1.5 var(--font-face); }
 
 /* Core terminal shell: one padded pane card keeps the renderer ready for later splits. */
 .terminal-screen {
@@ -305,7 +307,7 @@ button { color: inherit; }
   --keybar-height: 3rem;
   --keybar-gap: 1rem;
   --keybar-inset: 0.5rem;
-  z-index: 1;
+  z-index: var(--z-content);
   isolation: isolate;
 }
 /* Mono's wider glyphs use tighter tracking and smaller labels while touch heights stay unchanged. */
@@ -319,7 +321,7 @@ button { color: inherit; }
 :root[data-ui-font="mono"] .tab { font-size: var(--text-secondary); font-weight: var(--fw-body); }
 :root[data-ui-font="mono"] .palette-input input { letter-spacing: inherit; }
 :root[data-ui-font="mono"] .palette-input input::placeholder { letter-spacing: inherit; }
-.backdrop { position: fixed; z-index: 0; inset: 0; pointer-events: none; opacity: 0; transition: opacity 240ms ease-out; }
+.backdrop { position: fixed; z-index: 0; inset: 0; pointer-events: none; opacity: 0; transition: opacity var(--t-panel) ease-out; }
 .terminal-screen[data-no-motion] .backdrop { transition: none; }
 /* A theme, card, window or background pick swaps every token at once (core-screen.ts swapLook): nothing may fade from its old value. */
 :root[data-look-swap] *, :root[data-look-swap] *::before, :root[data-look-swap] *::after { transition: none !important; }
@@ -330,7 +332,7 @@ button { color: inherit; }
   opacity: 0.035; mix-blend-mode: overlay;
 }
 .panes {
-  position: absolute; z-index: 1;
+  position: absolute; z-index: var(--z-content);
   top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 0.75rem);
   left: var(--gutter); right: var(--gutter); bottom: 1rem;
   display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 0.625rem;
@@ -349,7 +351,7 @@ button { color: inherit; }
      two buttons where they are shown, see clusters.css). The pill's track shrinks to what both sides leave, so the pill
      never runs under a control and stays on the centre line. */
   --side: var(--pill-h);
-  position: absolute; z-index: 3;
+  position: absolute; z-index: calc(var(--z-content) + 2);
   top: calc(0.625rem + env(safe-area-inset-top)); left: var(--gutter); right: var(--gutter);
   display: grid; grid-template-columns: minmax(var(--side), 1fr) minmax(min(var(--capsule-min), calc(100vw - 2 * var(--gutter) - 2 * var(--side) - 1.25rem)), auto) minmax(var(--side), 1fr); align-items: center; gap: 0.625rem;
   pointer-events: none;
@@ -360,7 +362,7 @@ button { color: inherit; }
 
 /* The palette owns the top bar while it is open (TASTE): a control it covers fades out and takes no pointer; core-screen.ts
    marks the covered ones once, when the palette opens, and clears the marks on close. The fade is opacity only, 120 ms. */
-.top > .capsule, .top > .tabs > .tab-add { transition: opacity 120ms var(--ease-out); }
+.top > .capsule, .top > .tabs > .tab-add { transition: opacity var(--t-press) var(--ease-out); }
 .ui-pill[data-palette-covered] { opacity: 0; pointer-events: none; }
 
 /* The sidebar toggle is one pill that travels: top-left of the UI while the sidebar is closed, the
@@ -370,12 +372,12 @@ button { color: inherit; }
    sidebar's 1 px border plus its 8 px padding, so the pill lines up with the header row exactly. */
 .sidebar-toggle {
   --sb-w: 18.25rem; --sb-head-y: calc(var(--pill-h) + 0.75rem + 0.5625rem);
-  position: absolute; z-index: 6; top: calc(0.625rem + env(safe-area-inset-top)); left: var(--gutter);
-  transition: transform 260ms var(--ease-out), opacity 120ms var(--ease-out);
+  position: absolute; z-index: var(--z-overlay); top: calc(0.625rem + env(safe-area-inset-top)); left: var(--gutter);
+  transition: transform var(--t-panel) var(--ease-out), opacity var(--t-press) var(--ease-out);
 }
 /* packages/ui's sheet loads after this one, so the shared pill's 140 ms press transition would win over the rule above at
    equal specificity and the travel would run at 140 ms (#314). The doubled class keeps the travel's own timing. */
-.ui-pill.sidebar-toggle { transition: transform 260ms var(--ease-out), opacity 120ms var(--ease-out); }
+.ui-pill.sidebar-toggle { transition: transform var(--t-panel) var(--ease-out), opacity var(--t-press) var(--ease-out); }
 .ui-pill.sidebar-toggle.instant { transition: none; }
 @media (prefers-reduced-motion: reduce) { .ui-pill.sidebar-toggle { transition: none; } }
 .terminal-screen[data-sidebar-open] .sidebar-toggle { transform: translate(calc(var(--sb-w) - 0.5625rem - var(--pill-h)), var(--sb-head-y)); }
@@ -384,8 +386,8 @@ button { color: inherit; }
 /* Something waits in the inbox (D234) while the sidebar is closed: a small accent dot on the toggle's corner. It rides
    the toggle's own transform, and fades (opacity only) when the sidebar opens, where the card itself is visible. */
 .sidebar-toggle::after {
-  content: ""; position: absolute; top: 0.1875rem; right: 0.1875rem; width: 0.5625rem; height: 0.5625rem; border-radius: 50%;
-  background: var(--accent); box-shadow: 0 0 0 2px var(--bg); opacity: 0; transition: opacity 160ms var(--ease-out);
+  content: ""; position: absolute; top: 0.25rem; right: 0.25rem; width: 0.5625rem; height: 0.5625rem; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 2px var(--bg); opacity: 0; transition: opacity var(--t-pop) var(--ease-out);
 }
 .sidebar-toggle[data-pending]::after { opacity: 1; }
 .terminal-screen[data-sidebar-open] .sidebar-toggle[data-pending]::after { opacity: 0; }
@@ -398,14 +400,14 @@ button { color: inherit; }
 .capsule-sep { color: var(--fg-3); }
 .capsule-session { color: var(--fg-2); font-weight: var(--fw-secondary); white-space: nowrap; }
 .capsule-rtt { margin-left: auto; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.capsule-kbd { padding: 0.25rem 0.375rem; border-radius: 0.375rem; background: var(--hover); color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1 var(--font-ui); }
+.capsule-kbd { padding: 0.25rem 0.375rem; border-radius: var(--r-xs); background: var(--hover); color: var(--fg-2); font: var(--fw-label) var(--text-caption)/1 var(--font-ui); }
 .tabs { display: flex; align-items: center; gap: 0.375rem; }
 .tab { position: relative; min-width: 0; padding: 0 0.875rem; gap: 0.375rem; color: var(--fg-2); font-weight: var(--fw-label); white-space: nowrap; opacity: 0.8; }
 .tab:disabled { cursor: default; }
 .tab-host { color: var(--fg-3); }
 .tab-name { color: var(--fg); }
-.tab-add svg { width: 0.875rem; height: 0.875rem; }
-.capsule-os { display: none; flex: none; width: 1rem; height: 1rem; color: var(--fg-2); }
+.tab-add svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); }
+.capsule-os { display: none; flex: none; width: var(--ui-icon); height: var(--ui-icon); color: var(--fg-2); }
 .capsule-os svg { width: 100%; height: 100%; fill: currentColor; stroke: none; }
 .capsule-os svg.is-line { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 /* In the canvas preview the pill shows the host's OS mark in place of the connection dot. */
@@ -421,9 +423,9 @@ button { color: inherit; }
 
 /* Floating host tree: it can open without taking a permanent column from the terminal. */
 .sidebar {
-  position: absolute; z-index: 5; top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 0.75rem); left: var(--gutter); bottom: 1rem; width: 18.25rem;
+  position: absolute; z-index: var(--z-sidebar); top: calc(env(safe-area-inset-top) + 0.625rem + var(--pill-h) + 0.75rem); left: var(--gutter); bottom: 1rem; width: 18.25rem;
   display: flex; flex-direction: column; padding: 0.5rem; overflow: auto;
-  transform-origin: top left; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out;
+  transform-origin: top left; transition: transform var(--t-panel) var(--ease-drawer), opacity var(--t-pop) ease-out;
 }
 .sidebar[hidden] { display: flex !important; visibility: hidden; opacity: 0; transform: translateX(-0.5rem) scale(0.98); }
 .sidebar.instant { transition: none; }
@@ -451,11 +453,11 @@ button { color: inherit; }
 .bm-sec.cl-divided::before { top: -0.5rem; } /* the divider's gap is bridged: the trunk is one line */
 .bm > .bm-sec:last-child::before { bottom: auto; height: calc(var(--row) / 2 + 0.75px); border-radius: 0 0 1px 1px; }
 .bm > .bm-sec.cl-divided:last-child::before { height: calc(var(--row) / 2 + 0.5rem + 0.5rem + 0.75px); }
-.bm-marker { position: absolute; left: 0; top: 0; width: 1.5px; height: calc(var(--row) - 0.75rem); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity 150ms var(--ease-out); }
+.bm-marker { position: absolute; left: 0; top: 0; width: 1.5px; height: calc(var(--row) - 0.75rem); border-radius: 1px; background: var(--fg); will-change: transform; transition: opacity var(--t-press) var(--ease-out); }
 .bm-sec { list-style: none; }
 .bm-head, .bm-leaf {
-  display: flex; align-items: center; gap: 0.5rem; width: 100%; height: var(--row); padding: 0 0.5rem; border-radius: 0.375rem;
-  color: var(--fg-2); text-align: left; cursor: default; transition: transform 140ms var(--ease-out);
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; height: var(--row); padding: 0 0.5rem; border-radius: var(--r-xs);
+  color: var(--fg-2); text-align: left; cursor: default; transition: transform var(--t-press) var(--ease-out);
 }
 .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: scale(var(--ui-press-scale-soft)); }
 [data-focus-ring="on"] :is(.bm-head, .bm-leaf, .result):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -465,9 +467,9 @@ button { color: inherit; }
 .bm-meta { margin-left: auto; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
 /* The detached note is an icon, drawn like the marks beside it: small, quiet, on the right of the row. */
 .bm-meta.is-detached { display: grid; flex: none; place-items: center; }
-.bm-icon { display: grid; width: 1.125rem; height: 1.125rem; flex: none; place-items: center; color: var(--fg-3); }
-.bm-icon svg { width: 1rem; height: 1rem; fill: currentColor; stroke: none; }
-.bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out); }
+.bm-icon { display: grid; width: var(--ui-icon); height: var(--ui-icon); flex: none; place-items: center; color: var(--fg-3); }
+.bm-icon svg { width: var(--ui-icon); height: var(--ui-icon); fill: currentColor; stroke: none; }
+.bm-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--t-panel) var(--ease-out); }
 .bm-sec[data-open] > .bm-fold { grid-template-rows: 1fr; }
 .bm-sec.no-motion > .bm-fold { transition: none; }
 .bm-fold-in { position: relative; min-height: 0; overflow: hidden; }
@@ -480,25 +482,25 @@ button { color: inherit; }
 .glyph { width: 1.125rem; flex: none; color: var(--fg-3); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 .bm-leaf[aria-current] { color: var(--fg); }
 /* A renamed host shows its new name at once and settles to full strength when the server accepts it. */
-.bm-label { transition: opacity 140ms ease; }
+.bm-label { transition: opacity var(--t-press) ease; }
 .bm-leaf[data-pending] .bm-label { opacity: 0.6; }
 .bm-leaf[aria-current] .glyph { color: var(--accent); }
 /* A leaf under another leaf (Settings › Mesh › Keys): indented by one glyph column, so its glyph sits under its parent's name. */
 .bm-leaf[data-depth="1"] { padding-left: calc(0.5rem + 1.125rem + 0.5rem); }
 
 /* Palette open from the keyboard is immediate; pointer-open uses only opacity/transform. */
-.palette-scrim { position: absolute; z-index: 7; inset: 0; background: rgb(0 0 0 / 0.18); opacity: 1; transition: opacity 140ms ease-out, display 140ms allow-discrete; }
+.palette-scrim { position: absolute; z-index: calc(var(--z-overlay) + 1); inset: 0; background: rgb(0 0 0 / 0.18); opacity: 1; transition: opacity var(--t-press) ease-out, display var(--t-press) allow-discrete; }
 @starting-style { .palette-scrim:not([hidden]) { opacity: 0; } }
 .palette-scrim[hidden] { display: none; opacity: 0; }
 .palette {
-  position: absolute; z-index: 8; left: 50%; top: calc(max(4.125rem, env(safe-area-inset-top) + 3.5rem));
+  position: absolute; z-index: calc(var(--z-overlay) + 2); left: 50%; top: calc(max(4.125rem, env(safe-area-inset-top) + 3.5rem));
   width: min(35rem, calc(100% - 2rem)); max-height: min(72vh, 38.75rem); overflow: hidden;
-  transform: translate(-50%, 0); border-radius: 1rem;
+  transform: translate(-50%, 0); border-radius: var(--r-lg);
   opacity: 1; transform-origin: 50% 0;
   /* Pointer opens grow out from under the capsule; closing is quicker than opening. The
      discrete display transition keeps the element painted until its fade finishes. The
      material itself (fill, hairline, blur) comes from .ui-overlay-surface. */
-  transition: opacity 120ms ease-out, transform 120ms var(--ease-out), display 120ms allow-discrete;
+  transition: opacity var(--t-press) ease-out, transform var(--t-press) var(--ease-out), display var(--t-press) allow-discrete;
 }
 /* The palette is a list read at a glance over busy terminals, so its glass hides text at every card level (TASTE: glass shows
    colour, never legible text; the blur is at least about 1.5x the terminal line height, about 28 px). Tinted and Clear
@@ -507,13 +509,13 @@ button { color: inherit; }
    The fill also never falls below a floor of the page colour. The blur is one static region while the palette is open. */
 :root[data-card="tinted"] .palette, :root[data-card="clear"] .palette { --ui-overlay-blur: 1.75rem; }
 .palette { --ui-overlay-background: color-mix(in oklab, var(--overlay) 58%, var(--bg)); }
-.palette:not([hidden]) { transition-duration: 240ms; }
+.palette:not([hidden]) { transition-duration: var(--t-panel); }
 @starting-style { .palette:not([hidden]) { opacity: 0; transform: translate(-50%, -0.375rem) scale(0.98); } }
 .palette[hidden] { display: none; opacity: 0; transform: translate(-50%, -0.25rem) scale(0.99); }
 /* Animation never gets in the way: a key-triggered open is a short 180 ms fade and scale (a pointer open
    takes 240 ms), input is never blocked while it plays (the field is focused at once), and filtering,
    arrowing and height changes are never animated. */
-.palette[data-open-kind="keyboard"]:not([hidden]) { transition-duration: 180ms; }
+.palette[data-open-kind="keyboard"]:not([hidden]) { transition-duration: var(--t-pop); }
 /* Desktop: the palette is centred in the viewport and sized by its results. It grows and shrinks
    symmetrically from the middle (top 50%, translated back by half its own height), is as tall as
    its content (a single result is compact), and never exceeds 50 % of the height, so it stays at
@@ -532,23 +534,26 @@ button { color: inherit; }
 .palette-input input::placeholder { color: var(--fg-3); }
 .palette-results .result, .palette-results .group-label { content-visibility: auto; contain-intrinsic-size: auto 2.25rem; }
 .palette-results { max-height: min(54vh, 29.375rem); overflow: auto; padding: 0.5rem; overscroll-behavior: contain; }
-.group-label { padding: 0.625rem 0.5rem 0.25rem; color: var(--fg-3); font: var(--fw-title) var(--text-caption)/0.75rem var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
-.result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 0.25rem); gap: 0.5rem; padding: 0 0.5rem; border-radius: 0.375rem; text-align: left; position: relative; isolation: isolate; }
+.group-label { padding: 0.625rem 0.5rem 0.25rem; color: var(--fg-3); font: var(--fw-title) var(--text-caption)/var(--ui-size-eyebrow) var(--font-ui); letter-spacing: 0.09em; text-transform: uppercase; }
+.result { display: flex; align-items: center; width: 100%; min-height: calc(var(--row) + 0.25rem); gap: 0.5rem; padding: 0 0.5rem; border-radius: var(--r-xs); text-align: left; position: relative; isolation: isolate; }
 /* The highlight is drawn inset from the row (the row keeps its full hit area): 3 px above and below
    leave an even gap to the rows and section headers around it. */
-.result::before { content: ""; position: absolute; z-index: -1; inset: 0.1875rem 0; border-radius: var(--r-sm); background: transparent; }
+.result::before { content: ""; position: absolute; z-index: -1; inset: 0.25rem 0; border-radius: var(--r-sm); background: transparent; }
 .result:disabled { color: var(--fg-3); cursor: default; opacity: 0.72; }
 .result[aria-selected="true"]::before { background: var(--accent-soft); }
-.result-icon.has-svg svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.result-icon.has-svg svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .result-icon { display: grid; place-items: center; width: 1.25rem; flex: none; color: var(--fg-2); font: var(--fw-label) var(--text-secondary)/1 var(--font-mono); }
 /* The title wins the row: the hint takes only what the title leaves (to an ellipsis), so a long hint never squeezes the title to nothing
    on a narrow screen (the Settings row read as a row with no title on a phone). */
 .result-label { line-height: normal; flex: none; max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: right; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.2 var(--font-mono); white-space: nowrap; }
+/* Forget keeps its short state readable on a phone; its host title yields the space instead (D369, #435). */
+.result[data-action^="canvas:forgethost:"] .result-label { flex: 1 1 0; }
+.result[data-action^="canvas:forgethost:"] .result-hint { flex: none; }
 .swatch { height: 0.875rem; border-radius: 50%; }
 .palette-empty { margin: 1rem 0.5rem; color: var(--fg-2); font-size: var(--text-body); }
-.palette-foot { display: flex; align-items: center; gap: 0.3125rem; margin: 0; padding: 0.625rem 0.875rem; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
-.palette-foot kbd { padding: 0.1875rem 0.3125rem; border-radius: 0.25rem; background: var(--hover); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
+.palette-foot { display: flex; align-items: center; gap: 0.25rem; margin: 0; padding: 0.625rem 0.875rem; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }
+.palette-foot kbd { padding: 0.25rem 0.25rem; border-radius: var(--r-xs); background: var(--hover); font: var(--fw-label) var(--text-caption)/1 var(--font-mono); }
 /* The key hints are for a keyboard: with no fine pointer, or no hover, or a narrow screen they say nothing, so the footer
    goes and the list takes its space (TASTE: a phone sees phone things). The list's cap is the palette's own cap less
    the 57 px field, so what the footer used to hold is now rows. */
@@ -556,8 +561,8 @@ button { color: inherit; }
 @media (max-width: 720px) { .palette-results { max-height: calc(min(72vh, 38.75rem) - 3.5625rem); } }
 
 /* Variant A mobile tray: circular key targets over one blurred, edge-faded capsule. */
-.keyblur { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; height: 6.75rem; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity 180ms ease-out; }
-.keybar { display: none; position: absolute; z-index: 7; left: 0; right: 0; bottom: calc(0.5rem + env(safe-area-inset-bottom)); padding: 0 0.75rem; transition: transform 240ms var(--ease-drawer), opacity 180ms ease-out; }
+.keyblur { display: none; position: absolute; z-index: var(--z-overlay); left: 0; right: 0; bottom: 0; height: 6.75rem; pointer-events: none; background: linear-gradient(transparent, color-mix(in oklab, var(--bg) 58%, transparent)); transition: opacity var(--t-pop) ease-out; }
+.keybar { display: none; position: absolute; z-index: calc(var(--z-overlay) + 1); left: 0; right: 0; bottom: calc(0.5rem + env(safe-area-inset-bottom)); padding: 0 0.75rem; transition: transform var(--t-panel) var(--ease-drawer), opacity var(--t-pop) ease-out; }
 .keytray {
   position: relative; display: block; width: max-content; max-width: 100%; margin: 0 auto; overflow: hidden; overflow: clip; /* clip, not hidden: a hidden box can be scrolled by focus */
   --ui-pill-height: var(--keybar-height); padding: 0; border-radius: var(--r-pill);
@@ -572,9 +577,9 @@ button { color: inherit; }
   mask-image: linear-gradient(to right, transparent, #000 0.875rem, #000 calc(100% - 1.375rem), transparent);
 }
 .keyrow[hidden] { display: none; }
-.keydots { position: absolute; z-index: 1; top: 0; right: 0.4375rem; bottom: 0; display: none; flex-direction: column; justify-content: center; gap: 0.25rem; pointer-events: none; }
+.keydots { position: absolute; z-index: var(--z-content); top: 0; right: 0.4375rem; bottom: 0; display: none; flex-direction: column; justify-content: center; gap: 0.25rem; pointer-events: none; }
 .keytray[data-rows="2"] .keydots { display: flex; }
-.keydots i { width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--fg-3); opacity: 0.5; transition: opacity 160ms ease, background-color 160ms ease; }
+.keydots i { width: 0.25rem; height: 0.25rem; border-radius: 50%; background: var(--fg-3); opacity: 0.5; transition: opacity var(--t-pop) ease, background-color var(--t-pop) ease; }
 .keydots i[data-on] { background: var(--fg); opacity: 0.9; }
 .keytray[data-rows="2"] .keyrow { padding-right: 1rem; }
 .keyrow::-webkit-scrollbar { display: none; }
@@ -583,14 +588,14 @@ button { color: inherit; }
 .keytray.ui-pill { justify-content: safe center; }
 .keytray::-webkit-scrollbar { display: none; }
 [data-focus-ring="on"] .keytray:focus-visible { outline: 2px solid var(--accent); outline-offset: 0.1875rem; }
-.keybar button { position: relative; flex: none; width: 3rem; height: 3rem; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform 140ms var(--ease-out); }
+.keybar button { position: relative; flex: none; width: 3rem; height: 3rem; border-radius: 50%; display: grid; place-items: center; color: var(--fg); scroll-snap-align: start; transition: transform var(--t-press) var(--ease-out); }
 .keybar button svg { width: 1.5rem; height: 1.5rem; stroke-width: 1.75; }
 /* The selection circle is its own layer, inset from the 48 px target: the tray's rows are 46 px tall (the capsule's 48 px less
    its hairline), so a circle as big as the target touched or crossed the capsule edge. 38 px leaves 4 px above and below
    and 5 px at the sides (TASTE: toolbar selection stays inside the capsule). */
 .keybar button { isolation: isolate; }
-.keybar button::before { content: ""; position: absolute; z-index: -1; inset: 0.3125rem; border-radius: 50%; background: transparent; transition: background-color 140ms ease; }
-.keybar .key-word { font: var(--fw-title) 0.9375rem/1 var(--font-ui); letter-spacing: 0.01em; }
+.keybar button::before { content: ""; position: absolute; z-index: -1; inset: 0.25rem; border-radius: 50%; background: transparent; transition: background-color var(--t-press) ease; }
+.keybar .key-word { font: var(--fw-title) var(--ui-size-body)/1 var(--font-ui); letter-spacing: 0.01em; }
 /* Armed modifiers use a soft fill; locked modifiers add a small dot as a second cue. */
 .keybar button[data-mod-state="armed"], .keybar button[data-mod-state="locked"] { color: var(--accent); }
 .keybar button[data-mod-state="armed"]::before, .keybar button[data-mod-state="locked"]::before { background: var(--accent-soft); }
@@ -600,7 +605,7 @@ button { color: inherit; }
 .keybar button[data-disabled] { opacity: 0.35; }
 .keybar button[data-instant] { transition: none; }
 .keybar .dpad[hidden] { display: none !important; }
-.keybar.is-away { transform: translateY(calc(100% + 1rem)); opacity: 0; pointer-events: none; transition-duration: 180ms, 140ms; }
+.keybar.is-away { transform: translateY(calc(100% + 1rem)); opacity: 0; pointer-events: none; transition-duration: var(--t-pop), var(--t-press); }
 .keyblur.is-away { opacity: 0; }
 
 .terminal-host textarea, .terminal-host input {
@@ -632,12 +637,12 @@ button { color: inherit; }
   .palette { top: calc(0.625rem + env(safe-area-inset-top)); }
 }
 @media (max-width: 360px) {
-  .capsule { gap: 0.375rem; padding-left: 0.625rem; font-size: 0.75rem; }
+  .capsule { gap: 0.375rem; padding-left: 0.625rem; font-size: var(--ui-size-eyebrow); }
   .capsule-rtt { font-size: 0.625rem; }
   .keybar { padding-right: 0.375rem; padding-left: 0.375rem; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sidebar { transition: opacity 180ms ease; }
+  .sidebar { transition: opacity var(--t-pop) ease; }
   .bm-fold { transition: none; }
   .keybar button, .keybar button::before { transition: none; }
   .sidebar[hidden] { transform: none; }
@@ -645,7 +650,7 @@ button { color: inherit; }
   .top > .capsule, .top > .tabs > .tab-add { transition: none; }
   .palette { transition-duration: 0ms; }
   .keybar.is-away { transform: none; }
-  .backdrop { transition: opacity 240ms ease; }
+  .backdrop { transition: opacity var(--t-panel) ease; }
   .keybar button:active,
   .bm-head:active:not(:disabled), .bm-leaf:active:not(:disabled) { transform: none; transition: none; }
 }
@@ -654,15 +659,15 @@ button { color: inherit; }
 :root[data-kb="open"] .keyblur { height: 5rem; }
 
 /* Recovery extends the existing floating card/capsule controls; no idle animation or polling. */
-.recovery-notice { position: absolute; z-index: 8; top: calc(env(safe-area-inset-top) + 4.75rem); left: 50%; transform: translateX(-50%); width: min(32.5rem, calc(100% - 1.5rem)); padding: 0.75rem 1rem; }
+.recovery-notice { position: absolute; z-index: calc(var(--z-overlay) + 2); top: calc(env(safe-area-inset-top) + 4.75rem); left: 50%; transform: translateX(-50%); width: min(32.5rem, calc(100% - 1.5rem)); padding: 0.75rem 1rem; }
 .recovery-notice p { margin: 0 0 0.5rem; }
 .recovery-notice .ui-pill { min-width: 2.75rem; padding: 0 0.875rem; }
 .recovery-notice[hidden] { display: none; }
 
 
 /* Paste target for origins where the clipboard cannot be read: one field above the tray, same material. */
-.paste-target { position: absolute; z-index: 9; left: var(--gutter); right: var(--gutter); bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom) + 0.5rem); padding: 0.375rem; border-radius: 0.875rem; }
-.paste-target input { width: 100%; min-height: 2.75rem; padding: 0 0.75rem; border: 0; border-radius: 0.625rem; background: var(--hover); color: var(--fg); font: var(--fw-body) 1rem/1 var(--font-ui); outline: none; }
+.paste-target { position: absolute; z-index: calc(var(--z-overlay) + 3); left: var(--gutter); right: var(--gutter); bottom: calc(var(--keybar-inset) + var(--keybar-height) + var(--keybar-gap) + env(safe-area-inset-bottom) + 0.5rem); padding: 0.375rem; border-radius: var(--r-md); }
+.paste-target input { width: 100%; min-height: 2.75rem; padding: 0 0.75rem; border: 0; border-radius: var(--r-sm); background: var(--hover); color: var(--fg); font: var(--fw-body) 1rem/1 var(--font-ui); outline: none; }
 
 /* Hidden controls leave their row (Settings, Toolbar). */
 .keyrow > button[hidden] { display: none !important; }
@@ -670,21 +675,21 @@ button { color: inherit; }
 .terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keytray { transform: translateY(calc(var(--keybar-height) - 1rem)); }
 .terminal-screen[data-scrolled="true"]:not([data-toolbar-open]) .keyrows { opacity: 0.25; }
 .keytray { transition: transform 280ms var(--ease-drawer, var(--ease-out)); }
-.keyrows { transition: opacity 180ms ease; }
+.keyrows { transition: opacity var(--t-pop) ease; }
 @media (prefers-reduced-motion: reduce) { .keytray { transition: none; } }
 
 /* Editing the toolbar in place (long press): a gentle wiggle, a hide badge on each control, and a tray of hidden ones. */
 @keyframes keywiggle { 0% { rotate: -1.6deg; } 50% { rotate: 1.6deg; } 100% { rotate: -1.6deg; } }
 .terminal-screen[data-toolbar-edit] .keyrow > button { animation: keywiggle 260ms ease-in-out infinite; animation-delay: var(--wiggle, 0ms); touch-action: none; }
-.keyrow > button .keyx { position: absolute; left: 2px; top: 2px; display: grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 50%; background: var(--overlay-solid); border: 1px solid var(--overlay-line); color: var(--fg); font: var(--fw-label) 0.875rem/1 var(--font-ui); font-style: normal; }
+.keyrow > button .keyx { position: absolute; left: 2px; top: 2px; display: grid; place-items: center; width: 1.25rem; height: 1.25rem; border-radius: 50%; background: var(--overlay-solid); border: 1px solid var(--overlay-line); color: var(--fg); font: var(--fw-label) var(--ui-size-body)/1 var(--font-ui); font-style: normal; }
 .keyghost { display: grid; place-items: center; border-radius: 50%; background: var(--overlay-solid); box-shadow: var(--overlay-shadow-large, var(--shadow)); color: var(--fg); }
 .keyghost svg { width: 1.5rem; height: 1.5rem; stroke-width: 1.75; }
-.keyedit { position: absolute; z-index: 8; left: 50%; translate: -50% 0; bottom: calc(var(--keybar-inset) + var(--keybar-height) + env(safe-area-inset-bottom) + 0.875rem); --pill-h: 3.25rem; display: flex; z-index: 9; align-items: center; gap: 0.25rem; max-width: calc(100% - 1.5rem); padding: 0 0.375rem 0 0.5rem; }
+.keyedit { position: absolute; z-index: calc(var(--z-overlay) + 2); left: 50%; translate: -50% 0; bottom: calc(var(--keybar-inset) + var(--keybar-height) + env(safe-area-inset-bottom) + 0.875rem); --pill-h: 3.25rem; display: flex; z-index: calc(var(--z-overlay) + 3); align-items: center; gap: 0.25rem; max-width: calc(100% - 1.5rem); padding: 0 0.375rem 0 0.5rem; }
 .keyedit-list { display: flex; gap: 2px; overflow-x: auto; }
 .keyedit[data-empty="true"] .keyedit-list::before { content: "Nothing hidden"; padding: 0 0.625rem; color: var(--fg-3); font: var(--ui-type-label); white-space: nowrap; }
 .keyedit-add { position: relative; flex: none; display: grid; place-items: center; width: 2.75rem; height: 2.75rem; border: 0; border-radius: 50%; background: none; color: var(--fg); }
 .keyedit-add svg { width: 1.375rem; height: 1.375rem; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.keyedit-add i { position: absolute; right: 0.1875rem; top: 0.1875rem; display: grid; place-items: center; width: 1rem; height: 1rem; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font: var(--fw-label) 0.8125rem/1 var(--font-ui); font-style: normal; }
+.keyedit-add i { position: absolute; right: 0.25rem; top: 0.25rem; display: grid; place-items: center; width: 1rem; height: 1rem; border-radius: 50%; background: var(--accent); color: var(--accent-fg); font: var(--fw-label) var(--ui-size-label)/1 var(--font-ui); font-style: normal; }
 .keyedit-done { flex: none; min-height: 2.5rem; padding: 0 0.875rem; border: 0; border-radius: var(--r-pill); background: var(--hover); color: var(--fg); font: var(--ui-type-button); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .terminal-screen[data-toolbar-edit] .keyrow > button { animation: none; outline: 1px dashed var(--overlay-line); } }
 .terminal-screen[data-toolbar-edit] .test-double-badge { opacity: 0; }
@@ -694,7 +699,7 @@ button { color: inherit; }
    notes (the detached icon, ✓ 0), which keep their tooltips (row-pill.ts sets `right`); nothing moves on hover (a layout
    per hovered row cost frames). Fine pointers only: a phone has the row menu and the swipes. */
 li.bm-row, li.bm-subhead[data-id] { position: relative; }
-.cl-ha { position: absolute; top: 0; right: 0.25rem; bottom: 0; display: none; align-items: center; opacity: 0; pointer-events: none; transition: opacity 120ms ease; }
+.cl-ha { position: absolute; top: 0; right: 0.25rem; bottom: 0; display: none; align-items: center; opacity: 0; pointer-events: none; transition: opacity var(--t-press) ease; }
 .cl-ha .ui-window-actions { --ui-control-h: 1.5rem; margin: 0; padding: 0 2px; background: color-mix(in oklab, var(--bg) 90%, var(--fg)); } /* no blur of its own: a blur inside the sidebar's blur cost frames on every hover */
 .cl-ha .ui-window-action { width: 1.375rem; height: 1.375rem; }
 .cl-ha .ui-window-action[data-act="remove"]:hover { color: var(--danger); }
@@ -703,13 +708,13 @@ li.bm-row, li.bm-subhead[data-id] { position: relative; }
   li.bm-row:hover .cl-ha, li.bm-row:focus-within .cl-ha, li.bm-subhead:hover .cl-ha, li.bm-subhead:focus-within .cl-ha { opacity: 1; pointer-events: auto; }
 }
 li.bm-row:has(.ui-inline-rename) .cl-ha, li.bm-subhead:has(.ui-inline-rename) .cl-ha { display: none; }
-li.bm-subhead[data-id] { cursor: default; border-radius: 0.375rem; }
+li.bm-subhead[data-id] { cursor: default; border-radius: var(--r-xs); }
 li.bm-subhead[data-id]:focus { outline: none; }
 :root[data-focus-ring="on"] li.bm-subhead[data-id]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* ---- the privileged-access consent (#215; windows/access-level.on-demand.ts) ---- */
 /* The "Access level" value is a button while the machine is limited: the same highlight as a copyable value, a pointer, and its
    warm tooltip. The pane opens under the row (the grid row grows from 0 to its content, like the sidebar's folds). */
-.cl-pv { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 240ms var(--ease-out, var(--ease-out)); }
+.cl-pv { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--t-panel) var(--ease-out, var(--ease-out)); }
 .cl-pv[data-open] { grid-template-rows: 1fr; }
 .cl-pv-clip { min-height: 0; overflow: hidden; }
 /* A quiet tinted fill, never a border: the same fill as the compact field, so the field inside reads as sitting on it. */
@@ -718,18 +723,18 @@ li.bm-subhead[data-id]:focus { outline: none; }
 .cl-pv-pane > p { margin: 0; }
 .cl-pv-actions { display: flex; justify-content: flex-end; gap: 0.375rem; }
 .cl-pv-field { background: rgb(from var(--fg) r g b / 0.07); }
-.cl-pv-error { display: grid; grid-template-rows: 0fr; margin: -0.625rem 0 0; color: var(--danger); font: 450 var(--text-secondary, 0.75rem)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; opacity: 0;
-  transition: grid-template-rows 200ms var(--ease-out, ease-out), margin 200ms var(--ease-out, ease-out), opacity 160ms ease; }
+.cl-pv-error { display: grid; grid-template-rows: 0fr; margin: -0.625rem 0 0; color: var(--danger); font: 450 var(--text-secondary)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; opacity: 0;
+  transition: grid-template-rows var(--t-pop) var(--ease-out, ease-out), margin var(--t-pop) var(--ease-out, ease-out), opacity var(--t-pop) ease; }
 .cl-pv-error > span { min-height: 0; overflow: hidden; }
 .cl-pv-error[data-on] { grid-template-rows: 1fr; margin-top: 0; opacity: 1; }
-.cl-pv-run { display: flex; align-items: center; gap: 0.625rem; min-height: 1.5rem; color: var(--fg); font: 500 var(--text-body, 0.8125rem)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.cl-pv-run { display: flex; align-items: center; gap: 0.625rem; min-height: 1.5rem; color: var(--fg); font: 500 var(--text-body)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .cl-pv-runs { display: grid; gap: 0.5rem; }
 .cl-pv-run-mark { display: inline-grid; flex: none; }
 .cl-pv-alert { display: inline-grid; flex: none; place-items: center; width: 1.25rem; height: 1.25rem; color: var(--danger); }
 .cl-pv-alert svg { width: 1.125rem; height: 1.125rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .cl-pv-done-tick.tick .tick-fill { background: var(--ok); }
 .cl-pv-done-tick.tick svg { stroke: var(--bg); }
-.cl-pv[inert] { visibility: hidden; transition: grid-template-rows 240ms var(--ease-out, ease), visibility 0s linear 240ms; }
+.cl-pv[inert] { visibility: hidden; transition: grid-template-rows var(--t-panel) var(--ease-out, ease), visibility 0s linear var(--t-panel); }
 @media (prefers-reduced-motion: reduce) { .cl-pv, .cl-pv-error { transition: none; } }
 /* The overlay material gives text a soft halo for text that sits on a busy terminal; inside the consent it would only smear the glyphs. */
 .cl-pv, .cl-pv * { text-shadow: none; }

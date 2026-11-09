@@ -54,6 +54,8 @@ for arch in x86_64 aarch64; do
     install -m 755 "$session_target/$arch-unknown-linux-musl/release/infraternal-session" "$staging/infraternal-$arch-session-musl"
 done
 install -m 755 "$server" "$staging/infraternal"
-(cd "$staging" && sha256sum infraternal infraternal-*-musl > SHA256SUMS)
+install -d "$staging/licenses/libghostty-vt"
+cp -R "$root/licenses/libghostty-vt/." "$staging/licenses/libghostty-vt/"
+(cd "$staging" && sha256sum infraternal infraternal-*-musl licenses/libghostty-vt/* > SHA256SUMS)
 mv -T -- "$staging" "$output"
 printf 'Release bundle: %s (server %s; x86_64 and aarch64 host payloads)\n' "$output" "$architecture"

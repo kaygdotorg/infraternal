@@ -791,6 +791,7 @@ pub(crate) fn router(
         .with_state(api)
 }
 
+/// Admit a bearer-only action, enforce its review contract, and record the audited result.
 async fn action(
     State(api): State<Api>,
     Path(action_id): Path<String>,
@@ -852,10 +853,12 @@ async fn action(
     };
     let result = run_action(&api, action, identity.clone(), input, now, audit_id).await;
     match result {
-        // A completed removal finished its audit row in the removal's own transaction.
+        // A completed host change finished its audit row in its own transaction.
         Ok((value, true))
-            if action_id == "remote.host.remove"
-                && matches!(review, Some(ReviewStep::Reviewed)) =>
+            if matches!(
+                action_id.as_str(),
+                "remote.host.remove" | "remote.host.forget"
+            ) && matches!(review, Some(ReviewStep::Reviewed)) =>
         {
             value.into_response()
         }
@@ -964,6 +967,9 @@ async fn run_action(
         "remote.host.remove" if !action.fresh_passkey => {
             remove_host(api, &identity, &input, now, audit_id).await
         }
+        "remote.host.forget" if !action.fresh_passkey => {
+            forget_host(api, &identity, &input, now, audit_id).await
+        }
         // ssh.start uses the existing bounded bootstrap WebSocket adapter.
         "ssh.start" => Err(StatusCode::BAD_REQUEST),
         _ if action.fresh_passkey => Err(StatusCode::NOT_FOUND),
@@ -1049,11 +1055,65 @@ async fn remove_host(
         .map_err(|_| StatusCode::FORBIDDEN)
 }
 
+/// Route Forget through its owner/state checks; the API guard has already enforced scope and review.
+async fn forget_host(
+    api: &Api,
+    identity: &AuthorizedKey,
+    input: &Value,
+    now: i64,
+    audit_id: i64,
+) -> Result<(Json<Value>, bool), StatusCode> {
+    let request: RemovalInput =
+        serde_json::from_value(input.clone()).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.dry_run {
+        return api
+            .removal
+            .review_forget_with_key(&identity.person_id, request.host_id)
+            .await
+            .map(|value| (Json(value), true))
+            .map_err(|error| match error {
+                crate::auth::Error::Invalid | crate::auth::Error::Denied => StatusCode::NOT_FOUND,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            });
+    }
+    api.removal
+        .forget_with_key(
+            &identity.key_id,
+            &identity.person_id,
+            request.host_id,
+            audit_id,
+            now,
+        )
+        .await
+        .map(|value| (Json(value), true))
+        // A reviewed host can become ineligible before the writer locks it. That is a
+        // target conflict, not an invalid key; authority refusals retain their own status.
+        .map_err(|error| match error {
+            crate::auth::Error::Invalid => StatusCode::CONFLICT,
+            crate::auth::Error::Denied => StatusCode::FORBIDDEN,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        })
+}
+
 /// Tests the authorization table, bearer parser and per-key admission independently of storage.
 #[cfg(test)]
 mod tests {
     use super::{KEY_CALLS_PER_WINDOW, RateLimit, bearer_only, bearer_token};
     use axum::http::{HeaderMap, HeaderValue, header};
+
+    /// The shared catalogue exposes Forget only with hosts:write and a required review.
+    #[test]
+    #[cfg(feature = "remote")]
+    fn forget_retired_host_action_requires_write_scope_and_review() {
+        let forget = infraternal_plugin_remote::DESCRIPTOR
+            .actions
+            .iter()
+            .find(|action| action.id == "remote.host.forget")
+            .expect("forget is compiled");
+        assert_eq!(forget.api_scope, Some("hosts:write"));
+        assert!(forget.key_callable());
+        assert_eq!(forget.dry_run, infraternal_plugin_api::DryRun::Required);
+    }
 
     #[test]
     fn shared_descriptors_carry_api_scope_and_fresh_tap_metadata() {

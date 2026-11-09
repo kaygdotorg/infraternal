@@ -1,7 +1,7 @@
 # `scripts/verify quick`: the few-minute pre-check that runs before the full gate (#329).
 #
 # It runs what fails most often, cheapest first, and stops at the first failure:
-#   0. migration names (D347): no new sequential files or duplicate numeric versions
+#   0. migration names (D347), Nix Cargo vendoring, and the pinned native terminal source recipe
 #   1. cargo fmt --check (whole workspace; it needs no compilation)
 #   1b. the doc-coverage ratchet (D345): coverage per crate or package never goes down
 #   2. cargo clippy (workspace, same flags as the gate) when any Rust package changed against the
@@ -46,6 +46,8 @@ verify_quick() {
     rust_run_gate "migration names" python3 "${script_dir}/verify.d/migration-names.py"
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
     rust_run_gate "Nix Cargo vendoring" scripts/check-nix-vendor
+    rust_run_gate "VT source recipe" python3 scripts/test-build-vt-pinned.py
+    if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
     rust_run_gate "fmt" cargo fmt --all --check
     if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
 

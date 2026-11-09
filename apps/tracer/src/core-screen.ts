@@ -1353,7 +1353,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         ghost = b.cloneNode(true) as HTMLElement;
         ghost.classList.add("keyghost");
         ghost.querySelector(".keyx")?.remove();
-        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:30;pointer-events:none`;
+        ghost.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:calc(var(--z-overlay) + 7);pointer-events:none`;
         document.body.append(ghost);
         b.style.opacity = "0.25";
       }

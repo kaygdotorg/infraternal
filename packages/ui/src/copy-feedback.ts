@@ -100,12 +100,15 @@ export function confirmAction(button: HTMLElement, doneLabel: string, instant = 
  * localhost): on a plain-http LAN origin `navigator.clipboard` is undefined, so a hidden textarea
  * and `execCommand("copy")` is the fallback. It is taken synchronously when the async API is
  * missing, so it still runs inside the user's gesture, and also after a rejected async write.
+ *
+ * `legacy: false` skips that fallback. Use it for a write that no tap started: the fallback focuses a hidden field,
+ * which moves the caret and raises the keyboard on a phone, and without a gesture it fails anyway.
  */
-export async function writeClipboard(text: string): Promise<boolean> {
+export async function writeClipboard(text: string, options: { legacy?: boolean } = {}): Promise<boolean> {
   if (navigator.clipboard?.writeText) {
     try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through to the legacy path */ }
   }
-  return legacyCopy(text);
+  return options.legacy === false ? false : legacyCopy(text);
 }
 
 /**

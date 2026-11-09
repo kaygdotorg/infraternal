@@ -26,3 +26,17 @@ export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onC
     ...(returnFocus ? { returnFocus } : {}),
   });
 }
+
+/** Confirm D369's server-only forgetting, explicitly distinguishing it from machine cleanup. */
+export function confirmHostForget(name: string, anchor: HTMLElement | null, onConfirm: () => void, returnFocus?: () => void): ConfirmTipController {
+  return mountConfirmTip(anchor, {
+    label: `Forget ${name}`,
+    title: `Forget ${name}?`,
+    effect: "Remove this host from the list and stop its pending cleanup. Keep the audit record. This does not touch the machine itself or uninstall infraternal from it.",
+    named: true,
+    confirmLabel: "Forget",
+    cancelLabel: "Keep",
+    onConfirm,
+    ...(returnFocus ? { returnFocus } : {}),
+  });
+}

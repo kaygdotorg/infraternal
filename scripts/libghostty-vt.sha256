@@ -1,0 +1,5 @@
+# Official signed libghostty-vt 1.0.0 release inputs and signatures.
+4a6ef758be721923e1969e7b81b443dcc92d8dd3fb5a39600c03a8817a753676  libghostty-vt-1.0.0.tar.gz
+b4a4ec8bb3e61cf5326618cabcc69d0708e63fc23c0a8f400475826e2a7a27e8  libghostty-vt-1.0.0.tar.gz.minisig
+4d5ea5e448e4c7ea8fb55ccbaa8668f2a97d44f438cee831e2b7ecd162d85c29  libghostty-vt-1.0.0-deps.tar.gz
+776f51619d078739439065ab0e02470614ea07a44f070a0f571c5dfdacbb0616  libghostty-vt-1.0.0-deps.tar.gz.minisig
