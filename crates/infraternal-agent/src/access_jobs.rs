@@ -382,7 +382,7 @@ impl CronNames {
     }
 
     /// Apply only the known implementation's exclusion rules. Unknown hosts
-    /// retain possibly scheduled names and mark the overall inventory incomplete.
+    /// retain possibly scheduled names; see [`CronNames::uncertain`].
     fn accepts(self, name: &str) -> bool {
         if name.is_empty() || name.starts_with('.') || name.ends_with('~') {
             return false;
@@ -397,14 +397,20 @@ impl CronNames {
             Self::Unknown => true,
         }
     }
+
+    /// Whether this name's scheduling depends on which implementation runs.
+    /// Only an unknown implementation is uncertain, and only for a name that
+    /// Debian's strictest rule rejects: every implementation runs a plain
+    /// name like `e2scrub_all`, and its lines are inspected either way. A
+    /// dotted, hidden or backup name on such a host fails closed (#355).
+    fn uncertain(self, name: &str) -> bool {
+        self == Self::Unknown && !Self::Debian.accepts(name)
+    }
 }
 
 /// Observe both system cron sources. Missing files are absent, other errors unknown.
 fn cron(account: &User, observed: &mut Observation) {
     let implementation = CronNames::installed();
-    if implementation == CronNames::Unknown {
-        observed.complete = false;
-    }
     let mut paths = vec![std::path::PathBuf::from("/etc/crontab")];
     match fs::read_dir("/etc/cron.d") {
         Ok(entries) => {
@@ -423,6 +429,9 @@ fn cron(account: &User, observed: &mut Observation) {
                 }
                 let name = entry.file_name();
                 if let Some(name) = name.to_str() {
+                    if implementation.uncertain(name) {
+                        observed.complete = false;
+                    }
                     if !implementation.accepts(name) {
                         continue;
                     }
@@ -798,6 +807,11 @@ mod tests {
         assert!(!CronNames::Debian.accepts("backup.cron"));
         assert!(CronNames::Cronie.accepts("backup.cron"));
         assert!(CronNames::Unknown.accepts("backup.cron"));
+        // Only names the known implementations disagree on are uncertain.
+        assert!(CronNames::Unknown.uncertain("backup.cron"));
+        assert!(CronNames::Unknown.uncertain(".hidden"));
+        assert!(!CronNames::Unknown.uncertain("e2scrub_all"));
+        assert!(!CronNames::Debian.uncertain("backup.cron"));
         for name in [".hidden", "backup~", ""] {
             assert!(!CronNames::Debian.accepts(name));
             assert!(!CronNames::Cronie.accepts(name));
