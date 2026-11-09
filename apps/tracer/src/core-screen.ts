@@ -169,10 +169,10 @@ const SCREEN = `
     </div>
     <!-- The one sidebar toggle. It lives outside the top bar so it can travel into the sidebar's
          header when the sidebar opens (see .sidebar-toggle in style.css); a spacer keeps its slot. -->
-    <button class="ui-pill ui-pill-icon sidebar-toggle ui-key-instant" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false" aria-controls="sidebar">${SVG.menu}</button>
+    <button class="ui-pill ui-pill-icon sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Show hosts" aria-expanded="false" aria-controls="sidebar">${SVG.menu}</button>
     <header class="top" aria-label="Terminal controls">
       <span class="top-spacer" aria-hidden="true"></span>
-      <button class="ui-pill capsule ui-key-instant" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
+      <button class="ui-pill capsule" id="capsule" type="button" aria-haspopup="dialog" aria-controls="palette">
         <span class="capsule-os" id="capsule-os" aria-hidden="true"></span>
         <span class="dot" id="connection-dot" aria-hidden="true"></span>
         <span class="capsule-host" id="capsule-host"></span><span class="capsule-sep" aria-hidden="true">/</span>
@@ -180,15 +180,15 @@ const SCREEN = `
         <span class="capsule-keys" id="capsule-keys" aria-hidden="true"></span>
       </button>
       <nav class="tabs" aria-label="Other sessions">
-        <button class="ui-pill ui-pill-icon tab tab-add ui-key-instant" type="button" disabled aria-label="New session">${SVG.plus}</button>
+        <button class="ui-pill ui-pill-icon tab tab-add" type="button" disabled aria-label="New session">${SVG.plus}</button>
       </nav>
     </header>
-    <aside class="ui-panel ui-overlay-surface sidebar ui-key-instant" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
+    <aside class="ui-panel ui-overlay-surface sidebar" id="sidebar" data-overlay-size="large" aria-label="Hosts" hidden>
       <div class="sidebar-head"><span class="sidebar-title">Hosts</span></div>
       <div id="tree"></div>
     </aside>
-    <div class="palette-scrim ui-key-instant" id="scrim" hidden></div>
-    <section class="palette ui-overlay-surface ui-key-instant" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
+    <div class="palette-scrim" id="scrim" hidden></div>
+    <section class="palette ui-overlay-surface" id="palette" data-overlay-size="large" role="dialog" aria-label="Go to anything" aria-modal="true" hidden>
       <div class="palette-input">${SVG.search}<input id="palette-input" role="searchbox" aria-controls="palette-results" aria-label="Search hosts, sessions, actions and settings" placeholder="Go to a host, a session or an action" autocomplete="off" spellcheck="false"></div>
       <div class="palette-results" id="palette-results" role="listbox" aria-label="Search results"></div>
       <p class="palette-foot"><kbd>↑</kbd><kbd>↓</kbd> to navigate <kbd>↵</kbd> to select <kbd>esc</kbd> to close</p>
@@ -317,7 +317,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   const settings = options.canvas && !options.settingsView ? createSettingsOverlay({ stage, sections: settingsSections }) : undefined;
   const openSettingsFrom = (source: "pointer" | "keyboard"): void => {
     if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:appearance", source } }));
-    else settings?.open("about", source);
+    else settings?.open("about");
   };
   const askSignOutFrom = (anchor: HTMLElement): void => { askSignOut(anchor, toast); };
   const sidebarFoot = options.canvas
@@ -738,13 +738,13 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   };
   // Where focus was when the palette opened, so closing it (Escape most of all) puts focus back there instead of on the page.
   let paletteReturnFocus: HTMLElement | null = null;
-  // Whether it animates is not decided here: markMotion writes data-motion on the palette and scrim at the moment of the change, from the last input, and .ui-key-instant keys off it (#427).
+  // Whether it animates is not decided here: markMotion writes data-motion on the palette and scrim at the moment of the change, from the last input, and their open and close durations scale with it (--ui-motion-scale, #427).
   const setPalette = (open: boolean, only?: PaletteEntry[]): void => {
     if (open) {
       markMotion(palette, scrim);
       if (palette.hidden) paletteReturnFocus = document.activeElement instanceof HTMLElement && !palette.contains(document.activeElement) && document.activeElement !== document.body ? document.activeElement : null;
       shortcuts.close(true);
-      settings?.close("keyboard");
+      settings?.close();
       indexScoped(false);
       scopedEntries = only;
       indexScoped(true);
@@ -1478,7 +1478,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     } else if (kind === "settings") {
       setPalette(false);
       if (options.settingsView) window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: `canvas:settings:${value ?? "appearance"}`, source } }));
-      else settings?.open(value ?? "about", source);
+      else settings?.open(value ?? "about");
       return true;
     } else if (kind === "shortcuts") {
       // After the palette has gone, so the morph starts from the settled pill.

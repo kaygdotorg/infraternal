@@ -124,7 +124,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
   };
 
   const choose = (choice: Choice, how: PopoverSource): void => {
-    picker?.close(how);
+    picker?.close();
     if (choice.kind === "shell") cx.win.open(choice.machine.id);
     else open(choice.machine, choice.entry);
   };
@@ -132,7 +132,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
   const part: AppWindowsPart = {
     machines,
     togglePicker(anchor, source, query) {
-      if (picker) { picker.close(source); return; }
+      if (picker) { picker.close(); return; }
       picker = new Picker(cx, machines, anchor, source, choose, () => { picker = undefined; }, query);
     },
     paletteEntries() {
@@ -173,7 +173,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
       }
       return out;
     },
-    dispose() { offChange(); offHosts(); picker?.close("keyboard"); machines.dispose(); },
+    dispose() { offChange(); offHosts(); picker?.close(); machines.dispose(); },
   };
   // Preview builds expose the counters to the browser checks and the frame-time measurements; production builds do not.
   if (typeof __CLUSTERS_PREVIEW__ !== "undefined" && __CLUSTERS_PREVIEW__) Object.assign(window, { __appwin: part, __appwinCx: cx });

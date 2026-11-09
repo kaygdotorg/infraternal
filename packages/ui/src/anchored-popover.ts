@@ -9,7 +9,8 @@
  *   the window's edges on every side, so at its maximum height the gap is the same left, right and bottom.
  *   The visible viewport and an optional bottom limit (a key tray) only ever shrink it further.
  * - Motion: a pointer open grows from the anchor (scale 0.96 → 1 with opacity, 200 ms strong ease-out); closing
- *   is quicker (130 ms). Keyboard opens and closes are instant. Web Animations without fill leave nothing
+ *   is quicker (130 ms). Keyboard opens and closes are instant: the popover reads the input source (input-source.ts) itself,
+ *   when it opens and when it closes, so no caller passes (or can get wrong) whether a key caused it (#427). Web Animations without fill leave nothing
  *   transformed at rest, so text stays crisp (TASTE section 5).
  * - At a point: `at` places it at a pointer position (a right-click) instead of under the anchor: it opens down and
  *   right of the point, flips to the other side when it would leave the screen, and is kept one inset inside the
@@ -22,6 +23,9 @@
  *   footer) floats over the screen, which does not move.
  */
 import { currentUiScale } from "./ui-scale";
+import { triggeredByKeyboard } from "./input-source";
+
+/** What a caller may still want to know for its own reasons (where to put focus): which input opened a popover. Motion never takes it from here. */
 export type PopoverSource = "pointer" | "keyboard";
 
 export interface AnchoredPopoverOptions {
@@ -55,7 +59,11 @@ export interface AnchoredPopover {
   readonly root: HTMLElement;
   /** Re-places it, for content whose size changed. */
   place(): void;
-  close(source: PopoverSource): void;
+  /**
+   * Closes it: with a short fade after a pointer or touch, at once after a key. The argument is ignored (motion reads the input
+   * source itself); it is accepted only so wrappers that still carry a source for their own focus handling keep compiling.
+   */
+  close(source?: PopoverSource): void;
 }
 
 const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -64,7 +72,7 @@ const INSET = 8;
 const reduced = (): boolean => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /** Opens the popover; `onClosed` runs once it has gone. The caller fills `root` before or after. */
-export function openAnchoredPopover(options: AnchoredPopoverOptions, source: PopoverSource, onClosed: () => void): AnchoredPopover {
+export function openAnchoredPopover(options: AnchoredPopoverOptions, onClosed: () => void): AnchoredPopover {
   const { stage, anchor } = options;
   const root = document.createElement("section");
   root.className = `ui-overlay-surface ui-anchored-popover ${options.className ?? ""}`.trim();
@@ -149,7 +157,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   // lays out once, after the single write below.
   place();
   (inside ?? stage).append(root);
-  if (source === "pointer") {
+  if (!triggeredByKeyboard()) {
     if (reduced()) root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease" });
     else root.animate([{ opacity: 0, transform: `translateY(${above ? 4 : -4}px) scale(0.96)` }, { opacity: 1, transform: "none" }], { duration: 200, easing: EASE });
   }
@@ -157,13 +165,13 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
 
   let closed = false;
   const events = new AbortController();
-  const close = (how: PopoverSource): void => {
+  const close = (): void => {
     if (closed) return;
     closed = true;
     events.abort();
     anchor.setAttribute("aria-expanded", "false");
     const done = (): void => { root.remove(); onClosed(); };
-    if (how === "keyboard" || reduced()) { done(); return; }
+    if (triggeredByKeyboard() || reduced()) { done(); return; }
     root.style.pointerEvents = "none";
     root.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateY(${above ? 2 : -2}px) scale(0.98)` }],
       { duration: 130, easing: EASE, fill: "forwards" }).onfinish = done;
@@ -172,12 +180,12 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
   document.addEventListener("pointerdown", (event) => {
     const target = event.target as Element;
     if (root.contains(target) || anchor.contains(target) || target.closest?.(".ui-confirm-tip")) return;
-    close("pointer");
+    close();
   }, { capture: true, signal: events.signal });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || document.querySelector(".ui-confirm-tip")) return;
     event.stopPropagation();
-    close("keyboard");
+    close();
     anchor.focus({ preventScroll: true });
   }, { capture: true, signal: events.signal });
   window.addEventListener("resize", place, { signal: events.signal });
@@ -192,7 +200,7 @@ export function openAnchoredPopover(options: AnchoredPopoverOptions, source: Pop
     // The anchor leaving the visible area (the canvas panned away, the window closed) closes it: a popover with nothing to point at is clutter.
     // Only a button that WAS on screen and has left it closes the popover: one opened for a button that was never in view (a script, a test) is not dismissed by that.
     let seen = false;
-    const watched = new IntersectionObserver((entries) => { for (const entry of entries) { if (entry.isIntersecting) seen = true; else if (seen) close("pointer"); } });
+    const watched = new IntersectionObserver((entries) => { for (const entry of entries) { if (entry.isIntersecting) seen = true; else if (seen) close(); } });
     watched.observe(anchor);
     events.signal.addEventListener("abort", () => watched.disconnect());
   }

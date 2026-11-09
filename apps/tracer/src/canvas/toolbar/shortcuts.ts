@@ -70,21 +70,21 @@ export function installShortcuts(cx: Ctx): () => void {
     ...bindTerminalFont(() => cx.adapters.activeTerminal?.()),
     bindShortcut("canvas-lock", () => cx.nav.setCanvasLock(!state.canvasLock)),
     bindShortcut("input-lock", () => cx.inputLock.toggle()),
-    bindShortcut("split-right", (e) => windowKey(e, (w) => cx.win.split(w, "right", true))),
-    bindShortcut("split-down", (e) => windowKey(e, (w) => cx.win.split(w, "down", true))),
-    bindShortcut("new-window-right", (e) => windowKey(e, (w) => cx.win.newWindow(w, "right", true))),
-    bindShortcut("new-window-below", (e) => windowKey(e, (w) => cx.win.newWindow(w, "below", true))),
+    bindShortcut("split-right", (e) => windowKey(e, (w) => cx.win.split(w, "right"))),
+    bindShortcut("split-down", (e) => windowKey(e, (w) => cx.win.split(w, "down"))),
+    bindShortcut("new-window-right", (e) => windowKey(e, (w) => cx.win.newWindow(w, "right"))),
+    bindShortcut("new-window-below", (e) => windowKey(e, (w) => cx.win.newWindow(w, "below"))),
     bindShortcut("close-window", closeActive),
     ...(cx.adapters.docs ? [bindShortcut("window-docs", (e) => { const w = state.activeWin; if (!e.repeat && w && !cx.inputLock.state) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, w); }); })] : []),
     // Keyboard Lock (fullscreen only, D222): ⌘W on a Mac and Ctrl+Shift+W elsewhere close the window too, but only while the
     // browser has handed those keys over. Otherwise the browser keeps them (it closes the tab), so the chord is not bound.
     bindCombo(platformCombo({ code: "KeyW", key: "w", mod: true, shift: false }, { code: "KeyW", key: "w", mod: true, shift: true }), closeActive, () => isKeyboardLocked()),
-    bindShortcut("next-window", () => { if (!cx.inputLock.state) cx.win.step(1, true); }),
-    bindShortcut("previous-window", () => { if (!cx.inputLock.state) cx.win.step(-1, true); }),
-    bindShortcut("move-left", () => { if (!cx.inputLock.state) cx.win.move("left", true); }),
-    bindShortcut("move-right", () => { if (!cx.inputLock.state) cx.win.move("right", true); }),
-    bindShortcut("move-up", () => { if (!cx.inputLock.state) cx.win.move("up", true); }),
-    bindShortcut("move-down", () => { if (!cx.inputLock.state) cx.win.move("down", true); }),
+    bindShortcut("next-window", () => { if (!cx.inputLock.state) cx.win.step(1); }),
+    bindShortcut("previous-window", () => { if (!cx.inputLock.state) cx.win.step(-1); }),
+    bindShortcut("move-left", () => { if (!cx.inputLock.state) cx.win.move("left"); }),
+    bindShortcut("move-right", () => { if (!cx.inputLock.state) cx.win.move("right"); }),
+    bindShortcut("move-up", () => { if (!cx.inputLock.state) cx.win.move("up"); }),
+    bindShortcut("move-down", () => { if (!cx.inputLock.state) cx.win.move("down"); }),
   ];
   const offBindings = onBindingsChange(() => cx.toolbar.update());
   window.addEventListener("keydown", (e) => {

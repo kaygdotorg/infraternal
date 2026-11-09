@@ -28,7 +28,7 @@ export function installSessionScenes(env: { cx: Ctx; inventory: MockInventory; /
     if (!rec) return undefined;
     cx.win.setActive(rec);
     cx.nav.focusWindow(rec);
-    later(() => cx.sessionUi?.toggleManager(rec, anchor, "pointer"), settle);
+    later(() => cx.sessionUi?.toggleManager(rec, anchor), settle);
     return rec;
   };
   const reset = (): void => {

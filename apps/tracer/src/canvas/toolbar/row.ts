@@ -55,7 +55,7 @@ export function createToolbar(cx: Ctx): ToolbarModule {
   const openSessions = (): void => {
     const w = state.activeWin;
     const anchor = w?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
-    if (w && isTerminal(w)) cx.sessionUi?.toggleManager(w, anchor, "pointer");
+    if (w && isTerminal(w)) cx.sessionUi?.toggleManager(w, anchor);
   };
   const items: ToolbarItem[] = [
     { id: "search", label: "Search and actions", icon: ICONS.search, onSelect: openPalette },
